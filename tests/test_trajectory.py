@@ -41,6 +41,12 @@ from tests.harness.trajectory import (
 )
 
 
+def test_no_pr_feedback_phase_member() -> None:
+    """M2: DaydreamPhase.PR_FEEDBACK is removed; PR flow is kept."""
+    assert not hasattr(DaydreamPhase, "PR_FEEDBACK")
+    assert DaydreamRunFlow.PR.value == "pr"
+
+
 async def _drive(
     tmp_path: Path, *events: AgentEvent, phase: DaydreamPhase = DaydreamPhase.REVIEW
 ) -> dict[str, Any]:

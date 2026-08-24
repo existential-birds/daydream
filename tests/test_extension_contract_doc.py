@@ -9,6 +9,14 @@ from daydream.extensions.builtins import register_builtins
 CONTRACT_DOC = Path(__file__).resolve().parents[1] / "docs" / "extensions.md"
 
 
+def test_builtins_do_not_seed_pr_feedback_skill_slots() -> None:
+    """M7/M8: builtins no longer seed the removed PR-feedback skill slots."""
+    reg = Registry()
+    register_builtins(reg)
+    assert "pr-feedback-fetch" not in reg.skill_slots()
+    assert "pr-feedback-respond" not in reg.skill_slots()
+
+
 def test_contract_doc_names_every_registered_surface() -> None:
     doc = CONTRACT_DOC.read_text()
     reg = Registry()

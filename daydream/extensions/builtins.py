@@ -1,8 +1,7 @@
 """Built-in registry seed.
 
-``register_builtins(registry)`` seeds the registry with everything daydream
-does today: prompt names, the seeded pr-feedback skill slots, and the two flow
-definitions (deep, improve). Review/comment/shallow/pr-feedback are modes of
+``register_builtins(registry)`` seeds the registry with Daydream's prompt names
+and two flow definitions (deep, improve). Review/comment/shallow are modes of
 the deep flow (#330).
 
 Uses only function-local late imports (import-cycle guard): this module must
@@ -18,19 +17,7 @@ if TYPE_CHECKING:
 
 
 def register_builtins(registry: Registry) -> None:
-    """Seed ``registry`` with daydream's built-in phases, flows, and prompts.
-
-    No built-in review skill slots are seeded: built-in Deep/Improve reviews are
-    registry-independent and profile-driven. The only seeded skill slots are the
-    pr-feedback skills (``#887`` deletes those alongside generic skill machinery).
-    """
-    from daydream import config
-
-    # No stack:* / structural / audit:* review skill slots (M1/M10). The only
-    # remaining seeded skill slots are the PR-feedback flow's (removed in #887).
-    registry.override_skill("pr-feedback-fetch", config.PR_FEEDBACK_FETCH_SKILL)
-    registry.override_skill("pr-feedback-respond", config.PR_FEEDBACK_RESPOND_SKILL)
-
+    """Seed ``registry`` with Daydream's built-in phases, flows, and prompts."""
     _register_improve_builtins(registry)
     _register_builtin_prompts(registry)
     _register_builtin_renderers(registry)

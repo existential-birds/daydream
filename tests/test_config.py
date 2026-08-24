@@ -39,6 +39,14 @@ PHASE_NAMES = {
 IMPROVE_PHASE_NAMES = {"recon", "audit", "vet", "plan_write"}
 
 
+def test_no_pr_feedback_skill_constants() -> None:
+    """M7/M8: no PR-feedback skill constants remain in config."""
+    from daydream import config
+
+    assert not hasattr(config, "PR_FEEDBACK_FETCH_SKILL")
+    assert not hasattr(config, "PR_FEEDBACK_RESPOND_SKILL")
+
+
 def test_audit_categories_match_playbook() -> None:
     assert set(AUDIT_CATEGORIES) == {
         "correctness",

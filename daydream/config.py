@@ -356,11 +356,6 @@ DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
 # name, not a skill string, and is never selectable from the CLI.
 STRUCTURE_STACK_NAME: str = "structure"
 
-# PR-feedback skills for the ``daydream feedback <pr#>`` flow, seeded into the
-# extension registry as the ``pr-feedback-fetch`` / ``pr-feedback-respond`` slots.
-PR_FEEDBACK_FETCH_SKILL: str = "beagle-core:fetch-pr-feedback"
-PR_FEEDBACK_RESPOND_SKILL: str = "beagle-core:respond-pr-feedback"
-
 # Self-hosted review-bot setup constants — single source of truth shared by the
 # ``daydream setup`` orchestrator, the packaged workflow YAML, and the browser
 # guide. Drift between these names and the workflow templates is guarded by
