@@ -435,8 +435,8 @@ async def test_structural_meta_stack_flows_end_to_end(
     detected_stacks: list[StackAssignment] = []
     real_detect = _detection.detect_stacks
 
-    def _spy_detect(changed_files, *, skill_availability):
-        result = real_detect(changed_files, skill_availability=skill_availability)
+    def _spy_detect(changed_files, **kwargs):
+        result = real_detect(changed_files, **kwargs)
         detected_stacks.extend(result)
         return result
 

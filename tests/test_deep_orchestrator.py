@@ -27,7 +27,6 @@ import anyio
 import pytest
 
 from daydream.backends import ResultEvent, TextEvent
-from daydream.config import SKILL_MAP
 from daydream.eval.analyzer import _records_issues
 
 
@@ -2130,7 +2129,6 @@ async def test_fix_guard_reverts_generated_migration_edit(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
 
@@ -2203,7 +2201,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     stub.fix_edit_line = "\n// not \u201D\n"  # fix agent writes U+201D into the changed .go comment
     exit_code = await run(make_config(
         project, assume="yes", output_mode="loop", non_interactive=False,
-        archive=False, skill_availability=frozenset(SKILL_MAP),
+        archive=False,
     ))
     assert exit_code == 0
     go_src = (project / "main.go").read_text()
@@ -2258,7 +2256,6 @@ async def test_feedback_scrub_trust_gate_preserves_user_edits(
     exit_code = await run(make_config(
         project, pr_number=7, bot="my-app[bot]", assume="yes",
         output_mode="loop", non_interactive=False, archive=False,
-        skill_availability=frozenset(SKILL_MAP),
     ))
     assert exit_code == 0
     go_src = (project / "main.go").read_text()
@@ -2294,7 +2291,6 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
 
@@ -2444,7 +2440,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
     assert exit_code == 0
@@ -2512,7 +2507,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
 
@@ -3600,55 +3594,12 @@ def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
     registry.write_text(_registry_text(plugin_names))
 
 
-@pytest.mark.parametrize(
-    ("registry_text", "expected"),
-    [
-        pytest.param(
-            _registry_text([skill.split(":", 1)[0] for skill in SKILL_MAP.values()]),
-            set(SKILL_MAP.keys()),
-            id="all-plugins-present-full-coverage",
-        ),
-        pytest.param(
-            _registry_text(["beagle-python", "beagle-react"]),
-            {"python", "react"},
-            id="missing-beagle-go-excludes-go",
-        ),
-        pytest.param(None, None, id="missing-registry-signals-unknown"),
-        pytest.param("not json {{{", None, id="unparseable-registry-optimistic"),
-        # Regression: `data.get("plugins", {})` raised AttributeError when the
-        # registry parsed to a non-dict, aborting deep mode instead of returning None.
-        pytest.param("[]", None, id="non-dict-root-payload"),
-        # Regression: iterating ``data.get("plugins", {})`` raised TypeError when the
-        # `plugins` field was e.g. a list, aborting deep mode instead of returning None.
-        pytest.param(
-            '{"version": 2, "plugins": ["beagle-python@marketplace"]}',
-            None,
-            id="non-dict-plugins-field",
-        ),
-    ],
-)
-def test_get_installed_skills(
-    registry_text: str | None, expected: set[str] | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Registry shape -> resolved skill availability (``None`` == unknown, fall
-    back to optimistic availability)."""
-    from daydream.deep.orchestrator import get_installed_skills
-
-    if registry_text is not None:
-        registry = tmp_path / "plugins" / "installed_plugins.json"
-        registry.parent.mkdir(parents=True, exist_ok=True)
-        registry.write_text(registry_text)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-
-    assert get_installed_skills() == expected
-
-
 def test_run_deep_routes_missing_skill_to_generic(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When beagle-react is absent, React files route to the generic bucket.
 
-    Regression: previously orchestrator passed ``set(SKILL_MAP.keys())`` as
+    Regression: previously orchestrator passed the full built-in stack list as
     availability, so detect_stacks kept React as its own stack, the per-stack
     agent raised MissingSkillError, and phase_per_stack_reviews silently
     dropped the React findings.
@@ -3659,7 +3610,8 @@ def test_run_deep_routes_missing_skill_to_generic(
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target, pin_skill_availability=False)
-    # Registry with only python installed -- react and markdown should route to generic.
+    # A populated or empty plugin registry must not change built-in routing (M1):
+    # react stays its own stack even with only python installed.
     _write_plugin_registry(tmp_path, ["beagle-python"])
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
 
@@ -3677,10 +3629,11 @@ def test_run_deep_routes_missing_skill_to_generic(
     assert exit_code == 0
 
     stacks = {s.stack_name for s in captured["stacks"]}
-    # Python remains, but React (no skill installed) must have fallen through to generic.
+    # M1/M3: built-in routing is registry-independent and never degrades a
+    # detected stack to generic -- react stays its own stack regardless of
+    # which plugins are installed.
     assert "python" in stacks
-    assert "react" not in stacks
-    assert "generic" in stacks
+    assert "react" in stacks
 
 
 def test_diff_changed_files_rename_single_entry() -> None:
@@ -6152,9 +6105,9 @@ def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_skill()
     non_structural = [s for s in collapsed if s.stack_name != "structure"]
     assert len(non_structural) == 1
     combined = non_structural[0]
-    # The real-language skill survives (NOT downgraded to generic fallback).
+    # The real-language scope survives (NOT downgraded to generic fallback).
     assert combined.stack_name == "python"
-    assert combined.skill_invocation == "beagle-python:review-python"
+    assert combined.skill_invocation is None
     # The docs file is absorbed into the language stack.
     assert set(combined.files) == {"api.py", "README.md"}
     assert _single_stack_agent_count(len(collapsed)) < baseline_count
@@ -6194,7 +6147,7 @@ def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation == "beagle-python:review-python"
+    assert combined.skill_invocation is None
     # The docs file is absorbed into the preserved language stack.
     assert set(combined.files) == {"api.py", "README.md"}
 
@@ -6233,7 +6186,7 @@ def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation == "beagle-python:review-python"
+    assert combined.skill_invocation is None
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:

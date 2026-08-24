@@ -197,11 +197,6 @@ class RunConfig:
             switches the flow to single-request investigation mode.
         improve_prune_name: Name of the ``-reanchor`` worktree to remove for the
             ``daydream improve prune-reanchor`` sub-verb (only set there).
-        skill_availability: Stack keys with an installed Beagle review skill,
-            resolved once by :func:`run` from ``get_installed_skills()``. ``None``
-            means unresolved or registry-unreadable (→ optimistic routing in
-            ``detect_stacks``). Set explicitly to inject availability and bypass
-            the probe (tests).
         uncovered_sweep: Issue #309. Toggle the uncovered-diff-file sweep (the
             second-pass reviewer over diff files no per-stack reviewer read).
             ``None`` falls through to ``file_config.uncovered_sweep`` then the
@@ -318,7 +313,6 @@ class RunConfig:
     improve_scope: str | None = None
     improve_plan_description: str | None = None
     improve_prune_name: str | None = None
-    skill_availability: frozenset[str] | None = None
     # Issue #309: uncovered-diff-file sweep (second-pass reviewer). CLI-tier
     # overrides; ``None`` falls through to the file-config scalar then the
     # orchestrator default (True / DEFAULT_UNCOVERED_SWEEP_MAX_FILES /
@@ -873,16 +867,6 @@ async def run(config: RunConfig | None = None) -> int:
     except ExtensionError as exc:
         print_error(console, "Extension Error", str(exc))
         return 1
-
-    # Resolve installed-skill availability once, here at the composition root, so
-    # the orchestrators consume it as data instead of each probing the filesystem.
-    # None (unreadable registry) flows straight through to detect_stacks' optimistic
-    # default. An explicitly injected value is kept (the probe is skipped).
-    if config.skill_availability is None:
-        from daydream.deep.orchestrator import get_installed_skills
-
-        installed = get_installed_skills()
-        config.skill_availability = frozenset(installed) if installed is not None else None
 
     # Resolve target dir outside the workspace context so path-validation errors
     # short-circuit before any git work.

@@ -409,7 +409,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         tracked = branch_files if branch_focus else git_ops.ls_files(target)
         stacks = detect_stacks(
             tracked,
-            skill_availability=ctx.config.skill_availability,
             registry=ctx.registry,
         )
         if ctx.config.improve_scope:

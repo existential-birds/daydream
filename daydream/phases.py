@@ -14,7 +14,8 @@ import anyio
 from rich.text import Text
 
 import daydream
-from daydream import git_ops, review_profile as _rp
+from daydream import git_ops
+from daydream import review_profile as _rp
 from daydream.agent import (
     console,
     detect_test_success,
@@ -3867,16 +3868,12 @@ async def phase_per_stack_reviews(
         for stack in stacks:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
             if stack.stack_name == STRUCTURE_STACK_NAME:
-                # Structural prompt is NOT inlined — its lens legitimately roams
-                # beyond the diff, so it keeps its diff_path pointer and its
-                # repo-wide Read/Grep/Bash freedom. The skill key is routed
-                # through the backend formatter so each backend emits its own
-                # invocation syntax.
-                structural_invocation = backend.format_skill_invocation(
-                    stack.skill_invocation or get_registry().skill("structural")
-                )
+                # Structural is a first-class stack scope (not a skill): its
+                # prompt is not inlined — the lens legitimately roams beyond
+                # the diff, so it keeps its diff_path pointer and repo-wide
+                # Read/Grep/Bash freedom. No skill invocation is emitted.
                 prompt = get_registry().prompt("structural")(
-                    skill_invocation=structural_invocation,
+                    skill_invocation="",
                     files=stack.files,
                     diff_path=diff_path,
                     intent_path=intent_path,
@@ -3897,7 +3894,9 @@ async def phase_per_stack_reviews(
                     if diff_text is not None
                     else None
                 )
-                if stack.skill_invocation is None:
+                from daydream.deep.detection import GENERIC_STACK
+
+                if stack.stack_name == GENERIC_STACK:
                     prompt = get_registry().prompt("generic-fallback")(
                         strategy=_rp.build_default_profile().strategies["discovery.generic_fallback"].content,
                         files=stack.files,
@@ -3915,10 +3914,16 @@ async def phase_per_stack_reviews(
                         frontier_files=stack.frontier_files,
                     )
                 else:
-                    # Route the raw Beagle stack key through the backend
-                    # formatter so each backend emits its own invocation syntax.
+                    # Per-stack reviewer for language + fork stacks. Built-in
+                    # stacks carry no skill (M2); fork-registered stacks route
+                    # their own StackRule.skill through the backend formatter.
+                    skill_invocation = (
+                        backend.format_skill_invocation(stack.skill_invocation)
+                        if stack.skill_invocation
+                        else ""
+                    )
                     prompt = get_registry().prompt("per-stack")(
-                        skill_invocation=backend.format_skill_invocation(stack.skill_invocation),
+                        skill_invocation=skill_invocation,
                         stack_name=stack.stack_name,
                         files=stack.files,
                         diff_path=diff_path,

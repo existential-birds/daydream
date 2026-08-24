@@ -98,10 +98,10 @@ def test_run_config_exploration_depth():
     assert cfg.exploration_depth == 2
 
 
-def test_run_config_skill_availability_defaults_to_none():
-    assert RunConfig().skill_availability is None
-    cfg = RunConfig(skill_availability=frozenset({"python"}))
-    assert cfg.skill_availability == frozenset({"python"})
+def test_run_config_has_no_skill_availability_field():
+    """M1: RunConfig no longer carries installed-skill availability."""
+    assert not hasattr(RunConfig(), "skill_availability")
+    assert not hasattr(RunConfig(), "skill_availability")
 
 
 def test_run_config_exploration_context_defaults_to_none():

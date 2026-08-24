@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from daydream.cli import _parse_args
-from daydream.config import SKILL_MAP
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 
@@ -124,17 +123,9 @@ def test_yes_with_review_only_output_errors(monkeypatch, capsys, output_flag):
     assert "--yes" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("skill", "invocation"),
-    [
-        pytest.param("go", "beagle-go:review-go", id="go"),
-        pytest.param("rust", "beagle-rust:review-rust", id="rust"),
-        pytest.param("ios", "beagle-ios:review-ios", id="ios"),
-    ],
-)
-def test_skill_map_and_choice(monkeypatch, skill, invocation):
-    """Keep every CLI skill choice aligned with its invocation token."""
-    assert SKILL_MAP[skill] == invocation
+@pytest.mark.parametrize("skill", ["go", "rust", "ios"])
+def test_skill_choice_routes_to_skill_field(monkeypatch, skill):
+    """Every CLI skill selector routes into ``RunConfig.skill``."""
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", skill])
     config = _parse_args()
     assert config.skill == skill

@@ -620,7 +620,8 @@ def build_per_stack_prompt(
     if frontier_files:
         parts.append(_frontier_read_instruction(frontier_files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
-    parts.append(skill_invocation)
+    if skill_invocation:
+        parts.append(skill_invocation)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
@@ -694,7 +695,8 @@ def build_structural_prompt(
         f"the codebase easier or harder to live with."
     )
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(skill_invocation)
+    if skill_invocation:
+        parts.append(skill_invocation)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)

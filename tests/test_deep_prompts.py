@@ -337,11 +337,10 @@ def test_merge_prompt_requires_one_path_per_item(tmp_path: Path) -> None:
 
 def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) -> None:
     """Structural reviewer sees the whole change — no 'Focus ONLY on these files' clause."""
-    from daydream.config import STRUCTURE_SKILL
     from daydream.deep.prompts import build_structural_prompt
 
     prompt = build_structural_prompt(
-        skill_invocation=f"/{STRUCTURE_SKILL}",
+        skill_invocation="",
         files=["api/main.py", "ui/App.tsx"],
         diff_path=tmp_path / "diff.patch",
         intent_path=tmp_path / "intent.md",
@@ -351,7 +350,8 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
     )
     assert "Focus ONLY on these files" not in prompt
     assert "Do NOT review files from other stacks" not in prompt
-    assert STRUCTURE_SKILL in prompt or "/" + STRUCTURE_SKILL in prompt
+    # M12: no skill token may appear in the native structural prompt.
+    assert "/beagle-" not in prompt and "beagle" not in prompt.lower()
     assert str(tmp_path / "out.md") in prompt
 
 

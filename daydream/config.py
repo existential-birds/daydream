@@ -1,21 +1,17 @@
 """Configuration constants for daydream.
 
 Provide centralized configuration values used throughout the daydream package.
-This module contains constants for skill mappings, file paths, and regex patterns
-used by the review and fix loop system.
+This module contains constants for stack metadata, file paths, and defaults used
+by the review and fix loop system.
 
 Exports:
     AUDIT_CATEGORIES: tuple[str, ...] - Improve audit categories.
-    AUDIT_SKILL_MAP: dict[str, dict[str, str]] - Audit skill names by category
-        and detected stack.
+    STACK_CHOICES: tuple[str, ...] - Supported built-in stack names (no skills).
     EffortTier: Frozen improve audit effort-tier configuration.
     EFFORT_TIERS: dict[str, EffortTier] - Improve audit effort tiers.
     PLAN_WRITE_MAX_CONCURRENCY: int - Improve plan-writer concurrency ceiling.
     VET_BATCH_MAX_FINDINGS: int - Candidate findings per improve vetting batch.
-    ReviewSkillChoice: Enum for review skill menu choices.
-    REVIEW_SKILLS: dict[ReviewSkillChoice, str] - Mapping of review type identifiers to skill names.
     REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
-    UNKNOWN_SKILL_PATTERN: str - Regex pattern for detecting unknown skill errors.
     DEFAULT_CLAUDE_MODEL: str - Default Claude model id when no override is given.
     DEFAULT_CODEX_MODEL: str - Default Codex model id when no override is given.
     DEFAULT_PI_MODEL: str - Default Pi model id when no override is given (Nous
@@ -28,15 +24,11 @@ Exports:
     PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] - Per-backend per-phase default
         reasoning effort, same key shape as PHASE_DEFAULT_MODELS. Only consumed by
         the Codex backend.
-    STRUCTURE_SKILL: str - Beagle skill name for the structural-maintainability
-        meta-stack reviewer. Invoked internally by deep mode; not user-selectable
-        (intentionally absent from REVIEW_SKILLS, SKILL_MAP, and ReviewSkillChoice).
     STRUCTURE_STACK_NAME: str - Stack identifier emitted by detect_stacks for the
         structural meta-stack assignment.
 """
 
 from dataclasses import dataclass
-from enum import Enum
 
 # Default model ids — single source of truth. Resolved by ``create_backend`` only
 # when no explicit override is supplied. Every other layer takes ``model: str``
@@ -267,26 +259,17 @@ PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     for backend in {*DEEP_PHASE_DEFAULT_EFFORT, *IMPROVE_PHASE_DEFAULT_EFFORT}
 }
 
-class ReviewSkillChoice(Enum):
-    """Enum for review skill menu choices."""
-
-    PYTHON = "1"
-    REACT = "2"
-    ELIXIR = "3"
-    GO = "4"
-    RUST = "5"
-    IOS = "6"
-
-
-# Skill mapping for review types
-REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
-    ReviewSkillChoice.PYTHON: "beagle-python:review-python",
-    ReviewSkillChoice.REACT: "beagle-react:review-frontend",
-    ReviewSkillChoice.ELIXIR: "beagle-elixir:review-elixir",
-    ReviewSkillChoice.GO: "beagle-go:review-go",
-    ReviewSkillChoice.RUST: "beagle-rust:review-rust",
-    ReviewSkillChoice.IOS: "beagle-ios:review-ios",
-}
+# Supported built-in stack choices (lowercase stack names). This is the neutral
+# CLI selector metadata after the native-profile migration: a stack is a language
+# scope, not a skill.
+STACK_CHOICES: tuple[str, ...] = (
+    "python",
+    "react",
+    "elixir",
+    "go",
+    "rust",
+    "ios",
+)
 
 AUDIT_CATEGORIES: tuple[str, ...] = (
     "correctness",
@@ -298,6 +281,40 @@ AUDIT_CATEGORIES: tuple[str, ...] = (
     "dx",
     "docs",
 )
+
+# Audit specialist skill mapping by category/stack. NOT yet removed: Task 10
+# (native Improve) deletes this map after every audit consumer is profile-native.
+# Until then the built-in improve path still resolves audit skills for category
+# composition (M10 work remains in-flight). Literal strings, not derived from
+# the (now-removed) REVIEW_SKILLS / ReviewSkillChoice.
+AUDIT_SKILL_MAP: dict[str, dict[str, str]] = {
+    "correctness": {
+        "python": "beagle-python:review-python",
+        "react": "beagle-react:review-frontend",
+        "elixir": "beagle-elixir:review-elixir",
+        "go": "beagle-go:review-go",
+        "rust": "beagle-rust:review-rust",
+        "ios": "beagle-ios:review-ios",
+    },
+    "security": {
+        "elixir": "beagle-elixir:elixir-security-review",
+    },
+    "performance": {
+        "elixir": "beagle-elixir:elixir-performance-review",
+    },
+    "tests": {
+        "python": "beagle-python:pytest-code-review",
+        "go": "beagle-go:go-testing-code-review",
+        "rust": "beagle-rust:rust-testing-code-review",
+        "elixir": "beagle-elixir:exunit-code-review",
+    },
+    "tech-debt": {
+        "*": "beagle-core:review-structure",
+    },
+    "dependencies": {},
+    "dx": {},
+    "docs": {},
+}
 
 
 @dataclass(frozen=True)
@@ -339,43 +356,8 @@ EFFORT_TIERS: dict[str, EffortTier] = {
     ),
 }
 
-AUDIT_SKILL_MAP: dict[str, dict[str, str]] = {
-    "correctness": {
-        "python": REVIEW_SKILLS[ReviewSkillChoice.PYTHON],
-        "react": REVIEW_SKILLS[ReviewSkillChoice.REACT],
-        "elixir": REVIEW_SKILLS[ReviewSkillChoice.ELIXIR],
-        "go": REVIEW_SKILLS[ReviewSkillChoice.GO],
-        "rust": REVIEW_SKILLS[ReviewSkillChoice.RUST],
-        "ios": REVIEW_SKILLS[ReviewSkillChoice.IOS],
-    },
-    "security": {
-        "elixir": "beagle-elixir:elixir-security-review",
-    },
-    "performance": {
-        "elixir": "beagle-elixir:elixir-performance-review",
-    },
-    "tests": {
-        "python": "beagle-python:pytest-code-review",
-        "go": "beagle-go:go-testing-code-review",
-        "rust": "beagle-rust:rust-testing-code-review",
-        "elixir": "beagle-elixir:exunit-code-review",
-    },
-    "tech-debt": {
-        "*": "beagle-core:review-structure",
-    },
-    "dependencies": {},
-    "dx": {},
-    "docs": {},
-}
-
-# CLI skill name to full skill path mapping (derived from REVIEW_SKILLS to avoid duplication)
-SKILL_MAP: dict[str, str] = {choice.name.lower(): skill for choice, skill in REVIEW_SKILLS.items()}
-
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
-
-# Pattern to detect unknown skill errors
-UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
 
 # Issue #309: uncovered-diff-file sweep. After per-stack reviews + parse, the
 # deep flow re-reviews diff files no reviewer read with a cheap second-pass
@@ -400,12 +382,9 @@ DEFAULT_DEEP_SHARD_FANOUT_CAP: int = 16
 DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
 
 # Structural-maintainability meta-stack. Deep mode appends a synthetic
-# ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` and
-# ``skill_invocation=STRUCTURE_SKILL`` so the structural reviewer always runs
-# alongside per-language reviewers. Intentionally NOT added to ``REVIEW_SKILLS``,
-# ``SKILL_MAP``, or ``ReviewSkillChoice`` — this skill is a meta-stack invoked by
-# the orchestrator, never selected from the CLI.
-STRUCTURE_SKILL: str = "beagle-core:review-structure"
+# ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` so the structural
+# reviewer always runs alongside per-language reviewers. It is a scope metadata
+# name, not a skill string, and is never selectable from the CLI.
 STRUCTURE_STACK_NAME: str = "structure"
 
 # PR-feedback skills for the ``daydream feedback <pr#>`` flow, seeded into the

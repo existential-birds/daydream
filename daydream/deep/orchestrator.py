@@ -4276,9 +4276,10 @@ def _collapse_stacks_for_shallow(
             files=combined_files,
             is_docs_only=False,
         )
-    elif len(real_language) == 1 and real_language[0].skill_invocation is not None:
-        # Skill-preservation: the sole real-language stack survives unchanged
-        # (mirrors ``_collapse_stacks_for_tiny_diff`` for code+docs diffs).
+    elif len(real_language) == 1:
+        # Scope preservation: a sole real-language stack survives unchanged,
+        # absorbing any generic/docs files. Built-in stacks carry no skill (M2);
+        # a fork-registered sole stack keeps its own StackRule.skill.
         lang = real_language[0]
         combined = StackAssignment(
             stack_name=lang.stack_name,
@@ -4406,11 +4407,11 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                     )
                     return 1
 
-        # Stack detection (from diff file list). Availability is resolved once in
-        # runner.run and threaded via config; None flows through to detect_stacks'
-        # optimistic default.
+        # Stack detection (from diff file list). Built-in detection is
+        # registry-independent (M1); fork stack rules still resolve via the
+        # registry inside detect_stacks.
         changed_files = _diff_changed_files(diff)
-        stacks = detect_stacks(changed_files, skill_availability=config.skill_availability)
+        stacks = detect_stacks(changed_files)
         # Issue #172 — tiny-diff short-circuit. When the diff is small enough
         # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
         # to a single combined assignment and skip merge+arbiter downstream.

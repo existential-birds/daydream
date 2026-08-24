@@ -1396,7 +1396,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     deterministic affected-files index actually reaches the reviewer prompt.
     """
     from daydream.backends import ResultEvent, TextEvent
-    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.detection import StackAssignment
     from daydream.phases import phase_per_stack_reviews
 
@@ -1421,7 +1421,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     stacks = [
         StackAssignment(
             stack_name=STRUCTURE_STACK_NAME,
-            skill_invocation=STRUCTURE_SKILL,
+            skill_invocation=None,
             files=["api/main.py"],
             is_docs_only=False,
         )
@@ -1439,7 +1439,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
 
     assert failures == {}
     assert STRUCTURE_STACK_NAME in results
-    structural_prompt = next(p for p in backend.prompts if f"/{STRUCTURE_SKILL}" in p)
+    structural_prompt = next(p for p in backend.prompts if "structural" in p)
     assert str(exploration_dir / "affected_files.md") in structural_prompt
 
 

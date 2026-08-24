@@ -10,26 +10,29 @@ The routing order is significant (Pitfall 6 in 05-RESEARCH.md):
     3. Config promotion (D-13)    -> promote only on co-change
     4. Ambiguous nearest-ancestor (D-12)
     5. Equal-depth fallthrough (D-12c) -> generic
-    6. Missing-skill fallthrough (D-16) -> generic (fork stacks exempt)
 
-Stack->skill resolution goes through the extension registry: built-in stacks
-resolve the ``stack:<name>`` / ``structural`` skill slots (seeded from
-``SKILL_MAP`` / ``STRUCTURE_SKILL`` by ``register_builtins``, remappable by a
-fork), and fork-registered stacks carry their ``StackRule.skill`` directly.
+The detection is registry-independent for built-in stacks: the same changed
+files produce the same ordered stack scopes whether a plugin registry is
+present or not. Stack identity is scope metadata, not a skill -- built-in
+stacks carry no skill-invocation field. Fork-registered stacks resolve their
+StackRule.skill directly (that is the fork's own routing).
+
+Stack->skill resolution for built-in stacks no longer goes through the
+extension registry: built-in scopes set ``skill_invocation=None`` and only
+fork-registered stacks carry a skill.
 """
 
 from __future__ import annotations
 
 import fnmatch
-from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.extensions import Registry, StackRule, get_registry
 
-# Extension -> stack-key (lowercase, matches SKILL_MAP keys). Keep in sync with
-# SKILL_MAP; this table is about review-skill routing, not syntactic parsing
+# Extension -> stack-key (lowercase, matches the supported built-in stacks).
+# This table is about review routing, not syntactic parsing
 # (tree_sitter_index.LANGUAGES serves a different purpose).
 _EXT_TO_STACK: dict[str, str] = {
     ".py": "python",
@@ -61,8 +64,8 @@ _CONFIG_OWNERSHIP_SIGNALS: dict[str, str] = {
     "Package.swift": "ios",
 }
 
-# Generic-fallback stack key. Not present in SKILL_MAP by design — it's a synthetic
-# bucket signalling "run the generic review agent".
+# Generic-fallback stack key. Not a built-in language stack — it is a synthetic
+# bucket signalling "run the native generic review agent".
 GENERIC_STACK = "generic"
 
 
@@ -151,36 +154,33 @@ def _match_stack_rule(path: str, rules: tuple[StackRule, ...]) -> StackRule | No
 
 def detect_stacks(
     changed_files: list[str],
-    skill_availability: AbstractSet[str] | None = None,
     *,
     registry: Registry | None = None,
 ) -> list[StackAssignment]:
     """Route changed files to stacks per D-11..D-16.
 
+    Detection is registry-independent for built-in stacks: the same changed
+    files produce the same ordered scopes whether a plugin registry is present
+    or not. The registry is consulted only for fork stack rules.
+
     Args:
         changed_files: Paths (POSIX-style, repo-relative) of files that changed in the diff.
-        skill_availability: Lower-case stack keys for which a Beagle skill is installed.
-            Defaults to all of the registry's ``stack:<key>`` slot keys (optimistic
-            availability — runtime MissingSkillError would be handled separately).
-            Fork-registered stacks are exempt (they are not Beagle plugins).
-        registry: Extension registry for fork stack rules and skill-slot resolution.
-            Defaults to the current context's registry (``get_registry()``).
+        registry: Extension registry for fork stack rules only. Defaults to the
+            current context's registry (``get_registry()``). Built-in routing
+            never consults ``registry.stack_keys()``.
 
     Returns:
         One StackAssignment per distinct stack that received at least one file,
         plus a synthetic ``structure`` meta-stack appended last whenever the diff
         contains at least one file and is not docs-only. The structure stack
-        carries the full set of changed files (union across languages) and
-        invokes the registry's ``structural`` skill slot for repo-wide
-        structural-maintainability review.
+        carries the full set of changed files (union across languages) and,
+        like every built-in stack, carries no skill-invocation field.
         Ordering: non-generic language stacks alphabetical, then generic,
-        then structure last. Ordering is informational only — the orchestrator
+        then structure last. Ordering is informational only -- the orchestrator
         iterates the full list in parallel.
     """
     if registry is None:
         registry = get_registry()
-    if skill_availability is None:
-        skill_availability = registry.stack_keys()
     rules = registry.stack_rules()
     fork_rules = {rule.stack_name: rule for rule in rules}
 
@@ -239,11 +239,9 @@ def detect_stacks(
         nearest = _nearest_ancestor_stack(path, assigned)
         assigned[path] = nearest if nearest is not None else GENERIC_STACK
 
-    # Missing-skill fallthrough (D-16): move files of any stack without an
-    # installed skill into generic. Fork stacks are exempt (not Beagle plugins).
-    for path, stack in list(assigned.items()):
-        if stack != GENERIC_STACK and stack not in fork_rules and stack not in skill_availability:
-            assigned[path] = GENERIC_STACK
+    # D-16 is removed: a built-in stack never degrades to generic merely
+    # because a plugin registry is absent. Unknown/unassigned files route to the
+    # native generic fallback, never a detected built-in stack.
 
     groups: dict[str, list[str]] = {}
     for path, stack in assigned.items():
@@ -263,7 +261,9 @@ def detect_stacks(
     for stack_name in sorted(non_generic_stacks):
         files = sorted(groups[stack_name])
         rule = fork_rules.get(stack_name)
-        skill_invocation = rule.skill if rule is not None else registry.skill(f"stack:{stack_name}")
+        # Fork-registered stacks keep their own StackRule.skill (that is the
+        # fork's routing). Built-in stacks carry no skill-invocation field.
+        skill_invocation = rule.skill if rule is not None else None
         results.append(
             StackAssignment(
                 stack_name=stack_name,
@@ -284,13 +284,15 @@ def detect_stacks(
         )
 
     # Structural meta-stack: appended unconditionally for any non-docs-only diff
-    # with at least one changed file. Carries the union of all changed files so
-    # the structural reviewer judges the whole change across language boundaries.
+    # with at least one changed file (caller gates on ctx.pipeline().structural_enabled).
+    # Carries the union of all changed files so the structural reviewer judges the
+    # whole change across language boundaries. Like every built-in stack it carries
+    # no skill-invocation field.
     if changed_files and not diff_is_docs_only:
         results.append(
             StackAssignment(
                 stack_name=STRUCTURE_STACK_NAME,
-                skill_invocation=registry.skill("structural"),
+                skill_invocation=None,
                 files=sorted(changed_files),
                 is_docs_only=False,
             )

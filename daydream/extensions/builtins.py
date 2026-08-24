@@ -18,12 +18,16 @@ if TYPE_CHECKING:
 
 
 def register_builtins(registry: Registry) -> None:
-    """Seed ``registry`` with daydream's built-in phases, flows, skills, and prompts."""
+    """Seed ``registry`` with daydream's built-in phases, flows, and prompts.
+
+    No built-in review skill slots are seeded: built-in Deep/Improve reviews are
+    registry-independent and profile-driven. The only seeded skill slots are the
+    pr-feedback skills (``#887`` deletes those alongside generic skill machinery).
+    """
     from daydream import config
 
-    for stack_key, skill in config.SKILL_MAP.items():
-        registry.override_skill(f"stack:{stack_key}", skill)
-    registry.override_skill("structural", config.STRUCTURE_SKILL)
+    # No stack:* / structural / audit:* review skill slots (M1/M10). The only
+    # remaining seeded skill slots are the PR-feedback flow's (removed in #887).
     registry.override_skill("pr-feedback-fetch", config.PR_FEEDBACK_FETCH_SKILL)
     registry.override_skill("pr-feedback-respond", config.PR_FEEDBACK_RESPOND_SKILL)
 
@@ -38,6 +42,8 @@ def _register_improve_builtins(registry: Registry) -> None:
     from daydream import config
     from daydream.improve import prompts
 
+    # Audit skill-slot seeding stays until Task 10 removes it (native Improve);
+    # it is not part of the built-in *review* stack routing Task 1 removes.
     for category, stack_skills in config.AUDIT_SKILL_MAP.items():
         for stack, skill in stack_skills.items():
             slot = f"audit:{category}" if stack == "*" else f"audit:{category}:{stack}"

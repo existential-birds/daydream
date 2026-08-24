@@ -2479,14 +2479,17 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    # Generalist routing: one group, and its stack is the generic fallback value.
+    # Built-in detection drives the audit groups (M1/M3): the monorepo's
+    # python + react + docs files route to their detected stacks, never
+    # collapsed to generic by plugin presence.
     coverage = json.loads(
         improve_artifact(improve_monorepo_target, "coverage.json").read_text(
             encoding="utf-8"
         )
     )
-    assert len(coverage["groups"]) == 1
-    assert coverage["groups"][0]["stack"] == "generic"
+    assert sorted(group["stack"] for group in coverage["groups"]) == [
+        "generic", "python", "react",
+    ]
 
     plans = sorted(
         (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
@@ -2505,52 +2508,43 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("target_fixture", "injected", "expected_group_stacks"),
+    ("target_fixture", "expected_group_stacks"),
     [
-        # An empty set collapses every stack into a single generic audit group.
         pytest.param(
-            "improve_monorepo_target", frozenset[str](), ["generic"], id="empty-generalist"
-        ),
-        # A non-empty set splits the python services into their own group while
-        # react (no injected skill) falls back to generic.
-        pytest.param(
-            "improve_scaled_monorepo_target",
-            frozenset({"python"}),
-            ["generic", "python"],
-            id="nonempty-multistack",
+            "improve_monorepo_target",
+            ["generic", "python", "react"],
+            id="detected-stacks-drive-audit-groups",
         ),
     ],
 )
-async def test_injected_skill_availability_drives_routing_without_env(
+async def test_detected_stacks_drive_audit_groups_registry_independent(
     target_fixture: str,
-    injected: frozenset[str],
     expected_group_stacks: list[str],
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """``RunConfig.skill_availability`` alone drives audit routing, with no probe.
+    """Built-in audit routing is detection/profile-driven; plugin presence cannot
+    rewrite detected stack scopes (M1/M3).
 
-    Proves availability is data carried on RunConfig, not ambient filesystem I/O:
-    the field is injected directly (this test manipulates no CLAUDE_CONFIG_DIR /
-    env and patches no ``get_installed_skills``). The autouse hermetic fixture
-    makes the probe return an empty set, so a non-empty injected set producing
-    multi-stack routing can only have come from the injected field.
+    With the built-in (skill-free) review path, the scopes detected by ``detect_stacks``
+    are authoritative: a monorepo with python + react + docs always audits as
+    ``[generic, python, react]`` groups regardless of which Beagle plugins are (or are
+    not) installed or injected through the environment.
     """
     target: Path = request.getfixturevalue(target_fixture)
     install_improve_stub(monkeypatch, target, n_findings=0)
 
     code = await run(
         make_config(
-        target,
-        flow_name="improve",
-        skill_availability=injected,
+            target,
+            flow_name="improve",
         )
     )
 
     assert code == 0
-    coverage = json.loads(improve_artifact(target, "coverage.json").read_text(encoding="utf-8"))
-    # One group per expected stack: no collapse, and no stack split in two.
+    coverage = json.loads(improve_artifact(target, "coverage.json").read_text())
+    # One audit group per detected stack (not collapsed, not split):
     assert len(coverage["groups"]) == len(expected_group_stacks)
     assert sorted(group["stack"] for group in coverage["groups"]) == expected_group_stacks
 
