@@ -9,7 +9,7 @@ This runbook takes you from nothing to a scored result.
 - **A benchmark checkout.** Clone the benchmark beside this repo so its offline harness sits at `../code-review-benchmark/offline/`. That `offline/` directory is the `--benchmark-repo` path; the step2/2.5/3 modules read `results/benchmark_data.json` relative to it.
 - **`daydream` installed.** Run `uv sync` so the `daydream` console script is on `PATH` (the harness invokes it as a subprocess).
 - **`git` and `gh` on `PATH`.** `git` performs the blobless clone and `pull/N/head` fetch per PR.
-- **The Beagle plugin** installed in Claude Code (see the [Quickstart](../README.md#quickstart)). Deep review needs the stack-specific skills.
+- **The Beagle plugin** installed in Claude Code (see the [Quick start](../README.md#quick-start)). Deep review needs the stack-specific skills.
 - **A backend for the reviewer under test.** By default the reviewer runs daydream's built-in default backend (Claude), using the normal credentials for that backend. To benchmark another reviewer, select it with `--reviewer-backend` and optionally `--reviewer-model` / `--reviewer-provider` (see [Selecting the reviewer backend](#selecting-the-reviewer-backend)). These reviewer settings are separate from the judge route and judge `--model`. The `pi` backend driving a GLM model over OpenRouter additionally needs the `pi` CLI on `PATH` and the OpenRouter provider extension registered with `pi` (installed once via `pi install`); the run forwards `--reviewer-provider` to the reviewer as the `PI_PROVIDER` environment variable.
 - **A judge route and judge credential.** Scoring is controlled by `--judge-route` and the judge `--model`; this is independent of the reviewer backend/model that produced the findings.
 
@@ -57,7 +57,7 @@ benchmark-repo = "../code-review-benchmark/offline"   # makes --benchmark-repo o
 model = "anthropic/claude-opus-4-5-20251101"           # scoring model when --model is omitted
 judge-route = "martian"                               # or "anthropic-direct" / "openai-compatible"
 
-# Named reviewer presets: each expands to --reviewer-backend / -model / -provider.
+# Named reviewer presets: each expands to --reviewer-backend / --reviewer-model / --reviewer-provider.
 [tool.daydream.bench.reviewers.glm]
 backend = "pi"
 model = "z-ai/glm-5.2"
@@ -68,7 +68,7 @@ config-only: there are no built-in reviewer names or model ids baked into daydre
 
 ### `--reviewer <name>` expands a preset
 
-`--reviewer glm` looks up `[tool.daydream.bench.reviewers.glm]`, applies its `backend`/`model`/`provider` as the reviewer fields, and derives `--tool-label` as `daydream-glm` ; its findings file under a distinct results key automatically (see [`--tool-label` isolates per-backend results](#--tool-label-isolates-per-backend-results)). Explicit `--reviewer-backend`/`-model`/`-provider` or `--tool-label` flags still override the preset (CLI > config). An unknown `--reviewer` name is a usage error.
+`--reviewer glm` looks up `[tool.daydream.bench.reviewers.glm]`, applies its `backend`/`model`/`provider` as the reviewer fields, and derives `--tool-label` as `daydream-glm` ; its findings file under a distinct results key automatically (see [`--tool-label` isolates per-backend results](#--tool-label-isolates-per-backend-results)). Explicit `--reviewer-backend`/`--reviewer-model`/`--reviewer-provider` or `--tool-label` flags still override the preset (CLI > config). An unknown `--reviewer` name is a usage error.
 
 With the table above, the full GLM sweep over one PR collapses to:
 
@@ -147,7 +147,7 @@ daydream bench --reviewer glm --only grafana --limit 1 --verbose
 
 The harness benchmarks daydream itself, but the *reviewer under test*: the backend/model that produces the findings, is selectable. This is independent of `--model`, which only names the **judge**. Four flags control the reviewer:
 
-- `--reviewer-backend {claude,codex,pi}`: the backend daydream runs its deep review on. Forwarded to the per-PR subprocess as `--backend`. Omit to use daydream's built-in default (Claude).
+- `--reviewer-backend {claude,codex,pi,osprey}`: the backend daydream runs its deep review on. Forwarded to the per-PR subprocess as `--backend`. Omit to use daydream's built-in default (Claude).
 - `--reviewer-model <id>`: the reviewer model id. Forwarded as `--model` to the reviewer subprocess. Omit to use the backend's default.
 - `--reviewer-provider <name>`: the reviewer provider, forwarded to the reviewer subprocess as the `PI_PROVIDER` environment variable (never as an argv flag). Used by the `pi` backend to route a model through a specific provider, e.g. `openrouter` to run GLM via OpenRouter. Requires the OpenRouter provider extension registered with `pi` (see Prerequisites).
 - `--tool-label <label>`: the results key this reviewer's findings are filed under (default: `daydream`).

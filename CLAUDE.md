@@ -11,10 +11,10 @@ records every agent interaction as an
 pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT/RL fine-tuning.
 
 Default flow is the deep multi-stack pipeline; `--shallow` is a single-stack, single pass; `--comment`/`--review`
-are review-only; `daydream feedback <pr#>` ingests bot review comments. Three backends — Claude
-(in-process SDK), Codex and Pi (subprocess CLIs) — all emit the same `AgentEvent` stream.
+are review-only; `daydream feedback <pr#>` ingests bot review comments. Four backends — Claude
+(in-process SDK), Codex, Pi, and Osprey (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
-Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark,evaluation-framework}.md`.
+Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark}.md`.
 
 ## Commands
 
@@ -62,16 +62,16 @@ substitute. Reference exemplar: the non-interactive/EOF gate tests in `tests/tes
 ## Architecture
 
 ```text
-cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
-              -> deep/orchestrator.py | improve/orchestrator.py
-              |  flows/{shallow,review,pr_feedback}.py
-              -> phases.py -> agent.py -> Backend.execute()
+cli.py -> runner.py -> deep/orchestrator.py -> flows/engine.py (deep FlowSteps)
+              |        -> improve/orchestrator.py -> flows/engine.py (improve FlowSteps)
+              |        -> flows/engine.py (custom extension flows)
               \-> ui/ (terminal output)
+deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 ```
 
 - `runner.run()` is the async entry: builds the per-run extension `Registry` onto a `ContextVar`, then
-  dispatches one of five flows — `deep` (default), `shallow`, `review`, `pr-feedback`, `improve` — or a
-  custom extension flow (`--flow NAME`), each a preamble plus `run_flow()` over its ordered `FlowStep` list.
+  dispatches PR-process modes (`deep`, `shallow`, `review`, `comment`, or `feedback`) to the single deep
+  orchestrator. `improve` and custom extension flows run through `run_flow()` over registered `FlowStep` lists.
 - `agent.run_agent()` is the only agent call site. **Never call a backend/SDK directly from phases.**
 - Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel `run_agent()` calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))`, **not** SDK `agents=`.
@@ -92,7 +92,7 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
 | `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |
 | `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
-| `backends/` | `Backend` protocol, Claude/Codex/Pi, `AgentEvent` union, `create_backend()` |
+| `backends/` | `Backend` protocol, Claude/Codex/Pi/Osprey, `AgentEvent` union, `create_backend()` |
 | `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
 | `config.py`, `config_file.py` | Skill mappings, per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
 | `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree |
@@ -182,7 +182,7 @@ exploration pre-scan (cached across runs)
 - `.daydream/exploration/` survives the run, reused only on an **exact** key match (format version + head SHA + diff + tier +
   depth, in a sibling `cache-key` file) — a near-match hit would misground every prompt. Uncommitted edits
   are not in the key, so an exact hit on a dirty tree can serve pre-edit exploration. `--shallow`/`--review`
-  delete the directory, so alternating flows always misses.
+  delete the directory, so alternating modes always miss.
 - `--start-at` refuses stale artifacts: a fresh run records its diff in `.daydream/deep/diff-key`; a resume
   whose diff no longer matches (or has no key) exits 1 rather than adjudicating stale findings.
 
