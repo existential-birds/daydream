@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -838,6 +839,53 @@ def resolve_from_runconfig(cfg: object) -> ResolvedProfile:
     explicit = getattr(cfg, "review_profile_path", None)
     explicit_str = str(explicit) if explicit is not None else None
     return resolve_profile(explicit_path=explicit_str, file_config=file_config)
+
+
+def resolve_harbor_profile(
+    *,
+    file_config: object | None = None,
+    candidate_env: str = "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
+    env: Mapping | None = None,
+) -> ResolvedProfile:
+    """Resolve the Harbor run's review profile (R10: explicit-only mode).
+
+    A DISTINCT resolver mode from :func:`resolve_profile`: a benchmarked
+    repository can never configure its own evaluator, so this accepts ONLY the
+    control-plane-supplied candidate (a dedicated
+    ``DAYDREAM_REVIEW_PROFILE_CANDIDATE`` env var) or the packaged default. It
+    must NOT read ``DAYDREAM_REVIEW_PROFILE`` (the normal-run env), the
+    operator's normal defaults, or any ``file_config``/target-repo profile.
+
+    When no candidate var is set -> the packaged default with
+    ``source_kind="default"``. When set -> the candidate is parsed + validated
+    fail-closed (naming its source); any failure raises ``ProfileError`` and
+    the run aborts — never a fallback to a lower-precedence source.
+
+    Args:
+        file_config: Accepted for signature symmetry with
+            :func:`resolve_profile`; deliberately UNREAD — a benchmarked
+            repository can never point its own evaluation (the first Harbor
+            test asserts exactly this).
+        candidate_env: Env var name carrying the control-plane candidate path.
+        env: Environment mapping; ``None`` reads ``os.environ`` (the trusted
+            control-plane env in the Harbor agent container).
+
+    Returns:
+        The resolved ``ResolvedProfile``.
+
+    Raises:
+        ProfileError: On an invalid candidate, naming the candidate source.
+    """
+    if env is None:
+        env = os.environ
+    candidate = env.get(candidate_env)
+    if candidate:
+        raw = str(candidate)
+        profile = _read_and_parse(Path(raw), raw)
+        return ResolvedProfile(
+            profile=profile, source_kind="candidate", source_path=Path(raw)
+        )
+    return ResolvedProfile(profile=build_default_profile(), source_kind="default")
 
 
 def clone_with_overrides(
