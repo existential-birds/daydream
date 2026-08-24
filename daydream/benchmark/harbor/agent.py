@@ -159,6 +159,11 @@ def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
     process variables, then explicitly drops the banned variables (GitHub/HF/judge/
     archive and raw Anthropic SDK vars) so any future secret-holding variable not in
     the keep-set still cannot leak by default. Never passes the parent env wholesale.
+
+    The review-profile candidate (``DAYDREAM_REVIEW_PROFILE_CANDIDATE``, issue
+    #885/R11) rides the ``DAYDREAM_REVIEW_*`` allowlist to the entrypoint; the
+    verifier env is isolated to ``DAYDREAM_JUDGE_*`` (render_job_config), so the
+    candidate never reaches the judge.
     """
     child = {
         key: value

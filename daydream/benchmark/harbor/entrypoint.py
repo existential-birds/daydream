@@ -40,6 +40,11 @@ _BASE_URL_ENV = "DAYDREAM_REVIEW_BASE_URL"
 _REPO_DIR_ENV = "DAYDREAM_REVIEW_REPO_DIR"
 _ARTIFACT_PATH_ENV = "DAYDREAM_REVIEW_ARTIFACT_PATH"
 _TRAJECTORY_PATH_ENV = "DAYDREAM_REVIEW_TRAJECTORY_PATH"
+# Control-plane candidate channel (R10/R11): a dedicated var, distinct from the
+# normal-run ``DAYDREAM_REVIEW_PROFILE``, so a benchmarked repository can never
+# configure its own evaluator. Carried into the container through the
+# ``DAYDREAM_REVIEW_*`` child-env allowlist (agent.build_child_env).
+_CANDIDATE_ENV = "DAYDREAM_REVIEW_PROFILE_CANDIDATE"
 
 
 class EntrypointError(Exception):
@@ -67,8 +72,26 @@ def build_run_config(
     stays ``None`` -- the ``--findings-out`` emission path performs a live PR
     lookup and must be forbidden for an offline snapshot. ``base_ref`` carries
     the ``DAYDREAM_REVIEW_BASE_REF`` value rendered into the container env.
+
+    The review profile is resolved through the Harbor explicit-only resolver
+    (R10): the control-plane ``DAYDREAM_REVIEW_PROFILE_CANDIDATE`` env (or the
+    packaged default) is parsed + validated BEFORE the run, so an invalid
+    candidate aborts here — no review ever starts and no artifact is written.
+    The target repo's own config can never change the candidate.
+
+    Raises:
+        EntrypointError: On an invalid review-profile candidate (the process
+            exits non-zero and ``publish_review`` is never reached).
     """
-    return RunConfig(
+    from daydream.review_profile import ProfileError, resolve_harbor_profile
+
+    try:
+        resolved = resolve_harbor_profile(candidate_env=_CANDIDATE_ENV)
+    except ProfileError as exc:
+        raise EntrypointError(
+            f"invalid review-profile candidate: {exc}"
+        ) from exc
+    config = RunConfig(
         target=str(repo_dir),
         output_mode="review",
         base=base_ref,
@@ -81,6 +104,8 @@ def build_run_config(
         model=model,
         file_config=DaydreamFileConfig(),
     )
+    config.review_profile = resolved
+    return config
 
 
 def require_supported_backend() -> None:

@@ -26,3 +26,54 @@ def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypat
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", p)
     resolved = rp.resolve_harbor_profile(env=None)  # env passed explicitly as the trusted control plane
     assert resolved.profile.name == "candidate"
+
+# Task 11 (R11): controlled Harbor delivery -- entrypoint validation + no
+# artifact on failure.
+import asyncio
+
+
+def test_entrypoint_parses_and_validates_candidate_before_runconfig(tmp_path, monkeypatch):
+    from daydream.benchmark.harbor import entrypoint
+
+    good = tmp_path / "good.toml"
+    good.write_text('schema_version = 1\nname = "g"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
+    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(good))
+    cfg = entrypoint.build_run_config(
+        repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
+        backend="claude", model="sonnet",
+    )
+    assert cfg.review_profile.name == "g"  # candidate parsed+validated into RunConfig
+
+
+def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path, monkeypatch):
+    from daydream.benchmark.harbor import entrypoint
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text('schema_version = 99\nname = "bad"')
+    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(bad))
+    artifact = tmp_path / "logs" / "artifacts" / "review.json"
+    artifact.parent.mkdir(parents=True)
+    # main() is async and RETURNS exit code 1 on EntrypointError (it does not raise).
+    rc = asyncio.run(entrypoint.main(
+        monkeypatch_env={"DAYDREAM_REVIEW_CASE_ID": "case-x",
+                         "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
+                         "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path)}
+    ))
+    assert rc == 1  # agent/config error, non-zero exit
+    assert not artifact.exists()  # no candidate review artifact written
+
+
+def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path, monkeypatch):
+    from daydream.benchmark.harbor import entrypoint
+
+    # target repo .daydream.toml tries to point at its own profile
+    evil = tmp_path / ".daydream.toml"
+    evil.write_text('review_profile = "/tmp/evil.toml"')
+    good = tmp_path / "good.toml"
+    good.write_text('schema_version = 1\nname = "g"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
+    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(good))
+    cfg = entrypoint.build_run_config(
+        repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
+        backend="claude", model="sonnet",
+    )
+    assert cfg.review_profile.name == "g"  # candidate wins; target config ignored

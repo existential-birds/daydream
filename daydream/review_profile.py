@@ -743,6 +743,11 @@ class ResolvedProfile:
     def digest(self) -> str:
         return self.profile.digest
 
+    @property
+    def name(self) -> str:
+        """Human-readable name of the resolved profile (delegates to the value)."""
+        return self.profile.name
+
 
 def _read_and_parse(path: Path, source: str) -> ReviewProfile:
     try:
