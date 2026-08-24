@@ -124,6 +124,32 @@ class CompatibilityIdentity:
 
 
 @dataclass(frozen=True)
+class SuiteEntry:
+    """One exact completion referenced by a suite manifest.
+
+    ``workspace`` is the repository workspace path the run was recorded against
+    and ``run_id`` resolves the exact ledgered completion within it. Instances
+    are immutable and preserve manifest order.
+    """
+
+    workspace: Path
+    run_id: str
+
+
+@dataclass(frozen=True)
+class SuiteManifest:
+    """A validated, versioned manifest of exact completions to pool.
+
+    ``entries`` is a tuple of ``SuiteEntry`` in manifest order. Instances are
+    immutable; every entry was already validated to carry a ``workspace`` and
+    ``run_id`` and to be unique by ``(workspace, run_id)``.
+    """
+
+    schema_version: int
+    entries: tuple[SuiteEntry, ...]
+
+
+@dataclass(frozen=True)
 class CompletedRun:
     """Immutable projection of a completed, ledgered benchmark run."""
 
@@ -272,6 +298,55 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
 
 
 _PROFILE_SCHEMA_VERSION = 1
+
+_SUITE_SCHEMA_VERSION = 1
+
+
+def validate_suite_manifest(manifest: dict) -> list[SuiteEntry]:
+    """Validate a suite manifest and return its entries in manifest order.
+
+    Rejects a manifest whose ``schema_version`` is not 1, a missing/non-list
+    ``entries``, a non-dict entry, or an entry missing ``workspace``/``run_id``
+    --- every failure raises ``ObjectiveError``. Any duplicated
+    ``(workspace, run_id)`` pair is also rejected, naming the offending entry
+    and its index. Bad entries are never skipped nor coerced to a default;
+    the error always carries the entry index and offending field.
+    """
+    if not isinstance(manifest, dict):
+        raise ObjectiveError("suite manifest must be a mapping object")
+    if manifest.get("schema_version") != _SUITE_SCHEMA_VERSION:
+        raise ObjectiveError(
+            f"suite manifest has unsupported schema_version "
+            f"{manifest.get('schema_version')!r}"
+        )
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        raise ObjectiveError("suite manifest is missing its entries list")
+
+    result: list[SuiteEntry] = []
+    seen: set[tuple[str, str]] = set()
+    for index, raw in enumerate(entries):
+        if not isinstance(raw, dict):
+            raise ObjectiveError(
+                f"suite manifest entry #{index} is not an object: {raw!r}"
+            )
+        missing = [key for key in ("workspace", "run_id") if not raw.get(key)]
+        if missing:
+            raise ObjectiveError(
+                f"suite manifest entry #{index} is missing field(s) "
+                f"{', '.join(repr(k) for k in missing)}"
+            )
+        workspace = Path(str(raw["workspace"]))
+        run_id = str(raw["run_id"])
+        pair = (str(workspace), run_id)
+        if pair in seen:
+            raise ObjectiveError(
+                f"suite manifest entry #{index} duplicates (workspace={workspace!s}, "
+                f"run_id={run_id!r})"
+            )
+        seen.add(pair)
+        result.append(SuiteEntry(workspace=workspace, run_id=run_id))
+    return result
 
 
 def _bind_identity(

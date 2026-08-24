@@ -229,3 +229,30 @@ def test_objective_json_is_opaque(tmp_path):
     doc = json.loads(blob)
     assert set(doc) <= {"run_id", "mode", "schema_version", "identity", "objective"}
     assert isinstance(doc["objective"], dict)
+
+
+def test_suite_manifest_validation(tmp_path):
+    good = {"schema_version": 1, "entries": [
+        {"workspace": str(tmp_path / "a"), "run_id": "r1"},
+        {"workspace": str(tmp_path / "b"), "run_id": "r2"},
+    ]}
+    entries = objective.validate_suite_manifest(good)
+    assert [ (e.workspace.name, e.run_id) for e in entries ] == [("a", "r1"), ("b", "r2")]
+
+
+def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path):
+    dup = {"schema_version": 1, "entries": [
+        {"workspace": str(tmp_path / "a"), "run_id": "r1"},
+        {"workspace": str(tmp_path / "a"), "run_id": "r1"},
+    ]}
+    with pytest.raises(objective.ObjectiveError) as e:
+        objective.validate_suite_manifest(dup)
+    assert "duplicate" in str(e.value).lower()
+    incomplete = {"schema_version": 1, "entries": [
+        {"workspace": str(tmp_path / "a")},
+    ]}
+    with pytest.raises(objective.ObjectiveError):
+        objective.validate_suite_manifest(incomplete)
+    unsupported = {"schema_version": 99, "entries": []}
+    with pytest.raises(objective.ObjectiveError):
+        objective.validate_suite_manifest(unsupported)
