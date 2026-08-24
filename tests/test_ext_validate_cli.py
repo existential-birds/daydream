@@ -43,7 +43,7 @@ def test_ext_validate_ok(ext_dir, capsys) -> None:
     rc = _run_main(["ext", "validate"])
     assert rc == 0
     out = strip_ansi(capsys.readouterr().out)
-    assert "DAYDREAM_EXT_DIR" in out and "api version 5" in out.lower()
+    assert "DAYDREAM_EXT_DIR" in out and "api version 6" in out.lower()
     assert "tool supervisor: registered" in out.lower()
 
 
@@ -53,7 +53,7 @@ def test_ext_validate_without_supervisor_reports_none(ext_dir, capsys) -> None:
     assert rc == 0
     out = strip_ansi(capsys.readouterr().out).lower()
     assert "tool supervisor: none" in out
-    assert "supported: 5..5" in out
+    assert "supported: 6..6" in out
 
 
 def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir, capsys) -> None:

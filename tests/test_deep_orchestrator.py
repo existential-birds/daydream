@@ -7310,11 +7310,11 @@ def test_no_feedback_mode_resolver() -> None:
     assert deep_orchestrator._resolve_mode(config) != "feedback"
 
 
-def test_extension_api_version_is_five_and_alternatives_step_is_gone() -> None:
+def test_extension_api_version_is_six_and_alternatives_step_is_gone() -> None:
     from daydream.deep.orchestrator import STEPS
     from daydream.extensions.api import EXTENSION_API_VERSION
 
-    assert EXTENSION_API_VERSION == 5
+    assert EXTENSION_API_VERSION == 6
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names

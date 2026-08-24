@@ -783,7 +783,7 @@ def test_ext_dir_renderer_override_reaches_pr_review(
     ext = tmp_path / "ext"
     ext.mkdir()
     (ext / "__init__.py").write_text(
-        "DAYDREAM_EXT_API = 5\n"
+        "DAYDREAM_EXT_API = 6\n"
         "def register(r):\n"
         "    r.override_renderer('finding', lambda finding, ctx: f'EXT::{ctx.placement}::{finding.title}')\n"
     )
