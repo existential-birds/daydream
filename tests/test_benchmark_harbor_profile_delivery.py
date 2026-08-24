@@ -5,10 +5,15 @@ The Harbor control plane supplies the candidate through a dedicated
 normal-run ``DAYDREAM_REVIEW_PROFILE`` env, the operator's file config, or any
 target-repo profile. No candidate -> packaged default.
 """
-import pytest
+import asyncio
 
 from daydream import review_profile as rp
 from daydream.config_file import DaydreamFileConfig
+
+_resolver_fixture = (
+    'schema_version = 1\nname = "candidate"\n[strategies.intent]\n'
+    'content = "C"\nsource = "copied: a"'
+)
 
 
 def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch):
@@ -22,16 +27,14 @@ def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch):
 
 def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypatch):
     p = "/tmp/control-plane-candidate.toml"
-    open(p, "w").write('schema_version = 1\nname = "candidate"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
+    with open(p, "w") as handle:
+        handle.write(_resolver_fixture)
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", p)
     resolved = rp.resolve_harbor_profile(env=None)  # env passed explicitly as the trusted control plane
     assert resolved.profile.name == "candidate"
 
 # Task 11 (R11): controlled Harbor delivery -- entrypoint validation + no
 # artifact on failure.
-import asyncio
-
-
 def test_entrypoint_parses_and_validates_candidate_before_runconfig(tmp_path, monkeypatch):
     from daydream.benchmark.harbor import entrypoint
 

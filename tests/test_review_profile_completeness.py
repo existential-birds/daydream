@@ -6,7 +6,6 @@ simulates the production spine registry with a stand-in and asserts every
 registered stage carries both a profile strategy and an envelope
 classification; a stage added to the spine without either trips it.
 """
-import pytest
 
 from daydream import review_profile as rp
 

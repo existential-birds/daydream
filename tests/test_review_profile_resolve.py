@@ -74,7 +74,6 @@ def test_invalid_explicit_fails_naming_source(monkeypatch):
 # Task 7 (R1, R9): resolve-once plumbing via RunConfig.
 def test_runconfig_carries_resolved_profile_and_is_used(tmp_path, monkeypatch):
     from daydream.runner import RunConfig
-    from daydream import review_profile as rp
     p = tmp_path / "prof.toml"
     p.write_text('schema_version = 1\nname = "r"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     cfg = RunConfig(target=str(tmp_path), review_profile_path=str(p))
@@ -87,3 +86,36 @@ def test_resolve_from_runconfig_happens_once_at_composition_root():
     cfg = RunConfig(target="/tmp")
     resolved = rp.resolve_from_runconfig(cfg)     # seam: composition root resolves once
     assert resolved.profile.name and resolved.source_kind == "default"
+
+# Task 13: real-path CLI entry (real `daydream ... --review-profile` invocation).
+def test_real_cli_entry_resolves_profile_and_inspects(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # A real git target so the run gets past workspace open and actually
+    # reaches dispatch (the profile-resolution seam fires inside the deep
+    # flow's composition root, after open_workspace).
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "t"], check=True)
+    (tmp_path / "seed.txt").write_text("x\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True)
+
+    p = tmp_path / "prof.toml"
+    p.write_text('schema_version = 1\nname = "cli-p"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
+    env = {**os.environ, "DAYDREAM_REVIEW_PROFILE": str(p)}
+    repo_root = Path(__file__).resolve().parents[1]
+    # CLI: `daydream review --review-profile` is #886 (renamed); here prove the
+    # resolver seams through a real `daydream ... --review-profile` invocation.
+    out = subprocess.run(
+        [sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(tmp_path)],
+        capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
+    )
+    # The run should get past resolution (exit 0 means resolved; a non-zero exit must be
+    # the review's own result, never a profile-resolution failure). We assert the seam
+    # symbol resolves and the process reaches dispatch without a ProfileError.
+    assert "ProfileError" not in out.stderr
+    assert out.returncode == 0  # clean review of an empty diff: resolved + dispatched

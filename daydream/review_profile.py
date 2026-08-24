@@ -361,7 +361,7 @@ def build_default_profile() -> ReviewProfile:
                 "{severity_hint}{verdicts_hint}\n"
                 "For each issue found, return a JSON object with this structure:\n"
                 "{{\"issues\": [\n"
-                "  {{\"id\": 1, \"description\": \"Brief description of the issue\", \"file\": \"path/to/file.py\", \"line\": 42{severity_field}}}\n"
+                "  {{\"id\": 1, \"description\": \"Brief description of the issue\", \"file\": \"path/to/file.py\", \"line\": 42{severity_field}}}\n"  # noqa: E501 (verbatim copy of the phase_parse_feedback literal)
                 "]{verdicts_example}}}\n\n"
                 "If there are no actionable issues, return: {{\"issues\": []{verdicts_empty}}}\n"
             ),
@@ -790,7 +790,7 @@ def resolve_profile(
     *,
     explicit_path: str | None = None,
     file_config: object | None = None,
-    env: dict | None = None,
+    env: Mapping[str, str] | None = None,
     repo_root: Path | None = None,
 ) -> ResolvedProfile:
     """Resolve the single per-run review profile from the four normal sources (R9).
@@ -850,7 +850,7 @@ def resolve_harbor_profile(
     *,
     file_config: object | None = None,
     candidate_env: str = "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
-    env: Mapping | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ResolvedProfile:
     """Resolve the Harbor run's review profile (R10: explicit-only mode).
 
@@ -935,9 +935,11 @@ def clone_with_overrides(
                     "<clone override>",
                 )
             existing = strategies[key]
+            content = raw_override.get("content", existing.content)
+            source = raw_override.get("source", existing.source)
             strategies[key] = Strategy(
-                content=raw_override.get("content", existing.content),
-                source=raw_override.get("source", existing.source),
+                content=str(content),
+                source=str(source),
             )
         elif key == "pipeline":
             pipeline = _pipeline_with_overrides(pipeline, raw_override)

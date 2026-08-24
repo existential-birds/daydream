@@ -5,6 +5,8 @@ This task: strict model with stage schema. Digests (R3), parse (R4),
 fail-closed validation (R3), host caps (R5), typed clone (R8), provenance (R9/R12),
 and Harbor delivery (R10/R11) land in later tasks — not here.
 """
+import pytest
+
 from daydream import review_profile as rp
 
 
@@ -59,11 +61,6 @@ def test_default_profile_carries_schema_version_name_and_every_stage():
 
 
 # Task 2 (R4): canonical serialization + deterministic digest.
-import json
-
-from daydream import review_profile as rp
-
-
 def test_digest_is_order_whitespace_comment_path_independent(tmp_path):
     a = rp.parse_profile('''schema_version = 1
 name = "p"
@@ -110,11 +107,6 @@ structural_enabled = true''')   # default value spelled out
     assert implicit.digest == explicit.digest
 
 # Task 3 (R3): fail-closed validation.
-import pytest
-
-from daydream import review_profile as rp
-
-
 def test_unknown_key_fails_closed_naming_source():
     with pytest.raises(rp.ProfileError) as e:
         rp.parse_profile(

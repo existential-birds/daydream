@@ -49,7 +49,6 @@ from daydream.backends import Backend, create_backend
 from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
-from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.extensions import ExtensionError, build_registry, get_registry, set_registry
 from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
@@ -59,6 +58,7 @@ from daydream.phases import (
     _git_branch,
     _git_log,
 )
+from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
