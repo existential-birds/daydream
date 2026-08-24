@@ -9,7 +9,6 @@ before the main argparse parser runs (so its flags don't collide with the
 top-level ``TARGET`` positional):
 
 - ``daydream [review] <target>`` — the review/fix loop (default verb)
-- ``daydream feedback <pr#>`` — apply bot PR-review comments
 - ``daydream improve <target>`` — audit a repository and write advisory artifacts
     - ``improve plan <description> <target>`` — investigate and write one plan
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
@@ -25,7 +24,7 @@ top-level ``TARGET`` positional):
     - ``corpus label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
       — record an authoritative human outcome label that overrides automated ones
 - ``daydream ext validate`` — load the ``daydream_ext`` extension and
-  resolve-check the registry (flows, phases, skill slots, prompts)
+  resolve-check the registry (flows, phases, prompts)
 """
 
 import argparse
@@ -46,7 +45,7 @@ from daydream.agent import (
 from daydream.benchmark.cli import _handle_bench_command, _handle_benchmark_command
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.phases import UnconfinedFindingError
-from daydream.runner import RunConfig, run, run_feedback
+from daydream.runner import RunConfig, run
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
     ShutdownPanel,
@@ -66,7 +65,6 @@ if TYPE_CHECKING:
 # falls through to the ``review`` golden path via the default-verb shim.
 KNOWN_VERBS = {
     "review",
-    "feedback",
     "improve",
     "summarize",
     "corpus",
@@ -190,11 +188,9 @@ def _resolve_target_provenance(target: str | None) -> tuple[Path, str | None, Da
 
 
 def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = True) -> None:
-    """Add the shared (non-output-mode) arguments to a parser or subparser.
+    """Add the shared (non-output-mode) arguments to a parser.
 
-    Used by both the top-level parser and the ``feedback`` subparser so flags
-    like ``--backend``, ``--model``, ``--trajectory`` work in both places. The
-    global ``--model``/``--backend`` here feed the source-tiered precedence in
+    The global ``--model``/``--backend`` here feed the source-tiered precedence in
     :func:`daydream.runner._resolved_model` / ``_resolve_backend``
     (CLI > config-file phase override > config-file global > per-backend default).
 
@@ -322,9 +318,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
 def _build_summarize_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream summarize <path>``.
 
-    Like the ``feedback`` subcommand, ``summarize`` is dispatched manually
-    from ``main()`` before the main parser runs so its positional argument
-    doesn't collide with the top-level ``TARGET``.
+    ``summarize`` is dispatched manually from ``main()`` before the main parser
+    runs so its positional argument doesn't collide with the top-level
+    ``TARGET``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream summarize",
@@ -373,12 +369,6 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
     )
 
     # Filters (post-applied AFTER exclusion list)
-    parser.add_argument(
-        "--skill",
-        type=str,
-        default=None,
-        help="Match manifest.skill exactly",
-    )
     parser.add_argument(
         "--repo",
         action="append",
@@ -518,7 +508,6 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
         labels = tuple(args.label) if args.label else ("accepted",)
 
     filters = CorpusFilters(
-        skill=args.skill,
         repos=tuple(args.repo),
         labels=labels,
         min_grounding=args.min_grounding,
@@ -545,47 +534,6 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
         return 1
     run_build_corpus(config)
     return 0
-
-
-def _build_feedback_parser() -> argparse.ArgumentParser:
-    """Build the parser for the ``daydream feedback <pr#>`` subcommand.
-
-    Kept as its own parser (not an argparse subparser of the main one) so that
-    the main parser's positional ``TARGET`` doesn't collide with the subcommand
-    name. We dispatch to this parser from ``_parse_args`` based on argv[0].
-    """
-    parser = argparse.ArgumentParser(
-        prog="daydream feedback",
-        description="Fetch bot review comments on a PR, apply fixes, push, and respond.",
-    )
-    parser.add_argument(
-        "pr_number",
-        type=int,
-        metavar="PR",
-        help="Pull request number to process",
-    )
-    parser.add_argument(
-        "--bot",
-        required=True,
-        metavar="BOT_NAME",
-        help="Bot username to filter PR comments (e.g. coderabbitai[bot])",
-    )
-    parser.add_argument(
-        "target",
-        nargs="?",
-        default=None,
-        metavar="TARGET",
-        help="Target directory (default: current directory)",
-    )
-    parser.add_argument(
-        "--log",
-        action="store_true",
-        default=False,
-        dest="log_mode",
-        help=argparse.SUPPRESS,  # Suppressed in feedback parser unless modified
-    )
-    _add_shared_arguments(parser)
-    return parser
 
 
 def _build_improve_parser(
@@ -721,8 +669,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="daydream",
-        description="Automated code review and fix loop. "
-                    "Use `daydream feedback <pr#>` to process PR bot comments.",
+        description="Automated code review and fix loop.",
         epilog=(
             "Phase A emission: `daydream --review --findings-out PATH` writes a "
             "strict-schema findings artifact (fingerprints + comment placement) "
@@ -741,8 +688,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         metavar="TARGET",
-        help="Target directory (default: prompt interactively). "
-             "Use `daydream feedback <pr#>` for the PR feedback flow.",
+        help="Target directory (default: prompt interactively).",
     )
 
     # Output mode (mutually exclusive; default = fix-loop)
@@ -960,10 +906,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     """Parse command line arguments and return a RunConfig.
 
     Implements the consolidated CLI surface: a positional ``target`` directory,
-    the ``feedback`` subcommand, output-mode flags (``--comment`` / ``--review``),
-    selection flags (``--branch`` / ``--base``), and modifiers (``--worktree`` /
-    ``--shallow`` / ``--copy``). Deep is the default; ``--shallow`` opts into
-    single-stack mode.
+    output-mode flags (``--comment`` / ``--review``), selection flags
+    (``--branch`` / ``--base``), and modifiers (``--worktree`` / ``--shallow`` /
+    ``--copy``). Deep is the default; ``--shallow`` opts into single-stack mode.
     """
     raw_argv = sys.argv[1:] if argv is None else list(argv)
 
@@ -972,24 +917,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if raw_argv and raw_argv[0] == "review":
         raw_argv = raw_argv[1:]
 
-    # Manual subcommand dispatch: argparse subparsers would eat the first
-    # positional (conflicts with TARGET), so route "feedback" to its own parser.
-    if raw_argv and raw_argv[0] == "feedback":
-        feedback_parser = _build_feedback_parser()
-        _reject_removed_phase_flags(feedback_parser, raw_argv[1:])
-        feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
-        return _build_feedback_config(feedback_args)
-
     parser = _build_main_parser()
     _reject_removed_phase_flags(parser, raw_argv)
     args = parser.parse_args(raw_argv)
-
-    # Reject purely numeric TARGET (likely meant `daydream feedback N`)
-    if args.target is not None and args.target.lstrip("-").isdigit():
-        parser.error(
-            f"target '{args.target}' looks like a PR number — "
-            f"did you mean: daydream feedback {args.target}?"
-        )
 
     # Resolve output mode
     output_mode: str = "loop"
@@ -1081,56 +1011,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         non_interactive=args.non_interactive,
         assume=args.assume,
         log_mode=args.log_mode,
-    )
-
-
-def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
-    """Build a RunConfig from the ``feedback`` subcommand namespace.
-
-    The feedback subcommand handles PR bot comments — fetching them, applying
-    fixes, and posting responses. ``pr_number`` and ``bot`` are populated here
-    and consumed by :func:`runner.run_feedback`.
-    """
-    pr_number: int = args.pr_number
-    if pr_number <= 0:
-        # argparse already enforces type=int, but guard against negatives.
-        raise SystemExit(f"feedback subcommand: PR number must be positive (got {pr_number})")
-
-    _, pr_repo, file_config = _resolve_target_provenance(args.target)
-
-    return RunConfig(
-        target=args.target,
-        stack=None,
-        model=args.model,
-        reasoning_effort=args.reasoning_effort,
-        file_config=file_config,
-        review_profile_path=args.review_profile_path,
-        # Per-phase model/backend overrides are config-file-only (no CLI flags).
-        exploration_model=None,
-        review_model=None,
-        parse_model=None,
-        fix_model=None,
-        test_model=None,
-        cleanup=None,
-        quiet=True,
-        start_at="review",
-        pr_number=pr_number,
-        bot=args.bot,
-        backend=args.backend,
-        review_backend=None,
-        fix_backend=None,
-        test_backend=None,
-        ignore_paths=[],
-        trajectory_path=args.trajectory_path,
-        pr_repo=pr_repo,
-        archive=not args.no_archive,
-        run_eval=args.run_eval,
-        output_mode="loop",
-        non_interactive=args.non_interactive,
-        assume=args.assume,
-        log_mode=args.log_mode,
-        dump_artifacts=args.dump_artifacts,
-        trajectory_hub_repo=args.trajectory_hub_repo,
     )
 
 
@@ -1486,8 +1366,8 @@ def _ext_resolve_failure(registry: "Registry") -> str | None:
 
     Runs ``run_flow``'s pre-flight pass (every flow entry — including
     loop-group bodies — must name a registered phase), then checks that every
-    step's config key is a string and that every skill slot and fork stack
-    rule carries a non-empty skill invocation.
+    step's config key is a string and that every prompt and renderer resolves
+    to a callable.
     """
     from daydream.extensions import UnresolvedExtensionError
     from daydream.flows.engine import _resolve_steps
@@ -1501,12 +1381,6 @@ def _ext_resolve_failure(registry: "Registry") -> str | None:
         phase_key = registry.phase(name).phase_key
         if not isinstance(phase_key, str):
             return f"phase '{name}' has a non-string config key: {phase_key!r}"
-    for slot, skill in registry.skill_slots().items():
-        if not skill:
-            return f"skill slot '{slot}' has an empty skill invocation"
-    for rule in registry.stack_rules():
-        if not rule.skill:
-            return f"stack rule '{rule.stack_name}' has an empty skill invocation"
     for name in registry.prompt_names():
         if not callable(registry.prompt(name)):
             return f"prompt slot '{name}' does not resolve to a callable"
@@ -1569,7 +1443,6 @@ def _handle_ext_validate_command() -> int:
     console.print(
         f"registry OK: {len(registry.phase_names())} phases, "
         f"{len(registry.flow_names())} flows, "
-        f"{len(registry.skill_slots())} skill slots, "
         f"{len(registry.prompt_names())} prompts, "
         f"{len(registry.renderer_names())} renderers"
     )
@@ -1864,7 +1737,6 @@ def main() -> None:
 
     Verbs:
         - ``review`` (default) — the review/fix loop (bare ``daydream <target>``)
-        - ``feedback`` — apply bot PR-review comments
         - ``summarize`` — print run-info markdown for a trajectory
         - ``bench`` — score deep-review findings against the offline benchmark
         - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
@@ -1943,11 +1815,7 @@ def main() -> None:
             if verb == "improve"
             else _parse_args()
         )
-        if verb == "feedback":
-            assert config.pr_number is not None  # _build_feedback_config guarantees
-            exit_code = anyio.run(run_feedback, config, config.pr_number)
-        else:
-            exit_code = anyio.run(run, config)
+        exit_code = anyio.run(run, config)
         sys.exit(exit_code)
     except KeyboardInterrupt:
         panel = get_shutdown_panel()
