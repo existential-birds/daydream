@@ -56,3 +56,55 @@ def test_default_profile_carries_schema_version_name_and_every_stage():
     for key, strategy in p.strategies.items():
         assert strategy.content  # nonempty, real content (copied, not invented)
         assert strategy.source  # provenance string present ("copied:" / "authored:")
+
+
+# Task 2 (R4): canonical serialization + deterministic digest.
+import json
+
+from daydream import review_profile as rp
+
+
+def test_digest_is_order_whitespace_comment_path_independent(tmp_path):
+    a = rp.parse_profile('''schema_version = 1
+name = "p"
+[strategies.intent]
+content = "X"
+source = "copied: a"''')
+    b = rp.parse_profile('''schema_version=1
+# a comment
+name="p"
+[strategies.intent]
+source="copied: a"
+content="X"''')
+    assert a.digest == b.digest           # order/whitespace/comment independent
+
+
+def test_digest_semantic_change_changes_digest():
+    # A semantic change to a stage's strategy content changes the digest.
+    base = rp.parse_profile('''schema_version = 1
+name = "p"
+[strategies.intent]
+content = "X"
+source = "copied: a"''')
+    changed = rp.parse_profile('''schema_version = 1
+name = "p"
+[strategies.intent]
+content = "DIFFERENT"
+source = "copied: a"''')
+    assert changed.digest != base.digest
+
+
+def test_omitted_defaults_and_explicit_defaults_hash_identically():
+    implicit = rp.parse_profile('''schema_version = 1
+name = "p"
+[strategies.intent]
+content = "X"
+source = "copied: a"''')
+    explicit = rp.parse_profile('''schema_version = 1
+name = "p"
+[strategies.intent]
+content = "X"
+source = "copied: a"
+[pipeline]
+structural_enabled = true''')   # default value spelled out
+    assert implicit.digest == explicit.digest

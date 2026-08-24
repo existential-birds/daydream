@@ -22,6 +22,9 @@ nonempty copy already.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import tomllib
 from dataclasses import dataclass, field
 
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
@@ -140,6 +143,50 @@ class ReviewProfile:
     name: str = ""
     strategies: dict[str, Strategy] = field(default_factory=dict)
     pipeline: Pipeline = field(default_factory=Pipeline)
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        """Plain-dict projection of the fully-defaulted semantic value (R4).
+
+        Excludes provenance (``Strategy.source``), raw source text, and any
+        order/whitespace/comment artifacts so semantically-identical policies
+        project identically.
+        """
+        return {
+            "schema_version": self.schema_version,
+            "name": self.name,
+            "strategies": {
+                key: strategy.content for key, strategy in sorted(self.strategies.items())
+            },
+            "pipeline": {
+                "structural_enabled": self.pipeline.structural_enabled,
+                "uncovered_sweep_enabled": self.pipeline.uncovered_sweep_enabled,
+                "uncovered_sweep_max_files": self.pipeline.uncovered_sweep_max_files,
+                "uncovered_sweep_min_hunk_lines": self.pipeline.uncovered_sweep_min_hunk_lines,
+                "arbitration": {
+                    "enabled": self.pipeline.arbitration.enabled,
+                    "min_severity": self.pipeline.arbitration.min_severity,
+                    "contested_location": self.pipeline.arbitration.contested_location,
+                },
+                "suppression": {
+                    "enabled": self.pipeline.suppression.enabled,
+                    "severity_classes": list(self.pipeline.suppression.severity_classes),
+                    "confidence_classes": list(self.pipeline.suppression.confidence_classes),
+                },
+            },
+        }
+
+    @property
+    def digest(self) -> str:
+        """Canonical SHA-256 over sorted-key JSON of the defaulted semantic value (R4).
+
+        Deterministic: independent of key order, whitespace, comments, and
+        source path. Any semantic change to a strategy or pipeline value
+        changes the digest.
+        """
+        canonical = json.dumps(
+            self.to_canonical_dict(), sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def build_default_profile() -> ReviewProfile:
@@ -347,4 +394,114 @@ def build_default_profile() -> ReviewProfile:
         name="default",
         strategies=strategies,
         pipeline=Pipeline(),
+    )
+
+
+def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
+    """Strictly parse TOML into a fully-defaulted ``ReviewProfile``.
+
+    Task 2 (R4): every omitted pipeline field is filled from ``Pipeline()``
+    defaults so omitted-vs-explicit defaults hash identically; ``content`` /
+    ``source`` key order is irrelevant (dict semantics). Task 3 adds the
+    fail-closed unknown-key / bad-value rejections.
+
+    Args:
+        toml_text: Profile TOML source text.
+        source: Human-readable source description for error messages.
+
+    Raises:
+        ProfileError: On a structurally invalid profile (never silently
+            degrades to a default).
+    """
+    try:
+        data = tomllib.loads(toml_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ProfileError(f"TOML parse failure: {exc}", source) from exc
+
+    schema_version = data.get("schema_version", 1)
+    if not isinstance(schema_version, int):
+        raise ProfileError("schema_version", source)
+    name = data.get("name", "")
+    if not isinstance(name, str):
+        raise ProfileError("name", source)
+
+    strategies: dict[str, Strategy] = {}
+    raw_strategies = data.get("strategies", {})
+    if not isinstance(raw_strategies, dict):
+        raise ProfileError("strategies", source)
+    for key, raw in raw_strategies.items():
+        if not isinstance(raw, dict):
+            raise ProfileError(f"strategies.{key}", source)
+        content = raw.get("content", "")
+        strat_source = raw.get("source", "")
+        if not isinstance(content, str) or not isinstance(strat_source, str):
+            raise ProfileError(f"strategies.{key}", source)
+        strategies[key] = Strategy(content=content, source=strat_source)
+
+    pipeline = _parse_pipeline(data.get("pipeline", {}), source=source)
+
+    return ReviewProfile(
+        schema_version=schema_version,
+        name=name,
+        strategies=strategies,
+        pipeline=pipeline,
+    )
+
+
+def _parse_pipeline(data: object, *, source: str) -> Pipeline:
+    """Parse the bounded pipeline section, filling defaults for omitted fields."""
+    if not isinstance(data, dict):
+        raise ProfileError("pipeline", source)
+    defaults = Pipeline()
+
+    def _bool(key: str, fallback: bool) -> bool:
+        value = data.get(key, fallback)
+        if not isinstance(value, bool):
+            raise ProfileError(f"pipeline.{key}", source)
+        return value
+
+    def _int(key: str, fallback: int) -> int:
+        value = data.get(key, fallback)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ProfileError(f"pipeline.{key}", source)
+        return value
+
+    def _severity_classes(key: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
+        value = data.get(key, fallback)
+        if not isinstance(value, (list, tuple)):
+            raise ProfileError(f"pipeline.{key}", source)
+        if not all(isinstance(item, str) for item in value):
+            raise ProfileError(f"pipeline.{key}", source)
+        return tuple(value)
+
+    arbitration = Arbitration(
+        enabled=_bool("arbitration_enabled", defaults.arbitration.enabled),
+        min_severity=defaults.arbitration.min_severity,
+        contested_location=_bool(
+            "arbitration_contested_location", defaults.arbitration.contested_location
+        ),
+    )
+    suppression = Suppression(
+        enabled=_bool("suppression_enabled", defaults.suppression.enabled),
+        severity_classes=_severity_classes(
+            "suppression_severity_classes", defaults.suppression.severity_classes
+        ),
+        confidence_classes=_severity_classes(
+            "suppression_confidence_classes", defaults.suppression.confidence_classes
+        ),
+    )
+
+    return Pipeline(
+        structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
+        uncovered_sweep_enabled=_bool(
+            "uncovered_sweep_enabled", defaults.uncovered_sweep_enabled
+        ),
+        uncovered_sweep_max_files=_int(
+            "uncovered_sweep_max_files", defaults.uncovered_sweep_max_files
+        ),
+        uncovered_sweep_min_hunk_lines=_int(
+            "uncovered_sweep_min_hunk_lines", defaults.uncovered_sweep_min_hunk_lines
+        ),
+        arbitration=arbitration,
+        suppression=suppression,
     )
