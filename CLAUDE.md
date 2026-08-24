@@ -11,7 +11,7 @@ records every agent interaction as an
 pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT/RL fine-tuning.
 
 Default flow is the deep multi-stack pipeline; `--shallow` is a single-stack, single pass; `--comment`/`--review`
-are review-only; `daydream feedback <pr#>` ingests bot review comments. Four backends — Claude
+are review-only. Four backends — Claude
 (in-process SDK), Codex, Pi, and Osprey (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
 Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark}.md`.
@@ -40,7 +40,6 @@ daydream improve list-reanchor /path/to/project   # list existing -reanchor work
 daydream --shallow -s python /path/to/project      # shallow Python single-pass review-fix-test
 daydream --review /path/to/project                 # review only, skip fixes
 daydream --yes /path/to/project                    # auto-apply fixes without prompting
-daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # bot PR comments
 daydream --non-interactive /path/to/project        # unattended/harness run
 ```
 
@@ -109,7 +108,7 @@ Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.
 
 ### Backend protocol
 
-`Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()` + `format_skill_invocation()`.
+`Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()`.
 `execute()` yields the 8-member `AgentEvent` union (`Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
 `Metrics`, `TurnEnd`, `Result`). Adding a backend means producing that stream correctly — phases and the
 recorder are backend-agnostic.
@@ -226,8 +225,7 @@ Full contract: `docs/extensions.md`.
 | `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (default 2700; `0` disables) |
 | `MARTIAN_API_KEY` / `_BASE_URL` / `_MODEL`, `ANTHROPIC_API_KEY` | Benchmark | Judge endpoint/model (`martian` / `anthropic-direct`) |
 
-Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `DAYDREAM_SKILLS_DIR` (Beagle skills,
-Pi), `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).
+Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).
 
 ## Platform requirements
 

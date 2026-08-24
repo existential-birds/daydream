@@ -69,7 +69,6 @@ daydream --comment /path/to/project          # review, then post inline PR comme
 daydream --review /path/to/project           # write a report only; no fixes or PR comments
 daydream --shallow /path/to/project          # review one stack in one pass
 daydream --yes /path/to/project              # apply fixes without prompting
-daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
 ```
 
 The `--comment` mode posts inline PR comments and exits; `--review` writes a report and exits. Neither runs the fix cycle.

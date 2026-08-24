@@ -31,7 +31,6 @@ normal environment/configuration; credentials are never placed in argv.
 | Sandbox / roots | `--sandbox`, repeatable `--allowed-root` |
 | Turn/stream limits | `--max-turns`, `--turn-timeout`, `--stream-idle-timeout-secs`, `--streaming-timeout-secs` |
 | Result caps/spill | `--tool-result-cap`, `--tool-result-head`, `--tool-result-tail`, `--tool-result-max-lines`, `--tool-result-raw-dir` |
-| Skills | Verified `--skill` / `--skill-dir`; `format_skill_invocation()` emits `/skill:<name>` and the adapter forwards that named skill for loading |
 | Structured output | Writes the supplied JSON Schema to a temporary file and passes `--output-schema`; the file is removed after the subprocess ends |
 | Persistence | Osprey sessions are persistent by default; `resume` and `fork` map to `--resume` and `--fork-from`. `persist_session=False` fails closed because this CLI has no ephemeral-session flag |
 | Provider/base URL | Resolved by Osprey config/environment; the current CLI exposes no verified provider/base-url flags |
