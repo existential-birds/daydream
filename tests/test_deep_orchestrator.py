@@ -28,12 +28,6 @@ import pytest
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.eval.analyzer import _records_issues
-
-
-def _default_strategy(stage: str) -> str:
-    from daydream import review_profile as _rp
-
-    return _rp.build_default_profile().strategies[stage].content
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -63,6 +57,12 @@ _install_stub_backend = install_stub_backend
 
 MakeConfig = Callable[..., "RunConfig"]
 Mute = Callable[..., None]
+
+
+def _default_strategy(stage: str) -> str:
+    from daydream import review_profile as _rp
+
+    return _rp.build_default_profile().strategies[stage].content
 
 
 def _install_model_capturing_stubs(
@@ -102,6 +102,18 @@ def _install_model_capturing_stubs(
     return shared_calls
 
 
+def _profile_with_pipeline(**overrides: object):
+    """Build a test ResolvedProfile with the default strategies + pipeline overrides."""
+    from daydream.review_profile import (
+        ResolvedProfile,
+        build_default_profile,
+        clone_with_overrides,
+    )
+
+    profile = clone_with_overrides(build_default_profile(), {"pipeline": overrides})
+    return ResolvedProfile(profile=profile, source_kind="test")
+
+
 async def _run_deep(
     target: Path,
     *,
@@ -109,6 +121,7 @@ async def _run_deep(
     precision_mode: bool = False,
     uncovered_sweep: bool | None = None,
     approve_on_clean: bool = False,
+    review_profile: object | None = None,
 ) -> int:
     from daydream.runner import RunConfig, run
 
@@ -120,6 +133,7 @@ async def _run_deep(
         precision_mode=precision_mode,
         uncovered_sweep=uncovered_sweep,
         approve_on_clean=approve_on_clean,
+        review_profile=review_profile,
     )
     return await run(config)
 
@@ -3486,7 +3500,10 @@ async def test_preflight_notice_sweep_note_disabled_when_sweep_off(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    exit_code = await _run_deep(multi_stack_target, uncovered_sweep=False)
+    exit_code = await _run_deep(
+        multi_stack_target,
+        review_profile=_profile_with_pipeline(uncovered_sweep_enabled=False),
+    )
     assert exit_code == 0
     assert len(captured) == 1
     assert captured[0]["sweep_note"] is None
@@ -7776,7 +7793,7 @@ async def test_run_deep_uncovered_sweep_fails_open(
 async def test_uncovered_sweep_disabled_by_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
-    """Setting ``uncovered_sweep = false`` (CLI tier) skips the sweep entirely."""
+    """A profile pipeline with ``uncovered_sweep_enabled = false`` skips the sweep entirely."""
     from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
@@ -7789,7 +7806,12 @@ async def test_uncovered_sweep_disabled_by_config(
     stub.merge_echo_records = True
 
     exit_code = await run(
-        make_config(target, assume="yes", output_mode="loop", uncovered_sweep=False)
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            review_profile=_profile_with_pipeline(uncovered_sweep_enabled=False),
+        )
     )
     assert exit_code == 0
 
@@ -7852,7 +7874,11 @@ async def test_uncovered_sweep_per_stack_resume_clears_stale_artifacts(
     stub2.per_stack_emit_reads = True
     stub2.per_stack_unread = frozenset({"notes.txt"})
     stub2.merge_echo_records = True
-    assert await _run_deep(target, start_at="per-stack", uncovered_sweep=False) == 0
+    assert await _run_deep(
+        target,
+        start_at="per-stack",
+        review_profile=_profile_with_pipeline(uncovered_sweep_enabled=False),
+    ) == 0
 
     assert not (deep / "stack-uncovered-records.json").exists()
     assert not (deep / "coverage-stats.json").exists()
@@ -8061,18 +8087,14 @@ def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:
 
 
 def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
-    """The sweep toggle resolves via the named default constant, with config tiers."""
-    from daydream.config import DEFAULT_UNCOVERED_SWEEP_ENABLED
-    from daydream.config_file import DaydreamFileConfig
+    """The sweep toggle resolves from the profile pipeline (M8), not config tiers."""
     from daydream.deep.orchestrator import _uncovered_sweep_enabled
     from daydream.extensions import Registry
     from daydream.flows.engine import FlowContext
     from daydream.runner import RunConfig
     from daydream.workspace import WorkContext
 
-    assert DEFAULT_UNCOVERED_SWEEP_ENABLED is True
-
-    def _ctx(config: RunConfig) -> FlowContext:
+    def _ctx(config: RunConfig, review_profile: object | None = None) -> FlowContext:
         work = WorkContext(
             repo=tmp_path,
             source=tmp_path,
@@ -8083,108 +8105,66 @@ def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
             is_ephemeral=False,
             run_id="test",
         )
-        return FlowContext(config=config, work=work, registry=Registry(), data={})
+        return FlowContext(
+            config=config, work=work, registry=Registry(),
+            review_profile=review_profile, data={},
+        )
 
-    # Default on.
+    # Default profile pipeline (uncovered_sweep_enabled True) -> on.
     assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path)))) is True
-    # File-config False disables.
-    fc = DaydreamFileConfig(uncovered_sweep=False)
-    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path), file_config=fc))) is False
-    # RunConfig False (highest tier) beats a file-config True.
-    fc_on = DaydreamFileConfig(uncovered_sweep=True)
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep=False, file_config=fc_on)
-    assert _uncovered_sweep_enabled(_ctx(cfg)) is False
+    # A profile disabling uncovered_sweep_enabled -> off.
+    off = _profile_with_pipeline(uncovered_sweep_enabled=False)
+    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path)), review_profile=off)) is False
     # Merge/fix resumes always disable the sweep.
     assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path), start_at="merge"))) is False
 
 
-def test_uncovered_sweep_numeric_resolution_rejects_negatives(tmp_path: Path) -> None:
-    """Negative sweep numerics degrade to the named defaults; explicit 0 survives."""
-    from daydream.config import (
-        DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
-        DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
-    )
-    from daydream.config_file import DaydreamFileConfig
+def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> None:
+    """The sweep numeric caps resolve from the profile pipeline (already host-clamped)."""
     from daydream.deep.orchestrator import (
         _uncovered_sweep_max_files,
         _uncovered_sweep_min_hunk_lines,
     )
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
     from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
 
-    # A directly-constructed RunConfig negative override degrades to the default.
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=-1, uncovered_sweep_min_hunk_lines=-5)
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # Explicit 0 is preserved (0 max = sweep nothing; 0 min = no hunk floor).
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=0, uncovered_sweep_min_hunk_lines=0)
-    assert _uncovered_sweep_max_files(cfg) == 0
-    assert _uncovered_sweep_min_hunk_lines(cfg) == 0
-
-    # A negative file-config value is coerced to None at load -> default applies.
-    fc = DaydreamFileConfig(uncovered_sweep_max_files=-1, uncovered_sweep_min_hunk_lines=-3)
-    cfg = RunConfig(target=str(tmp_path), file_config=fc)
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # A file-config 0 with no RunConfig override stays 0.
-    fc = DaydreamFileConfig(uncovered_sweep_max_files=0, uncovered_sweep_min_hunk_lines=0)
-    cfg = RunConfig(target=str(tmp_path), file_config=fc)
-    assert _uncovered_sweep_max_files(cfg) == 0
-    assert _uncovered_sweep_min_hunk_lines(cfg) == 0
-
-
-def test_uncovered_sweep_numeric_resolution_rejects_non_ints(tmp_path: Path) -> None:
-    """RunConfig numeric overrides are type-validated, not just range-checked
-    (issue #309 finding 7).
-
-    Booleans subclass int and floats pass a ``>= 0`` check, but
-    ``filter_sweepable_files`` needs an int slice: ``max_files=1.5`` raises
-    TypeError and the fail-open wrapper discards the ENTIRE sweep. The resolver
-    accepts a value only when it is an int, not a bool, and >= 0; everything
-    else degrades to the named default.
-    """
-    from daydream.config import (
-        DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
-        DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="",
+        head_branch=None,
+        head_sha="",
+        is_ephemeral=False,
+        run_id="test",
     )
-    from daydream.deep.orchestrator import (
-        _uncovered_sweep_max_files,
-        _uncovered_sweep_min_hunk_lines,
-    )
-    from daydream.runner import RunConfig
 
-    # Bool overrides degrade to the defaults (True is not a meaningful count).
-    cfg = RunConfig(
-        target=str(tmp_path),
-        uncovered_sweep_max_files=True,  # type: ignore[arg-type]
-        uncovered_sweep_min_hunk_lines=True,  # type: ignore[arg-type]
+    profile = _profile_with_pipeline(
+        uncovered_sweep_max_files=3, uncovered_sweep_min_hunk_lines=6
     )
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # Float overrides degrade to the defaults (an int slice is required).
-    cfg = RunConfig(
-        target=str(tmp_path),
-        uncovered_sweep_max_files=1.5,  # type: ignore[arg-type]
-        uncovered_sweep_min_hunk_lines=1.5,  # type: ignore[arg-type]
+    ctx = FlowContext(
+        config=RunConfig(target=str(tmp_path)),
+        work=work,
+        registry=Registry(),
+        review_profile=profile,
+        data={},
     )
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+    assert _uncovered_sweep_max_files(ctx) == 3
+    assert _uncovered_sweep_min_hunk_lines(ctx) == 6
 
-    # String overrides degrade to the defaults (never compared or sliced).
-    cfg = RunConfig(
-        target=str(tmp_path),
-        uncovered_sweep_max_files="10",  # type: ignore[arg-type]
-        uncovered_sweep_min_hunk_lines="5",  # type: ignore[arg-type]
+    # Clamped pipeline values (review_profile._parse_pipeline HOST_CAPS) are
+    # what the orchestrator sees: a sub-floor max_files is clamped up to 1.
+    clamped = _profile_with_pipeline(uncovered_sweep_max_files=0)
+    ctx_clamped = FlowContext(
+        config=RunConfig(target=str(tmp_path)),
+        work=work,
+        registry=Registry(),
+        review_profile=clamped,
+        data={},
     )
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # Valid ints still pass through unchanged.
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=7, uncovered_sweep_min_hunk_lines=2)
-    assert _uncovered_sweep_max_files(cfg) == 7
-    assert _uncovered_sweep_min_hunk_lines(cfg) == 2
+    assert _uncovered_sweep_max_files(ctx_clamped) == 1
 
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
@@ -8492,3 +8472,46 @@ async def test_no_parse_phase_and_records_from_output_schema(
     assert records, "expected per-stack records written by the reviewer"
     loaded = json.loads(records[0].read_text())
     assert loaded["issues"][0]["description"] == "Sample issue"
+
+
+def test_structural_gate_reads_profile_pipeline(monkeypatch):
+    from daydream.deep import orchestrator as o
+
+    class _Ctx:
+        class _P:
+            structural_enabled = False
+            uncovered_sweep_enabled = True
+            uncovered_sweep_max_files = 10
+            uncovered_sweep_min_hunk_lines = 5
+
+        def pipeline(self):
+            return _Ctx._P()
+
+    assert o._structural_enabled(_Ctx()) is False
+
+    class _CtxOn:
+        class _P:
+            structural_enabled = True
+
+        def pipeline(self):
+            return _CtxOn._P()
+
+    assert o._structural_enabled(_CtxOn()) is True
+
+
+def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch):
+    from daydream.deep import orchestrator as o
+
+    class _Ctx:
+        class _Cfg:
+            start_at = "review"
+
+        class _P:
+            uncovered_sweep_enabled = False
+
+        config = _Cfg()
+
+        def pipeline(self):
+            return _Ctx._P()
+
+    assert o._uncovered_sweep_enabled(_Ctx()) is False

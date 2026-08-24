@@ -25,7 +25,7 @@ from daydream.extensions.api import (
 if TYPE_CHECKING:
     from daydream.backends import Backend
     from daydream.extensions.registry import FlowEntry, Registry
-    from daydream.review_profile import ResolvedProfile
+    from daydream.review_profile import Pipeline, ResolvedProfile
     from daydream.runner import RunConfig
     from daydream.workspace import WorkContext
 
@@ -89,7 +89,7 @@ class FlowContext:
                 return strategies[stage].content
         return build_default_profile().strategies[stage].content
 
-    def pipeline(self) -> object:
+    def pipeline(self) -> Pipeline:
         """Return the resolved profile's bounded pipeline section (R2).
 
         ``None`` (unresolved) falls back to the packaged default's pipeline so

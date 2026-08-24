@@ -42,9 +42,6 @@ from daydream.config import (
     DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE,
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_TOOL_CALL_BUDGET,
-    DEFAULT_UNCOVERED_SWEEP_ENABLED,
-    DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
-    DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
     DEFAULT_WALL_BUDGET_S,
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
@@ -263,6 +260,21 @@ def _resolve_config_value[T: (int, float, bool)](config: RunConfig, attr: str, d
     return default
 
 
+def _config_pipeline(config: RunConfig):
+    """Return the resolved profile pipeline for a ``RunConfig`` (pre-context).
+
+    ``FlowContext.pipeline()`` is the in-flow accessor; this mirrors it for the
+    pre-flight preamble (printed before the FlowContext is constructed) and for
+    any config-only call site. Falls back to the packaged default pipeline when
+    no profile was resolved (``review_profile is None``).
+    """
+    if config.review_profile is not None:
+        return config.review_profile.profile.pipeline
+    from daydream.review_profile import build_default_profile
+
+    return build_default_profile().pipeline
+
+
 def _shallow_fanout_threshold(config: RunConfig) -> int:
     """Resolve the tiny-diff short-circuit threshold (issue #172, AC7).
 
@@ -322,39 +334,33 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
     return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
 
 
-def _uncovered_sweep_max_files(config: RunConfig) -> int:
+def _structural_enabled(ctx: FlowContext) -> bool:
+    """Whether the structural meta-stack review is enabled (profile pipeline).
+
+    Default ``True`` preserves current behavior; a profile that disables
+    ``structural_enabled`` removes only the structural assignment/call (M8).
+    """
+    return ctx.pipeline().structural_enabled
+
+
+def _uncovered_sweep_max_files(ctx: FlowContext) -> int:
     """Resolve the per-run uncovered-file sweep capacity cap (issue #309).
 
-    Integer-only non-negative: an explicit ``0`` disables the sweep (nothing is
-    swept) while a negative value, a float, a bool, or any non-int degrades to
-    the named default -- the same integer-only predicate as the file-config
-    coercion ``config_file._coerce_non_negative_int`` (reused, import read-only)
-    so a directly-constructed ``RunConfig`` cannot smuggle an invalid capacity
-    in. ``filter_sweepable_files`` slices with ``max_files``, so a float here
-    would raise TypeError and the fail-open wrapper would discard the ENTIRE
-    sweep -- type validation lives at the resolver.
+    Reads the profile pipeline's ``uncovered_sweep_max_files`` bound, which
+    ``review_profile._parse_pipeline`` has already host-clamped (HOST_CAPS
+    floor 1, ceiling 10) before the digest is computed, so no per-run
+    coercion is needed here.
     """
-    value = _resolve_config_value(
-        config, "uncovered_sweep_max_files", DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    )
-    coerced = _coerce_non_negative_int(value)
-    return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    return ctx.pipeline().uncovered_sweep_max_files
 
 
-def _uncovered_sweep_min_hunk_lines(config: RunConfig) -> int:
+def _uncovered_sweep_min_hunk_lines(ctx: FlowContext) -> int:
     """Resolve the minimum hunk size for a file to be swept (issue #309).
 
-    Integer-only non-negative: ``0`` removes the hunk-size floor (every
-    uncovered file is eligible) while a negative value, a float, a bool, or any
-    non-int degrades to the named default -- mirroring
-    ``config_file._coerce_non_negative_int`` so a negative or malformed floor
-    can never make zero-change/trivial blocks eligible.
+    Reads the profile pipeline's ``uncovered_sweep_min_hunk_lines`` bound,
+    already host-clamped (HOST_CAPS floor 5) by ``review_profile._parse_pipeline``.
     """
-    value = _resolve_config_value(
-        config, "uncovered_sweep_min_hunk_lines", DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-    )
-    coerced = _coerce_non_negative_int(value)
-    return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+    return ctx.pipeline().uncovered_sweep_min_hunk_lines
 
 
 def _deep_shard_enabled(config: RunConfig) -> bool:
@@ -408,17 +414,16 @@ def _deep_shard_frontier_max(config: RunConfig) -> int:
 
 
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
-    """Resolve the uncovered-file sweep toggle (issue #309).
+    """Resolve the uncovered-file sweep toggle from the profile pipeline (issue #309).
 
-    Precedence mirrors ``_precision_mode``: ``RunConfig`` field > file-config
-    scalar > built-in default (:data:`DEFAULT_UNCOVERED_SWEEP_ENABLED`, the
-    single source of configuration defaults). Resume at ``merge``/``fix``
-    disables the step outright -- the per-stack records are already finalized
-    on disk, so a sweep would re-review stale coverage.
+    Reads ``ctx.pipeline().uncovered_sweep_enabled`` (already host-clamped);
+    resume at ``merge``/``fix`` disables the step outright -- the per-stack
+    records are already finalized on disk, so a sweep would re-review stale
+    coverage.
     """
     if ctx.config.start_at in ("merge", "fix"):
         return False
-    return _resolve_config_value(ctx.config, "uncovered_sweep", DEFAULT_UNCOVERED_SWEEP_ENABLED)
+    return ctx.pipeline().uncovered_sweep_enabled
 
 
 def _uncovered_sweep_preflight_note(config: RunConfig, changed_files: list[str]) -> str | None:
@@ -428,16 +433,16 @@ def _uncovered_sweep_preflight_note(config: RunConfig, changed_files: list[str])
     sweep will review are not known until after per-stack reviews + parse. Every
     swept file adds one review invocation AND one parse invocation (parse per
     stack file), so an honest estimate appends an upper-bound note: 2 agents per
-    file, capped by the configured capacity and the number of changed files that
+    file, capped by the pipeline capacity and the number of changed files that
     could possibly be swept. Returns ``None`` when the sweep is disabled or
     nothing could be swept.
     """
     if config.start_at in ("merge", "fix"):
         return None
-    if not _resolve_config_value(config, "uncovered_sweep", DEFAULT_UNCOVERED_SWEEP_ENABLED):
+    pipeline = _config_pipeline(config)
+    if not pipeline.uncovered_sweep_enabled:
         return None
-    max_files = _uncovered_sweep_max_files(config)
-    eligible = min(len(changed_files), max_files)
+    eligible = min(len(changed_files), pipeline.uncovered_sweep_max_files)
     if eligible <= 0:
         return None
     return (
@@ -1595,8 +1600,8 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
         load_hunk_index(dd.parent),
-        min_hunk_lines=_uncovered_sweep_min_hunk_lines(config),
-        max_files=_uncovered_sweep_max_files(config),
+        min_hunk_lines=_uncovered_sweep_min_hunk_lines(ctx),
+        max_files=_uncovered_sweep_max_files(ctx),
     )
 
     stats: dict[str, Any] = {
@@ -1792,7 +1797,10 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     # `arbiter_complete_path` so resume reasoning cannot under-read it as
     # arbiter-only (#232 review).
     adjudication_marker = adjudication_complete_path(dd)
-    if config.start_at != "merge" or not adjudication_marker.is_file():
+    if (
+        ctx.pipeline().arbitration.enabled
+        and (config.start_at != "merge" or not adjudication_marker.is_file())
+    ):
         arbiter_targets = select_arbiter_targets(all_records, record_sources)
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
@@ -1843,7 +1851,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # is the exclusion set so nothing high-severity / contested is re-judged
         # here. One batched agent call, resolved via the cheaper `suppression`
         # phase key (Sonnet default) -- never per-finding Opus.
-        if _precision_mode(config):
+        if ctx.pipeline().suppression.enabled or _precision_mode(config):
             suppression_exclude = [
                 i for i, r in enumerate(all_records) if id(r) in arbitrated_ids
             ]
@@ -4419,6 +4427,13 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # registry inside detect_stacks.
         changed_files = _diff_changed_files(diff)
         stacks = detect_stacks(changed_files)
+        # Structural gating (M8): ``detect_stacks`` still emits the structural
+        # meta-stack; a profile that disables ``structural_enabled`` removes only
+        # that assignment/call here, before collapse/sharding publish the list.
+        # This pre-context call reads the same resolved pipeline as
+        # ``_structural_enabled`` via ``FlowContext.pipeline()``.
+        if not _config_pipeline(config).structural_enabled:
+            stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
         # Issue #172 — tiny-diff short-circuit. When the diff is small enough
         # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
         # to a single combined assignment and skip merge+arbiter downstream.
