@@ -150,3 +150,29 @@ def test_invalid_profile_never_falls_through_to_default():
     # A failed parse raises; it does not silently return build_default_profile().
     with pytest.raises(rp.ProfileError):
         rp.parse_profile('schema_version = 1\nname = "p"\nunknown = true')
+
+
+# Task 4 (R5): host invariants unoverridable + host caps.
+def test_forbidden_host_fields_rejected():
+    for field in ("backend", "model", "effort", "trust_mode", "egress",
+                  "harbor_judge_model", "skill_name", "findings_schema"):
+        with pytest.raises(rp.ProfileError) as e:
+            rp.parse_profile(f'schema_version = 1\nname = "p"\n{field} = "x"', source="y")
+        assert "host-owned" in str(e.value).lower() or field in str(e.value)
+
+
+def test_host_cap_clamps_lower_profile_value_up():
+    # Host caps are the floor: a profile supplying LOWER than the host cap is clamped up.
+    p = rp.parse_profile('''schema_version = 1
+name = "p"
+[pipeline]
+uncovered_sweep_max_files = 2''')   # below host cap of 10
+    assert p.pipeline.uncovered_sweep_max_files == 10   # clamped up, never below
+
+
+def test_profile_cannot_raise_host_cap():
+    p = rp.parse_profile('''schema_version = 1
+name = "p"
+[pipeline]
+uncovered_sweep_max_files = 999''')   # above host cap
+    assert p.pipeline.uncovered_sweep_max_files == 10   # capped at host ceiling
