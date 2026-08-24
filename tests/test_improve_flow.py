@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from daydream import review_profile as rp
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
@@ -50,6 +51,10 @@ from tests.harness.improve_backend import (
 MakeConfig = Callable[..., RunConfig]
 
 
+def _default_strategy(stage: str) -> str:
+    return rp.build_default_profile().strategies[stage].content
+
+
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
     """Load a named improve artifact as decoded JSON."""
     return json.loads(
@@ -71,7 +76,7 @@ _GROUP = {
 def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
     prompt = build_audit_prompt(
         category="correctness",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.correctness"),
         group=_GROUP,
         scope_note="",
         recon_summary="{}",
@@ -89,7 +94,7 @@ def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -
         for category in AUDIT_CATEGORIES:
             prompt = build_audit_prompt(
                 category=category,
-                skill_invocation=None,
+                strategy=_default_strategy(f"improve.audit.{category}"),
                 group=_GROUP,
                 scope_note="",
                 recon_summary="{}",
@@ -109,7 +114,7 @@ def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
     """spec.md's monorepo requirement: a slice bounds search, never reading."""
     prompt = build_audit_prompt(
         category="security",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.security"),
         group=_GROUP,
         scope_note="Service scope slice: `apps/billing`.",
         recon_summary="{}",
@@ -122,7 +127,7 @@ def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
 def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
     tech_debt = build_audit_prompt(
         category="tech-debt",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.tech-debt"),
         group=_GROUP,
         scope_note="",
         recon_summary="{}",
@@ -131,7 +136,7 @@ def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
     )
     tests = build_audit_prompt(
         category="tests",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.tests"),
         group=_GROUP,
         scope_note="",
         recon_summary="{}",
@@ -171,7 +176,9 @@ def test_finding_and_vet_schemas_require_stable_maintenance_metadata() -> None:
 
 
 def test_vet_prompt_rejects_false_reuse_and_comment_cleanup() -> None:
-    prompt = build_vet_prompt(findings=[], cwd=Path("/repo"))
+    prompt = build_vet_prompt(
+        strategy=_default_strategy("improve.vetting"), findings=[], cwd=Path("/repo")
+    )
 
     assert "re-open both implementations" in prompt
     assert "layer boundaries" in prompt
@@ -335,8 +342,10 @@ def test_sample_paths_spreads_across_a_capped_list() -> None:
 
 def test_registry_seeds_audit_slots_and_improve_prompts() -> None:
     r = build_registry()
-    assert r.skill("audit:correctness:python") == "beagle-python:review-python"
-    assert r.skill("audit:security:elixir") == "beagle-elixir:elixir-security-review"
+    # Native Improve (M10): no built-in audit:* skill slots are seeded; the
+    # category playbooks are profile-owned strategies, not skills.
+    assert r.skill_if_registered("audit:correctness:python") is None
+    assert r.skill_if_registered("audit:security:elixir") is None
     assert r.skill_if_registered("audit:dx") is None
     for name in ("audit", "vet", "plan-writer"):
         assert callable(r.prompt(name))
@@ -3928,3 +3937,35 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
     assert "Improve issue publishing failed" in output
     assert "Improve planning failed" not in output
     assert "GitHub publication failures: 1" in report
+
+
+def test_audit_prompt_uses_category_strategy_no_skill():
+    from daydream import review_profile as rp
+
+    p = rp.build_default_profile()
+    strategy = p.strategies["improve.audit.security"].content
+    prompt = build_audit_prompt(
+        category="security",
+        strategy=strategy,
+        group={"name": "g1", "file_count": 1, "partitions": []},
+        scope_note="s",
+        recon_summary="{}",
+        cwd=Path("/c"),
+        tier=EFFORT_TIERS["standard"],
+    )
+    assert strategy in prompt                       # category playbook present
+    assert "Apply this specialist skill" not in prompt
+    assert "/beagle-" not in prompt and "beagle" not in prompt.lower()
+    # envelope preserved:
+    assert "read-only improve audit specialist" in prompt
+    assert "Hard Rule 4" in prompt and "Hard Rule 6" in prompt
+
+
+def test_vet_prompt_uses_native_vet_strategy_no_skill():
+    from daydream import review_profile as rp
+
+    strategy = rp.build_default_profile().strategies["improve.vetting"].content
+    prompt = build_vet_prompt(strategy=strategy, findings=[], cwd=Path("/c"))
+    assert "Treat every audit candidate as an untrusted hypothesis" in prompt
+    assert "beagle-core" not in prompt and "Apply the" not in prompt
+    assert "/c" in prompt

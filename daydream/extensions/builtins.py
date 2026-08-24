@@ -38,16 +38,8 @@ def register_builtins(registry: Registry) -> None:
 
 
 def _register_improve_builtins(registry: Registry) -> None:
-    """Seed improve audit skill slots and named prompts."""
-    from daydream import config
+    """Register the native improve named prompts (no audit skill slots)."""
     from daydream.improve import prompts
-
-    # Audit skill-slot seeding stays until Task 10 removes it (native Improve);
-    # it is not part of the built-in *review* stack routing Task 1 removes.
-    for category, stack_skills in config.AUDIT_SKILL_MAP.items():
-        for stack, skill in stack_skills.items():
-            slot = f"audit:{category}" if stack == "*" else f"audit:{category}:{stack}"
-            registry.override_skill(slot, skill)
 
     registry.override_prompt("audit", prompts.build_audit_prompt)
     registry.override_prompt("vet", prompts.build_vet_prompt)

@@ -282,39 +282,6 @@ AUDIT_CATEGORIES: tuple[str, ...] = (
     "docs",
 )
 
-# Audit specialist skill mapping by category/stack. NOT yet removed: Task 10
-# (native Improve) deletes this map after every audit consumer is profile-native.
-# Until then the built-in improve path still resolves audit skills for category
-# composition (M10 work remains in-flight). Literal strings, not derived from
-# the (now-removed) REVIEW_SKILLS / ReviewSkillChoice.
-AUDIT_SKILL_MAP: dict[str, dict[str, str]] = {
-    "correctness": {
-        "python": "beagle-python:review-python",
-        "react": "beagle-react:review-frontend",
-        "elixir": "beagle-elixir:review-elixir",
-        "go": "beagle-go:review-go",
-        "rust": "beagle-rust:review-rust",
-        "ios": "beagle-ios:review-ios",
-    },
-    "security": {
-        "elixir": "beagle-elixir:elixir-security-review",
-    },
-    "performance": {
-        "elixir": "beagle-elixir:elixir-performance-review",
-    },
-    "tests": {
-        "python": "beagle-python:pytest-code-review",
-        "go": "beagle-go:go-testing-code-review",
-        "rust": "beagle-rust:rust-testing-code-review",
-        "elixir": "beagle-elixir:exunit-code-review",
-    },
-    "tech-debt": {
-        "*": "beagle-core:review-structure",
-    },
-    "dependencies": {},
-    "dx": {},
-    "docs": {},
-}
 
 
 @dataclass(frozen=True)
