@@ -659,3 +659,124 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         arbitration=arbitration,
         suppression=suppression,
     )
+
+
+def clone_with_overrides(
+    base: ReviewProfile,
+    overrides: dict[str, dict[str, object]],
+) -> ReviewProfile:
+    """Deep-copy ``base`` and apply named overrides, then re-validate (R8).
+
+    ``overrides`` maps a ``STAGE_KEYS`` stage (or ``"pipeline"``) to a nested
+    mapping of profile-owned fields to apply on top of the base. The clone is a
+    full deep copy of the ``Strategy``/``Pipeline`` values, so un-overridden
+    fields stay byte-identical (and a no-override clone preserves the digest).
+    After applying overrides the result is re-validated — any host-owned
+    override raises ``ProfileError`` — and the digest is recomputed from the
+    updated canonical value. A no-op clone returns an equal canonical value
+    (same digest); one override changes only that stage's bytes. Overrides
+    operate on the typed model, never on rendered prompt text.
+    """
+    strategies: dict[str, Strategy] = {
+        key: Strategy(content=strategy.content, source=strategy.source)
+        for key, strategy in base.strategies.items()
+    }
+    pipeline = _copy_pipeline(base.pipeline)
+
+    for key, raw_override in overrides.items():
+        if not isinstance(raw_override, dict):
+            raise ProfileError(
+                f"clone override `{key}` must be a mapping", "<clone override>"
+            )
+        if key in STAGE_KEYS:
+            unknown = set(raw_override) - {"content", "source"}
+            if unknown:
+                raise ProfileError(
+                    f"clone {key}: unknown key `{sorted(unknown)[0]}`",
+                    "<clone override>",
+                )
+            host_owned = set(raw_override) & HOST_OWNED_KEYS
+            if host_owned:
+                raise ProfileError(
+                    f"clone {key}: host-owned key `{sorted(host_owned)[0]}` "
+                    "cannot be set by an override",
+                    "<clone override>",
+                )
+            existing = strategies[key]
+            strategies[key] = Strategy(
+                content=raw_override.get("content", existing.content),
+                source=raw_override.get("source", existing.source),
+            )
+        elif key == "pipeline":
+            pipeline = _pipeline_with_overrides(pipeline, raw_override)
+        else:
+            raise ProfileError(
+                f"clone: unknown stage `{key}`", "<clone override>"
+            )
+
+    return ReviewProfile(
+        schema_version=base.schema_version,
+        name=base.name,
+        strategies=strategies,
+        pipeline=pipeline,
+    )
+
+
+def _pipeline_with_overrides(
+    pipeline: Pipeline, override: dict[str, object]
+) -> Pipeline:
+    """Apply a pipeline override mapping onto a base ``Pipeline`` with re-validation.
+
+    Flat keys mirror ``_parse_pipeline`` (``arbitration_enabled``,
+    ``suppression_confidence_classes``, ...). ``override`` keys must be a subset
+    of the parseable pipeline keys and must not be host-owned.
+    """
+    flattened: dict[str, object] = {
+        "structural_enabled": pipeline.structural_enabled,
+        "uncovered_sweep_enabled": pipeline.uncovered_sweep_enabled,
+        "uncovered_sweep_max_files": pipeline.uncovered_sweep_max_files,
+        "uncovered_sweep_min_hunk_lines": pipeline.uncovered_sweep_min_hunk_lines,
+        "arbitration_enabled": pipeline.arbitration.enabled,
+        "arbitration_min_severity": pipeline.arbitration.min_severity,
+        "arbitration_contested_location": pipeline.arbitration.contested_location,
+        "suppression_enabled": pipeline.suppression.enabled,
+        "suppression_severity_classes": list(pipeline.suppression.severity_classes),
+        "suppression_confidence_classes": list(
+            pipeline.suppression.confidence_classes
+        ),
+    }
+    unknown = set(override) - set(flattened)
+    if unknown:
+        raise ProfileError(
+            f"clone.pipeline: unknown key `{sorted(unknown)[0]}`",
+            "<clone override>",
+        )
+    host_owned = set(override) & HOST_OWNED_KEYS
+    if host_owned:
+        raise ProfileError(
+            f"clone.pipeline: host-owned key `{sorted(host_owned)[0]}` "
+            "cannot be set by an override",
+            "<clone override>",
+        )
+    flattened.update(override)
+    return _parse_pipeline(flattened, source="<clone override>")
+
+
+def _copy_pipeline(source: Pipeline) -> Pipeline:
+    """Return a structural deep copy of a ``Pipeline`` (dataclasses are frozen)."""
+    return Pipeline(
+        structural_enabled=source.structural_enabled,
+        uncovered_sweep_enabled=source.uncovered_sweep_enabled,
+        uncovered_sweep_max_files=source.uncovered_sweep_max_files,
+        uncovered_sweep_min_hunk_lines=source.uncovered_sweep_min_hunk_lines,
+        arbitration=Arbitration(
+            enabled=source.arbitration.enabled,
+            min_severity=source.arbitration.min_severity,
+            contested_location=source.arbitration.contested_location,
+        ),
+        suppression=Suppression(
+            enabled=source.suppression.enabled,
+            severity_classes=source.suppression.severity_classes,
+            confidence_classes=source.suppression.confidence_classes,
+        ),
+    )

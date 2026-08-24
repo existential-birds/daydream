@@ -176,3 +176,25 @@ name = "p"
 [pipeline]
 uncovered_sweep_max_files = 999''')   # above host cap
     assert p.pipeline.uncovered_sweep_max_files == 10   # capped at host ceiling
+
+# Task 5 (R8): typed clone with overrides.
+def test_clone_no_overrides_preserves_bytes_and_digest():
+    base = rp.build_default_profile()
+    clone = rp.clone_with_overrides(base, {})
+    assert clone.digest == base.digest
+    assert clone.to_canonical_dict() == base.to_canonical_dict()
+
+def test_clone_one_override_changes_only_that_stage():
+    base = rp.build_default_profile()
+    clone = rp.clone_with_overrides(base, {"intent": {"content": "NEW INTENT STRATEGY"}})
+    assert clone.digest != base.digest
+    for key in rp.STAGE_KEYS:
+        if key != "intent":
+            assert clone.strategies[key].content == base.strategies[key].content  # byte-identical
+    assert clone.strategies["intent"].content == "NEW INTENT STRATEGY"
+
+def test_clone_override_revalidates_and_rejects_forbidden():
+    import pytest
+    base = rp.build_default_profile()
+    with pytest.raises(rp.ProfileError):
+        rp.clone_with_overrides(base, {"intent": {"backend": "claude"}})  # host-owned
