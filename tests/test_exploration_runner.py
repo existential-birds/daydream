@@ -480,3 +480,26 @@ def test_pre_scan_fallback_uses_rename_new_path(tmp_path, monkeypatch):
     dep_prompt = backend.execute_calls[0]["prompt"]
     assert str(tmp_path / "services/taste/new_name.py") in dep_prompt
     assert "old_name.py" not in dep_prompt
+
+
+def test_pre_scan_threads_profile_strategy(tmp_path):
+    import inspect
+
+    import daydream.exploration_runner as er
+    from daydream import review_profile as rp
+
+    p = rp.build_default_profile()
+    strategies = {
+        "exploration.repository_survey": p.strategies["exploration.repository_survey"].content,
+        "exploration.pattern_scan": p.strategies["exploration.pattern_scan"].content,
+        "exploration.dependency_trace": p.strategies["exploration.dependency_trace"].content,
+        "exploration.test_mapping": p.strategies["exploration.test_mapping"].content,
+    }
+    sig = inspect.signature(er.pre_scan)
+    assert "strategies" in sig.parameters
+
+    diff_text = (FIXTURES / "python_multifile.diff").read_text()
+    ctx = anyio.run(
+        er.pre_scan, _SpecialistMockBackend(), tmp_path, diff_text, 1, "HEAD", strategies
+    )
+    assert ctx is not None

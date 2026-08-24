@@ -188,6 +188,7 @@ async def pre_scan(
     diff_text: str,
     depth: int = 1,
     diff_ref: str = "HEAD",
+    strategies: dict[str, str] | None = None,
 ) -> ExplorationContext:
     """Run the pre-scan exploration pipeline for a diff.
 
@@ -206,7 +207,20 @@ async def pre_scan(
         depth: Static-resolution depth (forwarded to ``detect_affected_files``).
         diff_ref: Git ref or range (e.g. ``"main...HEAD"``) passed to specialist
             prompts so they can run ``git diff <ref> -- <file>`` per file.
+        strategies: Optional mapping of the four exploration strategy contents
+            (``exploration.pattern_scan`` / ``exploration.dependency_trace`` /
+            ``exploration.test_mapping`` / ``exploration.repository_survey``).
+            When ``None`` (the default), the packaged default-profile contents
+            are used, so non-profile callers stay operable.
     """
+    if strategies is None:
+        defaults = _rp.build_default_profile().strategies
+        strategies = {
+            "exploration.pattern_scan": defaults["exploration.pattern_scan"].content,
+            "exploration.dependency_trace": defaults["exploration.dependency_trace"].content,
+            "exploration.test_mapping": defaults["exploration.test_mapping"].content,
+            "exploration.repository_survey": defaults["exploration.repository_survey"].content,
+        }
     import anyio
 
     from daydream.agent import run_agent
@@ -285,7 +299,7 @@ async def pre_scan(
                     static_files_abs,
                     diff_ref,
                     cwd=repo_root,
-                    strategy=_rp.build_default_profile().strategies["exploration.dependency_trace"].content,
+                    strategy=strategies["exploration.dependency_trace"],
                 )
                 tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
             else:  # parallel
@@ -295,7 +309,7 @@ async def pre_scan(
                         static_files_abs,
                         diff_ref,
                         cwd=repo_root,
-                        strategy=_rp.build_default_profile().strategies["exploration.pattern_scan"].content,
+                        strategy=strategies["exploration.pattern_scan"],
                     ), PATTERN_SCANNER_SCHEMA,
                 )
                 tg.start_soon(
@@ -304,7 +318,7 @@ async def pre_scan(
                         static_files_abs,
                         diff_ref,
                         cwd=repo_root,
-                        strategy=_rp.build_default_profile().strategies["exploration.dependency_trace"].content,
+                        strategy=strategies["exploration.dependency_trace"],
                     ),
                     DEPENDENCY_TRACER_SCHEMA,
                 )
@@ -314,7 +328,7 @@ async def pre_scan(
                         static_files_abs,
                         diff_ref,
                         cwd=repo_root,
-                        strategy=_rp.build_default_profile().strategies["exploration.test_mapping"].content,
+                        strategy=strategies["exploration.test_mapping"],
                     ), TEST_MAPPER_SCHEMA,
                 )
 
@@ -352,13 +366,25 @@ async def repo_scan(
     repo_root: Path,
     *,
     max_files: int = 500,
+    strategies: dict[str, str] | None = None,
 ) -> ExplorationContext:
     """Discover repository conventions from a bounded tracked-file sample.
 
     Returns conventions and guidelines only. The tracked-file sample seeds the
     survey prompt but is not returned: a repo-scoped run has no affected files,
     and emitting one would mislabel the whole repository as change-relevant.
+
+    Args:
+        strategies: Optional mapping containing the
+            ``exploration.repository_survey`` strategy content. When ``None``
+            (the default), the packaged default-profile content is used.
     """
+    if strategies is None:
+        strategies = {
+            "exploration.repository_survey": _rp.build_default_profile().strategies[
+                "exploration.repository_survey"
+            ].content,
+        }
     import anyio
 
     from daydream.agent import run_agent
@@ -384,7 +410,7 @@ async def repo_scan(
                         sample,
                         len(paths),
                         cwd=repo_root,
-                        strategy=_rp.build_default_profile().strategies["exploration.repository_survey"].content,
+                        strategy=strategies["exploration.repository_survey"],
                     ),
                     output_schema=PATTERN_SCANNER_SCHEMA,
                     max_turns=EXPLORATION_MAX_TURNS,

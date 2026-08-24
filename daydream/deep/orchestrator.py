@@ -1118,6 +1118,12 @@ async def _step_exploration(ctx: FlowContext) -> None:
                     diff,
                     config.exploration_depth,
                     diff_ref=_compute_diff_ref(target_dir),
+                    strategies={
+                        "exploration.pattern_scan": ctx.strategy("exploration.pattern_scan"),
+                        "exploration.dependency_trace": ctx.strategy("exploration.dependency_trace"),
+                        "exploration.test_mapping": ctx.strategy("exploration.test_mapping"),
+                        "exploration.repository_survey": ctx.strategy("exploration.repository_survey"),
+                    },
                 )
             console.print(render_exploration_summary(config.exploration_context))
         if config.exploration_context is not None:
