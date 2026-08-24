@@ -6027,24 +6027,20 @@ def test_collapse_stacks_for_tiny_diff_two_languages() -> None:
     non_structural = [s for s in collapsed if s.stack_name != "structure"]
     assert len(non_structural) == 1
     combined = non_structural[0]
-    # Combined assignment carries both files and uses the generic-fallback skill
-    # (a single agent cannot invoke two per-language Beagle skills).
+    # Combined assignment carries both files and uses the generic fallback.
     assert set(combined.files) == {"api.py", "App.tsx"}
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     # Single-stack agent count is strictly less than 12.
     assert _single_stack_agent_count(len(collapsed)) < baseline_count
 
 
-def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_skill() -> None:
-    """Skill-preservation (unit): code+docs tiny diff keeps the per-language skill.
+def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_scope() -> None:
+    """A code+docs tiny diff keeps its sole language scope.
 
     A code+docs/config tiny diff routes via ``detect_stacks`` to exactly one real
-    language stack plus the ``generic`` bucket (e.g. ``api.py`` + ``README.md`` →
-    ``python`` + ``generic``). That is a single-language diff, so the collapse
-    must absorb the generic files into the language stack and keep its
-    per-language Beagle skill -- NOT downgrade it to the generic fallback
-    (the skill-preservation goal stated in ``_collapse_stacks_for_tiny_diff``'s
-    docstring). Only ≥2 *real* language stacks fall back to generic.
+    language stack plus the ``generic`` bucket. The collapse absorbs generic
+    files into that language stack. Only multiple real language stacks fall
+    back to generic.
     """
     from daydream.deep.detection import detect_stacks
     from daydream.deep.orchestrator import (
@@ -6066,7 +6062,7 @@ def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_skill()
     combined = non_structural[0]
     # The real-language scope survives (NOT downgraded to generic fallback).
     assert combined.stack_name == "python"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     # The docs file is absorbed into the language stack.
     assert set(combined.files) == {"api.py", "README.md"}
     assert _single_stack_agent_count(len(collapsed)) < baseline_count
@@ -6085,14 +6081,8 @@ def test_collapse_stacks_for_tiny_diff_disabled_at_threshold_zero() -> None:
     assert collapsed == stacks  # unchanged
 
 
-def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
-    """#6: shallow with no ``--skill`` keeps the sole detected language skill.
-
-    A python-only diff routes via ``detect_stacks`` to ``python`` + ``generic``
-    (if any docs) + ``structure``. Shallow collapse must preserve the python
-    stack's Beagle skill instead of downgrading the combined assignment to the
-    generic-fallback reviewer.
-    """
+def test_collapse_stacks_for_shallow_preserves_sole_language_scope() -> None:
+    """#6: shallow review keeps the sole detected language scope."""
     from daydream.deep.detection import detect_stacks
     from daydream.deep.orchestrator import _collapse_stacks_for_shallow
     from daydream.runner import RunConfig
@@ -6106,7 +6096,7 @@ def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     # The docs file is absorbed into the preserved language stack.
     assert set(combined.files) == {"api.py", "README.md"}
 
@@ -6126,12 +6116,12 @@ def test_collapse_stacks_for_shallow_two_languages_falls_back_to_generic() -> No
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "generic"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     assert set(combined.files) == {"api.py", "App.tsx"}
 
 
-def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
-    """#6: an explicit ``--skill`` still names the combined assignment."""
+def test_collapse_stacks_for_shallow_explicit_stack_wins() -> None:
+    """#6: an explicit ``--stack`` names the combined assignment."""
     from daydream.deep.detection import detect_stacks
     from daydream.deep.orchestrator import _collapse_stacks_for_shallow
     from daydream.runner import RunConfig
@@ -6145,7 +6135,7 @@ def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:

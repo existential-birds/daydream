@@ -488,8 +488,6 @@ def _collapse_stacks_for_tiny_diff(
     #   - ≥2 real language stacks (e.g. python + react): a single agent cannot
     #     cover two per-language scopes, so fall back to generic.
     #
-    # M2: every collapsed assignment (built-in or fork-registered) carries
-    # no skill-invocation field -- scope metadata only.
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
         real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
@@ -500,7 +498,6 @@ def _collapse_stacks_for_tiny_diff(
                     *structural,
                     StackAssignment(
                         stack_name=lang.stack_name,
-                        skill_invocation=None,
                         files=combined_files,
                         is_docs_only=False,
                     ),
@@ -511,7 +508,6 @@ def _collapse_stacks_for_tiny_diff(
         # so the combined assignment uses the native generic-fallback scope.
         combined = StackAssignment(
             stack_name=GENERIC_STACK,
-            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )
@@ -3992,8 +3988,6 @@ def _collapse_stacks_for_shallow(
       per-language scopes — or no real language at all) the combined assignment
       uses the native generic-fallback scope.
 
-    Every constructed StackAssignment carries no skill-invocation field (M2):
-    collapsed scopes never retain even a fork-registered stack's StackRule.skill.
     """
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
     combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
@@ -4004,28 +3998,24 @@ def _collapse_stacks_for_shallow(
     if config.stack is not None:
         combined = StackAssignment(
             stack_name=config.stack,
-            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )
     elif len(real_language) == 1:
         # Scope preservation: a sole real-language stack survives unchanged,
-        # absorbing any generic/docs files. The surviving stack carries no
-        # skill (M2): even a fork-registered sole stack's StackRule.skill is dropped.
+        # absorbing any generic/docs files.
         lang = real_language[0]
         combined = StackAssignment(
             stack_name=lang.stack_name,
-            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )
     else:
         # Multiple real-language stacks (one agent cannot cover two per-language
         # scopes) or no real language at all: the combined assignment uses the
-        # native generic-fallback scope (M2: no skill field).
+        # native generic-fallback scope.
         combined = StackAssignment(
             stack_name=GENERIC_STACK,
-            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )

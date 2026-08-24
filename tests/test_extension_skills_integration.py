@@ -72,7 +72,7 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
     ext_dir.write_module(
         "from daydream.extensions import StackRule\n"
         "def register(r):\n"
-        "    r.add_stack(StackRule('proto', ('*.proto',), 'ro-proto:review-proto'))\n"
+        "    r.add_stack(StackRule('proto', ('*.proto',)))\n"
     )
     (multi_stack_target / "api.proto").write_text('syntax = "proto3";\n')
     subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled

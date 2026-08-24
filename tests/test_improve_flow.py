@@ -340,13 +340,8 @@ def test_sample_paths_spreads_across_a_capped_list() -> None:
     assert _sample_paths([], 10) == []
 
 
-def test_registry_seeds_audit_slots_and_improve_prompts() -> None:
+def test_registry_seeds_improve_prompts() -> None:
     r = build_registry()
-    # Native Improve (M10): no built-in audit:* skill slots are seeded; the
-    # category playbooks are profile-owned strategies, not skills.
-    assert r.skill_if_registered("audit:correctness:python") is None
-    assert r.skill_if_registered("audit:security:elixir") is None
-    assert r.skill_if_registered("audit:dx") is None
     for name in ("audit", "vet", "plan-writer"):
         assert callable(r.prompt(name))
 

@@ -422,25 +422,23 @@ async def test_fork_disables_arbiter_in_deep(
     assert not any("you are the arbiter" in p.lower() for p in prompts)
 
 
-# Task 17 fixture source: a fork registers phase ``ro_gate`` whose run() resolves
-# its OWN backend (``ctx.backend_for('ro_gate')`` -> per-phase config), its OWN
-# registered prompt (``prompt('ro_gate')``), and its phase-bound skill slot
-# (``skill('phase:ro_gate')``), then inserts it into the deep flow after ``intent``.
+# A fork registers phase ``ro_gate`` whose run() resolves its OWN backend
+# (``ctx.backend_for('ro_gate')`` -> per-phase config) and registered prompt
+# (``prompt('ro_gate')``), then inserts it into the deep flow after ``intent``.
 FULL_RO_EXT = (
     "from daydream.extensions import FlowStep, get_registry\n"
-    "def _ro_prompt(skill):\n"
-    "    return f'RO-GATE {skill}'\n"
+    "def _ro_prompt():\n"
+    "    return 'RO-GATE'\n"
     "async def _ro(ctx):\n"
     "    from daydream.agent import run_agent\n"
     "    from daydream.trajectory import DaydreamPhase\n"
     "    r = get_registry()\n"
-    "    prompt = r.prompt('ro_gate')(skill=r.skill('phase:ro_gate'))\n"
+    "    prompt = r.prompt('ro_gate')()\n"
     "    await run_agent(ctx.backend_for('ro_gate'), ctx.work.repo, prompt,\n"
     "                    phase=DaydreamPhase.REVIEW)\n"
     "def register(r):\n"
     "    r.register_phase(FlowStep(name='ro_gate', run=_ro))\n"
     "    r.override_prompt('ro_gate', _ro_prompt)\n"
-    "    r.override_skill('phase:ro_gate', 'ro-core:gate-skill')\n"
     "    r.insert_after('deep', anchor='intent', step='ro_gate')\n"
 )
 
@@ -668,15 +666,15 @@ async def test_custom_phase_full_stack(
 ) -> None:
     """Seam acceptance (Task 17): custom phase end-to-end through ``runner.run``.
 
-    Proves the four must-haves are wired together: a fork-registered phase runs
-    inside the deep flow, builds its prompt from its OWN registered prompt
-    builder, resolves its OWN phase-bound skill slot, and gets its backend
-    through ``[tool.daydream.phases.ro_gate]`` per-phase config (Assumption 7:
-    ``_coerce_phases`` / ``_resolved_model`` accept arbitrary phase strings).
+    Proves the extension seams are wired together: a fork-registered phase runs
+    inside the deep flow, builds its prompt from its own registered prompt
+    builder, and gets its backend through ``[tool.daydream.phases.ro_gate]``
+    per-phase config (Assumption 7: ``_coerce_phases`` / ``_resolved_model``
+    accept arbitrary phase strings).
 
-    Observable outcomes: exit 0, the ``RO-GATE`` prompt containing the bound
-    skill reached the backend, and ``create_backend`` was called with the
-    per-phase model from ``.daydream.toml``.
+    Observable outcomes: exit 0, the ``RO-GATE`` prompt reached the backend,
+    and ``create_backend`` was called with the per-phase model from
+    ``.daydream.toml``.
     """
     from daydream.config_file import load_file_config
     from tests.test_deep_orchestrator import _silence, _StubBackend
@@ -711,7 +709,7 @@ async def test_custom_phase_full_stack(
     prompts = [call["prompt"] for call in backend.calls]
     ro_prompts = [p for p in prompts if p.startswith("RO-GATE")]
     assert rc == 0
-    assert ro_prompts and "ro-core:gate-skill" in ro_prompts[0]  # own prompt + bound skill
+    assert ro_prompts
     assert ("claude", "test-model-x") in created  # [tool.daydream.phases.ro_gate] honored
 
 

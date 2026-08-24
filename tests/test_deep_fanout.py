@@ -29,19 +29,16 @@ def _mk_stacks() -> list[StackAssignment]:
     return [
         StackAssignment(
             stack_name="python",
-            skill_invocation="beagle-python:review-python",
             files=["api.py"],
             is_docs_only=False,
         ),
         StackAssignment(
             stack_name="react",
-            skill_invocation="beagle-react:review-frontend",
             files=["App.tsx"],
             is_docs_only=False,
         ),
         StackAssignment(
             stack_name="generic",
-            skill_invocation=None,
             files=["README.md"],
             is_docs_only=True,
         ),
@@ -132,13 +129,11 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     stacks = [
         StackAssignment(
             stack_name="python",
-            skill_invocation="beagle-python:review-python",
             files=["a.py"],
             is_docs_only=False,
         ),
         StackAssignment(
             stack_name=STRUCTURE_STACK_NAME,
-            skill_invocation=None,
             files=["a.py"],
             is_docs_only=False,
         ),
@@ -156,7 +151,6 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert len(structural_calls) == 1
     assert len(per_stack_calls) == 1
     assert structural_calls[0]["files"] == ["a.py"]
-    assert "skill_invocation" not in structural_calls[0]  # skill-free (M2)
     assert structural_calls[0]["strategy"]  # profile-owned structural strategy (M4)
     assert "stack_name" not in structural_calls[0]
     assert per_stack_calls[0]["stack_name"] == "python"
@@ -216,21 +210,21 @@ async def test_per_stack_prompts_are_skill_free(
     backend = _PiShapeBackend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
-    # Built-in stacks carry no skill_invocation (M2); every dispatch is native.
+    # Every built-in stack dispatches through the native profile strategy.
     stacks = [
-        StackAssignment(stack_name="python", skill_invocation=None,
+        StackAssignment(stack_name="python",
             files=["api.py"], is_docs_only=False),
-        StackAssignment(stack_name="react", skill_invocation=None,
+        StackAssignment(stack_name="react",
             files=["App.tsx"], is_docs_only=False),
-        StackAssignment(stack_name="go", skill_invocation=None,
+        StackAssignment(stack_name="go",
             files=["main.go"], is_docs_only=False),
-        StackAssignment(stack_name="rust", skill_invocation=None,
+        StackAssignment(stack_name="rust",
             files=["lib.rs"], is_docs_only=False),
-        StackAssignment(stack_name="elixir", skill_invocation=None,
+        StackAssignment(stack_name="elixir",
             files=["app.ex"], is_docs_only=False),
-        StackAssignment(stack_name="generic", skill_invocation=None,
+        StackAssignment(stack_name="generic",
             files=["notes.txt"], is_docs_only=False),
-        StackAssignment(stack_name=STRUCTURE_STACK_NAME, skill_invocation=None,
+        StackAssignment(stack_name=STRUCTURE_STACK_NAME,
             files=["api.py", "App.tsx"], is_docs_only=False),
     ]
 
@@ -324,7 +318,7 @@ def test_shards_carry_scope_not_skill() -> None:
     files = ["a.py", "b.py", "c.py", "d.py"]
     stacks = detect_stacks(files)
     python = next(s for s in stacks if s.stack_name == "python")
-    assert python.skill_invocation is None  # built-in stack is skill-free
+    assert not hasattr(python, "skill_invocation")
 
     shards = sharding.shard_stacks(
         [python],
@@ -341,5 +335,5 @@ def test_shards_carry_scope_not_skill() -> None:
     assert len(shards) >= 2  # forced split -> shard path exercised
     for shard in shards:
         assert shard.stack_name.startswith("python")  # stack identity preserved
-        assert shard.skill_invocation is None  # no skill field copied
+        assert not hasattr(shard, "skill_invocation")
         assert shard.files and shard.frontier_files is not None

@@ -1427,7 +1427,6 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     stacks = [
         StackAssignment(
             stack_name=STRUCTURE_STACK_NAME,
-            skill_invocation=None,
             files=["api/main.py"],
             is_docs_only=False,
         )

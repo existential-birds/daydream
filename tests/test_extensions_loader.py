@@ -11,19 +11,21 @@ from tests.conftest import ExtDir
 
 
 @pytest.mark.parametrize(
-    ("version", "skill"),
+    ("version", "marker"),
     [
-        pytest.param(5, "ro-core:v5-structure", id="supported-floor-and-ceiling"),
+        pytest.param(5, "v5-review", id="supported-floor-and-ceiling"),
     ],
 )
-def test_supported_extension_loads(ext_dir: ExtDir, version: int, skill: str) -> None:
+def test_supported_extension_loads(ext_dir: ExtDir, version: int, marker: str) -> None:
     """Load supported extension API versions and apply their registry override."""
     ext_dir.write_module(
+        "def _prompt():\n"
+        f"    return '{marker}'\n"
         "def register(registry):\n"
-        f"    registry.override_skill('structural', '{skill}')\n",
+        "    registry.override_prompt('review', _prompt)\n",
         api_version=version,
     )
-    assert build_registry().skill("structural") == skill
+    assert build_registry().prompt("review")() == marker
 
 
 @pytest.mark.parametrize(

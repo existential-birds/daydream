@@ -154,8 +154,7 @@ class SummaryContext:
 
 @dataclass(frozen=True)
 class StackRule:
-    """A fork-registered stack: changed-file globs routed to a review skill."""
+    """A fork-registered stack: changed-file globs routed to a named stack."""
 
     stack_name: str
     patterns: tuple[str, ...]
-    skill: str

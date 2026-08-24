@@ -63,9 +63,6 @@ def _pack_shards(
             shards.append(
                 StackAssignment(
                     stack_name=f"{stack.stack_name}#{len(shards)}",
-                    # M2: a shard is scope metadata — stack name, owned files,
-                    # frontier context — never a skill-invocation field.
-                    skill_invocation=None,
                     files=list(cur),
                     is_docs_only=stack.is_docs_only,
                     frontier_files=[],

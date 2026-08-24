@@ -13,13 +13,8 @@ The routing order is significant (Pitfall 6 in 05-RESEARCH.md):
 
 The detection is registry-independent for built-in stacks: the same changed
 files produce the same ordered stack scopes whether a plugin registry is
-present or not. Stack identity is scope metadata, not a skill -- built-in
-stacks carry no skill-invocation field. Fork-registered stacks resolve their
-StackRule.skill directly (that is the fork's own routing).
-
-Stack->skill resolution for built-in stacks no longer goes through the
-extension registry: built-in scopes set ``skill_invocation=None`` and only
-fork-registered stacks carry a skill.
+present or not. Stack identity is routing metadata, and fork-registered stacks
+contribute only their names and changed-file patterns.
 """
 
 from __future__ import annotations
@@ -75,10 +70,6 @@ class StackAssignment:
 
     Attributes:
         stack_name: Lower-case stack key, e.g. "python" or "generic".
-        skill_invocation: Review-skill invocation for a fork-registered stack
-            (its ``StackRule.skill``, that being the fork's routing), or None for
-            every built-in scope (and the generic fallback). Built-ins carry no
-            skill-invocation field.
         files: Files routed to this stack. Never empty for entries in the returned list.
         is_docs_only: True when this assignment represents a docs-only diff (triggers D-20
             notice). Only set on the ``generic`` bucket, and only when no non-generic stacks
@@ -86,7 +77,6 @@ class StackAssignment:
     """
 
     stack_name: str
-    skill_invocation: str | None
     files: list[str] = field(default_factory=list)
     is_docs_only: bool = False
     # Issue #731: cross-shard frontier. For a shard with a synthetic ``#``
@@ -167,15 +157,13 @@ def detect_stacks(
     Args:
         changed_files: Paths (POSIX-style, repo-relative) of files that changed in the diff.
         registry: Extension registry for fork stack rules only. Defaults to the
-            current context's registry (``get_registry()``). Built-in routing
-            never consults ``registry.stack_keys()``.
+            current context's registry (``get_registry()``).
 
     Returns:
         One StackAssignment per distinct stack that received at least one file,
         plus a synthetic ``structure`` meta-stack appended last whenever the diff
         contains at least one file and is not docs-only. The structure stack
-        carries the full set of changed files (union across languages) and,
-        like every built-in stack, carries no skill-invocation field.
+        carries the full set of changed files (union across languages).
         Ordering: non-generic language stacks alphabetical, then generic,
         then structure last. Ordering is informational only -- the orchestrator
         iterates the full list in parallel.
@@ -183,7 +171,6 @@ def detect_stacks(
     if registry is None:
         registry = get_registry()
     rules = registry.stack_rules()
-    fork_rules = {rule.stack_name: rule for rule in rules}
 
     assigned: dict[str, str] = {}  # path -> stack_name
     ambiguous: list[str] = []
@@ -261,14 +248,9 @@ def detect_stacks(
     results: list[StackAssignment] = []
     for stack_name in sorted(non_generic_stacks):
         files = sorted(groups[stack_name])
-        rule = fork_rules.get(stack_name)
-        # Fork-registered stacks keep their own StackRule.skill (that is the
-        # fork's routing). Built-in stacks carry no skill-invocation field.
-        skill_invocation = rule.skill if rule is not None else None
         results.append(
             StackAssignment(
                 stack_name=stack_name,
-                skill_invocation=skill_invocation,
                 files=files,
                 is_docs_only=all(_ext(f) == ".md" for f in files),
             )
@@ -278,7 +260,6 @@ def detect_stacks(
         results.append(
             StackAssignment(
                 stack_name=GENERIC_STACK,
-                skill_invocation=None,
                 files=files,
                 is_docs_only=diff_is_docs_only,
             )
@@ -287,13 +268,11 @@ def detect_stacks(
     # Structural meta-stack: appended unconditionally for any non-docs-only diff
     # with at least one changed file (caller gates on ctx.pipeline().structural_enabled).
     # Carries the union of all changed files so the structural reviewer judges the
-    # whole change across language boundaries. Like every built-in stack it carries
-    # no skill-invocation field.
+    # whole change across language boundaries.
     if changed_files and not diff_is_docs_only:
         results.append(
             StackAssignment(
                 stack_name=STRUCTURE_STACK_NAME,
-                skill_invocation=None,
                 files=sorted(changed_files),
                 is_docs_only=False,
             )

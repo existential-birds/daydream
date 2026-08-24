@@ -1,9 +1,8 @@
 """Per-run extension registry.
 
-``Registry`` holds phases + flows, skill slots, named prompts, a tool
-supervisor, and fork stack rules. ``register_builtins()`` seeds it with
-everything daydream does today; an optional ``daydream_ext`` package mutates
-it through the same API.
+``Registry`` holds phases + flows, named prompts, renderers, a tool supervisor,
+and fork stack rules. ``register_builtins()`` seeds it with everything daydream
+does today; an optional ``daydream_ext`` package mutates it through the same API.
 
 This module must not import from ``daydream.runner`` or ``daydream.phases``
 (import-cycle guard).
@@ -29,12 +28,11 @@ _VALIDATE_HINT = "run 'daydream ext validate' to check the extension registry"
 
 
 class Registry:
-    """Mutable per-run store for phases, flows, skills, prompts, supervision, and stack rules."""
+    """Mutable per-run store for phases, flows, prompts, renderers, supervision, and stack rules."""
 
     def __init__(self) -> None:
         self._phases: dict[str, FlowStep] = {}
         self._flows: dict[str, list[FlowEntry]] = {}
-        self._skills: dict[str, str] = {}
         self._prompts: dict[str, Callable[..., str]] = {}
         self._renderers: dict[str, Callable[..., str]] = {}
         self._stack_rules: dict[str, StackRule] = {}
@@ -118,31 +116,6 @@ class Registry:
                     f" and cannot be addressed directly; {_VALIDATE_HINT}"
                 )
         raise UnresolvedExtensionError(f"flow '{flow_name}' has no step '{name}'; {_VALIDATE_HINT}")
-
-    # -- skill slots ------------------------------------------------------
-
-    def override_skill(self, slot: str, skill: str) -> None:
-        """Upsert the skill invocation string for a named slot."""
-        self._skills[slot] = skill
-
-    def skill(self, slot: str) -> str:
-        """Return the slot's skill string, or raise ``UnresolvedExtensionError``."""
-        try:
-            return self._skills[slot]
-        except KeyError:
-            raise UnresolvedExtensionError(f"skill slot '{slot}' is not registered; {_VALIDATE_HINT}") from None
-
-    def skill_if_registered(self, slot: str) -> str | None:
-        """Return the slot's skill string, or None; never raises."""
-        return self._skills.get(slot)
-
-    def skill_slots(self) -> dict[str, str]:
-        """Return a copy of the slot-to-skill-invocation mapping."""
-        return dict(self._skills)
-
-    def stack_keys(self) -> set[str]:
-        """Return the stack keys of every registered ``stack:<key>`` skill slot."""
-        return {slot.removeprefix("stack:") for slot in self._skills if slot.startswith("stack:")}
 
     # -- prompts ----------------------------------------------------------
 
