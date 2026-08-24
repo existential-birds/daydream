@@ -4196,7 +4196,12 @@ async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.PR,
     ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            review_profile=config.review_profile,
+        )
         ctx.data["mode"] = "feedback"
         ctx.data["pr_number"] = pr_number
         ctx.data["bot"] = bot
@@ -4486,6 +4491,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
             config=config,
             work=work,
             registry=get_registry(),
+            review_profile=config.review_profile,
             data={
                 "mode": mode,
                 "diff": bounded_diff,

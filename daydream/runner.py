@@ -49,6 +49,7 @@ from daydream.backends import Backend, create_backend
 from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
+from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.extensions import ExtensionError, build_registry, get_registry, set_registry
 from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
@@ -237,6 +238,18 @@ class RunConfig:
             file list surfaced to a shard as context (never part of its primary
             review targets). ``None`` falls through to file config then
             ``DEFAULT_DEEP_SHARD_FRONTIER_MAX`` (8).
+        review_profile_path: Explicit review-profile file path
+            (``--review-profile``), the highest-precedence source in the
+            four-source resolution order (R9: explicit > env > repo-committed
+            > packaged default). ``None`` falls through to the
+            ``DAYDREAM_REVIEW_PROFILE`` env var, then
+            ``file_config.review_profile``, then the packaged default. Resolved
+            once at the runner composition root onto ``review_profile``.
+        review_profile: The resolved per-run review profile (validated object +
+            source kind + digest), set exactly once by the runner composition
+            root (R1). Flows and prompt builders read this; they never re-read
+            profile files. ``None`` before resolution or when a direct caller
+            skips the composition-root seam.
 
     """
 
@@ -322,6 +335,13 @@ class RunConfig:
     deep_shard_max_bytes: int | None = None
     deep_shard_fanout_cap: int | None = None
     deep_shard_frontier_max: int | None = None
+    # Issue #885: versioned benchmark-tunable review profile. The path field is
+    # the CLI/env-carried explicit source; the profile field is the resolved
+    # value (validated object + source kind + digest), set once by
+    # ``_resolve_review_profile`` at the composition root and threaded into
+    # every ``FlowContext``/``run_deep`` so no consumer re-reads a file.
+    review_profile_path: str | Path | None = None
+    review_profile: ResolvedProfile | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -423,6 +443,22 @@ def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
     an absent file config behaves identically to one with no keys set.
     """
     return config.file_config if config.file_config is not None else DaydreamFileConfig()
+
+
+def _resolve_review_profile(config: RunConfig) -> None:
+    """Resolve the run's review profile exactly once at the composition root (R1).
+
+    ``resolve_from_runconfig`` picks the highest-precedence source among the
+    explicit ``review_profile_path`` (CLI flag), the ``DAYDREAM_REVIEW_PROFILE``
+    env var, the repo-committed ``file_config.review_profile`` path, and the
+    packaged default. The validated result (profile + source kind + digest) is
+    stored on ``config.review_profile`` and handed into every ``FlowContext``
+    the run builds. Idempotent: a direct caller that already resolved (or
+    injected) the profile is left untouched.
+    """
+    if config.review_profile is not None:
+        return
+    config.review_profile = resolve_from_runconfig(config)
 
 
 def _resolved_backend_name(config: RunConfig, phase: str) -> str:
@@ -1097,7 +1133,13 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         work=work,
         flow_kind=DaydreamRunFlow.IMPROVE,
     ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        _resolve_review_profile(config)
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            review_profile=config.review_profile,
+        )
         ctx.data["improve_dir"] = directory
         ctx.data["effort_tier"] = tier
         ctx.data["improve_publish_issues"] = _file_config_or_empty(config).improve_github_publish_issues
@@ -1166,7 +1208,13 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,
     ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        _resolve_review_profile(config)
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            review_profile=config.review_profile,
+        )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
         ctx.data["diff"] = diff
         ctx.data["log"] = log
@@ -1192,4 +1240,5 @@ async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
     """Delegate to the deep-mode orchestrator (the only PR-process flow, #330)."""
     from daydream.deep.orchestrator import run_deep
 
+    _resolve_review_profile(config)
     return await run_deep(config, work)
