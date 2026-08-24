@@ -751,10 +751,10 @@ supervisor is `registered` or `none`, resolve-checks every flow entry, skill
 slot, and stack rule, and prints a registry summary. Broken references exit 1
 naming the broken piece. Runs anywhere — no target repo needed.
 
-## Exclusions (Version 3)
+## Exclusions (Version 5)
 
 - **No backend registration.** Backends are the built-in `Backend`
-  implementations (claude, codex, pi); forks cannot register new ones.
+  implementations (claude, codex, pi, osprey); forks cannot register new ones.
 - **Backend dispatch timing is host-controlled.** A tool supervisor runs after
   `run_agent` receives a backend `ToolStartEvent`; extensions cannot move that
   check earlier or later in a backend's internal dispatch pipeline.

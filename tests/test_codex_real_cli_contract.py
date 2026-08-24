@@ -21,8 +21,7 @@ Two layers, per issue #154:
    event types.
 
 The golden is committed at ``tests/fixtures/codex_jsonl/real/golden.jsonl``;
-see ``tests/fixtures/codex_jsonl/real/README.md`` for the capture/refresh
-procedure, and ``scripts/capture-codex-golden.sh`` to re-capture.
+use ``scripts/capture-codex-golden.sh`` to re-capture it.
 """
 
 from __future__ import annotations
@@ -66,7 +65,7 @@ async def test_real_golden_parses_to_expected_events() -> None:
     """The committed REAL codex golden parses to a structurally-correct stream.
 
     The golden is genuine ``codex exec --experimental-json`` output (codex
-    0.139.0, see the fixture README). This asserts the parser still agrees
+    0.139.0). This asserts the parser still agrees
     with the live CLI on the observed event coverage: a text span, paired
     tool calls (zero orphans — the #153 contract), per-turn metrics with
     prompt/completion tokens, and a result event. Assertions are structural,

@@ -66,13 +66,13 @@ Use the common commands for the common tasks:
 ```bash
 daydream /path/to/project                    # review, fix, and test
 daydream --comment /path/to/project          # review, then post inline PR comments
-daydream --review /path/to/project           # write a report, no fixes
+daydream --review /path/to/project           # write a report only; no fixes or PR comments
 daydream --shallow /path/to/project          # review one stack in one pass
 daydream --yes /path/to/project              # apply fixes without prompting
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
 ```
 
-The `--comment` and `--review` modes stop after they post the review. They do not run the fix cycle.
+The `--comment` mode posts inline PR comments and exits; `--review` writes a report and exits. Neither runs the fix cycle.
 
 Run `daydream --help` to see the common flags. Run `daydream --help-all` to see the full advanced surface.
 
@@ -230,7 +230,7 @@ The evaluation framework has two arms:
 - **Recall.** Compare daydream findings against a human gold baseline. Report inter-annotator agreement (Krippendorff alpha) and PR-level bootstrap confidence intervals.
 - **Quality.** Track erosion and verbosity metrics. The fix-phase quality gate uses these metrics to flag degraded fixes.
 
-The offline benchmark scores deep-review findings against a held-out PR corpus. The benchmark uses micro-averaged metrics and bootstrap confidence intervals. See [docs/benchmark.md](docs/benchmark.md) and [docs/evaluation-framework.md](docs/evaluation-framework.md).
+The offline benchmark scores deep-review findings against a held-out PR corpus. The benchmark uses micro-averaged metrics and bootstrap confidence intervals. See [docs/benchmark.md](docs/benchmark.md).
 
 ## Architecture
 
@@ -307,6 +307,7 @@ Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `p
 | `claude` | `ClaudeAgentOptions.effort` → CLI `--effort` |
 | `codex` | `-c model_reasoning_effort=<level>` |
 | `pi` | `--thinking <level>` |
+| `osprey` | `--effort <level>` |
 
 The resolution order, highest first, is:
 
@@ -413,7 +414,7 @@ See [docs/self-hosted-bot-setup.md](docs/self-hosted-bot-setup.md) for details.
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
 | `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
 
-The `.daydream/exploration/` cache is reused on an exact key match. The key excludes uncommitted edits. A near-match never counts as a hit, because a stale hit would misground every review prompt. The `--shallow` and `--review` flows delete the directory. Alternating flows degrade to a cache miss, never to stale grounding.
+The `.daydream/exploration/` cache is reused on an exact key match. The key excludes uncommitted edits. A near-match never counts as a hit, because a stale hit would misground every review prompt. The `--shallow` and `--review` modes delete the directory. Alternating modes degrade to a cache miss, never to stale grounding.
 
 ## Development
 

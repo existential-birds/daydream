@@ -1481,8 +1481,8 @@ Depends on: issue 13.
 
 Scope:
 
-- Rewrite `docs/benchmark.md`, current README evaluation text,
-  `docs/evaluation-framework.md`, CLI help, and `CLAUDE.md` for exact commands,
+- Rewrite `docs/benchmark.md`, current README evaluation text, CLI help, and
+  `CLAUDE.md` for exact commands,
   gold modes, data/egress inventory, GitHub token scopes, same-env Harbor
   install, Linux/OrbStack requirement, wheel build, Oracle/run/Viewer, metrics,
   resume/stale/unreplayable handling, and cleanup.
