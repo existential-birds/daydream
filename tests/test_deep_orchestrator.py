@@ -44,6 +44,7 @@ from tests.harness.stub_backend import (
 if TYPE_CHECKING:
     from daydream.config_file import DaydreamFileConfig
     from daydream.pr_review import PRInfo
+    from daydream.review_profile import ResolvedProfile
     from daydream.runner import RunConfig
 
 # Re-exported under their historical ``_``-private names so this module's call
@@ -102,7 +103,7 @@ def _install_model_capturing_stubs(
     return shared_calls
 
 
-def _profile_with_pipeline(**overrides: object):
+def _profile_with_pipeline(**overrides: object) -> "ResolvedProfile":
     """Build a test ResolvedProfile with the default strategies + pipeline overrides."""
     from daydream.review_profile import (
         ResolvedProfile,
@@ -121,7 +122,7 @@ async def _run_deep(
     precision_mode: bool = False,
     uncovered_sweep: bool | None = None,
     approve_on_clean: bool = False,
-    review_profile: object | None = None,
+    review_profile: "ResolvedProfile | None" = None,
 ) -> int:
     from daydream.runner import RunConfig, run
 
@@ -8094,7 +8095,7 @@ def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
     from daydream.runner import RunConfig
     from daydream.workspace import WorkContext
 
-    def _ctx(config: RunConfig, review_profile: object | None = None) -> FlowContext:
+    def _ctx(config: RunConfig, review_profile: "ResolvedProfile | None" = None) -> FlowContext:
         work = WorkContext(
             repo=tmp_path,
             source=tmp_path,

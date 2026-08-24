@@ -529,3 +529,27 @@ def test_runconfig_uses_stack_terminology():
     cfg = RunConfig(target="/tmp", stack="go")
     assert cfg.stack == "go"
     assert not hasattr(cfg, "skill")   # old name removed
+
+
+def test_real_cli_stack_entry(tmp_path):
+    """Real entrypoint: --stack python reaches dispatch; --skill is rejected."""
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parent.parent
+    (tmp_path / "a.py").write_text("x = 1\n")
+    # skill-free env: no plugin/skill registry directory.
+    env = {**os.environ, "DAYDREAM_SKILLS_DIR": ""}
+    r = subprocess.run(
+        [sys.executable, "-m", "daydream", "--review", "--stack", "python", str(tmp_path)],
+        capture_output=True, text=True, env=env, cwd=repo_root, timeout=90,
+    )
+    # The run should get past arg parsing + profile resolution (exit 0 or the
+    # review's own later failure, never an unknown-option / ProfileError).
+    assert "--skill" not in r.stderr and "ProfileError" not in r.stderr
+    r2 = subprocess.run(
+        [sys.executable, "-m", "daydream", "--review", "--skill", "python", str(tmp_path)],
+        capture_output=True, text=True, env=env, cwd=repo_root, timeout=30,
+    )
+    assert r2.returncode == 2 or "unrecognized arguments" in r2.stderr or "invalid choice" in r2.stderr

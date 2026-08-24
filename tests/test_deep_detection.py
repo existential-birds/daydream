@@ -432,11 +432,9 @@ def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
         assert inline_grounded_files(diff, shard.files) == set(shard.files)
 
 
-
-from daydream.deep.detection import detect_stacks, GENERIC_STACK
-
-
 def test_detect_stacks_registry_independent_same_scopes():
+    from daydream.deep.detection import GENERIC_STACK, detect_stacks
+
     # Same files, absent vs empty vs populated registry -> same ordered scopes.
     changed = ["a.py", "b.ts", "c.md", "d.unknownext"]
     absent = detect_stacks(changed, registry=None)
@@ -451,6 +449,8 @@ def test_detect_stacks_registry_independent_same_scopes():
 
 
 def test_detect_stacks_never_degrades_to_generic_without_registry():
+    from daydream.deep.detection import GENERIC_STACK, detect_stacks
+
     # D-16 removed: a python stack never becomes generic merely because no
     # plugin registry is present.
     changed = ["a.py"]
