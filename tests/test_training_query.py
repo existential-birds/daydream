@@ -7,7 +7,7 @@ annotation per session. No mocking of SQLite, the archive layer, or the
 filesystem.
 
 ``_query_index`` applies only the label-independent SQL filters (status, C5
-exclusion, skill, repos, min_grounding) and the post-query C8 copyleft skip.
+exclusion, repos, min_grounding) and the post-query C8 copyleft skip.
 Label admission (C9 accepted-only / min-reward) moved into
 ``run_build_corpus`` because the label now comes from the ``as_of``-pinned
 silver annotation, not the denormalized ``runs.outcome_labels`` cache — so the
@@ -60,16 +60,17 @@ def test_query_excludes_c5_repos_unconditionally(archive: Path) -> None:
     assert "ddd-on-exclusion" not in _ids(rows)
 
 
-def test_query_skill_filter(archive: Path) -> None:
-    unfiltered = _query_index(archive, CorpusFilters(include_all_labels=True))
-    python_only = _query_index(
-        archive, CorpusFilters(skill="beagle-python:review-python", include_all_labels=True)
-    )
+def test_corpus_filters_have_no_skill_field() -> None:
+    """M21/M23: CorpusFilters no longer filters the legacy skill column; no raw-skill CLI."""
+    assert not hasattr(CorpusFilters(), "skill")
 
-    assert len(python_only) < len(unfiltered)
-    assert all(row["skill"] == "beagle-python:review-python" for row in python_only)
-    # Sanity: at least one python row survives the SQL filters.
-    assert "aaa-python-accepted" in _ids(python_only)
+
+def test_legacy_decoder_still_classifies(archive: Path) -> None:
+    """M21/M22: a historical beagle skill still decodes to its stack via the private map."""
+    from daydream.training.corpus import _stack_for_skill
+
+    assert _stack_for_skill("beagle-python:review-python") == "python"
+    assert _stack_for_skill("beagle-zig:review-zig") is None  # unknown → None (warned)
 
 
 def test_query_min_grounding_filter(archive: Path) -> None:
@@ -124,7 +125,7 @@ def test_query_attaches_stack(archive: Path) -> None:
 def test_query_warns_on_unknown_skill(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A row whose skill isn't in REVIEW_SKILLS triggers a one-time warning."""
+    """An unknown historical skill triggers a one-time warning."""
     from daydream.archive.index import upsert_run
     from daydream.archive.manifest import Manifest
 

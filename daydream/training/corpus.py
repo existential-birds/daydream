@@ -420,7 +420,6 @@ class CorpusFilters:
     admission rule is C9 accepted-only **OR** intrinsic-reward ≥ ``min_reward``.
 
     Attributes:
-        skill: Optional exact-match filter on the ``skill`` column.
         repos: Optional whitelist of ``owner/repo`` slugs (IN-clause).
         labels: Outcome labels considered acceptable, matched against the
             pinned annotation's label. Defaults to ``("accepted",)`` per C9.
@@ -446,7 +445,6 @@ class CorpusFilters:
             (``posterior_cost``), never subtracted into the composite.
     """
 
-    skill: str | None = None
     repos: tuple[str, ...] = ()
     labels: tuple[str, ...] = ("accepted",)
     min_grounding: float | None = None
@@ -522,9 +520,8 @@ def _build_query(
     3. C5 exclusion: ``repo_slug IS NULL OR repo_slug NOT IN (...)`` — always
        (when the exclusion list is non-empty; otherwise omitted to keep the
        SQL clean). Placeholder count is derived from the loaded set size.
-    4. ``skill = ?`` — when ``filters.skill`` is set.
-    5. ``repo_slug IN (...)`` — when ``filters.repos`` is non-empty.
-    6. ``grounding_rate >= ?`` — when ``filters.min_grounding`` is set.
+    4. ``repo_slug IN (...)`` — when ``filters.repos`` is non-empty.
+    5. ``grounding_rate >= ?`` — when ``filters.min_grounding`` is set.
 
     Returns:
         ``(where_clause, params)`` where ``where_clause`` has no leading
@@ -553,18 +550,13 @@ def _build_query(
         clauses.append(f"(repo_slug IS NULL OR repo_slug NOT IN ({placeholders}))")
         params.extend(ordered_exclusion)
 
-    # 3. skill — optional
-    if filters.skill is not None:
-        clauses.append("skill = ?")
-        params.append(filters.skill)
-
-    # 4. repos — optional
+    # 3. repos — optional
     if filters.repos:
         placeholders = ", ".join(["?"] * len(filters.repos))
         clauses.append(f"repo_slug IN ({placeholders})")
         params.extend(filters.repos)
 
-    # 5. min_grounding — optional
+    # 4. min_grounding — optional
     if filters.min_grounding is not None:
         clauses.append("grounding_rate >= ?")
         params.append(filters.min_grounding)
