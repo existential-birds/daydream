@@ -104,6 +104,17 @@ def test_run_config_has_no_skill_availability_field():
     assert not hasattr(RunConfig(), "skill_availability")
 
 
+def test_run_config_has_no_bot_field():
+    """M2: RunConfig no longer carries the feedback-mode ``bot`` field."""
+    cfg = RunConfig(target="/tmp")
+    assert not hasattr(cfg, "bot")
+
+
+def test_feedback_routes_to_review_shim_not_feedback():
+    """M2: numeric targets no longer select feedback; no feedback entry point exists."""
+    assert not hasattr(runner, "run_feedback")
+
+
 def test_run_config_exploration_context_defaults_to_none():
     cfg = RunConfig()
     assert cfg.exploration_context is None
@@ -154,9 +165,8 @@ _DISPATCH_TARGETS = (
 @pytest.mark.parametrize(
     ("expected_target", "config_kwargs", "expected_attr", "expected_value"),
     [
-        ("_run_loop_deep", {"pr_number": 42, "bot": "botname"}, "pr_number", 42),
-        # Auto-detected pr_number (no bot) routes to the deep loop, not PR feedback.
-        ("_run_loop_deep", {"pr_number": 42, "bot": None}, "pr_number", 42),
+        # A PR number is metadata and does not select a separate dispatch path.
+        ("_run_loop_deep", {"pr_number": 42}, "pr_number", 42),
         ("_run_loop_deep", {"output_mode": "comment"}, "output_mode", "comment"),
         ("_run_loop_deep", {"output_mode": "review"}, "output_mode", "review"),
         ("_run_loop_deep", {"output_mode": "loop", "shallow": True}, "shallow", True),
@@ -165,8 +175,7 @@ _DISPATCH_TARGETS = (
         ("_run_improve", {"flow_name": "improve"}, "flow_name", "improve"),
     ],
     ids=[
-        "pr_feedback_when_pr_number_set",
-        "auto_detected_pr_number_goes_deep",
+        "pr_number_metadata_goes_deep",
         "comment_mode",
         "review_mode",
         "shallow_mode",
@@ -188,9 +197,8 @@ async def test_run_dispatches_to_expected_flow(
     """``run()`` routes each flag combination to exactly one flow entrypoint.
 
     Every dispatch function is stubbed, so the recorded call list also proves
-    exclusivity: every PR-process mode (feedback / comment / review / shallow /
-    deep loop) lands on the single deep flow, and an auto-detected ``pr_number``
-    (no ``bot``) must not route to a separate PR-feedback path.
+    exclusivity: every PR-process mode (comment / review / shallow / deep loop)
+    lands on the single deep flow, while ``pr_number`` remains metadata only.
     """
     called: list[tuple[str, WorkContext, RunConfig]] = []
 
@@ -446,7 +454,6 @@ async def test_review_run_does_not_mint_app_identity(
 @pytest.mark.parametrize(
     ("config", "expected"),
     [
-        (RunConfig(bot="review-bot"), True),
         (RunConfig(output_mode="comment"), True),
         (RunConfig(output_mode="loop"), True),
         (RunConfig(flow_name="deep"), True),
@@ -457,7 +464,6 @@ async def test_review_run_does_not_mint_app_identity(
         (RunConfig(flow_name="custom-audit"), False),
     ],
     ids=[
-        "pr_feedback",
         "comment",
         "default_deep",
         "explicit_deep",
@@ -502,77 +508,6 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
 
     assert exit_code == 0
     assert seen == {"output_mode": "comment", "branch": "feat/missing"}, seen
-
-
-@pytest.mark.asyncio
-async def test_run_feedback_routes_through_deep_flow(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config
-):
-    """``run_feedback`` sets ``pr_number`` and re-enters dispatch (deep loop)."""
-    called: dict[str, Any] = {}
-
-    async def stub(work, config):
-        called["pr"] = config.pr_number
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
-    config = make_config(tmp_path, bot="botname")
-
-    exit_code = await runner.run_feedback(config, 99)
-    assert exit_code == 0
-    assert called["pr"] == 99
-    # The wrapper should have populated ``pr_number`` on the shared config.
-    assert config.pr_number == 99
-
-
-@pytest.mark.asyncio
-async def test_pr_feedback_banner_echoes_resolved_backend_model(
-    monkeypatch, tmp_path, make_work, make_config
-):
-    """The PR-feedback banner reports the model id that the resolved backend
-    actually carries — not a parallel literal hardcoded in the runner. Tests
-    propagation, not a specific id.
-    """
-    from daydream.deep import orchestrator
-    from daydream.extensions import build_registry, set_registry
-
-    work = make_work(tmp_path)
-    chosen_model = "fixture-model-xyz"
-
-    set_registry(build_registry())
-
-    # ``FlowContext.backend_for`` resolves through ``daydream.runner._resolve_backend``
-    # (late import) and passes ``cache=`` by keyword.
-    monkeypatch.setattr(
-        "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model=chosen_model),
-    )
-
-    async def _no_op_fetch(*_args, **_kwargs):
-        return None
-
-    async def _empty_parse(*_args, **_kwargs):
-        return []
-
-    # The fetch/parse call sites live in the feedback-mode prefix of the deep flow.
-    monkeypatch.setattr(
-        "daydream.deep.orchestrator.phase_fetch_pr_feedback", _no_op_fetch
-    )
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_parse_feedback", _empty_parse)
-
-    captured: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.orchestrator.print_info",
-        lambda _console, message: captured.append(message),
-    )
-
-    config = make_config(tmp_path, pr_number=42, bot="botname")
-
-    exit_code = await orchestrator._run_feedback_flow(config, work)
-    assert exit_code == 0
-    assert f"Model: {chosen_model}" in captured, (
-        f"Banner did not echo backend.model; got {captured!r}"
-    )
 
 
 # --- Per-phase model resolution tests (Task 2) -----------------------------
@@ -835,11 +770,10 @@ def test_runconfig_defaults_non_interactive_false():
     [
         ("daydream.runner._run_loop_deep", {"output_mode": "loop"}),
         ("daydream.runner._run_loop_deep", {"output_mode": "loop", "shallow": True}),
-        ("daydream.runner._run_loop_deep", {"pr_number": 7, "bot": "botname"}),
         ("daydream.runner._run_loop_deep", {"output_mode": "comment"}),
         ("daydream.runner._run_improve", {"flow_name": "improve"}),
     ],
-    ids=["deep_loop", "shallow", "pr_feedback", "comment", "improve"],
+    ids=["deep_loop", "shallow", "comment", "improve"],
 )
 async def test_run_threads_non_interactive_into_agent_state(
     dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path,
@@ -919,9 +853,6 @@ class _CommitWritingBackend:
 
     async def cancel(self) -> None:
         pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}" + (f" {args}" if args else "")
 
 
 @pytest.mark.asyncio
@@ -1270,9 +1201,9 @@ def test_open_recorder_resolves_backend_identity(tmp_path: Path) -> None:
 def test_open_recorder_resolves_backend_via_per_stack_review(tmp_path: Path) -> None:
     """The representative backend follows per_stack_review, not the review phase.
 
-    The deep flow's actual review fan-out runs on ``per_stack_review``; the
-    ``review`` phase only powers feedback-mode commit-push, so a per-phase
-    override on ``per_stack_review`` must win for the run's backend identity.
+    The deep flow's actual review fan-out runs on ``per_stack_review``; a
+    per-phase override on ``per_stack_review`` must win for the run's backend
+    identity.
     """
     from daydream.config_file import DaydreamFileConfig
     from daydream.runner import _open_recorder
@@ -1376,14 +1307,8 @@ def test_open_recorder_improve_resolves_backend_via_recon(tmp_path: Path) -> Non
     assert recorder.test_backend_name == ""
 
 
-def test_open_recorder_feedback_resolves_fix_omits_test(tmp_path: Path) -> None:
-    """Feedback (PR) flow records the fix backend but omits the test backend.
-
-    ``daydream feedback`` fixes items (fix phase) but never runs the test
-    phase, and its commit-push step uses the ``review`` backend — so the
-    representative follows the ``review`` phase and only ``fix_backend`` is
-    recorded.
-    """
+def test_open_recorder_pr_flow_resolves_fix_omits_test(tmp_path: Path) -> None:
+    """PR trajectories retain their historical fix-without-test backend metadata."""
     from daydream.runner import _open_recorder
     target_dir = tmp_path / "project"
     target_dir.mkdir()
@@ -1525,12 +1450,8 @@ def test_manifest_improve_omits_fix_test_backend(tmp_path: Path) -> None:
     assert "test_backend" not in run
 
 
-def test_manifest_feedback_records_fix_omits_test_backend(tmp_path: Path) -> None:
-    """Feedback (PR) manifests keep ``fix_backend`` but omit ``test_backend``.
-
-    ``daydream feedback`` runs the fix phase but never the test phase, and its
-    representative backend follows the ``review`` phase.
-    """
+def test_manifest_pr_flow_records_fix_omits_test_backend(tmp_path: Path) -> None:
+    """PR manifests retain their historical fix-without-test backend metadata."""
     config = RunConfig(
         target=str(tmp_path / "project"), run_eval=False, review_backend="codex",
     )

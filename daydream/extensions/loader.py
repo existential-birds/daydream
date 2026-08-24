@@ -1,7 +1,7 @@
 """Extension discovery, version gate, and per-run registry construction.
 
-Discovery precedence: ``$DAYDREAM_EXT_DIR`` (explicit path override, matching
-the ``$DAYDREAM_SKILLS_DIR`` convention; also the test seam) → ``import
+Discovery precedence: ``$DAYDREAM_EXT_DIR`` (explicit path override and the
+test seam) → ``import
 daydream_ext`` (the fork extension package pre-declared in the wheel) → no
 extension (builtins-only registry). Absence is fine; a present-but-broken
 extension is a loud, named error.

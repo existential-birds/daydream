@@ -758,7 +758,6 @@ def _stacks_for_services(
             scoped.append(
                 StackAssignment(
                     stack_name=stack.stack_name,
-                    skill_invocation=stack.skill_invocation,
                     files=files,
                     is_docs_only=stack.is_docs_only,
                 )

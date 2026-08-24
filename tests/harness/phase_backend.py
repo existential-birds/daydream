@@ -15,7 +15,7 @@ phase-keyed *replay* harness (``tests/harness/phase_replay.py``), which serves
 one fixture per phase per firing.
 
 It implements the 3-method ``Backend`` interface (``execute``/``cancel``/
-``format_skill_invocation``). Two response modes:
+Backend protocol methods (``execute`` / ``cancel``). Two response modes:
 
 * ``events``: a raw pre-built ``AgentEvent`` list yielded verbatim (the
   tool-panel / single-pass-fixture mode the old ``MockBackend(events=...)``
@@ -210,6 +210,3 @@ class PhaseDispatchBackend:
 
     async def cancel(self) -> None:
         pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}" + (f" {args}" if args else "")

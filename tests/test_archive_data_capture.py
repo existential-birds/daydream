@@ -469,9 +469,6 @@ class _FixEditingBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 async def test_shallow_run_captures_recommended_patch(
     feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path

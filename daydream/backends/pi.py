@@ -114,15 +114,6 @@ def _configured_pi_model(cwd: Path) -> str | None:
             return model
     return None
 
-# Matches Pi's native ``/skill:<slug>`` command embedded in a prompt (emitted by
-# ``format_skill_invocation``). Used in ``execute`` to register the referenced
-# skill directories with the subprocess via ``--skill`` flags. The character
-# class mirrors Pi's documented skill-name grammar (lowercase a-z, 0-9, hyphens
-# only; see pi docs/skills.md "Name Rules"): uppercase and underscore are
-# excluded because no valid Pi slug uses them, so the wider ``\w`` class would
-# otherwise admit tokens that can never resolve to a real skill.
-_SKILL_TOKEN_RE = re.compile(r"/skill:([a-z0-9-]+)")
-
 # Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
 # inject rich guidance (tool efficiency, exploration strategy, conciseness) at
 # the CLI layer; Pi does not, so the default DeepSeek model burns its
@@ -450,57 +441,6 @@ def _schema_instruction(schema: dict[str, Any]) -> str:
     )
 
 
-def _skill_slug(skill_key: str) -> str:
-    """Strip a Beagle plugin prefix from a skill key, leaving the bare slug.
-
-    ``beagle-python:review-python`` -> ``review-python``; a key that already
-    has no prefix (``review-python``) is returned unchanged. Pi has no plugin
-    namespace, so its native ``/skill:<slug>`` command and on-disk skill
-    directories are keyed by the bare slug.
-    """
-    return skill_key.split(":")[-1]
-
-
-def _resolve_skill_dir(skill_key: str) -> Path | None:
-    """Best-effort resolution of a Beagle skill key to its on-disk directory.
-
-    Searches, in priority order, for a directory whose slug matches
-    ``skill_key`` and contains a ``SKILL.md``:
-
-    1. ``$DAYDREAM_SKILLS_DIR`` — the configurable override; when set it is
-       searched first so it wins over the built-in locations.
-    2. ``~/.agents/skills`` — the primary default location.
-    3. ``~/.claude/skills`` — the legacy Claude Code plugin mirror.
-    4. the project-local ``.agents/skills`` then ``.claude/skills`` mirrors.
-
-    Returns ``None`` when unresolved; the caller degrades gracefully and this
-    function never raises.
-
-    Note: this is a standalone skill-location mechanism — built-in Deep/Improve
-    reviews no longer resolve review skills through the extension registry, so
-    this resolver serves the skill-token shaping path that remains.
-    """
-    slug = _skill_slug(skill_key)
-    home = Path.home()
-    search_roots: list[Path] = []
-    extra = os.environ.get("DAYDREAM_SKILLS_DIR")
-    if extra:
-        search_roots.append(Path(extra))
-    search_roots.extend(
-        [
-            home / ".agents" / "skills",
-            home / ".claude" / "skills",
-            Path.cwd() / ".agents" / "skills",
-            Path.cwd() / ".claude" / "skills",
-        ]
-    )
-    for root in search_roots:
-        candidate = root / slug
-        if (candidate / "SKILL.md").is_file():
-            return candidate
-    return None
-
-
 class PiBackend:
     """Backend that wraps the Pi CLI subprocess.
 
@@ -686,25 +626,11 @@ class PiBackend:
         else:
             args.append("--no-session")
 
+        args.append("--no-skills")
+
         full_prompt = prompt
         if output_schema:
             full_prompt = prompt + _schema_instruction(output_schema)
-
-        # Register any /skill:<slug> commands referenced in the prompt with the
-        # subprocess via repeatable --skill <dir> flags so availability does not
-        # depend solely on ambient ~/.agents/skills mirrors. Best-effort and
-        # de-duplicated: slugs that don't resolve to an on-disk skill dir are
-        # skipped (pi may still auto-discover them) and never crash the run.
-        registered_dirs: set[str] = set()
-        for slug in _SKILL_TOKEN_RE.findall(full_prompt):
-            skill_dir = _resolve_skill_dir(slug)
-            if skill_dir is None:
-                continue
-            resolved = str(skill_dir)
-            if resolved in registered_dirs:
-                continue
-            registered_dirs.add(resolved)
-            args.extend(["--skill", resolved])
 
         args.append(full_prompt)
 
@@ -942,19 +868,3 @@ class PiBackend:
         ``CodexBackend.cancel``).
         """
         await cancel_processes(self._processes)
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        """Format a skill invocation as Pi's native ``/skill:<slug>`` command.
-
-        Pi exposes installed skills through a built-in slash command keyed by
-        the bare slug (it has no plugin namespace), so a Beagle key like
-        ``beagle-python:review-python`` becomes ``/skill:review-python``. The
-        plugin prefix is stripped via :func:`_skill_slug`; the matching skill
-        directory is registered with the subprocess in :meth:`execute` via a
-        ``--skill`` flag so the command resolves even without an ambient
-        mirror. This method never raises.
-        """
-        base = f"/skill:{_skill_slug(skill_key)}"
-        if args:
-            base = f"{base} {args}"
-        return base

@@ -1,8 +1,7 @@
 """Real-path tests: fork flow mutations reach the registered flow definitions.
 
-Drives the production entrypoints (``runner.run_feedback`` / ``runner.run``)
-against a real temp git repo, mocking ONLY the backend seam
-(``daydream.runner.create_backend``) per the testing standard. A
+Drives ``runner.run`` against a real temp git repo, mocking ONLY the backend
+seam (``daydream.runner.create_backend``) per the testing standard. A
 ``daydream_ext`` package written by the ``ext_dir`` fixture mutates the flow
 definitions (remove/insert steps); assertions are on the prompts the backend
 actually received and the exit code. Grows across Tasks 9-15 of the
@@ -239,79 +238,6 @@ async def test_fork_filter_controls_fix_prompts(
     assert DROP_ME not in fix_prompts
 
 
-class RecordingBackend:
-    """Prompt-recording stub modelled on ``_PRFeedbackStubBackend``.
-
-    Dispatches on prompt content just enough to drive the pr-feedback flow
-    past every gate: writes the review-output file for the fetch prompt,
-    yields ONE parseable feedback item for the parse prompt, and no-ops
-    everything else (fix, commit, respond).
-    """
-
-    model = "mock-model"
-    fanout_concurrency = 4
-
-    def __init__(self) -> None:
-        self.prompts: list[str] = []
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ):
-        self.prompts.append(prompt)
-        pl = prompt.lower()
-
-        if "fetch-pr-feedback" in pl:
-            (cwd / ".review-output.md").write_text(
-                "# PR Feedback\n\n"
-                "## x[bot]\n\n"
-                "1. [api.py:1] `hello()` returns 'universe' but the docstring "
-                "says 'world' — align the return value.\n"
-            )
-            yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
-        if "extract only actionable issues" in pl:
-            yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": "Align hello() return value with docstring",
-                            "file": "api.py",
-                            "line": 1,
-                            "confidence": "HIGH",
-                            "rationale": "return value diverges from docstring",
-                            "evidence": "api.py:1",
-                        }
-                    ]
-                },
-                continuation=None,
-            )
-            return
-
-        yield TextEvent(text="")
-        yield ResultEvent(structured_output=None, continuation=None)
-
-    async def cancel(self) -> None:
-        pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        # Mirror ClaudeBackend: append args so the test can read the slot from the prompt.
-        result = f"/{skill_key}"
-        if args:
-            result = f"{result} {args}"
-        return result
-
-
 class DeferredWriteBackend:
     """Yield a write start before performing the write on generator resumption."""
 
@@ -346,34 +272,6 @@ class DeferredWriteBackend:
 
     async def cancel(self) -> None:
         pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
-
-async def test_fork_disables_respond_step(
-    ext_dir: ExtDir,
-    multi_stack_target: Path,
-    install_backend: InstallBackend,
-    make_config: MakeConfig,
-) -> None:
-    """A daydream_ext removal of ``respond-feedback`` skips only that step.
-
-    Observable outcomes: exit 0, the flow still ran (fetch prompt reached the
-    backend), and the removed respond step never invoked its skill.
-    """
-    ext_dir.write_module(
-        "def register(r):\n"
-        "    r.remove('deep', 'respond-feedback')\n"
-    )
-    backend = RecordingBackend()
-    install_backend(backend)
-
-    rc = await runner.run_feedback(make_config(multi_stack_target, bot="x[bot]"), pr=1)
-
-    assert rc == 0
-    assert any("fetch" in p.lower() for p in backend.prompts)  # flow still ran
-    assert not any("respond-pr-feedback" in p for p in backend.prompts)  # removed step never invoked
 
 
 async def test_fork_inserts_custom_phase_into_review_flow(
@@ -521,25 +419,23 @@ async def test_fork_disables_arbiter_in_deep(
     assert not any("you are the arbiter" in p.lower() for p in prompts)
 
 
-# Task 17 fixture source: a fork registers phase ``ro_gate`` whose run() resolves
-# its OWN backend (``ctx.backend_for('ro_gate')`` -> per-phase config), its OWN
-# registered prompt (``prompt('ro_gate')``), and its phase-bound skill slot
-# (``skill('phase:ro_gate')``), then inserts it into the deep flow after ``intent``.
+# A fork registers phase ``ro_gate`` whose run() resolves its OWN backend
+# (``ctx.backend_for('ro_gate')`` -> per-phase config) and registered prompt
+# (``prompt('ro_gate')``), then inserts it into the deep flow after ``intent``.
 FULL_RO_EXT = (
     "from daydream.extensions import FlowStep, get_registry\n"
-    "def _ro_prompt(skill):\n"
-    "    return f'RO-GATE {skill}'\n"
+    "def _ro_prompt():\n"
+    "    return 'RO-GATE'\n"
     "async def _ro(ctx):\n"
     "    from daydream.agent import run_agent\n"
     "    from daydream.trajectory import DaydreamPhase\n"
     "    r = get_registry()\n"
-    "    prompt = r.prompt('ro_gate')(skill=r.skill('phase:ro_gate'))\n"
+    "    prompt = r.prompt('ro_gate')()\n"
     "    await run_agent(ctx.backend_for('ro_gate'), ctx.work.repo, prompt,\n"
     "                    phase=DaydreamPhase.REVIEW)\n"
     "def register(r):\n"
     "    r.register_phase(FlowStep(name='ro_gate', run=_ro))\n"
     "    r.override_prompt('ro_gate', _ro_prompt)\n"
-    "    r.override_skill('phase:ro_gate', 'ro-core:gate-skill')\n"
     "    r.insert_after('deep', anchor='intent', step='ro_gate')\n"
 )
 
@@ -767,15 +663,15 @@ async def test_custom_phase_full_stack(
 ) -> None:
     """Seam acceptance (Task 17): custom phase end-to-end through ``runner.run``.
 
-    Proves the four must-haves are wired together: a fork-registered phase runs
-    inside the deep flow, builds its prompt from its OWN registered prompt
-    builder, resolves its OWN phase-bound skill slot, and gets its backend
-    through ``[tool.daydream.phases.ro_gate]`` per-phase config (Assumption 7:
-    ``_coerce_phases`` / ``_resolved_model`` accept arbitrary phase strings).
+    Proves the extension seams are wired together: a fork-registered phase runs
+    inside the deep flow, builds its prompt from its own registered prompt
+    builder, and gets its backend through ``[tool.daydream.phases.ro_gate]``
+    per-phase config (Assumption 7: ``_coerce_phases`` / ``_resolved_model``
+    accept arbitrary phase strings).
 
-    Observable outcomes: exit 0, the ``RO-GATE`` prompt containing the bound
-    skill reached the backend, and ``create_backend`` was called with the
-    per-phase model from ``.daydream.toml``.
+    Observable outcomes: exit 0, the ``RO-GATE`` prompt reached the backend,
+    and ``create_backend`` was called with the per-phase model from
+    ``.daydream.toml``.
     """
     from daydream.config_file import load_file_config
     from tests.test_deep_orchestrator import _silence, _StubBackend
@@ -810,7 +706,7 @@ async def test_custom_phase_full_stack(
     prompts = [call["prompt"] for call in backend.calls]
     ro_prompts = [p for p in prompts if p.startswith("RO-GATE")]
     assert rc == 0
-    assert ro_prompts and "ro-core:gate-skill" in ro_prompts[0]  # own prompt + bound skill
+    assert ro_prompts
     assert ("claude", "test-model-x") in created  # [tool.daydream.phases.ro_gate] honored
 
 
@@ -884,7 +780,7 @@ def test_ext_dir_renderer_override_reaches_pr_review(
     ext = tmp_path / "ext"
     ext.mkdir()
     (ext / "__init__.py").write_text(
-        "DAYDREAM_EXT_API = 5\n"
+        "DAYDREAM_EXT_API = 6\n"
         "def register(r):\n"
         "    r.override_renderer('finding', lambda finding, ctx: f'EXT::{ctx.placement}::{finding.title}')\n"
     )

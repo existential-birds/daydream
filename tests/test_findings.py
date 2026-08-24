@@ -203,9 +203,6 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
         async def cancel(self):
             pass
 
-        def format_skill_invocation(self, skill_key, args=""):
-            return f"/{skill_key}"
-
     head = git_ops.head_sha(feature_branch_repo)
     pr = PRInfo(number=7, head_sha=head, base_sha=head, base_ref="main",
                 owner="o", repo="r", url="https://example.invalid/pr/7")

@@ -1,15 +1,15 @@
 # Extension contract (`daydream_ext`)
 
-Daydream's extension seam lets a fork customize which phases run, which skills
-those phases use, the prompts, stack routing, tool supervision, and the
-canonical findings surface — entirely from a top-level `daydream_ext` package,
-without editing any file under `daydream/`. This document is the versioned
+Daydream's extension seam lets a fork customize which phases run, prompts,
+stack routing, tool supervision, and the canonical findings surface — entirely
+from a top-level `daydream_ext` package, without editing any file under
+`daydream/`. This document is the versioned
 contract: the module shape daydream loads, the exact name inventories a fork
 programs against, and the policy for when those names may change. A drift-guard
 test (`tests/test_extension_contract_doc.py`) pins this document to the
 registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 5`** (supported: `5..5`).
+Current contract version: **`EXTENSION_API_VERSION = 6`** (supported: `6..6`).
 
 ## Extension module contract
 
@@ -23,10 +23,10 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 5          # must be within daydream's supported range
+DAYDREAM_EXT_API = 6          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
-    ...                       # mutate flows / skills / prompts / stacks here
+    ...                       # mutate flows / prompts / stacks here
 ```
 
 `register(registry)` runs once per daydream run, after `register_builtins()`
@@ -50,7 +50,7 @@ The `daydream.extensions` package exports these contract symbols:
 | `FlowStep` | Named async flow step |
 | `LoopGroup` | Repeated ordered group of flow steps |
 | `Registry` | Per-run extension registry |
-| `StackRule` | Fork-defined changed-file-to-skill routing rule |
+| `StackRule` | Fork-defined changed-file-to-stack routing metadata |
 | `Stop` | End a flow with an exit code |
 | `SummaryContext` | Input to a `"summary"` renderer (findings, agent prompt, review info) |
 | `SummaryFinding` | One finding in a `SummaryContext` (public finding plus host-rendered `body_block`) |
@@ -63,8 +63,8 @@ The `daydream.extensions` package exports these contract symbols:
 
 ### Discovery order
 
-1. `$DAYDREAM_EXT_DIR` — explicit path to the package directory (matching the
-   `$DAYDREAM_SKILLS_DIR` convention; also the test seam). Daydream loads
+1. `$DAYDREAM_EXT_DIR` — explicit path to the package directory and the test
+   seam. Daydream loads
    `<dir>/__init__.py` fresh on every run — never via `sys.modules` — so
    repeat runs and tests never see a stale module.
 2. `import daydream_ext` — the fork extension package.
@@ -97,7 +97,6 @@ It bumps on **any** breaking change to:
   fields, the `Stop` / `BreakLoop` signals, the error hierarchy),
 - flow names or step names,
 - prompt names or their kwargs,
-- skill slot names,
 - the documented stable `ctx.data` keys below,
 - the tool-supervisor decision and findings-file semantics below.
 
@@ -124,61 +123,25 @@ not bump the version.
 
 ### Changelog
 
-- **Version 5** — **hard-breaking**. The `review` / `shallow` / `pr-feedback`
-  flows are gone; they collapsed into modes of the single `deep` flow (#330).
-  Their flow names, the `review` prompt slot, and the `phase:review` skill-slot
-  binding no longer exist. The `deep` flow inventory gained the feedback prefix
-  steps (`fetch-feedback`, `parse-feedback`, `fix-items`, `commit-push`,
-  `respond-feedback`) and the mode gates (review/comment/shallow/feedback are
-  `ctx.data["mode"]` values, not registered flows). Removing flow names and a
-  prompt slot is a breaking change to the flow and prompt inventories, so per
-  the policy above the floor rises to `5` in the same release: the supported
-  range is `5..5` and every fork must declare `DAYDREAM_EXT_API = 5`. Forks
-  that referenced `review`/`shallow`/`pr-feedback` flows, `--flow review`,
-  `override_prompt("review", …)`, or `override_skill("phase:review", …)` must
-  retarget: shallow/comment/review run the `deep` flow (replacing the per-stack
-  prompt, or inserting a step anchored to a `deep` step name), and the feedback
-  prefix is a mode of `deep`, not a separately registered flow.
-  Also removed in this series: the `cleanup` step name is gone from the `deep`
-  flow inventory — terminal `.review-output.md` cleanup now runs as a
-  success-path helper invoked by the review spine after `run_flow` returns
-  (gated on a zero exit, the loop/shallow/review/comment modes, and no
-  `--findings-out`), not as a registered step (#335). Forks that did
-  `r.remove("deep", "cleanup")` or
-  `insert_after("deep", anchor="cleanup", ...)` must retarget — `cleanup` is
-  no longer a step name (the step table below reflects the reduced inventory).
-- **Version 4** — **hard-breaking**. The `alternatives` step is removed from
-  the `deep` flow: the TTT alternative-review (wonder) now runs concurrently
-  with the per-stack fan-out inside the `per-stack-reviews` step, so on a fresh
-  multi-stack run the reviewers no longer wait for it. Removing a step name is a
-  breaking change to the flow inventory, so per the policy above the floor rises
-  to `4` in the same release: the supported range was `4..4` at the time.
-  Forks that did `r.remove("deep", "alternatives")` or
-  `insert_after("deep", anchor="alternatives", ...)` must retarget —
-  `alternatives` is no longer a step name. `[tool.daydream.phases.wonder]`
-  is unchanged: the config key survives, resolved inside `per-stack-reviews`.
-  Additive in the same release (no bump of their own): the `include_alternatives`
-  kwarg on the `per-stack` / `structural` / `generic-fallback` prompts, the
-  `inline_diff` kwarg on the `intent` / `alternatives` prompts, the
-  `resumed_from_arbiter` kwarg on the `merge` prompt, and the `verify` prompt's
-  `output_path` becoming accepted-but-ignored. (Version 5 later raised the
-  floor to `5`, so 4 is now aged out.)
-- **Version 3** — additive. Adds the `improve` flow and its steps, the
-  `audit:<category>[:<stack>]` skill slots, and three new prompt slots: `audit`
-  (kwargs `category`, `skill_invocation`, `group`, `scope_note`,
-  `recon_summary`, `cwd`, `tier`, where `group` is a partition-group mapping of
-  `name`, `stack`, `file_count`, `partitions[{name, root, file_count, service}]`),
-  `vet`, and `plan-writer`. Every one of these names is new in
-  this release, so no v1 or v2 extension can have overridden them. No existing
-  flow name, step name, prompt name, prompt kwarg, skill slot, or `Registry`
-  method changed. The floor therefore stays at `1`: the supported range is
-  `1..3` at the time. (Version 4 later raised the floor to `4`, and version 5
-  to `5`, so 1-3 are now aged out.)
-- **Version 2** — adds the synchronous tool-supervisor seam, the
-  `ToolDecision` result, and the public `items_file` findings surface. Aged out
-  by the version-4 floor raise.
-- **Version 1** — initial flow, skill, prompt, stack, loader, and validation
-  contract. Aged out by the version-4 floor raise.
+- **Version 6** — **hard-breaking**. Removes the feedback command and its deep-flow
+  prefix, and removes all extension-owned agent capability selection. `StackRule`
+  now contains only `stack_name` and `patterns`; review behavior comes from the
+  resolved review profile and prompt hooks. The corresponding registry methods
+  and prompt kwargs are gone. Because older extensions cannot run against this
+  contract, both the ceiling and floor rise together: the supported range is
+  `6..6`, and every fork must declare `DAYDREAM_EXT_API = 6`.
+- **Version 5** — **hard-breaking**. The `review` and `shallow` flows collapsed
+  into modes of the single `deep` flow, and the `review` prompt slot was removed.
+  The `cleanup` step also moved out of the registered flow and into the review
+  spine's success path. The supported range was `5..5` at the time.
+- **Version 4** — **hard-breaking**. Removed the `alternatives` step from the
+  `deep` flow when alternative review moved inside `per-stack-reviews`. The
+  supported range was `4..4` at the time.
+- **Version 3** — additive. Added the `improve` flow and the `audit`, `vet`, and
+  `plan-writer` prompt slots.
+- **Version 2** — added the synchronous tool-supervisor seam, the
+  `ToolDecision` result, and the public `items_file` findings surface.
+- **Version 1** — initial flow, prompt, stack, loader, and validation contract.
 
 ## Tool supervision
 
@@ -263,55 +226,42 @@ Each step's *config key* is its `[tool.daydream.phases.<key>]` key
 model/backend overrides resolve against.
 
 **Naming convention:** phase names are one global registry namespace. The `deep`
-flow owns the plain names. The `review` / `shallow` / `pr-feedback` flows were
-collapsed into modes of `deep` (#330) — `--review`, `--comment`, and `--shallow`
-run the review spine (stopping after `post-review` for review/comment, forcing a
-single stack for shallow), and `daydream feedback <pr#>` runs only the feedback
-prefix. Fork-defined flows should follow the same convention: pick globally
-unique step names, and use `config_phase` to reuse an existing config key.
+flow owns the plain names. The `review` and `shallow` flows were collapsed
+into modes of `deep` (#330): `--review`, `--comment`, and `--shallow` run the
+review spine, with shallow forcing a single stack. Fork-defined flows should
+follow the same convention: pick globally unique step names, and use
+`config_phase` to reuse an existing config key.
 
 #### `deep` (the single PR-process flow, #330)
 
 | # | Step | Config key |
 |---|------|------------|
-| 1 | `fetch-feedback` | `pr_feedback` |
-| 2 | `parse-feedback` | `parse` |
-| 3 | `fix-items` | `fix` |
-| 4 | `commit-push` | `review` |
-| 5 | `respond-feedback` | `pr_feedback` |
-| 6 | `exploration` | `exploration` |
-| 7 | `intent` | `intent` |
-| 8 | `per-stack-reviews` | `per_stack_review` |
-| 9 | `per-stack-parse` | `parse` |
-| 10 | `uncovered-sweep` | `parse` |
-| 11 | `arbiter` | `arbiter` |
-| 12 | `cross-stack-merge` | `merge` |
-| 13 | `single-stack-merge` | `single-stack-merge` |
-| 14 | `load-items` | `load-items` |
-| 15 | `supervise` | `supervise` |
-| 16 | `findings-out` | `findings-out` |
-| 17 | `post-review` | `post-review` |
-| 18 | `fix-gate` | `fix-gate` |
-| 19 | `verify` | `verify` |
-| 20 | `fix` | `fix` |
-| 21 | `fix-verify` | `verify` |
-| 22 | `test` | `test` |
-| 23 | `commit` | `fix` |
+| 1 | `exploration` | `exploration` |
+| 2 | `intent` | `intent` |
+| 3 | `per-stack-reviews` | `per_stack_review` |
+| 4 | `per-stack-parse` | `parse` |
+| 5 | `uncovered-sweep` | `parse` |
+| 6 | `arbiter` | `arbiter` |
+| 7 | `cross-stack-merge` | `merge` |
+| 8 | `single-stack-merge` | `single-stack-merge` |
+| 9 | `load-items` | `load-items` |
+| 10 | `supervise` | `supervise` |
+| 11 | `findings-out` | `findings-out` |
+| 12 | `post-review` | `post-review` |
+| 13 | `fix-gate` | `fix-gate` |
+| 14 | `verify` | `verify` |
+| 15 | `fix` | `fix` |
+| 16 | `fix-verify` | `verify` |
+| 17 | `test` | `test` |
+| 18 | `commit` | `fix` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
-preamble: `feedback` runs only the prefix (steps 1-5, ending at
-`respond-feedback`); `review` / `comment` run the review spine and stop after
-`post-review` (the fix cycle is gated off, and `post-review` auto-posts for
-`comment`); `shallow` forces `single_stack_mode` (no arbiter / cross-stack
-merge); `loop` is the unchanged default fixing everything.
+preamble. `review` / `comment` run the review spine and stop after `post-review`;
+`shallow` forces `single_stack_mode`; `loop` is the default fixing flow.
 
 `.review-output.md` cleanup is not a flow step; it runs in `_run_review_spine`
-after `run_flow` returns, tied to a successful outcome (`exit_code == 0`), the
-mode gate (loop/shallow/review/comment — never `feedback`, which writes no
-report), and `config.findings_out is None` (a `--findings-out` run keeps the
-rendered report the user asked it to produce). It is skipped entirely on any
-non-zero (failure) exit so evidence survives, and removes the report per
-`--cleanup` / `--no-cleanup` / interactive-or-unattended prompt defaults (#335).
+after `run_flow` returns, tied to a successful outcome, an applicable mode, and
+`config.findings_out is None`.
 
 `fix` and `fix-verify` (issue #744) are wrapped together in a `LoopGroup`
 (`fix-verify-loop`) capped at 3 rounds: each round dispatches findings, a
@@ -350,39 +300,6 @@ Steps carry `enabled` predicates internally (tier gates, mode gates,
 resume points); a step listed here may be skipped for a given run, but the
 name is stable.
 
-### Skill slots
-
-| Slot | Built-in value |
-|------|----------------|
-| `stack:python` | `beagle-python:review-python` |
-| `stack:react` | `beagle-react:review-frontend` |
-| `stack:elixir` | `beagle-elixir:review-elixir` |
-| `stack:go` | `beagle-go:review-go` |
-| `stack:rust` | `beagle-rust:review-rust` |
-| `stack:ios` | `beagle-ios:review-ios` |
-| `structural` | `beagle-core:review-structure` |
-| `pr-feedback-fetch` | `beagle-core:fetch-pr-feedback` |
-| `pr-feedback-respond` | `beagle-core:respond-pr-feedback` |
-| `audit:correctness:python` | `beagle-python:review-python` |
-| `audit:correctness:react` | `beagle-react:review-frontend` |
-| `audit:correctness:elixir` | `beagle-elixir:review-elixir` |
-| `audit:correctness:go` | `beagle-go:review-go` |
-| `audit:correctness:rust` | `beagle-rust:review-rust` |
-| `audit:correctness:ios` | `beagle-ios:review-ios` |
-| `audit:security:elixir` | `beagle-elixir:elixir-security-review` |
-| `audit:performance:elixir` | `beagle-elixir:elixir-performance-review` |
-| `audit:tests:python` | `beagle-python:pytest-code-review` |
-| `audit:tests:go` | `beagle-go:go-testing-code-review` |
-| `audit:tests:rust` | `beagle-rust:rust-testing-code-review` |
-| `audit:tests:elixir` | `beagle-elixir:exunit-code-review` |
-| `audit:tech-debt` | `beagle-core:review-structure` |
-
-`phase:<name>` is the phase-bound slot convention: no `phase:*` slot is
-registered by default, but when a fork binds one, the phase resolves its skill
-from it (a custom phase reads its own `phase:<name>` slot). The built-in deep
-flow binds no `phase:*` slots — the per-stack reviewer resolves its skill from
-the `stack:<name>` slots (or a fork `StackRule`), never from a `phase:*` slot.
-
 ### Prompts
 
 The 15 registered prompt names and the exact kwargs their builders receive
@@ -391,20 +308,20 @@ noted.
 
 | Prompt | Kwargs |
 |--------|--------|
-| `intent` | `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description`, `inline_diff` |
-| `alternatives` | `intent_summary`, `diff_path`, `exploration_dir`, `inline_diff` |
+| `intent` | `strategy`, `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description`, `inline_diff`, `inline_exploration_summary` |
+| `alternatives` | `strategy`, `intent_summary`, `diff_path`, `exploration_dir`, `inline_diff` |
 | `fix` | `test_output`, `feedback_items` (both positional), `repo`, `concise_mode` |
-| `per-stack` | `skill_invocation`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives` |
-| `structural` | `skill_invocation`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative`, `include_alternatives` |
-| `generic-fallback` | `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives` |
-| `arbiter` | `arbiter_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir`, `intent_authoritative` |
-| `supervise` | `supervise_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
-| `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
-| `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
-| `verify` | `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
+| `per-stack` | `strategy`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files` |
+| `structural` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative`, `include_alternatives` |
+| `generic-fallback` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files` |
+| `arbiter` | `strategy`, `arbiter_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir`, `intent_authoritative` |
+| `supervise` | `strategy`, `supervise_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
+| `suppression` | `strategy`, `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
+| `merge` | `strategy`, `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
+| `verify` | `strategy`, `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
 | `fix-verify` | `items`, `changed_hunks`, `cwd`, `round_number` |
-| `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
-| `vet` | `findings`, `cwd` |
+| `audit` | `category`, `strategy`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
+| `vet` | `strategy`, `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
 
 #### `plan-writer` compatibility and output contract
@@ -562,7 +479,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 5
+DAYDREAM_EXT_API = 6
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -631,10 +548,9 @@ their anchors eagerly.
 
 ### Selecting a flow
 
-The built-in PR-process modes all run the `deep` flow; `--shallow`,
-`--review`/`--comment`, and `daydream feedback <pr#>` are mode gates on it,
-not separate flow names (#330). The only other registered flow is `improve`
-(`daydream improve <target>`).
+The built-in PR-process modes all run the `deep` flow; `--shallow` and
+`--review`/`--comment` are mode gates on it, not separate flow names (#330).
+The only other registered flow is `improve` (`daydream improve <target>`).
 
 A newly registered flow is dispatched by name with `--flow <name>` (or
 `RunConfig(flow_name=...)`):
@@ -645,49 +561,21 @@ r.set_flow("ro-audit", ["ro_audit"])
 ```
 
 A built-in name passed to `--flow` (`deep`/`review`/`shallow`/`improve`) routes to its
-dedicated helper, so behavior matches the corresponding flag. `feedback` is
-not selectable via `--flow` (it needs a PR number and bot identity — use
-`daydream feedback`). An unregistered name errors with the same resolve check
-`daydream ext validate` runs.
-
-### Remap a built-in stack's skill
-
-```python
-r.override_skill("stack:python", "ro-python:review-python")
-```
+dedicated helper, so behavior matches the corresponding flag. An unregistered
+name errors with the same resolve check `daydream ext validate` runs.
 
 ### Add a stack
 
 ```python
 from daydream.extensions import StackRule
 
-r.add_stack(StackRule("proto", ("*.proto",), "ro-proto:review-proto"))
+r.add_stack(StackRule("proto", ("*.proto",)))
 ```
 
-Fork stack rules are evaluated per changed file *before* the built-in
-extension table (registration order, first match wins), and fork-registered
-stacks bypass the installed-Beagle-plugin availability check.
-
-### Override the structural or pr-feedback skills
-
-```python
-r.override_skill("structural", "ro-core:review-structure")
-r.override_skill("pr-feedback-fetch", "ro-core:fetch-pr-feedback")
-r.override_skill("pr-feedback-respond", "ro-core:respond-pr-feedback")
-```
-
-### Bind a skill to a custom phase
-
-A fork-defined step resolves its skill from a `phase:<name>` slot it binds
-itself:
-
-```python
-r.override_skill("phase:ro_gate", "ro-core:gate-skill")
-```
-
-The built-in deep flow binds no `phase:*` slots — its per-stack reviewer
-resolves the `stack:<name>` slot, never a `phase:*` slot — so this binding
-only takes effect in a step that calls `registry.skill("phase:<name>")`.
+`StackRule` is routing metadata only: a stack name and changed-file patterns.
+Fork rules are evaluated per changed file *before* the built-in extension table
+(registration order, first match wins). Review behavior comes from the resolved
+profile strategy and the registered prompt hooks.
 
 ### Override a prompt
 
@@ -699,28 +587,26 @@ Override is wholesale: the builder's return value is the whole prompt. There
 is no append/compose hook (the internal suffix helpers compose into built-in
 builders' outputs and are replaced along with them).
 
-### Custom phase with its own prompt, skill, and per-phase config
+### Custom phase with its own prompt and per-phase config
 
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 5
+DAYDREAM_EXT_API = 6
 
-def _ro_prompt(skill):
-    return f"RO-GATE {skill}"
+def _ro_prompt(*, policy):
+    return f"RO-GATE {policy}"
 
 async def _ro(ctx):
     from daydream.agent import run_agent
     from daydream.trajectory import DaydreamPhase
-    r = get_registry()
-    prompt = r.prompt("ro_gate")(skill=r.skill("phase:ro_gate"))
+    prompt = get_registry().prompt("ro_gate")(policy="read-only")
     await run_agent(ctx.backend_for("ro_gate"), ctx.work.repo, prompt,
                     phase=DaydreamPhase.REVIEW)
 
 def register(r):
     r.register_phase(FlowStep(name="ro_gate", run=_ro))
     r.override_prompt("ro_gate", _ro_prompt)
-    r.override_skill("phase:ro_gate", "ro-core:gate-skill")
     r.insert_after("deep", anchor="intent", step="ro_gate")
 ```
 
@@ -747,11 +633,11 @@ daydream ext validate
 ```
 
 Loads the extension, reports its source and API version, reports whether a tool
-supervisor is `registered` or `none`, resolve-checks every flow entry, skill
-slot, and stack rule, and prints a registry summary. Broken references exit 1
+supervisor is `registered` or `none`, resolve-checks every flow entry and stack
+rule, and prints a registry summary. Broken references exit 1
 naming the broken piece. Runs anywhere — no target repo needed.
 
-## Exclusions (Version 5)
+## Exclusions (Version 6)
 
 - **No backend registration.** Backends are the built-in `Backend`
   implementations (claude, codex, pi, osprey); forks cannot register new ones.

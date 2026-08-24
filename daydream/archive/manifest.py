@@ -163,17 +163,16 @@ class Manifest:
             per-stack execution — kept distinct from ``review_backend`` so
             "who reviewed" is never a misstatement. Every deep-flow mode
             executes per-stack reviews — loop, shallow (single collapsed
-            stack), review, and comment; only feedback mode (the review spine
-            is skipped entirely) and improve/custom flows (which never invoke
-            the deep orchestrator) have no per-stack fan-out and leave this
-            ``None`` (omitted from ``to_dict()``).
+            stack), review, and comment; only improve/custom flows (which
+            never invoke the deep orchestrator) have no per-stack fan-out and
+            leave this ``None`` (omitted from ``to_dict()``).
         per_stack_review_model: Per-stack review tier model for runs that
             execute per-stack reviews (issue #646), resolved from the
             ``per_stack_review`` phase key. The model is the load-bearing part
             of the identity: per-stack defaults to Sonnet vs the ``review``
             tier's Opus, which a pure backend name cannot distinguish. ``None``
             (and omitted from ``to_dict()``) only for runs that never execute
-            per-stack reviews (feedback / improve / custom flows). For a Pi run
+            per-stack reviews (improve / custom flows). For a Pi run
             with no explicit override the backend default (``DEFAULT_PI_MODEL``)
             is recorded: Pi's default intentionally lives outside
             ``PHASE_DEFAULT_MODELS``, so ``_resolved_model`` alone would leave
@@ -456,7 +455,7 @@ def build_manifest(
             (``"pre_test"`` = fix-phase fallback, ``"post_test"`` = post-heal
             re-capture), or ``None`` on legacy runs. On fix-bearing flows an
             absent sidecar defaults ``recommended_patch_capture`` to ``"pre_test"``;
-            flows with no fix phase (review-only / improve / feedback) leave it
+            flows with no fix phase (review-only / improve) leave it
             ``None`` since they never produce a fix-phase fallback capture.
         pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
             cancelled/unknown) derived from per-phase terminal states; distinct
@@ -493,8 +492,7 @@ def build_manifest(
     # NOT the "review" tier — so archives record that tier's resolved backend and
     # model from its own key. The per-stack-reviews step runs in every deep-flow
     # mode (loop, shallow, review, comment); shallow is NOT excluded — a collapsed
-    # single stack is still reviewed through phase_per_stack_reviews. Only feedback
-    # mode (config.bot set — the review spine is skipped entirely) and improve/custom
+    # single stack is still reviewed through phase_per_stack_reviews. Only improve/custom
     # flows (which never invoke the deep orchestrator) have no per-stack fan-out, so
     # those runs leave both fields None (and to_dict() omits them). The deep-flow
     # alias set is runner._DEEP_FLOW_ALIASES — the same list _dispatch_selected_flow
@@ -503,8 +501,7 @@ def build_manifest(
     # gate robust to lighter config fakes that omit the field.
     _start_at = getattr(config, "start_at", "review")
     per_stack_reviews_ran = (
-        config.bot is None
-        and (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
+        (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
         and _start_at not in ("merge", "fix")
     )
     per_stack_review_backend: str | None = None
@@ -529,8 +526,7 @@ def build_manifest(
     # Gate fix/test backend labels on whether this flow's step pipeline actually
     # includes those phases (issue #648): improve never reaches the fix/test
     # STEPS, TTT (review/comment) gates them off at runtime (_fix_cycle_enabled
-    # is loop/shallow only), PR (feedback) runs its own fix-items phase but
-    # never test, and custom flows are classified from their registered pipeline
+    # is loop/shallow only), and custom flows are classified from their registered pipeline
     # (every ``--flow`` run is stamped CUSTOM regardless of step composition), so
     # a fork composing the built-in fix/test steps records backends like the deep
     # family. Registry-resolved for every label so fork overrides of built-in

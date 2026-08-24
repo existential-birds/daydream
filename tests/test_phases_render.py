@@ -194,9 +194,6 @@ class _PerStackBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path, make_work):
     rec = _rec(monkeypatch)
@@ -210,9 +207,9 @@ async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path, make_wo
     alts.write_text("[]")
 
     stacks = [
-        StackAssignment(stack_name="stack-a", skill_invocation=None, files=["a.py"]),
-        StackAssignment(stack_name="stack-b", skill_invocation=None, files=["b.py"]),
-        StackAssignment(stack_name="stack-c", skill_invocation=None, files=["c.py"]),
+        StackAssignment(stack_name="stack-a", files=["a.py"]),
+        StackAssignment(stack_name="stack-b", files=["b.py"]),
+        StackAssignment(stack_name="stack-c", files=["c.py"]),
     ]
     backend = _PerStackBackend(fail_for={"stack-a", "stack-b"})
 

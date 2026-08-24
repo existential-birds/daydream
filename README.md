@@ -31,12 +31,6 @@ cd daydream
 uv sync
 ```
 
-Install the Beagle plugin. Beagle provides stack-specific review skills:
-
-```bash
-claude plugin marketplace add https://github.com/existential-birds/beagle
-claude plugin install beagle
-```
 
 To update daydream, run the following commands:
 
@@ -53,7 +47,7 @@ The default flow is the deep multi-stack pipeline. This pipeline performs the fo
 
 1. Pre-scan the repository for imports and conventions.
 2. Analyze the author intent.
-3. Review each stack with the applicable Beagle skill.
+3. Review each stack with the applicable review profile.
 4. Review alternative approaches.
 5. Resolve conflicts between findings.
 6. Merge the findings across stacks.
@@ -69,7 +63,6 @@ daydream --comment /path/to/project          # review, then post inline PR comme
 daydream --review /path/to/project           # write a report only; no fixes or PR comments
 daydream --shallow /path/to/project          # review one stack in one pass
 daydream --yes /path/to/project              # apply fixes without prompting
-daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
 ```
 
 The `--comment` mode posts inline PR comments and exits; `--review` writes a report and exits. Neither runs the fix cycle.
@@ -234,7 +227,7 @@ The offline benchmark scores deep-review findings against a held-out PR corpus. 
 
 ## Architecture
 
-Daydream runs a deep multi-stack review pipeline. The pipeline runs exploration, intent analysis, alternative review, per-stack Beagle reviews, an arbiter pass, cross-stack merge, and recommendation verification. A `--shallow` mode reviews one stack in a single pass for simpler projects.
+Daydream runs a deep multi-stack review pipeline. The pipeline runs exploration, intent analysis, alternative review, per-stack reviews, an arbiter pass, cross-stack merge, and recommendation verification. A `--shallow` mode reviews one stack in a single pass for simpler projects.
 
 Daydream records and archives every run as an ATIF v1.7 trajectory. The `--no-archive` flag skips archival. A bitemporal corpus pipeline harvests, scores, and projects these trajectories into JSONL datasets.
 
@@ -259,7 +252,7 @@ There is no environment-variable tier. `DAYDREAM_MODEL` and `DAYDREAM_BACKEND` a
 
 ### Extensions
 
-A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 5. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
+A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 6. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
 
 ## Configuration
 
@@ -296,7 +289,7 @@ The resolution order, highest first, is:
 
 ### Per-phase settings
 
-Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`, `pr_feedback`, `supervise`, and more. Any name is accepted, including phases a fork defines.
+Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`, `supervise`, and more. Any name is accepted, including phases a fork defines.
 
 ### Reasoning effort
 

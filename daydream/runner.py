@@ -4,7 +4,6 @@ The runner is unified around a single :func:`run` entry point. ``run`` opens
 the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
 to the single deep flow, which now carries every PR-process mode (#330)::
 
-    bot set (feedback mode)   -> deep feedback mode
     flow_name set (--flow):
         "review" / "shallow"  -> deep review / shallow mode
         "deep"                -> deep (default)
@@ -15,10 +14,6 @@ to the single deep flow, which now carries every PR-process mode (#330)::
     output_mode == "loop":
         config.shallow        -> deep shallow mode (single-stack deep)
         else                  -> deep (default)
-
-``run_feedback`` is the entry point used by the ``daydream feedback <pr#>``
-subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
-:func:`run`.
 
 ``run`` builds the per-run extension registry (builtins + optional
 ``daydream_ext``) and sets it on the registry ContextVar before dispatch;
@@ -97,8 +92,7 @@ class RunConfig:
         start_at: Phase to start at ("review", "fix", "ttt", "per-stack", or
             "merge"). parse/test are legacy shallow-loop stages with no mapping
             in the unified pipeline and are rejected at the CLI.
-        pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
-        bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
+        pr_number: GitHub PR number stored as run metadata.
         backend: Default backend to use ("claude" or "codex"). Default is None;
             ``_resolve_backend`` falls back through the config file to ``"claude"``.
         model: Global default model applied across phases when no explicit
@@ -256,7 +250,6 @@ class RunConfig:
     start_at: str = "review"
     pr_number: int | None = None
     approved_head_sha: str | None = None
-    bot: str | None = None
     backend: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
@@ -338,29 +331,6 @@ class RunConfig:
     # every ``FlowContext``/``run_deep`` so no consumer re-reads a file.
     review_profile_path: str | Path | None = None
     review_profile: ResolvedProfile | None = None
-
-
-def _print_missing_skill_error(skill_name: str) -> None:
-    """Print error message for missing skill with installation instructions."""
-    print_error(console, "Missing Skill", f"Skill '{skill_name}' is not available")
-
-    if skill_name.startswith("beagle"):
-        print_info(console, "The Beagle plugin is required but not installed or enabled.")
-        console.print()
-        print_dim(console, "To install Beagle:")
-        print_dim(console, "  1. Open Claude Code in your terminal")
-        print_dim(console, "  2. Run: /install-plugin beagle@existential-birds")
-        print_dim(console, "  3. Restart Claude Code")
-        console.print()
-        print_dim(console, "Or enable it manually in ~/.claude/settings.json:")
-        print_dim(console, '  "enabledPlugins": {')
-        print_dim(console, '    "beagle@existential-birds": true')
-        print_dim(console, "  }")
-    else:
-        print_info(console, f"The plugin providing '{skill_name}' is not installed.")
-        print_dim(console, "Check your ~/.claude/settings.json for enabled plugins.")
-
-    console.print()
 
 
 def _make_archive_callback(
@@ -457,9 +427,8 @@ def _resolve_review_profile(config: RunConfig) -> None:
     ``Trajectory.extra`` carries the ``profile_*`` keys on every real run.
     Deep-flow dispatch resolves before its recorder opens (fail-closed
     resolution must happen even for an empty-diff review that returns before
-    the recorder), so the deep spine and feedback flows re-enter this
-    composition root from inside their recorder scopes — the re-entry is a
-    no-op resolve that only records.
+    the recorder), so the deep spine re-enters this composition root from
+    inside its recorder scope — the re-entry is a no-op resolve that only records.
     """
     if config.review_profile is None:
         config.review_profile = resolve_from_runconfig(config)
@@ -474,7 +443,7 @@ def _record_review_profile(config: RunConfig) -> None:
     a real run carries exactly the policy tested. No-op when the run has no
     resolved profile or no recorder is open at the call site — both are
     legitimate: ``--review-profile`` is optional, and deep-flow dispatch
-    resolves before its recorder exists (the spine/feedback flows re-enter
+    resolves before its recorder exists (the deep spine re-enters
     ``_resolve_review_profile`` from inside the recorder scope, which is what
     lands the record here).
     """
@@ -538,9 +507,8 @@ def _recorder_backend_names(
     trajectory and manifest never diverge on which backend produced the run.
     The representative backend resolves through the phase that actually governs
     the flow: deep-flow runs (DEEP/NORMAL/TTT) fan out on ``per_stack_review``;
-    improve runs on its advisory phases with ``recon`` first; ``review`` only
-    powers feedback-mode commit-push and the PR-feedback banner, so PR/CUSTOM
-    fall back to it. Per-phase fix/test are recorded only for flows that
+    improve runs on its advisory phases with ``recon`` first; other flows fall
+    back to ``review``. Per-phase fix/test are recorded only for flows that
     statically run those phases: improve/TTT never run fix/test; PR runs fix
     but never test; CUSTOM composition is fork-defined and unknowable at
     recorder-open time, so labeling it unconditionally would mislabel
@@ -683,7 +651,7 @@ def _resolve_backend(
             file-config sources.
         phase: Phase name (e.g. ``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
             ``"intent"``, ``"wonder"``, ``"merge"``,
-            ``"exploration"``, ``"pr_feedback"``).
+            ``"exploration"``).
         cache: Optional dict to cache backends by
             ``(backend_name, model, reasoning_effort)``. When provided,
             backends are reused only when the backend kind, resolved model,
@@ -781,9 +749,9 @@ def _get_head_sha(cwd: Path) -> str | None:
 def _run_posts_to_github(config: RunConfig) -> bool:
     """Return whether the selected run can write to GitHub.
 
-    This mirrors the mode dispatch's write-capable paths: feedback mode may
-    reply to PR comments; an explicit ``--flow deep`` and the default
-    non-shallow loop both execute deep's ``post-review`` step; and ``--comment``
+    This mirrors the mode dispatch's write-capable paths: an explicit
+    ``--flow deep`` and the default non-shallow loop both execute deep's
+    ``post-review`` step; and ``--comment``
     posts inline comments. Improve is write-capable only when its repository
     config enables automatic issue publication. ``--review``, shallow mode,
     and generic custom flows are report-only from the runner's perspective, so
@@ -791,9 +759,6 @@ def _run_posts_to_github(config: RunConfig) -> bool:
     write must explicitly add its dispatch contract here before it can use App
     credentials.
     """
-    if config.bot is not None:
-        return True
-
     if config.flow_name is not None:
         if config.flow_name == "improve":
             return _file_config_or_empty(config).improve_github_publish_issues
@@ -812,10 +777,9 @@ async def run(config: RunConfig | None = None) -> int:
     """Execute a daydream run end-to-end.
 
     Opens the workspace via :func:`open_workspace` and dispatches to the single
-    deep flow based on ``config.bot`` / ``config.output_mode`` / ``config.shallow``
-    (feedback / review / comment / shallow modes, #330). Centralising workspace
-    lifecycle means every flow gets a real :class:`WorkContext` (in-place or
-    ephemeral) with consistent base/branch resolution.
+    deep flow based on ``config.output_mode`` / ``config.shallow`` (review /
+    comment / shallow modes, #330). Centralising workspace lifecycle means every
+    flow gets a real :class:`WorkContext` (in-place or ephemeral) with consistent base/branch resolution.
 
     Args:
         config: Optional configuration. Defaults to a fresh :class:`RunConfig`
@@ -929,17 +893,6 @@ async def run(config: RunConfig | None = None) -> int:
         return 1
 
 
-async def run_feedback(config: RunConfig, pr: int) -> int:
-    """Entry point for the ``daydream feedback <pr#>`` subcommand.
-
-    Sets ``config.pr_number`` and re-enters :func:`run` so the dispatch
-    routes to :func:`_run_pr_feedback`. Kept as a thin wrapper so cli.py
-    has a single named entry point per invocation shape.
-    """
-    config.pr_number = pr
-    return await run(config)
-
-
 # Dispatch
 
 
@@ -1019,15 +972,13 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     """Verify the approved head, then route to the resolved flow.
 
     Every PR-process mode routes to :func:`_run_loop_deep` (which delegates to
-    :func:`daydream.deep.orchestrator.run_deep`): feedback mode (``bot`` set by
-    the ``daydream feedback <pr#>`` subcommand) runs the feedback prefix,
-    ``--review`` / ``--comment`` run the review spine and stop after
-    post-review, ``--shallow`` forces single-stack mode, and the default loop
-    mode is unchanged. An explicit ``flow_name`` (``--flow``) routes via
-    :func:`_dispatch_selected_flow`.
+    :func:`daydream.deep.orchestrator.run_deep`): ``--review`` / ``--comment``
+    run the review spine and stop after post-review, ``--shallow`` forces
+    single-stack mode, and the default loop mode is unchanged. An explicit
+    ``flow_name`` (``--flow``) routes via :func:`_dispatch_selected_flow`.
 
-    Note: ``config.pr_number`` can be auto-detected from the current branch
-    for metadata (trajectory/archive) without implying feedback mode.
+    ``config.pr_number`` can be auto-detected from the current branch for
+    metadata (trajectory/archive) without changing dispatch.
 
     Args:
         config: Run configuration (``config.identity`` carries the resolved
@@ -1036,9 +987,6 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     head_status = _verify_approved_head(work, config)
     if head_status != 0:
         return head_status
-
-    if config.bot is not None:
-        return await _run_loop_deep(work, config)
 
     if config.flow_name is not None:
         return await _dispatch_selected_flow(work, config)

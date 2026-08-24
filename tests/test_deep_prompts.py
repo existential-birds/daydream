@@ -760,18 +760,8 @@ def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> No
     assert "same-turn echo" in out or "file:line" in out
 
 
-def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) -> None:
-    """The protocol gates are embedded inline as instruction text — never routed
-    through ``backend.format_skill_invocation`` AND never loaded from a skill file.
-
-    The structural and generic-fallback reviewers run with cwd set to the
-    reviewed repo, so a bare ``read review-verification-protocol/SKILL.md`` would
-    resolve against that repo and fail. The gates are therefore stated inline
-    (see ``VERIFICATION_PROTOCOL_INSTRUCTION``). Build the prompts with a real
-    backend formatter and assert the gate discipline is present while neither a
-    skill-file read nor the protocol's invocation token leaks into the prompt.
-    """
-    from daydream.backends import create_backend
+def test_verification_protocol_is_inline_without_skill_tokens(tmp_path: Path) -> None:
+    """Protocol gates are inline and require no skill invocation or file read."""
     from daydream.deep.prompts import build_structural_prompt
 
     p = _paths(tmp_path)
@@ -788,18 +778,12 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
         ),
     ]
 
-    for backend_name in ("claude", "codex", "pi"):
-        backend = create_backend(backend_name)
-        token = backend.format_skill_invocation("review-verification-protocol")
-        for prompt in prompts:
-            # Gates are embedded as methodology prose (the constant states
-            # gates 0-3 inline), never as an invocation and never as an
-            # unresolvable skill-file read.
-            assert "verification gates" in prompt
-            assert "SKILL.md" not in prompt
-            assert token not in prompt, (
-                f"{backend_name} protocol invocation token {token!r} leaked into prompt"
-            )
+    for prompt in prompts:
+        assert "verification gates" in prompt
+        assert "SKILL.md" not in prompt
+        assert "/skill:" not in prompt
+        assert "/review-verification-protocol" not in prompt
+        assert "$review-verification-protocol" not in prompt
 
 
 # =============================================================================

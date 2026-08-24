@@ -36,6 +36,14 @@ from daydream.trajectory import (
 )
 
 
+def test_agent_has_no_missing_skill_error() -> None:
+    """M17: agent.py carries no skill-resolution error path."""
+    import daydream.agent as agent
+
+    assert not hasattr(agent, "MissingSkillError")
+    assert not hasattr(agent, "_UNKNOWN_SKILL_PATTERN")
+
+
 @pytest.fixture(autouse=True)
 def _reset_recorder() -> Any:
     _reset_recorder_for_tests()
@@ -80,9 +88,6 @@ class _BurstBackend:
 
     async def cancel(self) -> None:
         self.cancel_calls += 1
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
@@ -282,9 +287,6 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
         async def cancel(self) -> None:
             self.cancel_calls += 1
 
-        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-            return f"/{skill_key}"
-
     backend = _SharedBackend()
     results: dict[str, str | bool] = {}
 
@@ -338,9 +340,6 @@ class _RecordingCancelBackend:
 
     async def cancel(self) -> None:
         self.cancelled = True
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return skill_key
 
 
 async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> None:

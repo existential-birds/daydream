@@ -345,6 +345,13 @@ def pr() -> PRInfo:
     )
 
 
+def test_agent_prompt_has_no_skill_advertising(pr: PRInfo) -> None:
+    """M5: the consolidated AI-agent prompt carries no /beagle-core skill reference."""
+    body = pr_review._build_consolidated_prompt(pr_review._ClassifiedIssues(), pr)
+    assert "/beagle-core:fetch-pr-feedback" not in body
+    assert "/beagle-core:" not in body
+
+
 def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRInfo) -> None:
     issues = [
         ParsedIssue(path="a.py", line=10, title="t1", body="anchor_one"),
@@ -477,9 +484,9 @@ def test_build_payload_shape(
     # Non-inline section grouped by file in <details>.
     assert "Non-inline findings" in body
     assert "b.py" in body
-    # Consolidated AI agent prompt references fetch commands with PR details.
+    # Consolidated AI agent prompt references manual fetch commands with PR details.
     assert "🔮 Prompt for all review comments" in body
-    assert "/beagle-core:fetch-pr-feedback --pr 42" in body
+    assert "/beagle-core:" not in body
     assert "repos/acme/widgets/pulls/42/comments" in body
     # Review info collapsible.
     assert "ℹ️ Review info" in body

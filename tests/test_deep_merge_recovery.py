@@ -238,9 +238,6 @@ class _MergeTextBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work) -> None:
     """R1: a bare-list result is normalized + merged, not treated as a failure."""

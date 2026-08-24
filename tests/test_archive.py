@@ -496,16 +496,10 @@ def test_build_manifest_per_stack_review_gate_tracks_runner_aliases(tmp_path: Pa
 
 
 def test_build_manifest_omits_per_stack_review_without_spine(tmp_path: Path) -> None:
-    """Issue #646: runs that never execute per-stack reviews record no identity —
-    feedback mode (the review spine is skipped entirely) and improve/custom flows
-    (which never invoke the deep orchestrator's per-stack-reviews step)."""
+    """Issue #646: improve/custom flows record no per-stack review identity."""
     for config in (
-        RunConfig(target=str(tmp_path), backend=None, model=None,
-                  bot="myapp[bot]", pr_number=42),        # feedback mode
-        RunConfig(target=str(tmp_path), backend=None, model=None,
-                  flow_name="improve"),                   # improve flow
-        RunConfig(target=str(tmp_path), backend=None, model=None,
-                  flow_name="custom-flow"),               # custom flow
+        RunConfig(target=str(tmp_path), backend=None, model=None, flow_name="improve"),
+        RunConfig(target=str(tmp_path), backend=None, model=None, flow_name="custom-flow"),
     ):
         m = build_manifest(
             recorder=cast(TrajectoryRecorder, _MockRecorder()),

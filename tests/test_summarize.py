@@ -334,9 +334,6 @@ async def test_per_phase_cells_show_whole_invocation_tokens(
         async def cancel(self) -> None:
             return None
 
-        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-            return f"/{skill_key}"
-
     run_dir = tmp_path / ".daydream"
     recorder = make_recorder(tmp_path, agent_model_name="claude-opus-5")
     async with recorder:

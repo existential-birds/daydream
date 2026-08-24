@@ -31,9 +31,6 @@ class _SpyBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 @pytest.fixture(autouse=True)
 def _silence_ui(monkeypatch):

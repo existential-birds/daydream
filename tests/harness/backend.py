@@ -2,7 +2,7 @@
 
 The suite had grown 84 hand-rolled ``Backend`` implementations across 31 files.
 Each re-declared the same three-method surface — ``model`` / ``execute`` /
-``cancel`` / ``format_skill_invocation`` — around one or two interesting lines,
+methods (``execute`` / ``cancel``) around one or two interesting lines,
 so a protocol change meant editing 31 files and a reader had to re-verify the
 boilerplate at every site.
 
@@ -159,6 +159,3 @@ class ScriptedBackend:
 
     async def cancel(self) -> None:
         pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}" + (f" {args}" if args else "")

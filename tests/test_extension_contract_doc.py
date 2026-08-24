@@ -35,8 +35,6 @@ def test_contract_doc_names_every_registered_surface() -> None:
         for entry in reg.flow(flow):
             for name in [entry] if isinstance(entry, str) else entry.steps:
                 assert name in doc, f"flow step {name!r} undocumented"
-    for slot in reg.skill_slots():
-        assert slot in doc, f"skill slot {slot!r} undocumented"
     for name in reg.prompt_names():
         assert name in doc, f"prompt {name!r} undocumented"
 

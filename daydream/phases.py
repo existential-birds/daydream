@@ -1696,31 +1696,34 @@ async def phase_parse_feedback(
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
+    Public, intentionally tested parse helper. It has no remaining production
+    caller: its former feedback teardown caller and the deep pre-merge per-stack
+    parse stage were removed, and the production deep path parses via
+    ``deep.orchestrator._step_per_stack_parse``, which consumes on-disk
+    ``PER_STACK_RECORD_SCHEMA`` records instead of re-parsing here. It is kept
+    (not deleted) because tests exercise its schema, ``input_path`` and
+    ``include_verdicts`` behavior directly.
+
     Args:
         backend: The Backend to execute against.
         work: Workspace context. ``work.repo`` doubles as the agent's cwd
             and the source of the default review path.
         input_path: Optional explicit path to the review markdown to parse.
-            When None (default), reads ``work.repo / REVIEW_OUTPUT_FILE``,
-            preserving behavior for single-skill, PR feedback, and TTT flows.
-            When provided, reads that path instead — used by deep-mode's
-            pre-merge parse stage to iterate per-stack outputs without
-            overwriting each other at the shared REVIEW_OUTPUT_FILE location.
+            When None (default), reads ``work.repo / REVIEW_OUTPUT_FILE``.
+            When provided, reads that path instead — useful for callers that
+            want to parse a specific review output without writing to the
+            shared ``REVIEW_OUTPUT_FILE`` location.
         output_schema: Optional structured-output schema. Defaults to
-            ``FEEDBACK_SCHEMA``. Deep-mode's pre-merge per-stack parse passes
-            ``PER_STACK_RECORD_SCHEMA`` so each record carries ``severity`` for
-            the scoped Opus arbiter (issue #168); the structural meta-stack
-            parses with the same schema so its anti-slop severity calibration
-            survives merge (issue #314). When the schema requires a
-            ``severity`` field, the prompt instructs the agent to extract it.
-        include_verdicts: When True (deep-mode's per-stack parse only, issue
-            #742), the declared per-file verdicts from the parse output are
-            surfaced alongside the issues list and the return is a
-            ``(feedback_items, verdicts)`` tuple; a malformed ``verdicts``
-            value (non-list / non-dict entries) is coerced to ``[]``
-            (fail-open, never raises, never fabricates verdicts). When False
-            (default), the return is the bare issues list, byte-identical to
-            today — shallow / PR-feedback / sweep callers are untouched.
+            ``FEEDBACK_SCHEMA``. A schema may require a ``severity`` field on
+            each issue (e.g. ``PER_STACK_RECORD_SCHEMA``); when it does, the
+            prompt instructs the agent to extract it.
+        include_verdicts: When True (issue #742), the declared per-file
+            verdicts from the parse output are surfaced alongside the issues
+            list and the return is a ``(feedback_items, verdicts)`` tuple; a
+            malformed ``verdicts`` value (non-list / non-dict entries) is
+            coerced to ``[]`` (fail-open, never raises, never fabricates
+            verdicts). When False (default), the return is the bare issues
+            list.
 
     Returns:
         List of validated feedback items with id, description, file, line
@@ -3481,91 +3484,6 @@ async def phase_commit_push(
     )
     if committed:
         print_success(console, "Commit and push complete")
-
-
-async def phase_fetch_pr_feedback(
-    backend: Backend, work: WorkContext, pr_number: int, bot: str,
-) -> None:
-    """Fetch PR feedback by invoking the fetch-pr-feedback skill.
-
-    Raises:
-        Exception: If the agent fails to fetch PR feedback.
-    """
-    print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
-    print_dim(console, f"Model: {backend.model}")
-
-    skill_invocation = backend.format_skill_invocation(
-        get_registry().skill("pr-feedback-fetch"), f"--pr {pr_number} --bot {bot}"
-    )
-
-    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
-
-    output_path = work.repo / REVIEW_OUTPUT_FILE
-    if output_path.exists():
-        print_success(console, f"PR feedback written to: {output_path}")
-    else:
-        print_warning(console, "PR feedback file was not created")
-
-
-async def phase_commit_push_auto(
-    backend: Backend,
-    work: WorkContext,
-    *,
-    items: list[dict[str, Any]] | None = None,
-    preexisting_untracked: set[str] | None = None,
-) -> None:
-    """Automatically commit and push changes without user prompt.
-
-    Args:
-        items: Optional fix items applied this run; forwarded to the commit
-            agent so it can craft an accurate commit message.
-        preexisting_untracked: Optional pre-run untracked snapshot; forwarded
-            to ``_do_commit`` for deterministic pre-staging (issue #543).
-    """
-    console.print()
-    print_info(console, "Committing and pushing changes...")
-    committed = await _do_commit(
-        backend, work, push=True, items=items,
-        preexisting_untracked=preexisting_untracked,
-    )
-    # Only claim success when a commit was actually created: the deterministic
-    # path uses the strict changed_files_against enumerator (a git failure
-    # surfaces as Stop(1), never an empty stage), so _do_commit returns False
-    # only for a genuinely empty daydream change set — a success banner on
-    # either would mislead the operator into believing the fixes were committed.
-    if committed:
-        print_success(console, "Commit and push complete")
-
-
-async def phase_respond_pr_feedback(
-    backend: Backend, work: WorkContext, pr_number: int, bot: str, results: list[FixResult]
-) -> None:
-    """Respond to PR feedback with results of applied fixes.
-
-    Filters to successful results only and invokes the respond-pr-feedback
-    skill to post replies on the pull request.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        pr_number: Pull request number to respond to
-        bot: Bot username to respond as
-        results: List of (item, success, error) tuples, one per applied fix
-    """
-    successful = [(item, ok, err) for item, ok, err in results if ok]
-
-    if not successful:
-        print_warning(console, "No successful fixes to report")
-        return
-
-    print_info(console, f"Responding to PR #{pr_number} with {len(successful)} fix result(s)...")
-
-    skill_invocation = backend.format_skill_invocation(
-        get_registry().skill("pr-feedback-respond"), f"--pr {pr_number} --bot {bot}"
-    )
-
-    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
-    print_success(console, f"Responded to PR #{pr_number} feedback")
 
 
 async def phase_understand_intent(

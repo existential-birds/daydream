@@ -238,9 +238,8 @@ def test_review_backend_override_is_none_when_unset(tmp_path: Path) -> None:
 def test_trajectory_hub_repo_flag_reaches_runconfig(tmp_path: Path) -> None:
     """The ``--trajectory-hub-repo`` shared flag must reach RunConfig via every builder.
 
-    Traces construction paths for the three flows that read shared args: deep
-    (``_parse_args``), improve (``_parse_improve_args``), and feedback
-    (``_parse_args`` dispatching to ``_build_feedback_config``).
+    Traces construction paths for both flows that read shared args: deep
+    (``_parse_args``) and improve (``_parse_improve_args``).
     """
     from daydream.cli import _parse_args, _parse_improve_args
 
@@ -253,8 +252,3 @@ def test_trajectory_hub_repo_flag_reaches_runconfig(tmp_path: Path) -> None:
         ["improve", target, "--trajectory-hub-repo", "acme/dd-trajectories"]
     )
     assert improve.trajectory_hub_repo == "acme/dd-trajectories"
-
-    feedback = _parse_args(
-        ["feedback", "42", "--bot", "bot[bot]", "--trajectory-hub-repo", "acme/dd-trajectories", target]
-    )
-    assert feedback.trajectory_hub_repo == "acme/dd-trajectories"

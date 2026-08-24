@@ -14,10 +14,11 @@ from daydream.cli import _first_verb, _parse_args, _parse_improve_args
 
 
 def test_first_verb_routing() -> None:
-    assert _first_verb(["feedback", "42", "--bot", "x"]) == "feedback"
     assert _first_verb(["/some/path"]) == "review"  # bare path → review shim
     assert _first_verb(["--comment", "/p"]) == "review"  # leading flag → review
-    assert _first_verb([]) == "review"  # empty → review (interactive target prompt)
+    assert _first_verb([]) == "review"
+    # "feedback" is not a verb anymore (M1): it falls through to the review shim.
+    assert _first_verb(["feedback", "42", "--bot", "x"]) == "review"
 
 
 @pytest.mark.parametrize("argv", [["/t"], ["review", "/t"]])

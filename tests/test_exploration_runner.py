@@ -177,9 +177,6 @@ class _SpecialistMockBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 # Backward compat alias for tests/test_integration.py
 _AgentsRecordingMockBackend = _SpecialistMockBackend
@@ -354,9 +351,6 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path):
 
         async def cancel(self):
             return None
-
-        def format_skill_invocation(self, skill_key, args=""):
-            return f"/{skill_key}"
 
     backend = _FailingPatternScanner()
     ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)

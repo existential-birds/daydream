@@ -4,6 +4,14 @@ Covers ``daydream.deep.detection.detect_stacks`` implemented in plan 05-01.
 """
 
 
+def test_stack_assignment_has_no_skill_field() -> None:
+    """M9: StackAssignment carries routing metadata only, never a skill invocation."""
+    from daydream.deep.detection import StackAssignment
+
+    assignment = StackAssignment(stack_name="python", files=["a.py"])
+    assert not hasattr(assignment, "skill_invocation")
+
+
 def test_extension_routing_python() -> None:
     """D-11: .py files route to python stack."""
     from daydream.deep.detection import detect_stacks
@@ -118,7 +126,6 @@ def test_structure_stack_emitted_for_code_diff() -> None:
     result = detect_stacks(["src/main.py", "src/util.py"])
     structure = next((a for a in result if a.stack_name == STRUCTURE_STACK_NAME), None)
     assert structure is not None
-    assert structure.skill_invocation is None
     assert structure.files == ["src/main.py", "src/util.py"]
     assert structure.is_docs_only is False
 
@@ -159,7 +166,6 @@ def test_shard_stacks_splits_oversized_stack_by_file_count() -> None:
 
     stack = StackAssignment(
         stack_name="python",
-        skill_invocation="beagle-python:review-python",
         files=[f"src/m{i}.py" for i in range(6)],
     )
     out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
@@ -178,7 +184,6 @@ def test_shard_stacks_never_splits_structure_meta_stack() -> None:
 
     structure = StackAssignment(
         stack_name=STRUCTURE_STACK_NAME,
-        skill_invocation="beagle-core:review-structure",
         files=[f"src/m{i}.py" for i in range(50)],
     )
     out = shard_stacks([structure], "", max_files=5, max_bytes=10**9, fanout_cap=16, frontier_max=8)
@@ -189,7 +194,7 @@ def test_shard_stacks_deterministic_names_and_assignments() -> None:
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
-    stack = StackAssignment(stack_name="python", skill_invocation="s", files=[f"src/m{i}.py" for i in range(5)])
+    stack = StackAssignment(stack_name="python", files=[f"src/m{i}.py" for i in range(5)])
 
     def _split() -> list:
         return shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
@@ -203,7 +208,7 @@ def test_shard_stacks_under_bound_returns_original_unsplit() -> None:
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
-    stack = StackAssignment(stack_name="python", skill_invocation="s", files=["a.py", "b.py"])
+    stack = StackAssignment(stack_name="python", files=["a.py", "b.py"])
     out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
     assert out == [stack]
 
@@ -223,7 +228,7 @@ def test_shard_stacks_splits_by_changed_bytes_not_file_count() -> None:
         "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n+'y'\n"
         "diff --git a/c.py b/c.py\n--- a/c.py\n+++ b/c.py\n@@ -1 +1 @@\n+'z'\n"
     )
-    stack = StackAssignment(stack_name="python", skill_invocation="s",
+    stack = StackAssignment(stack_name="python",
                             files=["a.py", "b.py", "c.py"])
     out = shard_stacks([stack], diff, max_files=100, max_bytes=100, fanout_cap=16, frontier_max=8)
     shards = [s for s in out if s.stack_name.startswith("python#")]
@@ -240,8 +245,8 @@ def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     from daydream.deep.sharding import shard_stacks
 
     # Two oversized stacks would each yield 6 shards = 12 tasks; cap=4.
-    py = StackAssignment(stack_name="python", skill_invocation="s", files=[f"p{i}.py" for i in range(12)])
-    rs = StackAssignment(stack_name="rust", skill_invocation="s", files=[f"r{i}.rs" for i in range(12)])
+    py = StackAssignment(stack_name="python", files=[f"p{i}.py" for i in range(12)])
+    rs = StackAssignment(stack_name="rust", files=[f"r{i}.rs" for i in range(12)])
     out = shard_stacks([py, rs], "", max_files=2, max_bytes=10**9, fanout_cap=4, frontier_max=8)
     # Total review tasks (shards + unsplit stacks) never exceeds the cap.
     assert len(out) <= 4
@@ -265,8 +270,8 @@ def test_shard_stacks_fanout_cap_single_shard_split_never_wastes_reduction() -> 
         + "x" * 80
         + "\n"
     )
-    huge = StackAssignment(stack_name="python", skill_invocation="s", files=["big.py"])
-    many = StackAssignment(stack_name="rust", skill_invocation="s", files=[f"r{i}.rs" for i in range(12)])
+    huge = StackAssignment(stack_name="python", files=["big.py"])
+    many = StackAssignment(stack_name="rust", files=[f"r{i}.rs" for i in range(12)])
     out = shard_stacks([huge, many], big_diff, max_files=2, max_bytes=100, fanout_cap=4, frontier_max=8)
     # The single-shard stack stays unsplit under its original name.
     assert any(s.stack_name == "python" and s.files == ["big.py"] for s in out)
@@ -284,7 +289,7 @@ def test_shard_stacks_fanout_cap_irreducible_when_unsplit_stacks_outnumber_cap()
     from daydream.deep.sharding import shard_stacks
 
     stacks = [
-        StackAssignment(stack_name=f"s{i}", skill_invocation="s", files=[f"f{i}.py"])
+        StackAssignment(stack_name=f"s{i}", files=[f"f{i}.py"])
         for i in range(18)
     ]
     out = shard_stacks(stacks, "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
@@ -310,7 +315,7 @@ def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path) -> None:
     # d.py imports a.py (a resolvable edge). 4 files / max_files=2 forces the
     # shard; the {a,d} component fits one shard so d.py stays co-located with
     # its dependency a.py.
-    stack = StackAssignment(stack_name="python", skill_invocation="s",
+    stack = StackAssignment(stack_name="python",
                             files=["a.py", "b.py", "c.py", "d.py"])
     root = Path(tmp_path)
     for name in ("a.py", "b.py", "c.py"):
@@ -330,7 +335,7 @@ def test_shard_stacks_fail_open_without_graph() -> None:
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
-    stack = StackAssignment(stack_name="python", skill_invocation="s",
+    stack = StackAssignment(stack_name="python",
                             files=[f"m{i}.py" for i in range(5)])
     out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8, graph={})
     union = [f for s in out for f in s.files]
@@ -348,7 +353,7 @@ def test_shard_stacks_populates_bounded_frontier(tmp_path) -> None:
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
-    stack = StackAssignment(stack_name="python", skill_invocation="s",
+    stack = StackAssignment(stack_name="python",
                             files=[f"m{i}.py" for i in range(8)])
     # m4..m7 all import m0 (a shared interface in shard 0).
     root = Path(tmp_path)
@@ -415,7 +420,7 @@ def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
         f"diff --git a/{f} b/{f}\n--- a/{f}\n+++ b/{f}\n@@ -1 +1 @@\n+x{'a' * 2900}\n"
         for f in files
     )
-    stack = StackAssignment(stack_name="python", skill_invocation="s", files=files)
+    stack = StackAssignment(stack_name="python", files=files)
     out = shard_stacks(
         [stack], diff,
         max_files=DEFAULT_DEEP_SHARD_MAX_FILES,
@@ -443,9 +448,6 @@ def test_detect_stacks_registry_independent_same_scopes():
     # python + react language stacks + generic (md + unknown) + structural last.
     assert "python" in names and "react" in names and GENERIC_STACK in names
     assert names[-1] == "structure"
-    for s in absent:
-        if s.stack_name not in ("structure", GENERIC_STACK):
-            assert s.skill_invocation is None   # no skill field on built-in stacks
 
 
 def test_detect_stacks_never_degrades_to_generic_without_registry():

@@ -356,8 +356,6 @@ class Backend(Protocol):
         """
         ...
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str: ...
-
 
 def resolve_fanout_concurrency(env_var: str, default: int) -> int:
     """Read a backend's fan-out hint from *env_var*, falling back to *default*.

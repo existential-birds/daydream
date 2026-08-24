@@ -281,26 +281,21 @@ def test_parse_args_copy_default_empty(monkeypatch):
     assert config.extra_copy == []
 
 
-def test_parse_args_integer_target_errors(monkeypatch, capsys):
-    """Pure-numeric TARGET errors with the suggested feedback message."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "42"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-    err = capsys.readouterr().err
-    assert "did you mean: daydream feedback 42" in err
-
-
-def test_parse_args_feedback_subcommand(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "7", "--bot", "copilot"])
-    config = _parse_args()
-    assert config.pr_number == 7
-    assert config.bot == "copilot"
-
-
-def test_parse_args_feedback_requires_bot(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "7"])
-    with pytest.raises(SystemExit):
-        _parse_args()
+def test_feedback_subcommand_is_unknown(tmp_path):
+    """The removed feedback command is rejected without starting a review."""
+    repo_root = Path(__file__).resolve().parent.parent
+    (tmp_path / "a.py").write_text("x = 1\n")
+    env = {**os.environ, "DAYDREAM_SKILLS_DIR": ""}
+    result = subprocess.run(
+        [sys.executable, "-m", "daydream", "feedback", "7", "--bot", "x[bot]", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=repo_root,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "feedback" not in result.stdout
 
 
 def test_phase_subtitles_include_wonder():
@@ -490,25 +485,6 @@ def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch, tmp_path):
 
     assert config.target is None
     assert config.pr_repo == "existential-birds/daydream"
-
-
-def test_feedback_pr_repo_detected_from_target_not_cwd(monkeypatch, tmp_path):
-    """The feedback subcommand also attributes pr_repo to the target (#128)."""
-    target = tmp_path / "target-checkout"
-    target.mkdir()
-
-    def fake_gh_repo_view(repo):
-        if Path(repo) == target:
-            return ("grafana", "grafana")
-        return ("existential-birds", "daydream")
-
-    monkeypatch.setattr("daydream.git_ops.gh_repo_view", fake_gh_repo_view)
-    monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "42", "--bot", "x[bot]", str(target)])
-
-    config = _parse_args()
-
-    assert config.pr_number == 42
-    assert config.pr_repo == "grafana/grafana"
 
 
 def test_cli_stack_selector_and_skill_rejected():

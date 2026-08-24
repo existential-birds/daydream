@@ -49,7 +49,6 @@ _PHASE_LABELS: dict[str, str] = {
     "test": "Test & Heal",
     "intent": "Understand Intent",
     "alternatives": "Alternatives",
-    "pr_feedback": "PR Feedback",
     "deep": "Deep Review",
     "exploration": "Exploration",
     "verify": "Verify Recommendations",

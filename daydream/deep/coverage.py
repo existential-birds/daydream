@@ -559,10 +559,9 @@ def build_uncovered_sweep_prompt(
     ``daydream.phases`` / ``daydream.deep.prompts``, read-only): the exploration
     pointer, the Confidence and Convention Rules (incl. QUAL-04 error
     semantics), the Dependency Impact instructions, and the full
-    ``VERIFICATION_PROTOCOL_INSTRUCTION``. The gates are embedded inline -- not
-    routed through ``Backend.format_skill_invocation`` and NOT loaded from a
-    skill file -- because the reviewer runs with cwd set to the reviewed repo,
-    where a bare ``read`` of the protocol skill file resolves against that repo
+    ``VERIFICATION_PROTOCOL_INSTRUCTION``. The gates are embedded inline and no
+    skill-file read is required because the reviewer runs with cwd set to the
+    reviewed repo, where a bare ``read`` of the protocol skill file resolves
     and silently drops the gates (same rationale as the canonical constant).
 
     Args:

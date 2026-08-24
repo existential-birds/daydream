@@ -47,8 +47,6 @@ class _MinimalBackend:
             yield ResultEvent(structured_output=None, continuation=None)
 
     def cancel(self) -> None: ...
-    def format_skill_invocation(self, key: str) -> str: return f"/{key}"
-
 
 async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkeypatch):
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")

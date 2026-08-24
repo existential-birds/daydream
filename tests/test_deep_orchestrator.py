@@ -2223,59 +2223,6 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     assert _git(project, "rev-parse", "HEAD") != head_before
 
 
-async def test_feedback_scrub_trust_gate_preserves_user_edits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """Real path: the pr-feedback scrub never rewrites uncommitted tracked user edits.
-
-    Feedback mode runs in-place on the user's checkout with no pre-fix snapshot
-    mechanism, so the scrub used to attribute the user's uncommitted tracked
-    smart-quote lines against bare HEAD as if the fix agent added them, and
-    rewrote them to ASCII. The trust gate captures a pre-fix stash snapshot
-    (mirroring ``_step_fix``) and attributes agent-added lines against it, so
-    the user's smart quotes survive the run byte-identical while the fix
-    agent's own smart-quote line is still normalized before commit.
-
-    Drives ``runner.run`` through feedback mode (``pr_number`` + ``bot``) with a
-    stub backend as the only mocked seam; the commit and push are real.
-    """
-    from daydream.runner import run
-
-    project = tmp_path / "fb_quote_repo"
-    project.mkdir()
-    (project / "main.go").write_text("package main\n\n// doc\n")
-    _init_repo(project)
-    _git(project, "add", "main.go")
-    _commit(project, "test: initialize feedback fixture")
-    bare = _bare_remote(tmp_path / "remote.git")
-    _git(project, "remote", "add", "origin", str(bare))
-
-    # User's uncommitted tracked edit in the in-place checkout carries smart quotes.
-    user_line = "// user \u201Cedit\u201D\n"
-    (project / "main.go").write_text((project / "main.go").read_text() + user_line)
-
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    mute_side_effects(heal=False, commit=False)
-    stub = _FeedbackQuoteScrubBackend(project)
-    # The fix agent writes U+201D into the changed .go comment; the user's own
-    # smart-quote line is baseline content the scrub must not touch.
-    stub.fix_edit_line = "\n// agent \u201D\n"
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-
-    exit_code = await run(make_config(
-        project, pr_number=7, bot="my-app[bot]", assume="yes",
-        output_mode="loop", non_interactive=False, archive=False,
-    ))
-    assert exit_code == 0
-    go_src = (project / "main.go").read_text()
-    assert user_line in go_src             # user's smart-quote line NOT rewritten
-    assert "// agent \u201D" not in go_src  # fix agent's U+201D never lands in the tree
-    assert '// agent "' in go_src          # ... it is normalized to ASCII straight quote
-
-
 async def test_test_healing_guard_reverts_generated_migration_edit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6080,24 +6027,20 @@ def test_collapse_stacks_for_tiny_diff_two_languages() -> None:
     non_structural = [s for s in collapsed if s.stack_name != "structure"]
     assert len(non_structural) == 1
     combined = non_structural[0]
-    # Combined assignment carries both files and uses the generic-fallback skill
-    # (a single agent cannot invoke two per-language Beagle skills).
+    # Combined assignment carries both files and uses the generic fallback.
     assert set(combined.files) == {"api.py", "App.tsx"}
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     # Single-stack agent count is strictly less than 12.
     assert _single_stack_agent_count(len(collapsed)) < baseline_count
 
 
-def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_skill() -> None:
-    """Skill-preservation (unit): code+docs tiny diff keeps the per-language skill.
+def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_scope() -> None:
+    """A code+docs tiny diff keeps its sole language scope.
 
     A code+docs/config tiny diff routes via ``detect_stacks`` to exactly one real
-    language stack plus the ``generic`` bucket (e.g. ``api.py`` + ``README.md`` →
-    ``python`` + ``generic``). That is a single-language diff, so the collapse
-    must absorb the generic files into the language stack and keep its
-    per-language Beagle skill -- NOT downgrade it to the generic fallback
-    (the skill-preservation goal stated in ``_collapse_stacks_for_tiny_diff``'s
-    docstring). Only ≥2 *real* language stacks fall back to generic.
+    language stack plus the ``generic`` bucket. The collapse absorbs generic
+    files into that language stack. Only multiple real language stacks fall
+    back to generic.
     """
     from daydream.deep.detection import detect_stacks
     from daydream.deep.orchestrator import (
@@ -6119,7 +6062,7 @@ def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_skill()
     combined = non_structural[0]
     # The real-language scope survives (NOT downgraded to generic fallback).
     assert combined.stack_name == "python"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     # The docs file is absorbed into the language stack.
     assert set(combined.files) == {"api.py", "README.md"}
     assert _single_stack_agent_count(len(collapsed)) < baseline_count
@@ -6138,14 +6081,8 @@ def test_collapse_stacks_for_tiny_diff_disabled_at_threshold_zero() -> None:
     assert collapsed == stacks  # unchanged
 
 
-def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
-    """#6: shallow with no ``--skill`` keeps the sole detected language skill.
-
-    A python-only diff routes via ``detect_stacks`` to ``python`` + ``generic``
-    (if any docs) + ``structure``. Shallow collapse must preserve the python
-    stack's Beagle skill instead of downgrading the combined assignment to the
-    generic-fallback reviewer.
-    """
+def test_collapse_stacks_for_shallow_preserves_sole_language_scope() -> None:
+    """#6: shallow review keeps the sole detected language scope."""
     from daydream.deep.detection import detect_stacks
     from daydream.deep.orchestrator import _collapse_stacks_for_shallow
     from daydream.runner import RunConfig
@@ -6159,7 +6096,7 @@ def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     # The docs file is absorbed into the preserved language stack.
     assert set(combined.files) == {"api.py", "README.md"}
 
@@ -6179,12 +6116,12 @@ def test_collapse_stacks_for_shallow_two_languages_falls_back_to_generic() -> No
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "generic"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
     assert set(combined.files) == {"api.py", "App.tsx"}
 
 
-def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
-    """#6: an explicit ``--skill`` still names the combined assignment."""
+def test_collapse_stacks_for_shallow_explicit_stack_wins() -> None:
+    """#6: an explicit ``--stack`` names the combined assignment."""
     from daydream.deep.detection import detect_stacks
     from daydream.deep.orchestrator import _collapse_stacks_for_shallow
     from daydream.runner import RunConfig
@@ -6198,7 +6135,7 @@ def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation is None
+    assert not hasattr(combined, "skill_invocation")
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
@@ -6952,56 +6889,6 @@ class _PushingCommittingStubBackend(_StubBackend):
             yield event
 
 
-class _FeedbackQuoteScrubBackend(_PushingCommittingStubBackend):
-    """Feedback-mode stub: parse-feedback yields one ``main.go`` issue; the rest delegate.
-
-    ``_PushingCommittingStubBackend`` already handles the fix turn (appending
-    ``fix_edit_line`` to the fixed file) and the commit/push turn. Feedback mode
-    additionally runs fetch-feedback (skill invocation, default empty branch)
-    and parse-feedback, whose prompt asks the agent to read the review output
-    file — the stub answers with a single actionable issue on ``main.go``.
-    """
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> Any:
-        if prompt.startswith("Read the review output file"):
-            yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": "doc comment fix",
-                            "file": "main.go",
-                            "line": 1,
-                            "confidence": "HIGH",
-                            "evidence": "main.go:1",
-                        }
-                    ]
-                },
-                continuation=None,
-            )
-            return
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
 async def test_test_verdict_records_failure_when_operator_ignores_it(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
@@ -7405,11 +7292,29 @@ async def test_skip_tier_writes_empty_alternatives(
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
 
-def test_extension_api_version_is_five_and_alternatives_step_is_gone() -> None:
+def test_deep_flow_has_no_feedback_prefix() -> None:
+    """M2: the registered deep flow has no feedback-only prefix."""
+    from daydream.deep.orchestrator import STEPS
+
+    names = {step.name for step in STEPS}
+    assert not names & {"fetch-feedback", "parse-feedback", "fix-items", "commit-push", "respond-feedback"}
+
+
+def test_no_feedback_mode_resolver() -> None:
+    """M2: `_resolve_mode` cannot return `feedback`; no feedback runner exists."""
+    from daydream.deep import orchestrator as deep_orchestrator
+    from daydream.runner import RunConfig
+
+    assert not hasattr(deep_orchestrator, "_run_feedback_flow")
+    config = RunConfig(target="/tmp", pr_number=7)
+    assert deep_orchestrator._resolve_mode(config) != "feedback"
+
+
+def test_extension_api_version_is_six_and_alternatives_step_is_gone() -> None:
     from daydream.deep.orchestrator import STEPS
     from daydream.extensions.api import EXTENSION_API_VERSION
 
-    assert EXTENSION_API_VERSION == 5
+    assert EXTENSION_API_VERSION == 6
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names

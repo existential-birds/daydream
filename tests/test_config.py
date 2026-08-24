@@ -30,13 +30,20 @@ PHASE_NAMES = {
     "intent",
     "wonder",
     "merge",
-    "pr_feedback",
     "recon",
     "audit",
     "vet",
     "plan_write",
 }
 IMPROVE_PHASE_NAMES = {"recon", "audit", "vet", "plan_write"}
+
+
+def test_no_pr_feedback_skill_constants() -> None:
+    """M7/M8: no PR-feedback skill constants remain in config."""
+    from daydream import config
+
+    assert not hasattr(config, "PR_FEEDBACK_FETCH_SKILL")
+    assert not hasattr(config, "PR_FEEDBACK_RESPOND_SKILL")
 
 
 def test_audit_categories_match_playbook() -> None:
@@ -106,7 +113,7 @@ def test_phase_default_models_claude_tier_assignments():
     # PARSE is the cheap tier
     assert claude["parse"] == "claude-haiku-4-5"
     # Expensive tier: REVIEW, WONDER, MERGE, PR_FEEDBACK, VET, PLAN_WRITE
-    for phase in ("review", "wonder", "merge", "pr_feedback", "vet", "plan_write"):
+    for phase in ("review", "wonder", "merge", "vet", "plan_write"):
         assert claude[phase] == "claude-opus-5"
     # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, RECON, AUDIT
     for phase in ("fix", "test", "exploration", "per_stack_review", "intent", "recon", "audit"):
@@ -147,7 +154,7 @@ def test_phase_default_models_codex_tier_assignments():
         "audit",
     ):
         assert codex[phase] == "gpt-5.6-terra", f"codex phase {phase} should default to the mid tier"
-    for phase in ("review", "arbiter", "wonder", "merge", "pr_feedback", "vet", "plan_write"):
+    for phase in ("review", "arbiter", "wonder", "merge", "vet", "plan_write"):
         assert codex[phase] == "gpt-5.6-sol", f"codex phase {phase} should default to the heavy tier"
 
 
@@ -193,7 +200,7 @@ def test_deep_phase_effort_tier_assignments():
         assert effort[phase] == "low", f"{phase} should be latency-tier effort"
     for phase in ("fix", "test", "verify", "suppression", "supervise", "merge", "intent"):
         assert effort[phase] == "medium", f"{phase} should be baseline effort"
-    for phase in ("per_stack_review", "review", "wonder", "pr_feedback"):
+    for phase in ("per_stack_review", "review", "wonder"):
         assert effort[phase] == "high", f"{phase} should be high effort"
     # The arbiter is a scoped quality-first pass over a small input.
     assert effort["arbiter"] == "xhigh"
