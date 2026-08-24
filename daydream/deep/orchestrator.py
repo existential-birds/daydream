@@ -459,14 +459,17 @@ def _collapse_stacks_for_tiny_diff(
       - If ≥2 distinct *non-structural* stacks exist, merge them into one
         combined assignment. A code+docs/config diff (exactly one *real*
         language stack plus the ``generic`` bucket) absorbs the generic files
-        into the language stack so its per-language Beagle skill survives; only
-        ≥2 *real* language stacks fall back to ``generic`` (a single agent
-        cannot invoke two per-language Beagle skills).
+        into the language stack so its scope survives; only ≥2 *real* language
+        stacks fall back to ``generic`` (a single agent cannot cover two
+        per-language scopes).
       - The ``STRUCTURE_STACK_NAME`` meta-stack stays as its own assignment so
         structural findings remain correctly tagged ``lens="structural"``
         downstream (AC6).
       - If only one non-structural stack exists (the common 1-file case), it is
-        preserved unchanged — the per-language skill survives.
+        preserved unchanged.
+
+    Built-in stacks carry no skill-invocation field (M2): the combined
+    assignment is scope metadata only.
 
     Returns ``(stacks, single_stack_mode)`` where ``single_stack_mode`` reports
     whether the tiny-diff gate is active (caller uses it to skip merge+arbiter).
@@ -488,14 +491,16 @@ def _collapse_stacks_for_tiny_diff(
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
 
     # When ≥2 distinct non-structural stacks exist, merge them into one combined
-    # assignment. The combined skill depends on how many *real* language stacks
+    # assignment. The combined scope depends on how many *real* language stacks
     # are present:
     #   - exactly one real language stack + the generic bucket (a code+docs/config
     #     tiny diff, e.g. api.py + README.md): absorb the generic files into the
-    #     language stack so its per-language Beagle skill survives (the
-    #     skill-preservation goal stated in this docstring).
+    #     language stack so its scope survives.
     #   - ≥2 real language stacks (e.g. python + react): a single agent cannot
-    #     invoke two per-language Beagle skills, so fall back to generic.
+    #     cover two per-language scopes, so fall back to generic.
+    #
+    # M2: built-in stacks carry no skill-invocation field; only a sole
+    # fork-registered stack keeps its own StackRule.skill.
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
         real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
@@ -506,18 +511,15 @@ def _collapse_stacks_for_tiny_diff(
                     *structural,
                     StackAssignment(
                         stack_name=lang.stack_name,
-                        skill_invocation=lang.skill_invocation,
+                        skill_invocation=None,
                         files=combined_files,
                         is_docs_only=False,
                     ),
                 ],
                 True,
             )
-        # ≥2 real-language stacks: one agent cannot invoke two per-language
-        # Beagle skills, so the combined assignment uses the generic-fallback
-        # skill (skill_invocation=None). is_docs_only is False by construction:
-        # ≥2 non-structural stacks means at least one is a real language stack
-        # (docs-only diff → single generic stack).
+        # ≥2 real-language stacks: one agent cannot cover two per-language scopes,
+        # so the combined assignment uses the native generic-fallback scope.
         combined = StackAssignment(
             stack_name=GENERIC_STACK,
             skill_invocation=None,
@@ -599,10 +601,9 @@ def _diff_changed_files(diff: str) -> list[str]:
 
 
 def _stack_preflight_line(stack: StackAssignment) -> str:
-    """Format one detected-stack line for the pre-flight notice."""
-    skill = stack.skill_invocation or "generic fallback"
+    """Format one detected-stack line for the pre-flight notice (skill-free, M2)."""
     docs_suffix = " (docs-only)" if stack.is_docs_only else ""
-    return f"{stack.stack_name}: {skill} -- {len(stack.files)} file(s){docs_suffix}"
+    return f"{stack.stack_name}: {len(stack.files)} file(s){docs_suffix}"
 
 
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4222,24 +4223,6 @@ async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
         return await run_flow(ctx.registry, "deep", ctx)
 
 
-def _shallow_skill_invocation(config: RunConfig) -> str | None:
-    """Resolve the ``--skill`` stack slot for shallow mode (#330).
-
-    Mirrors the old shallow preamble's precedence: ``stack:<skill>`` slot, then
-    a skill value that is itself a registered slot value. ``None`` (no skill or
-    unresolvable skill) falls back to the generic-fallback review.
-    """
-    if config.skill is None:
-        return None
-    registry = get_registry()
-    resolved = registry.skill_if_registered(f"stack:{config.skill}")
-    if resolved is not None:
-        return resolved
-    if config.skill in registry.skill_slots().values():
-        return config.skill
-    return None
-
-
 def _collapse_stacks_for_shallow(
     stacks: list[StackAssignment],
     changed_files: list[str],
@@ -4251,17 +4234,19 @@ def _collapse_stacks_for_shallow(
     the structural meta-stack separate, so structural findings stay correctly
     tagged ``lens="structural"`` downstream. Returns ``(stacks, True)``.
 
-    The combined assignment's skill, in precedence order:
+    The combined assignment's stack, in precedence order:
 
-    - an explicit ``--skill`` (CLI) wins — the combined stack is named by it;
-    - otherwise a *sole* detected non-structural stack preserves its
-      per-language Beagle skill (e.g. ``beagle-python:review-python`` for a
-      Python diff), absorbing any generic/docs files — so ``daydream --shallow
-      <repo>`` without ``--skill`` uses the language reviewer instead of the
+    - an explicit ``--stack`` (CLI) wins — the combined stack is named by it;
+    - otherwise a *sole* detected non-structural stack preserves its name,
+      absorbing any generic/docs files — so ``daydream --shallow <repo>``
+      without ``--stack`` uses the language reviewer instead of the native
       generic fallback (#6);
-    - otherwise (multiple real-language stacks — one agent cannot invoke two
-      per-language skills — or no real language at all) the combined assignment
-      uses the generic-fallback skill.
+    - otherwise (multiple real-language stacks — one agent cannot review two
+      per-language scopes — or no real language at all) the combined assignment
+      uses the native generic-fallback scope.
+
+    Built-in stacks carry no skill-invocation field (M2); only a sole
+    fork-registered stack keeps its own ``StackRule.skill``.
     """
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
     combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
@@ -4272,7 +4257,7 @@ def _collapse_stacks_for_shallow(
     if config.skill is not None:
         combined = StackAssignment(
             stack_name=config.skill,
-            skill_invocation=_shallow_skill_invocation(config),
+            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )
@@ -4283,11 +4268,14 @@ def _collapse_stacks_for_shallow(
         lang = real_language[0]
         combined = StackAssignment(
             stack_name=lang.stack_name,
-            skill_invocation=lang.skill_invocation,
+            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )
     else:
+        # Multiple real-language stacks (one agent cannot cover two per-language
+        # scopes) or no real language at all: the combined assignment uses the
+        # native generic-fallback scope (M2: no skill field).
         combined = StackAssignment(
             stack_name=GENERIC_STACK,
             skill_invocation=None,

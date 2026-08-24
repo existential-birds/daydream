@@ -313,3 +313,32 @@ async def test_fanout_low_concurrency(tmp_path: Path, make_work, monkeypatch) ->
     )
 
     assert captured == [2]
+
+
+def test_shards_carry_scope_not_skill() -> None:
+    """M2: shards inherit stack name / files / frontier, never a skill field."""
+    from daydream.deep import sharding
+    from daydream.deep.detection import detect_stacks
+
+    files = ["a.py", "b.py", "c.py", "d.py"]
+    stacks = detect_stacks(files)
+    python = next(s for s in stacks if s.stack_name == "python")
+    assert python.skill_invocation is None  # built-in stack is skill-free
+
+    shards = sharding.shard_stacks(
+        [python],
+        # Synthetic diff so every file has 1 changed byte.
+        "index 0..1 100644\n--- a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+x\n"
+        "index 0..1 100644\n--- a.py\n+++ b/b.py\n@@ -1 +1 @@\n-x\n+x\n"
+        "index 0..1 100644\n--- a.py\n+++ b/c.py\n@@ -1 +1 @@\n-x\n+x\n"
+        "index 0..1 100644\n--- a.py\n+++ b/d.py\n@@ -1 +1 @@\n-x\n+x\n",
+        max_files=2,
+        max_bytes=1_000_000,
+        fanout_cap=4,
+        frontier_max=2,
+    )
+    assert len(shards) >= 2  # forced split -> shard path exercised
+    for shard in shards:
+        assert shard.stack_name.startswith("python")  # stack identity preserved
+        assert shard.skill_invocation is None  # no skill field copied
+        assert shard.files and shard.frontier_files is not None
