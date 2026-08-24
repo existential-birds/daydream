@@ -13,13 +13,14 @@ dir containment — it only filters on ``state`` and reads the reward rows.
 """
 from __future__ import annotations
 
+import importlib.metadata
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from daydream.benchmark.harbor import calibrate, verifier_core
 from daydream.benchmark.harbor import run as run_mod
-from daydream.benchmark.harbor import verifier_core
 
 
 class ObjectiveError(Exception):
@@ -68,14 +69,46 @@ class Objective:
 
 
 @dataclass(frozen=True)
+class CompatibilityIdentity:
+    """Frozen, attributable compatibility identity of one exact completed run.
+
+    Every field is bound from an authoritative source only (the ledger entry,
+    the compiled ``benchmark.lock.json`` ``daydream`` block, the trusted
+    control-plane env, ``verifier_core``/``calibrate`` constants, and the
+    compiled ``harbor-job.yaml`` attempts) — never from inference or coercion.
+    ``reviewer_effort`` is the ledger-recorder effort (read-only) or ``None``
+    when absent; it is never fabricated.
+    """
+
+    objective_schema_version: int
+    profile_schema_version: int
+    profile_name: str
+    profile_digest: str | None
+    daydream_version: str
+    daydream_wheel_sha256: str
+    compiled_lock_sha256: str
+    harbor_version: str
+    reviewer_backend: str
+    reviewer_model: str
+    reviewer_base_url: str
+    reviewer_effort: str | None
+    judge_provider: str
+    judge_model: str
+    judge_host: str
+    verifier_template_sha256: str
+    threshold: float
+    attempts: int
+
+
+@dataclass(frozen=True)
 class CompletedRun:
     """Immutable projection of a completed, ledgered benchmark run."""
 
     run_id: str
     mode: str
     state: str
-    # Bound in Task 3 (full compatibility identity).
-    identity: Any | None = None
+    # Full compatibility identity from authoritative sources.
+    identity: CompatibilityIdentity | None = None
     # Per-task reward rows (flattened); populated in Task 2.
     task_rows: list[dict[str, object] | None] = field(default_factory=list)
     # Count-derived objective (populated in Task 2).
@@ -90,13 +123,15 @@ def read_completed_run(
     """Resolve a ledgered run by explicit ``run_id``.
 
     Loads the ledger through ``run_mod._load_ledger`` and admits only a run
-    whose ``state == "complete"``, then parses its per-task reward rows in
-    strict fail-closed fashion and binds the count-derived ``Objective``.
+    whose ``state == "complete"``, binds its full compatibility identity from
+    authoritative sources, then parses its per-task reward rows in strict
+    fail-closed fashion and binds the count-derived ``Objective``.
     Missing runs, running/cleanup-pending/cleaned runs, any ledger parse/
-    validation failure, and any malformed reward artifact all fail closed with
-    an ``ObjectiveError`` naming the run id and the offending artifact.
+    validation failure, any identity disagreement, and any malformed reward
+    artifact all fail closed with an ``ObjectiveError`` naming the run id and
+    the offending artifact.
     """
-    del env  # reserved for provenance binding in later tasks.
+    env = env or {}
     try:
         doc = run_mod._load_ledger(workspace)
     except run_mod.RunError as exc:
@@ -119,6 +154,7 @@ def read_completed_run(
         )
 
     job_dir = run_mod._validate_job_dir(workspace, str(entry.get("job_dir") or ""))
+    identity = _bind_identity(workspace, entry, run_id, env)
     rows, infra_errors = _parse_task_rows(Path(job_dir), run_id)
     objective = _build_objective(rows, infra_errors)
 
@@ -126,10 +162,118 @@ def read_completed_run(
         run_id=entry["run_id"],
         mode=entry["mode"],
         state=entry["state"],
+        identity=identity,
         task_rows=rows,
         objective=objective,
         job_dir=job_dir,
     )
+
+
+# The schema version recorded in ``CompatibilityIdentity.objective_schema_version``.
+_OBJECTIVE_SCHEMA_VERSION = 1
+
+
+# The review-profile schema version this plan's identity binds (the current
+# ``ReviewProfile.schema_version``). There is no read-only source for a loaded
+# profile's ``name`` here, so it stays empty rather than fabricated.
+_PROFILE_SCHEMA_VERSION = 1
+
+
+def _bind_identity(
+    workspace: Path, entry: dict[str, Any], run_id: str, env: dict[str, Any]
+) -> CompatibilityIdentity:
+    """Bind the full compatibility identity from authoritative sources.
+
+    The ledger's ``compiled_lock_sha256`` must equal the hash of the on-disk
+    compiled lock (oracle/default-run gate contract); disagreement is corruption
+    and raises ``ObjectiveError`` naming the offending field. Every other
+    fallible read (lock parse, missing/malformed ``daydream`` wheel block,
+    compiled job config) propagates via ``ObjectiveError`` naming the artifact
+    path — no plausible placeholder is ever defaulted.
+    """
+    ledger_digest = entry.get("compiled_lock_sha256")
+    try:
+        disk_digest = run_mod._compiled_lock_sha256(workspace)
+    except OSError as exc:
+        raise ObjectiveError(
+            f"run {run_id!r}: cannot hash compiled lock at "
+            f"{workspace / 'harbor' / 'benchmark.lock.json'}: {exc}"
+        ) from exc
+    if ledger_digest != disk_digest:
+        raise ObjectiveError(
+            f"run {run_id!r} ledger compiled_lock_sha256 disagrees with the "
+            f"on-disk compiled lock at {workspace / 'harbor' / 'benchmark.lock.json'}"
+        )
+
+    lock = _load_compiled_lock(workspace, run_id)
+    day = lock.get("daydream")
+    if not isinstance(day, dict):
+        raise ObjectiveError(
+            f"run {run_id!r}: compiled lock at {workspace / 'harbor' / 'benchmark.lock.json'}"
+            f" is missing its 'daydream' wheel block"
+        )
+    wheel_sha = day.get("sha256")
+    wheel_version = day.get("version")
+    if not isinstance(wheel_sha, str) or not wheel_sha or not isinstance(wheel_version, str):
+        raise ObjectiveError(
+            f"run {run_id!r}: compiled lock at {workspace / 'harbor' / 'benchmark.lock.json'}"
+            f" has a malformed or missing 'daydream' wheel digest/version"
+        )
+
+    try:
+        harbor_version = ".".join(
+            str(importlib.metadata.version("harbor")).split(".")[:2]
+        )
+    except importlib.metadata.PackageNotFoundError as exc:  # pragma: no cover
+        raise ObjectiveError(f"run {run_id!r}: harbor package metadata not found") from exc
+
+    judge_template = calibrate._load_judge_template()
+    profile_digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST") or entry.get(
+        "profile_digest"
+    )
+    try:
+        attempts = int(run_mod._compiled_job_config(workspace).get("n_attempts", 1))
+    except (run_mod.RunError, ValueError, TypeError) as exc:
+        raise ObjectiveError(
+            f"run {run_id!r}: cannot read compiled harbor-job.yaml at "
+            f"{workspace / 'harbor' / 'harbor-job.yaml'}: {exc}"
+        ) from exc
+
+    return CompatibilityIdentity(
+        objective_schema_version=_OBJECTIVE_SCHEMA_VERSION,
+        profile_schema_version=_PROFILE_SCHEMA_VERSION,
+        profile_name="",
+        profile_digest=str(profile_digest) if profile_digest else None,
+        daydream_version=str(wheel_version),
+        daydream_wheel_sha256=str(wheel_sha),
+        compiled_lock_sha256=str(ledger_digest),
+        harbor_version=harbor_version,
+        reviewer_backend=env.get("DAYDREAM_REVIEW_BACKEND") or "",
+        reviewer_model=env.get("DAYDREAM_REVIEW_MODEL") or "",
+        reviewer_base_url=env.get("DAYDREAM_REVIEW_BASE_URL") or "",
+        # Recorded at run-append time; absent -> None (never fabricated).
+        reviewer_effort=entry.get("reviewer_effort"),
+        judge_provider=env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
+        judge_model=env.get("DAYDREAM_JUDGE_MODEL") or "",
+        judge_host=calibrate._judge_host_from_env(env),
+        verifier_template_sha256=calibrate._render_judge_prompt_digest(judge_template),
+        threshold=verifier_core.CONFIDENCE_THRESHOLD,
+        attempts=attempts,
+    )
+
+
+def _load_compiled_lock(workspace: Path, run_id: str) -> dict[str, Any]:
+    """Read the compiled ``harbor/benchmark.lock.json`` strictly."""
+    path = workspace / "harbor" / "benchmark.lock.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ObjectiveError(
+            f"run {run_id!r}: cannot read compiled lock at {path}: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ObjectiveError(f"run {run_id!r}: compiled lock at {path} must be a mapping")
+    return data
 
 
 # The integer count keys a scored task must carry as JSON integers (mirrors
