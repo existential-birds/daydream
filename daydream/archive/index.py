@@ -275,6 +275,10 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "composite_reward": manifest.composite_reward,
                 "archive_path": manifest.archive_path,
                 "schema_version": SCHEMA_VERSION,
+                "profile_schema_version": manifest.profile_schema_version,
+                "profile_name": manifest.profile_name,
+                "profile_source_kind": manifest.profile_source_kind,
+                "profile_digest": manifest.profile_digest,
             },
         )
         conn.commit()

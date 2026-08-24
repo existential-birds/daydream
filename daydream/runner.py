@@ -58,10 +58,12 @@ from daydream.phases import (
     _git_branch,
     _git_log,
 )
+from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
     default_trajectory_path,
+    get_current_recorder,
 )
 from daydream.ui import (
     phase_subtitle,
@@ -237,6 +239,18 @@ class RunConfig:
             file list surfaced to a shard as context (never part of its primary
             review targets). ``None`` falls through to file config then
             ``DEFAULT_DEEP_SHARD_FRONTIER_MAX`` (8).
+        review_profile_path: Explicit review-profile file path
+            (``--review-profile``), the highest-precedence source in the
+            four-source resolution order (R9: explicit > env > repo-committed
+            > packaged default). ``None`` falls through to the
+            ``DAYDREAM_REVIEW_PROFILE`` env var, then
+            ``file_config.review_profile``, then the packaged default. Resolved
+            once at the runner composition root onto ``review_profile``.
+        review_profile: The resolved per-run review profile (validated object +
+            source kind + digest), set exactly once by the runner composition
+            root (R1). Flows and prompt builders read this; they never re-read
+            profile files. ``None`` before resolution or when a direct caller
+            skips the composition-root seam.
 
     """
 
@@ -322,6 +336,13 @@ class RunConfig:
     deep_shard_max_bytes: int | None = None
     deep_shard_fanout_cap: int | None = None
     deep_shard_frontier_max: int | None = None
+    # Issue #885: versioned benchmark-tunable review profile. The path field is
+    # the CLI/env-carried explicit source; the profile field is the resolved
+    # value (validated object + source kind + digest), set once by
+    # ``_resolve_review_profile`` at the composition root and threaded into
+    # every ``FlowContext``/``run_deep`` so no consumer re-reads a file.
+    review_profile_path: str | Path | None = None
+    review_profile: ResolvedProfile | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -423,6 +444,56 @@ def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
     an absent file config behaves identically to one with no keys set.
     """
     return config.file_config if config.file_config is not None else DaydreamFileConfig()
+
+
+def _resolve_review_profile(config: RunConfig) -> None:
+    """Resolve the run's review profile exactly once at the composition root (R1).
+
+    ``resolve_from_runconfig`` picks the highest-precedence source among the
+    explicit ``review_profile_path`` (CLI flag), the ``DAYDREAM_REVIEW_PROFILE``
+    env var, the repo-committed ``file_config.review_profile`` path, and the
+    packaged default. The validated result (profile + source kind + digest) is
+    stored on ``config.review_profile`` and handed into every ``FlowContext``
+    the run builds. Idempotent: a direct caller that already resolved (or
+    injected) the profile is left untouched.
+
+    R12 provenance: the resolved profile is also recorded onto the active
+    ``TrajectoryRecorder`` (when one is open at the call site) so
+    ``Trajectory.extra`` carries the ``profile_*`` keys on every real run.
+    Deep-flow dispatch resolves before its recorder opens (fail-closed
+    resolution must happen even for an empty-diff review that returns before
+    the recorder), so the deep spine and feedback flows re-enter this
+    composition root from inside their recorder scopes — the re-entry is a
+    no-op resolve that only records.
+    """
+    if config.review_profile is None:
+        config.review_profile = resolve_from_runconfig(config)
+    _record_review_profile(config)
+
+
+def _record_review_profile(config: RunConfig) -> None:
+    """Record resolved review-profile provenance when a recorder is active (R12).
+
+    Populates the active recorder's ``profile_*`` trajectory extra keys
+    (schema version, name, source kind, canonical digest) so the trajectory of
+    a real run carries exactly the policy tested. No-op when the run has no
+    resolved profile or no recorder is open at the call site — both are
+    legitimate: ``--review-profile`` is optional, and deep-flow dispatch
+    resolves before its recorder exists (the spine/feedback flows re-enter
+    ``_resolve_review_profile`` from inside the recorder scope, which is what
+    lands the record here).
+    """
+    if config.review_profile is None:
+        return
+    recorder = get_current_recorder()
+    if recorder is None:
+        return
+    recorder.record_profile(
+        schema_version=config.review_profile.profile.schema_version,
+        name=config.review_profile.name,
+        source_kind=config.review_profile.source_kind,
+        digest=config.review_profile.digest,
+    )
 
 
 def _resolved_backend_name(config: RunConfig, phase: str) -> str:
@@ -1097,7 +1168,13 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         work=work,
         flow_kind=DaydreamRunFlow.IMPROVE,
     ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        _resolve_review_profile(config)
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            review_profile=config.review_profile,
+        )
         ctx.data["improve_dir"] = directory
         ctx.data["effort_tier"] = tier
         ctx.data["improve_publish_issues"] = _file_config_or_empty(config).improve_github_publish_issues
@@ -1166,7 +1243,13 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,
     ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        _resolve_review_profile(config)
+        ctx = FlowContext(
+            config=config,
+            work=work,
+            registry=get_registry(),
+            review_profile=config.review_profile,
+        )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
         ctx.data["diff"] = diff
         ctx.data["log"] = log
@@ -1192,4 +1275,5 @@ async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
     """Delegate to the deep-mode orchestrator (the only PR-process flow, #330)."""
     from daydream.deep.orchestrator import run_deep
 
+    _resolve_review_profile(config)
     return await run_deep(config, work)

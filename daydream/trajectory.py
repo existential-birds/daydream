@@ -1519,6 +1519,11 @@ class TrajectoryRecorder:
     # Per-Invocation timing summaries registered at _InvocationCM.__aexit__.
     # Serialized into Trajectory.extra["subtrajectories"] when non-empty.
     _subtrajectories: list[dict[str, Any]] = field(default_factory=list)
+    # Resolved review-profile provenance (issue #885, R12): schema version,
+    # name, source kind, and canonical digest of the profile this run executed
+    # under, recorded via ``record_profile`` by the runner composition root.
+    # Serialized into Trajectory.extra["profile_*"] when set (new runs).
+    _profile: dict[str, Any] | None = None
     _aborted: bool = False
     on_write: Callable[[TrajectoryRecorder, str], None] | None = None
 
@@ -1587,6 +1592,32 @@ class TrajectoryRecorder:
         self._phase_events.append(
             PhaseEvent(phase=phase, event=event, timestamp=now_iso(), metadata=metadata)
         )
+
+    def record_profile(
+        self, *, schema_version: int, name: str, source_kind: str, digest: str
+    ) -> None:
+        """Record the resolved review-profile provenance for this run (R12).
+
+        Called exactly once at the runner composition root (issue #885) with
+        the run's resolved profile: schema version, human-readable name,
+        source kind (explicit/env/repo/default), and the canonical digest.
+        Serialized into ``Trajectory.extra`` as ``profile_schema_version`` /
+        ``profile_name`` / ``profile_source_kind`` / ``profile_digest`` so a
+        future optimizer can attribute results to the exact policy tested.
+        Required on new runs; older trajectories simply omit the keys.
+
+        Args:
+            schema_version: Profile ``schema_version`` (1).
+            name: Human-readable profile name.
+            source_kind: One of ``explicit``/``env``/``repo``/``default``.
+            digest: Canonical SHA-256 digest of the profile value.
+        """
+        self._profile = {
+            "profile_schema_version": schema_version,
+            "profile_name": name,
+            "profile_source_kind": source_kind,
+            "profile_digest": digest,
+        }
 
     def emit_phase_start(self, phase: DaydreamPhase, **metadata: Any) -> None:
         """Record a ``phase_start`` boundary event (issue #203).
@@ -1951,6 +1982,8 @@ class TrajectoryRecorder:
             extra["pr_number"] = self.pr_number
         if self.pr_repo is not None:
             extra["pr_repo"] = self.pr_repo
+        if self._profile is not None:
+            extra.update(self._profile)
         if self._phase_events:
             extra["phase_events"] = [e.to_dict() for e in self._phase_events]
         if self._subtrajectories:

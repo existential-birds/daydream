@@ -49,6 +49,10 @@ class DaydreamFileConfig:
             ``None`` falls through to the RunConfig field / orchestrator default;
             ``True`` posts ``event: "APPROVE"`` when a deep review has zero
             high/medium findings. Explicit opt-in: never coerced from a non-bool.
+        review_profile: Repo-committed review-profile path (R9). A lenient path
+            read only — the strict profile parse + validation stays in
+            ``review_profile.py``. ``None`` (absent or non-str) means the key is
+            unset and the default profile applies.
         group_max_wall_s: Per-file-group fix wall-clock ceiling in seconds
             (issue #201), a global ``[tool.daydream]`` key. Bounds the cumulative
             wall-clock of all fix ``run_agent`` turns targeting one file group so
@@ -152,6 +156,7 @@ class DaydreamFileConfig:
     improve_partition_max_files: int | None = None
     improve_max_partition_groups: int | None = None
     improve_github_publish_issues: bool = False
+    review_profile: Path | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -338,6 +343,17 @@ def _coerce_choice(raw: Any, choices: set[str]) -> str | None:
     return raw if isinstance(raw, str) and raw in choices else None
 
 
+def _coerce_review_profile_path(raw: Any) -> Path | None:
+    """Leniently read a repo-committed review-profile path (R9).
+
+    A path string only — the strict profile parse stays in review_profile.py.
+    Malformed/non-string values degrade to None (unset).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw)
+
+
 def load_file_config(root: Path) -> DaydreamFileConfig:
     """Load and merge daydream file configuration from a repo root.
 
@@ -419,6 +435,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         approve_on_clean=approve_on_clean,
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
+        review_profile=_coerce_review_profile_path(merged.get("review_profile")),
         uncovered_sweep=uncovered_sweep,
         uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
         uncovered_sweep_min_hunk_lines=_coerce_non_negative_int(merged.get("uncovered_sweep_min_hunk_lines")),

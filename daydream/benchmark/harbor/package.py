@@ -298,6 +298,7 @@ def render_job_config(*, oracle: bool) -> bytes:
             "DAYDREAM_REVIEW_MODEL": "${DAYDREAM_REVIEW_MODEL}",
             "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY}",
             "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL}",
+            "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "${DAYDREAM_REVIEW_PROFILE_CANDIDATE}",
         },
     }]
     document = {

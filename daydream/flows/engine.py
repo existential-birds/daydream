@@ -25,6 +25,7 @@ from daydream.extensions.api import (
 if TYPE_CHECKING:
     from daydream.backends import Backend
     from daydream.extensions.registry import FlowEntry, Registry
+    from daydream.review_profile import ResolvedProfile
     from daydream.runner import RunConfig
     from daydream.workspace import WorkContext
 
@@ -38,12 +39,17 @@ class FlowContext:
         work: The resolved workspace for the run.
         registry: The per-run extension registry the flow resolves against.
         data: Cross-step scratch state; steps replace locals with keys here.
+        review_profile: The resolved per-run review profile (validated object
+            + source kind + digest), set by the runner composition root (R1).
+            ``None`` before resolution; ``strategy()``/``pipeline()`` fall back
+            to the packaged default so steps stay operable either way.
     """
 
     config: RunConfig
     work: WorkContext
     registry: Registry
     data: dict[str, Any] = field(default_factory=dict)
+    review_profile: ResolvedProfile | None = None
     _backend_cache: dict[tuple[str, str | None, str | None], Backend] = field(
         default_factory=dict, repr=False
     )
@@ -61,6 +67,39 @@ class FlowContext:
         return _resolve_backend(
             self.config, phase, cache=self._backend_cache, cwd=self.work.repo
         )
+
+    def strategy(self, stage: str) -> str:
+        """Return the profile-owned strategy content for a model-bearing stage.
+
+        Narrow accessor for flows: reads the resolved per-run review profile
+        (never re-reads a profile file, R1). Stages without a profile strategy
+        and profiles that were never resolved fall back to the packaged
+        default's strategy for the stage, so flow steps stay operable without
+        a profile.
+        """
+        from daydream.review_profile import build_default_profile
+
+        # Fall back per-stage on missing keys: ``parse_profile`` accepts partial
+        # profiles, so a resolved profile may omit a given stage's strategy.
+        # Rather than raising KeyError for a valid partial profile, use the
+        # packaged default's strategy for that stage so steps stay operable.
+        if self.review_profile is not None:
+            strategies = self.review_profile.profile.strategies
+            if stage in strategies:
+                return strategies[stage].content
+        return build_default_profile().strategies[stage].content
+
+    def pipeline(self) -> object:
+        """Return the resolved profile's bounded pipeline section (R2).
+
+        ``None`` (unresolved) falls back to the packaged default's pipeline so
+        pipeline-driven flow steps never branch on resolution state.
+        """
+        from daydream.review_profile import build_default_profile
+
+        if self.review_profile is not None:
+            return self.review_profile.profile.pipeline
+        return build_default_profile().pipeline
 
 
 def _resolve_steps(registry: Registry, flow_name: str, entries: list[FlowEntry]) -> dict[str, FlowStep]:

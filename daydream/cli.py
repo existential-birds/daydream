@@ -251,6 +251,17 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--review-profile",
+        default=None,
+        metavar="PATH",
+        dest="review_profile_path",
+        help=(
+            "Explicit review-profile TOML path (highest-precedence source; "
+            "beats DAYDREAM_REVIEW_PROFILE, the repo-committed "
+            "file_config.review_profile, and the packaged default)"
+        ),
+    )
+    parser.add_argument(
         "--trajectory-hub-repo",
         default=None,
         metavar="REPO",
@@ -655,6 +666,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         file_config=file_config,
+        review_profile_path=args.review_profile_path,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
         archive=not args.no_archive,
@@ -1030,6 +1042,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         file_config=file_config,
+        review_profile_path=args.review_profile_path,
         # Per-phase overrides are config-file-only; left None so config is the
         # sole low-precedence source.
         exploration_model=None,
@@ -1090,6 +1103,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         file_config=file_config,
+        review_profile_path=args.review_profile_path,
         # Per-phase model/backend overrides are config-file-only (no CLI flags).
         exploration_model=None,
         review_model=None,
