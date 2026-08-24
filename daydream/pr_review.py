@@ -981,10 +981,7 @@ def _build_consolidated_prompt(
     prompt_body = (
         f"Fix the {total} review comment(s) posted on this PR.\n"
         "\n"
-        "If the /beagle-core:fetch-pr-feedback skill is available, run:\n"
-        f"/beagle-core:fetch-pr-feedback --pr {pr.number}\n"
-        "\n"
-        "Otherwise, fetch the comments manually:\n"
+        "Fetch the comments manually:\n"
         f"1. gh api repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments\n"
         f"2. gh api repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments\n"
         "\n"
