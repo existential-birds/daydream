@@ -140,7 +140,9 @@ your context stays small."""
 
 
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
-def build_pattern_scanner_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
+def build_pattern_scanner_prompt(
+    affected_files: list[FileInfo], diff_ref: str, *, cwd: Path, strategy: str
+) -> str:
     """Build the per-run pattern-scanner prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -151,10 +153,10 @@ def build_pattern_scanner_prompt(affected_files: list[FileInfo], diff_ref: str, 
         affected_files: FileInfo entries for files reachable from the diff.
         diff_ref: Git ref (e.g. base branch or SHA) the specialist can diff against.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
+        strategy: The profile-owned ``exploration.pattern_scan`` strategy content.
     """
     files_block = _files_block(affected_files)
-    return f"""You are the **pattern-scanner** specialist. Detect codebase conventions
-and read guideline files relevant to the changes below.
+    return f"""{strategy}
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
@@ -175,7 +177,9 @@ Instructions:
 """
 
 
-def build_repo_survey_prompt(sample_paths: list[str], total_tracked: int, *, cwd: Path) -> str:
+def build_repo_survey_prompt(
+    sample_paths: list[str], total_tracked: int, *, cwd: Path, strategy: str
+) -> str:
     """Build the repo-scoped survey prompt used by ``repo_scan``.
 
     There is no diff in a repo-scoped run, so this prompt must not borrow the
@@ -186,6 +190,7 @@ def build_repo_survey_prompt(sample_paths: list[str], total_tracked: int, *, cwd
         sample_paths: Repo-relative tracked paths, sampled across the tree.
         total_tracked: Total tracked-file count, so the sample is honest about coverage.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
+        strategy: The profile-owned ``exploration.repository_survey`` strategy content.
     """
     sample_block = "\n".join(f"- {path}" for path in sample_paths) or "- (no tracked files)"
     coverage = (
@@ -193,10 +198,7 @@ def build_repo_survey_prompt(sample_paths: list[str], total_tracked: int, *, cwd
         if len(sample_paths) < total_tracked
         else f"all {total_tracked} tracked files"
     )
-    return f"""You are the **repo-survey** specialist. Survey this repository as a whole
-and report the conventions an implementation plan would have to preserve. There
-is no change set here — you are describing the repository's steady state, not
-reviewing edits.
+    return f"""{strategy}
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
@@ -220,7 +222,9 @@ files you need. Work file-by-file so your context stays small.
 """
 
 
-def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
+def build_dependency_tracer_prompt(
+    affected_files: list[FileInfo], diff_ref: str, *, cwd: Path, strategy: str
+) -> str:
     """Build the per-run dependency-tracer prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -231,12 +235,10 @@ def build_dependency_tracer_prompt(affected_files: list[FileInfo], diff_ref: str
         affected_files: FileInfo entries for files reachable from the diff, each carrying a `path` and `role`.
         diff_ref: Git ref the specialist can diff against when probing call sites.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
+        strategy: The profile-owned ``exploration.dependency_trace`` strategy content.
     """
     files_block = _files_block(affected_files)
-    return f"""You are the **dependency-tracer** specialist. Extend the affected-files
-list beyond the static-resolved imports by grepping for call sites and
-reading the implementations. For every import or call edge you confirm,
-emit a Dependency record.
+    return f"""{strategy}
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
@@ -252,7 +254,9 @@ emit a Dependency record.
 """
 
 
-def build_test_mapper_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
+def build_test_mapper_prompt(
+    affected_files: list[FileInfo], diff_ref: str, *, cwd: Path, strategy: str
+) -> str:
     """Build the per-run test-mapper prompt.
 
     The prompt passes the affected file list and a diff ref. The specialist
@@ -263,12 +267,10 @@ def build_test_mapper_prompt(affected_files: list[FileInfo], diff_ref: str, *, c
         affected_files: FileInfo entries for files reachable from the diff.
         diff_ref: Git ref the specialist can diff against when locating test files.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
+        strategy: The profile-owned ``exploration.test_mapping`` strategy content.
     """
     files_block = _files_block(affected_files)
-    return f"""You are the **test-mapper** specialist. Locate test files for each modified
-source file using conventional path mapping (tests/test_X.py, *.test.ts,
-*_test.go, tests/<crate>_test.rs). Emit a FileInfo with role="test" for
-each test file you find, and set source_file to the source file it covers.
+    return f"""{strategy}
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 

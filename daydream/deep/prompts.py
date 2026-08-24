@@ -766,6 +766,7 @@ def build_arbiter_prompt(
 
 def build_supervise_prompt(
     *,
+    strategy: str,
     supervise_input_path: Path,
     diff_path: Path,
     intent_path: Path,
@@ -773,7 +774,18 @@ def build_supervise_prompt(
     cwd: Path,
     exploration_dir: Path | None = None,
 ) -> str:
-    """Assemble the batched canonical findings supervisor prompt."""
+    """Assemble the batched canonical findings supervisor prompt.
+
+    Args:
+        strategy: The profile-owned ``supervision`` strategy content, rendered
+            with the runtime ``supervise_input_path`` placeholder filled.
+        supervise_input_path: JSON file of the canonical findings to adjudicate.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
+        exploration_dir: Pre-scan exploration directory (if available).
+    """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
@@ -781,11 +793,7 @@ def build_supervise_prompt(
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(
-        "Supervisor adjudication: review the canonical findings listed in "
-        f"{supervise_input_path}. This is an adjudication pass, not a fresh "
-        "review: do not invent findings or change their file, line, or id."
-    )
+    parts.append(strategy.format(supervise_input_path=supervise_input_path))
     parts.append(
         "Return one JSON object matching the structured-output schema with one "
         "verdict per finding when possible. Each verdict must echo the canonical "
@@ -799,6 +807,7 @@ def build_supervise_prompt(
 
 def build_suppression_prompt(
     *,
+    strategy: str,
     suppression_input_path: Path,
     diff_path: Path,
     intent_path: Path,
@@ -820,6 +829,8 @@ def build_suppression_prompt(
     reject each input finding, but must not invent new ones.
 
     Args:
+        strategy: The profile-owned ``suppression`` strategy content, rendered
+            with the runtime ``suppression_input_path`` placeholder filled.
         suppression_input_path: JSON file of the selected borderline findings.
             Each entry carries a ``sup_id`` the reviewer must echo back, plus the
             original ``file``/``line``/``severity``/``confidence``/``description``.
@@ -836,16 +847,7 @@ def build_suppression_prompt(
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(
-        "You are the suppression reviewer. The cheaper per-stack reviewers "
-        "flagged the borderline, low-confidence / low-severity findings listed "
-        f"in {suppression_input_path}. These were NOT contested and NOT "
-        "high-severity, so no heavyweight arbiter looked at them. Your job is to "
-        "cut false positives: re-examine each one against the actual code "
-        "(Read/Grep/Bash) and the diff. You are adjudicating their work, NOT "
-        "starting a fresh review: do not introduce findings that are not in the "
-        "input list."
-    )
+    parts.append(strategy.format(suppression_input_path=suppression_input_path))
     parts.append(
         "Default to DROPPING each finding. Keep one ONLY when you can point at "
         "confirming evidence in the code that it is a real, actionable problem. "
@@ -1025,6 +1027,7 @@ def build_merge_prompt(
 
 def build_verification_prompt(
     *,
+    strategy: str,
     items: list[dict[str, Any]],
     cwd: Path,
     output_path: Path,
@@ -1054,6 +1057,7 @@ def build_verification_prompt(
     pays for twice.
 
     Args:
+        strategy: The profile-owned ``verification`` strategy content.
         items: The non-structural (per-stack / cross-stack) canonical items to
             verify. Rendered inline into the prompt; verdicts are keyed by each
             item's canonical ``id`` (the verdict ``issue_id``).
@@ -1065,10 +1069,7 @@ def build_verification_prompt(
 
     parts: list[str] = []
     parts.append(
-        "You are the recommendation-verifier agent. Your job is to audit each "
-        "numbered issue in the finding list below against the actual codebase "
-        "and decide whether its recommendation is consistent with trait/interface "
-        "specs and sibling implementations.\n\n"
+        strategy + "\n\n"
         f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
         "The numbered findings to verify (each `issue_id` in your output MUST "
         "match the leading number `N.` of the finding it verifies):\n\n"

@@ -1217,6 +1217,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             exploration_dir=ctx.data["exploration_dir"],
             pr_description=pr_description,
             diff_text=_ttt_diff_text(ctx),
+            strategy=ctx.strategy("intent"),
         )
     # Each TTT step persists its own half, so a later step's failure cannot
     # discard an artifact this one already produced.
@@ -1242,6 +1243,7 @@ async def _wonder(ctx: FlowContext) -> None:
                 intent_summary,
                 exploration_dir=ctx.data["exploration_dir"],
                 diff_text=_ttt_diff_text(ctx),
+                strategy=ctx.strategy("alternatives"),
             )
 
     alts_p = _alternatives_path(ctx.data["dd"])
@@ -1655,6 +1657,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         for n, file in enumerate(swept_files):
             output_path = dd / f"uncovered-{n}-review.md"
             prompt = build_uncovered_sweep_prompt(
+                strategy=ctx.strategy("uncovered_review"),
                 file=file,
                 hunks=diff_block_for_file(full_diff, file) or "",
                 intent_path=ctx.data["intent_path"],
@@ -1851,6 +1854,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         intent_path=ctx.data["intent_path"],
                         alternatives_path=ctx.data["alts_path"],
                         exploration_dir=ctx.data["exploration_dir"],
+                        strategy=ctx.strategy("suppression"),
                     )
                 all_records, record_sources = _apply_adjudication_verdicts(
                     all_records, record_sources, suppression_targets, sup_verdicts,
@@ -2278,6 +2282,7 @@ async def _step_supervise(ctx: FlowContext) -> None:
                 intent_path=ctx.data["intent_path"],
                 alternatives_path=ctx.data["alts_path"],
                 exploration_dir=ctx.data["exploration_dir"],
+                strategy=ctx.strategy("supervision"),
             )
     kept, held, events = apply_findings_verdicts(items, verdicts)
     items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
@@ -2411,6 +2416,7 @@ async def _step_verify(ctx: FlowContext) -> None:
             ctx.work,
             merged_items_path=ctx.data["items_file"],
             deep_dir=dd,
+            strategy=ctx.strategy("verification"),
         )
     print_verification_summary(console, verdicts_file)
 
@@ -3826,7 +3832,9 @@ async def _step_parse_feedback(ctx: FlowContext) -> Stop | None:
     """Parse the fetched feedback into actionable items; stop when none."""
     try:
         async with phase_scope(DaydreamPhase.PARSE):
-            feedback_items = await phase_parse_feedback(ctx.backend_for("parse"), ctx.work)
+            feedback_items = await phase_parse_feedback(
+                ctx.backend_for("parse"), ctx.work, strategy=ctx.strategy("parse")
+            )
     except ValueError:
         print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
         return Stop(1)

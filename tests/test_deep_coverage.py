@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from daydream import review_profile as rp
 from daydream.deep.coverage import (
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
@@ -418,6 +419,7 @@ def test_build_uncovered_sweep_prompt_includes_context_and_markers(tmp_path: Pat
     output = tmp_path / ".daydream" / "deep" / "uncovered-0-review.md"
     hunks = diff_block_for_file(_DIFF, "notes.txt") or ""
     prompt = build_uncovered_sweep_prompt(
+        strategy=rp.build_default_profile().strategies["uncovered_review"].content,
         file="notes.txt",
         hunks=hunks,
         intent_path=intent,
@@ -453,6 +455,7 @@ def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> Non
     hunks = diff_block_for_file(_DIFF, "notes.txt") or ""
     exploration = tmp_path / ".daydream" / "exploration"
     prompt = build_uncovered_sweep_prompt(
+        strategy=rp.build_default_profile().strategies["uncovered_review"].content,
         file="notes.txt",
         hunks=hunks,
         intent_path=intent,
@@ -465,6 +468,7 @@ def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> Non
     assert str(exploration) in prompt
 
     prompt_no_dir = build_uncovered_sweep_prompt(
+        strategy=rp.build_default_profile().strategies["uncovered_review"].content,
         file="notes.txt",
         hunks=hunks,
         intent_path=intent,

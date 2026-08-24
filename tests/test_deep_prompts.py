@@ -712,6 +712,7 @@ def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
     out = build_verification_prompt(
+        strategy=_default_strategy("verification"),
         items=[{"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
                 "line": 10, "description": "x", "rationale": "y"}],
         cwd=tmp_path,
@@ -750,6 +751,7 @@ def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> No
 
     items = [{"id": "1", "file": "x.py", "line": 10, "description": "Test finding"}]
     out = build_verification_prompt(
+        strategy=_default_strategy("verification"),
         items=items,
         cwd=tmp_path,
         output_path=tmp_path / "verdicts.json",
@@ -781,8 +783,9 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
         ),
         build_generic_fallback_prompt(
             strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-            **p),
+            files=["config.yaml"],
+            **p,
+        ),
     ]
 
     for backend_name in ("claude", "codex", "pi"):
@@ -883,6 +886,7 @@ def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: P
          "line": 10, "description": "x", "rationale": "y"}
     ]
     prompt = build_verification_prompt(
+        strategy=_default_strategy("verification"),
         items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
     )
 
@@ -910,6 +914,7 @@ def test_verification_prompt_advertises_full_read_only_bash_allowlist(tmp_path: 
          "line": 10, "description": "x", "rationale": "y"}
     ]
     prompt = build_verification_prompt(
+        strategy=_default_strategy("verification"),
         items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
     )
 
@@ -935,8 +940,14 @@ def test_verification_prompt_ignores_output_path(tmp_path: Path) -> None:
         {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
          "line": 10, "description": "x", "rationale": "y"}
     ]
-    a = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "a.json")
-    b = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "b.json")
+    a = build_verification_prompt(
+        strategy=_default_strategy("verification"),
+        items=items, cwd=tmp_path, output_path=tmp_path / "a.json",
+    )
+    b = build_verification_prompt(
+        strategy=_default_strategy("verification"),
+        items=items, cwd=tmp_path, output_path=tmp_path / "b.json",
+    )
     assert a == b
 
 
@@ -1446,9 +1457,11 @@ def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Pa
                                 files=["api.py"], **p),
         build_generic_fallback_prompt(
             strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"],
-            **p),
+            files=["config.yaml"],
+            **p,
+        ),
         build_uncovered_sweep_prompt(
+            strategy=_default_strategy("uncovered_review"),
             file="api.py", hunks="", intent_path=p["intent_path"],
             cwd=p["cwd"], output_path=p["output_path"],
         ),

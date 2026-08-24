@@ -14,6 +14,7 @@ import re
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from daydream import git_ops
+from daydream import review_profile as _rp
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.exploration import (
@@ -280,21 +281,41 @@ async def pre_scan(
     with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
         async with anyio.create_task_group() as tg:
             if tier == "single":
-                dep_prompt = build_dependency_tracer_prompt(static_files_abs, diff_ref, cwd=repo_root)
+                dep_prompt = build_dependency_tracer_prompt(
+                    static_files_abs,
+                    diff_ref,
+                    cwd=repo_root,
+                    strategy=_rp.build_default_profile().strategies["exploration.dependency_trace"].content,
+                )
                 tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
             else:  # parallel
                 tg.start_soon(
                     _run_specialist, "pattern_scanner",
-                    build_pattern_scanner_prompt(static_files_abs, diff_ref, cwd=repo_root), PATTERN_SCANNER_SCHEMA,
+                    build_pattern_scanner_prompt(
+                        static_files_abs,
+                        diff_ref,
+                        cwd=repo_root,
+                        strategy=_rp.build_default_profile().strategies["exploration.pattern_scan"].content,
+                    ), PATTERN_SCANNER_SCHEMA,
                 )
                 tg.start_soon(
                     _run_specialist, "dependency_tracer",
-                    build_dependency_tracer_prompt(static_files_abs, diff_ref, cwd=repo_root),
+                    build_dependency_tracer_prompt(
+                        static_files_abs,
+                        diff_ref,
+                        cwd=repo_root,
+                        strategy=_rp.build_default_profile().strategies["exploration.dependency_trace"].content,
+                    ),
                     DEPENDENCY_TRACER_SCHEMA,
                 )
                 tg.start_soon(
                     _run_specialist, "test_mapper",
-                    build_test_mapper_prompt(static_files_abs, diff_ref, cwd=repo_root), TEST_MAPPER_SCHEMA,
+                    build_test_mapper_prompt(
+                        static_files_abs,
+                        diff_ref,
+                        cwd=repo_root,
+                        strategy=_rp.build_default_profile().strategies["exploration.test_mapping"].content,
+                    ), TEST_MAPPER_SCHEMA,
                 )
 
     if recorder is not None:
@@ -359,7 +380,12 @@ async def repo_scan(
                 structured, _, _ = await run_agent(
                     backend,
                     repo_root,
-                    build_repo_survey_prompt(sample, len(paths), cwd=repo_root),
+                    build_repo_survey_prompt(
+                        sample,
+                        len(paths),
+                        cwd=repo_root,
+                        strategy=_rp.build_default_profile().strategies["exploration.repository_survey"].content,
+                    ),
                     output_schema=PATTERN_SCANNER_SCHEMA,
                     max_turns=EXPLORATION_MAX_TURNS,
                     phase=DaydreamPhase.EXPLORATION,

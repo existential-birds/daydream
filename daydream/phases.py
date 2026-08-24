@@ -1391,6 +1391,7 @@ def _inlineable_diff(diff_text: str | None) -> str | None:
 
 def build_intent_prompt(
     *,
+    strategy: str,
     diff_path: str = "",
     branch: str = "",
     log: str = "",
@@ -1402,6 +1403,8 @@ def build_intent_prompt(
     """Assemble the prompt for `phase_understand_intent`.
 
     Args:
+        strategy: The profile-owned ``intent`` strategy content, rendered with
+            the runtime ``diff_path`` placeholder filled.
         diff_path: Path to the diff file the agent should read.
         branch: Branch name under review.
         log: Commit log for the branch.
@@ -1456,27 +1459,25 @@ def build_intent_prompt(
             f"{safe_body}\n"
             "</pr_description>\n"
         )
+    # The strategy carries the non-inline intent body (diff-reading sentence +
+    # judgment tail). The host owns the runtime diff presentation: when the
+    # diff is inlined, the non-inline reading sentence is replaced with the
+    # inlined-diff framing while the strategy's judgment tail is preserved.
+    non_inline_body = strategy.format(diff_path=diff_path)
     if inline_diff is not None:
-        diff_section = (
+        inline_prefix = (
             "The complete diff under review is inlined below (do NOT re-Read "
             f"{diff_path} — it is already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
             "You have full access to explore the codebase. Examine it alongside "
             "the diff above to understand the intent of these changes. "
         )
+        _, _, judgment = non_inline_body.partition("That diff is the complete review target")
+        body = inline_prefix + (judgment or non_inline_body)
     else:
-        diff_section = (
-            f"You have full access to explore the codebase. Read the diff file at {diff_path} "
-            f"and examine the codebase to understand the intent of these changes. "
-        )
-    body = (
-        f"{diff_section}"
-        f"That diff is the complete review target, already computed against the "
-        f"repository's base branch — this run is not tied to a GitHub pull request, so "
-        f"do not look up, list, or ask about pull requests. Do not invoke any skills or "
-        f"slash commands. Present your understanding concisely — what problem is being "
-        f"solved and how — as plain text in your reply.\n\n"
-        f"Branch: {branch}\n\n"
+        body = non_inline_body
+    body += (
+        f"\n\nBranch: {branch}\n\n"
         f"Commit log:\n{log}\n"
     )
     parts.append(body)
@@ -1485,6 +1486,7 @@ def build_intent_prompt(
 
 def build_alternative_review_prompt(
     *,
+    strategy: str,
     intent_summary: str = "",
     diff_path: str = "",
     exploration_dir: Path | None = None,
@@ -1493,6 +1495,9 @@ def build_alternative_review_prompt(
     """Assemble the prompt for `phase_alternative_review`.
 
     Args:
+        strategy: The profile-owned ``alternatives`` strategy content, rendered
+            with the runtime ``intent_summary`` / ``diff_path`` placeholders
+            filled.
         inline_diff: When supplied, the whole diff is inlined and the
             read-the-file instruction is dropped. ``None`` (the default, and
             what every over-budget caller passes) keeps the ``diff_path``
@@ -1507,34 +1512,66 @@ def build_alternative_review_prompt(
         # diff is itself repository-controlled content, so guard it directly.
         parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     parts.append(_confidence_and_convention_instructions())
+    strategy_filled = strategy.format(intent_summary=intent_summary, diff_path=diff_path)
     if inline_diff is not None:
-        diff_clause = (
-            "in the diff inlined below (do NOT re-Read "
+        # Host-owned runtime diff presentation: replace the strategy's
+        # non-inline "in the diff at {diff_path}" clause with the inlined
+        # framing, preserving the shared judgment tail.
+        prefix = (
+            f"The intent of this PR has been confirmed as:\n\n"
+            f"{intent_summary}\n\n"
+            f"Given this intent, explore the codebase and evaluate the implementation "
+            f"in the diff inlined below (do NOT re-Read "
             f"{diff_path} — it is already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
+        )
+        _, _, tail = strategy_filled.partition(
             "Report only concrete problems you can substantiate "
         )
+        body = prefix + (tail or strategy_filled)
     else:
-        diff_clause = (
-            f"in the diff at {diff_path}. Report only concrete problems you can substantiate "
-        )
-    body = (
-        f"The intent of this PR has been confirmed as:\n\n"
-        f"{intent_summary}\n\n"
-        f"Given this intent, explore the codebase and evaluate the implementation "
-        f"{diff_clause}"
-        f"with evidence — correctness bugs, design decisions that will cause a real "
-        f"failure, or violations of a Codebase Convention above. Do NOT list stylistic "
-        f"preferences, speculative 'nice to have' opinions, or alternatives you cannot "
-        f"tie to a concrete downside.\n\n"
-        f"Return a numbered list of issues. For each issue, include: a sequential id "
-        f"number, a brief title, a description of the concrete problem and the evidence "
-        f"for it, a severity level (high/medium/low), a concrete recommendation for how "
-        f"to address it, and the relevant file paths.\n\n"
-        f"If the implementation is solid and you wouldn't change anything, return an empty issues list.\n"
-    )
-    parts.append(body)
+        body = strategy_filled
+    parts.append(body + "\n")
     return "\n".join(parts)
+
+
+def build_parse_prompt(
+    *,
+    strategy: str,
+    review_output_path: Path,
+    severity_hint: str,
+    verdicts_hint: str,
+    severity_field: str,
+    verdicts_example: str,
+    verdicts_empty: str,
+) -> str:
+    """Render the parse-stage prompt from the profile strategy + host envelope.
+
+    The profile-owned ``parse`` strategy carries the extraction/dedup judgment
+    prose as a template (``copied: daydream.phases.phase_parse_feedback``); the
+    host fills the runtime ``review_output_path`` and the schema/severity/verdict
+    envelope placeholders so the rendered prompt stays byte-identical to the
+    pre-extraction literal.
+
+    Args:
+        strategy: The profile-owned ``parse`` strategy content.
+        review_output_path: Absolute path to the review markdown to parse.
+        severity_hint: Severity-extraction instruction (empty when the schema
+            does not request a ``severity`` field).
+        verdicts_hint: Per-file verdict-surface instruction (empty when
+            ``include_verdicts`` is False).
+        severity_field: The schema's severity enum fragment (empty when absent).
+        verdicts_example: The schema's verdicts example fragment.
+        verdicts_empty: The schema's empty-verdicts fragment.
+    """
+    return strategy.format(
+        review_output_path=review_output_path,
+        severity_hint=severity_hint,
+        verdicts_hint=verdicts_hint,
+        severity_field=severity_field,
+        verdicts_example=verdicts_example,
+        verdicts_empty=verdicts_empty,
+    )
 
 
 FixResult = tuple[dict[str, Any], bool, str | None]
@@ -1634,6 +1671,7 @@ async def phase_parse_feedback(
     input_path: Path | None = None,
     output_schema: dict[str, Any] | None = None,
     include_verdicts: Literal[False] = False,
+    strategy: str | None = None,
 ) -> list[dict[str, Any]]: ...
 
 
@@ -1645,6 +1683,7 @@ async def phase_parse_feedback(
     input_path: Path | None = None,
     output_schema: dict[str, Any] | None = None,
     include_verdicts: Literal[True],
+    strategy: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
 
 
@@ -1655,6 +1694,7 @@ async def phase_parse_feedback(
     input_path: Path | None = None,
     output_schema: dict[str, Any] | None = None,
     include_verdicts: bool = False,
+    strategy: str | None = None,
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
@@ -1743,20 +1783,17 @@ async def phase_parse_feedback(
 
     # Use absolute path to prevent model hallucination of paths from training data
     review_output_path = input_path if input_path is not None else work.repo / REVIEW_OUTPUT_FILE
-    prompt = f"""Read the review output file at {review_output_path}.
-
-Extract ONLY actionable issues that need fixing. Skip these sections entirely:
-- "Good Patterns" or "Strengths"
-- "Summary" sections
-- Any positive observations
-{severity_hint}{verdicts_hint}
-For each issue found, return a JSON object with this structure:
-{{"issues": [
-  {{"id": 1, "description": "Brief description of the issue", "file": "path/to/file.py", "line": 42{severity_field}}}
-]{verdicts_example}}}
-
-If there are no actionable issues, return: {{"issues": []{verdicts_empty}}}
-"""
+    if strategy is None:
+        strategy = _rp.build_default_profile().strategies["parse"].content
+    prompt = build_parse_prompt(
+        strategy=strategy,
+        review_output_path=review_output_path,
+        severity_hint=severity_hint,
+        verdicts_hint=verdicts_hint,
+        severity_field=severity_field,
+        verdicts_example=verdicts_example,
+        verdicts_empty=verdicts_empty,
+    )
 
     result, _, budget_reason = await run_agent(
         backend,
@@ -1850,6 +1887,7 @@ async def phase_verify_recommendations(
     *,
     merged_items_path: Path,
     deep_dir: Path,
+    strategy: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Audit each non-structural item's recommendation against the codebase.
 
@@ -1910,6 +1948,7 @@ async def phase_verify_recommendations(
         return output_path, empty_payload
 
     prompt = get_registry().prompt("verify")(
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["verification"].content,
         items=verifiable,
         cwd=work.repo,
         output_path=output_path,
@@ -3541,6 +3580,7 @@ async def phase_understand_intent(
     exploration_dir: Path | None = None,
     pr_description: str | None = None,
     diff_text: str | None = None,
+    strategy: str | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -3615,6 +3655,7 @@ async def phase_understand_intent(
                 )
             inline_exploration_summary = summary_text
     prompt = get_registry().prompt("intent")(
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["intent"].content,
         diff_path=str(diff_path),
         branch=branch,
         log=log,
@@ -3712,6 +3753,7 @@ async def phase_alternative_review(
     *,
     exploration_dir: Path | None = None,
     diff_text: str | None = None,
+    strategy: str | None = None,
 ) -> list[dict[str, Any]]:
     """Phase: Evaluate whether there's a better way to implement the PR.
 
@@ -3727,6 +3769,7 @@ async def phase_alternative_review(
     print_dim(console, f"Model: {backend.model}")
 
     prompt = get_registry().prompt("alternatives")(
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["alternatives"].content,
         intent_summary=intent_summary,
         diff_path=str(diff_path),
         exploration_dir=exploration_dir,
@@ -4094,6 +4137,7 @@ async def phase_supervise_review(
     intent_path: Path,
     alternatives_path: Path,
     exploration_dir: Path | None = None,
+    strategy: str | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Adjudicate canonical merged findings in one batched LLM call."""
     from daydream.deep.artifacts import deep_dir
@@ -4106,6 +4150,7 @@ async def phase_supervise_review(
     input_path = dd / "supervise-input.json"
     input_path.write_text(json.dumps(items, indent=2))
     prompt = get_registry().prompt("supervise")(
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["supervision"].content,
         supervise_input_path=input_path,
         diff_path=diff_path,
         intent_path=intent_path,
@@ -4291,6 +4336,7 @@ async def phase_suppression_review(
     intent_path: Path,
     alternatives_path: Path,
     exploration_dir: Path | None = None,
+    strategy: str | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Skeptical precision-mode second opinion over borderline findings (#232).
 
@@ -4332,6 +4378,7 @@ async def phase_suppression_review(
     input_path.write_text(json.dumps(suppression_input, indent=2))
 
     prompt = get_registry().prompt("suppression")(
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["suppression"].content,
         suppression_input_path=input_path,
         diff_path=diff_path,
         intent_path=intent_path,

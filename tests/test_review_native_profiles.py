@@ -4,8 +4,8 @@
 # builders are excluded here — their output intentionally changes (skill line
 # removed + authored block inserted); those golden deltas are pinned separately
 # in Task 5.
-import pytest
 from pathlib import Path
+
 from daydream import review_profile as rp
 
 
@@ -54,3 +54,39 @@ def test_authored_blocks_land_verbatim():
     assert p.strategies["discovery.per_stack"].source == "authored: #886 NATIVE_PER_STACK_DISCOVERY_STRATEGY"
     assert p.strategies["discovery.structural"].source == "authored: #886 NATIVE_STRUCTURAL_DISCOVERY_STRATEGY"
     assert p.strategies["improve.vetting"].source == "authored: #886 NATIVE_IMPROVE_VET_STRATEGY"
+
+
+def test_copy_existing_stages_byte_identical_after_strategy_threading():
+    from daydream.deep.coverage import build_uncovered_sweep_prompt
+    from daydream.deep.prompts import (
+        build_supervise_prompt,
+        build_suppression_prompt,
+        build_verification_prompt,
+    )
+    from daydream.phases import build_alternative_review_prompt, build_intent_prompt
+    p = rp.build_default_profile()
+    sv = build_supervise_prompt(strategy=p.strategies["supervision"].content,
+        supervise_input_path=Path("/in"), diff_path=Path("/d"),
+        intent_path=Path("/i"), alternatives_path=Path("/a"), cwd=Path("/c"))
+    sup = build_suppression_prompt(strategy=p.strategies["suppression"].content,
+        suppression_input_path=Path("/in"), diff_path=Path("/d"),
+        intent_path=Path("/i"), alternatives_path=Path("/a"), cwd=Path("/c"))
+    ver = build_verification_prompt(strategy=p.strategies["verification"].content,
+        items=[{"id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "description": "x"}],
+        cwd=Path("/c"), output_path=Path("/o"))
+    unc = build_uncovered_sweep_prompt(strategy=p.strategies["uncovered_review"].content,
+        file="a.py", hunks="@@", intent_path=Path("/i"), cwd=Path("/c"),
+        output_path=Path("/o"))
+    intent = build_intent_prompt(strategy=p.strategies["intent"].content,
+        diff_path="/d", inline_diff="+x")
+    alt = build_alternative_review_prompt(strategy=p.strategies["alternatives"].content,
+        intent_summary="s", diff_path="/d")
+    # Host envelope sentinels preserved:
+    assert "/in" in sv and "/in" in sup
+    assert "per-stack" in ver or "verdict" in ver
+    assert "a.py" in unc and "/i" in unc and "/c" in unc
+    assert "/d" in intent and "+x" in intent
+    assert "s" in alt and "/d" in alt
+    # No skill tokens anywhere:
+    for text in (sv, sup, ver, unc, intent, alt):
+        assert "/beagle-" not in text and "beagle" not in text.lower()

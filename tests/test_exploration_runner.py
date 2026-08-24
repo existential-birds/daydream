@@ -10,6 +10,7 @@ from typing import Any
 import anyio
 import pytest
 
+from daydream import review_profile as rp
 from daydream.backends import AgentEvent, ResultEvent
 from daydream.exploration import ExplorationContext, FileInfo
 from daydream.exploration_runner import (
@@ -34,11 +35,17 @@ from daydream.prompts.grounding import (
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
 
+def _default_strategy(stage: str) -> str:
+    return rp.build_default_profile().strategies[stage].content
+
+
 # Subagent prompt sanity checks (Plan 03)
 def test_pattern_scanner_prompt_includes_guideline_files():
     files = [FileInfo("daydream/foo.py", "modified")]
     cwd = Path("/repo")
-    dynamic = build_pattern_scanner_prompt(files, "main...HEAD", cwd=cwd)
+    dynamic = build_pattern_scanner_prompt(
+        files, "main...HEAD", cwd=cwd, strategy=_default_strategy("exploration.pattern_scan")
+    )
     assert "CLAUDE.md" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
@@ -52,7 +59,9 @@ def test_pattern_scanner_prompt_includes_guideline_files():
 def test_dependency_tracer_prompt_mentions_affected_files():
     files = [FileInfo("daydream/a.py", "modified"), FileInfo("daydream/b.py", "modified")]
     cwd = Path("/repo")
-    prompt = build_dependency_tracer_prompt(files, "main...HEAD", cwd=cwd)
+    prompt = build_dependency_tracer_prompt(
+        files, "main...HEAD", cwd=cwd, strategy=_default_strategy("exploration.dependency_trace")
+    )
     assert "daydream/a.py" in prompt
     assert "daydream/b.py" in prompt
     assert "main...HEAD" in prompt
@@ -65,7 +74,9 @@ def test_dependency_tracer_prompt_mentions_affected_files():
 def test_test_mapper_prompt_instructs_mapping():
     files = [FileInfo("daydream/x.py", "modified")]
     cwd = Path("/repo")
-    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=cwd)
+    prompt = build_test_mapper_prompt(
+        files, "main...HEAD", cwd=cwd, strategy=_default_strategy("exploration.test_mapping")
+    )
     assert "test" in prompt.lower()
     assert "daydream/x.py" in prompt
     assert "main...HEAD" in prompt
@@ -383,22 +394,34 @@ def test_pre_scan_passes_cwd_absolute_paths(tmp_path):
     ("builder", "marker"),
     [
         pytest.param(
-            lambda: build_pattern_scanner_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            lambda: build_pattern_scanner_prompt(
+                [FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo"),
+                strategy=_default_strategy("exploration.pattern_scan"),
+            ),
             "<affected_files>",
             id="pattern-scanner",
         ),
         pytest.param(
-            lambda: build_repo_survey_prompt(["a.py", "b.py"], 10, cwd=Path("/repo")),
+            lambda: build_repo_survey_prompt(
+                ["a.py", "b.py"], 10, cwd=Path("/repo"),
+                strategy=_default_strategy("exploration.repository_survey"),
+            ),
             "<tracked_file_sample>",
             id="repo-survey",
         ),
         pytest.param(
-            lambda: build_dependency_tracer_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            lambda: build_dependency_tracer_prompt(
+                [FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo"),
+                strategy=_default_strategy("exploration.dependency_trace"),
+            ),
             "<affected_files>",
             id="dependency-tracer",
         ),
         pytest.param(
-            lambda: build_test_mapper_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            lambda: build_test_mapper_prompt(
+                [FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo"),
+                strategy=_default_strategy("exploration.test_mapping"),
+            ),
             "<affected_files>",
             id="test-mapper",
         ),
