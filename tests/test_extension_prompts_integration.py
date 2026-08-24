@@ -53,7 +53,7 @@ async def test_fork_prompt_override_reaches_backend(
     install_backend(backend)
     mute_side_effects("daydream.deep.orchestrator")
 
-    rc = await runner.run(make_config(feature_branch_repo, shallow=True, skill="python"))
+    rc = await runner.run(make_config(feature_branch_repo, shallow=True, stack="python"))
 
     assert rc == 0
     review_prompts = [p for p in backend.prompts if p.startswith("RO-STACK")]

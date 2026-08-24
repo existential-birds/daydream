@@ -4281,9 +4281,9 @@ def _collapse_stacks_for_shallow(
     non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
     real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
 
-    if config.skill is not None:
+    if config.stack is not None:
         combined = StackAssignment(
-            stack_name=config.skill,
+            stack_name=config.stack,
             skill_invocation=None,
             files=combined_files,
             is_docs_only=False,

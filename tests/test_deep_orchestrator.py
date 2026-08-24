@@ -6196,7 +6196,7 @@ def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
 
     stacks = detect_stacks(["api.py", "App.tsx"])
     collapsed, single_stack_mode = _collapse_stacks_for_shallow(
-        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True, skill="python")
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True, stack="python")
     )
     assert single_stack_mode is True
     non_structural = [s for s in collapsed if s.stack_name != "structure"]

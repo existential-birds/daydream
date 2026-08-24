@@ -386,7 +386,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     traj = tmp_path / "trajectory.json"
     config = RunConfig(
         target=str(feature_branch_repo),
-        skill="python",
+        stack="python",
         shallow=True,
         cleanup=False,
         non_interactive=True,

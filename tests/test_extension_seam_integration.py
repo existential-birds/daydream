@@ -465,7 +465,7 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
     )
     install_backend(backend)
 
-    rc = await runner.run(make_config(multi_stack_target, shallow=True, skill="python"))
+    rc = await runner.run(make_config(multi_stack_target, shallow=True, stack="python"))
 
     assert "RO-SHALLOW-PROMPT" in backend.prompts, "fork phase never reached the backend"
     assert rc == 0
@@ -863,7 +863,7 @@ async def test_flow_shallow_routes_to_shallow_helper(
     )
     install_backend(backend)
 
-    rc = await runner.run(make_config(multi_stack_target, flow_name="shallow", skill="python"))
+    rc = await runner.run(make_config(multi_stack_target, flow_name="shallow", stack="python"))
 
     assert rc == 0
     # Issue #745: the shallow (deep single-stack) flow's per-stack reviewer

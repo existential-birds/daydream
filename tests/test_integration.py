@@ -205,7 +205,7 @@ Found 1 issue to address.
 @pytest.mark.asyncio
 async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path, make_config):
     """Test the complete review -> parse -> fix -> test flow."""
-    config = make_config(target_project, skill="python", quiet=True, shallow=True)
+    config = make_config(target_project, stack="python", quiet=True, shallow=True)
 
     exit_code = await run(config)
 
@@ -287,7 +287,7 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
 
     config = make_config(
         feature_branch_repo,
-        skill="python",
+        stack="python",
         quiet=True,
         shallow=True,
         non_interactive=False,

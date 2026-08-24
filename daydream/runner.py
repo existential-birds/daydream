@@ -90,7 +90,7 @@ class RunConfig:
 
     Attributes:
         target: Target directory path for the review. If None, prompts user.
-        skill: Review skill to use ("python", "react", "elixir", "go", "rust",
+        stack: Review stack to use ("python", "react", "elixir", "go", "rust",
             or "ios"). If None and shallow, prompts user.
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
@@ -250,7 +250,7 @@ class RunConfig:
     """
 
     target: str | None = None
-    skill: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
+    stack: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
     cleanup: bool | None = None
     quiet: bool = True
     start_at: str = "review"

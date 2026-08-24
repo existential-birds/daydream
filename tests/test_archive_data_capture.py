@@ -492,7 +492,7 @@ async def test_shallow_run_captures_recommended_patch(
     exit_code = await run(
         RunConfig(
             target=str(feature_branch_repo),
-            skill="python",
+            stack="python",
             quiet=True,
             cleanup=False,
             shallow=True,

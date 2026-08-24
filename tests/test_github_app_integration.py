@@ -57,7 +57,7 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkey
     # ``pr_repo`` supplies owner/repo so installation-token minting resolves
     # without a real git remote (the temp repo has none).
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="comment", shallow=True, skill="python", quiet=False,
+                       output_mode="comment", shallow=True, stack="python", quiet=False,
                        pr_repo="myorg/myrepo")
 
     # Pin a wide recording console so the identity line is captured at the
@@ -86,7 +86,7 @@ async def test_fallback_identity_without_app_creds(feature_branch_repo, monkeypa
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="review", shallow=True, skill="python", quiet=False)
+                       output_mode="review", shallow=True, stack="python", quiet=False)
 
     with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
          patch("daydream.github_app._mint_installation_token") as mock_mint, \
@@ -108,7 +108,7 @@ async def test_fallback_clears_stale_token_from_previous_run(feature_branch_repo
     git_ops.set_gh_token_env({"GH_TOKEN": "stale"})
 
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="review", shallow=True, skill="python", quiet=False)
+                       output_mode="review", shallow=True, stack="python", quiet=False)
 
     with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"), \
          patch("daydream.runner.create_backend", return_value=_MinimalBackend()):
@@ -127,7 +127,7 @@ async def test_posting_aborts_when_owner_repo_undeterminable(feature_branch_repo
     # Posting mode (--comment) with no pr_repo and no resolvable remote: the
     # run must abort rather than let gh fall back to ambient auth.
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="comment", shallow=True, skill="python", quiet=False)
+                       output_mode="comment", shallow=True, stack="python", quiet=False)
 
     with patch("daydream.git_ops.gh_repo_view", return_value=None), \
          patch("daydream.github_app._mint_installation_token") as mock_mint, \
@@ -146,7 +146,7 @@ async def test_minting_failure_aborts_run(feature_branch_repo, monkeypatch, caps
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
 
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="comment", shallow=True, skill="python", quiet=False,
+                       output_mode="comment", shallow=True, stack="python", quiet=False,
                        pr_repo="myorg/myrepo")
 
     with patch("daydream.github_app._mint_installation_token",

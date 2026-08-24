@@ -74,7 +74,7 @@ async def test_stack_slot_override_reaches_shallow_skill_flag(
     install_backend(backend)
     mute_side_effects("daydream.deep.orchestrator")
 
-    rc = await runner.run(make_config(feature_branch_repo, shallow=True, skill="python"))
+    rc = await runner.run(make_config(feature_branch_repo, shallow=True, stack="python"))
 
     assert rc == 0
     assert any("ro-python:review-python" in p for p in backend.prompts)
