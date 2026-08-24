@@ -75,9 +75,10 @@ class StackAssignment:
 
     Attributes:
         stack_name: Lower-case stack key, e.g. "python" or "generic".
-        skill_invocation: Review-skill invocation resolved through the extension
-            registry (e.g. "beagle-python:review-python" from the ``stack:python``
-            slot, or a fork ``StackRule.skill``), or None for the generic fallback.
+        skill_invocation: Review-skill invocation for a fork-registered stack
+            (its ``StackRule.skill``, that being the fork's routing), or None for
+            every built-in scope (and the generic fallback). Built-ins carry no
+            skill-invocation field.
         files: Files routed to this stack. Never empty for entries in the returned list.
         is_docs_only: True when this assignment represents a docs-only diff (triggers D-20
             notice). Only set on the ``generic`` bucket, and only when no non-generic stacks

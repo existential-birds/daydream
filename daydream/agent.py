@@ -38,10 +38,6 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.extensions import get_registry
-
-# Generic skill-error detection for the extension/backend skill machinery (deleted
-# alongside that machinery in #887). Built-in Deep/Improve reviews no longer invoke
-# skills, so this is never reached on the native review path.
 from daydream.json_utils import extract_json
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
 from daydream.ui import (

@@ -2473,8 +2473,8 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
     This is the "works for everyone" baseline the generalist fallback exists to
     guarantee. It relies on the autouse ``_hermetic_skill_availability`` fixture
-    (empty plugin registry → ``get_installed_skills()`` returns an empty set), so
-    it deliberately does NOT call ``_pin_stack_availability``. Every stack falls
+    (an empty plugin registry with no stack plugins), so it deliberately does NOT
+    call ``_pin_stack_availability``. Every stack falls
     back to generic, collapsing the monorepo into a single generic audit group;
     the flow must still produce one plan per selected finding.
     """

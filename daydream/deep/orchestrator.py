@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 from dataclasses import asdict
 from functools import lru_cache
@@ -504,8 +503,8 @@ def _collapse_stacks_for_tiny_diff(
     #   - ≥2 real language stacks (e.g. python + react): a single agent cannot
     #     cover two per-language scopes, so fall back to generic.
     #
-    # M2: built-in stacks carry no skill-invocation field; only a sole
-    # fork-registered stack keeps its own StackRule.skill.
+    # M2: every collapsed assignment (built-in or fork-registered) carries
+    # no skill-invocation field -- scope metadata only.
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
         real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
@@ -536,48 +535,6 @@ def _collapse_stacks_for_tiny_diff(
     # 0 or 1 non-structural stacks: nothing to collapse (lever 1 is a no-op), but
     # the gate is still active so the caller applies lever 2 (skip merge+arbiter).
     return stacks, True
-
-
-def get_installed_skills() -> set[str] | None:
-    """Detect which Beagle review-skill plugins are installed.
-
-    Reads the Claude Code plugin registry at
-    ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json`` (default
-    ``~/.claude``) and maps installed plugin names back to stack keys via
-    the extension registry's ``stack:<key>`` skill slots, so a remapped
-    stack checks the remapped plugin prefix. A stack is considered
-    "installed" iff its skill's plugin is present.
-
-    Returns:
-        Set of installed stack keys (subset of the registry's stack keys), or
-        ``None`` if the registry cannot be read (missing file, bad JSON).
-        ``None`` signals "unknown" so callers can fall back to optimistic
-        availability without forcing every stack through generic.
-    """
-    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
-    registry = config_dir / "plugins" / "installed_plugins.json"
-    try:
-        data = json.loads(registry.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    # Structurally invalid payloads (non-dict root, non-dict `plugins`) also
-    # signal "unknown" so callers fall back to optimistic availability
-    # instead of aborting deep mode on an AttributeError / TypeError.
-    if not isinstance(data, dict):
-        return None
-    plugins = data.get("plugins")
-    if not isinstance(plugins, dict):
-        return None
-    # Keys in the registry look like "<plugin-name>@<marketplace>".
-    installed_plugins = {key.split("@", 1)[0] for key in plugins}
-    skill_registry = get_registry()
-    installed: set[str] = set()
-    for stack_key in skill_registry.stack_keys():
-        # Slot values are "<plugin-name>:<skill-name>".
-        plugin_prefix = skill_registry.skill(f"stack:{stack_key}").split(":", 1)[0]
-        if plugin_prefix in installed_plugins:
-            installed.add(stack_key)
-    return installed
 
 
 def _diff_changed_files(diff: str) -> list[str]:
@@ -1826,6 +1783,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     alternatives_path=ctx.data["alts_path"],
                     exploration_dir=ctx.data["exploration_dir"],
                     intent_authoritative=ctx.data.get("intent_authoritative", False),
+                    strategy=ctx.strategy("arbitration"),
                 )
                 # Identity gate: only resume when merge runs on the very same
                 # backend instance. A per-phase override that resolves a
@@ -2039,6 +1997,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
             structural_records_path=ctx.data["structural_records_path"],
             intent_authoritative=ctx.data.get("intent_authoritative", False),
             continuation=ctx.data.get("arbiter_continuation"),
+            strategy=ctx.strategy("merge"),
         )
     except CrossStackMergeError as exc:
         _salvage_merge_failure(ctx, exc)
@@ -4272,8 +4231,8 @@ def _collapse_stacks_for_shallow(
       per-language scopes — or no real language at all) the combined assignment
       uses the native generic-fallback scope.
 
-    Built-in stacks carry no skill-invocation field (M2); only a sole
-    fork-registered stack keeps its own ``StackRule.skill``.
+    Every constructed StackAssignment carries no skill-invocation field (M2):
+    collapsed scopes never retain even a fork-registered stack's StackRule.skill.
     """
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
     combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
@@ -4290,8 +4249,8 @@ def _collapse_stacks_for_shallow(
         )
     elif len(real_language) == 1:
         # Scope preservation: a sole real-language stack survives unchanged,
-        # absorbing any generic/docs files. Built-in stacks carry no skill (M2);
-        # a fork-registered sole stack keeps its own StackRule.skill.
+        # absorbing any generic/docs files. The surviving stack carries no
+        # skill (M2): even a fork-registered sole stack's StackRule.skill is dropped.
         lang = real_language[0]
         combined = StackAssignment(
             stack_name=lang.stack_name,

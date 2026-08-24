@@ -691,7 +691,6 @@ def _coverage_ledger(
 
 
 def _audit_assignments(
-    ctx: FlowContext,
     categories: tuple[str, ...],
     groups: list[PartitionGroup],
 ) -> list[_AuditAssignment]:
@@ -931,7 +930,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     groups: list[PartitionGroup] = ctx.data["partition_groups"]
     categories = resolve_categories(tier, ctx.config.improve_focus)
     branch_focus = ctx.config.improve_focus == "branch"
-    assignments = _audit_assignments(ctx, categories, groups)
+    assignments = _audit_assignments(categories, groups)
     backend = ctx.backend_for("audit")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(

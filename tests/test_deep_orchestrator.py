@@ -98,7 +98,6 @@ def _install_model_capturing_stubs(
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return shared_calls
 
@@ -1927,7 +1926,6 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     stub = _SecondaryEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
 
     exit_code = await run(
@@ -2017,7 +2015,6 @@ async def test_fix_quality_gate_flags_missing_baseline_secondary_file(
     )
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     warnings: list[str] = []
     monkeypatch.setattr(
@@ -2343,7 +2340,6 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     mute_side_effects(heal=True, commit=False)
     stub = _CommittingStubBackend(multi_stack_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
@@ -2437,7 +2433,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
 
     issues: list[tuple[Any, ...]] = []
@@ -2508,7 +2503,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr(
         "daydream.git_ops.restore_paths_from_ref",
@@ -7038,7 +7032,6 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
 
     stub = _CommittingStubBackend(tiny_diff_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
 

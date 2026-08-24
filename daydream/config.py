@@ -283,7 +283,6 @@ AUDIT_CATEGORIES: tuple[str, ...] = (
 )
 
 
-
 @dataclass(frozen=True)
 class EffortTier:
     """Configuration for one improve audit effort tier."""

@@ -1,9 +1,9 @@
 """Built-in registry seed.
 
 ``register_builtins(registry)`` seeds the registry with everything daydream
-does today: built-in skill slots, prompt names, and the two flow definitions
-(deep, improve). Review/comment/shallow/pr-feedback are modes of the deep flow
-(#330).
+does today: prompt names, the seeded pr-feedback skill slots, and the two flow
+definitions (deep, improve). Review/comment/shallow/pr-feedback are modes of
+the deep flow (#330).
 
 Uses only function-local late imports (import-cycle guard): this module must
 not import from ``daydream.runner`` or ``daydream.phases`` at module level.

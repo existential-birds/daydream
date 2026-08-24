@@ -1472,7 +1472,7 @@ def build_intent_prompt(
             "You have full access to explore the codebase. Examine it alongside "
             "the diff above to understand the intent of these changes. "
         )
-        _, _, judgment = non_inline_body.partition("That diff is the complete review target")
+        _, _, judgment = non_inline_body.partition(_rp.INTENT_STRATEGY_JUDGMENT_MARKER)
         body = inline_prefix + (judgment or non_inline_body)
     else:
         body = non_inline_body
@@ -1525,9 +1525,7 @@ def build_alternative_review_prompt(
             f"{diff_path} — it is already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
         )
-        _, _, tail = strategy_filled.partition(
-            "Report only concrete problems you can substantiate "
-        )
+        _, _, tail = strategy_filled.partition(_rp.ALTERNATIVES_STRATEGY_JUDGMENT_MARKER)
         body = prefix + (tail or strategy_filled)
     else:
         body = strategy_filled
@@ -4224,6 +4222,7 @@ async def phase_arbiter_review(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     intent_authoritative: bool = False,
+    strategy: str | None = None,
 ) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
     """Re-review high-severity / contested per-stack findings with the arbiter (#168).
 
@@ -4248,6 +4247,9 @@ async def phase_arbiter_review(
         intent_authoritative: Issue #279. When True, the arbiter prompt includes
             the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because the intent
             phase was grounded by a fresh, head-matched PR description.
+        strategy: The profile-owned ``arbitration`` strategy content rendered by
+            the arbiter prompt. ``None`` (default) falls back to the packaged
+            default's arbitration strategy.
 
     Returns:
         ``(verdicts, continuation)``. ``verdicts`` maps ``arb_id`` -> adjudicated
@@ -4272,7 +4274,7 @@ async def phase_arbiter_review(
     input_path.write_text(json.dumps(arbiter_input, indent=2))
 
     prompt = get_registry().prompt("arbiter")(
-        strategy=_rp.build_default_profile().strategies["arbitration"].content,
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["arbitration"].content,
         arbiter_input_path=input_path,
         diff_path=diff_path,
         intent_path=intent_path,
@@ -4601,6 +4603,7 @@ async def phase_cross_stack_merge(
     structural_records_path: Path | None = None,
     intent_authoritative: bool = False,
     continuation: ContinuationToken | None = None,
+    strategy: str | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
 
@@ -4642,6 +4645,9 @@ async def phase_cross_stack_merge(
             the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
             the TTT intent summary line, because the intent phase was grounded
             by a fresh, head-matched PR description.
+        strategy: The profile-owned ``merge`` strategy content rendered by the
+            merge prompt. ``None`` (default) falls back to the packaged
+            default's merge strategy.
 
     Returns:
         Path to the rendered merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
@@ -4668,7 +4674,7 @@ async def phase_cross_stack_merge(
     (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
 
     prompt = get_registry().prompt("merge")(
-        strategy=_rp.build_default_profile().strategies["merge"].content,
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["merge"].content,
         per_stack_records_paths=per_stack_records_paths,
         intent_path=intent_path,
         alternatives_path=alternatives_path,

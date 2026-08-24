@@ -248,6 +248,19 @@ class ReviewProfile:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# Host-owned continuation anchors (R1 inline splicing). The default ``intent``
+# and ``alternatives`` strategies each close their diff-reading head with one
+# of these markers; ``build_intent_prompt`` / ``build_alternative_review_prompt``
+# partition the rendered strategy on the marker to drop that reading head and
+# splice in the host's inlined-diff framing while preserving the shared judgment
+# tail. A profile that overrides either strategy retains that inline splicing by
+# keeping the marker in its content. Defining them here, beside the default
+# prose they bisect, keeps the host's split and the default content one source
+# of truth.
+INTENT_STRATEGY_JUDGMENT_MARKER = "That diff is the complete review target"
+ALTERNATIVES_STRATEGY_JUDGMENT_MARKER = "Report only concrete problems you can substantiate "
+
+
 def build_default_profile() -> ReviewProfile:
     """Return the packaged default profile (R7).
 
@@ -297,7 +310,7 @@ def build_default_profile() -> ReviewProfile:
             content=(
                 "You have full access to explore the codebase. Read the diff file at "
                 "{diff_path} and examine the codebase to understand the intent of these changes. "
-                "That diff is the complete review target, already computed against the "
+                f"{INTENT_STRATEGY_JUDGMENT_MARKER}, already computed against the "
                 "repository's base branch — this run is not tied to a GitHub pull request, so "
                 "do not look up, list, or ask about pull requests. Do not invoke any skills or "
                 "slash commands. Present your understanding concisely — what problem is being "
@@ -310,7 +323,7 @@ def build_default_profile() -> ReviewProfile:
                 "The intent of this PR has been confirmed as:\n\n"
                 "{intent_summary}\n\n"
                 "Given this intent, explore the codebase and evaluate the implementation "
-                "in the diff at {diff_path}. Report only concrete problems you can substantiate "
+                f"in the diff at {{diff_path}}. {ALTERNATIVES_STRATEGY_JUDGMENT_MARKER}"
                 "with evidence — correctness bugs, design decisions that will cause a real "
                 "failure, or violations of a Codebase Convention above. Do NOT list stylistic "
                 "preferences, speculative 'nice to have' opinions, or alternatives you cannot "

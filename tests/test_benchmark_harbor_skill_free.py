@@ -40,7 +40,25 @@ def test_entrypoint_skill_free_python_case(tmp_path, monkeypatch):
     assert "ProfileError" not in text
 
 
-def test_entrypoint_env_has_no_skill_dirs(monkeypatch):
+def test_entrypoint_env_has_no_skill_dirs(tmp_path, monkeypatch):
     # The controlled entrypoint must never inject a skill-registry env var.
     monkeypatch.delenv("DAYDREAM_SKILLS_DIR", raising=False)
+    artifact = tmp_path / "logs" / "artifacts" / "review.json"
+    artifact.parent.mkdir(parents=True)
+
+    async def _fake_run(config):
+        return 0
+
+    def _fake_publish(*, repo_dir, artifact_path, case_id, base_ref="base", head_ref="head"):
+        Path(artifact_path).write_text("{}")
+
+    monkeypatch.setattr("daydream.runner.run", _fake_run)
+    monkeypatch.setattr(entrypoint, "publish_review", _fake_publish)
+
+    rc = asyncio.run(entrypoint.main(monkeypatch_env={
+        "DAYDREAM_REVIEW_CASE_ID": "case-noskill",
+        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
+        "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path),
+    }))
+    assert rc == 0
     assert os.environ.get("DAYDREAM_SKILLS_DIR") is None

@@ -791,7 +791,6 @@ async def test_custom_phase_full_stack(
         return backend
 
     monkeypatch.setattr("daydream.runner.create_backend", fake_create)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     _silence(monkeypatch)
 

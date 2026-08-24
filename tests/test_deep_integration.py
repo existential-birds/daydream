@@ -521,7 +521,6 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
     # Pin all built-in stack skills as available so api.py -> python and
     # App.tsx -> react route per-stack instead of collapsing into generic under
     # the hermetic no-plugin skill registry.
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
 
     backend = _ClaudeShape(multi_stack_target)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
@@ -612,7 +611,6 @@ async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
 
     # Pin all built-in stack skills as available so src/main.rs -> rust routes
     # per-stack instead of collapsing into generic.
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
 
     backend = _ClaudeShape(rust_wire_target)
     exit_code = await _run_deep(

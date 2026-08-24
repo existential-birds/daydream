@@ -19,7 +19,6 @@ async def _run_deep(target: Path) -> int:
 
 def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
 
 
