@@ -196,9 +196,81 @@ def read_completed_run(
 _OBJECTIVE_SCHEMA_VERSION = 1
 
 
-# The review-profile schema version this plan's identity binds (the current
-# ``ReviewProfile.schema_version``). There is no read-only source for a loaded
-# profile's ``name`` here, so it stays empty rather than fabricated.
+def objective_to_json(run: CompletedRun) -> dict[str, object]:
+    """Project a completed run into opaque, privacy-safe machine-readable JSON.
+
+    Produces only the opaque ``run_id``, ``mode``, ``schema_version``, the
+    ``identity`` dict, and the ``objective`` dict (counts + ``comparison_eligible``
+    + optional ``tokens``/``cost``). No repository slug, PR number, source path,
+    gold/candidate text, judge reasoning, or source code is ever emitted; only
+    opaque benchmark/run ids and counts pass through (spec privacy must-have).
+
+    The ledger entry's ``job_dir`` is deliberately dropped before projection so
+    the workspace filesystem path never leaks into the output.
+    """
+    identity = run.identity
+    identity_json = None
+    if identity is not None:
+        identity_json = {
+            "objective_schema_version": identity.objective_schema_version,
+            "profile_schema_version": identity.profile_schema_version,
+            "profile_name": identity.profile_name,
+            "profile_digest": identity.profile_digest,
+            "daydream_version": identity.daydream_version,
+            "daydream_wheel_sha256": identity.daydream_wheel_sha256,
+            "compiled_lock_sha256": identity.compiled_lock_sha256,
+            "harbor_version": identity.harbor_version,
+            "reviewer_backend": identity.reviewer_backend,
+            "reviewer_model": identity.reviewer_model,
+            "reviewer_base_url": identity.reviewer_base_url,
+            "reviewer_effort": identity.reviewer_effort,
+            "judge_provider": identity.judge_provider,
+            "judge_model": identity.judge_model,
+            "judge_host": identity.judge_host,
+            "verifier_template_sha256": identity.verifier_template_sha256,
+            "threshold": identity.threshold,
+            "attempts": identity.attempts,
+        }
+
+    objective_dict: dict[str, object] | None = None
+    if run.objective is not None:
+        obj = run.objective
+        objective_dict = {
+            "tp": obj.tp,
+            "fp": obj.fp,
+            "fn": obj.fn,
+            "precision": obj.precision,
+            "recall": obj.recall,
+            "f1": obj.f1,
+            "clean_task_count": obj.clean_task_count,
+            "clean_pass_count": obj.clean_pass_count,
+            "clean_accuracy": obj.clean_accuracy,
+            "task_count": obj.task_count,
+            "scored_task_count": obj.scored_task_count,
+            "candidate_count": obj.candidate_count,
+            "gold_count": obj.gold_count,
+            "infra_error_task_count": obj.infra_error_task_count,
+            "verifier_error_task_count": obj.verifier_error_task_count,
+            "malformed_task_count": obj.malformed_task_count,
+            "failed_task_count": obj.failed_task_count,
+            "comparison_eligible": obj.comparison_eligible,
+            "mean_task_score": obj.mean_task_score,
+        }
+        if obj.tokens is not None:
+            objective_dict["tokens"] = obj.tokens
+        if obj.cost is not None:
+            objective_dict["cost"] = obj.cost
+
+    return {
+        "run_id": run.run_id,
+        "mode": run.mode,
+        "schema_version": _OBJECTIVE_SCHEMA_VERSION,
+        "identity": identity_json,
+        "objective": objective_dict,
+    }
+
+
+
 _PROFILE_SCHEMA_VERSION = 1
 
 

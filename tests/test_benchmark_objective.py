@@ -211,3 +211,21 @@ def test_objective_tokens_cost_absent_when_unrecorded(tmp_path):
     ws = _complete_ws(tmp_path)
     run = objective.read_completed_run(ws, "run-1", env={})
     assert run.objective.tokens is None and run.objective.cost is None
+
+
+def test_objective_json_is_opaque(tmp_path):
+    ws = _complete_ws(tmp_path)
+    # seed a private repo slug + gold/judge text into the workspace artifacts
+    (ws / "benchmark.yaml").write_text(json.dumps(
+        {"schema_version": 1, "source": {"repository": "acme/private-repo"},
+         "cases": [], "pull_requests": []}))
+    job = ws / "harbor" / "jobs" / "run-1" / "case-0" / "verifier"
+    (job / "reward-details.json").write_text(
+        json.dumps({"reasoning": "the gold finding in private-repo", "path": "/src/x.py"}))
+    run = objective.read_completed_run(ws, "run-1", env={})
+    blob = json.dumps(objective.objective_to_json(run))
+    for forbidden in ("acme", "private-repo", "/src/", "reasoning"):
+        assert forbidden not in blob
+    doc = json.loads(blob)
+    assert set(doc) <= {"run_id", "mode", "schema_version", "identity", "objective"}
+    assert isinstance(doc["objective"], dict)
