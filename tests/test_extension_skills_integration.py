@@ -53,23 +53,21 @@ async def test_fork_overrides_pr_feedback_fetch_skill(
     assert not any("beagle-core:fetch-pr-feedback" in p for p in backend.prompts)
 
 
-async def test_stack_slot_override_reaches_shallow_skill_flag(
+async def test_shallow_stack_uses_native_profile_strategy_no_skill(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """``--skill python`` resolves through the ``stack:python`` slot, not SKILL_MAP.
+    """``--stack python`` renders the native per-stack strategy with no skill token.
 
-    With a daydream_ext override of ``stack:python``, the shallow flow's
-    review prompt must carry the overridden invocation and never the built-in
-    ``beagle-python:review-python`` literal.
+    Built-in stacks have no ``stack:*`` skill slot (M1/M2); the shallow flow's
+    review prompt must carry the profile-owned ``discovery.per_stack`` strategy
+    and never a Beagle/skill invocation.
     """
-    ext_dir.write_module(
-        "def register(r):\n"
-        "    r.override_skill('stack:python', 'ro-python:review-python')\n"
-    )
+    from daydream import review_profile as rp
+
     backend = ScriptedBackend(events=_CLEAN_TURN)
     install_backend(backend)
     mute_side_effects("daydream.deep.orchestrator")
@@ -77,8 +75,9 @@ async def test_stack_slot_override_reaches_shallow_skill_flag(
     rc = await runner.run(make_config(feature_branch_repo, shallow=True, stack="python"))
 
     assert rc == 0
-    assert any("ro-python:review-python" in p for p in backend.prompts)
-    assert not any("beagle-python:review-python" in p for p in backend.prompts)
+    strategy = rp.build_default_profile().strategies["discovery.per_stack"].content
+    assert any(strategy in p for p in backend.prompts)
+    assert not any("/beagle-" in p or "/ro-" in p or "/skill:" in p for p in backend.prompts)
 
 
 async def test_fork_stack_rule_routes_deep_per_stack_review(
@@ -92,9 +91,9 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
 
     Commits a ``.proto`` file into the multi-stack diff so ``detect_stacks``
     (deep flow only) sees a file matching the fork glob, then drives the full
-    deep pipeline through ``runner.run``. Observable outcomes: exit 0 and a
-    per-stack review prompt carrying the fork skill invocation AND the routed
-    ``.proto`` file reached the backend.
+    deep pipeline through ``runner.run``. Observable outcomes: exit 0, the
+    routed ``.proto`` file reaches the per-stack reviewer, and the prompt is
+    native (profile strategy, no fork skill invocation).
     """
     from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
@@ -119,5 +118,13 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
     rc = await runner.run(make_config(multi_stack_target))
 
     assert rc == 0
-    proto_prompts = [c["prompt"] for c in backend.calls if "/ro-proto:review-proto" in c["prompt"]]
+    # The fork StackRule routes the .proto file to the proto stack (scope
+    # metadata), but the native per-stack prompt carries the profile strategy
+    # with no skill invocation (M2/M12).
+    proto_prompts = [
+        c["prompt"] for c in backend.calls
+        if "you are reviewing the proto stack" in c["prompt"].lower()
+    ]
     assert proto_prompts and "api.proto" in proto_prompts[0]
+    assert "/ro-proto:review-proto" not in proto_prompts[0]
+    assert "/beagle-" not in proto_prompts[0]
