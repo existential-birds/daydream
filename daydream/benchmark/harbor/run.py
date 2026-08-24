@@ -241,11 +241,18 @@ def _validate_job_dir(workspace: Path, job_dir: str) -> str:
 def ledger_append_running(
     workspace: Path, *, run_id: str, compiled_lock_sha256: str, job_dir: str,
     mode: str = "oracle",
+    profile_digest: str | None = None,
 ) -> None:
     """Append a ``running`` entry (written before Harbor spawns) for this run.
 
     Uniqueness is the freshly generated uuid4 ``run_id``; the ``job_dir`` is
     validated only for containment under ``<ws>/harbor/jobs/``.
+
+    ``profile_digest`` (issue #885/R12) is the canonical digest of the
+    review-profile candidate this run executes under, supplied by the control
+    plane (the entrypoint computes it from the validated candidate); this
+    function never reads ambient env itself. Optional: legacy/late callers
+    that omit it leave the field ``None`` on the entry.
     """
     contained = _validate_job_dir(workspace, job_dir)
     with storage.WorkspaceLock(workspace):
@@ -259,6 +266,7 @@ def ledger_append_running(
             "harbor_job_id": None,
             "environments": [],
             "error": None,
+            "profile_digest": profile_digest,
         }
         doc["runs"].append(entry)
         storage.atomic_write_json(_ledger_path(workspace), doc, mode=0o600)
@@ -292,7 +300,16 @@ def _calibration_invalidation_inputs(env: dict[str, Any]) -> dict[str, Any]:
     """The calibration-receipt invalidation inputs for ``env`` (reused verbatim)."""
     sr = calibrate._load_judge_template()
     pairs = calibrate._load_fixture()
-    return calibrate._invalidation_inputs(env, pairs, sr)
+    inputs = calibrate._invalidation_inputs(env, pairs, sr)
+    # Candidate review-profile digest (issue #885/R12): when the control plane
+    # supplies a ``DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST``, a change of
+    # candidate invalidates the calibration receipt (benchmark attribution
+    # requires per-candidate invalidation). Omitted when absent so the
+    # legacy receipt contract stays byte-stable for default-profile runs.
+    digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
+    if digest:
+        inputs["profile_digest"] = str(digest)
+    return inputs
 
 
 def _preflight(
@@ -664,7 +681,8 @@ def run_run(
     job_dir = (workspace / "harbor" / "jobs" / run_id).resolve()
     mode = "oracle" if oracle else "benchmark"
     ledger_append_running(workspace, run_id=run_id, compiled_lock_sha256=compiled_lock_sha,
-                          job_dir=str(job_dir), mode=mode)
+                          job_dir=str(job_dir), mode=mode,
+                          profile_digest=env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"))
 
     # 6. Spawn Harbor with an absolute config path, the parent environment
     #    (PATH/HOME/etc.) merged in, and telemetry forced off.

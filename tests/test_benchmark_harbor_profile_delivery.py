@@ -77,3 +77,30 @@ def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path, monkey
         backend="claude", model="sonnet",
     )
     assert cfg.review_profile.name == "g"  # candidate wins; target config ignored
+
+
+# Task 12 (R12): Harbor ledger/receipt provenance.
+def test_ledger_entry_records_candidate_digest(tmp_path):
+    from daydream.benchmark.harbor import run
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "harbor" / "jobs").mkdir(parents=True)
+    job_dir = str((ws / "harbor" / "jobs" / "job-1").resolve())
+    run.ledger_append_running(
+        ws, run_id="run-1", compiled_lock_sha256="lock",
+        job_dir=job_dir, mode="benchmark",
+        profile_digest="abc123",
+    )
+    led = run._load_ledger(ws)
+    entry = led["runs"][0]
+    assert entry["profile_digest"] == "abc123"
+
+
+def test_receipt_invalidation_inputs_include_candidate_digest():
+    from daydream.benchmark.harbor import run
+
+    inputs = run._calibration_invalidation_inputs(
+        {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "xyz"}
+    )
+    assert "profile_digest" in inputs and inputs["profile_digest"] == "xyz"
