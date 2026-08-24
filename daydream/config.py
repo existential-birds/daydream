@@ -331,6 +331,9 @@ REVIEW_OUTPUT_FILE = ".review-output.md"
 # `uncovered_sweep_max_files` caps how many uncovered files are swept in one run
 # (the remainder is recorded, not silently dropped);
 # `uncovered_sweep_min_hunk_lines` skips files whose hunks are trivially small.
+# After the profile-pipeline migration these are realized through the
+# review-profile pipeline defaults (see ``daydream/review_profile.py``); the
+# module constants remain the nominal defaults (True / 10 / 5).
 DEFAULT_UNCOVERED_SWEEP_ENABLED: bool = True
 DEFAULT_UNCOVERED_SWEEP_MAX_FILES: int = 10
 DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES: int = 5

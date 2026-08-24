@@ -410,7 +410,9 @@ def build_default_profile() -> ReviewProfile:
         "discovery.generic_fallback": Strategy(
             content=(
                 "Review these files for correctness, clarity, and consistency with the "
-                "author's intent. Apply language-agnostic review practices."
+                "author's intent. Read every assigned file in full and the full "
+                "enclosing symbol for each relevant hunk before judging it. Apply "
+                "language-agnostic review practices."
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",
         ),

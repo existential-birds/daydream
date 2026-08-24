@@ -101,7 +101,7 @@ def test_no_files_dropped() -> None:
     assert routed == set(files)
 
 
-def test_missing_skill_routes_to_generic() -> None:
+def test_detected_stack_never_degrades_to_generic() -> None:
     """M3: D-16 removed — a detected stack never degrades to generic without a skill."""
     from daydream.deep.detection import detect_stacks
 

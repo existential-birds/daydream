@@ -1525,8 +1525,8 @@ def build_alternative_review_prompt(
             f"{diff_path} — it is already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
         )
-        _, _, tail = strategy_filled.partition(_rp.ALTERNATIVES_STRATEGY_JUDGMENT_MARKER)
-        body = prefix + (tail or strategy_filled)
+        _, marker, tail = strategy_filled.partition(_rp.ALTERNATIVES_STRATEGY_JUDGMENT_MARKER)
+        body = prefix + (marker + tail if marker else strategy_filled)
     else:
         body = strategy_filled
     parts.append(body + "\n")

@@ -8468,29 +8468,23 @@ async def test_no_parse_phase_and_records_from_output_schema(
     assert loaded["issues"][0]["description"] == "Sample issue"
 
 
-def test_structural_gate_reads_profile_pipeline(monkeypatch):
-    from daydream.deep import orchestrator as o
+def test_structural_gate_resolver_reads_profile_pipeline() -> None:
+    """The structural gate's pre-context resolver reads the profile flag.
 
-    class _Ctx:
-        class _P:
-            structural_enabled = False
-            uncovered_sweep_enabled = True
-            uncovered_sweep_max_files = 10
-            uncovered_sweep_min_hunk_lines = 5
+    Mirrors the inline gate at the top of ``run_deep`` (line: ``_config_pipeline
+    (config).structural_enabled``) that replaced the ``_structural_enabled``
+    helper: the flag is off for a profile that disables ``structural_enabled``
+    and the packaged default keeps it on.
+    """
+    from daydream.deep.orchestrator import _config_pipeline
+    from daydream.runner import RunConfig
 
-        def pipeline(self):
-            return _Ctx._P()
-
-    assert o._structural_enabled(_Ctx()) is False
-
-    class _CtxOn:
-        class _P:
-            structural_enabled = True
-
-        def pipeline(self):
-            return _CtxOn._P()
-
-    assert o._structural_enabled(_CtxOn()) is True
+    assert _config_pipeline(RunConfig(target="/tmp/x")).structural_enabled is True
+    off = _profile_with_pipeline(structural_enabled=False)
+    assert (
+        _config_pipeline(RunConfig(target="/tmp/x", review_profile=off)).structural_enabled
+        is False
+    )
 
 
 def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch):

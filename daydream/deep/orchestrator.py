@@ -333,15 +333,6 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
     return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
 
 
-def _structural_enabled(ctx: FlowContext) -> bool:
-    """Whether the structural meta-stack review is enabled (profile pipeline).
-
-    Default ``True`` preserves current behavior; a profile that disables
-    ``structural_enabled`` removes only the structural assignment/call (M8).
-    """
-    return ctx.pipeline().structural_enabled
-
-
 def _uncovered_sweep_max_files(ctx: FlowContext) -> int:
     """Resolve the per-run uncovered-file sweep capacity cap (issue #309).
 
@@ -4389,8 +4380,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # Structural gating (M8): ``detect_stacks`` still emits the structural
         # meta-stack; a profile that disables ``structural_enabled`` removes only
         # that assignment/call here, before collapse/sharding publish the list.
-        # This pre-context call reads the same resolved pipeline as
-        # ``_structural_enabled`` via ``FlowContext.pipeline()``.
+        # This pre-context call reads the same resolved pipeline that
+        # ``FlowContext.pipeline()`` resolves in-flow.
         if not _config_pipeline(config).structural_enabled:
             stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
         # Issue #172 — tiny-diff short-circuit. When the diff is small enough
