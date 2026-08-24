@@ -424,7 +424,15 @@ class _FixEditingBackend:
         from daydream.backends import ResultEvent, TextEvent
 
         pl = prompt.lower()
-        if "beagle-" in pl and "review" in pl:
+        # Native review prompts are skill-free (#886): dispatch on distinctive
+        # judgment-prose markers instead of a ``beagle-*`` invocation token.
+        if "review" in pl and (
+            "inclusion obligation" in pl
+            or "full change spans" in pl
+            or "language-agnostic review practices" in pl
+            or "assigned to this stack" in pl
+            or "repository-wide interactions" in pl
+        ):
             yield TextEvent(text="Review complete.")
             # Issue #745: the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
             # structured output directly (no separate parse step).
@@ -484,7 +492,7 @@ async def test_shallow_run_captures_recommended_patch(
     exit_code = await run(
         RunConfig(
             target=str(feature_branch_repo),
-            skill="python",
+            stack="python",
             quiet=True,
             cleanup=False,
             shallow=True,

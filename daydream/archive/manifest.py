@@ -542,7 +542,7 @@ def build_manifest(
         archived_at=datetime.now(timezone.utc).isoformat(),
         status=status,
         run_flow=recorder.run_flow.value,
-        skill=config.skill,
+        skill=config.stack,
         model=None,
         backend=_default_backend_name(config),
         review_backend=_resolved_review_backend_name(config),

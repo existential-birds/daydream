@@ -106,7 +106,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     tmp_path: Path, make_work, monkeypatch
 ) -> None:
     """Structural stack flows through build_structural_prompt; language stacks do not."""
-    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep import prompts as _prompts
     from daydream.phases import phase_per_stack_reviews as _phase
 
@@ -138,7 +138,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
         ),
         StackAssignment(
             stack_name=STRUCTURE_STACK_NAME,
-            skill_invocation=STRUCTURE_SKILL,
+            skill_invocation=None,
             files=["a.py"],
             is_docs_only=False,
         ),
@@ -156,7 +156,8 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert len(structural_calls) == 1
     assert len(per_stack_calls) == 1
     assert structural_calls[0]["files"] == ["a.py"]
-    assert structural_calls[0]["skill_invocation"] == f"/{STRUCTURE_SKILL}"
+    assert "skill_invocation" not in structural_calls[0]  # skill-free (M2)
+    assert structural_calls[0]["strategy"]  # profile-owned structural strategy (M4)
     assert "stack_name" not in structural_calls[0]
     assert per_stack_calls[0]["stack_name"] == "python"
 
@@ -206,58 +207,31 @@ class _PiShapeBackend(ScriptedBackend):
         return self._pi.format_skill_invocation(skill_key, args)
 
 
-async def test_per_stack_prompts_use_pi_native_skill_command(
+async def test_per_stack_prompts_are_skill_free(
     tmp_path: Path, make_work
 ) -> None:
-    """Every stack with a skill emits Pi's native /skill:<slug>."""
-    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    """M12: built-in stacks dispatch native per-stack prompts with no /skill: token."""
+    from daydream.config import STRUCTURE_STACK_NAME
 
     backend = _PiShapeBackend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
+    # Built-in stacks carry no skill_invocation (M2); every dispatch is native.
     stacks = [
-        StackAssignment(
-            stack_name="python",
-            skill_invocation="beagle-python:review-python",
-            files=["api.py"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name="react",
-            skill_invocation="beagle-react:review-frontend",
-            files=["App.tsx"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name="go",
-            skill_invocation="beagle-go:review-go",
-            files=["main.go"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name="rust",
-            skill_invocation="beagle-rust:review-rust",
-            files=["lib.rs"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name="elixir",
-            skill_invocation="beagle-elixir:review-elixir",
-            files=["app.ex"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name="generic",
-            skill_invocation=None,
-            files=["notes.txt"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name=STRUCTURE_STACK_NAME,
-            skill_invocation=STRUCTURE_SKILL,
-            files=["api.py", "App.tsx"],
-            is_docs_only=False,
-        ),
+        StackAssignment(stack_name="python", skill_invocation=None,
+            files=["api.py"], is_docs_only=False),
+        StackAssignment(stack_name="react", skill_invocation=None,
+            files=["App.tsx"], is_docs_only=False),
+        StackAssignment(stack_name="go", skill_invocation=None,
+            files=["main.go"], is_docs_only=False),
+        StackAssignment(stack_name="rust", skill_invocation=None,
+            files=["lib.rs"], is_docs_only=False),
+        StackAssignment(stack_name="elixir", skill_invocation=None,
+            files=["app.ex"], is_docs_only=False),
+        StackAssignment(stack_name="generic", skill_invocation=None,
+            files=["notes.txt"], is_docs_only=False),
+        StackAssignment(stack_name=STRUCTURE_STACK_NAME, skill_invocation=None,
+            files=["api.py", "App.tsx"], is_docs_only=False),
     ]
 
     results, failures = await phase_per_stack_reviews(
@@ -273,26 +247,13 @@ async def test_per_stack_prompts_use_pi_native_skill_command(
     assert len(backend.prompts) == 7
     joined = "\n\n".join(backend.prompts)
 
-    for token in (
-        "/skill:review-python",
-        "/skill:review-frontend",
-        "/skill:review-go",
-        "/skill:review-rust",
-        "/skill:review-elixir",
-        "/skill:review-structure",
-    ):
-        assert token in joined, f"missing {token} in dispatched prompts"
+    # No skill token or raw Beagle key may appear anywhere.
+    for token in ("/skill:", "/beagle-", "beagle-", "$review-"):
+        assert token not in joined, f"skill token {token} leaked into a per-stack prompt"
 
-    # No raw Beagle key may leak into any prompt.
-    for raw in (
-        "beagle-python:review-python",
-        "beagle-react:review-frontend",
-        "beagle-go:review-go",
-        "beagle-rust:review-rust",
-        "beagle-elixir:review-elixir",
-        "beagle-core:review-structure",
-    ):
-        assert raw not in joined, f"raw key {raw} leaked into a prompt"
+    # Every language stack still gets a per-stack (non-generic) prompt.
+    for stack_name in ("python", "react", "go", "rust", "elixir"):
+        assert stack_name in joined
 
     # Generic fallback stack injects no skill command at all.
     generic_prompt = next(p for p in backend.prompts if "generic-fallback" in p)
@@ -353,3 +314,32 @@ async def test_fanout_low_concurrency(tmp_path: Path, make_work, monkeypatch) ->
     )
 
     assert captured == [2]
+
+
+def test_shards_carry_scope_not_skill() -> None:
+    """M2: shards inherit stack name / files / frontier, never a skill field."""
+    from daydream.deep import sharding
+    from daydream.deep.detection import detect_stacks
+
+    files = ["a.py", "b.py", "c.py", "d.py"]
+    stacks = detect_stacks(files)
+    python = next(s for s in stacks if s.stack_name == "python")
+    assert python.skill_invocation is None  # built-in stack is skill-free
+
+    shards = sharding.shard_stacks(
+        [python],
+        # Synthetic diff so every file has 1 changed byte.
+        "index 0..1 100644\n--- a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+x\n"
+        "index 0..1 100644\n--- a.py\n+++ b/b.py\n@@ -1 +1 @@\n-x\n+x\n"
+        "index 0..1 100644\n--- a.py\n+++ b/c.py\n@@ -1 +1 @@\n-x\n+x\n"
+        "index 0..1 100644\n--- a.py\n+++ b/d.py\n@@ -1 +1 @@\n-x\n+x\n",
+        max_files=2,
+        max_bytes=1_000_000,
+        fanout_cap=4,
+        frontier_max=2,
+    )
+    assert len(shards) >= 2  # forced split -> shard path exercised
+    for shard in shards:
+        assert shard.stack_name.startswith("python")  # stack identity preserved
+        assert shard.skill_invocation is None  # no skill field copied
+        assert shard.files and shard.frontier_files is not None

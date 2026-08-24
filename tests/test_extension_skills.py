@@ -14,9 +14,10 @@ def test_fork_stack_rule_and_remap_reach_detection(ext_dir: ExtDir) -> None:
     )
     stacks = detect_stacks(
         ["api/v1.proto", "svc/app.py"],
-        skill_availability={"python"},
         registry=build_registry(),
     )
     by_name = {s.stack_name: s.skill_invocation for s in stacks}
     assert by_name["proto"] == "ro-proto:review-proto"
-    assert by_name["python"] == "ro-python:review-python"
+    # Built-in stacks are registry-independent (M1/M2): a fork's `stack:python`
+    # skill-slot remap does NOT attach a skill to the built-in python scope.
+    assert by_name["python"] is None

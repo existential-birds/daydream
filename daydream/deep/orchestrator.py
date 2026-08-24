@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 from dataclasses import asdict
 from functools import lru_cache
@@ -42,9 +41,6 @@ from daydream.config import (
     DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE,
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_TOOL_CALL_BUDGET,
-    DEFAULT_UNCOVERED_SWEEP_ENABLED,
-    DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
-    DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
     DEFAULT_WALL_BUDGET_S,
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
@@ -263,6 +259,21 @@ def _resolve_config_value[T: (int, float, bool)](config: RunConfig, attr: str, d
     return default
 
 
+def _config_pipeline(config: RunConfig):
+    """Return the resolved profile pipeline for a ``RunConfig`` (pre-context).
+
+    ``FlowContext.pipeline()`` is the in-flow accessor; this mirrors it for the
+    pre-flight preamble (printed before the FlowContext is constructed) and for
+    any config-only call site. Falls back to the packaged default pipeline when
+    no profile was resolved (``review_profile is None``).
+    """
+    if config.review_profile is not None:
+        return config.review_profile.profile.pipeline
+    from daydream.review_profile import build_default_profile
+
+    return build_default_profile().pipeline
+
+
 def _shallow_fanout_threshold(config: RunConfig) -> int:
     """Resolve the tiny-diff short-circuit threshold (issue #172, AC7).
 
@@ -322,39 +333,24 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
     return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
 
 
-def _uncovered_sweep_max_files(config: RunConfig) -> int:
+def _uncovered_sweep_max_files(ctx: FlowContext) -> int:
     """Resolve the per-run uncovered-file sweep capacity cap (issue #309).
 
-    Integer-only non-negative: an explicit ``0`` disables the sweep (nothing is
-    swept) while a negative value, a float, a bool, or any non-int degrades to
-    the named default -- the same integer-only predicate as the file-config
-    coercion ``config_file._coerce_non_negative_int`` (reused, import read-only)
-    so a directly-constructed ``RunConfig`` cannot smuggle an invalid capacity
-    in. ``filter_sweepable_files`` slices with ``max_files``, so a float here
-    would raise TypeError and the fail-open wrapper would discard the ENTIRE
-    sweep -- type validation lives at the resolver.
+    Reads the profile pipeline's ``uncovered_sweep_max_files`` bound, which
+    ``review_profile._parse_pipeline`` has already host-clamped (HOST_CAPS
+    floor 1, ceiling 10) before the digest is computed, so no per-run
+    coercion is needed here.
     """
-    value = _resolve_config_value(
-        config, "uncovered_sweep_max_files", DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    )
-    coerced = _coerce_non_negative_int(value)
-    return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    return ctx.pipeline().uncovered_sweep_max_files
 
 
-def _uncovered_sweep_min_hunk_lines(config: RunConfig) -> int:
+def _uncovered_sweep_min_hunk_lines(ctx: FlowContext) -> int:
     """Resolve the minimum hunk size for a file to be swept (issue #309).
 
-    Integer-only non-negative: ``0`` removes the hunk-size floor (every
-    uncovered file is eligible) while a negative value, a float, a bool, or any
-    non-int degrades to the named default -- mirroring
-    ``config_file._coerce_non_negative_int`` so a negative or malformed floor
-    can never make zero-change/trivial blocks eligible.
+    Reads the profile pipeline's ``uncovered_sweep_min_hunk_lines`` bound,
+    already host-clamped (HOST_CAPS floor 5) by ``review_profile._parse_pipeline``.
     """
-    value = _resolve_config_value(
-        config, "uncovered_sweep_min_hunk_lines", DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-    )
-    coerced = _coerce_non_negative_int(value)
-    return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+    return ctx.pipeline().uncovered_sweep_min_hunk_lines
 
 
 def _deep_shard_enabled(config: RunConfig) -> bool:
@@ -408,17 +404,16 @@ def _deep_shard_frontier_max(config: RunConfig) -> int:
 
 
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
-    """Resolve the uncovered-file sweep toggle (issue #309).
+    """Resolve the uncovered-file sweep toggle from the profile pipeline (issue #309).
 
-    Precedence mirrors ``_precision_mode``: ``RunConfig`` field > file-config
-    scalar > built-in default (:data:`DEFAULT_UNCOVERED_SWEEP_ENABLED`, the
-    single source of configuration defaults). Resume at ``merge``/``fix``
-    disables the step outright -- the per-stack records are already finalized
-    on disk, so a sweep would re-review stale coverage.
+    Reads ``ctx.pipeline().uncovered_sweep_enabled`` (already host-clamped);
+    resume at ``merge``/``fix`` disables the step outright -- the per-stack
+    records are already finalized on disk, so a sweep would re-review stale
+    coverage.
     """
     if ctx.config.start_at in ("merge", "fix"):
         return False
-    return _resolve_config_value(ctx.config, "uncovered_sweep", DEFAULT_UNCOVERED_SWEEP_ENABLED)
+    return ctx.pipeline().uncovered_sweep_enabled
 
 
 def _uncovered_sweep_preflight_note(config: RunConfig, changed_files: list[str]) -> str | None:
@@ -428,16 +423,16 @@ def _uncovered_sweep_preflight_note(config: RunConfig, changed_files: list[str])
     sweep will review are not known until after per-stack reviews + parse. Every
     swept file adds one review invocation AND one parse invocation (parse per
     stack file), so an honest estimate appends an upper-bound note: 2 agents per
-    file, capped by the configured capacity and the number of changed files that
+    file, capped by the pipeline capacity and the number of changed files that
     could possibly be swept. Returns ``None`` when the sweep is disabled or
     nothing could be swept.
     """
     if config.start_at in ("merge", "fix"):
         return None
-    if not _resolve_config_value(config, "uncovered_sweep", DEFAULT_UNCOVERED_SWEEP_ENABLED):
+    pipeline = _config_pipeline(config)
+    if not pipeline.uncovered_sweep_enabled:
         return None
-    max_files = _uncovered_sweep_max_files(config)
-    eligible = min(len(changed_files), max_files)
+    eligible = min(len(changed_files), pipeline.uncovered_sweep_max_files)
     if eligible <= 0:
         return None
     return (
@@ -459,14 +454,17 @@ def _collapse_stacks_for_tiny_diff(
       - If ≥2 distinct *non-structural* stacks exist, merge them into one
         combined assignment. A code+docs/config diff (exactly one *real*
         language stack plus the ``generic`` bucket) absorbs the generic files
-        into the language stack so its per-language Beagle skill survives; only
-        ≥2 *real* language stacks fall back to ``generic`` (a single agent
-        cannot invoke two per-language Beagle skills).
+        into the language stack so its scope survives; only ≥2 *real* language
+        stacks fall back to ``generic`` (a single agent cannot cover two
+        per-language scopes).
       - The ``STRUCTURE_STACK_NAME`` meta-stack stays as its own assignment so
         structural findings remain correctly tagged ``lens="structural"``
         downstream (AC6).
       - If only one non-structural stack exists (the common 1-file case), it is
-        preserved unchanged — the per-language skill survives.
+        preserved unchanged.
+
+    Built-in stacks carry no skill-invocation field (M2): the combined
+    assignment is scope metadata only.
 
     Returns ``(stacks, single_stack_mode)`` where ``single_stack_mode`` reports
     whether the tiny-diff gate is active (caller uses it to skip merge+arbiter).
@@ -488,14 +486,16 @@ def _collapse_stacks_for_tiny_diff(
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
 
     # When ≥2 distinct non-structural stacks exist, merge them into one combined
-    # assignment. The combined skill depends on how many *real* language stacks
+    # assignment. The combined scope depends on how many *real* language stacks
     # are present:
     #   - exactly one real language stack + the generic bucket (a code+docs/config
     #     tiny diff, e.g. api.py + README.md): absorb the generic files into the
-    #     language stack so its per-language Beagle skill survives (the
-    #     skill-preservation goal stated in this docstring).
+    #     language stack so its scope survives.
     #   - ≥2 real language stacks (e.g. python + react): a single agent cannot
-    #     invoke two per-language Beagle skills, so fall back to generic.
+    #     cover two per-language scopes, so fall back to generic.
+    #
+    # M2: every collapsed assignment (built-in or fork-registered) carries
+    # no skill-invocation field -- scope metadata only.
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
         real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
@@ -506,18 +506,15 @@ def _collapse_stacks_for_tiny_diff(
                     *structural,
                     StackAssignment(
                         stack_name=lang.stack_name,
-                        skill_invocation=lang.skill_invocation,
+                        skill_invocation=None,
                         files=combined_files,
                         is_docs_only=False,
                     ),
                 ],
                 True,
             )
-        # ≥2 real-language stacks: one agent cannot invoke two per-language
-        # Beagle skills, so the combined assignment uses the generic-fallback
-        # skill (skill_invocation=None). is_docs_only is False by construction:
-        # ≥2 non-structural stacks means at least one is a real language stack
-        # (docs-only diff → single generic stack).
+        # ≥2 real-language stacks: one agent cannot cover two per-language scopes,
+        # so the combined assignment uses the native generic-fallback scope.
         combined = StackAssignment(
             stack_name=GENERIC_STACK,
             skill_invocation=None,
@@ -529,48 +526,6 @@ def _collapse_stacks_for_tiny_diff(
     # 0 or 1 non-structural stacks: nothing to collapse (lever 1 is a no-op), but
     # the gate is still active so the caller applies lever 2 (skip merge+arbiter).
     return stacks, True
-
-
-def get_installed_skills() -> set[str] | None:
-    """Detect which Beagle review-skill plugins are installed.
-
-    Reads the Claude Code plugin registry at
-    ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json`` (default
-    ``~/.claude``) and maps installed plugin names back to stack keys via
-    the extension registry's ``stack:<key>`` skill slots, so a remapped
-    stack checks the remapped plugin prefix. A stack is considered
-    "installed" iff its skill's plugin is present.
-
-    Returns:
-        Set of installed stack keys (subset of the registry's stack keys), or
-        ``None`` if the registry cannot be read (missing file, bad JSON).
-        ``None`` signals "unknown" so callers can fall back to optimistic
-        availability without forcing every stack through generic.
-    """
-    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
-    registry = config_dir / "plugins" / "installed_plugins.json"
-    try:
-        data = json.loads(registry.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    # Structurally invalid payloads (non-dict root, non-dict `plugins`) also
-    # signal "unknown" so callers fall back to optimistic availability
-    # instead of aborting deep mode on an AttributeError / TypeError.
-    if not isinstance(data, dict):
-        return None
-    plugins = data.get("plugins")
-    if not isinstance(plugins, dict):
-        return None
-    # Keys in the registry look like "<plugin-name>@<marketplace>".
-    installed_plugins = {key.split("@", 1)[0] for key in plugins}
-    skill_registry = get_registry()
-    installed: set[str] = set()
-    for stack_key in skill_registry.stack_keys():
-        # Slot values are "<plugin-name>:<skill-name>".
-        plugin_prefix = skill_registry.skill(f"stack:{stack_key}").split(":", 1)[0]
-        if plugin_prefix in installed_plugins:
-            installed.add(stack_key)
-    return installed
 
 
 def _diff_changed_files(diff: str) -> list[str]:
@@ -599,10 +554,9 @@ def _diff_changed_files(diff: str) -> list[str]:
 
 
 def _stack_preflight_line(stack: StackAssignment) -> str:
-    """Format one detected-stack line for the pre-flight notice."""
-    skill = stack.skill_invocation or "generic fallback"
+    """Format one detected-stack line for the pre-flight notice (skill-free, M2)."""
     docs_suffix = " (docs-only)" if stack.is_docs_only else ""
-    return f"{stack.stack_name}: {skill} -- {len(stack.files)} file(s){docs_suffix}"
+    return f"{stack.stack_name}: {len(stack.files)} file(s){docs_suffix}"
 
 
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1117,6 +1071,12 @@ async def _step_exploration(ctx: FlowContext) -> None:
                     diff,
                     config.exploration_depth,
                     diff_ref=_compute_diff_ref(target_dir),
+                    strategies={
+                        "exploration.pattern_scan": ctx.strategy("exploration.pattern_scan"),
+                        "exploration.dependency_trace": ctx.strategy("exploration.dependency_trace"),
+                        "exploration.test_mapping": ctx.strategy("exploration.test_mapping"),
+                        "exploration.repository_survey": ctx.strategy("exploration.repository_survey"),
+                    },
                 )
             console.print(render_exploration_summary(config.exploration_context))
         if config.exploration_context is not None:
@@ -1216,6 +1176,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             exploration_dir=ctx.data["exploration_dir"],
             pr_description=pr_description,
             diff_text=_ttt_diff_text(ctx),
+            strategy=ctx.strategy("intent"),
         )
     # Each TTT step persists its own half, so a later step's failure cannot
     # discard an artifact this one already produced.
@@ -1241,6 +1202,7 @@ async def _wonder(ctx: FlowContext) -> None:
                 intent_summary,
                 exploration_dir=ctx.data["exploration_dir"],
                 diff_text=_ttt_diff_text(ctx),
+                strategy=ctx.strategy("alternatives"),
             )
 
     alts_p = _alternatives_path(ctx.data["dd"])
@@ -1307,6 +1269,11 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 diff_text=ctx.data["diff"],
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
                 include_alternatives=include_alternatives,
+                strategies={
+                    "discovery.per_stack": ctx.strategy("discovery.per_stack"),
+                    "discovery.structural": ctx.strategy("discovery.structural"),
+                    "discovery.generic_fallback": ctx.strategy("discovery.generic_fallback"),
+                },
                 # Issue #731: always write deterministic coverage receipts so
                 # the sweep credits reviewed files on every run (decoupled from
                 # sharding; #740 updates the evidence gate and bounds).
@@ -1581,8 +1548,8 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
         load_hunk_index(dd.parent),
-        min_hunk_lines=_uncovered_sweep_min_hunk_lines(config),
-        max_files=_uncovered_sweep_max_files(config),
+        min_hunk_lines=_uncovered_sweep_min_hunk_lines(ctx),
+        max_files=_uncovered_sweep_max_files(ctx),
     )
 
     stats: dict[str, Any] = {
@@ -1649,6 +1616,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         for n, file in enumerate(swept_files):
             output_path = dd / f"uncovered-{n}-review.md"
             prompt = build_uncovered_sweep_prompt(
+                strategy=ctx.strategy("uncovered_review"),
                 file=file,
                 hunks=diff_block_for_file(full_diff, file) or "",
                 intent_path=ctx.data["intent_path"],
@@ -1777,7 +1745,10 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     # `arbiter_complete_path` so resume reasoning cannot under-read it as
     # arbiter-only (#232 review).
     adjudication_marker = adjudication_complete_path(dd)
-    if config.start_at != "merge" or not adjudication_marker.is_file():
+    if (
+        ctx.pipeline().arbitration.enabled
+        and (config.start_at != "merge" or not adjudication_marker.is_file())
+    ):
         arbiter_targets = select_arbiter_targets(all_records, record_sources)
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
@@ -1803,6 +1774,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     alternatives_path=ctx.data["alts_path"],
                     exploration_dir=ctx.data["exploration_dir"],
                     intent_authoritative=ctx.data.get("intent_authoritative", False),
+                    strategy=ctx.strategy("arbitration"),
                 )
                 # Identity gate: only resume when merge runs on the very same
                 # backend instance. A per-phase override that resolves a
@@ -1828,7 +1800,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # is the exclusion set so nothing high-severity / contested is re-judged
         # here. One batched agent call, resolved via the cheaper `suppression`
         # phase key (Sonnet default) -- never per-finding Opus.
-        if _precision_mode(config):
+        if ctx.pipeline().suppression.enabled or _precision_mode(config):
             suppression_exclude = [
                 i for i, r in enumerate(all_records) if id(r) in arbitrated_ids
             ]
@@ -1845,6 +1817,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         intent_path=ctx.data["intent_path"],
                         alternatives_path=ctx.data["alts_path"],
                         exploration_dir=ctx.data["exploration_dir"],
+                        strategy=ctx.strategy("suppression"),
                     )
                 all_records, record_sources = _apply_adjudication_verdicts(
                     all_records, record_sources, suppression_targets, sup_verdicts,
@@ -2015,6 +1988,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
             structural_records_path=ctx.data["structural_records_path"],
             intent_authoritative=ctx.data.get("intent_authoritative", False),
             continuation=ctx.data.get("arbiter_continuation"),
+            strategy=ctx.strategy("merge"),
         )
     except CrossStackMergeError as exc:
         _salvage_merge_failure(ctx, exc)
@@ -2272,6 +2246,7 @@ async def _step_supervise(ctx: FlowContext) -> None:
                 intent_path=ctx.data["intent_path"],
                 alternatives_path=ctx.data["alts_path"],
                 exploration_dir=ctx.data["exploration_dir"],
+                strategy=ctx.strategy("supervision"),
             )
     kept, held, events = apply_findings_verdicts(items, verdicts)
     items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
@@ -2405,6 +2380,7 @@ async def _step_verify(ctx: FlowContext) -> None:
             ctx.work,
             merged_items_path=ctx.data["items_file"],
             deep_dir=dd,
+            strategy=ctx.strategy("verification"),
         )
     print_verification_summary(console, verdicts_file)
 
@@ -3820,7 +3796,9 @@ async def _step_parse_feedback(ctx: FlowContext) -> Stop | None:
     """Parse the fetched feedback into actionable items; stop when none."""
     try:
         async with phase_scope(DaydreamPhase.PARSE):
-            feedback_items = await phase_parse_feedback(ctx.backend_for("parse"), ctx.work)
+            feedback_items = await phase_parse_feedback(
+                ctx.backend_for("parse"), ctx.work, strategy=ctx.strategy("parse")
+            )
     except ValueError:
         print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
         return Stop(1)
@@ -4222,24 +4200,6 @@ async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
         return await run_flow(ctx.registry, "deep", ctx)
 
 
-def _shallow_skill_invocation(config: RunConfig) -> str | None:
-    """Resolve the ``--skill`` stack slot for shallow mode (#330).
-
-    Mirrors the old shallow preamble's precedence: ``stack:<skill>`` slot, then
-    a skill value that is itself a registered slot value. ``None`` (no skill or
-    unresolvable skill) falls back to the generic-fallback review.
-    """
-    if config.skill is None:
-        return None
-    registry = get_registry()
-    resolved = registry.skill_if_registered(f"stack:{config.skill}")
-    if resolved is not None:
-        return resolved
-    if config.skill in registry.skill_slots().values():
-        return config.skill
-    return None
-
-
 def _collapse_stacks_for_shallow(
     stacks: list[StackAssignment],
     changed_files: list[str],
@@ -4251,17 +4211,19 @@ def _collapse_stacks_for_shallow(
     the structural meta-stack separate, so structural findings stay correctly
     tagged ``lens="structural"`` downstream. Returns ``(stacks, True)``.
 
-    The combined assignment's skill, in precedence order:
+    The combined assignment's stack, in precedence order:
 
-    - an explicit ``--skill`` (CLI) wins — the combined stack is named by it;
-    - otherwise a *sole* detected non-structural stack preserves its
-      per-language Beagle skill (e.g. ``beagle-python:review-python`` for a
-      Python diff), absorbing any generic/docs files — so ``daydream --shallow
-      <repo>`` without ``--skill`` uses the language reviewer instead of the
+    - an explicit ``--stack`` (CLI) wins — the combined stack is named by it;
+    - otherwise a *sole* detected non-structural stack preserves its name,
+      absorbing any generic/docs files — so ``daydream --shallow <repo>``
+      without ``--stack`` uses the language reviewer instead of the native
       generic fallback (#6);
-    - otherwise (multiple real-language stacks — one agent cannot invoke two
-      per-language skills — or no real language at all) the combined assignment
-      uses the generic-fallback skill.
+    - otherwise (multiple real-language stacks — one agent cannot review two
+      per-language scopes — or no real language at all) the combined assignment
+      uses the native generic-fallback scope.
+
+    Every constructed StackAssignment carries no skill-invocation field (M2):
+    collapsed scopes never retain even a fork-registered stack's StackRule.skill.
     """
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
     combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
@@ -4269,24 +4231,28 @@ def _collapse_stacks_for_shallow(
     non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
     real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
 
-    if config.skill is not None:
+    if config.stack is not None:
         combined = StackAssignment(
-            stack_name=config.skill,
-            skill_invocation=_shallow_skill_invocation(config),
+            stack_name=config.stack,
+            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )
-    elif len(real_language) == 1 and real_language[0].skill_invocation is not None:
-        # Skill-preservation: the sole real-language stack survives unchanged
-        # (mirrors ``_collapse_stacks_for_tiny_diff`` for code+docs diffs).
+    elif len(real_language) == 1:
+        # Scope preservation: a sole real-language stack survives unchanged,
+        # absorbing any generic/docs files. The surviving stack carries no
+        # skill (M2): even a fork-registered sole stack's StackRule.skill is dropped.
         lang = real_language[0]
         combined = StackAssignment(
             stack_name=lang.stack_name,
-            skill_invocation=lang.skill_invocation,
+            skill_invocation=None,
             files=combined_files,
             is_docs_only=False,
         )
     else:
+        # Multiple real-language stacks (one agent cannot cover two per-language
+        # scopes) or no real language at all: the combined assignment uses the
+        # native generic-fallback scope (M2: no skill field).
         combined = StackAssignment(
             stack_name=GENERIC_STACK,
             skill_invocation=None,
@@ -4406,11 +4372,18 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                     )
                     return 1
 
-        # Stack detection (from diff file list). Availability is resolved once in
-        # runner.run and threaded via config; None flows through to detect_stacks'
-        # optimistic default.
+        # Stack detection (from diff file list). Built-in detection is
+        # registry-independent (M1); fork stack rules still resolve via the
+        # registry inside detect_stacks.
         changed_files = _diff_changed_files(diff)
-        stacks = detect_stacks(changed_files, skill_availability=config.skill_availability)
+        stacks = detect_stacks(changed_files)
+        # Structural gating (M8): ``detect_stacks`` still emits the structural
+        # meta-stack; a profile that disables ``structural_enabled`` removes only
+        # that assignment/call here, before collapse/sharding publish the list.
+        # This pre-context call reads the same resolved pipeline that
+        # ``FlowContext.pipeline()`` resolves in-flow.
+        if not _config_pipeline(config).structural_enabled:
+            stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
         # Issue #172 — tiny-diff short-circuit. When the diff is small enough
         # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
         # to a single combined assignment and skip merge+arbiter downstream.

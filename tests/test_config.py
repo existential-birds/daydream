@@ -4,7 +4,6 @@ import pytest
 
 from daydream.config import (
     AUDIT_CATEGORIES,
-    AUDIT_SKILL_MAP,
     DEEP_PHASE_DEFAULT_EFFORT,
     DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
@@ -13,6 +12,8 @@ from daydream.config import (
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
     REASONING_EFFORT_LEVELS,
+    STACK_CHOICES,
+    STRUCTURE_STACK_NAME,
 )
 
 PHASE_NAMES = {
@@ -51,6 +52,20 @@ def test_audit_categories_match_playbook() -> None:
     }
 
 
+def test_stack_choices_are_neutral_stack_names() -> None:
+    """M1: STACK_CHOICES names built-in scopes, never skill strings."""
+    assert STACK_CHOICES == (
+        "python",
+        "react",
+        "elixir",
+        "go",
+        "rust",
+        "ios",
+    )
+    for stack in STACK_CHOICES:
+        assert "/" not in stack and ":" not in stack
+
+
 def test_quick_effort_tier_uses_high_confidence_core_categories() -> None:
     assert EFFORT_TIERS["quick"].categories == (
         "correctness",
@@ -67,10 +82,12 @@ def test_effort_tiers_carry_partition_group_ceilings() -> None:
 
 
 def test_audit_skill_map_values_are_plugin_skill_names() -> None:
-    for stack_skills in AUDIT_SKILL_MAP.values():
-        for skill in stack_skills.values():
-            plugin, separator, skill_name = skill.partition(":")
-            assert separator == ":" and plugin and skill_name
+    """M10: AUDIT_SKILL_MAP removed — improve categories are profile-native scopes."""
+    # AUDIT_SKILL_MAP is gone; categories map to profile strategies, not skills.
+    for category in AUDIT_CATEGORIES:
+        assert category  # each category remains a valid profile strategy key scope
+        assert "beagle" not in category
+        assert "skill" not in category
 
 
 def test_phase_default_models_covers_all_backends():
@@ -213,19 +230,7 @@ def test_default_exploration_model_matches_claude_phase_default():
     assert DEFAULT_EXPLORATION_MODEL == PHASE_DEFAULT_MODELS["claude"]["exploration"]
 
 
-def test_structure_skill_constant_not_user_selectable() -> None:
-    """The structural reviewer is a meta-stack: invokable internally, never via CLI."""
-    from daydream.config import (
-        REVIEW_SKILLS,
-        SKILL_MAP,
-        STRUCTURE_SKILL,
-        STRUCTURE_STACK_NAME,
-        ReviewSkillChoice,
-    )
-
-    assert STRUCTURE_SKILL == "beagle-core:review-structure"
+def test_structure_constant_is_scope_metadata_not_a_skill() -> None:
+    """M2: the structural meta-stack is a scope name, never a skill string."""
     assert STRUCTURE_STACK_NAME == "structure"
-    assert STRUCTURE_SKILL not in SKILL_MAP.values()
-    assert STRUCTURE_STACK_NAME not in SKILL_MAP
-    assert STRUCTURE_SKILL not in REVIEW_SKILLS.values()
-    assert all(choice.name != "STRUCTURE" for choice in ReviewSkillChoice)
+    assert "/" not in STRUCTURE_STACK_NAME and ":" not in STRUCTURE_STACK_NAME

@@ -1,9 +1,9 @@
 """Built-in registry seed.
 
 ``register_builtins(registry)`` seeds the registry with everything daydream
-does today: built-in skill slots, prompt names, and the two flow definitions
-(deep, improve). Review/comment/shallow/pr-feedback are modes of the deep flow
-(#330).
+does today: prompt names, the seeded pr-feedback skill slots, and the two flow
+definitions (deep, improve). Review/comment/shallow/pr-feedback are modes of
+the deep flow (#330).
 
 Uses only function-local late imports (import-cycle guard): this module must
 not import from ``daydream.runner`` or ``daydream.phases`` at module level.
@@ -18,12 +18,16 @@ if TYPE_CHECKING:
 
 
 def register_builtins(registry: Registry) -> None:
-    """Seed ``registry`` with daydream's built-in phases, flows, skills, and prompts."""
+    """Seed ``registry`` with daydream's built-in phases, flows, and prompts.
+
+    No built-in review skill slots are seeded: built-in Deep/Improve reviews are
+    registry-independent and profile-driven. The only seeded skill slots are the
+    pr-feedback skills (``#887`` deletes those alongside generic skill machinery).
+    """
     from daydream import config
 
-    for stack_key, skill in config.SKILL_MAP.items():
-        registry.override_skill(f"stack:{stack_key}", skill)
-    registry.override_skill("structural", config.STRUCTURE_SKILL)
+    # No stack:* / structural / audit:* review skill slots (M1/M10). The only
+    # remaining seeded skill slots are the PR-feedback flow's (removed in #887).
     registry.override_skill("pr-feedback-fetch", config.PR_FEEDBACK_FETCH_SKILL)
     registry.override_skill("pr-feedback-respond", config.PR_FEEDBACK_RESPOND_SKILL)
 
@@ -34,14 +38,8 @@ def register_builtins(registry: Registry) -> None:
 
 
 def _register_improve_builtins(registry: Registry) -> None:
-    """Seed improve audit skill slots and named prompts."""
-    from daydream import config
+    """Register the native improve named prompts (no audit skill slots)."""
     from daydream.improve import prompts
-
-    for category, stack_skills in config.AUDIT_SKILL_MAP.items():
-        for stack, skill in stack_skills.items():
-            slot = f"audit:{category}" if stack == "*" else f"audit:{category}:{stack}"
-            registry.override_skill(slot, skill)
 
     registry.override_prompt("audit", prompts.build_audit_prompt)
     registry.override_prompt("vet", prompts.build_vet_prompt)

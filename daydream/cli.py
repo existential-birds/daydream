@@ -864,12 +864,13 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
 
-    # Skill selection (overrides auto-detect)
+    # Stack selection (overrides auto-detect)
     parser.add_argument(
-        "-s", "--skill",
+        "-s", "--stack",
         choices=["python", "react", "elixir", "go", "rust", "ios"],
         default=None,
-        help="Force a specific review skill (default: auto-detect from changed files)",
+        dest="stack",
+        help="Force a specific stack (default: auto-detect from changed files)",
     )
 
     # Cleanup / phase resume
@@ -1038,7 +1039,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
 
     return RunConfig(
         target=args.target,
-        skill=args.skill,
+        stack=args.stack,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         file_config=file_config,
@@ -1099,7 +1100,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
 
     return RunConfig(
         target=args.target,
-        skill=None,
+        stack=None,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         file_config=file_config,

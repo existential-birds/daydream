@@ -9,6 +9,12 @@ from daydream.phases import phase_cross_stack_merge
 from tests.harness.backend import ScriptedBackend, Turn
 
 
+def _default_strategy(stage: str) -> str:
+    from daydream import review_profile as _rp
+
+    return _rp.build_default_profile().strategies[stage].content
+
+
 def test_merge_prompt_specifies_structured_item_list(tmp_path: Path) -> None:
     """D-25: the agent is told to return a schema item list with lens + severity."""
     intent = tmp_path / "intent.md"
@@ -17,6 +23,7 @@ def test_merge_prompt_specifies_structured_item_list(tmp_path: Path) -> None:
     out = tmp_path / ".review-output.md"
     records = [tmp_path / "r1.json", tmp_path / "r2.json"]
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=records,
         intent_path=intent,
         alternatives_path=alts,
@@ -33,6 +40,7 @@ def test_merge_prompt_specifies_structured_item_list(tmp_path: Path) -> None:
 def test_merge_prompt_mandates_cross_stack_lens(tmp_path: Path) -> None:
     """D-26: cross-stack concerns are tagged via the cross-stack lens."""
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "r.json"],
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
@@ -50,6 +58,7 @@ def test_merge_prompt_references_records_by_path(tmp_path: Path) -> None:
         tmp_path / "deep" / "stack-react-records.json",
     ]
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=records,
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
@@ -63,6 +72,7 @@ def test_merge_prompt_references_records_by_path(tmp_path: Path) -> None:
 def test_merge_prompt_mentions_dedup_candidates(tmp_path: Path) -> None:
     """D-27: merger is told to read dedup-candidates and adjudicate."""
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "r.json"],
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
@@ -136,6 +146,7 @@ def test_merge_prompt_accepts_shard_records_paths(tmp_path: Path) -> None:
     records = [tmp_path / "deep" / "stack-python#0-records.json",
                tmp_path / "deep" / "stack-python#1-records.json"]
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=records,
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",
@@ -148,6 +159,7 @@ def test_merge_prompt_accepts_shard_records_paths(tmp_path: Path) -> None:
 
 def test_merge_prompt_tags_alternatives_items_as_wonder(tmp_path: Path) -> None:
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "r.json"],
         intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json",

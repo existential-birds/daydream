@@ -37,7 +37,6 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
@@ -53,6 +52,11 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
+
+# Generic skill-error detection for the extension/backend skill machinery (deleted
+# alongside that machinery in #887). Built-in Deep/Improve reviews no longer invoke
+# skills, so this is never reached on the native review path.
+_UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
 
 _logger = logging.getLogger(__name__)
 
@@ -628,7 +632,7 @@ async def run_agent(
                             if isinstance(event, TextEvent):
                                 output_parts.append(event.text)
 
-                                skill_match = re.search(UNKNOWN_SKILL_PATTERN, event.text)
+                                skill_match = re.search(_UNKNOWN_SKILL_PATTERN, event.text)
                                 if skill_match:
                                     if not use_callback and not _state.log_mode:
                                         agent_renderer.finish()

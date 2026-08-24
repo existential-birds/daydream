@@ -27,7 +27,6 @@ import anyio
 import pytest
 
 from daydream.backends import ResultEvent, TextEvent
-from daydream.config import SKILL_MAP
 from daydream.eval.analyzer import _records_issues
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from tests.harness.git_helpers import bare_remote as _bare_remote
@@ -45,6 +44,7 @@ from tests.harness.stub_backend import (
 if TYPE_CHECKING:
     from daydream.config_file import DaydreamFileConfig
     from daydream.pr_review import PRInfo
+    from daydream.review_profile import ResolvedProfile
     from daydream.runner import RunConfig
 
 # Re-exported under their historical ``_``-private names so this module's call
@@ -58,6 +58,12 @@ _install_stub_backend = install_stub_backend
 
 MakeConfig = Callable[..., "RunConfig"]
 Mute = Callable[..., None]
+
+
+def _default_strategy(stage: str) -> str:
+    from daydream import review_profile as _rp
+
+    return _rp.build_default_profile().strategies[stage].content
 
 
 def _install_model_capturing_stubs(
@@ -92,9 +98,20 @@ def _install_model_capturing_stubs(
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     return shared_calls
+
+
+def _profile_with_pipeline(**overrides: object) -> "ResolvedProfile":
+    """Build a test ResolvedProfile with the default strategies + pipeline overrides."""
+    from daydream.review_profile import (
+        ResolvedProfile,
+        build_default_profile,
+        clone_with_overrides,
+    )
+
+    profile = clone_with_overrides(build_default_profile(), {"pipeline": overrides})
+    return ResolvedProfile(profile=profile, source_kind="test")
 
 
 async def _run_deep(
@@ -104,6 +121,7 @@ async def _run_deep(
     precision_mode: bool = False,
     uncovered_sweep: bool | None = None,
     approve_on_clean: bool = False,
+    review_profile: "ResolvedProfile | None" = None,
 ) -> int:
     from daydream.runner import RunConfig, run
 
@@ -115,6 +133,7 @@ async def _run_deep(
         precision_mode=precision_mode,
         uncovered_sweep=uncovered_sweep,
         approve_on_clean=approve_on_clean,
+        review_profile=review_profile,
     )
     return await run(config)
 
@@ -1907,7 +1926,6 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     stub = _SecondaryEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
 
     exit_code = await run(
@@ -1997,7 +2015,6 @@ async def test_fix_quality_gate_flags_missing_baseline_secondary_file(
     )
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     warnings: list[str] = []
     monkeypatch.setattr(
@@ -2124,7 +2141,6 @@ async def test_fix_guard_reverts_generated_migration_edit(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
 
@@ -2197,7 +2213,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     stub.fix_edit_line = "\n// not \u201D\n"  # fix agent writes U+201D into the changed .go comment
     exit_code = await run(make_config(
         project, assume="yes", output_mode="loop", non_interactive=False,
-        archive=False, skill_availability=frozenset(SKILL_MAP),
+        archive=False,
     ))
     assert exit_code == 0
     go_src = (project / "main.go").read_text()
@@ -2252,7 +2268,6 @@ async def test_feedback_scrub_trust_gate_preserves_user_edits(
     exit_code = await run(make_config(
         project, pr_number=7, bot="my-app[bot]", assume="yes",
         output_mode="loop", non_interactive=False, archive=False,
-        skill_availability=frozenset(SKILL_MAP),
     ))
     assert exit_code == 0
     go_src = (project / "main.go").read_text()
@@ -2288,7 +2303,6 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
 
@@ -2326,7 +2340,6 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     mute_side_effects(heal=True, commit=False)
     stub = _CommittingStubBackend(multi_stack_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
@@ -2420,7 +2433,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
 
     issues: list[tuple[Any, ...]] = []
@@ -2438,7 +2450,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
     assert exit_code == 0
@@ -2492,7 +2503,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr(
         "daydream.git_ops.restore_paths_from_ref",
@@ -2506,7 +2516,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
             output_mode="loop",
             non_interactive=False,
             archive=False,
-            skill_availability=frozenset(SKILL_MAP),
         )
     )
 
@@ -3486,7 +3495,10 @@ async def test_preflight_notice_sweep_note_disabled_when_sweep_off(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    exit_code = await _run_deep(multi_stack_target, uncovered_sweep=False)
+    exit_code = await _run_deep(
+        multi_stack_target,
+        review_profile=_profile_with_pipeline(uncovered_sweep_enabled=False),
+    )
     assert exit_code == 0
     assert len(captured) == 1
     assert captured[0]["sweep_note"] is None
@@ -3594,55 +3606,12 @@ def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
     registry.write_text(_registry_text(plugin_names))
 
 
-@pytest.mark.parametrize(
-    ("registry_text", "expected"),
-    [
-        pytest.param(
-            _registry_text([skill.split(":", 1)[0] for skill in SKILL_MAP.values()]),
-            set(SKILL_MAP.keys()),
-            id="all-plugins-present-full-coverage",
-        ),
-        pytest.param(
-            _registry_text(["beagle-python", "beagle-react"]),
-            {"python", "react"},
-            id="missing-beagle-go-excludes-go",
-        ),
-        pytest.param(None, None, id="missing-registry-signals-unknown"),
-        pytest.param("not json {{{", None, id="unparseable-registry-optimistic"),
-        # Regression: `data.get("plugins", {})` raised AttributeError when the
-        # registry parsed to a non-dict, aborting deep mode instead of returning None.
-        pytest.param("[]", None, id="non-dict-root-payload"),
-        # Regression: iterating ``data.get("plugins", {})`` raised TypeError when the
-        # `plugins` field was e.g. a list, aborting deep mode instead of returning None.
-        pytest.param(
-            '{"version": 2, "plugins": ["beagle-python@marketplace"]}',
-            None,
-            id="non-dict-plugins-field",
-        ),
-    ],
-)
-def test_get_installed_skills(
-    registry_text: str | None, expected: set[str] | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Registry shape -> resolved skill availability (``None`` == unknown, fall
-    back to optimistic availability)."""
-    from daydream.deep.orchestrator import get_installed_skills
-
-    if registry_text is not None:
-        registry = tmp_path / "plugins" / "installed_plugins.json"
-        registry.parent.mkdir(parents=True, exist_ok=True)
-        registry.write_text(registry_text)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-
-    assert get_installed_skills() == expected
-
-
 def test_run_deep_routes_missing_skill_to_generic(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When beagle-react is absent, React files route to the generic bucket.
 
-    Regression: previously orchestrator passed ``set(SKILL_MAP.keys())`` as
+    Regression: previously orchestrator passed the full built-in stack list as
     availability, so detect_stacks kept React as its own stack, the per-stack
     agent raised MissingSkillError, and phase_per_stack_reviews silently
     dropped the React findings.
@@ -3653,7 +3622,8 @@ def test_run_deep_routes_missing_skill_to_generic(
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target, pin_skill_availability=False)
-    # Registry with only python installed -- react and markdown should route to generic.
+    # A populated or empty plugin registry must not change built-in routing (M1):
+    # react stays its own stack even with only python installed.
     _write_plugin_registry(tmp_path, ["beagle-python"])
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
 
@@ -3671,10 +3641,11 @@ def test_run_deep_routes_missing_skill_to_generic(
     assert exit_code == 0
 
     stacks = {s.stack_name for s in captured["stacks"]}
-    # Python remains, but React (no skill installed) must have fallen through to generic.
+    # M1/M3: built-in routing is registry-independent and never degrades a
+    # detected stack to generic -- react stays its own stack regardless of
+    # which plugins are installed.
     assert "python" in stacks
-    assert "react" not in stacks
-    assert "generic" in stacks
+    assert "react" in stacks
 
 
 def test_diff_changed_files_rename_single_entry() -> None:
@@ -3767,6 +3738,7 @@ def test_merge_prompt_emits_related_files_instruction():
     from daydream.deep.prompts import build_merge_prompt
 
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[Path("a-records.json")],
         intent_path=Path("intent.md"), alternatives_path=Path("alt.md"),
         dedup_candidates_path=Path("dedup.json"), output_path=Path("o.json"),
@@ -6145,9 +6117,9 @@ def test_collapse_stacks_for_tiny_diff_code_plus_docs_preserves_language_skill()
     non_structural = [s for s in collapsed if s.stack_name != "structure"]
     assert len(non_structural) == 1
     combined = non_structural[0]
-    # The real-language skill survives (NOT downgraded to generic fallback).
+    # The real-language scope survives (NOT downgraded to generic fallback).
     assert combined.stack_name == "python"
-    assert combined.skill_invocation == "beagle-python:review-python"
+    assert combined.skill_invocation is None
     # The docs file is absorbed into the language stack.
     assert set(combined.files) == {"api.py", "README.md"}
     assert _single_stack_agent_count(len(collapsed)) < baseline_count
@@ -6187,7 +6159,7 @@ def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation == "beagle-python:review-python"
+    assert combined.skill_invocation is None
     # The docs file is absorbed into the preserved language stack.
     assert set(combined.files) == {"api.py", "README.md"}
 
@@ -6219,14 +6191,14 @@ def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
 
     stacks = detect_stacks(["api.py", "App.tsx"])
     collapsed, single_stack_mode = _collapse_stacks_for_shallow(
-        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True, skill="python")
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True, stack="python")
     )
     assert single_stack_mode is True
     non_structural = [s for s in collapsed if s.stack_name != "structure"]
     assert len(non_structural) == 1
     combined = non_structural[0]
     assert combined.stack_name == "python"
-    assert combined.skill_invocation == "beagle-python:review-python"
+    assert combined.skill_invocation is None
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
@@ -7060,7 +7032,6 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
 
     stub = _CommittingStubBackend(tiny_diff_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
 
@@ -7816,7 +7787,7 @@ async def test_run_deep_uncovered_sweep_fails_open(
 async def test_uncovered_sweep_disabled_by_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
-    """Setting ``uncovered_sweep = false`` (CLI tier) skips the sweep entirely."""
+    """A profile pipeline with ``uncovered_sweep_enabled = false`` skips the sweep entirely."""
     from daydream.runner import run
 
     target = _uncovered_sweep_target(tmp_path)
@@ -7829,7 +7800,12 @@ async def test_uncovered_sweep_disabled_by_config(
     stub.merge_echo_records = True
 
     exit_code = await run(
-        make_config(target, assume="yes", output_mode="loop", uncovered_sweep=False)
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            review_profile=_profile_with_pipeline(uncovered_sweep_enabled=False),
+        )
     )
     assert exit_code == 0
 
@@ -7892,7 +7868,11 @@ async def test_uncovered_sweep_per_stack_resume_clears_stale_artifacts(
     stub2.per_stack_emit_reads = True
     stub2.per_stack_unread = frozenset({"notes.txt"})
     stub2.merge_echo_records = True
-    assert await _run_deep(target, start_at="per-stack", uncovered_sweep=False) == 0
+    assert await _run_deep(
+        target,
+        start_at="per-stack",
+        review_profile=_profile_with_pipeline(uncovered_sweep_enabled=False),
+    ) == 0
 
     assert not (deep / "stack-uncovered-records.json").exists()
     assert not (deep / "coverage-stats.json").exists()
@@ -8101,18 +8081,14 @@ def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:
 
 
 def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
-    """The sweep toggle resolves via the named default constant, with config tiers."""
-    from daydream.config import DEFAULT_UNCOVERED_SWEEP_ENABLED
-    from daydream.config_file import DaydreamFileConfig
+    """The sweep toggle resolves from the profile pipeline (M8), not config tiers."""
     from daydream.deep.orchestrator import _uncovered_sweep_enabled
     from daydream.extensions import Registry
     from daydream.flows.engine import FlowContext
     from daydream.runner import RunConfig
     from daydream.workspace import WorkContext
 
-    assert DEFAULT_UNCOVERED_SWEEP_ENABLED is True
-
-    def _ctx(config: RunConfig) -> FlowContext:
+    def _ctx(config: RunConfig, review_profile: "ResolvedProfile | None" = None) -> FlowContext:
         work = WorkContext(
             repo=tmp_path,
             source=tmp_path,
@@ -8123,108 +8099,66 @@ def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
             is_ephemeral=False,
             run_id="test",
         )
-        return FlowContext(config=config, work=work, registry=Registry(), data={})
+        return FlowContext(
+            config=config, work=work, registry=Registry(),
+            review_profile=review_profile, data={},
+        )
 
-    # Default on.
+    # Default profile pipeline (uncovered_sweep_enabled True) -> on.
     assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path)))) is True
-    # File-config False disables.
-    fc = DaydreamFileConfig(uncovered_sweep=False)
-    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path), file_config=fc))) is False
-    # RunConfig False (highest tier) beats a file-config True.
-    fc_on = DaydreamFileConfig(uncovered_sweep=True)
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep=False, file_config=fc_on)
-    assert _uncovered_sweep_enabled(_ctx(cfg)) is False
+    # A profile disabling uncovered_sweep_enabled -> off.
+    off = _profile_with_pipeline(uncovered_sweep_enabled=False)
+    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path)), review_profile=off)) is False
     # Merge/fix resumes always disable the sweep.
     assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path), start_at="merge"))) is False
 
 
-def test_uncovered_sweep_numeric_resolution_rejects_negatives(tmp_path: Path) -> None:
-    """Negative sweep numerics degrade to the named defaults; explicit 0 survives."""
-    from daydream.config import (
-        DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
-        DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
-    )
-    from daydream.config_file import DaydreamFileConfig
+def test_uncovered_sweep_numeric_resolution_reads_pipeline(tmp_path: Path) -> None:
+    """The sweep numeric caps resolve from the profile pipeline (already host-clamped)."""
     from daydream.deep.orchestrator import (
         _uncovered_sweep_max_files,
         _uncovered_sweep_min_hunk_lines,
     )
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
     from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
 
-    # A directly-constructed RunConfig negative override degrades to the default.
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=-1, uncovered_sweep_min_hunk_lines=-5)
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # Explicit 0 is preserved (0 max = sweep nothing; 0 min = no hunk floor).
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=0, uncovered_sweep_min_hunk_lines=0)
-    assert _uncovered_sweep_max_files(cfg) == 0
-    assert _uncovered_sweep_min_hunk_lines(cfg) == 0
-
-    # A negative file-config value is coerced to None at load -> default applies.
-    fc = DaydreamFileConfig(uncovered_sweep_max_files=-1, uncovered_sweep_min_hunk_lines=-3)
-    cfg = RunConfig(target=str(tmp_path), file_config=fc)
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # A file-config 0 with no RunConfig override stays 0.
-    fc = DaydreamFileConfig(uncovered_sweep_max_files=0, uncovered_sweep_min_hunk_lines=0)
-    cfg = RunConfig(target=str(tmp_path), file_config=fc)
-    assert _uncovered_sweep_max_files(cfg) == 0
-    assert _uncovered_sweep_min_hunk_lines(cfg) == 0
-
-
-def test_uncovered_sweep_numeric_resolution_rejects_non_ints(tmp_path: Path) -> None:
-    """RunConfig numeric overrides are type-validated, not just range-checked
-    (issue #309 finding 7).
-
-    Booleans subclass int and floats pass a ``>= 0`` check, but
-    ``filter_sweepable_files`` needs an int slice: ``max_files=1.5`` raises
-    TypeError and the fail-open wrapper discards the ENTIRE sweep. The resolver
-    accepts a value only when it is an int, not a bool, and >= 0; everything
-    else degrades to the named default.
-    """
-    from daydream.config import (
-        DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
-        DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="",
+        head_branch=None,
+        head_sha="",
+        is_ephemeral=False,
+        run_id="test",
     )
-    from daydream.deep.orchestrator import (
-        _uncovered_sweep_max_files,
-        _uncovered_sweep_min_hunk_lines,
-    )
-    from daydream.runner import RunConfig
 
-    # Bool overrides degrade to the defaults (True is not a meaningful count).
-    cfg = RunConfig(
-        target=str(tmp_path),
-        uncovered_sweep_max_files=True,  # type: ignore[arg-type]
-        uncovered_sweep_min_hunk_lines=True,  # type: ignore[arg-type]
+    profile = _profile_with_pipeline(
+        uncovered_sweep_max_files=3, uncovered_sweep_min_hunk_lines=6
     )
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # Float overrides degrade to the defaults (an int slice is required).
-    cfg = RunConfig(
-        target=str(tmp_path),
-        uncovered_sweep_max_files=1.5,  # type: ignore[arg-type]
-        uncovered_sweep_min_hunk_lines=1.5,  # type: ignore[arg-type]
+    ctx = FlowContext(
+        config=RunConfig(target=str(tmp_path)),
+        work=work,
+        registry=Registry(),
+        review_profile=profile,
+        data={},
     )
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+    assert _uncovered_sweep_max_files(ctx) == 3
+    assert _uncovered_sweep_min_hunk_lines(ctx) == 6
 
-    # String overrides degrade to the defaults (never compared or sliced).
-    cfg = RunConfig(
-        target=str(tmp_path),
-        uncovered_sweep_max_files="10",  # type: ignore[arg-type]
-        uncovered_sweep_min_hunk_lines="5",  # type: ignore[arg-type]
+    # Clamped pipeline values (review_profile._parse_pipeline HOST_CAPS) are
+    # what the orchestrator sees: a sub-floor max_files is clamped up to 1.
+    clamped = _profile_with_pipeline(uncovered_sweep_max_files=0)
+    ctx_clamped = FlowContext(
+        config=RunConfig(target=str(tmp_path)),
+        work=work,
+        registry=Registry(),
+        review_profile=clamped,
+        data={},
     )
-    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
-    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
-
-    # Valid ints still pass through unchanged.
-    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=7, uncovered_sweep_min_hunk_lines=2)
-    assert _uncovered_sweep_max_files(cfg) == 7
-    assert _uncovered_sweep_min_hunk_lines(cfg) == 2
+    assert _uncovered_sweep_max_files(ctx_clamped) == 1
 
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
@@ -8532,3 +8466,40 @@ async def test_no_parse_phase_and_records_from_output_schema(
     assert records, "expected per-stack records written by the reviewer"
     loaded = json.loads(records[0].read_text())
     assert loaded["issues"][0]["description"] == "Sample issue"
+
+
+def test_structural_gate_resolver_reads_profile_pipeline() -> None:
+    """The structural gate's pre-context resolver reads the profile flag.
+
+    Mirrors the inline gate at the top of ``run_deep`` (line: ``_config_pipeline
+    (config).structural_enabled``) that replaced the ``_structural_enabled``
+    helper: the flag is off for a profile that disables ``structural_enabled``
+    and the packaged default keeps it on.
+    """
+    from daydream.deep.orchestrator import _config_pipeline
+    from daydream.runner import RunConfig
+
+    assert _config_pipeline(RunConfig(target="/tmp/x")).structural_enabled is True
+    off = _profile_with_pipeline(structural_enabled=False)
+    assert (
+        _config_pipeline(RunConfig(target="/tmp/x", review_profile=off)).structural_enabled
+        is False
+    )
+
+
+def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch):
+    from daydream.deep import orchestrator as o
+
+    class _Ctx:
+        class _Cfg:
+            start_at = "review"
+
+        class _P:
+            uncovered_sweep_enabled = False
+
+        config = _Cfg()
+
+        def pipeline(self):
+            return _Ctx._P()
+
+    assert o._uncovered_sweep_enabled(_Ctx()) is False

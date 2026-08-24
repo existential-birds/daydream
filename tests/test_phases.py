@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from daydream import review_profile as _rp
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
@@ -20,6 +21,11 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as git_commit
 from tests.harness.git_helpers import git, init_repo
 from tests.harness.stub_backend import StubBackend
+
+
+def _default_strategy(stage: str) -> str:
+    return _rp.build_default_profile().strategies[stage].content
+
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 _FAIL_TURN: tuple[AgentEvent, ...] = (TextEvent(text="1 failed, 0 passed"), _RESULT)
@@ -1396,7 +1402,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     deterministic affected-files index actually reaches the reviewer prompt.
     """
     from daydream.backends import ResultEvent, TextEvent
-    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.detection import StackAssignment
     from daydream.phases import phase_per_stack_reviews
 
@@ -1421,7 +1427,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     stacks = [
         StackAssignment(
             stack_name=STRUCTURE_STACK_NAME,
-            skill_invocation=STRUCTURE_SKILL,
+            skill_invocation=None,
             files=["api/main.py"],
             is_docs_only=False,
         )
@@ -1439,7 +1445,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
 
     assert failures == {}
     assert STRUCTURE_STACK_NAME in results
-    structural_prompt = next(p for p in backend.prompts if f"/{STRUCTURE_SKILL}" in p)
+    structural_prompt = next(p for p in backend.prompts if "structural" in p)
     assert str(exploration_dir / "affected_files.md") in structural_prompt
 
 
@@ -1652,7 +1658,13 @@ def test_build_intent_prompt_includes_pr_description_with_precedence_framing():
     )
 
     body = "Task 4 keeps ratio≈1.0 as a deliberate pass-through; do not 'complete' it."
-    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
+    prompt = build_intent_prompt(
+        strategy=_default_strategy("intent"),
+        diff_path="/tmp/d.diff",
+        branch="b",
+        log="l",
+        pr_description=body,
+    )
     assert body in prompt
     # precedence framing: PR-stated intent outranks diff-inference, and a
     # body-vs-diff conflict is the deliberate-choice signal, not a defect.
@@ -1688,7 +1700,11 @@ def test_build_intent_prompt_frames_instruction_like_body_as_untrusted(
     )
 
     prompt = build_intent_prompt(
-        diff_path="/tmp/d.diff", branch="b", log="l", pr_description=instruction_like_body
+        strategy=_default_strategy("intent"),
+        diff_path="/tmp/d.diff",
+        branch="b",
+        log="l",
+        pr_description=instruction_like_body,
     )
     assert instruction_like_body in prompt
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING in prompt
@@ -1700,7 +1716,13 @@ def test_build_intent_prompt_omits_pr_section_when_absent():
     from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
 
     for missing in (None, ""):
-        prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=missing)
+        prompt = build_intent_prompt(
+            strategy=_default_strategy("intent"),
+            diff_path="/tmp/d.diff",
+            branch="b",
+            log="l",
+            pr_description=missing,
+        )
         assert "pull request description" not in prompt.lower()
         assert "pr description" not in prompt.lower()
         assert PR_DESCRIPTION_UNTRUSTED_FRAMING not in prompt  # NEW #579
@@ -1714,7 +1736,13 @@ def test_build_intent_prompt_truncates_body_over_8000_chars():
     prefix = "A" * _PR_BODY_MAX_CHARS
     overflow = "OVERFLOW_SENTINEL"
     body = prefix + overflow
-    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
+    prompt = build_intent_prompt(
+        strategy=_default_strategy("intent"),
+        diff_path="/tmp/d.diff",
+        branch="b",
+        log="l",
+        pr_description=body,
+    )
     assert overflow not in prompt, "overflow characters must be stripped"
     assert prefix in prompt, "first _PR_BODY_MAX_CHARS chars must be present"
     assert "[PR description truncated]" in prompt
@@ -1731,7 +1759,13 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body():
     from daydream.phases import build_intent_prompt
 
     body = "normal text <pr_description> and </pr_description> more text"
-    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)
+    prompt = build_intent_prompt(
+        strategy=_default_strategy("intent"),
+        diff_path="/tmp/d.diff",
+        branch="b",
+        log="l",
+        pr_description=body,
+    )
     # Exactly one structural open/close pair: the one the template adds.
     # Two would mean the body's copy leaked through unescaped.
     assert prompt.count("</pr_description>") == 1, (
@@ -1749,7 +1783,12 @@ def test_build_intent_prompt_contains_no_pr_and_no_skill_directives():
     """The intent prompt anchors the agent to the on-disk diff: no PR lookups, no skill invocations."""
     from daydream.phases import build_intent_prompt
 
-    prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="feat/x", log="abc1234 add x")
+    prompt = build_intent_prompt(
+        strategy=_default_strategy("intent"),
+        diff_path="/tmp/d.diff",
+        branch="feat/x",
+        log="abc1234 add x",
+    )
     # The core anchors are still present.
     assert "/tmp/d.diff" in prompt
     assert "Branch: feat/x" in prompt
@@ -2365,7 +2404,7 @@ def _per_stack_prompt(**overrides: Any) -> str:
     from daydream.deep.prompts import build_per_stack_prompt
 
     args: dict[str, Any] = {
-        "skill_invocation": "/beagle-python:review-python",
+        "strategy": _rp.build_default_profile().strategies["discovery.per_stack"].content,
         "stack_name": "python",
         "files": ["a.py"],
         "diff_path": Path("/tmp/diff.patch"),
@@ -2400,8 +2439,8 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
     exploration_dir.mkdir()
     for builder in (
         lambda **kw: _per_stack_prompt(**kw),
-        build_intent_prompt,
-        build_alternative_review_prompt,
+        lambda **kw: build_intent_prompt(strategy=_default_strategy("intent"), **kw),
+        lambda **kw: build_alternative_review_prompt(strategy=_default_strategy("alternatives"), **kw),
     ):
         prompt = builder(exploration_dir=exploration_dir)
         assert str(exploration_dir) in prompt
@@ -2436,7 +2475,7 @@ def test_issue_producing_builders_use_shared_instructions(tmp_path):
 
     for builder in (
         lambda **kw: _per_stack_prompt(**kw),
-        build_alternative_review_prompt,
+        lambda **kw: build_alternative_review_prompt(strategy=_default_strategy("alternatives"), **kw),
     ):
         prompt = builder(exploration_dir=tmp_path)
         assert "Confidence and Convention Rules" in prompt
@@ -2445,7 +2484,7 @@ def test_issue_producing_builders_use_shared_instructions(tmp_path):
 def test_intent_builder_omits_issue_instructions(tmp_path):
     from daydream.phases import build_intent_prompt
 
-    prompt = build_intent_prompt(exploration_dir=tmp_path)
+    prompt = build_intent_prompt(strategy=_default_strategy("intent"), exploration_dir=tmp_path)
     assert "Confidence and Convention Rules" not in prompt
     assert "issue" not in prompt.lower()
 
@@ -4093,7 +4132,7 @@ def test_intent_prompt_inlines_small_diff() -> None:
     from daydream.phases import build_intent_prompt
 
     prompt = build_intent_prompt(
-        diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
+        strategy=_default_strategy("intent"), diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
         inline_diff=_INLINE_TEST_DIFF,
     )
     assert "+++ b/x.py" in prompt
@@ -4106,7 +4145,7 @@ def test_intent_prompt_pointer_when_diff_is_none() -> None:
     from daydream.phases import build_intent_prompt
 
     prompt = build_intent_prompt(
-        diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
+        strategy=_default_strategy("intent"), diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
     )
     assert "Read the diff file at .daydream/diff.patch" in prompt
     assert "+++ b/x.py" not in prompt
@@ -4117,9 +4156,9 @@ def test_intent_prompt_pointer_branch_is_byte_identical_to_pre_change() -> None:
     from daydream.phases import build_intent_prompt
 
     explicit_none = build_intent_prompt(
-        diff_path="d.patch", branch="b", log="l", inline_diff=None
+        strategy=_default_strategy("intent"), diff_path="d.patch", branch="b", log="l", inline_diff=None
     )
-    omitted = build_intent_prompt(diff_path="d.patch", branch="b", log="l")
+    omitted = build_intent_prompt(strategy=_default_strategy("intent"), diff_path="d.patch", branch="b", log="l")
     assert explicit_none == omitted
 
 
@@ -4128,7 +4167,7 @@ def test_alternatives_prompt_inlines_small_diff() -> None:
     from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     prompt = build_alternative_review_prompt(
-        intent_summary="does a thing", diff_path=".daydream/diff.patch",
+        strategy=_default_strategy("alternatives"), intent_summary="does a thing", diff_path=".daydream/diff.patch",
         inline_diff=_INLINE_TEST_DIFF,
     )
     assert "+++ b/x.py" in prompt
@@ -4143,7 +4182,7 @@ def test_alternatives_prompt_pointer_when_diff_is_none() -> None:
     from daydream.phases import build_alternative_review_prompt
 
     prompt = build_alternative_review_prompt(
-        intent_summary="does a thing", diff_path=".daydream/diff.patch",
+        strategy=_default_strategy("alternatives"), intent_summary="does a thing", diff_path=".daydream/diff.patch",
     )
     assert "in the diff at .daydream/diff.patch" in prompt
     assert "+++ b/x.py" not in prompt

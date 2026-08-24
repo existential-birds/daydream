@@ -60,7 +60,7 @@ def _make_round_trip_fixture(
 
     config = RunConfig(
         target=str(tmp_path),
-        skill="python",
+        stack="python",
         backend="claude",
         archive=True,
         run_eval=False,

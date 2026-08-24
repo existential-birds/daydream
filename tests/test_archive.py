@@ -69,7 +69,7 @@ class _MockRecorder:
 
 @dataclass
 class _MockConfig:
-    skill: str | None = "python"
+    stack: str | None = "python"
     backend: str | None = None
     model: str | None = None
     review_backend: str | None = None

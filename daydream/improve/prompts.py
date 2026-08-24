@@ -942,22 +942,28 @@ def _tier_instruction(tier: EffortTier, category: str) -> str:
 def build_audit_prompt(
     *,
     category: str,
-    skill_invocation: str | None,
+    strategy: str,
     group: Mapping[str, Any],
     scope_note: str,
     recon_summary: str,
     cwd: Path,
     tier: EffortTier,
 ) -> str:
-    """Build one category audit prompt for one partition group."""
-    try:
-        playbook = AUDIT_PLAYBOOK_SECTIONS[category]
-    except KeyError:
-        raise ValueError(f"unknown audit category: {category}") from None
-    invocation = f"\nApply this specialist skill:\n{skill_invocation}\n" if skill_invocation else ""
+    """Build one category audit prompt for one partition group.
+
+    Args:
+        category: Audit category name (one of ``AUDIT_CATEGORIES``).
+        strategy: The profile-owned ``improve.audit.<category>`` strategy content
+            (the native category playbook).
+        group: Partition-group mapping rendered by the host envelope.
+        scope_note: Host-owned scope framing.
+        recon_summary: Recon facts (runtime data).
+        cwd: Absolute working directory the agent runs in.
+        tier: The improve effort tier driving audit depth.
+    """
     return f"""You are a read-only improve audit specialist. Return findings only;
 do not edit files, propose file dumps, or claim issues without evidence.
-{invocation}
+
 {CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
 
 Recon facts:
@@ -976,7 +982,7 @@ dependencies across service boundaries whenever evidence requires it.
 Audit depth:
 {_tier_instruction(tier, category)}
 
-{playbook}
+{strategy}
 
 {FINDING_FORMAT}
 
@@ -990,11 +996,19 @@ Hard Rule 6 (verbatim):
 """
 
 
-def build_vet_prompt(*, findings: Sequence[dict[str, Any]], cwd: Path) -> str:
-    """Build the skeptical re-verification prompt for candidate findings."""
+def build_vet_prompt(*, strategy: str, findings: Sequence[dict[str, Any]], cwd: Path) -> str:
+    """Build the skeptical re-verification prompt for candidate findings.
+
+    Args:
+        strategy: The profile-owned ``improve.vetting`` strategy content (the
+            native vet playbook).
+        findings: The batched audit candidates to re-verify.
+        cwd: Absolute working directory the agent runs in.
+    """
     return f"""You are the improve vet. Re-open every cited location before deciding
-whether to keep a candidate. Apply the `beagle-core:review-verification-protocol`
-skill while checking the evidence.
+whether to keep a candidate.
+
+{strategy}
 
 {CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
 

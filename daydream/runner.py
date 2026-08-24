@@ -90,7 +90,7 @@ class RunConfig:
 
     Attributes:
         target: Target directory path for the review. If None, prompts user.
-        skill: Review skill to use ("python", "react", "elixir", "go", "rust",
+        stack: Review stack to use ("python", "react", "elixir", "go", "rust",
             or "ios"). If None and shallow, prompts user.
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
@@ -197,26 +197,21 @@ class RunConfig:
             switches the flow to single-request investigation mode.
         improve_prune_name: Name of the ``-reanchor`` worktree to remove for the
             ``daydream improve prune-reanchor`` sub-verb (only set there).
-        skill_availability: Stack keys with an installed Beagle review skill,
-            resolved once by :func:`run` from ``get_installed_skills()``. ``None``
-            means unresolved or registry-unreadable (→ optimistic routing in
-            ``detect_stacks``). Set explicitly to inject availability and bypass
-            the probe (tests).
         uncovered_sweep: Issue #309. Toggle the uncovered-diff-file sweep (the
             second-pass reviewer over diff files no per-stack reviewer read).
-            ``None`` falls through to ``file_config.uncovered_sweep`` then the
-            built-in default ``True`` (precedence CLI > file > default,
-            mirroring ``shallow_fanout_threshold``; resolved by
-            ``_uncovered_sweep_enabled``).
+            Resolved from the review-profile pipeline
+            (``pipeline.uncovered_sweep_enabled``, default True) by
+            ``_uncovered_sweep_enabled``; these fields no longer feed sweep
+            resolution after the profile-pipeline migration.
         uncovered_sweep_max_files: Issue #309. Cap on how many uncovered files
             are swept in one run; files beyond the cap are recorded in
             ``coverage-stats.json`` as ``sweep_skipped_capacity`` rather than
-            silently dropped. ``None`` falls through to file config then
-            ``DEFAULT_UNCOVERED_SWEEP_MAX_FILES`` (10).
+            silently dropped. Resolved from the review-profile pipeline
+            (``pipeline.uncovered_sweep_max_files``, default 10).
         uncovered_sweep_min_hunk_lines: Issue #309. A file counts as sweepable
             only when its hunks contain at least this many added/removed lines.
-            ``None`` falls through to file config then
-            ``DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
+            Resolved from the review-profile pipeline
+            (``pipeline.uncovered_sweep_min_hunk_lines``, default 5).
         deep_shard_enabled: Issue #731. Toggle deep-review sharding, which splits
             oversized non-structural language stacks into bounded,
             dependency-aware shards that ride the existing ``stack_name``-keyed
@@ -255,7 +250,7 @@ class RunConfig:
     """
 
     target: str | None = None
-    skill: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
+    stack: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
     cleanup: bool | None = None
     quiet: bool = True
     start_at: str = "review"
@@ -318,11 +313,11 @@ class RunConfig:
     improve_scope: str | None = None
     improve_plan_description: str | None = None
     improve_prune_name: str | None = None
-    skill_availability: frozenset[str] | None = None
-    # Issue #309: uncovered-diff-file sweep (second-pass reviewer). CLI-tier
-    # overrides; ``None`` falls through to the file-config scalar then the
-    # orchestrator default (True / DEFAULT_UNCOVERED_SWEEP_MAX_FILES /
-    # DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES).
+    # Issue #309: uncovered-diff-file sweep (second-pass reviewer). Retained
+    # fields: sweep resolution reads the review-profile pipeline
+    # (``uncovered_sweep_enabled`` / ``_max_files`` / ``_min_hunk_lines``), not
+    # these fields nor the file-config scalar, after the profile-pipeline
+    # migration.
     uncovered_sweep: bool | None = None
     uncovered_sweep_max_files: int | None = None
     uncovered_sweep_min_hunk_lines: int | None = None
@@ -873,16 +868,6 @@ async def run(config: RunConfig | None = None) -> int:
     except ExtensionError as exc:
         print_error(console, "Extension Error", str(exc))
         return 1
-
-    # Resolve installed-skill availability once, here at the composition root, so
-    # the orchestrators consume it as data instead of each probing the filesystem.
-    # None (unreadable registry) flows straight through to detect_stacks' optimistic
-    # default. An explicitly injected value is kept (the probe is skipped).
-    if config.skill_availability is None:
-        from daydream.deep.orchestrator import get_installed_skills
-
-        installed = get_installed_skills()
-        config.skill_availability = frozenset(installed) if installed is not None else None
 
     # Resolve target dir outside the workspace context so path-validation errors
     # short-circuit before any git work.

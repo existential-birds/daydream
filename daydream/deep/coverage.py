@@ -540,6 +540,7 @@ def filter_sweepable_files(
 
 def build_uncovered_sweep_prompt(
     *,
+    strategy: str,
     file: str,
     hunks: str,
     intent_path: Path,
@@ -561,22 +562,18 @@ def build_uncovered_sweep_prompt(
     ``VERIFICATION_PROTOCOL_INSTRUCTION``. The gates are embedded inline -- not
     routed through ``Backend.format_skill_invocation`` and NOT loaded from a
     skill file -- because the reviewer runs with cwd set to the reviewed repo,
-    where a bare ``read review-verification-protocol/SKILL.md`` resolves against
-    that repo and silently drops the gates (same rationale as the canonical
-    constant).
+    where a bare ``read`` of the protocol skill file resolves against that repo
+    and silently drops the gates (same rationale as the canonical constant).
+
+    Args:
+        strategy: The profile-owned ``uncovered_review`` strategy content,
+            rendered with the runtime ``file`` placeholder filled.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    parts.append(
-        "You are the uncovered file sweep reviewer for the deep-review "
-        "pipeline (issue #309).\n"
-        f"The changed file {file} was NOT read by any per-stack reviewer, "
-        "so you are the second pass that covers it. Review ONLY this "
-        "file's hunks below -- correctness, error handling, test quality, "
-        "and maintainability. Do NOT review other files."
-    )
+    parts.append(strategy.format(file=file))
     parts.append(f"TTT author intent is at {intent_path}. Read it before starting.")
     parts.append(
         f"Relevant diff hunks for {file} (inlined; do NOT re-read "

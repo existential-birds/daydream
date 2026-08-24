@@ -995,13 +995,11 @@ def install_stub_backend(
     """Patch create_backend to return a single stub backend instance.
 
     Args:
-        pin_skill_availability: When True (default), patches
-            ``get_installed_skills`` to return ``None`` (optimistic fallback
-            giving all SKILL_MAP stacks) and disables the exploration
-            pre-scan. This isolates tests from the local machine's Beagle
-            plugin registry and prevents exploration from adding unexpected
-            backend calls. Pass False when a test explicitly controls skill
-            availability (e.g. via ``CLAUDE_CONFIG_DIR``).
+        pin_skill_availability: When True (default), disables the exploration
+            pre-scan so it doesn't add unexpected backend calls. Pass False when
+            a test wants to leave ``EXPLORATION_AVAILABLE`` at its module value.
+            Kept for call-site compatibility; stack detection is now
+            registry-independent, so there is no skill-availability gate to pin.
         enable_exploration: When True, leaves ``EXPLORATION_AVAILABLE`` True so
             the real ``pre_scan`` branch runs and the stub answers the
             specialist prompts. Default False preserves the existing behavior
@@ -1010,8 +1008,6 @@ def install_stub_backend(
     stub = StubBackend(target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     if pin_skill_availability:
-        # None -> orchestrator falls back to set(SKILL_MAP.keys()).
-        monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
         if enable_exploration:
             # Pin True so the pre_scan branch runs regardless of ambient module state.
             monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", True)

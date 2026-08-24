@@ -120,7 +120,7 @@ def evaluate_diff(
     non-constant accuracy signals rather than degenerate constants.
     """
     changed = _changed_files(diff)
-    stacks = detect_stacks(changed, skill_availability=None)
+    stacks = detect_stacks(changed)
     shards = shard_stacks(
         stacks,
         diff,

@@ -8,16 +8,17 @@ def test_extension_routing_python() -> None:
     """D-11: .py files route to python stack."""
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["src/main.py"], skill_availability={"python"})
+    result = detect_stacks(["src/main.py"])
     names = {a.stack_name for a in result}
     assert "python" in names
+
 
 
 def test_extension_routing_react() -> None:
     """D-11: .tsx files route to react stack."""
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["src/App.tsx"], skill_availability={"react"})
+    result = detect_stacks(["src/App.tsx"])
     assert "react" in {a.stack_name for a in result}
 
 
@@ -25,7 +26,7 @@ def test_ambiguous_single_stack_shortcut() -> None:
     """D-12: single stack in diff -> ambiguous files unconditionally join it."""
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["src/app.py", "migrations/001.sql"], skill_availability={"python"})
+    result = detect_stacks(["src/app.py", "migrations/001.sql"])
     python = next(a for a in result if a.stack_name == "python")
     assert "migrations/001.sql" in python.files
 
@@ -36,7 +37,6 @@ def test_ambiguous_nearest_ancestor() -> None:
 
     result = detect_stacks(
         ["backend/api/main.py", "backend/api/queries.sql", "frontend/App.tsx"],
-        skill_availability={"python", "react"},
     )
     python = next(a for a in result if a.stack_name == "python")
     assert "backend/api/queries.sql" in python.files
@@ -47,8 +47,7 @@ def test_equal_depth_fallthrough() -> None:
     from daydream.deep.detection import detect_stacks
 
     result = detect_stacks(
-        ["main.py", "App.tsx", "shared.sql"],  # .sql has no unambiguous ancestor
-        skill_availability={"python", "react"},
+        ["main.py", "App.tsx", "shared.sql"],  # .sql has no unambiguous ancestor,
     )
     generic = next(a for a in result if a.stack_name == "generic")
     assert "shared.sql" in generic.files
@@ -58,7 +57,7 @@ def test_config_default_generic() -> None:
     """D-13a: .yaml / .toml route to generic by default."""
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["config.yaml"], skill_availability=set())
+    result = detect_stacks(["config.yaml"])
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
     assert language_names == {"generic"}
 
@@ -67,7 +66,7 @@ def test_config_promotion_pyproject() -> None:
     """D-13b: pyproject.toml + .py co-change -> python."""
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["pyproject.toml", "src/main.py"], skill_availability={"python"})
+    result = detect_stacks(["pyproject.toml", "src/main.py"])
     python = next(a for a in result if a.stack_name == "python")
     assert "pyproject.toml" in python.files
 
@@ -77,7 +76,7 @@ def test_no_static_promotion_without_cochange() -> None:
     from daydream.deep.detection import detect_stacks
 
     # pyproject.toml alone (no .py in diff) stays generic
-    result = detect_stacks(["pyproject.toml"], skill_availability={"python"})
+    result = detect_stacks(["pyproject.toml"])
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
     assert language_names == {"generic"}
 
@@ -86,7 +85,7 @@ def test_md_pinned_to_generic() -> None:
     """D-14: .md files pinned to generic even when co-changed with code."""
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["src/main.py", "README.md"], skill_availability={"python"})
+    result = detect_stacks(["src/main.py", "README.md"])
     generic = next(a for a in result if a.stack_name == "generic")
     assert "README.md" in generic.files
     assert generic.is_docs_only is False  # mixed with py stack, but docs go here
@@ -97,29 +96,29 @@ def test_no_files_dropped() -> None:
     from daydream.deep.detection import detect_stacks
 
     files = ["src/main.py", "README.md", "config.yaml", "Dockerfile", "src/App.tsx"]
-    result = detect_stacks(files, skill_availability={"python", "react"})
+    result = detect_stacks(files)
     routed = {f for a in result for f in a.files}
     assert routed == set(files)
 
 
-def test_missing_skill_routes_to_generic() -> None:
-    """D-16: detected stack with no installed skill -> generic."""
+def test_detected_stack_never_degrades_to_generic() -> None:
+    """M3: D-16 removed — a detected stack never degrades to generic without a skill."""
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["src/lib.rs"], skill_availability=set())  # rust not installed
+    result = detect_stacks(["src/lib.rs"])
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
-    assert language_names == {"generic"}
+    assert language_names == {"rust"}
 
 
 def test_structure_stack_emitted_for_code_diff() -> None:
-    """Structure stack is unconditionally present on any non-docs-only code diff."""
-    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    """Structure stack is present on any non-docs-only code diff (skill-free)."""
+    from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["src/main.py", "src/util.py"], skill_availability={"python"})
+    result = detect_stacks(["src/main.py", "src/util.py"])
     structure = next((a for a in result if a.stack_name == STRUCTURE_STACK_NAME), None)
     assert structure is not None
-    assert structure.skill_invocation == STRUCTURE_SKILL
+    assert structure.skill_invocation is None
     assert structure.files == ["src/main.py", "src/util.py"]
     assert structure.is_docs_only is False
 
@@ -130,7 +129,7 @@ def test_structure_stack_files_are_union_across_languages() -> None:
     from daydream.deep.detection import detect_stacks
 
     files = ["api/main.py", "ui/App.tsx", "infra/Dockerfile"]
-    result = detect_stacks(files, skill_availability={"python", "react"})
+    result = detect_stacks(files)
     structure = next(a for a in result if a.stack_name == STRUCTURE_STACK_NAME)
     assert sorted(structure.files) == sorted(files)
 
@@ -140,7 +139,7 @@ def test_structure_stack_skipped_for_docs_only_diff() -> None:
     from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.detection import detect_stacks
 
-    result = detect_stacks(["README.md", "CHANGELOG.md"], skill_availability=set())
+    result = detect_stacks(["README.md", "CHANGELOG.md"])
     assert all(a.stack_name != STRUCTURE_STACK_NAME for a in result)
 
 
@@ -148,7 +147,7 @@ def test_structure_stack_skipped_for_empty_diff() -> None:
     """Empty changed_files yields no stacks at all, including structure."""
     from daydream.deep.detection import detect_stacks
 
-    assert detect_stacks([], skill_availability=set()) == []
+    assert detect_stacks([]) == []
 
 
 # --- Issue #731: deep-review sharding splitter ---
@@ -432,3 +431,29 @@ def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
     for shard in shards:
         assert inline_grounded_files(diff, shard.files) == set(shard.files)
 
+
+def test_detect_stacks_registry_independent_same_scopes():
+    from daydream.deep.detection import GENERIC_STACK, detect_stacks
+
+    # Same files, absent vs empty vs populated registry -> same ordered scopes.
+    changed = ["a.py", "b.ts", "c.md", "d.unknownext"]
+    absent = detect_stacks(changed, registry=None)
+    # `skill_availability` param is removed; the call must work with no registry.
+    names = [s.stack_name for s in absent]
+    # python + react language stacks + generic (md + unknown) + structural last.
+    assert "python" in names and "react" in names and GENERIC_STACK in names
+    assert names[-1] == "structure"
+    for s in absent:
+        if s.stack_name not in ("structure", GENERIC_STACK):
+            assert s.skill_invocation is None   # no skill field on built-in stacks
+
+
+def test_detect_stacks_never_degrades_to_generic_without_registry():
+    from daydream.deep.detection import GENERIC_STACK, detect_stacks
+
+    # D-16 removed: a python stack never becomes generic merely because no
+    # plugin registry is present.
+    changed = ["a.py"]
+    stacks = detect_stacks(changed)
+    assert any(s.stack_name == "python" for s in stacks)
+    assert not any(s.stack_name == GENERIC_STACK for s in stacks)

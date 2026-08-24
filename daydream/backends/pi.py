@@ -476,11 +476,9 @@ def _resolve_skill_dir(skill_key: str) -> Path | None:
     Returns ``None`` when unresolved; the caller degrades gracefully and this
     function never raises.
 
-    Note: this is a parallel skill-location mechanism —
-    :func:`daydream.deep.orchestrator.get_installed_skills` answers the
-    same question by reading the Claude Code plugin registry. The two
-    can disagree on where the Beagle skills live; consolidate when the
-    full resolver lands.
+    Note: this is a standalone skill-location mechanism — built-in Deep/Improve
+    reviews no longer resolve review skills through the extension registry, so
+    this resolver serves the skill-token shaping path that remains.
     """
     slug = _skill_slug(skill_key)
     home = Path.home()

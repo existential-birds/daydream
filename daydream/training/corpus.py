@@ -64,7 +64,6 @@ from typing import Any
 
 from daydream.archive import get_archive_dir
 from daydream.archive.index import bulk_latest_label_observations, count_runs, normalize_as_of, query_runs
-from daydream.config import REVIEW_SKILLS
 from daydream.json_utils import atomic_write_json
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
 from daydream.training.harvest import _read_review_output
@@ -458,15 +457,27 @@ class CorpusFilters:
     min_reward: float | None = None
 
 
-# Inverse of REVIEW_SKILLS with dual keys: both the full skill string and the
-# short stack name map to the lowercase stack label, so _stack_for_skill is one
-# dict lookup regardless of which form the manifest stored.
+# Legacy skill->stack decode map for historically captured corpus metadata.
+# Built-in reviews no longer emit skills (#886): this maps archived manifest
+# `skill` fields to stack labels so legacy runs stay stratifiable. It is only
+# a decoding table for already-captured runs -- never a source of new skill
+# invocations -- and is intentionally local to the training corpus, not exported.
+_LEGACY_SKILL_TO_STACK: dict[str, str] = {
+    "beagle-python:review-python": "python",
+    "beagle-react:review-frontend": "react",
+    "beagle-elixir:review-elixir": "elixir",
+    "beagle-go:review-go": "go",
+    "beagle-rust:review-rust": "rust",
+    "beagle-ios:review-ios": "ios",
+}
+# Dual keys: both the full skill string and the short stack name map to the
+# lowercase stack label, so _stack_for_skill is one dict lookup regardless of
+# which form the manifest stored.
 _SKILL_TO_STACK: dict[str, str] = {}
-for _choice, _skill in REVIEW_SKILLS.items():
-    _short = _choice.name.lower()
-    _SKILL_TO_STACK[_skill] = _short
-    _SKILL_TO_STACK[_short] = _short
-del _choice, _skill, _short
+for _skill, _stack in _LEGACY_SKILL_TO_STACK.items():
+    _SKILL_TO_STACK[_skill] = _stack
+    _SKILL_TO_STACK[_stack] = _stack
+del _skill, _stack
 
 
 def _stack_for_skill(skill: str | None) -> str | None:
@@ -480,7 +491,7 @@ def _stack_for_skill(skill: str | None) -> str | None:
 
     Returns:
         The lowercase stack label, or ``None`` when ``skill`` is ``None``
-        or not present in ``REVIEW_SKILLS`` under either form.
+        or not present in the legacy skill map under either form.
     """
     if skill is None:
         return None
@@ -599,8 +610,8 @@ def _query_index(archive_dir: Path, filters: CorpusFilters) -> list[dict[str, An
         for skill in sorted(unknown_skills):
             print_warning(
                 console,
-                f"Skill {skill!r} is not in REVIEW_SKILLS — records will be "
-                f"stratified under stack=None. Add it to ReviewSkillChoice if "
+                f"Skill {skill!r} is not a known legacy skill — records will be "
+                f"stratified under stack=None. Add it to the legacy map if "
                 f"it should route to its own stack.",
             )
 

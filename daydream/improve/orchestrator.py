@@ -212,7 +212,6 @@ def _with_artifact_provenance(
 class _AuditAssignment:
     category: str
     group: PartitionGroup
-    skill: str | None
 
     @property
     def key(self) -> str:
@@ -409,7 +408,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         tracked = branch_files if branch_focus else git_ops.ls_files(target)
         stacks = detect_stacks(
             tracked,
-            skill_availability=ctx.config.skill_availability,
             registry=ctx.registry,
         )
         if ctx.config.improve_scope:
@@ -693,24 +691,14 @@ def _coverage_ledger(
 
 
 def _audit_assignments(
-    ctx: FlowContext,
     categories: tuple[str, ...],
     groups: list[PartitionGroup],
 ) -> list[_AuditAssignment]:
     assignments: list[_AuditAssignment] = []
     for category in categories:
         for group in groups:
-            skill = (
-                ctx.registry.skill_if_registered(
-                    f"audit:{category}:{group.stack}"
-                )
-                if group.stack
-                else None
-            )
-            if skill is None:
-                skill = ctx.registry.skill_if_registered(f"audit:{category}")
             assignments.append(
-                _AuditAssignment(category=category, group=group, skill=skill)
+                _AuditAssignment(category=category, group=group)
             )
     return assignments
 
@@ -942,7 +930,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     groups: list[PartitionGroup] = ctx.data["partition_groups"]
     categories = resolve_categories(tier, ctx.config.improve_focus)
     branch_focus = ctx.config.improve_focus == "branch"
-    assignments = _audit_assignments(ctx, categories, groups)
+    assignments = _audit_assignments(categories, groups)
     backend = ctx.backend_for("audit")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
@@ -953,11 +941,6 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
 
     async with anyio.create_task_group() as task_group:
         for assignment in assignments:
-            invocation = (
-                backend.format_skill_invocation(assignment.skill)
-                if assignment.skill is not None
-                else None
-            )
             scope_note = (
                 f"Audit the {assignment.group.stack} stack in this group."
                 if assignment.group.stack
@@ -983,7 +966,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 )
             prompt = ctx.registry.prompt("audit")(
                 category=assignment.category,
-                skill_invocation=invocation,
+                strategy=ctx.strategy(f"improve.audit.{assignment.category}"),
                 group=_group_dict(assignment.group),
                 scope_note=scope_note,
                 recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
@@ -1305,6 +1288,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                 for vet_id, finding in enumerate(batch, start=1)
             ]
             prompt = ctx.registry.prompt("vet")(
+                strategy=ctx.strategy("improve.vetting"),
                 findings=indexed,
                 cwd=_audit_repo(ctx),
             )

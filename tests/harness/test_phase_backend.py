@@ -32,7 +32,7 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, moc
     exit_code = await run(
         RunConfig(
             target=str(feature_branch_repo),
-            skill="python",
+            stack="python",
             quiet=True,
             cleanup=False,
             shallow=True,

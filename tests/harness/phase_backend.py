@@ -136,7 +136,22 @@ class PhaseDispatchBackend:
         prompt_lower = prompt.lower()
         self.call_log.append(prompt_lower[:80])
 
-        if "beagle-" in prompt_lower and "review" in prompt_lower:
+        # Native review prompts are skill-free (#886): the per-stack / structural /
+        # generic-fallback builders no longer carry a ``beagle-*`` invocation, so
+        # dispatch on their distinctive judgment-prose markers instead (covering
+        # the pre- and post-strategy-threading wording).
+        _review_markers = (
+            "inclusion obligation",  # _stack_scope_instruction (pre-threading)
+            "full change spans",  # structural runtime line (pre-threading)
+            "language-agnostic review practices",  # generic-fallback strategy
+            "assigned to this stack",  # authored per-stack strategy (post-threading)
+            "repository-wide interactions",  # authored structural strategy (post-threading)
+        )
+        if (
+            "beagle-" in prompt_lower
+            and "review" in prompt_lower
+            or any(marker in prompt_lower for marker in _review_markers)
+        ):
             self.review_prompts.append(prompt)
             yield TextEvent(text="Review complete.")
             if output_schema is not None:

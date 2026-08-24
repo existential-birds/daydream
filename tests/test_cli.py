@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from daydream.cli import _parse_args
-from daydream.config import SKILL_MAP
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 
@@ -124,26 +123,18 @@ def test_yes_with_review_only_output_errors(monkeypatch, capsys, output_flag):
     assert "--yes" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("skill", "invocation"),
-    [
-        pytest.param("go", "beagle-go:review-go", id="go"),
-        pytest.param("rust", "beagle-rust:review-rust", id="rust"),
-        pytest.param("ios", "beagle-ios:review-ios", id="ios"),
-    ],
-)
-def test_skill_map_and_choice(monkeypatch, skill, invocation):
-    """Keep every CLI skill choice aligned with its invocation token."""
-    assert SKILL_MAP[skill] == invocation
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", skill])
+@pytest.mark.parametrize("stack", ["go", "rust", "ios"])
+def test_stack_choice_routes_to_stack_field(monkeypatch, stack):
+    """Every CLI stack selector routes into ``RunConfig.stack``."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--stack", stack])
     config = _parse_args()
-    assert config.skill == skill
+    assert config.stack == stack
 
 
-def test_skill_short_flag(monkeypatch):
+def test_stack_short_flag(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "-s", "python"])
     config = _parse_args()
-    assert config.skill == "python"
+    assert config.stack == "python"
 
 
 def test_ignore_paths_default_empty(monkeypatch):
@@ -518,3 +509,47 @@ def test_feedback_pr_repo_detected_from_target_not_cwd(monkeypatch, tmp_path):
 
     assert config.pr_number == 42
     assert config.pr_repo == "grafana/grafana"
+
+
+def test_cli_stack_selector_and_skill_rejected():
+    from daydream.cli import _build_main_parser
+
+    p = _build_main_parser()
+    args = p.parse_args(["--stack", "python", "/tmp"])
+    assert args.stack == "python"
+    # --skill is rejected as an unknown option (no alias).
+    with pytest.raises(SystemExit) as e:
+        p.parse_args(["--skill", "python", "/tmp"])
+    assert e.value.code == 2   # argparse unknown-option exit code
+
+
+def test_runconfig_uses_stack_terminology():
+    from daydream.runner import RunConfig
+
+    cfg = RunConfig(target="/tmp", stack="go")
+    assert cfg.stack == "go"
+    assert not hasattr(cfg, "skill")   # old name removed
+
+
+def test_real_cli_stack_entry(tmp_path):
+    """Real entrypoint: --stack python reaches dispatch; --skill is rejected."""
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parent.parent
+    (tmp_path / "a.py").write_text("x = 1\n")
+    # skill-free env: no plugin/skill registry directory.
+    env = {**os.environ, "DAYDREAM_SKILLS_DIR": ""}
+    r = subprocess.run(
+        [sys.executable, "-m", "daydream", "--review", "--stack", "python", str(tmp_path)],
+        capture_output=True, text=True, env=env, cwd=repo_root, timeout=90,
+    )
+    # The run should get past arg parsing + profile resolution (exit 0 or the
+    # review's own later failure, never an unknown-option / ProfileError).
+    assert "--skill" not in r.stderr and "ProfileError" not in r.stderr
+    r2 = subprocess.run(
+        [sys.executable, "-m", "daydream", "--review", "--skill", "python", str(tmp_path)],
+        capture_output=True, text=True, env=env, cwd=repo_root, timeout=30,
+    )
+    assert r2.returncode == 2 or "unrecognized arguments" in r2.stderr or "invalid choice" in r2.stderr

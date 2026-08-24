@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from daydream import review_profile as rp
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
@@ -50,6 +51,10 @@ from tests.harness.improve_backend import (
 MakeConfig = Callable[..., RunConfig]
 
 
+def _default_strategy(stage: str) -> str:
+    return rp.build_default_profile().strategies[stage].content
+
+
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
     """Load a named improve artifact as decoded JSON."""
     return json.loads(
@@ -71,7 +76,7 @@ _GROUP = {
 def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
     prompt = build_audit_prompt(
         category="correctness",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.correctness"),
         group=_GROUP,
         scope_note="",
         recon_summary="{}",
@@ -89,7 +94,7 @@ def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -
         for category in AUDIT_CATEGORIES:
             prompt = build_audit_prompt(
                 category=category,
-                skill_invocation=None,
+                strategy=_default_strategy(f"improve.audit.{category}"),
                 group=_GROUP,
                 scope_note="",
                 recon_summary="{}",
@@ -109,7 +114,7 @@ def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
     """spec.md's monorepo requirement: a slice bounds search, never reading."""
     prompt = build_audit_prompt(
         category="security",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.security"),
         group=_GROUP,
         scope_note="Service scope slice: `apps/billing`.",
         recon_summary="{}",
@@ -122,7 +127,7 @@ def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
 def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
     tech_debt = build_audit_prompt(
         category="tech-debt",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.tech-debt"),
         group=_GROUP,
         scope_note="",
         recon_summary="{}",
@@ -131,7 +136,7 @@ def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
     )
     tests = build_audit_prompt(
         category="tests",
-        skill_invocation=None,
+        strategy=_default_strategy("improve.audit.tests"),
         group=_GROUP,
         scope_note="",
         recon_summary="{}",
@@ -171,7 +176,9 @@ def test_finding_and_vet_schemas_require_stable_maintenance_metadata() -> None:
 
 
 def test_vet_prompt_rejects_false_reuse_and_comment_cleanup() -> None:
-    prompt = build_vet_prompt(findings=[], cwd=Path("/repo"))
+    prompt = build_vet_prompt(
+        strategy=_default_strategy("improve.vetting"), findings=[], cwd=Path("/repo")
+    )
 
     assert "re-open both implementations" in prompt
     assert "layer boundaries" in prompt
@@ -335,8 +342,10 @@ def test_sample_paths_spreads_across_a_capped_list() -> None:
 
 def test_registry_seeds_audit_slots_and_improve_prompts() -> None:
     r = build_registry()
-    assert r.skill("audit:correctness:python") == "beagle-python:review-python"
-    assert r.skill("audit:security:elixir") == "beagle-elixir:elixir-security-review"
+    # Native Improve (M10): no built-in audit:* skill slots are seeded; the
+    # category playbooks are profile-owned strategies, not skills.
+    assert r.skill_if_registered("audit:correctness:python") is None
+    assert r.skill_if_registered("audit:security:elixir") is None
     assert r.skill_if_registered("audit:dx") is None
     for name in ("audit", "vet", "plan-writer"):
         assert callable(r.prompt(name))
@@ -2464,8 +2473,8 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
     This is the "works for everyone" baseline the generalist fallback exists to
     guarantee. It relies on the autouse ``_hermetic_skill_availability`` fixture
-    (empty plugin registry → ``get_installed_skills()`` returns an empty set), so
-    it deliberately does NOT call ``_pin_stack_availability``. Every stack falls
+    (an empty plugin registry with no stack plugins), so it deliberately does NOT
+    call ``_pin_stack_availability``. Every stack falls
     back to generic, collapsing the monorepo into a single generic audit group;
     the flow must still produce one plan per selected finding.
     """
@@ -2479,14 +2488,17 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    # Generalist routing: one group, and its stack is the generic fallback value.
+    # Built-in detection drives the audit groups (M1/M3): the monorepo's
+    # python + react + docs files route to their detected stacks, never
+    # collapsed to generic by plugin presence.
     coverage = json.loads(
         improve_artifact(improve_monorepo_target, "coverage.json").read_text(
             encoding="utf-8"
         )
     )
-    assert len(coverage["groups"]) == 1
-    assert coverage["groups"][0]["stack"] == "generic"
+    assert sorted(group["stack"] for group in coverage["groups"]) == [
+        "generic", "python", "react",
+    ]
 
     plans = sorted(
         (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
@@ -2505,52 +2517,43 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("target_fixture", "injected", "expected_group_stacks"),
+    ("target_fixture", "expected_group_stacks"),
     [
-        # An empty set collapses every stack into a single generic audit group.
         pytest.param(
-            "improve_monorepo_target", frozenset[str](), ["generic"], id="empty-generalist"
-        ),
-        # A non-empty set splits the python services into their own group while
-        # react (no injected skill) falls back to generic.
-        pytest.param(
-            "improve_scaled_monorepo_target",
-            frozenset({"python"}),
-            ["generic", "python"],
-            id="nonempty-multistack",
+            "improve_monorepo_target",
+            ["generic", "python", "react"],
+            id="detected-stacks-drive-audit-groups",
         ),
     ],
 )
-async def test_injected_skill_availability_drives_routing_without_env(
+async def test_detected_stacks_drive_audit_groups_registry_independent(
     target_fixture: str,
-    injected: frozenset[str],
     expected_group_stacks: list[str],
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """``RunConfig.skill_availability`` alone drives audit routing, with no probe.
+    """Built-in audit routing is detection/profile-driven; plugin presence cannot
+    rewrite detected stack scopes (M1/M3).
 
-    Proves availability is data carried on RunConfig, not ambient filesystem I/O:
-    the field is injected directly (this test manipulates no CLAUDE_CONFIG_DIR /
-    env and patches no ``get_installed_skills``). The autouse hermetic fixture
-    makes the probe return an empty set, so a non-empty injected set producing
-    multi-stack routing can only have come from the injected field.
+    With the built-in (skill-free) review path, the scopes detected by ``detect_stacks``
+    are authoritative: a monorepo with python + react + docs always audits as
+    ``[generic, python, react]`` groups regardless of which Beagle plugins are (or are
+    not) installed or injected through the environment.
     """
     target: Path = request.getfixturevalue(target_fixture)
     install_improve_stub(monkeypatch, target, n_findings=0)
 
     code = await run(
         make_config(
-        target,
-        flow_name="improve",
-        skill_availability=injected,
+            target,
+            flow_name="improve",
         )
     )
 
     assert code == 0
-    coverage = json.loads(improve_artifact(target, "coverage.json").read_text(encoding="utf-8"))
-    # One group per expected stack: no collapse, and no stack split in two.
+    coverage = json.loads(improve_artifact(target, "coverage.json").read_text())
+    # One audit group per detected stack (not collapsed, not split):
     assert len(coverage["groups"]) == len(expected_group_stacks)
     assert sorted(group["stack"] for group in coverage["groups"]) == expected_group_stacks
 
@@ -3934,3 +3937,35 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
     assert "Improve issue publishing failed" in output
     assert "Improve planning failed" not in output
     assert "GitHub publication failures: 1" in report
+
+
+def test_audit_prompt_uses_category_strategy_no_skill():
+    from daydream import review_profile as rp
+
+    p = rp.build_default_profile()
+    strategy = p.strategies["improve.audit.security"].content
+    prompt = build_audit_prompt(
+        category="security",
+        strategy=strategy,
+        group={"name": "g1", "file_count": 1, "partitions": []},
+        scope_note="s",
+        recon_summary="{}",
+        cwd=Path("/c"),
+        tier=EFFORT_TIERS["standard"],
+    )
+    assert strategy in prompt                       # category playbook present
+    assert "Apply this specialist skill" not in prompt
+    assert "/beagle-" not in prompt and "beagle" not in prompt.lower()
+    # envelope preserved:
+    assert "read-only improve audit specialist" in prompt
+    assert "Hard Rule 4" in prompt and "Hard Rule 6" in prompt
+
+
+def test_vet_prompt_uses_native_vet_strategy_no_skill():
+    from daydream import review_profile as rp
+
+    strategy = rp.build_default_profile().strategies["improve.vetting"].content
+    prompt = build_vet_prompt(strategy=strategy, findings=[], cwd=Path("/c"))
+    assert "Treat every audit candidate as an untrusted hypothesis" in prompt
+    assert "beagle-core" not in prompt and "Apply the" not in prompt
+    assert "/c" in prompt

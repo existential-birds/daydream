@@ -37,7 +37,7 @@ from daydream.prompts.wire_contract import (
 )
 
 DOC_REVIEW_NOTICE = (
-    "[Notice] Dedicated documentation review (beagle-docs) is planned but not yet "
+    "[Notice] Dedicated documentation review is planned but not yet "
     "implemented.\nThese documentation files are currently being reviewed by the "
     "generic-fallback agent (D-20)."
 )
@@ -107,14 +107,14 @@ TRUST_MODEL_INSTRUCTION = (
 # builders (issue #229). The gates are embedded inline as instruction text, not
 # routed through ``Backend.format_skill_invocation`` and NOT loaded from a skill
 # file: these two reviewers run with cwd set to the reviewed repo, so a bare
-# ``read review-verification-protocol/SKILL.md`` resolves against that repo and
-# fails ("skill doesn't exist as a file"), silently dropping the gates. Both
+# ``read`` of the protocol skill file resolves against that repo and fails
+# ("skill doesn't exist as a file"), silently dropping the gates. Both
 # reviewers are language-agnostic (repo-wide structural / non-stack fallback), so
 # the protocol's language-specific valid-pattern tables add little here — the
 # gate discipline is what matters, and it is self-contained below. Mirrors the
 # inline gate-0 embedding in ``build_verification_prompt``.
 VERIFICATION_PROTOCOL_INSTRUCTION = (
-    "Before writing findings, apply the review-verification-protocol gates "
+    "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
     "  Gate-0 anti-confabulation (before ANY finding): echo the exact artifact "
     "you are judging — file:line plus the cited code, read freshly in THIS turn, "
@@ -232,12 +232,16 @@ def _context_pointers(
 
 
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
+    """Host-owned scope/verdict envelope for a reviewed stack scope.
+
+    Carries only runtime scope metadata (stack name, assigned files, the
+    parallel-review boundary, and the per-file verdict contract). The judgment
+    policy is the profile-owned ``discovery.per_stack`` strategy, rendered by
+    the caller.
+    """
     joined = ", ".join(files)
     return (
-        f"You are reviewing the {stack_name} stack. Your assigned files are an "
-        f"inclusion obligation: read and review EACH one in full -- a file you "
-        f"did not read is not covered by this review.\n"
-        f"  Assigned files: {joined}\n"
+        f"You are reviewing the {stack_name} stack. Assigned files: {joined}\n"
         f"Do NOT review files from other stacks -- their reviews are running in "
         f"parallel and will be merged afterwards.\n"
         f"After the review, output ONE verdict line per assigned file, as: "
@@ -563,7 +567,7 @@ def _frontier_read_instruction(frontier_files: list[str]) -> str:
 
 def build_per_stack_prompt(
     *,
-    skill_invocation: str,
+    strategy: str,
     stack_name: str,
     files: list[str],
     diff_path: Path,
@@ -581,7 +585,7 @@ def build_per_stack_prompt(
     """Assemble the per-stack review prompt.
 
     Args:
-        skill_invocation: Beagle skill invocation, e.g. "/beagle-python:review-python".
+        strategy: The profile-owned ``discovery.per_stack`` strategy content.
         stack_name: Lower-case stack key for scope messaging.
         files: Files this stack owns.
         diff_path: Path to the full diff on disk.
@@ -620,7 +624,7 @@ def build_per_stack_prompt(
     if frontier_files:
         parts.append(_frontier_read_instruction(frontier_files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
-    parts.append(skill_invocation)
+    parts.append(strategy)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
@@ -634,7 +638,7 @@ def build_per_stack_prompt(
 
 def build_structural_prompt(
     *,
-    skill_invocation: str,
+    strategy: str,
     files: list[str],
     diff_path: Path,
     intent_path: Path,
@@ -655,7 +659,7 @@ def build_structural_prompt(
     instead of being scoped to a stack subset.
 
     Args:
-        skill_invocation: Backend-formatted invocation for the structural skill.
+        strategy: The profile-owned ``discovery.structural`` strategy content.
         files: Full union of changed files across every stack. Used to anchor
             the scope statement; the reviewer is still free to read beyond.
         diff_path: Path to the full diff on disk.
@@ -687,14 +691,10 @@ def build_structural_prompt(
         )
     )
     parts.append(
-        f"You are the structural reviewer. The full change spans: {joined}. "
-        f"The structural rubric applies repo-wide -- read any file in the "
-        f"codebase as needed (Read/Grep/Bash) to judge whether canonical "
-        f"helpers exist, file-size budgets are honored, and the change makes "
-        f"the codebase easier or harder to live with."
+        f"You are the structural reviewer. The full change spans: {joined}."
     )
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(skill_invocation)
+    parts.append(strategy)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
@@ -705,6 +705,7 @@ def build_structural_prompt(
 
 def build_arbiter_prompt(
     *,
+    strategy: str,
     arbiter_input_path: Path,
     diff_path: Path,
     intent_path: Path,
@@ -747,13 +748,7 @@ def build_arbiter_prompt(
         )
     )
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(
-        "You are the arbiter. The cheaper per-stack reviewers flagged the "
-        f"high-severity and contested findings listed in {arbiter_input_path}. "
-        "Re-review each one against the actual code (Read/Grep/Bash) and the "
-        "diff. You are adjudicating their work, NOT starting a fresh review: do "
-        "not introduce findings that are not in the input list."
-    )
+    parts.append(strategy.format(arbiter_input_path=arbiter_input_path))
     parts.append(
         "Return a single JSON object matching the structured-output schema: "
         '{"findings": [ ... ]}. Emit exactly one entry per input finding, echoing '
@@ -771,6 +766,7 @@ def build_arbiter_prompt(
 
 def build_supervise_prompt(
     *,
+    strategy: str,
     supervise_input_path: Path,
     diff_path: Path,
     intent_path: Path,
@@ -778,7 +774,18 @@ def build_supervise_prompt(
     cwd: Path,
     exploration_dir: Path | None = None,
 ) -> str:
-    """Assemble the batched canonical findings supervisor prompt."""
+    """Assemble the batched canonical findings supervisor prompt.
+
+    Args:
+        strategy: The profile-owned ``supervision`` strategy content, rendered
+            with the runtime ``supervise_input_path`` placeholder filled.
+        supervise_input_path: JSON file of the canonical findings to adjudicate.
+        diff_path: Path to the full diff on disk.
+        intent_path: Path to TTT intent.md.
+        alternatives_path: Path to TTT alternatives.json.
+        cwd: Absolute working directory the agent runs in (grounds path resolution).
+        exploration_dir: Pre-scan exploration directory (if available).
+    """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
@@ -786,11 +793,7 @@ def build_supervise_prompt(
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(
-        "Supervisor adjudication: review the canonical findings listed in "
-        f"{supervise_input_path}. This is an adjudication pass, not a fresh "
-        "review: do not invent findings or change their file, line, or id."
-    )
+    parts.append(strategy.format(supervise_input_path=supervise_input_path))
     parts.append(
         "Return one JSON object matching the structured-output schema with one "
         "verdict per finding when possible. Each verdict must echo the canonical "
@@ -804,6 +807,7 @@ def build_supervise_prompt(
 
 def build_suppression_prompt(
     *,
+    strategy: str,
     suppression_input_path: Path,
     diff_path: Path,
     intent_path: Path,
@@ -825,6 +829,8 @@ def build_suppression_prompt(
     reject each input finding, but must not invent new ones.
 
     Args:
+        strategy: The profile-owned ``suppression`` strategy content, rendered
+            with the runtime ``suppression_input_path`` placeholder filled.
         suppression_input_path: JSON file of the selected borderline findings.
             Each entry carries a ``sup_id`` the reviewer must echo back, plus the
             original ``file``/``line``/``severity``/``confidence``/``description``.
@@ -841,16 +847,7 @@ def build_suppression_prompt(
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(
-        "You are the suppression reviewer. The cheaper per-stack reviewers "
-        "flagged the borderline, low-confidence / low-severity findings listed "
-        f"in {suppression_input_path}. These were NOT contested and NOT "
-        "high-severity, so no heavyweight arbiter looked at them. Your job is to "
-        "cut false positives: re-examine each one against the actual code "
-        "(Read/Grep/Bash) and the diff. You are adjudicating their work, NOT "
-        "starting a fresh review: do not introduce findings that are not in the "
-        "input list."
-    )
+    parts.append(strategy.format(suppression_input_path=suppression_input_path))
     parts.append(
         "Default to DROPPING each finding. Keep one ONLY when you can point at "
         "confirming evidence in the code that it is a real, actionable problem. "
@@ -875,6 +872,7 @@ def build_suppression_prompt(
 
 def build_merge_prompt(
     *,
+    strategy: str,
     per_stack_records_paths: list[Path],
     intent_path: Path,
     alternatives_path: Path,
@@ -958,12 +956,8 @@ def build_merge_prompt(
             "them -- downstream readers must be able to tell 'no findings' apart "
             "from 'this stack never ran'."
         )
-    parts.append(
-        "You are the cross-stack merge agent. Read every artifact above by path -- "
-        "do NOT re-run any reviews. Return a single JSON object matching the "
-        "structured-output schema: {\"items\": [ ... ]}. Each item is one "
-        "actionable finding. Emit nothing else."
-    )
+    parts.append(strategy)
+
     parts.append(
         "Dedup adjudication:\n"
         "  dedup-candidates.json has two sections:\n\n"
@@ -1033,6 +1027,7 @@ def build_merge_prompt(
 
 def build_verification_prompt(
     *,
+    strategy: str,
     items: list[dict[str, Any]],
     cwd: Path,
     output_path: Path,
@@ -1062,6 +1057,7 @@ def build_verification_prompt(
     pays for twice.
 
     Args:
+        strategy: The profile-owned ``verification`` strategy content.
         items: The non-structural (per-stack / cross-stack) canonical items to
             verify. Rendered inline into the prompt; verdicts are keyed by each
             item's canonical ``id`` (the verdict ``issue_id``).
@@ -1073,10 +1069,7 @@ def build_verification_prompt(
 
     parts: list[str] = []
     parts.append(
-        "You are the recommendation-verifier agent. Your job is to audit each "
-        "numbered issue in the finding list below against the actual codebase "
-        "and decide whether its recommendation is consistent with trait/interface "
-        "specs and sibling implementations.\n\n"
+        strategy + "\n\n"
         f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
         "The numbered findings to verify (each `issue_id` in your output MUST "
         "match the leading number `N.` of the finding it verifies):\n\n"
@@ -1221,6 +1214,7 @@ def build_fix_verify_prompt(
 
 def build_generic_fallback_prompt(
     *,
+    strategy: str,
     files: list[str],
     diff_path: Path,
     intent_path: Path,
@@ -1280,10 +1274,8 @@ def build_generic_fallback_prompt(
     if frontier_files:
         parts.append(_frontier_read_instruction(frontier_files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
-    parts.append(
-        "Review these files for correctness, clarity, and consistency with the "
-        "author's intent. Apply language-agnostic review practices."
-    )
+    parts.append(strategy)
+
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
