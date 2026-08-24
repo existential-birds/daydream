@@ -40,3 +40,17 @@ def test_golden_baseline_arbiter_and_merge():
     assert "adjudicating their work" in a      # strategy content present
     assert "/ps" in m and "/dc" in m           # envelope runtime data present
     assert "/in" in a and "/i" in m
+
+def test_authored_blocks_land_verbatim():
+    p = rp.build_default_profile()
+    per_stack = p.strategies["discovery.per_stack"].content
+    structural = p.strategies["discovery.structural"].content
+    vet = p.strategies["improve.vetting"].content
+    assert per_stack.startswith("Review the changed behavior assigned to this stack")
+    assert structural.startswith("Review the repository-wide interactions introduced or exposed by this diff")
+    assert vet.startswith("Treat every audit candidate as an untrusted hypothesis, not as evidence")
+    for text in (per_stack, structural, vet):
+        assert "beagle" not in text.lower()
+    assert p.strategies["discovery.per_stack"].source == "authored: #886 NATIVE_PER_STACK_DISCOVERY_STRATEGY"
+    assert p.strategies["discovery.structural"].source == "authored: #886 NATIVE_STRUCTURAL_DISCOVERY_STRATEGY"
+    assert p.strategies["improve.vetting"].source == "authored: #886 NATIVE_IMPROVE_VET_STRATEGY"

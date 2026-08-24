@@ -325,24 +325,74 @@ def build_default_profile() -> ReviewProfile:
         ),
         "discovery.per_stack": Strategy(
             content=(
-                "You are reviewing the {stack_name} stack. Your assigned files are an "
-                "inclusion obligation: read and review EACH one in full -- a file you "
-                "did not read is not covered by this review.\n"
-                "  Assigned files: {files}\n"
-                "Do NOT review files from other stacks -- their reviews are running in "
-                "parallel and will be merged afterwards."
+                "Review the changed behavior assigned to this stack and its integration "
+                "with the rest of the repository. Use the stack name to orient repository "
+                "searches, not as permission to apply a memorized framework checklist.\n"
+                "\n"
+                "Method:\n"
+                "1. Read every assigned file and the full enclosing symbol for each "
+                "relevant hunk. Follow changed callers, callees, types, configuration, "
+                "persistence or network boundaries, error paths, and cleanup or lifecycle "
+                "paths as needed.\n"
+                "2. Compare the change with repository-local conventions and canonical "
+                "helpers before asserting that something is missing, inconsistent, unused, "
+                "or duplicated.\n"
+                "3. Test each candidate with a concrete triggering input or state and an "
+                "observable consequence. Search for evidence that disproves the candidate, "
+                "including guards, validation, callers, tests, generated counterparts, and "
+                "ownership or lifecycle behavior.\n"
+                "4. Prioritize regressions in correctness, data integrity, security or "
+                "trust boundaries, concurrency, resource lifetime, external or wire "
+                "contracts, configuration flow, and tests that can pass while behavior is "
+                "wrong.\n"
+                "5. Report only defects introduced or made actionable by this diff. Exclude "
+                "style preferences, generic best practices, speculative future "
+                "requirements, and pre-existing issues not materially affected by the "
+                "change.\n"
+                "\n"
+                "For every surviving finding, identify the precise file and line, the "
+                "triggering path or state, the observable impact, and the smallest safe "
+                "remediation. If no candidate survives after the required reads, report "
+                "every read assigned file as clean and every unread assigned file as not "
+                "reviewed; never invent a finding to fill the review."
             ),
-            source="copied: daydream.deep.prompts._stack_scope_instruction",
+            source="authored: #886 NATIVE_PER_STACK_DISCOVERY_STRATEGY",
         ),
         "discovery.structural": Strategy(
             content=(
-                "You are the structural reviewer. The full change spans: {joined}. "
-                "The structural rubric applies repo-wide -- read any file in the "
-                "codebase as needed (Read/Grep/Bash) to judge whether canonical "
-                "helpers exist, file-size budgets are honored, and the change makes "
-                "the codebase easier or harder to live with."
+                "Review the repository-wide interactions introduced or exposed by this "
+                "diff. Concentrate on boundaries that a file-scoped reviewer can miss:\n"
+                "\n"
+                "- incompatible contracts across modules or stacks, including types, "
+                "schemas, CLI or API behavior, configuration, serialization, error "
+                "semantics, and ownership or lifecycle expectations;\n"
+                "- values parsed or accepted at one layer but dropped, re-resolved, "
+                "renamed, or applied inconsistently downstream;\n"
+                "- partial migrations in which callers, implementations, generated "
+                "counterparts, tests, documentation, or compatibility paths no longer "
+                "agree;\n"
+                "- new dependency-direction or layering violations, duplicated sources of "
+                "truth, and bypasses of an existing canonical helper;\n"
+                "- partial-failure, rollback, cleanup, cancellation, and resource-lifetime "
+                "gaps that emerge only across components;\n"
+                "- diff-introduced branching, duplication, or module growth that creates a "
+                "concrete correctness or maintenance hazard under an established repository "
+                "convention.\n"
+                "\n"
+                "For each candidate, read both sides of the boundary and trace the relevant "
+                "value, call, state transition, or resource lifetime end to end. Search for "
+                "repository evidence that disproves the concern. Verify that any "
+                "recommended canonical helper, contract, or layer actually exists and is "
+                "compatible before proposing reuse.\n"
+                "\n"
+                "Report only a concrete risk introduced or made actionable by this change. "
+                "Do not report general refactoring wishes, subjective architecture "
+                "preferences, arbitrary file-size complaints, or pre-existing design debt "
+                "that the diff does not worsen. Every surviving finding must name the "
+                "trigger, observable impact, precise evidence locations, and smallest safe "
+                "remediation."
             ),
-            source="copied: daydream.deep.prompts.build_structural_prompt",
+            source="authored: #886 NATIVE_STRUCTURAL_DISCOVERY_STRATEGY",
         ),
         "discovery.generic_fallback": Strategy(
             content=(
@@ -441,11 +491,29 @@ def build_default_profile() -> ReviewProfile:
 
     strategies["improve.vetting"] = Strategy(
         content=(
-            "You are the improve vet. Re-open every cited location before deciding\n"
-            "whether to keep a candidate. Apply the `beagle-core:review-verification-protocol`\n"
-            "skill while checking the evidence."
+            "Treat every audit candidate as an untrusted hypothesis, not as evidence.\n"
+            "\n"
+            "For each candidate:\n"
+            "1. Re-read every cited location and its full enclosing symbol in this turn.\n"
+            "2. Search the definitions, callers, configuration, tests, repository "
+            "decisions, and related implementations needed to prove or disprove the claim.\n"
+            "3. Identify a concrete triggering input, state, or maintenance operation and "
+            "its observable impact. A pattern that is merely unusual is not enough.\n"
+            "4. Check whether the behavior is intentional, already guarded, unreachable, "
+            "generated, externally constrained, or correctly handled at another layer.\n"
+            "5. Verify that the proposed remediation fits existing contracts and layer "
+            "boundaries. When reuse is proposed, read the claimed reuse target and confirm "
+            "behavioral compatibility.\n"
+            "6. Collapse duplicates that describe the same underlying problem, correcting "
+            "citations and metadata only when the repository supports the correction.\n"
+            "\n"
+            "Keep a candidate only when current repository evidence establishes the claim "
+            "and its impact. Reject candidates that are speculative, stylistic, by design, "
+            "unsupported by the cited location, duplicates, or dependent on an unverified "
+            "assumption. Never preserve a candidate merely because the audit stated it "
+            "confidently."
         ),
-        source="copied: daydream.improve.prompts.build_vet_prompt",
+        source="authored: #886 NATIVE_IMPROVE_VET_STRATEGY",
     )
 
     return ReviewProfile(
