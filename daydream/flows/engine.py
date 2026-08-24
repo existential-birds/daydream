@@ -77,10 +77,16 @@ class FlowContext:
         default's strategy for the stage, so flow steps stay operable without
         a profile.
         """
-        from daydream.review_profile import STAGE_KEYS, build_default_profile
+        from daydream.review_profile import build_default_profile
 
-        if self.review_profile is not None and stage in STAGE_KEYS:
-            return self.review_profile.profile.strategies[stage].content
+        # Fall back per-stage on missing keys: ``parse_profile`` accepts partial
+        # profiles, so a resolved profile may omit a given stage's strategy.
+        # Rather than raising KeyError for a valid partial profile, use the
+        # packaged default's strategy for that stage so steps stay operable.
+        if self.review_profile is not None:
+            strategies = self.review_profile.profile.strategies
+            if stage in strategies:
+                return strategies[stage].content
         return build_default_profile().strategies[stage].content
 
     def pipeline(self) -> object:

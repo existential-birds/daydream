@@ -25,11 +25,10 @@ def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch):
     assert resolved.profile.name  # the packaged default, not user/repo
 
 
-def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypatch):
-    p = "/tmp/control-plane-candidate.toml"
-    with open(p, "w") as handle:
-        handle.write(_resolver_fixture)
-    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", p)
+def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypatch, tmp_path):
+    p = tmp_path / "control-plane-candidate.toml"
+    p.write_text(_resolver_fixture)
+    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(p))
     resolved = rp.resolve_harbor_profile(env=None)  # env passed explicitly as the trusted control plane
     assert resolved.profile.name == "candidate"
 

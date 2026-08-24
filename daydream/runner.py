@@ -63,6 +63,7 @@ from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
     default_trajectory_path,
+    get_current_recorder,
 )
 from daydream.ui import (
     phase_subtitle,
@@ -455,10 +456,44 @@ def _resolve_review_profile(config: RunConfig) -> None:
     stored on ``config.review_profile`` and handed into every ``FlowContext``
     the run builds. Idempotent: a direct caller that already resolved (or
     injected) the profile is left untouched.
+
+    R12 provenance: the resolved profile is also recorded onto the active
+    ``TrajectoryRecorder`` (when one is open at the call site) so
+    ``Trajectory.extra`` carries the ``profile_*`` keys on every real run.
+    Deep-flow dispatch resolves before its recorder opens (fail-closed
+    resolution must happen even for an empty-diff review that returns before
+    the recorder), so the deep spine and feedback flows re-enter this
+    composition root from inside their recorder scopes — the re-entry is a
+    no-op resolve that only records.
     """
-    if config.review_profile is not None:
+    if config.review_profile is None:
+        config.review_profile = resolve_from_runconfig(config)
+    _record_review_profile(config)
+
+
+def _record_review_profile(config: RunConfig) -> None:
+    """Record resolved review-profile provenance when a recorder is active (R12).
+
+    Populates the active recorder's ``profile_*`` trajectory extra keys
+    (schema version, name, source kind, canonical digest) so the trajectory of
+    a real run carries exactly the policy tested. No-op when the run has no
+    resolved profile or no recorder is open at the call site — both are
+    legitimate: ``--review-profile`` is optional, and deep-flow dispatch
+    resolves before its recorder exists (the spine/feedback flows re-enter
+    ``_resolve_review_profile`` from inside the recorder scope, which is what
+    lands the record here).
+    """
+    if config.review_profile is None:
         return
-    config.review_profile = resolve_from_runconfig(config)
+    recorder = get_current_recorder()
+    if recorder is None:
+        return
+    recorder.record_profile(
+        schema_version=config.review_profile.profile.schema_version,
+        name=config.review_profile.name,
+        source_kind=config.review_profile.source_kind,
+        digest=config.review_profile.digest,
+    )
 
 
 def _resolved_backend_name(config: RunConfig, phase: str) -> str:

@@ -90,6 +90,7 @@ def test_resolve_from_runconfig_happens_once_at_composition_root():
 # Task 13: real-path CLI entry (real `daydream ... --review-profile` invocation).
 def test_real_cli_entry_resolves_profile_and_inspects(tmp_path, monkeypatch):
     import os
+    import re
     import subprocess
     import sys
     from pathlib import Path
@@ -114,8 +115,26 @@ def test_real_cli_entry_resolves_profile_and_inspects(tmp_path, monkeypatch):
         [sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(tmp_path)],
         capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
     )
-    # The run should get past resolution (exit 0 means resolved; a non-zero exit must be
-    # the review's own result, never a profile-resolution failure). We assert the seam
-    # symbol resolves and the process reaches dispatch without a ProfileError.
+    # A valid explicit profile resolves cleanly: the review of an empty diff runs
+    # to completion (exit 0) without a ProfileError.
     assert "ProfileError" not in out.stderr
     assert out.returncode == 0  # clean review of an empty diff: resolved + dispatched
+
+    # The flag is actually read (fail-closed): an invalid explicit profile
+    # aborts non-zero naming its source instead of silently falling through to
+    # a default, proving resolution is enforced on this real path.
+    bad = tmp_path / "bad.toml"
+    bad.write_text('schema_version = 1\nname = "bad"\nunknown = 1')
+    out_bad = subprocess.run(
+        [sys.executable, "-m", "daydream", "--review", "--review-profile", str(bad), str(tmp_path)],
+        capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
+    )
+    assert out_bad.returncode != 0
+    # The failure must name its source (fail-closed: no silent fall-through to a
+    # default). Rich wraps the error panel at console width, and the pytest/xdist
+    # tmp path is long enough that the filename is split across a wrap with the
+    # panel border interleaved ("ba\u2551\u2551d.toml)"), so strip whitespace and
+    # box-drawing characters before searching — wrapping inserts no spaces, so
+    # the basename reassembles exactly.
+    cleaned = re.sub(r"[\s║═╔╗╚╝]", "", out_bad.stdout + out_bad.stderr)
+    assert "bad.toml" in cleaned

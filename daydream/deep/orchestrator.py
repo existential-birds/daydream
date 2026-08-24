@@ -4179,7 +4179,7 @@ async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
     Validates args, opens the trajectory recorder, prints the info block,
     then delegates to the registered ``deep`` flow's feedback prefix.
     """
-    from daydream.runner import _open_recorder
+    from daydream.runner import _open_recorder, _resolve_review_profile
 
     if config.pr_number is None or config.bot is None:
         print_error(
@@ -4196,6 +4196,10 @@ async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.PR,
     ):
+        # Composition-root re-entry: resolution already happened in
+        # ``_run_loop_deep`` before this recorder existed; this no-op resolve
+        # records the profile onto the active recorder (R12).
+        _resolve_review_profile(config)
         ctx = FlowContext(
             config=config,
             work=work,
@@ -4303,6 +4307,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     from daydream.runner import (
         _default_backend_name,
         _open_recorder,
+        _resolve_review_profile,
     )
 
     # Cache one Backend instance per (backend_name, resolved_model, resolved_effort)
@@ -4356,6 +4361,10 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=_flow_kind_for_mode(mode),
     ):
+        # Composition-root re-entry: resolution already happened in
+        # ``_run_loop_deep`` before this recorder existed; this no-op resolve
+        # records the profile onto the active recorder (R12).
+        _resolve_review_profile(config)
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")

@@ -11,20 +11,14 @@ from daydream import review_profile as rp
 
 
 def test_every_registered_model_bearing_stage_has_strategy_and_classification():
-    # Simulate the spine registry: every model-bearing stage must carry a
-    # profile strategy + host-envelope classification. The canary
-    # ``NEW_UNCLASSIFIED_STAGE`` documents R13's failure mode -- a stage added
-    # to the spine without a strategy + envelope classification would trip this
-    # guard. It is intentionally absent from the production registry, so only
-    # real stages are enumerated here.
-    registered_stages = {  # stand-in for the production stage registry
-        "intent",
-        "arbitration",
-        "discovery.per_stack",
-        "merge",
-    }
-    for stage in registered_stages:
-        assert stage in rp.STAGE_KEYS, f"model-bearing stage {stage} has no profile strategy"
+    # The production spine registry (STAGE_KEYS) is the model of truth here:
+    # every model-bearing stage must carry a profile strategy and a host-
+    # envelope classification. Iterating STAGE_KEYS directly (not a hardcoded
+    # 4-stage subset) means a stage added to the spine without either trips this
+    # guard -- it cannot pass silently by listing a smaller curated set.
+    default = rp.build_default_profile()
+    for stage in rp.STAGE_KEYS:
+        assert stage in default.strategies, f"model-bearing stage {stage} has no profile strategy"
         assert stage in rp.ENVELOPE_CLASSIFICATION, f"stage {stage} has no host-envelope classification"
 
 

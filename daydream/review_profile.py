@@ -544,16 +544,21 @@ def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
         raise ProfileError("top level must be a table", source)
 
     _TOP_LEVEL_KEYS = frozenset({"schema_version", "name", "strategies", "pipeline"})
-    unknown = set(data) - _TOP_LEVEL_KEYS
-    if unknown:
-        raise ProfileError(f"unknown top-level key `{sorted(unknown)[0]}`", source)
 
+    # Host-owned keys are disjoint from the allowed top-level set, so check
+    # them FIRST: otherwise an unoverridable host key would be swallowed by the
+    # generic unknown-key branch and never surface the dedicated "host-owned"
+    # rejection.
     host_owned = set(data) & HOST_OWNED_KEYS
     if host_owned:
         raise ProfileError(
             f"host-owned key `{sorted(host_owned)[0]}` cannot be set by a profile",
             source,
         )
+
+    unknown = set(data) - _TOP_LEVEL_KEYS
+    if unknown:
+        raise ProfileError(f"unknown top-level key `{sorted(unknown)[0]}`", source)
 
     schema_version = data.get("schema_version", 1)
     if not isinstance(schema_version, int) or isinstance(schema_version, bool):
@@ -574,17 +579,17 @@ def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
     for key, raw in raw_strategies.items():
         if not isinstance(raw, dict):
             raise ProfileError(f"strategies.{key} must be a table", source)
-        unknown = set(raw) - {"content", "source"}
-        if unknown:
-            raise ProfileError(
-                f"strategies.{key}: unknown key `{sorted(unknown)[0]}`", source
-            )
         host_owned = set(raw) & HOST_OWNED_KEYS
         if host_owned:
             raise ProfileError(
                 f"strategies.{key}: host-owned key `{sorted(host_owned)[0]}` "
                 "cannot be set by a profile",
                 source,
+            )
+        unknown = set(raw) - {"content", "source"}
+        if unknown:
+            raise ProfileError(
+                f"strategies.{key}: unknown key `{sorted(unknown)[0]}`", source
             )
         content = raw.get("content", "")
         strat_source = raw.get("source", "")
@@ -837,13 +842,20 @@ def resolve_profile(
 def resolve_from_runconfig(cfg: object) -> ResolvedProfile:
     """Resolve the profile from a ``RunConfig`` (R1: once at composition root).
 
-    The ``RunConfig`` carries the CLI/env-derived ``review_profile_path`` and the
-    file config; this is the single seam the runner calls exactly once per run.
+    The ``RunConfig`` carries the caller-derived ``review_profile_path``, the
+    file config, and the target repo; this is the single seam the runner calls
+    exactly once per run. The target is threaded as ``repo_root`` so a
+    repo-committed RELATIVE ``file_config.review_profile`` path resolves beneath
+    the target repo rather than the invoking cwd (R9).
     """
     file_config = getattr(cfg, "file_config", None)
     explicit = getattr(cfg, "review_profile_path", None)
     explicit_str = str(explicit) if explicit is not None else None
-    return resolve_profile(explicit_path=explicit_str, file_config=file_config)
+    repo_root = getattr(cfg, "target", None)
+    repo_root = Path(repo_root) if repo_root else None
+    return resolve_profile(
+        explicit_path=explicit_str, file_config=file_config, repo_root=repo_root
+    )
 
 
 def resolve_harbor_profile(
