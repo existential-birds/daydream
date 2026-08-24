@@ -246,10 +246,9 @@ async def _dangerous_command_guard(input_data: Any, tool_use_id: Any, context: A
     return {}
 
 
-# A skill invocation daydream embeds in a prompt: a whitespace/line-anchored
-# ``/{skill_key}`` token as emitted by ``format_skill_invocation`` (e.g.
-# ``/beagle-python:review-python``). A filesystem path never matches — the key
-# must end at whitespace/EOL, never at another ``/``.
+# A skill invocation embedded in a prompt: a whitespace/line-anchored
+# ``/{skill_key}`` token (e.g. ``/beagle-python:review-python``). A filesystem
+# path never matches — the key must end at whitespace/EOL, never at another ``/``.
 _PROMPT_SKILL_PATTERN = re.compile(r"(?:^|(?<=\s))/([\w.-]+(?::[\w.-]+)*)(?=\s|$)")
 
 # Beagle skills chain (e.g. a review skill loads review-verification-protocol),
@@ -544,13 +543,3 @@ class ClaudeBackend:
         """
         for client in list(self._active_clients):
             await client.interrupt()
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        """Format a skill invocation for Claude.
-
-        Claude uses /{namespace:skill} syntax.
-        """
-        result = f"/{skill_key}"
-        if args:
-            result = f"{result} {args}"
-        return result

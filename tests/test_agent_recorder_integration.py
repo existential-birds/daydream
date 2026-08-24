@@ -50,9 +50,8 @@ from tests.harness.trajectory import make_recorder
 class MockBackend:
     """Minimal Backend implementation that replays a canned event list.
 
-    Mirrors the three-method Backend protocol surface (execute / cancel /
-    format_skill_invocation) without inheriting; tests substitute this
-    in place of ClaudeBackend / CodexBackend so the event sequence is
+    Mirrors the Backend protocol surface (execute / cancel) without inheriting;
+    tests substitute this in place of ClaudeBackend / CodexBackend so the event
     deterministic.
     """
 
@@ -81,9 +80,6 @@ class MockBackend:
 
     async def cancel(self) -> None:
         return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 async def _run_with_recorder(
@@ -377,9 +373,6 @@ class MaxTurnsBackend:
 
     async def cancel(self) -> None:
         return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None:

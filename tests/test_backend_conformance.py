@@ -10,8 +10,7 @@ canonical-script loaders and asserted against one behavior contract:
   emitted;
 - ``read_only=True`` is accepted by ``execute`` and does not change the
   observable vocabulary;
-- ``format_skill_invocation`` yields ``/{key}`` for Claude and ``${name}`` for
-  Codex (namespace stripped) — asserted against the real backend instances.
+- no backend exposes a Daydream-owned skill-invocation surface.
 
 Per-driver divergences are documented in ``KNOWN_DELTAS`` and the assertions
 consult that allow-list instead of demanding strict cross-driver equivalence.
@@ -122,13 +121,10 @@ async def test_read_only_preserves_vocabulary(loader: Loader) -> None:
     assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= _vocabulary(read_only_events)
 
 
-def test_format_skill_invocation_per_driver() -> None:
-    """Claude yields /{key}; Codex yields ${name} with the namespace stripped.
+def test_backends_have_no_skill_method() -> None:
+    """M13: no backend formats/resolves/registers/permits/invokes a skill."""
+    from daydream.backends import Backend
 
-    Asserted against the real backend instances, not mocks.
-    """
-    key = "beagle-python:review-python"
-    claude = ClaudeBackend(model="claude-test-model")
-    codex = CodexBackend(model="codex-test-model")
-    assert claude.format_skill_invocation(key) == f"/{key}"
-    assert codex.format_skill_invocation(key) == "$review-python"
+    assert not hasattr(Backend, "format_skill_invocation")
+    for cls in (ClaudeBackend, CodexBackend):
+        assert not hasattr(cls, "format_skill_invocation")

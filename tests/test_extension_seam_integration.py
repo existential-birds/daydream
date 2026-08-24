@@ -273,9 +273,6 @@ class DeferredWriteBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 async def test_fork_inserts_custom_phase_into_review_flow(
     ext_dir: ExtDir,

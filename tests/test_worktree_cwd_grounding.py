@@ -58,9 +58,6 @@ class _PromptCapturingBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 def test_pre_scan_grounds_specialists_to_linked_worktree(linked_worktree: tuple[Path, Path]) -> None:
     main_repo, linked = linked_worktree

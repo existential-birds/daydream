@@ -64,9 +64,6 @@ class MockBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
     """Deep-mode fork: 2 per-stack children with run_flow=DEEP."""

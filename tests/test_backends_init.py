@@ -97,9 +97,6 @@ async def test_backend_execute_accepts_agents_kwarg():
         async def cancel(self) -> None:
             pass
 
-        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-            return f"/{skill_key}"
-
     backend: Backend = MockBackendWithAgents()
     events = []
     async for event in backend.execute(Path("/tmp"), "test", agents=None):

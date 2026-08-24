@@ -114,11 +114,10 @@ def _configured_pi_model(cwd: Path) -> str | None:
             return model
     return None
 
-# Matches Pi's native ``/skill:<slug>`` command embedded in a prompt (emitted by
-# ``format_skill_invocation``). Used in ``execute`` to register the referenced
-# skill directories with the subprocess via ``--skill`` flags. The character
-# class mirrors Pi's documented skill-name grammar (lowercase a-z, 0-9, hyphens
-# only; see pi docs/skills.md "Name Rules"): uppercase and underscore are
+# Matches Pi's native ``/skill:<slug>`` command embedded in a prompt. Used in
+# ``execute`` to register referenced skill directories via ``--skill`` flags.
+# The character class mirrors Pi's documented skill-name grammar (lowercase
+# a-z, 0-9, hyphens only; see pi docs/skills.md "Name Rules"): uppercase and
 # excluded because no valid Pi slug uses them, so the wider ``\w`` class would
 # otherwise admit tokens that can never resolve to a real skill.
 _SKILL_TOKEN_RE = re.compile(r"/skill:([a-z0-9-]+)")
@@ -942,19 +941,3 @@ class PiBackend:
         ``CodexBackend.cancel``).
         """
         await cancel_processes(self._processes)
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        """Format a skill invocation as Pi's native ``/skill:<slug>`` command.
-
-        Pi exposes installed skills through a built-in slash command keyed by
-        the bare slug (it has no plugin namespace), so a Beagle key like
-        ``beagle-python:review-python`` becomes ``/skill:review-python``. The
-        plugin prefix is stripped via :func:`_skill_slug`; the matching skill
-        directory is registered with the subprocess in :meth:`execute` via a
-        ``--skill`` flag so the command resolves even without an ambient
-        mirror. This method never raises.
-        """
-        base = f"/skill:{_skill_slug(skill_key)}"
-        if args:
-            base = f"{base} {args}"
-        return base

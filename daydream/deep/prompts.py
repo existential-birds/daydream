@@ -104,12 +104,11 @@ TRUST_MODEL_INSTRUCTION = (
 )
 
 # Shared verification-protocol instruction for structural and generic-fallback
-# builders (issue #229). The gates are embedded inline as instruction text, not
-# routed through ``Backend.format_skill_invocation`` and NOT loaded from a skill
-# file: these two reviewers run with cwd set to the reviewed repo, so a bare
-# ``read`` of the protocol skill file resolves against that repo and fails
-# ("skill doesn't exist as a file"), silently dropping the gates. Both
-# reviewers are language-agnostic (repo-wide structural / non-stack fallback), so
+# builders (issue #229). The gates are embedded inline as instruction text and
+# no skill-file read is required: these two reviewers run with cwd set to the
+# reviewed repo, so a bare ``read`` of the protocol skill file resolves against
+# that repo and fails ("skill doesn't exist as a file"), silently dropping the
+# gates. Both reviewers are language-agnostic (repo-wide structural / non-stack
 # the protocol's language-specific valid-pattern tables add little here — the
 # gate discipline is what matters, and it is self-contained below. Mirrors the
 # inline gate-0 embedding in ``build_verification_prompt``.

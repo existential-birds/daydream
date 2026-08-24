@@ -854,9 +854,6 @@ class _CommitWritingBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}" + (f" {args}" if args else "")
-
 
 @pytest.mark.asyncio
 async def test_fix_cycle_yes_commits_fixes(

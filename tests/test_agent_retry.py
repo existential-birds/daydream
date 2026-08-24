@@ -224,9 +224,6 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
         async def cancel(self) -> None:
             cancel_calls.append("cancel")
 
-        def format_skill_invocation(self, *a: Any, **kw: Any) -> str:
-            return ""
-
     backend = _SharedBackend()
 
     results: list[tuple[str, str]] = []

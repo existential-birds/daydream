@@ -244,20 +244,6 @@ async def test_max_turns_result_raises_typed_error(patch_sdk):
     assert isinstance(excinfo.value, ClaudeAgentError)
 
 
-@pytest.mark.parametrize(
-    ("skill_key", "args", "expected"),
-    [
-        ("beagle-python:review-python", "", "/beagle-python:review-python"),
-        ("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot", "/beagle-core:fetch-pr-feedback --pr 42 --bot mybot"),
-    ],
-    ids=["full-key", "with-args"],
-)
-def test_format_skill_invocation(skill_key, args, expected):
-    backend = ClaudeBackend(model="fixture-model")
-    result = backend.format_skill_invocation(skill_key, args) if args else backend.format_skill_invocation(skill_key)
-    assert result == expected
-
-
 @pytest.mark.parametrize("cmd,allowed", [
     ("git log --oneline -5", True),
     ("git blame -L 10,10 daydream/phases.py", True),

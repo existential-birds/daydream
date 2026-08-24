@@ -68,9 +68,6 @@ class MockBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 def _make_backend(turn_idx: int) -> MockBackend:
     """Claude-shaped mock: completion is a near-constant single digit per
@@ -219,9 +216,6 @@ class _MetricsAndCostBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 @dataclass
 class _PiShapedBackend:
@@ -271,9 +265,6 @@ class _PiShapedBackend:
 
     async def cancel(self) -> None:
         return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 async def _drive_one(tmp_path: Path, backend: Any) -> dict[str, Any]:
@@ -339,9 +330,6 @@ async def test_cost_event_only_backend_still_accumulates(tmp_path: Path) -> None
         async def cancel(self) -> None:
             return None
 
-        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-            return f"/{skill_key}"
-
     traj = await _drive_one(tmp_path, _CostOnlyBackend())
     final = traj["final_metrics"]
     assert final["total_prompt_tokens"] == 70
@@ -390,9 +378,6 @@ class _MetricsOnlyBackend:
 
     async def cancel(self) -> None:
         return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 async def test_step_metrics_accumulate_across_turns(tmp_path: Path) -> None:

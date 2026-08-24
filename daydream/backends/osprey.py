@@ -13,7 +13,6 @@ import json
 import logging
 import math
 import os
-import re
 import tempfile
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass, field
@@ -47,7 +46,6 @@ _OSPREY_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _JSONL_PROTOCOL_VERSION = 2
 _MAX_DIAGNOSTIC_LINES = 10
 _MAX_DIAGNOSTIC_LINE_CHARS = 500
-_SKILL_INVOCATION_RE = re.compile(r"(?<![\w/])/skill:([a-z0-9][a-z0-9_.:-]*)")
 
 _SUCCESS_OUTCOMES = frozenset({"completed", "terminal_tool"})
 _KNOWN_IGNORED_EVENTS = frozenset(
@@ -266,8 +264,6 @@ class OspreyBackend:
         no_progress_artifact_threshold: int | None = None,
         no_progress_suppression_window: int | None = None,
         vars: Iterable[tuple[str, str]] = (),
-        skills: Iterable[str] = (),
-        skill_dirs: Iterable[Path | str] = (),
         max_subagents: int | None = None,
         llm_rpm: int | None = None,
         effort: str | None = None,
@@ -323,8 +319,6 @@ class OspreyBackend:
         self.no_progress_artifact_threshold = no_progress_artifact_threshold
         self.no_progress_suppression_window = no_progress_suppression_window
         self.vars = tuple(vars)
-        self.skills = tuple(skills)
-        self.skill_dirs = tuple(str(path) for path in skill_dirs)
         self.max_subagents = max_subagents
         self.llm_rpm = llm_rpm
         self.effort = effort
@@ -448,10 +442,6 @@ class OspreyBackend:
         add_value("--no-progress-suppression-window", self.no_progress_suppression_window)
         for key, value in self.vars:
             args.extend(["--var", f"{key}={value}"])
-        for skill in self._skills_for_prompt(prompt):
-            args.extend(["--skill", skill])
-        for skill_dir in self.skill_dirs:
-            args.extend(["--skill-dir", skill_dir])
         if continuation is not None:
             data = continuation.data
             session_id = data.get("session_id")
@@ -473,13 +463,6 @@ class OspreyBackend:
             args.append("--ultracode")
         args.append(prompt)
         return args
-
-    def _skills_for_prompt(self, prompt: str) -> tuple[str, ...]:
-        explicit = list(self.skills)
-        for skill in _SKILL_INVOCATION_RE.findall(prompt):
-            if skill not in explicit:
-                explicit.append(skill)
-        return tuple(explicit)
 
     @staticmethod
     def _write_temp_schema(schema: dict[str, Any]) -> str:
@@ -790,10 +773,3 @@ class OspreyBackend:
     async def cancel(self) -> None:
         """Terminate all active Osprey process groups and reap their pipes."""
         await cancel_processes(self._processes)
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        """Format a skill directive and let the verified ``--skill`` flag load it."""
-        result = f"/skill:{skill_key}"
-        if args:
-            result = f"{result} {args}"
-        return result

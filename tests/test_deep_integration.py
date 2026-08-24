@@ -164,9 +164,6 @@ class _DeepMockBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 class _ClaudeShape(_DeepMockBackend):
     cost_usd = 0.0123

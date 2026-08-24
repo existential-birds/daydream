@@ -863,21 +863,6 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
             await second_task
 
 
-@pytest.mark.parametrize(
-    ("skill_key", "args", "expected"),
-    [
-        ("beagle-python:review-python", "", "$review-python"),
-        ("beagle-core:fetch-pr-feedback", "--pr 42 --bot mybot", "$fetch-pr-feedback --pr 42 --bot mybot"),
-        ("commit-push", "", "$commit-push"),
-    ],
-    ids=["namespaced", "with-args", "no-namespace"],
-)
-def test_format_skill_invocation(skill_key, args, expected):
-    backend = CodexBackend(model="fixture-model")
-    result = backend.format_skill_invocation(skill_key, args) if args else backend.format_skill_invocation(skill_key)
-    assert result == expected
-
-
 class TestUnwrapShellCommand:
     """Tests for _unwrap_shell_command helper."""
 

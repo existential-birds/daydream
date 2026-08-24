@@ -194,9 +194,6 @@ class _PerStackBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path, make_work):
     rec = _rec(monkeypatch)

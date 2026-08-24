@@ -794,9 +794,6 @@ class ImproveStubBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 class _ProductionPathPlannerError(RuntimeError):
     category = "PROCESS_EXIT"

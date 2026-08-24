@@ -197,9 +197,6 @@ class _PiShapeBackend(ScriptedBackend):
 
         self._pi = PiBackend(model="glm-5.2")
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return self._pi.format_skill_invocation(skill_key, args)
-
 
 async def test_per_stack_prompts_are_skill_free(
     tmp_path: Path, make_work

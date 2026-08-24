@@ -716,21 +716,6 @@ class CodexBackend:
         """
         await cancel_processes(self._processes)
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        """Format a skill invocation for Codex.
-
-        Codex uses $skill-name syntax. Strips namespace prefix if present.
-        """
-        if ":" in skill_key:
-            skill_name = skill_key.split(":")[-1]
-        else:
-            skill_name = skill_key
-
-        result = f"${skill_name}"
-        if args:
-            result = f"{result} {args}"
-        return result
-
     @staticmethod
     def _extract_text(item: dict[str, Any]) -> str:
         """Extract text from a Codex item.

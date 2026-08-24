@@ -736,22 +736,6 @@ def test_resolve_skill_dir_env_override_wins(tmp_path, monkeypatch):
     assert _resolve_skill_dir("beagle-python:review-python") == override_dir
 
 
-@pytest.mark.parametrize(
-    ("skill_key", "args", "expected"),
-    [
-        ("beagle-python:review-python", "", "/skill:review-python"),
-        ("beagle-core:review-structure", "--pr 7", "/skill:review-structure --pr 7"),
-        ("review-go", "", "/skill:review-go"),
-    ],
-    ids=["namespaced-strips-prefix", "preserves-args", "bare-slug-unchanged"],
-)
-def test_format_skill_invocation(skill_key, args, expected):
-    backend = PiBackend(model="glm-5.2")
-    result = backend.format_skill_invocation(skill_key, args) if args else backend.format_skill_invocation(skill_key)
-    assert result == expected
-    assert "beagle-" not in result
-
-
 def test_skill_token_re_grammar_matches_pi_name_rules():
     # Pi skill names are lowercase letters, digits, and hyphens.
     admitted = ["review-python", "review-frontend", "review-go", "2-thing", "a"]
@@ -765,8 +749,8 @@ def test_skill_token_re_grammar_matches_pi_name_rules():
 
 
 @pytest.mark.asyncio
-async def test_format_skill_invocation_token_is_consumed_by_execute(tmp_path, monkeypatch):
-    # The formatted token must be recognized by execute's scanner and registered.
+async def test_skill_token_is_consumed_by_execute(tmp_path, monkeypatch):
+    # A native token is recognized by execute's scanner and registered.
     skills_root = tmp_path / "skills"
     py_dir = skills_root / "review-python"
     py_dir.mkdir(parents=True)
@@ -776,7 +760,7 @@ async def test_format_skill_invocation_token_is_consumed_by_execute(tmp_path, mo
     monkeypatch.chdir(tmp_path)
 
     backend = PiBackend(model="glm-5.2")
-    prompt = f"Review this.\n\n{backend.format_skill_invocation('beagle-python:review-python')}"
+    prompt = "Review this.\n\n/skill:review-python"
 
     mock_proc = make_mock_process(['{"id": "s1"}'])
     with patch(
@@ -788,8 +772,7 @@ async def test_format_skill_invocation_token_is_consumed_by_execute(tmp_path, mo
     flat_args = list(mock_exec.call_args.args)
     skill_indices = [i for i, a in enumerate(flat_args) if a == "--skill"]
     assert len(skill_indices) == 1, (
-        f"producer/consumer pairing broken: token from format_skill_invocation "
-        f"was not scanned by execute; args: {flat_args}"
+        f"prompt token was not scanned by execute; args: {flat_args}"
     )
     assert flat_args[skill_indices[0] + 1] == str(py_dir)
 

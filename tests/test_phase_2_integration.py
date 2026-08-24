@@ -107,9 +107,6 @@ class MockBackend:
     async def cancel(self) -> None:
         return None
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 # Test 1 — ROADMAP #1: Claude metrics on every agent step; user/agent source split.
 async def test_claude_metrics_populated_on_every_agent_step(tmp_path: Path) -> None:

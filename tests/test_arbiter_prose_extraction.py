@@ -110,9 +110,6 @@ class _PiLikeBackend:
     async def cancel(self) -> None:
         pass
 
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
-
 
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(tmp_path: Path, make_work) -> None:
     """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
@@ -222,9 +219,6 @@ class _SplitTextBackend:
 
     async def cancel(self) -> None:
         pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
 
 
 async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, make_work) -> None:
