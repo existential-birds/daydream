@@ -13,6 +13,7 @@ dir containment — it only filters on ``state`` and reads the reward rows.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 from dataclasses import dataclass, field
@@ -147,6 +148,55 @@ class SuiteManifest:
 
     schema_version: int
     entries: tuple[SuiteEntry, ...]
+
+
+def _compatibility_fields(identity: CompatibilityIdentity) -> dict[str, object]:
+    """Every compatibility field that must match across a pooled suite.
+
+    Repository/benchmark ids and the per-run ``run_id`` are deliberately not
+    part of the identity and so are free to differ across entries.
+    """
+    return {
+        "objective_schema_version": identity.objective_schema_version,
+        "profile_schema_version": identity.profile_schema_version,
+        "profile_name": identity.profile_name,
+        "profile_digest": identity.profile_digest,
+        "daydream_version": identity.daydream_version,
+        "daydream_wheel_sha256": identity.daydream_wheel_sha256,
+        "compiled_lock_sha256": identity.compiled_lock_sha256,
+        "harbor_version": identity.harbor_version,
+        "reviewer_backend": identity.reviewer_backend,
+        "reviewer_model": identity.reviewer_model,
+        "reviewer_base_url": identity.reviewer_base_url,
+        "reviewer_effort": identity.reviewer_effort,
+        "judge_provider": identity.judge_provider,
+        "judge_model": identity.judge_model,
+        "judge_host": identity.judge_host,
+        "verifier_template_sha256": identity.verifier_template_sha256,
+        "threshold": identity.threshold,
+        "attempts": identity.attempts,
+    }
+
+
+@dataclass(frozen=True)
+class SuiteObjective:
+    """A pooled, compatible suite of exact completions.
+
+    ``objective`` holds the count-derived micro-metrics pooled across every
+    entry's flattened per-task rows (never per-repository averages).
+    ``experiment_id`` is a stable SHA-256 derived from the canonicalized
+    manifest plus the shared compatibility identity. ``identity`` is the
+    (single, verified-shared) ``CompatibilityIdentity``; ``profile_digest`` is
+    always present (spec must-have). ``diagnostics`` carries per-entry
+    ``{index, workspace, run_id, error}`` records for the error/reporting path
+    -- never prose-only -- and is empty on a cleanly pooled suite.
+    """
+
+    objective: Objective
+    experiment_id: str
+    profile_digest: str | None
+    identity: CompatibilityIdentity
+    diagnostics: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -295,6 +345,116 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
         "objective": objective_dict,
     }
 
+
+
+def _canonical_suite_manifest(entries: list[SuiteEntry]) -> dict[str, object]:
+    """Canonical, reorder-stable projection of a validated suite manifest."""
+    return {
+        "schema_version": _SUITE_SCHEMA_VERSION,
+        "entries": sorted(
+            ({"workspace": str(e.workspace), "run_id": e.run_id} for e in entries),
+            key=lambda ent: (ent["workspace"], ent["run_id"]),
+        ),
+    }
+
+
+def _suite_experiment_id(
+    entries: list[SuiteEntry], identity: CompatibilityIdentity
+) -> str:
+    """Stable SHA-256 over the canonicalized manifest plus the shared identity.
+
+    Canonicalizing (sorting unique entries) means reordering identical unique
+    entries yields the same id; duplicates are rejected before this runs.
+    """
+    payload = {
+        "manifest": _canonical_suite_manifest(entries),
+        "identity": _compatibility_fields(identity),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def aggregate_suite(
+    manifest: dict, *, env: dict[str, Any] | None = None
+) -> SuiteObjective:
+    """Validate and pool a suite manifest into one compatible ``SuiteObjective``.
+
+    Validates the manifest, resolves every entry via ``read_completed_run``, and
+    requires the full compatibility identity to match across every entry
+    (non-optional): any differing compatibility field — profile digest, wheel/
+    runtime digest, reviewer/judge identity, verifier template, threshold, or
+    attempts — raises ``ObjectiveError`` naming the field. Any entry that is
+    incomplete, malformed, comparison-ineligible, or a duplicated pair fails the
+    entire command fail-closed — never a silently-subsetted pool.
+
+    The pooled objective feeds the flattened per-task rows across all entries
+    through ``verifier_core.aggregate_metrics`` exactly once; TP/FP/FN pool to
+    micro precision/recall/F1 and the task/clean/infra counts sum across entries.
+    Per-repository precision/recall/F1 are never averaged.
+    """
+    env = env or {}
+    entries = validate_suite_manifest(manifest)
+
+    resolved: list[tuple[SuiteEntry, CompletedRun]] = []
+    diagnostics: list[dict[str, object]] = []
+    for index, entry in enumerate(entries):
+        try:
+            run = read_completed_run(entry.workspace, entry.run_id, env=env)
+        except ObjectiveError as exc:
+            diagnostics.append({
+                "index": index,
+                "workspace": str(entry.workspace),
+                "run_id": entry.run_id,
+                "error": str(exc),
+            })
+            raise ObjectiveError(f"suite entry #{index} failed: {exc}") from exc
+        resolved.append((entry, run))
+
+    identities: list[CompatibilityIdentity | None] = [r.identity for _, r in resolved]
+    if any(identity is None for identity in identities):
+        raise ObjectiveError(
+            "suite entries must each bind a compatibility identity for pooling"
+        )
+    base = identities[0]
+    assert base is not None
+    base_fields = _compatibility_fields(base)
+    for entry, run in resolved[1:]:
+        run_identity = run.identity
+        assert run_identity is not None
+        for comp_field, value in base_fields.items():
+            if getattr(run_identity, comp_field) != value:
+                raise ObjectiveError(
+                    f"suite is not comparable: {comp_field} differs across entries "
+                    f"at workspace {entry.workspace} run {entry.run_id!r}"
+                )
+
+    # Fail closed on any comparison-ineligible entry (never a subsetted pool).
+    for entry, run in resolved:
+        if run.objective is not None and not run.objective.comparison_eligible:
+            raise ObjectiveError(
+                f"suite entry at workspace {entry.workspace} run {entry.run_id!r} "
+                f"is not comparison-eligible; refusing to pool"
+            )
+
+    rows = [row for _, run in resolved for row in run.task_rows]
+    infra_errors = sum(1 for row in rows if row is None)
+    suite_label = _suite_label(entries)
+    pooled = _build_objective(
+        rows, infra_errors, job_dir=Path("@suite"), run_id=suite_label
+    )
+    experiment_id = _suite_experiment_id(entries, base)
+    return SuiteObjective(
+        objective=pooled,
+        experiment_id=experiment_id,
+        profile_digest=base.profile_digest,
+        identity=base,
+        diagnostics=diagnostics,
+    )
+
+
+def _suite_label(entries: list[SuiteEntry]) -> str:
+    return "-".join(f"{e.workspace.name}:{e.run_id}" for e in entries)
 
 
 _PROFILE_SCHEMA_VERSION = 1

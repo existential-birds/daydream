@@ -231,6 +231,73 @@ def test_objective_json_is_opaque(tmp_path):
     assert isinstance(doc["objective"], dict)
 
 
+def _complete_ws_at(tmp_path, name, run_id, trials, digest="d" * 64, wheel=None):
+    """A complete, consistent run under a repository workspace of the given name.
+
+    The ledger stores the on-disk compiled-lock hash and the supplied ``digest``
+    as the canonical review-profile digest, so ``read_completed_run`` resolves
+    the run and binds a differing profile digest per caller-supplied value.
+    """
+    ws = _ws(tmp_path / name)
+    _seed_compiled_lock(ws, wheel=wheel or _WHEEL)
+    run_mod.ledger_append_running(
+        ws, run_id=run_id,
+        compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
+        job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
+        profile_digest=digest,
+    )
+    run_mod.ledger_mark(ws, run_id, state="complete")
+    _seed_trials(ws, run_id, trials)
+    return ws
+
+
+def test_aggregate_suite_pools_micro_metrics_and_never_mean(tmp_path):
+    from daydream.benchmark.harbor import verifier_core
+
+    a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=1, fn=0)])
+    b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=3, fn=0)])
+    manifest = {"schema_version": 1, "entries": [
+        {"workspace": str(a), "run_id": "r1"},
+        {"workspace": str(b), "run_id": "r2"},
+    ]}
+    suite = objective.aggregate_suite(manifest, env={})
+    assert suite.objective.precision == pytest.approx(2 / 6)  # pooled, not mean
+    assert suite.objective.precision != pytest.approx((0.5 + 0.25) / 2)
+    a_rows = objective.read_completed_run(a, "r1", env={}).task_rows
+    b_rows = objective.read_completed_run(b, "r2", env={}).task_rows
+    flat = a_rows + b_rows   # flattened per-task dicts across both runs
+    assert suite.objective._as_metric_dict() == verifier_core.aggregate_metrics(flat)
+
+
+def test_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path):
+    a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)])
+    b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)])
+    m1 = {"schema_version": 1, "entries": [
+        {"workspace": str(a), "run_id": "r1"}, {"workspace": str(b), "run_id": "r2"}]}
+    m2 = {"schema_version": 1, "entries": [
+        {"workspace": str(b), "run_id": "r2"}, {"workspace": str(a), "run_id": "r1"}]}
+    s1 = objective.aggregate_suite(m1, env={})
+    s2 = objective.aggregate_suite(m2, env={})
+    assert s1.experiment_id == s2.experiment_id
+    assert s1.objective == s2.objective
+    dup = {"schema_version": 1, "entries": [
+        {"workspace": str(a), "run_id": "r1"}, {"workspace": str(a), "run_id": "r1"}]}
+    with pytest.raises(objective.ObjectiveError):
+        objective.aggregate_suite(dup, env={})
+
+
+def test_aggregate_suite_fails_closed_on_incompatible_identity(tmp_path):
+    a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)],
+                        digest="d" * 64)
+    b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)],
+                        digest="e" * 64)
+    manifest = {"schema_version": 1, "entries": [
+        {"workspace": str(a), "run_id": "r1"}, {"workspace": str(b), "run_id": "r2"}]}
+    with pytest.raises(objective.ObjectiveError) as e:
+        objective.aggregate_suite(manifest, env={})
+    assert "profile_digest" in str(e.value)
+
+
 def test_suite_manifest_validation(tmp_path):
     good = {"schema_version": 1, "entries": [
         {"workspace": str(tmp_path / "a"), "run_id": "r1"},
