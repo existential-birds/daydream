@@ -456,13 +456,13 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
     Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``,
-    ``curate``, ``calibrate-judge``, ``run``, ``clean``, ``objective``.
+    ``curate``, ``calibrate-judge``, ``run``, ``clean``, ``objective``, ``aggregate``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
         description=(
             "Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/"
-            "import-prs/curate/calibrate-judge/run/clean/objective."
+            "import-prs/curate/calibrate-judge/run/clean/objective/aggregate."
         ),
     )
     sub = parser.add_subparsers(dest="subcommand")
@@ -589,6 +589,19 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH|-",
         help="write the strict objective JSON to this path ('-' writes to stdout)",
+    )
+
+    aggregate_p = sub.add_parser(
+        "aggregate", help="pool a suite manifest of exact runs into one compatible objective JSON"
+    )
+    aggregate_p.add_argument(
+        "manifest", type=Path, help="suite manifest file (schema_version + entries of workspace/run_id)"
+    )
+    aggregate_p.add_argument(
+        "--json",
+        default=None,
+        metavar="PATH|-",
+        help="write the pooled suite objective JSON to this path ('-' writes to stdout)",
     )
 
     return parser
@@ -936,6 +949,93 @@ def _handle_benchmark_objective(args) -> int:
     return 0
 
 
+def _suite_objective_to_json(suite) -> dict[str, object]:
+    """Project a pooled ``SuiteObjective`` into opaque machine-readable JSON.
+
+    Produces the stable ``experiment_id``, the shared ``profile_digest``, the
+    full ``identity`` dict (identical across every pooled entry), and the
+    count-derived ``objective`` dict projected in the authoritative
+    ``aggregate_metrics`` key/shaper set. No repository slug, PR number, source
+    path, sample text, judge reasoning, or source code is emitted; only opaque
+    ids and counts pass through (privacy must-have).
+    """
+    identity = suite.identity
+    objective_json = suite.objective._as_metric_dict()
+    return {
+        "experiment_id": suite.experiment_id,
+        "profile_digest": suite.profile_digest,
+        "identity": {
+            "objective_schema_version": identity.objective_schema_version,
+            "profile_schema_version": identity.profile_schema_version,
+            "profile_name": identity.profile_name,
+            "profile_digest": identity.profile_digest,
+            "daydream_version": identity.daydream_version,
+            "daydream_wheel_sha256": identity.daydream_wheel_sha256,
+            "compiled_lock_sha256": identity.compiled_lock_sha256,
+            "harbor_version": identity.harbor_version,
+            "reviewer_backend": identity.reviewer_backend,
+            "reviewer_model": identity.reviewer_model,
+            "reviewer_base_url": identity.reviewer_base_url,
+            "reviewer_effort": identity.reviewer_effort,
+            "judge_provider": identity.judge_provider,
+            "judge_model": identity.judge_model,
+            "judge_host": identity.judge_host,
+            "verifier_template_sha256": identity.verifier_template_sha256,
+            "threshold": identity.threshold,
+            "attempts": identity.attempts,
+        },
+        "objective": objective_json,
+    }
+
+
+def _handle_benchmark_aggregate(args) -> int:
+    """Pool a suite manifest of exact runs into one compatible objective JSON (issue #888).
+
+    Loads the manifest through ``storage.load_json_strict``, then drives
+    ``objective.aggregate_suite`` (which fails closed on any missing/incomplete/
+    incompatible/malformed/duplicated entry — never a silently-subsetted pool).
+    When ``--json`` is set, the strict suite objective is written through
+    ``storage.atomic_write_json`` (or printed on ``-``); an expected
+    ``ObjectiveError``/``WorkspaceCorrupt`` prints to stderr and returns exit
+    ``1`` without touching an existing output file — never a bare traceback.
+    The shared profile digest and full compatibility identity are always printed
+    to stdout.
+    """
+    from daydream.benchmark.harbor import objective
+    from daydream.benchmark.storage import WorkspaceCorrupt, atomic_write_json, load_json_strict
+
+    try:
+        manifest = load_json_strict(args.manifest)
+        suite = objective.aggregate_suite(manifest, env=dict(os.environ))
+    except objective.ObjectiveError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except WorkspaceCorrupt as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    blob = _suite_objective_to_json(suite)
+    if args.json is not None:
+        if args.json == "-":
+            print(json.dumps(blob, indent=2))
+        else:
+            atomic_write_json(Path(args.json), blob)
+
+    identity = suite.identity
+    print(f"profile digest: {suite.profile_digest or ''}")
+    print(
+        "identity: "
+        f"profile={identity.profile_name} "
+        f"reviewer={identity.reviewer_backend}/{identity.reviewer_model} "
+        f"judge={identity.judge_provider}/{identity.judge_model}"
+    )
+    print(
+        f"aggregate {suite.objective.task_count} tasks, "
+        f"micro_f1={suite.objective.f1:.4f}, experiment_id={suite.experiment_id}"
+    )
+    return 0
+
+
 def _handle_benchmark_command(argv: list[str]) -> int:
     """Handle ``daydream benchmark init|status|validate|build-harbor|upgrade|import-prs|curate``.
 
@@ -943,9 +1043,10 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
     ``ImportTargetError``/``PreflightError``/``CurationError``) are printed to
     stderr and mapped to exit ``1`` — never a bare traceback. ``run`` dispatches
-    to :func:`_handle_benchmark_run` (the supervised Harbor runner) and
+    to :func:`_handle_benchmark_run` (the supervised Harbor runner),
     ``objective`` to :func:`_handle_benchmark_objective` (the read-only
-    machine-readable run resolution).
+    machine-readable run resolution), and ``aggregate`` to
+    :func:`_handle_benchmark_aggregate` (the pooled suite objective).
     """
 
     parser = _build_benchmark_parser()
@@ -976,5 +1077,7 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_clean(args)
     if sub == "objective":
         return _handle_benchmark_objective(args)
+    if sub == "aggregate":
+        return _handle_benchmark_aggregate(args)
     parser.print_help(file=sys.stderr)
     return 2

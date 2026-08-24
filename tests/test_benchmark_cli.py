@@ -414,6 +414,41 @@ def test_objective_cli_failure_leaves_output_unchanged(tmp_path):
     assert out.read_text() == "SENTINEL"
 
 
+def test_aggregate_cli_writes_json_and_prints_digest(tmp_path, capsys):
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from tests.test_benchmark_objective import _complete_ws_at, _reward
+    a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)])
+    b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)])
+    manifest = tmp_path / "suite.json"
+    manifest.write_text(json.dumps({"schema_version": 1, "entries": [
+        {"workspace": str(a), "run_id": "r1"},
+        {"workspace": str(b), "run_id": "r2"}]}))
+    out = tmp_path / "agg.json"
+    code = _handle_benchmark_command(["aggregate", str(manifest), "--json", str(out)])
+    assert code == 0
+    doc = json.loads(out.read_text())
+    assert doc["experiment_id"]
+    assert doc["profile_digest"]
+    assert "micro_precision" in doc["objective"]
+    assert "d"*64 in capsys.readouterr().out   # digest always printed
+
+
+def test_aggregate_cli_fails_closed_leaves_output_unchanged(tmp_path):
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from tests.test_benchmark_objective import _complete_ws_at, _reward
+    a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)], digest="d"*64)
+    b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)], digest="e"*64)
+    manifest = tmp_path / "suite.json"
+    manifest.write_text(json.dumps({"schema_version": 1, "entries": [
+        {"workspace": str(a), "run_id": "r1"},
+        {"workspace": str(b), "run_id": "r2"}]}))
+    out = tmp_path / "agg.json"
+    out.write_text("SENTINEL")
+    code = _handle_benchmark_command(["aggregate", str(manifest), "--json", str(out)])
+    assert code == 1
+    assert out.read_text() == "SENTINEL"
+
+
 def test_bench_help_lists_flags():
     r = subprocess.run(  # noqa: S603 - args are not user-controlled
         ["daydream", "bench", "--help"], capture_output=True, text=True  # noqa: S607 - daydream is a trusted command
