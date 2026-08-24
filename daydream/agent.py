@@ -53,20 +53,7 @@ from daydream.ui import (
     prompt_user,
 )
 
-# Generic skill-error detection for the extension/backend skill machinery (deleted
-# alongside that machinery in #887). Built-in Deep/Improve reviews no longer invoke
-# skills, so this is never reached on the native review path.
-_UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
-
 _logger = logging.getLogger(__name__)
-
-
-class MissingSkillError(Exception):
-    """Raised when a required skill is not available."""
-
-    def __init__(self, skill_name: str):
-        self.skill_name = skill_name
-        super().__init__(f"Skill '{skill_name}' is not available")
 
 
 class _ToolSupervisorFailure(Exception):
@@ -536,7 +523,6 @@ async def run_agent(
         turn was cut short.
 
     Raises:
-        MissingSkillError: If a required skill is not available.
         TypeError: If the keyword-only ``phase`` argument is not provided
             (raised by the Python interpreter at call time).
     """
@@ -631,13 +617,6 @@ async def run_agent(
                         async for event in event_iter:
                             if isinstance(event, TextEvent):
                                 output_parts.append(event.text)
-
-                                skill_match = re.search(_UNKNOWN_SKILL_PATTERN, event.text)
-                                if skill_match:
-                                    if not use_callback and not _state.log_mode:
-                                        agent_renderer.finish()
-                                        tool_registry.finish_all()
-                                    raise MissingSkillError(skill_match.group(1))
 
                                 if _state.log_mode:
                                     _print_log(event.text)
