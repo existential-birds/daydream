@@ -55,9 +55,18 @@ body:
       placeholder: |
         - OS: macOS 14.2
         - Python: 3.12.1
-        - Claude Code version: x.x.x
-        - Beagle plugin version: x.x.x
-        - Command used: daydream /path --python --debug
+        - Daydream version: x.x.x
+        - Backend: claude|codex|pi|osprey
+        - Provider: <provider>
+        - Model: <model>
+        - Reasoning effort: low|medium|high
+        - Review profile name: <profile>
+        - Review profile schema version: <version>
+        - Review profile digest: <sha256>
+        - Review profile source: explicit|env|repo|default
+        - Stacks: <selected or auto-detected stacks>
+        - Benchmark run ID (if applicable): <run ID>
+        - Command used: daydream /path --backend claude --model <model>
     validations:
       required: true
 
@@ -69,7 +78,7 @@ body:
       placeholder: |
         - Tried with --debug flag to see more output
         - Tried with --review-only to isolate the issue
-        - Checked if Beagle skills are installed
+        - Verified the resolved review profile source and digest with `daydream profiles`
     validations:
       required: false
 
@@ -98,7 +107,10 @@ body:
         - Test and heal phase
         - Agent SDK integration
         - UI (terminal output)
-        - Beagle skills integration
+        - Review
+        - Improve
+        - Profile (review profiles)
+        - Benchmark
         - Other
     validations:
       required: true
