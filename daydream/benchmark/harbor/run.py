@@ -434,6 +434,18 @@ def _preflight(
     return failures
 
 
+def _iter_trial_dirs(job_dir: Path):
+    """Yield the sorted trial subdirectories of a Harbor job dir.
+
+    Non-directory siblings (lockfiles, READMEs) are skipped. Shared by
+    ``_parse_job_results`` (oracle path) and ``objective._parse_task_rows`` so
+    the trial-dir traversal skeleton lives in one place (issue #888 anti-slop).
+    """
+    for trial in sorted(job_dir.iterdir()):
+        if trial.is_dir():
+            yield trial
+
+
 def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
     """Parse Harbor's job dir for per-task scores + resolved environments.
 
@@ -451,9 +463,7 @@ def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
         return (False, [])
     environments: list[dict[str, Any]] = []
     oracle_ok = True
-    for trial in sorted(job_dir.iterdir()):
-        if not trial.is_dir():
-            continue  # a non-directory sibling is not a task trial
+    for trial in _iter_trial_dirs(job_dir):
         verifier = trial / "verifier"
         reward_path = verifier / "reward.json"
         # Resolve the trial environment even when the trial carries no claimable

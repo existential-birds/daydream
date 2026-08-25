@@ -939,14 +939,19 @@ def _handle_benchmark_objective(args) -> int:
             atomic_write_json(Path(args.json), blob)
 
     obj = run.objective
+    # In ``--json -`` mode stdout must stay pure JSON (issue #888 machine-readable
+    # contract); route the human summary to stderr so ``jq``/``> file.json`` sees
+    # only the blob.
+    out_stream = sys.stderr if args.json == "-" else sys.stdout
     if obj is not None:
         print(
             f"objective {run.run_id}: comparison_eligible={obj.comparison_eligible} "
             f"micro_f1={obj.f1:.4f} tasks={obj.task_count} "
-            f"scored={obj.scored_task_count} infra={obj.infra_error_task_count}"
+            f"scored={obj.scored_task_count} infra={obj.infra_error_task_count}",
+            file=out_stream,
         )
     else:
-        print(f"objective {run.run_id}: no objective (unscored run)")
+        print(f"objective {run.run_id}: no objective (unscored run)", file=out_stream)
     return 0
 
 
@@ -960,31 +965,14 @@ def _suite_objective_to_json(suite) -> dict[str, object]:
     path, sample text, judge reasoning, or source code is emitted; only opaque
     ids and counts pass through (privacy must-have).
     """
+    from daydream.benchmark.harbor import objective
+
     identity = suite.identity
     objective_json = suite.objective._as_metric_dict()
     return {
         "experiment_id": suite.experiment_id,
         "profile_digest": suite.profile_digest,
-        "identity": {
-            "objective_schema_version": identity.objective_schema_version,
-            "profile_schema_version": identity.profile_schema_version,
-            "profile_name": identity.profile_name,
-            "profile_digest": identity.profile_digest,
-            "daydream_version": identity.daydream_version,
-            "daydream_wheel_sha256": identity.daydream_wheel_sha256,
-            "compiled_lock_sha256": identity.compiled_lock_sha256,
-            "harbor_version": identity.harbor_version,
-            "reviewer_backend": identity.reviewer_backend,
-            "reviewer_model": identity.reviewer_model,
-            "reviewer_base_url": identity.reviewer_base_url,
-            "reviewer_effort": identity.reviewer_effort,
-            "judge_provider": identity.judge_provider,
-            "judge_model": identity.judge_model,
-            "judge_host": identity.judge_host,
-            "verifier_template_sha256": identity.verifier_template_sha256,
-            "threshold": identity.threshold,
-            "attempts": identity.attempts,
-        },
+        "identity": objective.identity_to_dict(identity),
         "objective": objective_json,
     }
 
@@ -1023,16 +1011,21 @@ def _handle_benchmark_aggregate(args) -> int:
             atomic_write_json(Path(args.json), blob)
 
     identity = suite.identity
-    print(f"profile digest: {suite.profile_digest or ''}")
+    # In ``--json -`` mode stdout must stay pure JSON; route the human summary
+    # to stderr so a ``jq``/file-redirect consumer sees only the blob.
+    out_stream = sys.stderr if args.json == "-" else sys.stdout
+    print(f"profile digest: {suite.profile_digest or ''}", file=out_stream)
     print(
         "identity: "
         f"profile={identity.profile_name} "
         f"reviewer={identity.reviewer_backend}/{identity.reviewer_model} "
-        f"judge={identity.judge_provider}/{identity.judge_model}"
+        f"judge={identity.judge_provider}/{identity.judge_model}",
+        file=out_stream,
     )
     print(
         f"aggregate {suite.objective.task_count} tasks, "
-        f"micro_f1={suite.objective.f1:.4f}, experiment_id={suite.experiment_id}"
+        f"micro_f1={suite.objective.f1:.4f}, experiment_id={suite.experiment_id}",
+        file=out_stream,
     )
     return 0
 

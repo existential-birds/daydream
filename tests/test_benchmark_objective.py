@@ -361,3 +361,45 @@ def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path):
     unsupported = {"schema_version": 99, "entries": []}
     with pytest.raises(objective.ObjectiveError):
         objective.validate_suite_manifest(unsupported)
+
+
+def test_identity_to_dict_is_single_source_for_all_projections(tmp_path):
+    """Issue #888 anti-slop: one shared identity projection everywhere.
+
+    ``objective_to_json`` (per-run), ``_compatibility_fields`` (pool compat),
+    and the suite aggregate identity must all be byte-identical projections of
+    the same ``CompatibilityIdentity`` so a field added/renamed in one place
+    can't silently desynchronize the others.
+    """
+    ws = _complete_ws(tmp_path)
+    run = objective.read_completed_run(ws, "run-1", env=_env())
+    assert run.identity is not None
+
+    per_run = objective.objective_to_json(run)["identity"]
+    compat = objective._compatibility_fields(run.identity)
+    assert per_run == compat == objective.identity_to_dict(run.identity)
+
+    # The suite aggregate identity for the same workspace must match too.
+    manifest = {"schema_version": 1, "entries": [
+        {"workspace": str(ws), "run_id": "run-1"}]}
+    suite = objective.aggregate_suite(manifest, env=_env())
+    assert suite.identity == run.identity
+    assert objective.identity_to_dict(suite.identity) == per_run
+
+
+def test_shared_trial_walker_skips_non_dirs_and_matches_parse_job_results(tmp_path):
+    """Issue #888 anti-slop: objective._parse_task_rows reuses run's trial walker.
+
+    The shared ``run_mod._iter_trial_dirs`` skips non-directory siblings and
+    yields the same sorted trials the oracle path traverses.
+    """
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _complete_ws(tmp_path)
+    job_dir = ws / "harbor" / "jobs" / "run-1"
+    (job_dir / "README.txt").write_text("not a trial")
+    trials = [p.name for p in run_mod._iter_trial_dirs(job_dir)]
+    assert "README.txt" not in trials
+    assert trials == sorted(
+        p.name for p in job_dir.iterdir() if p.is_dir()
+    )

@@ -150,11 +150,14 @@ class SuiteManifest:
     entries: tuple[SuiteEntry, ...]
 
 
-def _compatibility_fields(identity: CompatibilityIdentity) -> dict[str, object]:
-    """Every compatibility field that must match across a pooled suite.
+def identity_to_dict(identity: CompatibilityIdentity) -> dict[str, object]:
+    """Canonical 18-field compatibility/identity projection.
 
-    Repository/benchmark ids and the per-run ``run_id`` are deliberately not
-    part of the identity and so are free to differ across entries.
+    Single source of truth for the identity mapping reused by
+    ``objective_to_json``, the suite aggregate identity, and the CLI's
+    ``_suite_objective_to_json`` (issue #888 anti-slop: adding/renaming a field
+    in one place must not silently desynchronize the others). Repository/
+    benchmark ids are deliberately not part of the identity.
     """
     return {
         "objective_schema_version": identity.objective_schema_version,
@@ -176,6 +179,15 @@ def _compatibility_fields(identity: CompatibilityIdentity) -> dict[str, object]:
         "threshold": identity.threshold,
         "attempts": identity.attempts,
     }
+
+
+def _compatibility_fields(identity: CompatibilityIdentity) -> dict[str, object]:
+    """Every compatibility field that must match across a pooled suite.
+
+    Repository/benchmark ids and the per-run ``run_id`` are deliberately not
+    part of the identity and so are free to differ across entries.
+    """
+    return identity_to_dict(identity)
 
 
 @dataclass(frozen=True)
@@ -287,26 +299,7 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
     identity = run.identity
     identity_json = None
     if identity is not None:
-        identity_json = {
-            "objective_schema_version": identity.objective_schema_version,
-            "profile_schema_version": identity.profile_schema_version,
-            "profile_name": identity.profile_name,
-            "profile_digest": identity.profile_digest,
-            "daydream_version": identity.daydream_version,
-            "daydream_wheel_sha256": identity.daydream_wheel_sha256,
-            "compiled_lock_sha256": identity.compiled_lock_sha256,
-            "harbor_version": identity.harbor_version,
-            "reviewer_backend": identity.reviewer_backend,
-            "reviewer_model": identity.reviewer_model,
-            "reviewer_base_url": identity.reviewer_base_url,
-            "reviewer_effort": identity.reviewer_effort,
-            "judge_provider": identity.judge_provider,
-            "judge_model": identity.judge_model,
-            "judge_host": identity.judge_host,
-            "verifier_template_sha256": identity.verifier_template_sha256,
-            "threshold": identity.threshold,
-            "attempts": identity.attempts,
-        }
+        identity_json = identity_to_dict(identity)
 
     objective_dict: dict[str, object] | None = None
     if run.objective is not None:
@@ -535,20 +528,10 @@ def _bind_identity(
             f"on-disk compiled lock at {workspace / 'harbor' / 'benchmark.lock.json'}"
         )
 
-    lock = _load_compiled_lock(workspace, run_id)
-    day = lock.get("daydream")
-    if not isinstance(day, dict):
-        raise ObjectiveError(
-            f"run {run_id!r}: compiled lock at {workspace / 'harbor' / 'benchmark.lock.json'}"
-            f" is missing its 'daydream' wheel block"
-        )
-    wheel_sha = day.get("sha256")
-    wheel_version = day.get("version")
-    if not isinstance(wheel_sha, str) or not wheel_sha or not isinstance(wheel_version, str):
-        raise ObjectiveError(
-            f"run {run_id!r}: compiled lock at {workspace / 'harbor' / 'benchmark.lock.json'}"
-            f" has a malformed or missing 'daydream' wheel digest/version"
-        )
+    try:
+        wheel_version, wheel_sha = run_mod._compiled_daydream_wheel(workspace)
+    except run_mod.RunError as exc:
+        raise ObjectiveError(f"run {run_id!r}: {exc}") from exc
 
     try:
         harbor_version = ".".join(
@@ -592,20 +575,6 @@ def _bind_identity(
     )
 
 
-def _load_compiled_lock(workspace: Path, run_id: str) -> dict[str, Any]:
-    """Read the compiled ``harbor/benchmark.lock.json`` strictly."""
-    path = workspace / "harbor" / "benchmark.lock.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ObjectiveError(
-            f"run {run_id!r}: cannot read compiled lock at {path}: {exc}"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ObjectiveError(f"run {run_id!r}: compiled lock at {path} must be a mapping")
-    return data
-
-
 # The integer count keys a scored task must carry as JSON integers (mirrors
 # the generated reward-row shape consumed by ``verifier_core.aggregate_metrics``).
 _SCORED_COUNT_KEYS = ("tp", "fp", "fn")
@@ -632,9 +601,7 @@ def _parse_task_rows(
         return [], 0
     rows: list[dict[str, object] | None] = []
     infra_errors = 0
-    for trial in sorted(job_dir.iterdir()):
-        if not trial.is_dir():
-            continue  # a non-directory sibling is not a task trial
+    for trial in run_mod._iter_trial_dirs(job_dir):
         verifier = trial / "verifier"
         reward_path = verifier / "reward.json"
         if reward_path.is_file():

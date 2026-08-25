@@ -632,7 +632,22 @@ def test_ledger_records_reviewer_effort_when_present(tmp_path):
     run_id = "run-1"
     run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256="a" * 64,
                                   job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
-                                  profile_digest="d" * 64)
+                                  profile_digest="d" * 64, reviewer_effort="high")
     run_mod.ledger_mark(ws, run_id, state="complete")
     doc = run_mod._load_ledger(ws)
     assert doc["runs"][0]["profile_digest"] == "d" * 64
+    assert doc["runs"][0]["reviewer_effort"] == "high"
+
+
+def test_ledger_reviewer_effort_defaults_none_when_omitted(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    run_id = "run-1"
+    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256="a" * 64,
+                                  job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()))
+    run_mod.ledger_mark(ws, run_id, state="complete")
+    doc = run_mod._load_ledger(ws)
+    # Issue #888: an omitted effort stays None on the entry (byte-stable for
+    # legacy callers); the objective reader surfaces it as None, never 0/"".
+    assert doc["runs"][0]["reviewer_effort"] is None

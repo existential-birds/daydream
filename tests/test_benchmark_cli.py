@@ -399,6 +399,22 @@ def test_objective_cli_writes_json_atomically_and_summary(tmp_path, capsys):
     assert "run-1" in captured   # concise local summary by default
 
 
+def test_objective_cli_json_dash_keeps_stdout_pure_json(tmp_path, capsys):
+    from daydream.benchmark.cli import _handle_benchmark_command
+
+    ws = _objective_ws(tmp_path)
+    code = _handle_benchmark_command([
+        "objective", str(ws), "--run-id", "run-1", "--json", "-",
+    ])
+    assert code == 0
+    captured = capsys.readouterr()
+    # Issue #888 machine-readable '-' mode: stdout must be exactly the JSON blob
+    # (no interleaved human summary); the summary routes to stderr.
+    doc = json.loads(captured.out)
+    assert doc["run_id"] == "run-1" and "f1" in doc["objective"]
+    assert "objective run-1:" in captured.err   # human summary went to stderr
+
+
 def test_objective_cli_failure_leaves_output_unchanged(tmp_path):
     from daydream.benchmark.cli import _handle_benchmark_command
     from daydream.benchmark.harbor import run as run_mod
