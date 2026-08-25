@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 from pathlib import Path
 
@@ -109,3 +110,24 @@ def test_fresh_install_docs_have_no_plugin_step() -> None:
         text = (ROOT / name).read_text().lower()
         for token in ("beagle", "plugin", "daydream_skills_dir", "review skill"):
             assert token not in text, f"{name} still mentions {token!r}"
+
+
+def test_historical_records_preserved() -> None:
+    expected = {
+        "CHANGELOG.md": "53bf5caac1cceaeef3cb14a1e9d7cb7cbf56f02844e0ddb41a23ddaa8f53c0f5",
+        "benchmark/corpora/osprey-coderabbit/index.json": (
+            "ff6e5f43443c1181c8b2b51c3d662c7bc2d37615cdd54240919fabe300a3c0b8"
+        ),
+        "benchmark/corpora/osprey-coderabbit/manifest.json": (
+            "12be2b049b4b609721286e57ce8dc88059ed1a7bf396384ee28c82bee29d3c5e"
+        ),
+        "benchmark/corpora/sharding/ground-truth.json": (
+            "4aa4858a98dc128aced5385ee93d17c94566192913db4ab61784060ae08c4bd0"
+        ),
+        "benchmark/corpora/sharding/large-python.patch": (
+            "b04c51b699a9cbd156ec87ef9468fcf178a9264cef2774de4c4871d371f1a711"
+        ),
+    }
+    for rel, want in expected.items():
+        data = (ROOT / rel).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == want, f"{rel} changed byte-for-byte"
