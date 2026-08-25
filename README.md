@@ -63,9 +63,13 @@ daydream --comment /path/to/project          # review, then post inline PR comme
 daydream --review /path/to/project           # write a report only; no fixes or PR comments
 daydream --shallow /path/to/project          # review one stack in one pass
 daydream --yes /path/to/project              # apply fixes without prompting
+daydream --review-profile review.toml /path/to/project   # explicit review profile
+daydream -s python /path/to/project                      # force a specific stack
 ```
 
-The `--comment` mode posts inline PR comments and exits; `--review` writes a report and exits. Neither runs the fix cycle.
+Profile precedence is: explicit `--review-profile <path>` > env `DAYDREAM_REVIEW_PROFILE` > repo-committed `file_config.review_profile` > built-in default. The `--comment` mode posts inline PR comments and exits; `--review` writes a report and exits. Neither runs the fix cycle.
+
+The profile selects analysis and effort settings, but backend, provider, model, reasoning effort, and safety/scoring are host-owned invariants outside the profile — they come from the host, not the profile.
 
 Run `daydream --help` to see the common flags. Run `daydream --help-all` to see the full advanced surface.
 
