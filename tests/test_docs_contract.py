@@ -2,6 +2,7 @@ import contextlib
 import io
 from pathlib import Path
 
+from daydream.benchmark.cli import _build_benchmark_parser
 from daydream.cli import _parse_args
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,3 +45,24 @@ def test_readme_run_examples_parse() -> None:
             io.StringIO()
         ):
             _parse_args(tokens)  # parses without SystemExit
+
+
+def test_benchmark_runbook_native() -> None:
+    runbook = (ROOT / "docs" / "benchmark.md").read_text()
+    assert "beagle" not in runbook.lower(), "Beagle prerequisite still present"
+    lower = runbook.lower()
+    assert "daydream benchmark objective" in lower
+    assert "daydream benchmark aggregate" in lower
+    # the Harbor (private-PR `daydream benchmark`) section — no optimizer claim
+    harbor = lower[lower.find("## private pr benchmark workspaces"):]
+    for banned in ("optimiz", "hill climb", "search loop"):
+        assert banned not in harbor, f"Harbor section claims {banned!r}"
+    for frag in ("explicit", "trust", "digest", "micro",
+                 "schema_version", "run_id", "workspace"):
+        assert frag in harbor, f"Harbor section missing {frag!r}"
+
+
+def test_benchmark_objective_aggregate_parse() -> None:
+    p = _build_benchmark_parser()                    # production parser
+    p.parse_args(["objective", "./ws", "--run-id", "run-abc123", "--json", "-"])
+    p.parse_args(["aggregate", "./suite.json", "--json", "-"])
