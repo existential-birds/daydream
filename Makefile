@@ -1,7 +1,9 @@
 .PHONY: install lint typecheck test check lockcheck hooks benchmark-report
 
 install:
-	uv sync
+	# All extras so `make check` runs the full suite (benchmark objective tests
+	# need the harbor package from the benchmark extra).
+	uv sync --all-extras
 
 lint:
 	uv run ruff check daydream tests bench
