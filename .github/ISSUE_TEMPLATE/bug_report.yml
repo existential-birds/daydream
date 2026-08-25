@@ -78,7 +78,7 @@ body:
       placeholder: |
         - Tried with --debug flag to see more output
         - Tried with --review-only to isolate the issue
-        - Verified the resolved review profile source and digest with `daydream profiles`
+        - Checked the run archive manifest for the resolved review profile source and digest
     validations:
       required: false
 

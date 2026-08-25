@@ -69,7 +69,7 @@ daydream -s python /path/to/project                      # force a specific stac
 
 Profile precedence is: explicit `--review-profile <path>` > env `DAYDREAM_REVIEW_PROFILE` > repo-committed `file_config.review_profile` > built-in default. The `--comment` mode posts inline PR comments and exits; `--review` writes a report and exits. Neither runs the fix cycle.
 
-The profile selects analysis and effort settings, but backend, provider, model, reasoning effort, and safety/scoring are host-owned invariants outside the profile — they come from the host, not the profile.
+The profile selects analysis settings, but backend, provider, model, reasoning effort, and safety/scoring are host-owned invariants outside the profile — they come from the host, not the profile.
 
 Run `daydream --help` to see the common flags. Run `daydream --help-all` to see the full advanced surface.
 
