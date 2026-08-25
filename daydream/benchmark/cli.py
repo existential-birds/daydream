@@ -16,6 +16,7 @@ checkout (``--benchmark-repo``) or a harvested dir (``--harvest-dir``).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -455,13 +456,13 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
     Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``,
-    ``curate``, ``calibrate-judge``, ``run``, ``clean``.
+    ``curate``, ``calibrate-judge``, ``run``, ``clean``, ``objective``, ``aggregate``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
         description=(
             "Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/"
-            "import-prs/curate/calibrate-judge/run/clean."
+            "import-prs/curate/calibrate-judge/run/clean/objective/aggregate."
         ),
     )
     sub = parser.add_subparsers(dest="subcommand")
@@ -576,6 +577,31 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     )
     clean_p.add_argument(
         "--yes", action="store_true", help="confirm --all without prompting"
+    )
+
+    objective_p = sub.add_parser(
+        "objective", help="resolve an exact completed run as machine-readable JSON"
+    )
+    objective_p.add_argument("dir", type=Path, help="workspace directory")
+    objective_p.add_argument("--run-id", required=True, help="exact ledgered run id")
+    objective_p.add_argument(
+        "--json",
+        default=None,
+        metavar="PATH|-",
+        help="write the strict objective JSON to this path ('-' writes to stdout)",
+    )
+
+    aggregate_p = sub.add_parser(
+        "aggregate", help="pool a suite manifest of exact runs into one compatible objective JSON"
+    )
+    aggregate_p.add_argument(
+        "manifest", type=Path, help="suite manifest file (schema_version + entries of workspace/run_id)"
+    )
+    aggregate_p.add_argument(
+        "--json",
+        default=None,
+        metavar="PATH|-",
+        help="write the pooled suite objective JSON to this path ('-' writes to stdout)",
     )
 
     return parser
@@ -772,6 +798,7 @@ def _handle_benchmark_run(args) -> int:
             "DAYDREAM_REVIEW_MODEL",
             "DAYDREAM_REVIEW_API_KEY",
             "DAYDREAM_REVIEW_BASE_URL",
+            "DAYDREAM_REVIEW_EFFORT",
             "DAYDREAM_JUDGE_PROVIDER",
             "DAYDREAM_JUDGE_MODEL",
             "DAYDREAM_JUDGE_API_KEY",
@@ -884,6 +911,125 @@ def _handle_benchmark_curate(args) -> int:
     return 0
 
 
+def _handle_benchmark_objective(args) -> int:
+    """Resolve an exact completed run and emit its machine-readable objective.
+
+    ``--json`` serializes the opaque privacy-safe objective via
+    ``objective.objective_to_json`` and writes it through
+    ``storage.atomic_write_json`` (or prints it directly on ``-``); a parse/
+    compat failure leaves an existing output file byte-identical. Without
+    ``--json``, prints a concise local summary (run_id, comparison_eligible,
+    micro F1, task/infra counts) to stdout. Expected ``ObjectiveError`` prints
+    to stderr and returns exit ``1`` — never a bare traceback.
+    """
+    from daydream.benchmark.harbor import objective
+    from daydream.benchmark.storage import atomic_write_json
+
+    try:
+        run = objective.read_completed_run(args.dir, args.run_id, env=dict(os.environ))
+    except objective.ObjectiveError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.json is not None:
+        blob = objective.objective_to_json(run)
+        if args.json == "-":
+            print(json.dumps(blob, indent=2))
+        else:
+            atomic_write_json(Path(args.json), blob)
+
+    obj = run.objective
+    # In ``--json -`` mode stdout must stay pure JSON (issue #888 machine-readable
+    # contract); route the human summary to stderr so ``jq``/``> file.json`` sees
+    # only the blob.
+    out_stream = sys.stderr if args.json == "-" else sys.stdout
+    if obj is not None:
+        print(
+            f"objective {run.run_id}: comparison_eligible={obj.comparison_eligible} "
+            f"micro_f1={obj.f1:.4f} tasks={obj.task_count} "
+            f"scored={obj.scored_task_count} infra={obj.infra_error_task_count}",
+            file=out_stream,
+        )
+    else:
+        print(f"objective {run.run_id}: no objective (unscored run)", file=out_stream)
+    return 0
+
+
+def _suite_objective_to_json(suite) -> dict[str, object]:
+    """Project a pooled ``SuiteObjective`` into opaque machine-readable JSON.
+
+    Produces the stable ``experiment_id``, the shared ``profile_digest``, the
+    full ``identity`` dict (identical across every pooled entry), and the
+    count-derived ``objective`` dict projected in the authoritative
+    ``aggregate_metrics`` key/shaper set. No repository slug, PR number, source
+    path, sample text, judge reasoning, or source code is emitted; only opaque
+    ids and counts pass through (privacy must-have).
+    """
+    from daydream.benchmark.harbor import objective
+
+    identity = suite.identity
+    objective_json = suite.objective._as_metric_dict()
+    return {
+        "experiment_id": suite.experiment_id,
+        "profile_digest": suite.profile_digest,
+        "identity": objective.identity_to_dict(identity),
+        "objective": objective_json,
+    }
+
+
+def _handle_benchmark_aggregate(args) -> int:
+    """Pool a suite manifest of exact runs into one compatible objective JSON (issue #888).
+
+    Loads the manifest through ``storage.load_json_strict``, then drives
+    ``objective.aggregate_suite`` (which fails closed on any missing/incomplete/
+    incompatible/malformed/duplicated entry — never a silently-subsetted pool).
+    When ``--json`` is set, the strict suite objective is written through
+    ``storage.atomic_write_json`` (or printed on ``-``); an expected
+    ``ObjectiveError``/``WorkspaceCorrupt`` prints to stderr and returns exit
+    ``1`` without touching an existing output file — never a bare traceback.
+    The shared profile digest and full compatibility identity are always printed
+    to stdout.
+    """
+    from daydream.benchmark.harbor import objective
+    from daydream.benchmark.storage import WorkspaceCorrupt, atomic_write_json, load_json_strict
+
+    try:
+        manifest = load_json_strict(args.manifest)
+        suite = objective.aggregate_suite(manifest, env=dict(os.environ))
+    except objective.ObjectiveError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except WorkspaceCorrupt as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    blob = _suite_objective_to_json(suite)
+    if args.json is not None:
+        if args.json == "-":
+            print(json.dumps(blob, indent=2))
+        else:
+            atomic_write_json(Path(args.json), blob)
+
+    identity = suite.identity
+    # In ``--json -`` mode stdout must stay pure JSON; route the human summary
+    # to stderr so a ``jq``/file-redirect consumer sees only the blob.
+    out_stream = sys.stderr if args.json == "-" else sys.stdout
+    print(f"profile digest: {suite.profile_digest or ''}", file=out_stream)
+    print(
+        "identity: "
+        f"profile={identity.profile_name} "
+        f"reviewer={identity.reviewer_backend}/{identity.reviewer_model} "
+        f"judge={identity.judge_provider}/{identity.judge_model}",
+        file=out_stream,
+    )
+    print(
+        f"aggregate {suite.objective.task_count} tasks, "
+        f"micro_f1={suite.objective.f1:.4f}, experiment_id={suite.experiment_id}",
+        file=out_stream,
+    )
+    return 0
+
+
 def _handle_benchmark_command(argv: list[str]) -> int:
     """Handle ``daydream benchmark init|status|validate|build-harbor|upgrade|import-prs|curate``.
 
@@ -891,7 +1037,10 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
     ``ImportTargetError``/``PreflightError``/``CurationError``) are printed to
     stderr and mapped to exit ``1`` — never a bare traceback. ``run`` dispatches
-    to :func:`_handle_benchmark_run` (the supervised Harbor runner).
+    to :func:`_handle_benchmark_run` (the supervised Harbor runner),
+    ``objective`` to :func:`_handle_benchmark_objective` (the read-only
+    machine-readable run resolution), and ``aggregate`` to
+    :func:`_handle_benchmark_aggregate` (the pooled suite objective).
     """
 
     parser = _build_benchmark_parser()
@@ -920,5 +1069,9 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_run(args)
     if sub == "clean":
         return _handle_benchmark_clean(args)
+    if sub == "objective":
+        return _handle_benchmark_objective(args)
+    if sub == "aggregate":
+        return _handle_benchmark_aggregate(args)
     parser.print_help(file=sys.stderr)
     return 2
