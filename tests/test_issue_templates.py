@@ -1,5 +1,6 @@
-import yaml
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 BUG = ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
