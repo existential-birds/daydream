@@ -23,3 +23,22 @@ def test_bug_report_template_native() -> None:
     for cat in ("review", "improve", "profile", "benchmark"):
         assert cat in options, f"affected-area missing {cat!r}"
     assert "beagle" not in options
+
+
+FEAT = ROOT / ".github" / "ISSUE_TEMPLATE" / "feature_request.yml"
+
+
+def test_feature_request_template_native() -> None:
+    data = yaml.safe_load(FEAT.read_text())          # must parse as valid YAML
+    bodies = " ".join(
+        (b.get("attributes", {}).get("label", "") + " "
+         + b.get("attributes", {}).get("placeholder", "") + " "
+         + b.get("attributes", {}).get("description", ""))
+        for b in data["body"])
+    for token in ("beagle", "plugin", "skill", "review skill"):
+        assert token.lower() not in bodies.lower(), f"stale token {token!r} still present"
+    area = next(b for b in data["body"] if b.get("id") == "area")
+    options = " ".join(area["attributes"]["options"]).lower()
+    for cat in ("review", "improve", "profile", "benchmark"):
+        assert cat in options, f"affected-area missing {cat!r}"
+    assert "beagle" not in options
