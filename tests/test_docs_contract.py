@@ -2,8 +2,11 @@ import contextlib
 import io
 from pathlib import Path
 
+import daydream.extensions as ext
 from daydream.benchmark.cli import _build_benchmark_parser
 from daydream.cli import _parse_args
+from daydream.extensions import Registry
+from daydream.extensions.builtins import register_builtins
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,3 +69,25 @@ def test_benchmark_objective_aggregate_parse() -> None:
     p = _build_benchmark_parser()                    # production parser
     p.parse_args(["objective", "./ws", "--run-id", "run-abc123", "--json", "-"])
     p.parse_args(["aggregate", "./suite.json", "--json", "-"])
+
+
+def test_extensions_doc_claims_only_exposed() -> None:
+    doc = (ROOT / "docs" / "extensions.md").read_text()
+    reg = Registry()
+    register_builtins(reg)
+    # every public API symbol the doc's table names must exist in production
+    table = doc.split("### Public API symbols")[1].split("### Discovery order")[0]
+    for row in table.splitlines():
+        if row.strip().startswith("| `"):
+            symbol = row.split("`")[1]
+            assert hasattr(ext, symbol), f"doc claims unexposed symbol {symbol!r}"
+    # every prompt the doc's table names must be registered
+    prompts = doc.split("### Prompts")[1].split("### Renderers")[0]
+    for row in prompts.splitlines():
+        if row.strip().startswith("| `"):
+            name = row.split("`")[1]
+            assert name in reg.prompt_names(), f"doc claims unexposed prompt {name!r}"
+    # profile-source-kind: docs never name 'packaged' as a source kind
+    assert "packaged" not in doc.lower()
+    # migration guidance present (spec must-have 45)
+    assert "migration" in doc.lower()

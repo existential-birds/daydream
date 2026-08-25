@@ -121,6 +121,15 @@ run a newer contract — forward compatibility is unachievable by any gate.
 Additive changes (new steps, new slots, new prompts, new optional kwargs) do
 not bump the version.
 
+### Migration guidance
+
+To migrate a fork to a new contract version: read the matching `### Changelog`
+entry, adjust the registered steps, prompts, and `StackRule`/findings surface to
+the new inventory, then declare the new `DAYDREAM_EXT_API` and validate with
+`daydream ext validate`. A hard-breaking bump (where ceiling and floor rise
+together) requires the declaration and the new surface in the same change; an
+additive bump only widens the window and needs no code migration.
+
 ### Changelog
 
 - **Version 6** — **hard-breaking**. Removes the feedback command and its deep-flow
