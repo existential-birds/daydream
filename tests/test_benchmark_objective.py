@@ -366,7 +366,7 @@ def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path):
 def test_identity_to_dict_is_single_source_for_all_projections(tmp_path):
     """Issue #888 anti-slop: one shared identity projection everywhere.
 
-    ``objective_to_json`` (per-run), ``_compatibility_fields`` (pool compat),
+    ``objective_to_json`` (per-run), ``identity_to_dict`` (pool compat),
     and the suite aggregate identity must all be byte-identical projections of
     the same ``CompatibilityIdentity`` so a field added/renamed in one place
     can't silently desynchronize the others.
@@ -376,7 +376,7 @@ def test_identity_to_dict_is_single_source_for_all_projections(tmp_path):
     assert run.identity is not None
 
     per_run = objective.objective_to_json(run)["identity"]
-    compat = objective._compatibility_fields(run.identity)
+    compat = objective.identity_to_dict(run.identity)
     assert per_run == compat == objective.identity_to_dict(run.identity)
 
     # The suite aggregate identity for the same workspace must match too.

@@ -137,19 +137,6 @@ class SuiteEntry:
     run_id: str
 
 
-@dataclass(frozen=True)
-class SuiteManifest:
-    """A validated, versioned manifest of exact completions to pool.
-
-    ``entries`` is a tuple of ``SuiteEntry`` in manifest order. Instances are
-    immutable; every entry was already validated to carry a ``workspace`` and
-    ``run_id`` and to be unique by ``(workspace, run_id)``.
-    """
-
-    schema_version: int
-    entries: tuple[SuiteEntry, ...]
-
-
 def identity_to_dict(identity: CompatibilityIdentity) -> dict[str, object]:
     """Canonical 18-field compatibility/identity projection.
 
@@ -179,15 +166,6 @@ def identity_to_dict(identity: CompatibilityIdentity) -> dict[str, object]:
         "threshold": identity.threshold,
         "attempts": identity.attempts,
     }
-
-
-def _compatibility_fields(identity: CompatibilityIdentity) -> dict[str, object]:
-    """Every compatibility field that must match across a pooled suite.
-
-    Repository/benchmark ids and the per-run ``run_id`` are deliberately not
-    part of the identity and so are free to differ across entries.
-    """
-    return identity_to_dict(identity)
 
 
 @dataclass(frozen=True)
@@ -264,7 +242,12 @@ def read_completed_run(
             f"(state {entry.get('state')!r})"
         )
 
-    job_dir = run_mod._validate_job_dir(workspace, str(entry.get("job_dir") or ""))
+    try:
+        job_dir = run_mod._validate_job_dir(workspace, str(entry.get("job_dir") or ""))
+    except run_mod.RunError as exc:
+        raise ObjectiveError(
+            f"run {run_id!r} at {workspace} has uncontained job_dir: {exc}"
+        ) from exc
     identity = _bind_identity(workspace, entry, run_id, env)
     rows, infra_errors = _parse_task_rows(Path(job_dir), run_id)
     objective = _build_objective(rows, infra_errors, Path(job_dir), run_id)
@@ -361,7 +344,7 @@ def _suite_experiment_id(
     """
     payload = {
         "manifest": _canonical_suite_manifest(entries),
-        "identity": _compatibility_fields(identity),
+        "identity": identity_to_dict(identity),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -411,7 +394,7 @@ def aggregate_suite(
         )
     base = identities[0]
     assert base is not None
-    base_fields = _compatibility_fields(base)
+    base_fields = identity_to_dict(base)
     for entry, run in resolved[1:]:
         run_identity = run.identity
         assert run_identity is not None
@@ -541,8 +524,8 @@ def _bind_identity(
         raise ObjectiveError(f"run {run_id!r}: harbor package metadata not found") from exc
 
     judge_template = calibrate._load_judge_template()
-    profile_digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST") or entry.get(
-        "profile_digest"
+    profile_digest = entry.get("profile_digest") or env.get(
+        "DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"
     )
     try:
         attempts = int(run_mod._compiled_job_config(workspace).get("n_attempts", 1))
@@ -561,14 +544,22 @@ def _bind_identity(
         daydream_wheel_sha256=str(wheel_sha),
         compiled_lock_sha256=str(ledger_digest),
         harbor_version=harbor_version,
-        reviewer_backend=env.get("DAYDREAM_REVIEW_BACKEND") or "",
-        reviewer_model=env.get("DAYDREAM_REVIEW_MODEL") or "",
-        reviewer_base_url=env.get("DAYDREAM_REVIEW_BASE_URL") or "",
+        reviewer_backend=entry.get("reviewer_backend")
+        or env.get("DAYDREAM_REVIEW_BACKEND")
+        or "",
+        reviewer_model=entry.get("reviewer_model")
+        or env.get("DAYDREAM_REVIEW_MODEL")
+        or "",
+        reviewer_base_url=entry.get("reviewer_base_url")
+        or env.get("DAYDREAM_REVIEW_BASE_URL")
+        or "",
         # Recorded at run-append time; absent -> None (never fabricated).
         reviewer_effort=entry.get("reviewer_effort"),
-        judge_provider=env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
-        judge_model=env.get("DAYDREAM_JUDGE_MODEL") or "",
-        judge_host=calibrate._judge_host_from_env(env),
+        judge_provider=entry.get("judge_provider")
+        or env.get("DAYDREAM_JUDGE_PROVIDER")
+        or "anthropic",
+        judge_model=entry.get("judge_model") or env.get("DAYDREAM_JUDGE_MODEL") or "",
+        judge_host=entry.get("judge_host") or calibrate._judge_host_from_env(env) or "",
         verifier_template_sha256=calibrate._render_judge_prompt_digest(judge_template),
         threshold=verifier_core.CONFIDENCE_THRESHOLD,
         attempts=attempts,
@@ -737,6 +728,8 @@ def _build_objective(
         verifier_error_task_count=verifier_errors,
         malformed_task_count=malformed,
         failed_task_count=failed,
-        comparison_eligible=not (infra_errors + verifier_errors + malformed + failed),
+        comparison_eligible=bool(agg["scored_task_count"]) and not (
+            infra_errors + verifier_errors + malformed + failed
+        ),
         mean_task_score=float(agg["mean_task_score"]),
     )

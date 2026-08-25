@@ -269,6 +269,12 @@ def ledger_append_running(
     mode: str = "oracle",
     profile_digest: str | None = None,
     reviewer_effort: str | None = None,
+    reviewer_backend: str | None = None,
+    reviewer_model: str | None = None,
+    reviewer_base_url: str | None = None,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+    judge_host: str | None = None,
 ) -> None:
     """Append a ``running`` entry (written before Harbor spawns) for this run.
 
@@ -285,6 +291,14 @@ def ledger_append_running(
     executed under, threaded from the control-plane env so the read-only
     objective can recover it without inference. Optional: callers that omit it
     leave the field ``None`` on the entry (legacy/late callers stay byte-stable).
+
+    ``reviewer_backend``/``reviewer_model``/``reviewer_base_url``/``judge_provider``/
+    ``judge_model``/``judge_host`` (issue #888) persist the reviewer/judge
+    attribution the run actually executed under, so the read-only objective
+    binds them from the run's recorded state rather than the resolution-time
+    ambient env (which would mis-attribute a historical run under env drift).
+    These are always supplied by the control-plane env; callers that omit them
+    leave the fields ``None`` on the entry (legacy/late callers stay byte-stable).
     """
     validated = _validate_job_dir(workspace, job_dir)
     with storage.WorkspaceLock(workspace):
@@ -300,6 +314,12 @@ def ledger_append_running(
             "error": None,
             "profile_digest": profile_digest,
             "reviewer_effort": reviewer_effort,
+            "reviewer_backend": reviewer_backend,
+            "reviewer_model": reviewer_model,
+            "reviewer_base_url": reviewer_base_url,
+            "judge_provider": judge_provider,
+            "judge_model": judge_model,
+            "judge_host": judge_host,
         }
         doc["runs"].append(entry)
         storage.atomic_write_json(_ledger_path(workspace), doc, mode=0o600)
@@ -747,7 +767,13 @@ def run_run(
     ledger_append_running(workspace, run_id=run_id, compiled_lock_sha256=compiled_lock_sha,
                           job_dir=str(job_dir), mode=mode,
                           profile_digest=env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"),
-                          reviewer_effort=env.get("DAYDREAM_REVIEW_EFFORT"))
+                          reviewer_effort=env.get("DAYDREAM_REVIEW_EFFORT"),
+                          reviewer_backend=env.get("DAYDREAM_REVIEW_BACKEND") or "",
+                          reviewer_model=env.get("DAYDREAM_REVIEW_MODEL") or "",
+                          reviewer_base_url=env.get("DAYDREAM_REVIEW_BASE_URL") or "",
+                          judge_provider=env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
+                          judge_model=env.get("DAYDREAM_JUDGE_MODEL") or "",
+                          judge_host=calibrate._judge_host_from_env(env) or "")
 
     # 6. Spawn Harbor with an absolute config path, the parent environment
     #    (PATH/HOME/etc.) merged in, and telemetry forced off.
