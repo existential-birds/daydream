@@ -2,6 +2,8 @@ import contextlib
 import io
 from pathlib import Path
 
+import pytest
+
 import daydream.extensions as ext
 from daydream.benchmark.cli import _build_benchmark_parser
 from daydream.cli import _parse_args
@@ -91,3 +93,19 @@ def test_extensions_doc_claims_only_exposed() -> None:
     assert "packaged" not in doc.lower()
     # migration guidance present (spec must-have 45)
     assert "migration" in doc.lower()
+
+
+def test_help_exposes_native_surface(capsys) -> None:
+    for flag in ("--help", "--help-all"):
+        with pytest.raises(SystemExit):
+            _parse_args([flag])
+        out = capsys.readouterr().out
+        assert "--review-profile" in out and "--stack" in out
+        assert "feedback" not in out and "--skill" not in out
+
+
+def test_fresh_install_docs_have_no_plugin_step() -> None:
+    for name in ("README.md", "CLAUDE.md"):
+        text = (ROOT / name).read_text().lower()
+        for token in ("beagle", "plugin", "daydream_skills_dir", "review skill"):
+            assert token not in text, f"{name} still mentions {token!r}"
