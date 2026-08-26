@@ -69,6 +69,53 @@ class _ToolSupervisorFailure(Exception):
         return type(self.original).__name__
 
 
+class _RedactedSupervisorError(RuntimeError):
+    """Scrubbed stand-in for a supervisor exception that cannot be rebuilt clean.
+
+    A tool supervisor is arbitrary extension code and may raise an exception
+    whose ``str()`` is not derived from ``args`` (e.g. ``OSError`` built from
+    errno/strerror, or a type overriding ``__str__``/``__repr__``); such a value
+    cannot be scrubbed in place. This stand-in carries the original type name
+    (for recognizable diagnostics) and a message already run through
+    ``redact_text``, so ``str(exc)`` re-printed by outer handlers never re-
+    surfaces the raw credential.
+    """
+
+    def __init__(self, original_type_name: str, message: str) -> None:
+        self.original_type_name = original_type_name
+        self.retryable: bool = False
+        super().__init__(message)
+
+
+def _scrubbed_supervisor_error(original: BaseException) -> BaseException:
+    """Return a re-propagatable copy of ``original`` whose ``str()`` is scrubbed.
+
+    Reconstruct the same exception type from its args (each string run through
+    ``redact_text``) where possible -- this handles RuntimeError-derived types
+    and OSError alike, since a fresh instance rebuilds errno/strerror from the
+    scrubbed args. Where reconstruction is impossible or the resulting str()
+    still carries a redactable value (a type overriding ``__str__``/``__repr__``),
+    fall back to ``_RedactedSupervisorError``. Either way the re-raised
+    exception's ``str()`` is clean and ``retryable`` (a discriminator consumers
+    like improve-run retry checks read via ``getattr``) is preserved.
+    """
+    scrubbed_args = tuple(
+        redact_text(a) if isinstance(a, str) else a for a in original.args
+    )
+    try:
+        clone = type(original)(*scrubbed_args)
+    except (AttributeError, TypeError):
+        clone = None
+    if clone is not None and redact_text(str(clone)) == str(clone):
+        setattr(clone, "retryable", getattr(original, "retryable", False))
+        return clone
+    stand_in = _RedactedSupervisorError(
+        type(original).__name__, redact_text(str(original))
+    )
+    stand_in.retryable = getattr(original, "retryable", False)
+    return stand_in
+
+
 class _EventStreamScope:
     """Idempotent owner for one backend invocation's event stream."""
 
@@ -833,8 +880,18 @@ async def run_agent(
                 raise
 
     except _ToolSupervisorFailure as exc:
-        print_error(console, "Extension Failure", f"{type(exc.original).__name__}: {exc.original}")
-        raise exc.original from None
+        original = exc.original
+        print_error(
+            console, "Extension Failure", redact_text(f"{type(original).__name__}: {original}")
+        )
+        # The exception itself still propagates to outer handlers that re-print
+        # str(exc) without redaction (e.g. the CLI's "Fatal Error" panel on
+        # `daydream <target>`, improve-run retry checks). Rewriting .args in
+        # place is not enough: a supervisor can raise OSError (whose str() is
+        # built from errno/strerror) or a type overriding __str__/__repr__, for
+        # which the raw credential would survive. Rebuild a scrubbed exception
+        # here, failing closed instead of silently passing the raw value onward.
+        raise _scrubbed_supervisor_error(original) from original
     except Exception as exc:
         category = getattr(exc, "category", None)
         msg = str(exc).strip()
