@@ -83,10 +83,12 @@ baseline against a pi-scaffold trained run moves two variables at once.
 
 ## Adding a repository
 
-1. **Harvest a corpus.** Any repo NOT in `daydream/training/schema/exclusion.txt`:
+1. **Provide a harvested corpus.** Any repo NOT in `daydream/training/schema/exclusion.txt`:
 
    ```bash
-   daydream bench harvest --repo OWNER/REPO --bot "<bot-login>[bot]" --out ./corpus-train
+   # corpus shape: an index.json (harvested-PR records) plus a results/ dir.
+   # The old `daydream bench harvest` command was removed with the Martian stack
+   # (issue-785); point `--corpus` at an existing harvested-corpus directory.
    ```
 
    Target merged-PR snapshots. The image build requires the suite to be green at

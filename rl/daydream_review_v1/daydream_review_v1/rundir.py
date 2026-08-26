@@ -328,7 +328,7 @@ async def daydream_completed(
     daydream writes the trajectory's ``final_metrics`` only at the very end, so
     its presence separates a legitimate non-zero outcome — tests still red after
     the fix pass, ``Stop(1)`` at ``deep/orchestrator.py:1389`` — from a crash.
-    Mirror of ``daydream/benchmark/daydream_run.py:85-102`` ``_review_complete``.
+    Mirrors the legacy ``_review_complete`` benchmark run-completion check.
     """
     session_dir = await _session_dir(runtime, archive_root)
     if session_dir is None:

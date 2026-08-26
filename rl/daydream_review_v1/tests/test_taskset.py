@@ -27,7 +27,7 @@ from daydream_review_v1.taskset import (
 
 
 def _write_corpus(root: Path, repo: str, prs: list[dict[str, object]]) -> Path:
-    """Write a minimal `daydream bench harvest`-shaped corpus at *root*."""
+    """Write a minimal harvested-corpus at *root*."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "index.json").write_text(
         json.dumps({"repo": repo, "bot": "some-bot[bot]", "n_prs_with_bot_activity": len(prs), "prs": prs}),
