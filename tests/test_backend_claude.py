@@ -262,6 +262,16 @@ async def test_max_turns_result_raises_typed_error(patch_sdk):
     ("git log; rm x", False),            # semicolon chain
     ("echo $(rm x)", False),             # command substitution
     ("git logfoo", False),               # prefix must be word-bounded
+    ("git status > status.txt", False),  # output redirection creates/truncates a file
+    ("cat README.md >> copy.txt", False),# append redirection
+    ("cat < README.md", False),          # input redirection
+    ("git diff --output=diff.patch", False),  # git output-file option, equals form
+    ("git log --output log.txt", False), # git output-file option, separated form
+    ("ls -la ( x )", False),             # subshell grouping operator
+    ("git log\nrm x", False),           # newline command separator -> fail closed
+    ("git log 'unclosed", False),        # malformed quoting -> fail closed
+    ("git log --grep='fix|bug'", True),  # quoted | is argument content, not an operator
+    ("git diff HEAD~1 HEAD -- --output", True),  # --output after -- is a path arg; scan stops at --
     ("", False),                          # empty → fail closed
 ])
 def test_read_only_bash_guard_decision(cmd, allowed):

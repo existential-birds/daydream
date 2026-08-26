@@ -53,13 +53,16 @@ READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
     "git diff",
 )
 
-# Chaining metacharacters that can append a second, non-allowlisted command.
-_CHAIN_METACHARS: tuple[str, ...] = (";", "&&", "||", "|", "`", "$(")
+# Shell-control tokens checked against shlex output: shlex (non-posix)
+# splits multi-char sequences like ``&&``/``$(`` into single chars, so we check
+# per-char. ``<``/``>``/``(``/``)`` are included so redirection and subshell
+# grouping can never write to or truncate a file in the caller's tree. Safe
+# inside quotes (shlex returns a quoted chunk as one token).
+_SHELL_CONTROL_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$", "<", ">", "(", ")"})
 
-# Single-char danger tokens checked against shlex output: shlex (non-posix)
-# splits ``&&``/``$(`` into single chars, so we check per-char. Safe inside
-# quotes (shlex returns a quoted chunk as one token).
-_DANGEROUS_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$"})
+# Git options that write the command's output to a file. Scanned only after a
+# matched ``git …`` allowlist family, so ``ls``/``cat`` never hit it.
+_GIT_WRITE_OPTIONS: tuple[str, ...] = ("--output",)
 
 # ``.*`` fires the guard for EVERY tool call so it can fail-closed (allow only
 # the safe set); a deny-list of mutating tools was fail-open.
@@ -131,19 +134,54 @@ class MaxTurnsError(ClaudeAgentError):
         self.subtype = subtype
 
 
+def _denies_git_output_option(argv: list[str], start: int) -> bool:
+    """True when an allowlisted ``git …`` argv writes output to a file.
+
+    Scans ``argv[start:]`` (skipping the matched allowlist family words) for the
+    ``--output`` option in both separated (``--output log.txt``) and equals
+    (``--output=diff.patch``) forms. The scan stops at a standalone ``--`` path
+    separator, so a literal path argument named ``--output`` after it stays
+    allowed. Returns False (not denied) when no write option appears before that
+    boundary.
+
+    Args:
+        argv: The posix-split argv tokens.
+        start: Index of the first token after the matched allowlist family
+            words (e.g. 2 for ``git status``).
+    """
+    for tok in argv[start:]:
+        if tok == "--":
+            return False
+        if tok in _GIT_WRITE_OPTIONS or any(
+            tok.startswith(opt + "=") for opt in _GIT_WRITE_OPTIONS
+        ):
+            return True
+    return False
+
+
 def _is_read_only_command(cmd: str) -> bool:
     """Return True only if *cmd* is a single allowlisted read-only command.
 
     Denies (returns False) on: an empty/blank command, any command containing a
-    newline or carriage return, any command whose first token is not an
-    allowlisted prefix, and any command containing a shell chaining
-    metacharacter (``;``, ``&&``, ``||``, ``|``, backtick, ``$(``).
+    newline or carriage return, any command containing a shell-control
+    metacharacter (``|``, ``;``, ``&``, backtick, ``$``, ``<``, ``>``, ``(``,
+    ``)``), any command whose leading argv words do not match an allowlisted
+    family word-for-word, and any allowlisted ``git …`` command that writes its
+    output to a file via ``--output``.
+
+    The extended token set closes the redirection (``>``/``>>``/``<``) and
+    subshell-grouping (``(``/``)``) escapes that could otherwise create,
+    truncate, or append files in the caller's working tree. Word-bounded argv
+    matching uses posix ``shlex.split`` so a token merely *beginning* with an
+    allowlisted word (``git logfoo``) is never an allowlist hit.
 
     Metacharacter detection uses ``shlex`` to avoid false positives from
     metacharacters that appear only inside quoted arguments (e.g.
     ``git log --grep='fix|bug'`` is safe and must be allowed).  Newlines and
     carriage returns are bash command separators but ``shlex`` treats them as
-    whitespace and elides them, so they are rejected directly on the raw string.
+    whitespace and strips them, so they are rejected directly on the raw string.
+    Malformed quoting makes ``shlex`` raise ``ValueError``; both lexing steps map
+    that to deny (fail-closed) and never propagate.
     """
     stripped = cmd.strip()
     if not stripped:
@@ -151,18 +189,28 @@ def _is_read_only_command(cmd: str) -> bool:
     if "\n" in cmd or "\r" in cmd:
         return False
     # Non-posix lex: quoted strings stay single tokens; unquoted metacharacters
-    # appear as individual bare chars (``&&`` → ``&``, ``&``). See _DANGEROUS_TOKENS.
+    # appear as individual bare chars (``&&`` → ``&``, ``&``). See _SHELL_CONTROL_TOKENS.
     try:
         tokens = list(shlex.shlex(stripped, posix=False))
     except ValueError:
         return False  # Malformed quoting — deny.
     for tok in tokens:
-        if tok in _DANGEROUS_TOKENS:
+        if tok in _SHELL_CONTROL_TOKENS:
             return False
-    return any(
-        stripped == prefix or stripped.startswith(prefix + " ")
-        for prefix in READ_ONLY_BASH_ALLOWLIST
-    )
+    # Posix split reconstructs the argv words so we can match the allowlist
+    # families word-for-word (rejecting ``git logfoo``) and scan ``git …`` args
+    # for a ``--output`` file write.
+    try:
+        argv = shlex.split(stripped, posix=True)
+    except ValueError:
+        return False  # Malformed quoting — deny (fail-closed).
+    for family in READ_ONLY_BASH_ALLOWLIST:
+        words = family.split()
+        if argv[: len(words)] == words:
+            if family.startswith("git ") and _denies_git_output_option(argv, len(words)):
+                return False
+            return True
+    return False
 
 
 def _tool_input(input_data: Any) -> dict[str, Any]:
