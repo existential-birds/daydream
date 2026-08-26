@@ -172,7 +172,7 @@ daydream benchmark build-harbor ~/bench-owner-repo --daydream-wheel dist/daydrea
 ```
 
 Packages a validated workspace for Harbor `0.22`. `--daydream-wheel` names the
-wheel for this Daydream version; the emitted `harbor/benchmark.lock.json`'
+wheel for this Daydream version; the emitted `harbor/benchmark.lock.json`
 `daydream` block records its version and SHA-256.
 
 ### `upgrade` — repair legacy case documents
@@ -410,7 +410,7 @@ run. `daydream benchmark upgrade <dir>` (and `--dry-run`) is that repair path:
 
 ### Legacy transition note
 
-`daydream bench` is a deprecate**d**, legacy scoring path pending deletion in
+`daydream bench` is a deprecated, legacy scoring path pending deletion in
 #785. `daydream benchmark` is the supported private Harbor workflow documented
 throughout this runbook. This sentence is the only mention of the legacy path.
 
