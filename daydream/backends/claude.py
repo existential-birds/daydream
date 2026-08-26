@@ -55,10 +55,25 @@ READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
 
 # Shell-control tokens checked against shlex output: shlex (non-posix)
 # splits multi-char sequences like ``&&``/``$(`` into single chars, so we check
-# per-char. ``<``/``>``/``(``/``)`` are included so redirection and subshell
-# grouping can never write to or truncate a file in the caller's tree. Safe
-# inside quotes (shlex returns a quoted chunk as one token).
-_SHELL_CONTROL_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$", "<", ">", "(", ")"})
+# per-char. ``<``/``>`` are included so redirection can never write to or
+# truncate a file in the caller's tree.
+#
+# ``(``/``)`` are deliberately NOT here: bash rejects an unquoted paren glued to
+# a word (``--format=%C(red)%h``, ``foo(1).txt``) as a syntax error, so nothing
+# executes and no file is touched; a subshell only executes when ``(`` begins
+# the command, which the command-leading check in _is_read_only_command()
+# denies. A subshell reached after an operator (``a | (rm x)``,
+# ``a && (rm x)``, ``a; (rm x)``, ``$(rm x)``) is already caught by that
+# operator token in this set.
+#
+# The quote-safety claim holds only inside single quotes and for *literal*
+# characters inside double quotes: ``|``/``;``/``&``/``<``/``>`` are inert in
+# both, and shlex returns the wrapped chunk as one token. ``$`` and backtick are
+# NOT inert inside double quotes -- bash still performs parameter
+# expansion/command substitution there, so ``git log "$(rm x)"`` passes this
+# token scan yet stays live in bash. That gap is pre-existing and is not sealed
+# here, so the guard must not be advertised as "safe inside any quotes".
+_SHELL_CONTROL_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$", "<", ">"})
 
 # Git options that write the command's output to a file. Scanned only after a
 # matched ``git …`` allowlist family, so ``ls``/``cat`` never hit it.
@@ -159,51 +174,88 @@ def _denies_git_output_option(argv: list[str], start: int) -> bool:
     return False
 
 
+def _shlex_tokens(cmd: str, *, posix: bool, words: bool) -> list[str] | None:
+    """Lex *cmd* via shlex; return the token list, or None on malformed quoting.
+
+    Both the control-token scan and the argv reconstruction pass through this
+    single helper so they share one explicit comment policy: ``commenters`` is
+    cleared, making ``#`` always a literal character. Bash only treats a ``#``
+    that begins a word as a comment; the default ``#`` commenter would instead
+    strip everything after ANY ``#`` -- even mid-word -- hiding a trailing
+    redirection/chaining token from the control-token scan. That is exactly the
+    escape the deny set closes, so the comment semantics must be explicit and
+    identical for both passes (a future edit cannot silently resurrect the
+    blind spot by changing only one).
+
+    ``words=True`` yields whole argv words; ``words=False`` yields per-char bare
+    metacharacters so the control-token scan sees ``<``/``>``/``(``, etc. The
+    ``words`` flag maps onto shlex ``whitespace_split``.
+    """
+    lexer = shlex.shlex(cmd, posix=posix)
+    lexer.commenters = ""  # '#' is never a comment; keep every character.
+    lexer.whitespace_split = words
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
 def _is_read_only_command(cmd: str) -> bool:
     """Return True only if *cmd* is a single allowlisted read-only command.
 
     Denies (returns False) on: an empty/blank command, any command containing a
     newline or carriage return, any command containing a shell-control
-    metacharacter (``|``, ``;``, ``&``, backtick, ``$``, ``<``, ``>``, ``(``,
-    ``)``), any command whose leading argv words do not match an allowlisted
-    family word-for-word, and any allowlisted ``git …`` command that writes its
-    output to a file via ``--output``.
+    metacharacter (``|``, ``;``, ``&``, backtick, ``$``, ``<``, ``>``) or a
+    command-leading ``(``/``)`` subshell group, any command whose leading argv
+    words do not match an allowlisted family word-for-word, and any allowlisted
+    ``git …`` command that writes its output to a file via ``--output``.
 
-    The extended token set closes the redirection (``>``/``>>``/``<``) and
-    subshell-grouping (``(``/``)``) escapes that could otherwise create,
-    truncate, or append files in the caller's working tree. Word-bounded argv
-    matching uses posix ``shlex.split`` so a token merely *beginning* with an
-    allowlisted word (``git logfoo``) is never an allowlist hit.
+    ``<``/``>``/``|``/``;``/``&``/``$``/backtick are shell operators wherever
+    they appear unquoted, closing the redirection (``>``/``>>``/``<``) and
+    command-substitution escapes that could otherwise create, truncate, or
+    append files in the caller's working tree. ``(``/``)`` only execute as a
+    subshell when they begin the command, so only that position is denied;
+    parens mid-command or glued to a word (``--format=%C(red)%h``,
+    ``cat foo(1).txt``) are bash syntax errors that never run and must stay
+    allowed. Word-bounded argv matching uses posix ``shlex.split`` so a token
+    merely *beginning* with an allowlisted word (``git logfoo``) is never an
+    allowlist hit.
 
     Metacharacter detection uses ``shlex`` to avoid false positives from
     metacharacters that appear only inside quoted arguments (e.g.
     ``git log --grep='fix|bug'`` is safe and must be allowed).  Newlines and
     carriage returns are bash command separators but ``shlex`` treats them as
     whitespace and strips them, so they are rejected directly on the raw string.
-    Malformed quoting makes ``shlex`` raise ``ValueError``; both lexing steps map
-    that to deny (fail-closed) and never propagate.
+    Malformed quoting makes ``shlex`` raise ``ValueError``; the shared lexing
+    helper maps that to deny (fail-closed) and never propagates.
     """
     stripped = cmd.strip()
     if not stripped:
         return False
     if "\n" in cmd or "\r" in cmd:
         return False
-    # Non-posix lex: quoted strings stay single tokens; unquoted metacharacters
-    # appear as individual bare chars (``&&`` → ``&``, ``&``). See _SHELL_CONTROL_TOKENS.
-    try:
-        tokens = list(shlex.shlex(stripped, posix=False))
-    except ValueError:
-        return False  # Malformed quoting — deny.
+    # Control-token pass: per-char bare tokens (``whitespace_split=False``), so
+    # unquoted metacharacters (``&&`` -> ``&``) surface on their own. See
+    # _SHELL_CONTROL_TOKENS.
+    tokens = _shlex_tokens(stripped, posix=False, words=False)
+    if tokens is None:
+        return False  # Malformed quoting -- deny (fail-closed).
     for tok in tokens:
         if tok in _SHELL_CONTROL_TOKENS:
             return False
-    # Posix split reconstructs the argv words so we can match the allowlist
-    # families word-for-word (rejecting ``git logfoo``) and scan ``git …`` args
-    # for a ``--output`` file write.
-    try:
-        argv = shlex.split(stripped, posix=True)
-    except ValueError:
-        return False  # Malformed quoting — deny (fail-closed).
+    if tokens[0] in ("(", ")"):
+        # Command-leading ``(``/``)`` starts a subshell group that executes
+        # (``( rm x )``, ``(rm x)``) -> deny. Anywhere else in a command bash
+        # rejects unquoted parens (``--format=%C(red)%h``, ``foo(1).txt``,
+        # ``ls -la ( x )``) as a syntax error, so nothing runs and the command
+        # stays harmless; those previously-allowed forms must not be denied.
+        return False
+    # Argv pass: whole argv words (``whitespace_split=True``), matching the
+    # allowlist families word-for-word (rejecting ``git logfoo``) and allowing
+    # the ``git ... --output`` file-write scan.
+    argv = _shlex_tokens(stripped, posix=True, words=True)
+    if argv is None:
+        return False  # Malformed quoting -- deny (fail-closed).
     for family in READ_ONLY_BASH_ALLOWLIST:
         words = family.split()
         if argv[: len(words)] == words:
