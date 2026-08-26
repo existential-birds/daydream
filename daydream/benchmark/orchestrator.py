@@ -37,7 +37,6 @@ from daydream.benchmark.benchmark_data import (
     load_benchmark_data,
     save_benchmark_data,
 )
-from daydream.benchmark.cli import _format_elapsed
 from daydream.benchmark.corpus import CorpusSource, resolve_corpus
 from daydream.benchmark.daydream_run import run_daydream_review
 from daydream.benchmark.mapping import merged_items_to_review_comments
@@ -241,7 +240,9 @@ def _run_sweep(
             )
         )
         noun = "finding" if count == 1 else "findings"
-        print_success(console, f"Reviewed {pr.golden_url} in {_format_elapsed(elapsed)} · {count} {noun}")
+        total = int(elapsed)
+        elapsed_str = f"{total}s" if total < 60 else f"{total // 60}m{total % 60}s"
+        print_success(console, f"Reviewed {pr.golden_url} in {elapsed_str} · {count} {noun}")
 
     if failed:
         print_warning(console, f"{failed} of {len(prs)} selected PR(s) failed")
