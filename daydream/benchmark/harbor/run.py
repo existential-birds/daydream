@@ -530,8 +530,7 @@ def _environment_from_trial(trial: Path) -> dict[str, Any]:
 
 
 def _current_state_mapping(
-    *, workspace: Path, compiled_lock_sha256: str, env: dict[str, Any],
-    calibration_digest: str,
+    workspace: Path, *, compiled_lock_sha256: str, env: dict[str, Any],
 ) -> dict[str, Any]:
     """The current Oracle/Harbor state an oracle receipt must match.
 
@@ -554,7 +553,6 @@ def _current_state_mapping(
         "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
         "threshold": verifier_core.CONFIDENCE_THRESHOLD,
         "attempts": config.get("n_attempts", 1),
-        "calibration_receipt_sha256": calibration_digest,
     }
     # Daydream wheel provenance (issue #888): bind the exact compiled wheel
     # digest/version the run was built under from the authoritative lock. An
@@ -581,12 +579,11 @@ def _current_state_mapping(
 
 def _oracle_receipt_document(
     *, workspace: Path, compiled_lock_sha256: str, env: dict[str, Any],
-    calibration_digest: str, result_dir: Path,
+    result_dir: Path,
 ) -> dict[str, Any]:
     """Assemble the private deterministic Oracle receipt (mode-0600)."""
     doc = _current_state_mapping(
         workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
-        calibration_digest=calibration_digest,
     )
     doc["result_dir"] = str(Path(result_dir).resolve())
     doc["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -595,7 +592,7 @@ def _oracle_receipt_document(
 
 def _write_oracle_receipt(
     workspace: Path, *, job_dir: Path, compiled_lock_sha256: str,
-    env: dict[str, Any], calibration_digest: str,
+    env: dict[str, Any],
 ) -> int:
     """Write the oracle-receipt only when the Oracle run reproduced gold."""
     ok, _ = _parse_job_results(Path(job_dir))
@@ -608,7 +605,7 @@ def _write_oracle_receipt(
         return 1
     doc = _oracle_receipt_document(
         workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
-        calibration_digest=calibration_digest, result_dir=Path(job_dir),
+        result_dir=Path(job_dir),
     )
     storage.atomic_write_json(
         workspace / "harbor" / "oracle-receipt.json", doc, mode=0o600
@@ -618,7 +615,6 @@ def _write_oracle_receipt(
 
 def _default_run_gate(
     workspace: Path, *, env: dict[str, Any], compiled_lock_sha256: str,
-    calibration_digest: str,
 ) -> str | None:
     """Gate a default (non-Oracle) run behind a matching Oracle receipt."""
     receipt_path = workspace / "harbor" / "oracle-receipt.json"
@@ -632,7 +628,6 @@ def _default_run_gate(
         return f"malformed oracle receipt at {receipt_path}"
     current = _current_state_mapping(
         workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
-        calibration_digest=calibration_digest,
     )
     for key, value in current.items():
         if receipt.get(key) != value:
@@ -666,15 +661,6 @@ def _default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, Any]) -> dict[st
     """Default Harbor subprocess spawn (the real production seam)."""
     completed = subprocess.run(cmd, cwd=str(cwd), env=dict(env))
     return {"returncode": completed.returncode}
-
-
-def _calibration_digest(workspace: Path) -> str:
-    """sha256 of ``runtime/calibration-receipt.json`` bytes (empty when absent)."""
-    path = workspace / "runtime" / "calibration-receipt.json"
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return ""
 
 
 def _ledger_job_dir(workspace: Path, run_id: str) -> Path:
@@ -737,7 +723,6 @@ def run_run(
     if not oracle:
         gate_reason = _default_run_gate(
             workspace, env=env, compiled_lock_sha256=compiled_lock_sha,
-            calibration_digest=_calibration_digest(workspace),
         )
         if gate_reason is not None:
             print(gate_reason, file=sys.stderr)
@@ -792,7 +777,7 @@ def run_run(
                 return returncode or 1
             write_code = _write_oracle_receipt(
                 workspace, job_dir=actual_dir, compiled_lock_sha256=compiled_lock_sha,
-                env=env, calibration_digest=_calibration_digest(workspace),
+                env=env,
             )
             ledger_mark(workspace, run_id, state="complete",
                         environments=environments)
