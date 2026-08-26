@@ -348,22 +348,6 @@ def ledger_mark(
         raise RunError(f"run {run_id!r} not found in cleanup ledger {path}")
 
 
-def _calibration_invalidation_inputs(env: dict[str, Any]) -> dict[str, Any]:
-    """The calibration-receipt invalidation inputs for ``env`` (reused verbatim)."""
-    sr = calibrate._load_judge_template()
-    pairs = calibrate._load_fixture()
-    inputs = calibrate._invalidation_inputs(env, pairs, sr)
-    # Candidate review-profile digest (issue #885/R12): when the control plane
-    # supplies a ``DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST``, a change of
-    # candidate invalidates the calibration receipt (benchmark attribution
-    # requires per-candidate invalidation). Omitted when absent so the
-    # legacy receipt contract stays byte-stable for default-profile runs.
-    digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
-    if digest:
-        inputs["profile_digest"] = str(digest)
-    return inputs
-
-
 def _preflight(
     workspace: Path,
     *,

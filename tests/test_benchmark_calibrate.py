@@ -46,11 +46,15 @@ def test_fixture_is_source_free():
 def test_fixture_provenance_declares_unverified_llm_origin():
     from daydream.benchmark.harbor.calibrate import _load_fixture, _load_provenance
 
-    prov = _load_provenance()
+    pairs = _load_fixture()
+    prov = _load_provenance(pairs)
     assert prov["origin"] == "llm_generated"
     assert prov["human_reviewed"] is False
     assert prov["labels"] == "unverified"
-    assert len(_load_fixture()) == 24          # the 24 pairs survive the shape change
+    # Pair-attestable facts are derived from the passed pairs, not a fixed file.
+    assert prov["class_balance"] == {"match": 12, "nonmatch": 12}
+    assert prov["categories"] == 8
+    assert len(pairs) == 24          # the 24 pairs survive the shape change
 
 
 def test_every_pair_renders_within_24kib():
@@ -285,7 +289,7 @@ def test_diagnostic_receipt_invalidates_on_fixture_content_change(tmp_path, monk
     assert receipt["provenance"]["human_reviewed"] is False
     assert receipt["provenance"]["labels"] == "unverified"
     # Full fixture content (provenance + all pairs) is part of the invalidation inputs.
-    assert receipt["inputs"]["fixture_sha256"] == calibrate._fixture_sha256()
+    assert receipt["inputs"]["fixture_sha256"] == calibrate._fixture_sha256(pairs)
     assert receipt["inputs"]["fixture_provenance"]["origin"] == "llm_generated"
 
     assert calibrate.is_receipt_current(path, calibrate._invalidation_inputs(env, pairs, sr))
@@ -293,13 +297,13 @@ def test_diagnostic_receipt_invalidates_on_fixture_content_change(tmp_path, monk
     # A provenance-block change (the fixture now claims human_reviewed=true)
     # must invalidate an existing diagnostic receipt, even though the ordered
     # gold/candidate/label triples (label_sha256) are unchanged.
-    modified_provenance = dict(calibrate._load_provenance())
+    modified_provenance = dict(calibrate._load_provenance(pairs))
     modified_provenance["human_reviewed"] = True
-    monkeypatch.setattr(calibrate, "_load_provenance", lambda: modified_provenance)
+    monkeypatch.setattr(calibrate, "_load_provenance", lambda pairs: modified_provenance)
     monkeypatch.setattr(
         calibrate,
         "_fixture_sha256",
-        lambda: hashlib.sha256(b"fixture-with-human-revised-provenance").hexdigest(),
+        lambda pairs: hashlib.sha256(b"fixture-with-human-revised-provenance").hexdigest(),
     )
     assert not calibrate.is_receipt_current(
         path, calibrate._invalidation_inputs(env, pairs, sr))

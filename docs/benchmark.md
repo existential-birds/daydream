@@ -427,13 +427,14 @@ the whole before- or after-state — never a checksum-drifted partial.
 
 ## Diagnostics vs the Oracle gate vs the benchmark-after-Oracle gate
 
-The Harbor/private-benchmark path has three distinct concepts that are easy to
-conflate. Keep them separate:
+The Harbor/private-benchmark path has four distinct concepts (or three concepts
+plus one threshold distinction) that are easy to conflate. Keep them separate:
 
 1. **Optional unverified judge-agreement diagnostics** — `daydream benchmark
    calibrate-judge <workspace>` drives the exact packaged judge path over an
    **unverified** 24-pair fixture and reports how closely the judge agrees with
-   that fixture (the `0.90` diagnostic metric). It is optional, diagnostic-only,
+   that fixture, passing on a `0.90` balanced-accuracy threshold. It is
+   optional, diagnostic-only,
    and is **not** an authorization, correctness, or validation check. Neither the
    fixture nor its receipts gate any run: they are machine-readable provenance
    artifacts you may inspect, never a pass/fail prerequisite. Loading a
@@ -449,9 +450,11 @@ conflate. Keep them separate:
    the workspace's compiled lock state (for example, an allowlist change
    invalidates an existing receipt). This governs normal runs against a verified
    Oracle; it does not read calibration diagnostics.
-4. **The `0.90` diagnostic metric vs the `0.70` retained-edge threshold.** These
-   are different numbers with different purposes: `0.90` is the judge-agreement
-   diagnostic threshold reported during calibration; `0.70` is the benchmark's
+4. **The `0.90` judge-agreement diagnostic threshold vs the `0.70` retained-edge
+   threshold.** These are different numbers with different purposes: `0.90` is
+   the judge-agreement diagnostic threshold (the pass threshold on balanced
+   accuracy) reported
+   during calibration; `0.70` is the benchmark's
    retained-edge (per-case) threshold. Do not treat one as the other.
 
 ### OpenRouter data handling

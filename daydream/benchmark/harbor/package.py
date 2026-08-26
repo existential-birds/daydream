@@ -413,8 +413,9 @@ def _render_and_check(
 def _normalized_allowed_hosts(hosts: list[str] | None, label: str) -> list[str]:
     """Normalize and sort an allowlist, failing closed on empty/invalid input.
 
-    Each host goes through ``schema.normalize_hostname`` (rejects schemes,
-    credentials, ports, paths, wildcards, whitespace, empties, and dot-less
+    Each host goes through ``schema.normalize_hostname`` (drops a
+    ``<scheme>://`` prefix, ``user:pass@`` credentials, a ``:port`` suffix, and
+    a trailing ``/path``; rejects wildcards, whitespace, empties, and dot-less
     segments). The normalized list is sorted so the rendered TOML bytes stay
     deterministic; a missing/empty list or a single bad host is a hard
     ``PackageError`` -- there is no silent fallback host.

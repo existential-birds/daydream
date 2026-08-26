@@ -103,16 +103,30 @@ def _load_fixture() -> list[dict[str, Any]]:
     return pairs
 
 
-def _load_provenance() -> dict[str, Any]:
-    """Read and return the fixture's machine-readable provenance block.
+def _load_provenance(pairs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the fixture's provenance declaration bound to the passed pairs.
 
-    Raises ``ValueError`` if the provenance block is absent or not an object.
+    The declaration (``origin``, ``human_reviewed``, ``labels``, notes) comes
+    from the fixture document, while the pair-attestable facts
+    (``class_balance``, ``categories``) are computed from the passed ``pairs``
+    argument, so the provenance describes exactly the pairs a receipt was
+    built from and a synthetic or subset-pairs caller gets a matching
+    declaration. Raises ``ValueError`` if the provenance block is absent or
+    not an object.
     """
     data = _load_fixture_document()
     provenance = data.get("provenance")
     if not isinstance(provenance, dict):
         raise ValueError('calibration fixture must contain a "provenance" object')
-    return provenance
+    balance: dict[str, int] = {}
+    for pair in pairs:
+        label = pair.get("label")
+        balance[label] = balance.get(label, 0) + 1
+    return {
+        **provenance,
+        "class_balance": balance,
+        "categories": len({pair.get("category") for pair in pairs}),
+    }
 
 
 def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
@@ -316,18 +330,21 @@ def _label_sha256(pairs: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _fixture_sha256() -> str:
-    """Canonical sha256 over the full pairs.json bytes (content + provenance).
+def _fixture_sha256(pairs: list[dict[str, Any]]) -> str:
+    """Canonical sha256 over the full passed fixture pairs.
 
-    Digests the raw file, so any change to the fixture object — a pair's
-    content or the provenance block — invalidates every existing diagnostic
-    receipt.
+    Digests the ``pairs`` argument — every pair field (gold/candidate content,
+    category, label), not just the ordered triples covered by ``label_sha256`` —
+    so the authoritative invalidation digest is bound to exactly what was
+    judged. A caller passing synthetic or subset pairs binds the digest to
+    those pairs rather than to a fixed on-disk file; any fixture content change
+    moves the digest even without a triple reorder and invalidates existing
+    receipts.
     """
-    path = _CALIBRATION_DIR / "pairs.json"
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise ValueError(f"could not read calibration fixture at {path}: {exc}") from exc
+    canonical = json.dumps(
+        pairs, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _render_judge_prompt_digest(sr: Any) -> str:
@@ -348,10 +365,11 @@ def _invalidation_inputs(
 ) -> dict[str, Any]:
     """The receipt's invalidation contract: a deterministic byte-stable dict.
 
-    ``fixture_sha256`` digests the full pairs.json bytes (content + provenance),
-    and ``fixture_provenance`` mirrors the provenance block, so a fixture
+    ``fixture_sha256`` digests the passed ``pairs`` (all content, not just the
+    ordered triples covered by ``label_sha256``), and ``fixture_provenance``
+    mirrors the provenance declaration bound to those pairs, so a fixture
     content or provenance change invalidates existing receipts — not just a
-    reorder of the ordered triples covered by ``label_sha256``.
+    reorder of the ordered triples.
     """
     inputs = {
         "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
@@ -360,16 +378,15 @@ def _invalidation_inputs(
         "judge_prompt_sha256": _render_judge_prompt_digest(sr),
         "threshold": sr.verifier_core.CONFIDENCE_THRESHOLD,
         "label_sha256": _label_sha256(pairs),
-        "fixture_sha256": _fixture_sha256(),
-        "fixture_provenance": _load_provenance(),
+        "fixture_sha256": _fixture_sha256(pairs),
+        "fixture_provenance": _load_provenance(pairs),
         "attempts": 3,
         "request_timeout": sr._REQUEST_TIMEOUT,
     }
     # Candidate review-profile digest (issue #885/R12): a change of candidate
     # invalidates the calibration receipt (per-candidate attribution). Omitted
     # when absent so the legacy receipt contract stays byte-stable for default
-    # runs. Mirrors run._calibration_invalidation_inputs, which delegates here,
-    # so the receipt built here and run.py's helper produce identical inputs.
+    # runs.
     digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
     if digest:
         inputs["profile_digest"] = str(digest)
@@ -396,7 +413,7 @@ def _build_receipt(
         "type": "judge-calibration",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "inputs": _invalidation_inputs(env, pairs, sr),
-        "provenance": _load_provenance(),
+        "provenance": _load_provenance(pairs),
         "result": {
             "passed": passed,
             "balanced_accuracy": balanced_accuracy,
@@ -421,8 +438,9 @@ def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bo
     document satisfies the diagnostic-receipt contract: ``schema_version`` 1,
     ``type`` ``judge-calibration``, ``result.passed`` True, and a provenance
     block declaring the fixture ``llm_generated`` and not ``human_reviewed``.
-    Any violation — including a fixture content or provenance change, which
-    moves ``fixture_sha256`` — returns False.
+    Any violation — including a fixture content change, which moves
+    ``fixture_sha256``, or a provenance change, which moves
+    ``fixture_provenance`` — returns False.
     """
     try:
         raw = json.loads(Path(receipt_path).read_bytes())

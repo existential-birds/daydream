@@ -31,8 +31,11 @@ def test_spike_task_toml_env_carries_case_key(tmp_path, fake_gh):
     assert f"DAYDREAM_REVIEW_CASE_ID = \"{key}\"" in toml
     assert "[environment]" in toml
     # determinism: re-rendering identical bytes
+    # re-render with the same workspace-seeded privacy allowlists so the bytes
+    # are identical to the compiled task.toml (reviewer h1/judge h2, not a
+    # different policy like api.anthropic.com)
     assert pkg.render_task_toml(
-        key, reviewer_hosts=["api.anthropic.com"], judge_hosts=["api.anthropic.com"]
+        key, reviewer_hosts=["h1.example.com"], judge_hosts=["h2.example.com"]
     ) == (case / "task.toml").read_bytes()
     # Harbor validates the enriched task.toml (same-interpreter Task model)
     try:
