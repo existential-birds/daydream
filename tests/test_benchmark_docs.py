@@ -229,6 +229,8 @@ def test_claude_has_no_active_legacy_benchmark_reference():
     text = CLAUDE.read_text(encoding="utf-8")
     assert re.search(r"\bdaydream bench\b", text) is None
     assert "docs/benchmark.md" in text
+    for token in FORBIDDEN_LEGACY_TOKENS:
+        assert token not in text, f"legacy token {token!r} must not appear in CLAUDE.md"
 
 
 # --- Change-scope guards (out-of-scope) ---

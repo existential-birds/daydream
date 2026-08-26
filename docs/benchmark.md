@@ -315,7 +315,7 @@ judge reasoning, or source code is ever emitted.
     "task_count": 8,
     "scored_task_count": 8,
     "candidate_count": 25,
-    "gold_count": 14,
+    "gold_count": 22,
     "infra_error_task_count": 0,
     "verifier_error_task_count": 0,
     "malformed_task_count": 0,
