@@ -36,7 +36,7 @@ body:
       label: How do you handle this today?
       description: Describe any current workarounds, manual processes, or alternative tools you use. What are the limitations of these approaches?
       placeholder: |
-        Currently I use --review-only and manually apply the fixes I agree with. This is time-consuming and defeats the purpose of automation.
+        Currently I use --review and manually apply the fixes I agree with. This is time-consuming and defeats the purpose of automation.
     validations:
       required: true
 
