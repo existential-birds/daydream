@@ -630,8 +630,19 @@ def _compile_case(
     *,
     runtime_lock: bytes,
     wheel: Path | None,
+    reviewer_hosts: list[str],
+    judge_hosts: list[str],
 ) -> dict:
-    """Compile one case tree into ``stage/<key>/`` and return its lock row."""
+    """Compile one case tree into ``stage/<key>/`` and return its lock row.
+
+    The network policy is threaded from the workspace's persisted privacy
+    allowlists: ``reviewer_hosts`` become ``[agent].allowed_hosts`` and
+    ``judge_hosts`` become ``[verifier.environment].allowed_hosts``, keeping
+    the two egress boundaries separate. Because the policy lands in
+    ``task.toml`` and that file's digest is inventoried in the lock, a policy
+    change propagates to the lock bytes / ``compiled_lock_sha256`` and thereby
+    invalidates any existing Oracle receipt.
+    """
     case_id = case_doc["case_id"]
     key = derive_task_key(case_id)
     case_stage = stage / key
@@ -657,8 +668,8 @@ def _compile_case(
     (case_stage / "task.toml").write_bytes(
         render_task_toml(
             key,
-            reviewer_hosts=["api.anthropic.com"],
-            judge_hosts=["api.anthropic.com"],
+            reviewer_hosts=reviewer_hosts,
+            judge_hosts=judge_hosts,
         )
     )
     (case_stage / "environment").mkdir(exist_ok=True)
@@ -831,6 +842,17 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
         # validate/status read path); a present-but-corrupt case raises
         # ``WorkspaceCorrupt`` before any staging begins.
         manifest_model = schema.BenchmarkManifest.model_validate(manifest)
+        # The compiled network policy is sourced from the workspace's persisted
+        # privacy allowlists -- never a hardcoded default. The pydantic model
+        # already rejects empty lists, but re-raise fail-closed so a private
+        # workspace can never silently compile an unsafe (or hostless) policy.
+        reviewer_hosts = list(manifest_model.privacy.reviewer_allowed_hosts)
+        judge_hosts = list(manifest_model.privacy.judge_allowed_hosts)
+        if not reviewer_hosts or not judge_hosts:
+            raise CompileError(
+                "network policy requires non-empty privacy reviewer_allowed_hosts "
+                "and judge_allowed_hosts in benchmark.yaml"
+            )
         case_docs: dict[str, dict] = {}
         for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
             dumped = doc.model_dump(mode="json")
@@ -868,6 +890,8 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
                     repo_slug,
                     runtime_lock=runtime_lock,
                     wheel=wheel,
+                    reviewer_hosts=reviewer_hosts,
+                    judge_hosts=judge_hosts,
                 )
                 case_rows.append(row)
                 key = row["key"]
