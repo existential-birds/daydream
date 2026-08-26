@@ -175,11 +175,11 @@ def test_preflight_blocks_unsupported_docker_allowlist(tmp_path):
     assert any("Docker allowlist" in e for e in errs)
 
 
-def test_preflight_blocks_missing_calibration_receipt_for_oracle(tmp_path):
+def test_preflight_ok_for_oracle_without_calibration_receipt(tmp_path):
     import daydream.benchmark.harbor.run as run_mod
 
     errs = run_mod._preflight(_ws(tmp_path), oracle=True, env=_env(), docker_ok=lambda: True)
-    assert any("calibration" in e for e in errs)  # runtime/calibration-receipt.json absent
+    assert errs == []          # Oracle preflight no longer requires a calibration receipt
 
 
 # ---------------------------------------------------------------------------

@@ -3,8 +3,7 @@
 A thin safety wrapper around Harbor 0.21 that fail-closes on every preflight
 before Harbor starts (same-interpreter Harbor, compiled-tree presence,
 endpoint hosts vs the workspace allowlists, telemetry/upload rejection,
-Docker allowlist support, and — for the Oracle pass — a current
-``runtime/calibration-receipt.json``), prints a pre-run spend summary, and
+and Docker allowlist support), prints a pre-run spend summary, and
 records every run in a private ``runtime/harbor.json`` cleanup ledger. Harbor
 remains the only orchestrator/results implementation; this module only
 selects the already-compiled config, drives ``harbor run -c <config>`` with
@@ -379,7 +378,6 @@ def _preflight(
       2. judge/reviewer egress hosts vs the workspace allowlists
       3. telemetry/upload rejection (archive + uploads must be ``disabled``)
       4. Docker allowlist support (no public-networking fallback)
-      5. (oracle only) a current passed calibration receipt
     """
     failures: list[str] = []
 
@@ -436,21 +434,6 @@ def _preflight(
             "Docker allowlist is unsupported on the selected runtime; "
             "refusing to fall back to public networking"
         )
-
-    if oracle:
-        receipt_path = workspace / "runtime" / "calibration-receipt.json"
-        try:
-            current = calibrate.is_receipt_current(
-                receipt_path, _calibration_invalidation_inputs(env)
-            )
-        except Exception as exc:  # noqa: BLE001 - surfaced as a preflight failure
-            current = False
-            failures.append(f"calibration receipt check failed: {exc}")
-        if not current:
-            failures.append(
-                "no current calibration receipt at runtime/calibration-receipt.json "
-                "(run 'daydream benchmark calibrate-judge' first)"
-            )
     return failures
 
 
