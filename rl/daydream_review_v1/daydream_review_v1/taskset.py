@@ -24,13 +24,13 @@ from pathlib import Path
 from typing import Any
 
 import verifiers.v1 as vf
-from daydream.benchmark.corpus import harvested_corpus
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
+from daydream_review_v1.corpus import harvested_corpus
 from daydream_review_v1.rundir import (
     DEFAULT_ARCHIVE_ROOT,
     candidate_diff_cmd,
@@ -406,7 +406,7 @@ DEFAULT_TIMEOUT = vf.TaskTimeout(setup=900, harness=5400, scoring=1800)
 class GoldenComment(BaseModel):
     """One review comment the upstream bot actually posted on the PR.
 
-    Shape mirrors ``daydream/benchmark/harvest.py`` ``build_harvested_corpus``.
+    Shape mirrors ``daydream_review_v1.corpus`` ``harvested_corpus``.
     Used only for the non-summed ``golden_overlap`` metric — never a reward.
     """
 

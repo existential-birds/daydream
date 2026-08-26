@@ -43,8 +43,7 @@ import tempfile
 from pathlib import Path
 from typing import cast
 
-from daydream.benchmark.corpus import harvested_corpus
-
+from daydream_review_v1.corpus import harvested_corpus
 from daydream_review_v1.fixture import (
     FIXTURE_BASE_SHA,
     FIXTURE_PR1_HEAD_SHA,

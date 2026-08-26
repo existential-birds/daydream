@@ -405,7 +405,7 @@ run. `daydream benchmark upgrade <dir>` (and `--dry-run`) is that repair path:
 - An **un-upgraded** such workspace fails `CaseDocument` validation and reports
   as **corrupt**.
 
-## 7. Legacy path and failure/cleanup states
+## 7. Failure and cleanup states
 
 ### Failure / recovery states
 

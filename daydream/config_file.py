@@ -356,6 +356,16 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
 
     merged = _merge_section(base, dotfile)
 
+    # The legacy `bench` table was removed with the Martian benchmark stack
+    # (issue-785). A stale `[tool.daydream.bench]` section is now ignored; warn
+    # so the upgrade path is not silent, mirroring cli.py's loud rejection of the
+    # removed legacy `bench` verb.
+    if "bench" in merged:
+        logger.warning(
+            "daydream: [tool.daydream.bench] is no longer a supported daydream "
+            "config section (legacy benchmark verb removed); ignoring it"
+        )
+
     model = merged.get("model")
     backend = merged.get("backend")
     reasoning_effort = merged.get("reasoning_effort")

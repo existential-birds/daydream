@@ -1808,7 +1808,7 @@ def main() -> None:
             sys.exit(_handle_list_reanchor(config))
 
         # ``improve list-reanchored`` is a sync, read-only one-purpose command
-        # (mirroring the corpus/bench/ext short-circuits), so it never spins up
+        # (mirroring the corpus/ext short-circuits), so it never spins up
         # a flow through ``_parse_improve_args``/``anyio.run``.
         if verb == "improve" and len(argv) > 1 and argv[1] == "list-reanchored":
             sys.exit(_handle_list_reanchored_command(argv[2:]))
