@@ -43,7 +43,7 @@ daydream --non-interactive /path/to/project        # unattended/harness run
 ```
 
 The rest of the surface — `post-findings`, `setup`, `summarize`, `ext validate`, `corpus *` — is in
-README "Additional Commands" / "Corpus Commands"; `daydream bench` is in `docs/benchmark.md`.
+README "Additional Commands" / "Corpus Commands"; `daydream benchmark` is in `docs/benchmark.md`.
 
 ## Testing standard (mandatory)
 

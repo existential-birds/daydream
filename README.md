@@ -227,7 +227,7 @@ The evaluation framework has two arms:
 - **Recall.** Compare daydream findings against a human gold baseline. Report inter-annotator agreement (Krippendorff alpha) and PR-level bootstrap confidence intervals.
 - **Quality.** Track erosion and verbosity metrics. The fix-phase quality gate uses these metrics to flag degraded fixes.
 
-The offline benchmark scores deep-review findings against a held-out PR corpus. The benchmark uses micro-averaged metrics and bootstrap confidence intervals. See [docs/benchmark.md](docs/benchmark.md).
+Private PR benchmarks run on Harbor. See [docs/benchmark.md](docs/benchmark.md) for the benchmark runbook.
 
 ## Architecture
 
