@@ -613,6 +613,12 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
     assert "[REDACTED_ENV_VAR]" in out
     assert "credential-shaped-supervisor-value" not in out
 
+    # The propagated exception's str() must be scrubbed too: on the canonical
+    # `daydream <target>` path the CLI's "Fatal Error" handler re-prints
+    # str(exc), which would otherwise leak the credential past run_agent.
+    assert "[REDACTED_ENV_VAR]" in str(exc_info.value)
+    assert "credential-shaped-supervisor-value" not in str(exc_info.value)
+
     assert getattr(exc_info.value, "retryable", False) is True
     assert len(backends) == 1
     assert backends[0].execute_calls == 1

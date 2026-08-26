@@ -836,6 +836,16 @@ async def run_agent(
         print_error(
             console, "Extension Failure", redact_text(f"{type(exc.original).__name__}: {exc.original}")
         )
+        # The exception itself still propagates to outer handlers that re-print
+        # str(exc) (e.g. the CLI's "Fatal Error" panel on `daydream <target>`);
+        # scrub its args at the same host boundary so the diagnostic cannot
+        # re-surface the raw value through them.
+        try:
+            exc.original.args = tuple(
+                redact_text(arg) if isinstance(arg, str) else arg for arg in exc.original.args
+            )
+        except (AttributeError, TypeError):
+            pass
         raise exc.original from None
     except Exception as exc:
         category = getattr(exc, "category", None)
