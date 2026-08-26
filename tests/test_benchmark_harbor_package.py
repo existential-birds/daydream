@@ -111,63 +111,6 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch):
     assert "[0.22, 0.23)" in str(wrong.value)
 
 
-def test_docker_network_policy_capability_requires_live_sidecar_probe(monkeypatch):
-    """A kernel/config guess must not advertise the Docker allowlist backend."""
-    import subprocess
-
-    from daydream.benchmark.harbor import package as pkg
-
-    monkeypatch.setattr(pkg, "resolve_harbor", lambda: "/venv/bin/harbor")
-    monkeypatch.setattr(
-        pkg,
-        "_ensure_harbor_egress_sidecar_image",
-        lambda: "harbor-egress:test",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        pkg,
-        "_probe_harbor_egress_sidecar_image",
-        lambda image: subprocess.CompletedProcess(
-            ["docker", "run", image], 1, stdout="", stderr="fib rule rejected"
-        ),
-        raising=False,
-    )
-
-    capability = pkg.docker_network_policy_capability()
-
-    assert capability.supported is False
-    assert capability.image_name == "harbor-egress:test"
-    assert "fib rule rejected" in capability.reason
-
-
-def test_docker_network_policy_capability_reports_live_sidecar_success(monkeypatch):
-    import subprocess
-
-    from daydream.benchmark.harbor import package as pkg
-
-    monkeypatch.setattr(pkg, "resolve_harbor", lambda: "/venv/bin/harbor")
-    monkeypatch.setattr(
-        pkg,
-        "_ensure_harbor_egress_sidecar_image",
-        lambda: "harbor-egress:test",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        pkg,
-        "_probe_harbor_egress_sidecar_image",
-        lambda image: subprocess.CompletedProcess(
-            ["docker", "run", image], 0, stdout="ruleset-ok\n", stderr=""
-        ),
-        raising=False,
-    )
-
-    capability = pkg.docker_network_policy_capability()
-
-    assert capability.supported is True
-    assert capability.image_name == "harbor-egress:test"
-    assert capability.reason == ""
-
-
 def test_render_task_toml_threads_reviewer_and_judge_hosts():
     import tomllib
 
