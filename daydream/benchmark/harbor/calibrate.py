@@ -120,7 +120,7 @@ def _load_provenance(pairs: list[dict[str, Any]]) -> dict[str, Any]:
         raise ValueError('calibration fixture must contain a "provenance" object')
     balance: dict[str, int] = {}
     for pair in pairs:
-        label = pair.get("label")
+        label = pair.get("label") or ""
         balance[label] = balance.get(label, 0) + 1
     return {
         **provenance,
