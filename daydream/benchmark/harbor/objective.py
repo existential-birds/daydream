@@ -557,9 +557,14 @@ def _bind_identity(
         reviewer_effort=entry.get("reviewer_effort"),
         judge_provider=entry.get("judge_provider")
         or env.get("DAYDREAM_JUDGE_PROVIDER")
-        or "anthropic",
+        or "",
         judge_model=entry.get("judge_model") or env.get("DAYDREAM_JUDGE_MODEL") or "",
-        judge_host=entry.get("judge_host") or calibrate._judge_host_from_env(env) or "",
+        judge_host=entry.get("judge_host")
+        or (
+            calibrate._judge_host_from_env(env)
+            if env.get("DAYDREAM_JUDGE_PROVIDER")
+            else ""
+        ),
         verifier_template_sha256=calibrate._render_judge_prompt_digest(judge_template),
         threshold=verifier_core.CONFIDENCE_THRESHOLD,
         attempts=attempts,

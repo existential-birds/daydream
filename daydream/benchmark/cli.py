@@ -482,9 +482,9 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
 
     validate_p = sub.add_parser("validate", help="validate the workspace (0/2/1 exit codes)")
     validate_p.add_argument("dir", type=Path, help="workspace directory")
-    validate_p.add_argument("--compiled", action="store_true", help="validate emitted tasks with Harbor 0.21")
+    validate_p.add_argument("--compiled", action="store_true", help="validate emitted tasks with Harbor 0.22")
 
-    build_p = sub.add_parser("build-harbor", help="package a validated workspace for Harbor 0.21")
+    build_p = sub.add_parser("build-harbor", help="package a validated workspace for Harbor 0.22")
     build_p.add_argument("dir", type=Path, help="workspace directory")
     build_p.add_argument("--daydream-wheel", required=True, type=Path, help="wheel for this Daydream version")
 

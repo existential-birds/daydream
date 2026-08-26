@@ -300,6 +300,22 @@ async def test_pi_api_key_never_enters_process_argv(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pi_api_key_maps_to_openrouter_native_env(monkeypatch):
+    sentinel = "synthetic-openrouter-key"
+    monkeypatch.setenv("PI_PROVIDER", "openrouter")
+    monkeypatch.setenv("PI_API_KEY", sentinel)
+
+    backend = PiBackend(model="deepseek/deepseek-v4-flash-0731")
+    flat_args, mock_exec = await _run_and_capture_args(backend)
+
+    assert flat_args[flat_args.index("--provider") + 1] == "openrouter"
+    assert sentinel not in flat_args
+    assert "--api-key" not in flat_args
+    assert mock_exec.call_args.kwargs["env"]["OPENROUTER_API_KEY"] == sentinel
+    assert "PI_API_KEY" not in mock_exec.call_args.kwargs["env"]
+
+
+@pytest.mark.asyncio
 async def test_pi_api_key_unknown_provider_warns_and_skips(monkeypatch, caplog):
     """An unmapped provider warns and proceeds; the key never reaches argv or any env var."""
     sentinel = "synthetic-unknown-provider-key"

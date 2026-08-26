@@ -10,22 +10,36 @@ import asyncio
 import os
 from pathlib import Path
 
+import pytest
+
 from daydream.benchmark.harbor import entrypoint
 
 
-def test_openrouter_reviewer_env_uses_anthropic_auth_token(monkeypatch):
+def test_openrouter_reviewer_env_uses_pi_provider(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "stale-url")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-token")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "stale-openrouter-key")
+    monkeypatch.setenv("PI_API_KEY", "stale-pi-key")
 
     entrypoint.apply_reviewer_env({
         "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
         "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
     })
 
-    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "sk-or-test"
-    assert os.environ["ANTHROPIC_API_KEY"] == ""
-    assert os.environ["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+    assert os.environ["PI_PROVIDER"] == "openrouter"
+    assert os.environ["PI_API_KEY"] == "sk-or-test"
+    assert os.environ["PI_TELEMETRY"] == "0"
+    assert "OPENROUTER_API_KEY" not in os.environ
+    assert not any(key.startswith("ANTHROPIC_") for key in os.environ)
+
+
+def test_reviewer_env_rejects_non_openrouter_endpoint():
+    with pytest.raises(entrypoint.EntrypointError, match="openrouter.ai"):
+        entrypoint.apply_reviewer_env({
+            "DAYDREAM_REVIEW_API_KEY": "key",
+            "DAYDREAM_REVIEW_BASE_URL": "https://example.com/api",
+        })
 
 
 def test_entrypoint_skill_free_python_case(tmp_path, monkeypatch):
@@ -49,6 +63,9 @@ def test_entrypoint_skill_free_python_case(tmp_path, monkeypatch):
         "DAYDREAM_REVIEW_CASE_ID": "case-python",
         "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
         "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path),
+        "DAYDREAM_REVIEW_BACKEND": "pi",
+        "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
     }))
     assert rc == 0
     text = Path(artifact).read_text() if Path(artifact).exists() else ""
@@ -74,6 +91,9 @@ def test_entrypoint_env_has_no_skill_dirs(tmp_path, monkeypatch):
         "DAYDREAM_REVIEW_CASE_ID": "case-noskill",
         "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
         "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path),
+        "DAYDREAM_REVIEW_BACKEND": "pi",
+        "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
     }))
     assert rc == 0
     assert os.environ.get("DAYDREAM_SKILLS_DIR") is None

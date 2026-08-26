@@ -1,7 +1,8 @@
-"""Package compiled benchmark tasks for Harbor 0.21."""
+"""Package compiled benchmark tasks for Harbor 0.22."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.metadata
 import importlib.resources
@@ -23,6 +24,11 @@ GENERATION_COMMAND = "uv export --frozen --no-dev --no-emit-project --format req
 _BASE_DIGEST = "sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4"
 ENV_BASE_IMAGE = f"python:3.12-slim@{_BASE_DIGEST}"
 VERIFIER_BASE_IMAGE = ENV_BASE_IMAGE
+PI_BASE_IMAGE = (
+    "node:24.18.1-bookworm-slim@"
+    "sha256:a09aabc645e86e81e23dab78e0c0f2eaa233cab4277c7188232181a1a8bd5d39"
+)
+PI_PACKAGE = "@earendil-works/pi-coding-agent@0.84.3"
 
 # Marker comment pair delimiting the wheel-install block of the environment
 # Dockerfile template. render_environment_dockerfile strips the delimited block
@@ -48,6 +54,15 @@ class WheelInfo:
     distribution: str
     version: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class DockerNetworkPolicyCapability:
+    """Result of loading Harbor's real Docker egress-control ruleset."""
+
+    supported: bool
+    reason: str = ""
+    image_name: str | None = None
 
 
 def validate_wheel(wheel_path: Path, *, daydream_version: str) -> WheelInfo:
@@ -86,12 +101,12 @@ def resolve_harbor() -> str:
         parts = tuple(int(part) for part in version.split(".")[:2])
     except ValueError as exc:
         raise PackageError(
-            f"Harbor version {version!r} is invalid; supported range is [0.21, 0.22)",
+            f"Harbor version {version!r} is invalid; supported range is [0.22, 0.23)",
             remediation=remediation,
         ) from exc
-    if parts != (0, 21):
+    if parts != (0, 22):
         raise PackageError(
-            f"Harbor version {version} is outside supported range [0.21, 0.22)",
+            f"Harbor version {version} is outside supported range [0.22, 0.23)",
             remediation=remediation,
         )
     executable = Path(sys.executable).parent / "harbor"
@@ -101,6 +116,96 @@ def resolve_harbor() -> str:
             remediation=remediation,
         )
     return str(executable)
+
+
+def _ensure_harbor_egress_sidecar_image() -> str:
+    """Build Harbor's content-addressed sidecar image through its own helper."""
+    from harbor.environments.docker.docker import DockerEnvironment
+    from harbor.environments.docker.utils import (
+        default_docker_platform,
+        ensure_docker_image_built,
+    )
+
+    async def ensure() -> str:
+        platform = await default_docker_platform()
+        return await ensure_docker_image_built(
+            docker_name=DockerEnvironment._EGRESS_CONTROL_SIDECAR_DOCKER_NAME,
+            docker_build_context=DockerEnvironment._EGRESS_CONTROL_SIDECAR_CONTEXT_PATH,
+            dockerfile_path=DockerEnvironment._egress_control_sidecar_dockerfile_path(),
+            build_args={},
+            platform=platform,
+        )
+
+    return asyncio.run(ensure())
+
+
+def _probe_harbor_egress_sidecar_image(
+    image_name: str,
+) -> subprocess.CompletedProcess[str]:
+    """Load Harbor's actual nftables rules in a disposable isolated container."""
+    return subprocess.run(
+        [
+            "docker",
+            "container",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cap-add",
+            "NET_ADMIN",
+            "--cap-add",
+            "NET_RAW",
+            "--entrypoint",
+            "/bin/sh",
+            image_name,
+            "-c",
+            "network-policy deny-all >/dev/null && "
+            "nft list table inet gost_egress >/dev/null",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def _bounded_probe_error(result: subprocess.CompletedProcess[str]) -> str:
+    detail = "\n".join(
+        part.strip() for part in (result.stderr or "", result.stdout or "") if part.strip()
+    )
+    return detail[:1000] or f"probe exited {result.returncode} without output"
+
+
+def docker_network_policy_capability() -> DockerNetworkPolicyCapability:
+    """Return whether Harbor's real Docker allowlist backend works now.
+
+    Harbor 0.22 fixes daemon-kernel capability detection, but a config-bit
+    check alone is not sufficient for Daydream's paid-run preflight.  Build
+    the exact content-addressed sidecar Harbor will use and load its complete
+    nftables ruleset.  Any import, build, Docker, timeout, or ruleset failure
+    is reported as unsupported; there is no public-networking fallback.
+    """
+    image_name: str | None = None
+    try:
+        resolve_harbor()
+        image_name = _ensure_harbor_egress_sidecar_image()
+        result = _probe_harbor_egress_sidecar_image(image_name)
+    except Exception as exc:  # noqa: BLE001 - every probe failure must fail closed
+        return DockerNetworkPolicyCapability(
+            supported=False,
+            reason=f"Harbor Docker egress sidecar live probe failed: {str(exc)[:1000]}",
+            image_name=image_name,
+        )
+    if result.returncode != 0:
+        return DockerNetworkPolicyCapability(
+            supported=False,
+            reason=(
+                "Harbor Docker egress sidecar rejected its nftables rules: "
+                f"{_bounded_probe_error(result)}"
+            ),
+            image_name=image_name,
+        )
+    return DockerNetworkPolicyCapability(supported=True, image_name=image_name)
 
 
 def _read_packaged_resource(
@@ -230,11 +335,11 @@ def validate_compiled(root: Path | None) -> int:
         from harbor.models.job.config import JobConfig
         try:
             from harbor.models.task import Task
-        except ImportError:  # Harbor 0.21 wheel currently exposes a namespace package.
+        except ImportError:  # Harbor exposes task as a namespace package in some wheels.
             from harbor.models.task.task import Task
     except ImportError as exc:
         raise PackageError(
-            f"cannot import Harbor 0.21 models from the Daydream interpreter: {exc}",
+            f"cannot import Harbor 0.22 models from the Daydream interpreter: {exc}",
             remediation="pip install 'daydream[benchmark]'",
         ) from exc
 
@@ -296,11 +401,11 @@ def render_job_config(*, oracle: bool) -> bytes:
     agents: list[dict[str, Any]] = [{"name": "oracle"}] if oracle else [{
         "import_path": "daydream.benchmark.harbor.agent:DaydreamReviewAgent",
         "env": {
-            "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-claude}",
+            "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-pi}",
             "DAYDREAM_REVIEW_MODEL": "${DAYDREAM_REVIEW_MODEL}",
             "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY}",
             "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL}",
-            "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "${DAYDREAM_REVIEW_PROFILE_CANDIDATE}",
+            "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
         },
     }]
     document = {
@@ -310,7 +415,7 @@ def render_job_config(*, oracle: bool) -> bytes:
         "environment": {"type": "docker", "delete": True},
         "agents": agents,
         "verifier": {"env": {
-            "DAYDREAM_JUDGE_PROVIDER": "${DAYDREAM_JUDGE_PROVIDER:-anthropic}",
+            "DAYDREAM_JUDGE_PROVIDER": "${DAYDREAM_JUDGE_PROVIDER}",
             "DAYDREAM_JUDGE_MODEL": "${DAYDREAM_JUDGE_MODEL}",
             "DAYDREAM_JUDGE_API_KEY": "${DAYDREAM_JUDGE_API_KEY}",
             "DAYDREAM_JUDGE_BASE_URL": "${DAYDREAM_JUDGE_BASE_URL}",
@@ -329,7 +434,7 @@ def render_verifier_dockerfile(*, base_image: str) -> bytes:
     text = _render_and_check(
         "tests/Dockerfile",
         replaces={"__BASE_IMAGE__": base_image},
-        required=("httpx==0.28.1",),
+        required=("httpx==0.28.1", "WORKDIR /tests", "verifier-metadata.json"),
         forbidden=("ENTRYPOINT", "CMD", "/verifier", "httpx>="),
         error_label="verifier Dockerfile template",
     )
@@ -337,6 +442,9 @@ def render_verifier_dockerfile(*, base_image: str) -> bytes:
 
 
 _ENV_REQUIRED: tuple[str, ...] = (
+    PI_PACKAGE,
+    "node --version",
+    "pi --version",
     "git clone",
     "repository.bundle",
     "/workspace/repo",
@@ -371,7 +479,12 @@ def render_environment_dockerfile(*, base_image: str, daydream_version: str, whe
     """
     text = _render_and_check(
         "environment/Dockerfile",
-        replaces={"__BASE_IMAGE__": base_image, "__DAYDREAM_VERSION__": daydream_version},
+        replaces={
+            "__BASE_IMAGE__": base_image,
+            "__PI_BASE_IMAGE__": PI_BASE_IMAGE,
+            "__PI_PACKAGE__": PI_PACKAGE,
+            "__DAYDREAM_VERSION__": daydream_version,
+        },
         required=_ENV_REQUIRED + (("--no-deps",) if wheel else ()),
         error_label="environment Dockerfile template",
         transform=lambda rendered: _strip_wheel_block(rendered, wheel=wheel),

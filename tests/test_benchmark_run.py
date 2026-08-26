@@ -31,7 +31,7 @@ def _stub_harbor_environment(monkeypatch):
     real_version = importlib.metadata.version
 
     def _version(dist):
-        return "0.21.0" if dist == "harbor" else real_version(dist)
+        return "0.22.0" if dist == "harbor" else real_version(dist)
 
     monkeypatch.setattr(importlib.metadata, "version", _version)
     monkeypatch.setattr(
@@ -199,6 +199,28 @@ def test_preflight_blocks_unsupported_docker_allowlist(tmp_path):
 
     errs = run_mod._preflight(_ws(tmp_path), oracle=True, env=_env(), docker_ok=lambda: False)
     assert any("Docker allowlist" in e for e in errs)
+
+
+def test_preflight_uses_live_docker_capability_by_default(tmp_path, monkeypatch):
+    """Production preflight must fail with the actual sidecar probe reason."""
+    from types import SimpleNamespace
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    monkeypatch.setattr(
+        run_mod.package,
+        "docker_network_policy_capability",
+        lambda: SimpleNamespace(
+            supported=False,
+            reason="Harbor egress sidecar rejected nftables fib rules",
+        ),
+        raising=False,
+    )
+
+    errs = run_mod._preflight(_ws(tmp_path), oracle=True, env=_env())
+
+    assert any("Docker allowlist" in e for e in errs)
+    assert any("rejected nftables fib rules" in e for e in errs)
 
 
 def test_preflight_ok_for_oracle_without_calibration_receipt(tmp_path):
@@ -436,6 +458,8 @@ def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path):
     assert "--upload" not in captures["args"] and "--publish" not in captures["args"]
     assert any("harbor-oracle.yaml" in str(a) for a in captures["args"])  # selects oracle config
     ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert captures["args"][-2:] == ["--job-name", ledger["runs"][0]["run_id"]]
+    assert Path(ledger["runs"][0]["job_dir"]).name == ledger["runs"][0]["run_id"]
     assert ledger["runs"][0]["state"] == "complete"
 
 

@@ -35,6 +35,23 @@ class CandidateError(Exception):
         self.kind = kind
 
 
+def _candidate_title(description: str) -> str:
+    """Return a verifier-bounded display title without dropping review content.
+
+    Canonical Daydream descriptions can be paragraph-length. The full text is
+    retained in the candidate body; the title uses its first non-empty line and
+    is shortened deterministically only when that line exceeds the verifier's
+    500-character display bound.
+    """
+    first_line = next(
+        (line.strip() for line in description.splitlines() if line.strip()),
+        description.strip(),
+    )
+    if len(first_line) <= 500:
+        return first_line
+    return first_line[:497].rstrip() + "..."
+
+
 def _assemble_body(fields: Any) -> str:
     """Assemble the candidate body exactly like ``benchmark.mapping``.
 
@@ -79,7 +96,7 @@ def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
             continue
         if fields.line_int is None or fields.line_int < 1:
             continue
-        title = fields.description
+        title = _candidate_title(fields.description)
         body = _assemble_body(fields)
         if not title.strip() or not body.strip():
             continue
@@ -94,7 +111,7 @@ def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
         # Enforce the verifier's per-finding bounds fail-closed, reusing the
         # verifier's own validators so no drift surfaces as a verifier-rejected
         # artifact after the builder already declared success: an over-long
-        # title (>500 chars) or body (>8 KiB), a non-enum severity, a
+        # body (>8 KiB), a non-enum severity, a
         # rooted/'..'-containing/NUL path, or a non-positive/non-ascending
         # line range are each a typed failure, never an artifact the verifier
         # would reject (``_validate_location`` re-checks path + lines on parse).

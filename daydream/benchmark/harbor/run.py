@@ -1,6 +1,6 @@
 """Supervised Harbor runs behind the Oracle self-match gate (issue #781).
 
-A thin safety wrapper around Harbor 0.21 that fail-closes on every preflight
+A thin safety wrapper around Harbor 0.22 that fail-closes on every preflight
 before Harbor starts (same-interpreter Harbor, compiled-tree presence,
 endpoint hosts vs the compiled network policy, telemetry/upload rejection,
 and Docker allowlist support), prints a pre-run spend summary, and
@@ -108,15 +108,14 @@ def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | No
 
 
 def _reviewer_host_from_env(env: dict[str, Any]) -> str:
-    """Reviewer egress host for ``env``: base-URL host, else the anthropic default.
+    """Return the reviewer base-URL host, failing closed when it is absent.
 
-    Mirrors ``calibrate._judge_host_from_env``: a configured
-    ``DAYDREAM_REVIEW_BASE_URL`` resolves to its hostname (lowercased, no
-    port); without one the reviewer routes to the default ``api.anthropic.com``.
+    A configured ``DAYDREAM_REVIEW_BASE_URL`` resolves to its hostname
+    (lowercased, no port). Daydream no longer selects an implicit provider API.
     """
     base = env.get("DAYDREAM_REVIEW_BASE_URL") or ""
     if not base:
-        return "api.anthropic.com"
+        raise ValueError("missing DAYDREAM_REVIEW_BASE_URL")
     return str(urllib.parse.urlsplit(base).hostname or "").lower()
 
 
@@ -387,7 +386,7 @@ def _preflight(
     *,
     oracle: bool,
     env: dict[str, Any],
-    docker_ok: Callable[[], bool],
+    docker_ok: Callable[[], Any] | None = None,
 ) -> list[str]:
     """Fail-closed preflight: collect every blocking failure (empty = pass).
 
@@ -444,11 +443,25 @@ def _preflight(
                     f"privacy {field} must be disabled before a Harbor run (got {value!r})"
                 )
 
-    if not docker_ok():
-        failures.append(
+    try:
+        capability = (docker_ok or _default_docker_ok)()
+        if isinstance(capability, bool):
+            docker_supported = capability
+            docker_reason = ""
+        else:
+            docker_supported = bool(getattr(capability, "supported", False))
+            docker_reason = str(getattr(capability, "reason", ""))
+    except Exception as exc:  # noqa: BLE001 - preflight probes always fail closed
+        docker_supported = False
+        docker_reason = f"Docker capability probe failed: {str(exc)[:1000]}"
+    if not docker_supported:
+        message = (
             "Docker allowlist is unsupported on the selected runtime; "
             "refusing to fall back to public networking"
         )
+        if docker_reason:
+            message = f"{message}: {docker_reason}"
+        failures.append(message)
     return failures
 
 
@@ -559,7 +572,7 @@ def _current_state_mapping(
     mapping = {
         "compiled_lock_sha256": compiled_lock_sha256,
         "harbor_version": major_minor,
-        "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
+        "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "",
         "judge_model": env.get("DAYDREAM_JUDGE_MODEL") or "",
         "judge_host": calibrate._judge_host_from_env(env),
         "reviewer_backend": env.get("DAYDREAM_REVIEW_BACKEND") or "",
@@ -663,13 +676,14 @@ def _default_confirm(prompt: str) -> bool:
     return answer in ("y", "yes")
 
 
-def _default_docker_ok() -> bool:
-    """Default Docker allowlist probe: never fall back to public networking.
+def _default_docker_ok() -> package.DockerNetworkPolicyCapability:
+    """Probe Harbor's real Docker allowlist backend before any run starts.
 
-    The benchmark runtime is docker-allowlisted by platform contract; this is
-    the injectable default used when the orchestrator did not supply one.
+    The live probe builds Harbor's exact sidecar image and loads its nftables
+    rules in a disposable container.  Unsupported kernels and broken Docker
+    daemons therefore fail preflight instead of becoming public networking.
     """
-    return True
+    return package.docker_network_policy_capability()
 
 
 def _default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, Any]) -> dict[str, Any]:
@@ -754,7 +768,7 @@ def run_run(
                           reviewer_backend=env.get("DAYDREAM_REVIEW_BACKEND") or "",
                           reviewer_model=env.get("DAYDREAM_REVIEW_MODEL") or "",
                           reviewer_base_url=env.get("DAYDREAM_REVIEW_BASE_URL") or "",
-                          judge_provider=env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
+                          judge_provider=env.get("DAYDREAM_JUDGE_PROVIDER") or "",
                           judge_model=env.get("DAYDREAM_JUDGE_MODEL") or "",
                           judge_host=calibrate._judge_host_from_env(env) or "")
 
@@ -768,7 +782,7 @@ def run_run(
             spawn_env[key] = value
     spawn_env["HARBOR_TELEMETRY"] = "off"
     result = spawn(
-        [harbor_exe, "run", "-c", str(config)],
+        [harbor_exe, "run", "-c", str(config), "--job-name", run_id],
         cwd=workspace / "harbor", env=spawn_env,
     )
     returncode = int(result.get("returncode", 0))

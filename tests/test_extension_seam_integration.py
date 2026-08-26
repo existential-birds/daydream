@@ -162,6 +162,25 @@ async def test_post_review_uses_published_items_path(
     assert posted_paths == [stable_items]
 
 
+async def test_report_only_review_mode_never_enters_pr_posting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = _post_context(
+        dd=tmp_path / "private-deep",
+        items_file=tmp_path / "stable-merged-items.json",
+    )
+    ctx.data["mode"] = "review"
+
+    async def _post_forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("report-only review mode must not resolve or post to a PR")
+
+    monkeypatch.setattr(
+        "daydream.pr_review.post_review_to_pr_from_report", _post_forbidden
+    )
+
+    assert await _step_post_review(ctx) is None
+
+
 async def test_fork_filter_controls_findings_artifact(
     ext_dir: ExtDir,
     multi_stack_target: Path,

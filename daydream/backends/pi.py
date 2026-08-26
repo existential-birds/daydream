@@ -82,6 +82,7 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
 _PI_PROVIDER_API_KEY_ENV = {
+    "openrouter": "OPENROUTER_API_KEY",
     "zai": "ZAI_API_KEY",
     "nous": "NOUS_API_KEY",
 }

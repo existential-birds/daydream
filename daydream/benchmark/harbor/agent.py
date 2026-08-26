@@ -1,6 +1,6 @@
 """Harbor ``BaseAgent`` that reviews a frozen private-PR snapshot in-container (issue #780).
 
-``DaydreamReviewAgent`` runs host-side: it guarantees the Claude backend, builds
+``DaydreamReviewAgent`` runs host-side: it guarantees the Pi/OpenRouter backend, builds
 a fail-closed allowlist child environment, and invokes the controlled
 in-container entrypoint (``daydream.benchmark.harbor.entrypoint``) via
 ``environment.exec``. The entrypoint runs the real Daydream runner in-process
@@ -43,9 +43,18 @@ _BANNED_VARS = (
     "DAYDREAM_ARCHIVE_DIR",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "PI_API_KEY",
 )
-# Judge vars and any raw Anthropic SDK vars must never leak into the child env.
-_BANNED_PREFIXES = ("DAYDREAM_JUDGE_", "ANTHROPIC_")
+# Judge vars and raw provider credentials must never leak into the child env.
+_BANNED_PREFIXES = (
+    "DAYDREAM_JUDGE_",
+    "ANTHROPIC_",
+    "MARTIAN_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "PI_",
+)
 
 
 class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
@@ -72,15 +81,16 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
 
     async def setup(self, environment: Any) -> None:
         """Network-free setup: confirm the container installs this exact Daydream
-        release and the Claude backend SDK (``claude_agent_sdk``).
+        release and the Pi CLI.
 
         A single ``environment.exec`` runs an in-container Python probe; a
         non-zero exec return (missing exact version or missing backend SDK)
         raises :class:`AgentError` -- never a silent pass.
         """
         probe = (
-            "import importlib.metadata, claude_agent_sdk;"
+            "import importlib.metadata, shutil;"
             f"assert importlib.metadata.version('daydream') == {self.version()!r};"
+            "assert shutil.which('pi') is not None;"
         )
         command = 'python -X utf8 -c "' + probe + '"'
         result = await environment.exec(command)
@@ -98,17 +108,17 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
     ) -> None:
         """Review the frozen snapshot in-container.
 
-        Fail-closed: refuses any backend other than ``claude`` *before* any
+        Fail-closed: refuses any backend other than ``pi`` *before* any
         reviewing (never installs tools or widens network access), maps the
         allowlist child environment, and invokes the controlled entrypoint. A
         non-zero entrypoint return raises :class:`AgentError`.
         """
         if not _HARBOR:
             raise AgentError("Harbor is not installed; install 'daydream[benchmark]'")
-        backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "claude").strip().lower()
-        if backend != "claude":
+        backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
+        if backend != "pi":
             raise AgentError(
-                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'claude' is supported"
+                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'pi' is supported"
             )
         parent = {**os.environ, **self.extra_env}
         child_env = build_child_env(parent)
@@ -157,7 +167,7 @@ def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
 
     Keeps only ``DAYDREAM_REVIEW_*`` reviewer config/credential plus the required
     process variables, then explicitly drops the banned variables (GitHub/HF/judge/
-    archive and raw Anthropic SDK vars) so any future secret-holding variable not in
+    archive and raw provider vars) so any future secret-holding variable not in
     the keep-set still cannot leak by default. Never passes the parent env wholesale.
 
     The review-profile candidate (``DAYDREAM_REVIEW_PROFILE_CANDIDATE``, issue

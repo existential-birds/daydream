@@ -753,7 +753,7 @@ _ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
 _ENV_ALLOWED_HOSTS = "DAYDREAM_JUDGE_ALLOWED_HOSTS"
 _ENV_ARTIFACT_PATH = "DAYDREAM_JUDGE_ARTIFACT_PATH"
 _ENV_OUT_PATH = "DAYDREAM_JUDGE_OUT_PATH"
-_DEFAULT_PROVIDER = "anthropic"
+_DEFAULT_PROVIDER = ""
 
 
 class _CountingClient:
@@ -1130,11 +1130,11 @@ def _build_client(env: dict[str, Any]) -> Any:
     """Build the judge client from the DAYDREAM_JUDGE_* env surface.
 
     Provider is fail-closed: exactly ``anthropic`` | ``openai-compatible`` is
-    accepted (absent -> default ``anthropic``); anything else raises before any
+    accepted when explicit; absent or unsupported values raise before any
     request. The provider's base URL is resolved and the initial request URL is
     validated against the effective judge-host allowlist at build time.
     """
-    provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+    provider = env.get(_ENV_PROVIDER) or ""
     model = env.get(_ENV_MODEL)
     api_key = env.get(_ENV_API_KEY)
     if not model or not api_key:

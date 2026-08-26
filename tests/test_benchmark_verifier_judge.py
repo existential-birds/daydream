@@ -1124,11 +1124,12 @@ def test_error_bounding_and_redaction(sr_module) -> None:
 
 def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module) -> None:
     sr = sr_module
-    # absent provider defaults to anthropic (unchanged)
-    assert isinstance(sr._build_client(
-        {"DAYDREAM_JUDGE_PROVIDER": None, "DAYDREAM_JUDGE_MODEL": "m",
-         "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}),
-        sr.AnthropicJudgeClient)
+    # Absent providers fail closed instead of selecting an implicit API.
+    with pytest.raises(sr.VerifierError):
+        sr._build_client(
+            {"DAYDREAM_JUDGE_PROVIDER": None, "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+        )
     # exactly anthropic | openai-compatible accepted
     cert = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "https://api.openai.com/v1"}

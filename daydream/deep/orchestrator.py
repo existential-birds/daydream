@@ -2257,12 +2257,16 @@ async def _step_supervise(ctx: FlowContext) -> None:
 
 
 async def _step_post_review(ctx: FlowContext) -> Stop | None:
-    """Offer to post findings as inline PR review comments; ``--comment`` auto-posts.
+    """Offer to post in loop/shallow modes; ``--comment`` auto-posts.
 
     In comment mode posting is the run's deliverable, so a missing PR or a
     failed GitHub submission ends the run with exit code 1 instead of the
-    warn-and-continue the default deep flow gets (#8).
+    warn-and-continue the default deep flow gets (#8). Report-only review mode
+    never resolves a PR or enters the posting helper.
     """
+    if _mode_of(ctx) == "review":
+        return None
+
     from daydream.pr_review import PostStatus, post_review_to_pr_from_report
 
     items_file: Path = ctx.data["items_file"]

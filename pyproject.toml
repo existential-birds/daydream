@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-benchmark = ["harbor>=0.21,<0.22"]
+benchmark = ["harbor>=0.22,<0.23"]
 
 [dependency-groups]
 dev = [
