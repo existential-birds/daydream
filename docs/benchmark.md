@@ -1,467 +1,445 @@
-# Benchmark Runbook
+# Private PR Benchmark Runbook (Harbor)
 
-`daydream bench` scores daydream's deep-review findings against [Martian's Code Review Benchmark](https://github.com/withmartian/code-review-benchmark) offline set: the 26 evaluable Python/Go/TS PRs (6 Sentry + 10 Grafana + 10 Cal.com). Per PR it acquires a local checkout, runs `daydream --non-interactive` as a subprocess, deterministically maps the merged findings into the benchmark's `benchmark_data.json`, then drives the benchmark's step2/2.5/3 modules to produce precision/recall. The benchmark repo itself is never modified by code; only its `results/` data is injected.
+This runbook is the operator's guide to Daydream's **private PR benchmark** — a
+GitHub-only, crash-consistent workspace where the repository's own PR-review
+cases are imported, curated, built into a Harbor dataset, and scored. It is the
+single authoritative reference for the shipped `daydream benchmark` surface and
+replaces the legacy scoring path (see [section 7](#7-legacy-path-and-failurecleanup-states)).
 
-This runbook takes you from nothing to a scored result.
+The workflow is split into seven sections: prerequisites/privacy → initialize/
+import/validate → build/run → inspect/objective/aggregate → candidate-profile
+trust → upgrade path → legacy transition + failure/cleanup.
 
-## Prerequisites
+The shipped `daydream benchmark` surface is: `daydream benchmark init`,
+`daydream benchmark status`, `daydream benchmark validate`,
+`daydream benchmark build-harbor`, `daydream benchmark upgrade`,
+`daydream benchmark import-prs`, `daydream benchmark curate`,
+`daydream benchmark calibrate-judge`, `daydream benchmark run`,
+`daydream benchmark clean`, `daydream benchmark objective`, and
+`daydream benchmark aggregate`.
 
-- **A benchmark checkout.** Clone the benchmark beside this repo so its offline harness sits at `../code-review-benchmark/offline/`. That `offline/` directory is the `--benchmark-repo` path; the step2/2.5/3 modules read `results/benchmark_data.json` relative to it.
-- **`daydream` installed.** Run `uv sync` so the `daydream` console script is on `PATH` (the harness invokes it as a subprocess).
-- **`git` and `gh` on `PATH`.** `git` performs the blobless clone and `pull/N/head` fetch per PR.
-- **A backend for the reviewer under test.** By default the reviewer runs daydream's built-in default backend (Claude), using the normal credentials for that backend. To benchmark another reviewer, select it with `--reviewer-backend` and optionally `--reviewer-model` / `--reviewer-provider` (see [Selecting the reviewer backend](#selecting-the-reviewer-backend)). These reviewer settings are separate from the judge route and judge `--model`. The `pi` backend driving a GLM model over OpenRouter additionally needs the `pi` CLI on `PATH` and the OpenRouter provider extension registered with `pi` (installed once via `pi install`); the run forwards `--reviewer-provider` to the reviewer as the `PI_PROVIDER` environment variable.
-- **A judge route and judge credential.** Scoring is controlled by `--judge-route` and the judge `--model`; this is independent of the reviewer backend/model that produced the findings.
+## 1. Prerequisites and privacy boundary
 
-  `--judge-route martian` is the default, backward-compatible OpenAI-compatible Martian/OpenRouter route. It drives the benchmark step2/2.5/3 modules through their OpenAI Chat Completions-compatible client.
-  - `MARTIAN_API_KEY`: an OpenRouter `sk-or-...` key (or a withmartian key). Required for `--score` on this route.
-  - `MARTIAN_BASE_URL`: the OpenAI-compatible judge endpoint. Defaults to `https://api.withmartian.com/v1` (default set by the withmartian step modules, not by daydream); set to `https://openrouter.ai/api/v1` when using an OpenRouter key.
-  - `MARTIAN_MODEL`: the judge model id fallback when `--model` is omitted. Required for scoring if `--model` is omitted.
+Before anything else, confirm the environment is exactly what the benchmark
+expects — and understand the data/egress boundary that keeps private source
+material in your control.
 
-  `--judge-route anthropic-direct` sends scoring calls directly to the Anthropic Messages API for extraction, deduplication, and final judging. It is not a `MARTIAN_BASE_URL` setting and it is not an OpenAI-compatible proxy route.
-  - `ANTHROPIC_API_KEY`: required for `--score` on this route.
-  - `--model`: the Anthropic judge model id, for example `claude-opus-4-5-20251101`. If omitted, `MARTIAN_MODEL` is used as the judge model fallback and result-directory label.
-  - `MARTIAN_BASE_URL` is invalid for direct Anthropic scoring. Unset it when selecting `--judge-route anthropic-direct`; `https://api.anthropic.com` is not an OpenAI Chat Completions-compatible endpoint.
+### Prerequisites
 
-  `--judge-route openai-compatible` runs the same in-process pipeline (extraction → deduplication → per-pair judging) directly against any OpenAI Chat Completions-compatible endpoint — OpenAI direct, OpenRouter, or a compatible gateway. It is not a `MARTIAN_BASE_URL` setting.
-  - `OPENAI_API_KEY`: required for `--score` on this route.
-  - `OPENAI_BASE_URL`: the Chat Completions base URL. Defaults to `https://api.openai.com/v1`; an `sk-or-` OpenRouter key with no explicit `OPENAI_BASE_URL` auto-routes to `https://openrouter.ai/api/v1` (mirroring the martian route's OpenRouter handling). An explicit `OPENAI_BASE_URL` always wins.
-  - `--model`: the judge model id (e.g. `gpt-5.6-luna`, or `openai/gpt-5.6-luna` when routing through OpenRouter). If omitted, `MARTIAN_MODEL` is used as the judge model fallback and result-directory label.
-  - `MARTIAN_BASE_URL` is invalid for OpenAI-compatible scoring. Unset it when selecting `--judge-route openai-compatible`.
+- **Harbor** `0.22` in range `[0.22, 0.23)` installed in the **same Python
+  environment** as Daydream (`uv sync` installs it alongside the `daydream`
+  console script).
+- **Docker Desktop for macOS** in its standard, local configuration. The first
+  build/run performs a live `nftables` capability preflight against the local
+  engine — the run itself validates the Docker + Harbor integration, there is no
+  fake end-to-end fixture.
+- **Explicitly not supported** and refused/unsupported by the runbook: Docker
+  Desktop *Business* air-gapped containers, OrbStack, any proxy or custom
+  network bridge, Linux/cloud Docker hosts, or a public-network fallback. The
+  workspace targets a locked-down local engine and these setups will not behave
+  correctly.
 
-  These env vars may live in a `.env` file in the directory you run `daydream bench` from; it is auto-loaded at bench entry (`python-dotenv`, searching from the cwd upward). Already-exported shell variables win, so an inline `ANTHROPIC_API_KEY=... daydream bench ...` still overrides the `.env`; a missing or malformed `.env` is a silent no-op.
+### Reviewer / judge boundary
 
-  ```bash
-  # .env beside your invocation, OpenAI-compatible Martian/OpenRouter judge route
-  MARTIAN_API_KEY=sk-or-...
-  MARTIAN_BASE_URL=https://openrouter.ai/api/v1
-  MARTIAN_MODEL=anthropic/claude-opus-4-5-20251101
+- **Pi** is the reviewer backend. **OpenRouter** is the provider for **both**
+  the reviewer and the judge.
+- Both runtime phases are restricted to the single egress host `openrouter.ai`
+  (see `--reviewer-host` / `--judge-host` below).
+- On `init`, the repository host allowlists (`--reviewer-host`, `--judge-host`)
+  must be **nonempty** — the workspace refuses a review/judge edge with no
+  allowlisted host. Host values are normalized (lowercase, scheme/credential/
+  port/path stripped).
 
-  # .env beside your invocation, direct Anthropic judge route
-  ANTHROPIC_API_KEY=sk-ant-...
-  MARTIAN_MODEL=claude-opus-4-5-20251101
+### Data and egress inventory
 
-  # .env beside your invocation, in-process OpenAI-compatible judge route
-  OPENAI_API_KEY=sk-...
-  OPENAI_BASE_URL=https://openrouter.ai/api/v1   # optional; sk-or- keys auto-route without it
-  MARTIAN_MODEL=gpt-5.6-luna
-  ```
+- The base container runs in a **`no-network`** environment; no traffic leaves
+  the job except what an explicit allowlist opens.
+- The **reviewer allowlist** admits `openrouter.ai` for the reviewer; a
+  **separate verifier allowlist** admits only the verifier's own required egress
+  — the two edges are scoped independently.
+- Each imported case is **frozen** into a deterministic, offline-replayable
+  source snapshot before anything reviews it.
+- Gold reviews are **hidden** from the reviewer; a run passes the **Oracle**
+  self-match/reward gate before its findings are trusted (see
+  [section 3](#3-build-and-run)).
+- **No-publication boundary:** the runbook never publishes private profile
+  content, source, gold, candidate findings, credentials, or judge reasoning.
 
-## Configuration file (`[tool.daydream.bench]`)
+### Credentials
 
-Repeating `--benchmark-repo`, the scoring `--model`, and the full reviewer flag set on every invocation gets old. A `[tool.daydream.bench]` table in the `pyproject.toml` (or `.daydream.toml`) of the directory you run `daydream bench` from supplies defaults **under** the CLI flags. Precedence is always **CLI flag > config file > built-in default**: an explicit flag always wins; the config only fills a flag you omit.
+- A **minimal GitHub token** (no unnecessary scopes) is read from the
+  environment for `import-prs`; API keys for the reviewer/judge OpenRouter route
+  are read from the environment as well.
+- Credentials are **never written into the workspace or the compiled task** —
+  they stay in the environment that launched the command.
 
-```toml
-[tool.daydream.bench]
-benchmark-repo = "../code-review-benchmark/offline"   # makes --benchmark-repo optional
-model = "anthropic/claude-opus-4-5-20251101"           # scoring model when --model is omitted
-judge-route = "martian"                               # or "anthropic-direct" / "openai-compatible"
+### Privacy rule
 
-# Named reviewer presets: each expands to --reviewer-backend / --reviewer-model / --reviewer-provider.
-[tool.daydream.bench.reviewers.glm]
-backend = "pi"
-model = "z-ai/glm-5.2"
-provider = "openrouter"
-```
+Every example in this runbook uses placeholders only: `OWNER/REPO`, `<40-hex>`,
+`<run-id>`, `<case-id>`. There are no real repository names, PR numbers,
+credentials, source paths, gold text, candidate findings, or judge reasoning
+anywhere in the examples. If you see a real value in a command you are about to
+run, you have copied it from a place that should never have contained it.
 
-config-only: there are no built-in reviewer names or model ids baked into daydream; a preset exists only if you define its table.
+## 2. Initialize / import / validate
 
-### `--reviewer <name>` expands a preset
+All commands operate on a workspace directory (below, `~/bench-owner-repo`).
 
-`--reviewer glm` looks up `[tool.daydream.bench.reviewers.glm]`, applies its `backend`/`model`/`provider` as the reviewer fields, and derives `--tool-label` as `daydream-glm` ; its findings file under a distinct results key automatically (see [`--tool-label` isolates per-backend results](#--tool-label-isolates-per-backend-results)). Explicit `--reviewer-backend`/`--reviewer-model`/`--reviewer-provider` or `--tool-label` flags still override the preset (CLI > config). An unknown `--reviewer` name is a usage error.
-
-With the table above, the full GLM sweep over one PR collapses to:
-
-```bash
-daydream bench --reviewer glm --only grafana --limit 1
-```
-
-`benchmark-repo`, `judge-route`, and the scoring `model` come from config; `--reviewer glm` supplies the backend/model/provider and the `daydream-glm` label. (Scoring is on by default, so the selected judge route's credential must be present; see [Prerequisites](#prerequisites).)
-
-## Smoke subset
-
-Wire the pipeline cheaply before spending on the paid judge. Run two Grafana PRs with scoring off:
-
-> **Note:** On first run each PR repo is blobless-cloned from GitHub. The clone is subject to a 300 s timeout; on a slow connection a large repo (Grafana, Sentry) can hit that limit and surface as a `GitError`, aborting that PR (the sweep continues, but the run exits non-zero). If you see a clone timeout, retry once the network is faster, or pre-clone the repos manually and point `--benchmark-repo` at a local mirror.
-
-```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline --only grafana --limit 2 --no-score
-```
-
-This acquires the checkouts, runs deep review, and injects two `daydream` reviews into `benchmark_data.json`; no judge calls. When the wiring looks right, add the default OpenAI-compatible Martian/OpenRouter judge:
+### `init` — create the private workspace
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline \
-  --judge-route martian \
-  --only grafana --limit 2 --score
+daydream benchmark init ~/bench-owner-repo --repo OWNER/REPO \
+  --reviewer-host openrouter.ai --judge-host openrouter.ai
 ```
 
-For direct Anthropic scoring, keep the default Claude reviewer and select the Anthropic Messages API judge route explicitly:
+`init` refuses a nonempty target directory and persists an immutable
+forge-identity block rather than a bare `OWNER/REPO`. Both `--reviewer-host` and
+`--judge-host` are repeatable; each must be nonempty. The created workspace is
+`0700`-rooted with `imports/ cases/ snapshots/ transactions/ runtime/ cache/
+harbor/` and a self-ignoring `.gitignore`.
+
+### `status` — read-only derived state
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline \
-  --judge-route anthropic-direct \
-  --model claude-opus-4-5-20251101 \
-  --only grafana --limit 2 --score
+daydream benchmark status ~/bench-owner-repo
 ```
 
-`--only` matches a source-repo name (`sentry`, `grafana`, `cal.com`) or a golden-URL substring. `--limit N` caps how many of the selected PRs run.
+Reports the derived workspace state (`empty` / `collecting` / `ready` / …),
+whether the repository identity is **unresolved**, the PR ledger, and per-indexed
+case snapshot state (`ready` / `unreplayable` / `imported`) with the frozen head
+prefix each case was caught at. Safe to run concurrently with other read-only
+commands.
 
-## Full sweep
-
-Drop `--only` and `--limit` to run all 26 evaluable PRs:
+### `validate` — 0/2/1 exit codes
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline \
-  --judge-route martian \
-  --score
+daydream benchmark validate ~/bench-owner-repo
 ```
 
-Full sweep with the default Claude reviewer and direct Anthropic judge:
+Returns a numeric **exit** code: `0` ready, `2` structurally valid but
+incomplete (for example an unresolved repository identity on a fresh workspace),
+`1` corrupt (invalid/missing `benchmark.yaml`, an orphan or missing indexed file,
+or a checksum-mismatched ready-snapshot bundle).
+
+### `import-prs` — explicit private evidence
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline \
-  --judge-route anthropic-direct \
-  --model claude-opus-4-5-20251101 \
-  --score
+daydream benchmark import-prs ~/bench-owner-repo --pr 123
+daydream benchmark import-prs ~/bench-owner-repo --pr-file prs.txt
+daydream benchmark import-prs ~/bench-owner-repo --head PR=<40-hex>
+daydream benchmark import-prs ~/bench-owner-repo --pr 456 --head PR=<40-hex> --refresh
 ```
 
-This is the load-bearing, money-spending run: 26 deep reviews plus 26 judge passes.
+- `--pr` accepts a PR number (or a GitHub pull URL, `https://github.com/OWNER/REPO/pull/N`);
+  repeatable.
+- `--pr-file` accepts a file listing PR numbers/URLs, one per line; repeatable.
+- `--head PR=<40-hex>` ties an explicit head SHA to its PR (a bare `<40-hex>` is
+  accepted for back-compat and treated as the sole requested PR).
+- `--refresh` re-fetches already-imported PRs, marking stale cases without
+  overwriting curation.
 
-## Watching progress (`--verbose`)
+Each requested head is frozen into a `base → head` snapshot bundle under
+`snapshots/`; the case is written with a `ready|unreplayable` snapshot instead of
+`imported`. A classified git failure yields a schema-valid `unreplayable` case,
+never a silent failure. A six-step preflight (binaries, `gh` auth, authenticated
+user, repository identity + read access, credentialed `git ls-remote`, summary
+print) runs before any fetch; the first successful repository resolution fills
+`repository_id`/`visibility` atomically and immutably. A failed fetch leaves no
+import file and marks the PR `fetch_failed` in the resumable ledger. The command
+never selects gold and never filters bot authors — bot classification is retained
+as metadata only.
 
-A deep review of one PR runs for minutes. By default each PR shows a live spinner with the PR label and reviewer, then a completion line with the elapsed time and finding count:
-
-```text
-▶ [1/2] Reviewing https://github.com/grafana/grafana/pull/1234 · reviewer daydream…
-Reviewed https://github.com/grafana/grafana/pull/1234 in 4m12s · 3 findings
-```
-
-Pass `-v`/`--verbose` to stream the underlying `daydream --non-interactive` subprocess output live instead of the spinner (streaming and a spinner can't share one console, so verbose replaces the spinner; the announce and completion lines stay):
+### `curate` — golden review
 
 ```bash
-daydream bench --reviewer glm --only grafana --limit 1 --verbose
+daydream benchmark curate ~/bench-owner-repo --case <case-id>
+daydream benchmark curate ~/bench-owner-repo --case <case-id> --apply-gold gold.yaml
 ```
 
-## Selecting the reviewer backend
+`curate` edits a case's golden review; `--apply-gold` applies a reviewed gold YAML
+draft (deriving all forbidden fields, never flipping a case to `ready` by itself).
 
-The harness benchmarks daydream itself, but the *reviewer under test*: the backend/model that produces the findings, is selectable. This is independent of `--model`, which only names the **judge**. Four flags control the reviewer:
+All workspace writes are atomic and journaled (`prepared | committing |
+complete`) under the workspace lock, so a crash mid-mutation restores either the
+whole before- or after-state — never a checksum-drifted partial.
 
-- `--reviewer-backend {claude,codex,pi,osprey}`: the backend daydream runs its deep review on. Forwarded to the per-PR subprocess as `--backend`. Omit to use daydream's built-in default (Claude).
-- `--reviewer-model <id>`: the reviewer model id. Forwarded as `--model` to the reviewer subprocess. Omit to use the backend's default.
-- `--reviewer-provider <name>`: the reviewer provider, forwarded to the reviewer subprocess as the `PI_PROVIDER` environment variable (never as an argv flag). Used by the `pi` backend to route a model through a specific provider, e.g. `openrouter` to run GLM via OpenRouter. Requires the OpenRouter provider extension registered with `pi` (see Prerequisites).
-- `--tool-label <label>`: the results key this reviewer's findings are filed under (default: `daydream`).
+## 3. Build and run
 
-> **Note:** There is no `--provider` flag on the main `daydream` CLI; the reviewer provider crosses the subprocess boundary only as `PI_PROVIDER`. Pass it to the benchmark as `--reviewer-provider`, not `--provider`.
-
-Example: benchmark daydream driven by GLM (`glm-5.2`) on the `pi` backend, routed through OpenRouter, filed under a distinct label:
+### `build-harbor` — package the workspace for Harbor
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline \
-  --reviewer-backend pi --reviewer-model glm-5.2 --reviewer-provider openrouter \
-  --tool-label daydream-glm --only grafana --limit 1 --score
+daydream benchmark build-harbor ~/bench-owner-repo --daydream-wheel dist/daydream.whl
 ```
 
-### `--tool-label` isolates per-backend results
+Packages a validated workspace for Harbor `0.22`. `--daydream-wheel` names the
+wheel for this Daydream version; the emitted `harbor/benchmark.lock.json`'
+`daydream` block records its version and SHA-256.
 
-Every reviewer's findings are injected into `benchmark_data.json` and scored under its `--tool-label`. The label is the **only** thing keeping two reviewer backends from overwriting each other:
-
-- A PR is skipped on re-run when a review with the *same* `--tool-label` already exists. Two backends sharing one label would mean the second never runs (the first's review is "already present").
-- The judge writes each tool's scores into a leaf keyed by the tool label inside `evaluations.json`. Sharing a label silently merges/overwrites the two backends' scores.
-
-So when benchmarking more than the default reviewer, give each backend a distinct label (`daydream` for the default, `daydream-glm` for the GLM/pi reviewer, etc.). Reviews and score leaves for different labels coexist in the same corpus and the same `results/<judge>/` directory, side by side.
-
-## Where the number lands
-
-For each scored PR the harness writes a leaf (keyed by the reviewer's `--tool-label`, default `daydream`) into:
-
-```text
-<benchmark-repo>/results/<sanitized-model>/evaluations.json
-```
-
-`<sanitized-model>` is the resolved judge model id with `/` replaced by `_`; `--model` wins over the route-specific environment fallback. Inside each PR's entry the scores are filed under the reviewer's `--tool-label` (default `daydream`; e.g. `daydream-glm` for a GLM reviewer). Each leaf carries `tp`, `fp`, `fn`, `precision`, and `recall` for that PR. Every in-process leaf also carries `judge_model` and `judge_route` (`"anthropic-direct"` or `"openai-compatible"`), so trend reports can tell the routes apart.
-
-The command also prints to stdout:
-
-- per-PR tp/fp/fn counts,
-- the aggregate precision/recall over all scored PRs (`precision = ΣTP / (ΣTP + ΣFP)`, `recall = ΣTP / (ΣTP + ΣFN)`), and
-- the **N scored** count.
-
-Aggregate scores use **micro-averaging** (pool all TP/FP/FN, then divide), the same method used in the published Martian benchmark numbers, so results are directly comparable.
-
-## Incremental re-runs
-
-Re-running is resumable and idempotent. `benchmark_data.json` is saved after each PR, so an interrupted sweep can be resumed. A PR that already has a `tool:"daydream"` review is **skipped**: no checkout, no review, no judge call. Pass `--force` to re-run injected PRs and replace their findings.
-
-**Run one sweep per benchmark repo at a time.** Each save acquires an exclusive `benchmark_data.json.lock` file to serialise concurrent writers on the same machine, but two sweeps sharing the same `--benchmark-repo` would still race at the read-inject-write level: the second run reads a stale corpus, overwrites the first run's injections, and you lose results. Start a second sweep only after the first has finished (or been interrupted).
-
-## Repeated trials and variance reporting
-
-Both the reviewer LLM and the LLM judge are stochastic, so a single sweep's precision/recall/F1 is one draw from a distribution with unknown variance. Ranking two reviewer configs by one sweep each compares two draws from possibly-overlapping distributions — the classic way to ship a false "X beats Y." `--trials N` runs each reviewer config `N` times end-to-end (review + score) and reports the spread.
+### `upgrade` — repair legacy case documents
 
 ```bash
-daydream bench --benchmark-repo ../code-review-benchmark/offline --trials 10
+daydream benchmark upgrade ~/bench-owner-repo --dry-run
+daydream benchmark upgrade ~/bench-owner-repo
 ```
 
-Each trial is fully isolated. Rather than change the idempotent inject/save logic, a trial materializes its own **standard corpus dir** under `<benchmark-repo>/.daydream-bench/trials/<tool-label>/trial-NN/`, seeded with a fresh copy of the canonical `results/benchmark_data.json`, and runs under a **trial-suffixed tool label** (`daydream-t00`, `daydream-t01`, …). The unmodified withmartian steps therefore write a distinct `evaluations.json` per trial and no trial overwrites another. The canonical `results/benchmark_data.json` — the external leaderboard submission contract — is only read, never written, when `--trials > 1`.
+Deterministically upgrades pre-provenance-split case documents (`finding_id` +
+`schema_version`). `--dry-run` reports without writing. Full detail in
+[section 6](#6-upgrade-path).
 
-After all trials, the harness computes per-metric statistics over precision, recall, and F1 — mean, median, sample standard deviation, min, max, and a **percentile bootstrap 95% confidence interval** of the mean — and prints a distribution table:
-
-```text
-Distribution over 10 trial(s):
-metric        mean  median  stddev     min     max              ci95
-----------------------------------------------------------------------
-precision    0.214   0.210   0.018   0.190   0.250   [0.203, 0.226]
-recall       0.585   0.590   0.031   0.530   0.630   [0.566, 0.604]
-f1           0.313   0.311   0.021   0.280   0.350   [0.300, 0.327]
-```
-
-The bootstrap resamples the `N` trial values with replacement (10 000 resamples, seeded for reproducibility) and reports the 2.5th/97.5th percentiles of the resampled means — a distribution-free CI that makes no normality assumption. It is a best-effort estimate at small `N`, not a substitute for it.
-
-A `trials-summary.json` is written to `<benchmark-repo>/.daydream-bench/trials/<tool-label>/` carrying full reproducibility metadata: the reviewer backend/model/provider, the judge route + model, the PR set, the daydream git SHA, a UTC timestamp, the aggregate distribution, and each trial's raw precision/recall/F1.
-
-**Choosing N.** The bootstrap CI width shrinks roughly as `1/√N`. Use `N ≥ 10` for a reasonable band and `N ≥ 30` when you need a tight interval to separate two close configs. Trials multiply judge cost linearly, so the harness prints an up-front estimate (`~|candidates| × |golden| × PRs × N` judge calls) before the loop starts.
-
-**Seeds are best-effort.** LLM provider seeds are soft-honored at best and never guaranteed across a fleet; aggregation across trials is the mechanism that quantifies the residual noise, and it is mandatory regardless of any seed the provider accepts. Only the bootstrap resampling itself is deterministically seeded.
-
-## Harvested bot-review corpora
-
-The withmartian set is not the only corpus. `daydream bench harvest` builds one from a repository's own history with a commercial review bot: every PR the bot reviewed becomes a benchmark entry whose golden comments are the bot's findings. That measures daydream against a bot on *your* code, not on 26 fixed upstream PRs.
+### `run` — supervised Harbor run
 
 ```bash
-daydream bench harvest --repo acme/widgets --bot "reviewbot[bot]" --out ./harvested --limit 200
+daydream benchmark run ~/bench-owner-repo --yes
+daydream benchmark run ~/bench-owner-repo --oracle --yes
 ```
 
-`--bot` takes the bot's login; the `[bot]` suffix is optional (GitHub's REST API keeps it on `user.login` while GraphQL drops it, and the harvester matches either form). `--state {all,open,closed,merged}` filters which PRs are scanned. The output dir *is* the corpus — one harvest, one corpus, no per-repo nesting:
+`run <dir>` supervises a Harbor run behind the **Oracle self-match / reward**
+gate; `--oracle` runs the Oracle self-match pass. `--yes` confirms the paid run
+without prompting.
 
-```text
-./cr-corpus/index.json                    # PR inventory: snapshot commit, base ref, counts
-./cr-corpus/harvest/pr-<N>.json           # full per-PR record (reviews, comments, threads)
-./cr-corpus/results/benchmark_data.json   # the corpus daydream reviews are injected into
-```
+The run itself validates the Docker and Harbor integration — it exercises the
+real engine, not a fake end-to-end fixture.
 
-> **Not to be confused with `daydream corpus harvest`**, which annotates archived daydream runs for the training pipeline. Different namespace, unrelated job.
-
-Run against it with `--harvest-dir` in place of `--benchmark-repo`:
+### `calibrate-judge` — optional diagnostic
 
 ```bash
-daydream bench --harvest-dir ./cr-corpus \
-  --judge-route anthropic-direct \
-  --model claude-opus-4-5-20251101 \
-  --score
-
-# or score the same corpus with any OpenAI-compatible judge endpoint
-daydream bench --harvest-dir ./cr-corpus \
-  --judge-route openai-compatible \
-  --model gpt-5.6-luna \
-  --score
+daydream benchmark calibrate-judge ~/bench-owner-repo --yes
 ```
 
-The two flags are mutually exclusive: a run has exactly one corpus, and exactly one of them must resolve — from the flag or from a `[tool.daydream.bench]` `harvest-dir` / `benchmark-repo` key. Everything else — `--only`/`--limit`, `--reviewer*`/`--tool-label`, `--trials`, `--force`, resumability — behaves identically, because both corpora share the same on-disk shape.
+`calibrate-judge` is an optional, **diagnostic**-only pass that measures the
+configured judge's agreement with an **unverified** fixture. It is not an
+authorization, correctness, or validation check, and it carries no operational
+authority.
 
-**Scoring a harvested corpus requires an in-process judge route (`--judge-route anthropic-direct` or `--judge-route openai-compatible`).** This is a hard constraint, not a preference: the `martian` route does not judge in-process, it shells `python -m code_review_benchmark.step2/2.5/3` with the corpus root as the working directory, and that package only exists inside the withmartian checkout. Pairing `--harvest-dir` with `--judge-route martian` and `--score` is a usage error.
-
-**Golden semantics.** Golden comments are *all* of the bot's standalone inline comments on the PR — thread replies are excluded (they are follow-ups, not findings) and so are body-only review summaries. Each golden comment also carries a `resolved` flag derived from GitHub's review-thread resolution state. That flag is recorded metadata only: nothing scores on it today. It is the raw "acted upon" signal, on the assumption that a resolved thread is a finding the author acted on, and an unresolved one may be noise. Treat unfiltered bot comments as a noisy recall denominator when reading precision/recall from a harvested run.
-
-Each PR is reviewed at the bot's own snapshot — the commit its latest review was made against, which is often an ancestor of the final PR head — so daydream sees the same code the bot saw.
-
-### The CodeRabbit-parity corpus
-
-**Internal-only corpus. This section describes a lab-internal regression harness, not a
-publicly reproducible dataset.** The corpus is harvested from
-[existential-birds/osprey](https://github.com/existential-birds/osprey), which is a
-**private** lab repository — it is not public (it will be open-sourced some day, but is
-not currently). The committed `index.json`/`manifest.json` reference that private repo's
-PR history and comment IDs; a reader without access to `existential-birds/osprey` cannot
-regenerate or inspect the full payloads (`harvest/` and `results/` are gitignored). Treat
-every number below as internal lab state.
-
-The corpus is the standing daydream-vs-bot parity signal for daydream's own development:
-harvest the bot's review history on a private repo, score daydream against it, and trend
-parity across prompt changes. It was built with (maintainer-only, requires access to the
-private repo):
+### `clean` — disposable artifacts
 
 ```bash
-daydream bench harvest --repo existential-birds/osprey --bot "coderabbitai[bot]" \
-  --state closed --limit 400 --out benchmark/corpora/osprey-coderabbit
+daydream benchmark clean ~/bench-owner-repo --derived
+daydream benchmark clean ~/bench-owner-repo --all --yes
 ```
 
-The corpus holds **142 closed PRs** with CodeRabbit activity, **342 golden comments** (the bot's standalone inline comments — the recall denominator), and **740 resolved threads** (read from `index.json`; do not invent these — regenerate them). `resolved` is recorded metadata only, a genuine-finding proxy: it aggregates GitHub review-thread resolution and is not 1:1 with golden comments, so the resolved count deliberately exceeds the comment count.
+`clean <dir>` removes ledger-derived disposable artifacts. `--cache` removes the
+disposable clone + build stage under `cache/`; `--jobs` removes ledgered Harbor
+job dirs and their recorded Docker images; `--trajectories` removes contained
+`agent/trajectory.json` files in ledgered job dirs; `--derived` is the union of
+`--cache --jobs --trajectories` (preserving curated source/gold); `--all` deletes
+every deletable artifact including curated source/gold (needs `--yes`).
 
-**What is committed.** Only the compact inventory and manifest are tracked:
+### Paid maintainer gates
 
-```text
-benchmark/corpora/osprey-coderabbit/index.json     # PR inventory (committed)
-benchmark/corpora/osprey-coderabbit/manifest.json  # corpus summary + golden-set ids (committed)
-benchmark/corpora/osprey-coderabbit/harvest/       # full per-PR payloads (gitignored)
-benchmark/corpora/osprey-coderabbit/results/       # benchmark_data.json (gitignored)
-```
+`calibrate-judge` and `run --oracle` are **paid maintainer gates** — they spend
+on hosted model calls (72-call calibration, the Oracle self-match pass). State it
+plainly: **these paid maintainer gates are never executed in CI.**
 
-`.gitignore` covers `benchmark/corpora/*/harvest/` and `benchmark/corpora/*/results/`, so a re-harvest cannot dirty the tree; `manifest.json` and `index.json` stay tracked. Regenerate the manifest after a re-harvest with `daydream bench manifest --harvest-dir benchmark/corpora/osprey-coderabbit` (see `daydream bench manifest --help`).
+### OpenRouter data handling
 
-**Re-running the parity harness** against this corpus:
+Live private-source runs that route through **OpenRouter** send private source
+data to a third-party provider. Before running such a run you must explicitly
+accept that provider's **data-handling and retention policy** — especially for
+its free endpoints, which may retain or further process inputs. Never put API
+keys or source findings in docs or receipts. This `data handling` contract is
+part of operating the benchmark at all; it is separate from the diagnostic
+vs. Oracle distinction above, and it never becomes a skip-able step.
+
+### Diagnostics vs the Oracle gate
+
+Keep three concepts distinct:
+
+1. **Optional unverified judge-agreement diagnostics** — `calibrate-judge`
+   reports how closely the judge agrees with the unverified fixture. It is
+   optional, diagnostic-only, and never a pass/fail prerequisite; no calibration
+   fixture or receipt gates any run.
+2. **The Oracle self-match / reward gate.** The supervised run uses `--oracle`
+   and gates on the reviewer achieving the Oracle's **self-match / reward** result
+   — a verified, operational state, not a calibration fixture.
+3. **The normal benchmark-after-Oracle gate.** Once an Oracle receipt exists, a
+   normal (non-`--oracle`) run is gated on that receipt being current for the
+   workspace's compiled lock state (an allowlist change invalidates it).
+
+## 4. Inspect / objective / aggregate
+
+`objective` and `aggregate` are **read-only** commands. They resolve and project
+**completed Harbor results** that already exist in the ledger. They **do not run
+Harbor**, they **do not call a judge**, and they never generate candidates,
+select an objective, or implement hill-climbing.
+
+### `objective` — one exact run as JSON
 
 ```bash
-# Anthropic judge (Anthropic spend)
-daydream bench --harvest-dir benchmark/corpora/osprey-coderabbit \
-  --tool-label daydream-owl-alpha \
-  --judge-route anthropic-direct \
-  --score
-
-# OpenAI-compatible judge (no Anthropic spend — the #317 unblock)
-daydream bench --harvest-dir benchmark/corpora/osprey-coderabbit \
-  --tool-label daydream-owl-alpha \
-  --judge-route openai-compatible \
-  --model gpt-5.6-luna \
-  --score
+daydream benchmark objective ~/bench-owner-repo --run-id <run-id> --json -
 ```
 
-The command is the contract: it replays daydream at each bot snapshot and scores overlap against the golden set. The one-liner runs through any in-process judge route, so it can score the corpus without Anthropic budget — see [#324](https://github.com/existential-birds/daydream/issues/324), the in-process OpenAI-compatible judge that unblocks the baseline scoring deferred in [#317](https://github.com/existential-birds/daydream/issues/317).
+Resolves an exact ledgered run by explicit `<run-id>`, requiring a terminal
+`complete` state, and writes strict machine-readable JSON. `--json PATH|-` writes
+the JSON to a path or `-` for stdout (`--json` omitted prints a human summary).
 
-## The run report
+The output is opaque and privacy-safe: only opaque run/benchmark ids and counts
+pass through. No repository slug, PR number, source path, gold/candidate text,
+judge reasoning, or source code is ever emitted.
 
-Every run — either corpus, with or without `--score`, single-shot or multi-trial — writes a JSON report to `<corpus-root>/.daydream-bench/report-<tool-label>.json`. It is the canonical machine-readable artifact of a sweep:
+```json
+{
+  "run_id": "run-8f3a1c2e",
+  "mode": "benchmark",
+  "schema_version": 1,
+  "identity": {
+    "objective_schema_version": 1,
+    "profile_schema_version": 1,
+    "profile_name": "openrouter-pi-next",
+    "profile_digest": "sha256:<40-hex>",
+    "daydream_version": "0.12.0",
+    "daydream_wheel_sha256": "sha256:<40-hex>",
+    "compiled_lock_sha256": "sha256:<40-hex>",
+    "harbor_version": "0.22",
+    "reviewer_backend": "pi",
+    "reviewer_model": "z-ai/glm-5.2",
+    "reviewer_base_url": "",
+    "reviewer_effort": null,
+    "judge_provider": "openrouter",
+    "judge_model": "openrouter/auto",
+    "judge_host": "openrouter.ai",
+    "verifier_template_sha256": "sha256:<40-hex>",
+    "threshold": 0.7,
+    "attempts": 1
+  },
+  "objective": {
+    "tp": 18,
+    "fp": 7,
+    "fn": 4,
+    "precision": 0.72,
+    "recall": 0.818,
+    "f1": 0.767,
+    "clean_task_count": 2,
+    "clean_pass_count": 1,
+    "clean_accuracy": 0.5,
+    "task_count": 8,
+    "scored_task_count": 8,
+    "candidate_count": 25,
+    "gold_count": 14,
+    "infra_error_task_count": 0,
+    "verifier_error_task_count": 0,
+    "malformed_task_count": 0,
+    "failed_task_count": 0,
+    "comparison_eligible": true,
+    "mean_task_score": 0.75,
+    "tokens": 81234.5,
+    "cost": 0.62
+  }
+}
+```
+
+The top-level keys are exactly `run_id`, `mode`, `schema_version`, `identity`,
+`objective`. `schema_version` is `1`; `mode` is `oracle` or `benchmark`. The
+`objective` dict carries the count-derived micro-metrics plus counts
+(`comparison_eligible`, `task_count`, `candidate_count`, `gold_count`), with
+optional `tokens`/`cost`.
+
+### `aggregate` — pool a suite manifest
+
+```bash
+daydream benchmark aggregate suite.json --json -
+```
+
+`aggregate <manifest> [--json PATH|-]` pools a suite manifest of exact,
+already-completed runs into one compatible objective JSON. A suite *manifest* is
+a small JSON file naming the workspaces/runs to pool:
 
 ```json
 {
   "schema_version": 1,
-  "corpus": "withmartian" | "harvested",
-  "corpus_root": "…", "tool_label": "…",
-  "reviewer_backend": "…", "reviewer_model": "…", "reviewer_provider": "…",
-  "judge_route": "…", "judge_model": "…", "git_sha": "…", "timestamp": "…",
-  "prs": [{"golden_url": "…", "injected_comments": 7, "elapsed_s": 412.3,
-           "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
-           "cost_usd": 0.41, "cost_source": "measured|synthesized|unknown",
-           "tp": 2, "fp": 5, "fn": 1, "precision": 0.29, "recall": 0.67}],
-  "aggregate": {"scored_pr_count": 22, "tp": 36, "fp": 139, "fn": 25,
-                "precision": 0.206, "recall": 0.590, "f1": 0.305},
-  "distribution": null
+  "entries": [
+    { "workspace": "/workspaces/repo-alpha", "run_id": "run-11aa22bb" },
+    { "workspace": "/workspaces/repo-beta",  "run_id": "run-33cc44dd" }
+  ]
 }
 ```
 
-`aggregate` is `null` when the run did not score, and on multi-trial runs (where `distribution` carries the summary instead and `prs` holds one entry per PR per trial). Tokens and cost come from each PR's trajectory `final_metrics`; when the backend reports no cost, it is synthesized from `daydream/pricing.py` (override the price cards with `$DAYDREAM_PRICES_FILE`) and labeled `synthesized` rather than passed off as measured. The pi backend's `prompt`/`cached` counters are *disjoint* buckets, so synthesis bills both; every other backend reports a prompt total inclusive of cache reads, and synthesis subtracts before pricing.
+Each entry is `{workspace, run_id}`. The suite validates the manifest, resolves
+every entry fail-closed (any missing, incomplete, malformed, comparison-ineligible,
+or duplicated entry fails the whole command — never a silently-subsetted pool),
+and requires the full compatibility identity to match across every entry.
 
-`trials-summary.json` is unaffected and still written for `--trials > 1`.
+The suite **pools** TP/FP/FN across repositories and derives **micro**
+precision/recall/F1 from the flattened per-task rows. Per-repository F1 is
+**never averaged** — the pooled counts are the only number that means anything
+across repositories. The aggregate *output* is keyed by `experiment_id`,
+`profile_digest`, `identity`, and `objective` (the `entries`/`schema_version`
+belong to the manifest *input*, not the output). A stable `experiment_id` is a
+SHA-256 over the canonicalized manifest plus the shared identity.
 
-## Comparability caveat
+Both commands write through an atomic write; on an expected `ObjectiveError` they
+print to stderr and exit `1` without touching an existing output file.
 
-What matters is the reviewer. A different reviewer pipeline (different backend, model config, or tool label) produces different findings — changing the reviewer changes the numbers. The offline HTML report at `bench/benchmark-report/runs/latest/index.html` documents the reviewer configuration for each run.
+## 5. Candidate-profile trust boundary
 
-The `daydream bench` `--model` flag sets the scoring model label (for the results directory). The runner's model is set by `--reviewer-model`. Both are documented in the report metadata.
+A benchmark accepts only an **explicit validated candidate profile** from the
+trusted **control plane** — or the **packaged default**. Harbor ignores ambient
+user environment profiles and every target-repository `.daydream.toml` /
+profile; target source, gold, and verifier content cannot mutate the candidate.
 
-## First measured baseline (provisional)
+Attribution records four fields for every emitted objective: the `schema version`
+(`objective_schema_version` / `profile_schema_version`), the `profile name`, the
+`source kind` (control plane vs packaged default), and the canonical `digest`
+(`profile_digest`, plus the wheel/compiled-lock digests in the identity block).
+The profile is model/backend/effort/schemas/privacy-controls/verifier-threshold/
+matching/gold/scoring-independent — everything that is *not* the candidate
+profile stays outside it.
 
-A first full sweep was run on **2026-06-04** to validate the harness end-to-end. These numbers are a **single-sweep provisional baseline**, not a published result. For the published commercial-bot numbers these are ultimately measured against, see the [Martian Code Review Benchmark leaderboard (offline mode)](https://codereview.withmartian.com/?mode=offline). Daydream's default deep multi-stack pipeline (tool label `daydream-owl-alpha`) produced the following baseline:
+Profiles are a **seam for a future optimizer**, not an implemented hill-climber.
+The runbook never publishes private profile content, and a digest is a
+commitment to content — it does **not** reveal the content it fingerprints.
 
-The benchmark report generator (`make benchmark-report`) renders an offline comparison from the same `results/` data against 42 competing review tools on the 22-PR subset daydream covered:
+## 6. Upgrade path
 
-| Metric | Value | Rank (of 42 tools) |
-|---|---|---|
-| Precision (micro) | 0.206 | 34 |
-| Recall (micro) | 0.590 | 10 |
-| F1 (micro) | 0.305 | 30 |
-| PRs scored | 22/26 | |
-| TP / FP / FN | 36 / 139 / 25 | |
+Pre-provenance-split workspaces need a one-time repair before they can build and
+run. `daydream benchmark upgrade <dir>` (and `--dry-run`) is that repair path:
 
-The full per-reviewer scorecard, per-PR breakdown, and cost comparison are in the self-contained HTML report at `bench/benchmark-report/runs/latest/index.html`.
+- It backfills `requested_base_sha` from the recorded `original_base_sha` on
+  every `ready`/`imported` snapshot — **v1 and already-v2 alike**.
+- It re-derives the v1→v2 **case-scoped `finding_id`** for the same snapshots.
+- **Authored content is left untouched** — curation, gold, and any author edits
+  are preserved byte-for-byte.
+- `unreplayable` cases are left byte-unchanged (they have no replayable base to
+  provenance-split).
+- A second run is a **no-op** (idempotent); `--dry-run` reports the upgrade that
+  *would* be written without writing.
+- An **un-upgraded** such workspace fails `CaseDocument` validation and reports
+  as **corrupt**.
 
-Caveats:
+## 7. Legacy path and failure/cleanup states
 
-- **Single sweep.** No variance band; the LLM judge runs at `temperature: 0.0` but is not fully deterministic.
-- **4 PRs unscored.** The offline set has 26 evaluable PRs; daydream's sweep covered 22 (the remainder exceeded per-PR time caps or hit transient failures). The sweep is resumable.
-- **Precision gap.** 36 TP against 139 FP. Precision (0.206) is the weakest metric of the three. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
-- **Tied to this setup.** Reviewer pipeline, date both move the number.
+### Legacy transition note
 
-## Private PR benchmark workspaces (`daydream benchmark`)
+`daydream bench` is a deprecate**d**, legacy scoring path pending deletion in
+#785. `daydream benchmark` is the supported private Harbor workflow documented
+throughout this runbook. This sentence is the only mention of the legacy path.
 
-Beyond the legacy `daydream bench` scoring run, a separate **private PR
-benchmark workspace** houses the repo's own PR-review cases for training and
-evals. `daydream benchmark` initializes, inspects, and validates a private,
-GitHub-only benchmark workspace whose on-disk state is strictly validated,
-crash-consistent, and safe to build on.
+### Failure / recovery states
 
-- `daydream benchmark init <dir> --repo OWNER/REPO --reviewer-host HOST --judge-host HOST`
-  creates a private workspace: `0700` root + `imports/ cases/ snapshots/
-  transactions/ runtime/ cache/ harbor/`, a self-ignoring `.gitignore`, and a
-  strictly validated `benchmark.yaml` manifest. Rather than a bare
-  `OWNER/REPO`, it persists an immutable forge-identity block. Reviewer and
-  judge **egress hosts** are normalized (lowercase, scheme/credential/port/
-  path stripped); both allowlists must be nonempty. Hosts `--reviewer-host`
-  and `--judge-host` are repeatable. A nonempty target directory is refused.
-- `daydream benchmark status <dir>` reads the derived workspace state
-  (`empty` / `collecting` / `ready` / …), whether the repository identity is
-  **unresolved**, and the PR ledger — read-only, safe to run concurrently
-  with another read-only command. It also reports, per indexed case, the
-  snapshot state (`ready` / `unreplayable` / `imported`) and the frozen head
-  prefix each case was caught at.
-- `daydream benchmark validate <dir>` returns a numeric **exit**: `0` ready,
-  `2` structurally valid but incomplete (for example an unresolved
-  repository identity on a fresh workspace), `1` corrupt (invalid or missing
-  `benchmark.yaml`, an orphan or missing indexed file, or a corrupted /
-  missing / checksum-mismatched ready-snapshot bundle).
+- **Unreplayable case.** A case whose head could not be frozen into a replayable
+  snapshot. It stays `unreplayable` (valid, never silently accepted); `upgrade`
+  leaves it byte-unchanged and `curate` cannot flip it to `ready`.
+- **Stale case.** An already-imported case whose snapshot is stale; `--refresh`
+  re-fetches and marks it without overwriting curation.
+- **Cleanup-pending.** A run that finished but whose disposable artifacts have
+  not yet been collected; `objective` refuses a non-`complete` (cleanup-pending)
+  run, and `clean --jobs`/`--derived` collects the artifacts.
+- **Failed verifier.** A run whose verifier errored on one or more trials;
+  `comparison_eligible` becomes `false` and a suite refuses to pool it.
+- **Interrupted run.** A crash mid-run restores either the whole before- or
+  after-state via the atomic journal (`prepared | committing | complete`); the
+  ledger stays consistent and the run can be resumed or cleaned.
 
-The legacy `daydream bench` command remains available alongside `benchmark`;
-removal is a separate cutover.
+### Cleanup behavior
 
-- `daydream benchmark import-prs <dir> --pr N|URL [--pr-file FILE]
-  [--head PR=<40-hex>] [--refresh]` imports explicit private PR evidence into
-  an isolated workspace. Each requested head is **frozen** into a deterministic, offline-
-  replayable ``base → head`` source snapshot bundle under `snapshots/`, and
-  the case is written with a `ready|unreplayable` snapshot instead of
-  `imported` (a classified git failure yields a schema-valid `unreplayable`
-  case, never a silent failure). `--head <PR_NUMBER>=<40-hex>` ties an
-  explicit head to its PR (a bare 40-hex is accepted for back-compat). A six-step preflight (binaries, `gh` auth to github.com, the
-  authenticated user, repository identity + read access, a credentialed
-  `git ls-remote`, then a summary print) runs before any fetch; the first
-  successful repository resolution fills `repository_id`/`visibility`
-  atomically and immutably. Each PR's import file, one case per requested
-  head, and the ledger are written as one atomic, crash-recoverable unit;
-  a failed fetch leaves no import file and marks that PR `fetch_failed` in
-  the resumable ledger. Rate-limited requests retry three times honoring
-  `Retry-After` (60s cap). `--refresh` re-fetches and marks stale cases
-  without overwriting curation. The command never selects gold and never
-  filters bot authors — bot classification is retained as metadata only.
+| `clean` scope | Removes |
+|---|---|
+| `--cache` | disposable clone + build stage under `cache/` |
+| `--jobs` | ledgered Harbor job dirs + recorded Docker images |
+| `--trajectories` | contained `agent/trajectory.json` files in ledgered job dirs |
+| `--derived` | union of `--cache --jobs --trajectories` (preserves curated source/gold) |
+| `--all` | every deletable artifact including curated source/gold (needs `--yes`) |
 
-All workspace writes are atomic and journaled (`prepared | committing |
-complete`) under the workspace lock, so a crash mid-mutation restores either
-the whole before- or after-state — never a checksum-drifted partial.
-
-## Diagnostics vs the Oracle gate vs the benchmark-after-Oracle gate
-
-The Harbor/private-benchmark path has four distinct concepts (or three concepts
-plus one threshold distinction) that are easy to conflate. Keep them separate:
-
-1. **Optional unverified judge-agreement diagnostics** — `daydream benchmark
-   calibrate-judge <workspace>` drives the exact packaged judge path over an
-   **unverified** 24-pair fixture and reports how closely the judge agrees with
-   that fixture, passing on a `0.90` balanced-accuracy threshold. It is
-   optional, diagnostic-only,
-   and is **not** an authorization, correctness, or validation check. Neither the
-   fixture nor its receipts gate any run: they are machine-readable provenance
-   artifacts you may inspect, never a pass/fail prerequisite. Loading a
-   calibration receipt is not required to run the benchmark and carries no
-   operational authority.
-
-2. **The Oracle self-match/reward gate.** The supervised run uses `--oracle` and
-   gates on the reviewer achieving the Oracle's **self-match / reward** result —
-   a verified, operational state — not on any calibration fixture or receipt.
-   This is the actual quality gate.
-3. **The normal benchmark-after-Oracle gate.** Once an Oracle receipt exists, a
-   normal (non-`--oracle`) run is gated on the matching receipt being current for
-   the workspace's compiled lock state (for example, an allowlist change
-   invalidates an existing receipt). This governs normal runs against a verified
-   Oracle; it does not read calibration diagnostics.
-4. **The `0.90` judge-agreement diagnostic threshold vs the `0.70` retained-edge
-   threshold.** These are different numbers with different purposes: `0.90` is
-   the judge-agreement diagnostic threshold (the pass threshold on balanced
-   accuracy) reported
-   during calibration; `0.70` is the benchmark's
-   retained-edge (per-case) threshold. Do not treat one as the other.
-
-### OpenRouter data handling
-
-Live private-source runs that route through **OpenRouter** send private
-source data to a third-party provider. Before running such a run you must
-explicitly accept that provider's **data-handling and retention policy** —
-especially for its free endpoints, which may retain or further process inputs.
-Never put API keys or source findings in docs or receipts.
-
+Run these scopes to reclaim space or to invalidate a stale compiled lock
+deliberately; the Oracle/receipt gate then requires a fresh compile, which is the
+intended recovery path for an allowlist or profile change.
