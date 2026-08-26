@@ -107,6 +107,7 @@ def _scrubbed_supervisor_error(original: BaseException) -> BaseException:
     except (AttributeError, TypeError):
         clone = None
     if clone is not None and redact_text(str(clone)) == str(clone):
+        setattr(clone, "retryable", getattr(original, "retryable", False))
         return clone
     stand_in = _RedactedSupervisorError(
         type(original).__name__, redact_text(str(original))
