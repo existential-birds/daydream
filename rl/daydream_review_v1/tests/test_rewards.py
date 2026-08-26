@@ -1540,11 +1540,12 @@ async def test_verify_checkout_failed_diff_fails_closed(
 
     task = _task(corpus_mini_dir, fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    # Make the diff-derivation step itself fail (not the clone): a diff.external
-    # tool that cannot run makes ``git diff`` exit non-zero while clone and
-    # checkout --detach both succeed.
+    # Make the diff-derivation step itself fail (not the clone): an invalid
+    # diff.algorithm is a genuine Git error making ``git diff`` exit non-zero
+    # while clone and checkout --detach both succeed. (diff.external is now
+    # ignored by the hardened argv, so it can no longer trigger this path.)
     subprocess.run(
-        ["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"],
+        ["git", "-C", str(repo), "config", "diff.algorithm", "not-a-real-algorithm"],
         check=True,
     )
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
@@ -1632,3 +1633,105 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
     assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
         "the verify checkout did not carry the candidate diff the seal binds"
     )
+
+
+def test_candidate_diff_cmd_carries_hardening_flags() -> None:
+    from daydream_review_v1.rundir import candidate_diff_cmd
+
+    argv = candidate_diff_cmd("/work/repo", "deadbeef")
+    assert argv == [
+        "git", "-C", "/work/repo", "diff",
+        "--no-ext-diff", "--no-textconv",
+        "deadbeef", "HEAD",
+    ]
+
+
+async def test_verify_checkout_external_diff_ignored(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A repo-local diff.external that cannot run must not abort verifier-checkout."""
+    from daydream_review_v1 import taskset
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"],
+        check=True,
+    )
+    result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
+    verify_dir = tmp_path / "repo-verify"
+    assert verify_dir.is_dir(), "the verify checkout must still be constructed"
+    if os.geteuid() == 0:
+        assert result == str(verify_dir), "construction must succeed on a root host"
+    assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
+        "the candidate patch must reach repo-verify despite the repo diff.external"
+    )
+
+
+async def test_verify_checkout_textconv_ignored(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """An attribute-selected textconv that cannot run must not abort verifier-checkout."""
+    from daydream_review_v1 import taskset
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    # Repository-controlled attribute selecting a driver whose textconv cannot run.
+    (repo / ".gitattributes").write_text("*.py diff=evil\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitattributes"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "attr"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "diff.evil.textconv", "/nonexistent-textconv-tool"],
+        check=True,
+    )
+    result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
+    verify_dir = tmp_path / "repo-verify"
+    assert verify_dir.is_dir(), "the verify checkout must still be constructed"
+    if os.geteuid() == 0:
+        assert result == str(verify_dir), "construction must succeed on a root host"
+    assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
+        "the repo patch must still be applied despite the attribute-selected diff.evil"
+    )
+
+
+async def test_fixes_applied_quiet_probe_carries_hardening_flags() -> None:
+    from conftest import FakeRuntime
+
+    from daydream_review_v1 import taskset
+
+    rt = FakeRuntime(exit_code=0)
+    await taskset._fixes_applied(rt, "/work/repo", "deadbeef")
+    # rt.commands[0] is the git status probe; [1] is the git diff --quiet probe.
+    assert rt.commands[1] == [
+        "git", "-C", "/work/repo", "diff",
+        "--no-ext-diff", "--no-textconv", "--quiet",
+        "deadbeef", "HEAD", "--", taskset.DAYDREAM_EXCLUDE,
+    ]
+
+
+async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags() -> None:
+    from conftest import FakeRuntime
+
+    from daydream_review_v1 import taskset
+
+    rt = FakeRuntime(exit_code=0)
+    await taskset._protected_test_paths_unchanged(rt, "/work/repo", "deadbeef", ["tests"])
+    # rt.commands[0] is the first probe row: the git diff --quiet oracle probe.
+    assert rt.commands[0] == [
+        "git", "-C", "/work/repo", "diff",
+        "--no-ext-diff", "--no-textconv", "--quiet",
+        "deadbeef", "--", *["tests"], *taskset.ORACLE_IGNORE_PATHSPECS,
+    ]
+
+
+# There is deliberately no real-path "trusted diff.external" attack test for
+# the --quiet oracle probes: on the pinned git (2.43.0) ``git diff --quiet``
+# never invokes diff.external or textconv, so the exit-code forgery such a
+# test would stage cannot fire and the test would pass identically with or
+# without the hardening flags -- vacuous either way. The flags' presence on
+# both probes is pinned by the argv-contract tests above
+# (test_fixes_applied_quiet_probe_carries_hardening_flags and
+# test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags);
+# the genuine repo-configurable-helper surface is the non-quiet candidate-diff
+# path, covered by test_verify_checkout_external_diff_ignored and
+# test_verify_checkout_textconv_ignored.

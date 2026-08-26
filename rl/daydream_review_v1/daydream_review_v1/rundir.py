@@ -51,6 +51,16 @@ RUN_DIR_FILES: tuple[str, ...] = (
 
 DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
 
+#: Flags disabling git's two repository-configurable diff-rewrite mechanisms: a
+#: ``diff.external`` helper (optionally with ``diff.trustExitCode``) configured
+#: in ``.git/config`` and per-path ``.gitattributes`` ``diff.*.textconv``
+#: drivers. The supervisor derives every load-bearing diff as (the root) host
+#: identity, while a repo-local external helper would execute under the repo's
+#: own untrusted identity. Single-sourced here so every load-bearing ``git diff``
+#: deriv site carries the identical pair, and a future hardening flag added
+#: once cannot silently leave another deriv site unhardened.
+GIT_DIFF_HARDENING_FLAGS: tuple[str, str] = ("--no-ext-diff", "--no-textconv")
+
 
 def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     """Argv for re-deriving the rollout's committed diff against the baked head.
@@ -59,8 +69,45 @@ def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     verifier re-applies, so it must be derived identically everywhere it is
     needed (seal production, seal verification, and the verify-checkout
     construction). Single-sourcing the command keeps those sites from drifting.
+
+    The ``--no-ext-diff --no-textconv`` flags harden the derivation against a
+    repository-configured external diff helper or text conversion driver: the
+    supervisor runs as root, while a repo-local ``diff.external`` / textconv
+    runs under the repo's own (untrusted) identity, so neither may execute
+    during the load-bearing diff.
     """
-    return ["git", "-C", repo, "diff", head_sha, "HEAD"]
+    return [
+        "git", "-C", repo, "diff",
+        *GIT_DIFF_HARDENING_FLAGS,
+        head_sha, "HEAD",
+    ]
+
+
+def candidate_quiet_diff_cmd(
+    repo: str,
+    head_sha: str,
+    pathspecs: list[str],
+    *,
+    include_head: bool = False,
+) -> list[str]:
+    """Argv for the ``--quiet`` oracle-probe diff against the baked head.
+
+    The ``--quiet`` companion of :func:`candidate_diff_cmd`, used by the two
+    non-regression oracle probes (``_fixes_applied`` and
+    ``_protected_test_paths_unchanged``). Single-sourced here alongside
+    ``candidate_diff_cmd`` and ``GIT_DIFF_HARDENING_FLAGS`` so a third
+    hardening flag or a quiet-form change is edited in exactly one place
+    instead of drifting across the seal deriv site and both probes.
+
+    ``include_head`` selects the committed-tree form (``<head_sha> HEAD --
+    <pathspecs>``, used by ``_fixes_applied``) versus the working-tree form
+    (``<head_sha> -- <pathspecs>``, used by ``_protected_test_paths_unchanged``,
+    which must compare against the mutable tree to catch uncommitted tampering).
+    """
+    cmd = ["git", "-C", repo, "diff", *GIT_DIFF_HARDENING_FLAGS, "--quiet", head_sha]
+    if include_head:
+        cmd.append("HEAD")
+    return [*cmd, "--", *pathspecs]
 
 
 async def _session_dir(runtime: vf.Runtime, archive_root: str) -> str | None:
