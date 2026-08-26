@@ -2,6 +2,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import stat
@@ -265,6 +266,43 @@ def test_receipt_invalidated_on_input_change(tmp_path):
         tmp_path / "runtime" / "calibration-receipt.json",
         _invalidation_inputs(changed, pairs, sr),
     ) is False
+
+
+def test_diagnostic_receipt_invalidates_on_fixture_content_change(tmp_path, monkeypatch):
+    from daydream.benchmark.harbor import calibrate
+
+    sr = calibrate._load_judge_template()
+    pairs = calibrate._load_fixture()
+    env = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9", "DAYDREAM_JUDGE_API_KEY": "k"}
+    receipt = calibrate._build_receipt(
+        sr, pairs, env, passed=True, balanced_accuracy=1.0,
+        confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0}, disagreements=[])
+    path = calibrate._write_receipt(tmp_path, receipt)
+
+    # Diagnostic receipts carry honest machine-readable provenance matching the fixture.
+    assert receipt["provenance"]["origin"] == "llm_generated"
+    assert receipt["provenance"]["human_reviewed"] is False
+    assert receipt["provenance"]["labels"] == "unverified"
+    # Full fixture content (provenance + all pairs) is part of the invalidation inputs.
+    assert receipt["inputs"]["fixture_sha256"] == calibrate._fixture_sha256()
+    assert receipt["inputs"]["fixture_provenance"]["origin"] == "llm_generated"
+
+    assert calibrate.is_receipt_current(path, calibrate._invalidation_inputs(env, pairs, sr))
+
+    # A provenance-block change (the fixture now claims human_reviewed=true)
+    # must invalidate an existing diagnostic receipt, even though the ordered
+    # gold/candidate/label triples (label_sha256) are unchanged.
+    modified_provenance = dict(calibrate._load_provenance())
+    modified_provenance["human_reviewed"] = True
+    monkeypatch.setattr(calibrate, "_load_provenance", lambda: modified_provenance)
+    monkeypatch.setattr(
+        calibrate,
+        "_fixture_sha256",
+        lambda: hashlib.sha256(b"fixture-with-human-revised-provenance").hexdigest(),
+    )
+    assert not calibrate.is_receipt_current(
+        path, calibrate._invalidation_inputs(env, pairs, sr))
 
 
 def test_receipt_has_no_credentials_or_source():

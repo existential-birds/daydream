@@ -292,7 +292,11 @@ def _pass_gate(
 
 
 def _label_sha256(pairs: list[dict[str, Any]]) -> str:
-    """Canonical sha256 over the ordered gold/candidate/label triples."""
+    """Canonical sha256 over the ordered gold/candidate/label triples.
+
+    Retained as a compatibility field; the full-content ``fixture_sha256`` is
+    the authoritative invalidation digest.
+    """
     triples = [
         {
             "gold": p["gold"]["finding_id"],
@@ -305,6 +309,20 @@ def _label_sha256(pairs: list[dict[str, Any]]) -> str:
         triples, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _fixture_sha256() -> str:
+    """Canonical sha256 over the full pairs.json bytes (content + provenance).
+
+    Digests the raw file, so any change to the fixture object — a pair's
+    content or the provenance block — invalidates every existing diagnostic
+    receipt.
+    """
+    path = _CALIBRATION_DIR / "pairs.json"
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ValueError(f"could not read calibration fixture at {path}: {exc}") from exc
 
 
 def _render_judge_prompt_digest(sr: Any) -> str:
@@ -323,7 +341,13 @@ def _serialize_inputs(inputs: dict[str, Any]) -> bytes:
 def _invalidation_inputs(
     env: dict[str, Any], pairs: list[dict[str, Any]], sr: Any
 ) -> dict[str, Any]:
-    """The receipt's invalidation contract: a deterministic byte-stable dict."""
+    """The receipt's invalidation contract: a deterministic byte-stable dict.
+
+    ``fixture_sha256`` digests the full pairs.json bytes (content + provenance),
+    and ``fixture_provenance`` mirrors the provenance block, so a fixture
+    content or provenance change invalidates existing receipts — not just a
+    reorder of the ordered triples covered by ``label_sha256``.
+    """
     inputs = {
         "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
         "model": env.get("DAYDREAM_JUDGE_MODEL") or "",
@@ -331,14 +355,16 @@ def _invalidation_inputs(
         "judge_prompt_sha256": _render_judge_prompt_digest(sr),
         "threshold": sr.verifier_core.CONFIDENCE_THRESHOLD,
         "label_sha256": _label_sha256(pairs),
+        "fixture_sha256": _fixture_sha256(),
+        "fixture_provenance": _load_provenance(),
         "attempts": 3,
         "request_timeout": sr._REQUEST_TIMEOUT,
     }
     # Candidate review-profile digest (issue #885/R12): a change of candidate
     # invalidates the calibration receipt (per-candidate attribution). Omitted
     # when absent so the legacy receipt contract stays byte-stable for default
-    # runs. Mirrors run._calibration_invalidation_inputs so the receipt built
-    # here and the preflight check in run.py produce identical inputs.
+    # runs. Mirrors run._calibration_invalidation_inputs, which delegates here,
+    # so the receipt built here and run.py's helper produce identical inputs.
     digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
     if digest:
         inputs["profile_digest"] = str(digest)
@@ -355,12 +381,17 @@ def _build_receipt(
     confusion: dict[str, int],
     disagreements: list[Any],
 ) -> dict[str, Any]:
-    """Build the private deterministic calibration receipt document."""
+    """Build the private deterministic calibration receipt document.
+
+    The receipt mirrors the fixture's machine-readable provenance, so a future
+    re-verification of the fixture is visible in every receipt built from it.
+    """
     return {
         "schema_version": 1,
         "type": "judge-calibration",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "inputs": _invalidation_inputs(env, pairs, sr),
+        "provenance": _load_provenance(),
         "result": {
             "passed": passed,
             "balanced_accuracy": balanced_accuracy,
@@ -379,12 +410,34 @@ def _write_receipt(workspace: Path, receipt: dict[str, Any]) -> Path:
 
 
 def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bool:
-    """Fail-closed invalidation check: True only on a byte-exact inputs match."""
+    """Fail-closed invalidation check for diagnostic receipts.
+
+    True only when the stored inputs byte-match the current inputs AND the
+    document satisfies the diagnostic-receipt contract: ``schema_version`` 1,
+    ``type`` ``judge-calibration``, ``result.passed`` True, and a provenance
+    block declaring the fixture ``llm_generated`` and not ``human_reviewed``.
+    Any violation — including a fixture content or provenance change, which
+    moves ``fixture_sha256`` — returns False.
+    """
     try:
         raw = json.loads(Path(receipt_path).read_bytes())
     except (ValueError, OSError):
         return False
     if not isinstance(raw, dict) or not isinstance(raw.get("inputs"), dict):
+        return False
+    if raw.get("schema_version") != 1:
+        return False
+    if raw.get("type") != "judge-calibration":
+        return False
+    result = raw.get("result")
+    if not isinstance(result, dict) or result.get("passed") is not True:
+        return False
+    provenance = raw.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    if provenance.get("origin") != "llm_generated":
+        return False
+    if provenance.get("human_reviewed") is not False:
         return False
     return _serialize_inputs(raw["inputs"]) == _serialize_inputs(current_inputs)
 
