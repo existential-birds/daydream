@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import importlib.resources
+import json
 import re
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from daydream.benchmark import schema
 from daydream.benchmark.harbor.build import CompileError
 
 GENERATION_COMMAND = "uv export --frozen --no-dev --no-emit-project --format requirements-txt"
@@ -408,17 +410,51 @@ def _render_and_check(
     return text
 
 
-def render_task_toml(opaque_key: str) -> bytes:
-    """Render the fixed Harbor schema-1.4 task configuration.
+def _normalized_allowed_hosts(hosts: list[str] | None, label: str) -> list[str]:
+    """Normalize and sort an allowlist, failing closed on empty/invalid input.
+
+    Each host goes through ``schema.normalize_hostname`` (rejects schemes,
+    credentials, ports, paths, wildcards, whitespace, empties, and dot-less
+    segments). The normalized list is sorted so the rendered TOML bytes stay
+    deterministic; a missing/empty list or a single bad host is a hard
+    ``PackageError`` -- there is no silent fallback host.
+    """
+    if not hosts:
+        raise PackageError(f"task network policy requires a non-empty {label} host list")
+    normalized: list[str] = []
+    for host in hosts:
+        try:
+            normalized.append(schema.normalize_hostname(host))
+        except ValueError as exc:
+            raise PackageError(f"invalid {label} host: {exc}") from exc
+    return sorted(normalized)
+
+
+def render_task_toml(
+    opaque_key: str,
+    *,
+    reviewer_hosts: list[str] | None = None,
+    judge_hosts: list[str] | None = None,
+) -> bytes:
+    """Render the Harbor schema-1.4 task configuration with an explicit network policy.
+
+    ``reviewer_hosts`` populate ``[agent].allowed_hosts`` (the boundary the
+    reviewing agent may reach) and ``judge_hosts`` populate the verifier's
+    separate ``[verifier.environment].allowed_hosts`` boundary -- the two
+    policies stay independent. Both lists are normalized and sorted before
+    rendering, and compilation fails closed (``PackageError``) on a missing,
+    empty, or invalid list rather than silently defaulting to a host.
 
     The ``[environment.env]`` block threads the opaque per-case task key and the
     deterministic ``base``/``head`` ref names into the agent container (Harbor
-    natively injects ``[environment].env`` into the environment). The case key
-    is the only per-case value; everything else is fixed. No judge/credential/
-    archive configuration is ever rendered onto the agent surface.
+    natively injects ``[environment].env`` into the environment). No judge/
+    credential/archive configuration is ever rendered onto the agent surface.
     """
+    reviewer = _normalized_allowed_hosts(reviewer_hosts, "reviewer")
+    judge = _normalized_allowed_hosts(judge_hosts, "judge")
     # TOML is intentionally rendered directly: fixed ordering and no timestamp
     # make these bytes part of the deterministic compiled-tree contract.
+    # json.dumps renders each list as a double-quoted TOML inline array.
     return f'''schema_version = "1.4"
 
 [metadata]
@@ -428,7 +464,7 @@ source_kind = "historic-github-pr"
 [agent]
 timeout_sec = 1800.0
 network_mode = "allowlist"
-allowed_hosts = ["api.anthropic.com"]
+allowed_hosts = {json.dumps(reviewer)}
 
 [environment]
 network_mode = "no-network"
@@ -449,7 +485,7 @@ environment_mode = "separate"
 
 [verifier.environment]
 network_mode = "allowlist"
-allowed_hosts = ["api.anthropic.com"]
+allowed_hosts = {json.dumps(judge)}
 build_timeout_sec = 1200.0
 cpus = 1
 memory_mb = 2048

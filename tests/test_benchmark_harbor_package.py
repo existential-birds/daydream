@@ -111,12 +111,75 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch):
     assert "[0.21, 0.22)" in str(wrong.value)
 
 
+def test_render_task_toml_threads_reviewer_and_judge_hosts():
+    import tomllib
+
+    from daydream.benchmark.harbor import package as pkg
+
+    text = pkg.render_task_toml(
+        "case-abc123def456",
+        reviewer_hosts=["api.anthropic.com"],
+        judge_hosts=["openrouter.ai"]).decode()
+    doc = tomllib.loads(text)
+    assert doc["agent"]["allowed_hosts"] == ["api.anthropic.com"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
+    # deterministic
+    assert pkg.render_task_toml("case-abc123def456",
+                                reviewer_hosts=["api.anthropic.com"],
+                                judge_hosts=["openrouter.ai"]) == \
+           pkg.render_task_toml("case-abc123def456",
+                                reviewer_hosts=["api.anthropic.com"],
+                                judge_hosts=["openrouter.ai"])
+
+
+def test_render_task_toml_fails_closed_on_empty_or_missing_hosts():
+    import pytest
+
+    from daydream.benchmark.harbor import package as pkg
+
+    for kw in ({"reviewer_hosts": [], "judge_hosts": ["h.example"]},
+               {"reviewer_hosts": ["h.example"], "judge_hosts": []},
+               {"reviewer_hosts": [], "judge_hosts": []}):
+        with pytest.raises(pkg.PackageError):
+            pkg.render_task_toml("case-abc", **kw)
+    with pytest.raises(pkg.PackageError):
+        pkg.render_task_toml("case-abc")   # missing required kwargs
+
+
+def test_render_task_toml_normalizes_and_sorts_hosts():
+    import tomllib
+
+    import pytest
+
+    from daydream.benchmark.harbor import package as pkg
+
+    doc = tomllib.loads(pkg.render_task_toml(
+        "case-abc",
+        reviewer_hosts=["HTTPS://B.Example.com", "a.example.com"],
+        judge_hosts=["openrouter.ai"],
+    ).decode())
+    assert doc["agent"]["allowed_hosts"] == ["a.example.com", "b.example.com"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
+    with pytest.raises(pkg.PackageError):
+        pkg.render_task_toml("case-abc",
+                             reviewer_hosts=["not-a-host"],
+                             judge_hosts=["openrouter.ai"])
+    with pytest.raises(pkg.PackageError):
+        pkg.render_task_toml("case-abc",
+                             reviewer_hosts=["api.anthropic.com"],
+                             judge_hosts=["*.example.com"])
+
+
 def test_render_task_toml_matches_plan_s8():
     import tomllib
 
     from daydream.benchmark.harbor import package as pkg
 
-    text = pkg.render_task_toml("case-4f7c81d922a0").decode()
+    text = pkg.render_task_toml(
+        "case-4f7c81d922a0",
+        reviewer_hosts=["api.anthropic.com"],
+        judge_hosts=["api.anthropic.com"],
+    ).decode()
     doc = tomllib.loads(text)
     assert doc["schema_version"] == "1.4"
     assert doc["metadata"] == {

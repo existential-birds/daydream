@@ -31,7 +31,9 @@ def test_spike_task_toml_env_carries_case_key(tmp_path, fake_gh):
     assert f"DAYDREAM_REVIEW_CASE_ID = \"{key}\"" in toml
     assert "[environment]" in toml
     # determinism: re-rendering identical bytes
-    assert pkg.render_task_toml(key) == (case / "task.toml").read_bytes()
+    assert pkg.render_task_toml(
+        key, reviewer_hosts=["api.anthropic.com"], judge_hosts=["api.anthropic.com"]
+    ) == (case / "task.toml").read_bytes()
     # Harbor validates the enriched task.toml (same-interpreter Task model)
     try:
         from harbor.models.task import Task  # noqa: PLC0415 - namespace fallback as in package.py
@@ -151,16 +153,44 @@ def test_artifact_write_failure_raises(tmp_path):
 def test_render_task_toml_host_policy_and_case_env():
     from daydream.benchmark.harbor import package as pkg
 
-    toml = pkg.render_task_toml("case-abc123def456").decode("utf-8")
+    toml = pkg.render_task_toml(
+        "case-abc123def456",
+        reviewer_hosts=["api.anthropic.com"],
+        judge_hosts=["api.anthropic.com"],
+    ).decode("utf-8")
     assert 'allowed_hosts = ["api.anthropic.com"]' in toml       # reviewer-only host
     assert '"github.com"' not in toml and '"huggingface.co"' not in toml
     assert 'DAYDREAM_REVIEW_CASE_ID = "case-abc123def456"' in toml
     assert 'DAYDREAM_REVIEW_BASE_REF = "base"' in toml
     assert 'DAYDREAM_REVIEW_HEAD_REF = "head"' in toml
     # deterministic
-    assert pkg.render_task_toml("case-abc123def456") == pkg.render_task_toml("case-abc123def456")
+    assert pkg.render_task_toml(
+        "case-abc123def456",
+        reviewer_hosts=["api.anthropic.com"],
+        judge_hosts=["api.anthropic.com"],
+    ) == pkg.render_task_toml(
+        "case-abc123def456",
+        reviewer_hosts=["api.anthropic.com"],
+        judge_hosts=["api.anthropic.com"],
+    )
     # no judge vars or archive/target config reach the agent surface
     assert "DAYDREAM_JUDGE" not in toml and "HF_TOKEN" not in toml and "GITHUB_TOKEN" not in toml
+
+
+def test_render_task_toml_keeps_agent_verifier_host_boundaries():
+    from daydream.benchmark.harbor import package as pkg
+
+    toml = pkg.render_task_toml(
+        "case-abc123def456",
+        reviewer_hosts=["api.anthropic.com"],
+        judge_hosts=["openrouter.ai"],
+    ).decode("utf-8")
+    agent_block = toml.split("[agent]", 1)[1].split("[environment]", 1)[0]
+    verifier_block = toml.split("[verifier.environment]", 1)[1]
+    assert 'allowed_hosts = ["api.anthropic.com"]' in agent_block
+    assert "openrouter.ai" not in agent_block
+    assert 'allowed_hosts = ["openrouter.ai"]' in verifier_block
+    assert "api.anthropic.com" not in verifier_block
 
 
 # ---------------------------------------------------------------------------

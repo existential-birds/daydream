@@ -654,7 +654,13 @@ def _compile_case(
         render_task_toml,
     )
 
-    (case_stage / "task.toml").write_bytes(render_task_toml(key))
+    (case_stage / "task.toml").write_bytes(
+        render_task_toml(
+            key,
+            reviewer_hosts=["api.anthropic.com"],
+            judge_hosts=["api.anthropic.com"],
+        )
+    )
     (case_stage / "environment").mkdir(exist_ok=True)
     (case_stage / "environment" / "Dockerfile").write_bytes(
         render_environment_dockerfile(
