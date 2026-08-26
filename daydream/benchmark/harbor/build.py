@@ -21,6 +21,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 
@@ -840,8 +842,14 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
         # Every indexed case is loaded through the shared model-gated loader
         # (same ``_schema_ready`` + ``CaseDocument`` validation as the
         # validate/status read path); a present-but-corrupt case raises
-        # ``WorkspaceCorrupt`` before any staging begins.
-        manifest_model = schema.BenchmarkManifest.model_validate(manifest)
+        # ``WorkspaceCorrupt`` before any staging begins. The manifest model
+        # validation (which rejects malformed/empty privacy host lists) is
+        # surfaced as ``CompileError`` so a disallowed-host policy fails the
+        # compile closed through the documented rejection type.
+        try:
+            manifest_model = schema.BenchmarkManifest.model_validate(manifest)
+        except ValidationError as exc:
+            raise CompileError(f"{root}: invalid benchmark.yaml: {exc}") from exc
         # The compiled network policy is sourced from the workspace's persisted
         # privacy allowlists -- never a hardcoded default. The pydantic model
         # already rejects empty lists, but re-raise fail-closed so a private
