@@ -424,3 +424,41 @@ removal is a separate cutover.
 All workspace writes are atomic and journaled (`prepared | committing |
 complete`) under the workspace lock, so a crash mid-mutation restores either
 the whole before- or after-state — never a checksum-drifted partial.
+
+## Diagnostics vs the Oracle gate vs the benchmark-after-Oracle gate
+
+The Harbor/private-benchmark path has three distinct concepts that are easy to
+conflate. Keep them separate:
+
+1. **Optional unverified judge-agreement diagnostics** — `daydream benchmark
+   calibrate-judge <workspace>` drives the exact packaged judge path over an
+   **unverified** 24-pair fixture and reports how closely the judge agrees with
+   that fixture (the `0.90` diagnostic metric). It is optional, diagnostic-only,
+   and is **not** an authorization, correctness, or validation check. Neither the
+   fixture nor its receipts gate any run: they are machine-readable provenance
+   artifacts you may inspect, never a pass/fail prerequisite. Loading a
+   calibration receipt is not required to run the benchmark and carries no
+   operational authority.
+
+2. **The Oracle self-match/reward gate.** The supervised run uses `--oracle` and
+   gates on the reviewer achieving the Oracle's **self-match / reward** result —
+   a verified, operational state — not on any calibration fixture or receipt.
+   This is the actual quality gate.
+3. **The normal benchmark-after-Oracle gate.** Once an Oracle receipt exists, a
+   normal (non-`--oracle`) run is gated on the matching receipt being current for
+   the workspace's compiled lock state (for example, an allowlist change
+   invalidates an existing receipt). This governs normal runs against a verified
+   Oracle; it does not read calibration diagnostics.
+4. **The `0.90` diagnostic metric vs the `0.70` retained-edge threshold.** These
+   are different numbers with different purposes: `0.90` is the judge-agreement
+   diagnostic threshold reported during calibration; `0.70` is the benchmark's
+   retained-edge (per-case) threshold. Do not treat one as the other.
+
+### OpenRouter data handling
+
+Live private-source runs that route through **OpenRouter** send private
+source data to a third-party provider. Before running such a run you must
+explicitly accept that provider's **data-handling and retention policy** —
+especially for its free endpoints, which may retain or further process inputs.
+Never put API keys or source findings in docs or receipts.
+

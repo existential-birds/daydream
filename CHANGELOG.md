@@ -10,9 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **benchmark:** add `daydream benchmark run <workspace> [--oracle] [--yes]` command (supervised Harbor runs behind the Oracle self-match gate, private `runtime/harbor.json` cleanup ledger)
-- **benchmark:** add `daydream benchmark calibrate-judge <workspace>` command (drives the exact packaged judge path, 24-pair fixture, three-part pass gate, private `runtime/calibration-receipt.json`)
+- **benchmark:** add `daydream benchmark calibrate-judge <workspace>` command (optional diagnostic of judge agreement against the unverified 24-pair fixture — it is not an authorization or correctness gate; writes an unverified `runtime/calibration-receipt.json`)
 
 ### Changed
+
+- **benchmark:** decouple the Oracle self-match/reward gate and the normal benchmark-after-Oracle gate from loaded calibration fixtures; `run.py` no longer treats a calibration receipt as a run prerequisite or tracks `calibration_receipt_sha256` in the shared Oracle-state mapping (old receipts with the legacy field stay usable)
+- **benchmark:** re-scope the calibration fixture and receipts as explicit unverified, diagnostic-only artifacts; `pairs.json` carries machine-readable provenance and receipts validate it; the `0.90` judge-agreement diagnostic metric is distinct from the `0.70` retained-edge threshold
+- **benchmark:** compile the workspace's persisted network policy from `benchmark.yaml` privacy allowlists into Harbor task TOML (`render_task_toml` now requires explicit reviewer/judge host lists and fails closed); an allowlist change invalidates existing Oracle receipts via the compiled lock digest
+- **benchmark:** regression coverage for Oracle decoupling, fixture provenance, fail-closed host policies, and agent/verifier host separation; docs distinguish diagnostics, the Oracle gate, and the OpenRouter data-handling requirement
 
 - **benchmark:** require `requested_base_sha` on ready/imported snapshot records; `migrate.migrate_workspace` backfills the field from `original_base_sha` on both v1 upgrade and v2 repair passes so pre-provenance-split workspaces stay loadable.
 
