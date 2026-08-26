@@ -358,6 +358,11 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     )
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
 
+    deny_git_output = await decide(
+        {"tool_name": "Bash", "tool_input": {"command": "git diff --output=diff.patch"}}
+    )
+    assert deny_git_output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
     allow_bash = await decide(
         {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}
     )
