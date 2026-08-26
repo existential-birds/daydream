@@ -5,7 +5,7 @@ Stdlib only, never imports daydream (or the bundled verifier_core): the
 aggregation body is inlined at build time so a compiled task's ``metric.py``
 needs nothing but the stdlib. Reads one JSONL line per task — a reward dict or
 ``null`` (unscored infrastructure failure) — and writes the pooled micro metrics to the ``-o`` path.
-Invocation matches Harbor 0.21's ``uv run metric.py -i <rewards.jsonl> -o
+Invocation matches Harbor 0.22's ``uv run metric.py -i <rewards.jsonl> -o
 <metric.json>``; a missing input raises ``FileNotFoundError`` (uncaught ->
 nonzero exit, no output written — fail-closed, never partial).
 """

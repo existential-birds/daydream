@@ -33,14 +33,14 @@ def test_spike_task_toml_env_carries_case_key(tmp_path, fake_gh):
     # determinism: re-rendering identical bytes
     # re-render with the same workspace-seeded privacy allowlists so the bytes
     # are identical to the compiled task.toml (reviewer h1/judge h2, not a
-    # different policy like api.anthropic.com)
+    # different reviewer policy)
     assert pkg.render_task_toml(
         key, reviewer_hosts=["h1.example.com"], judge_hosts=["h2.example.com"]
     ) == (case / "task.toml").read_bytes()
     # Harbor validates the enriched task.toml (same-interpreter Task model)
     try:
         from harbor.models.task import Task  # noqa: PLC0415 - namespace fallback as in package.py
-    except ImportError:  # Harbor 0.21 wheel exposes task as a namespace package.
+    except ImportError:  # Harbor exposes task as a namespace package in some wheels.
         from harbor.models.task.task import Task  # noqa: PLC0415
     assert Task(str(case), disable_verification=True) is not None
 
@@ -87,12 +87,13 @@ def test_build_candidate_findings_enforces_verifier_bounds_fail_closed():
     from daydream.benchmark.harbor import candidate
 
     case_id = "case-abc123def456"
-    # over-long title (>500 chars) is a typed failure, not a rejectable artifact
+    # A verbose canonical description is preserved in the body while the
+    # display title is deterministically bounded for the verifier schema.
     overlong_title = [{"file": "src/a.py", "line": 1,
                        "description": "t" * 501, "rationale": "", "severity": "low"}]
-    with pytest.raises(candidate.CandidateError) as bad_title:
-        candidate.build_candidate_findings(overlong_title, case_id=case_id)
-    assert bad_title.value.kind == "invalid_finding"
+    [bounded] = candidate.build_candidate_findings(overlong_title, case_id=case_id)
+    assert len(bounded["title"]) <= 500
+    assert "t" * 501 in bounded["body"]
 
     # over-long body (>8 KiB) is a typed failure
     overlong_body = [{"file": "src/a.py", "line": 1,
@@ -158,10 +159,10 @@ def test_render_task_toml_host_policy_and_case_env():
 
     toml = pkg.render_task_toml(
         "case-abc123def456",
-        reviewer_hosts=["api.anthropic.com"],
-        judge_hosts=["api.anthropic.com"],
+        reviewer_hosts=["openrouter.ai"],
+        judge_hosts=["openrouter.ai"],
     ).decode("utf-8")
-    assert 'allowed_hosts = ["api.anthropic.com"]' in toml       # reviewer-only host
+    assert 'allowed_hosts = ["openrouter.ai"]' in toml       # reviewer-only host
     assert '"github.com"' not in toml and '"huggingface.co"' not in toml
     assert 'DAYDREAM_REVIEW_CASE_ID = "case-abc123def456"' in toml
     assert 'DAYDREAM_REVIEW_BASE_REF = "base"' in toml
@@ -169,12 +170,12 @@ def test_render_task_toml_host_policy_and_case_env():
     # deterministic
     assert pkg.render_task_toml(
         "case-abc123def456",
-        reviewer_hosts=["api.anthropic.com"],
-        judge_hosts=["api.anthropic.com"],
+        reviewer_hosts=["openrouter.ai"],
+        judge_hosts=["openrouter.ai"],
     ) == pkg.render_task_toml(
         "case-abc123def456",
-        reviewer_hosts=["api.anthropic.com"],
-        judge_hosts=["api.anthropic.com"],
+        reviewer_hosts=["openrouter.ai"],
+        judge_hosts=["openrouter.ai"],
     )
     # no judge vars or archive/target config reach the agent surface
     assert "DAYDREAM_JUDGE" not in toml and "HF_TOKEN" not in toml and "GITHUB_TOKEN" not in toml
@@ -185,15 +186,15 @@ def test_render_task_toml_keeps_agent_verifier_host_boundaries():
 
     toml = pkg.render_task_toml(
         "case-abc123def456",
-        reviewer_hosts=["api.anthropic.com"],
+        reviewer_hosts=["reviewer.example.com"],
         judge_hosts=["openrouter.ai"],
     ).decode("utf-8")
     agent_block = toml.split("[agent]", 1)[1].split("[environment]", 1)[0]
     verifier_block = toml.split("[verifier.environment]", 1)[1]
-    assert 'allowed_hosts = ["api.anthropic.com"]' in agent_block
+    assert 'allowed_hosts = ["reviewer.example.com"]' in agent_block
     assert "openrouter.ai" not in agent_block
     assert 'allowed_hosts = ["openrouter.ai"]' in verifier_block
-    assert "api.anthropic.com" not in verifier_block
+    assert "reviewer.example.com" not in verifier_block
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +209,8 @@ def test_entrypoint_build_run_config_is_controlled():
     cfg = entrypoint.build_run_config(
         repo_dir="/workspace/repo",
         trajectory_path="/logs/agent/trajectory.json",
-        backend="claude",
-        model="sonnet",
+        backend="pi",
+        model="deepseek/deepseek-v4-flash-0731",
     )
     assert cfg.output_mode == "review"
     assert cfg.base == "base"
@@ -217,7 +218,7 @@ def test_entrypoint_build_run_config_is_controlled():
     assert cfg.archive is False and cfg.run_eval is False
     assert cfg.findings_out is None                     # NO --findings-out (live PR lookup)
     assert cfg.trajectory_path == Path("/logs/agent/trajectory.json")
-    assert cfg.backend == "claude" and cfg.model == "sonnet"
+    assert cfg.backend == "pi" and cfg.model == "deepseek/deepseek-v4-flash-0731"
     assert isinstance(cfg.file_config, DaydreamFileConfig)
     # controlled empty: the target repo's .daydream.toml is never loaded
     assert cfg.file_config == DaydreamFileConfig()
@@ -229,7 +230,7 @@ def test_entrypoint_backend_fail_closed(monkeypatch):
     monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "codex")
     with pytest.raises(entrypoint.EntrypointError) as exc:
         entrypoint.require_supported_backend()
-    assert "claude" in str(exc.value)
+    assert "pi" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +327,7 @@ def test_agent_setup_confirms_version_and_backend(tmp_path):
     from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(
-        logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "claude"}
+        logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "pi"}
     )
 
     class Env:
@@ -339,7 +340,7 @@ def test_agent_setup_confirms_version_and_backend(tmp_path):
 
     asyncio.run(agent.setup(env))
     assert agent.version() in env.captured        # setup checks the packaged version
-    assert "claude_agent_sdk" in env.captured      # and the required backend SDK
+    assert "shutil.which('pi')" in env.captured      # and the required Pi CLI
 
 
 def test_agent_setup_nonzero_exec_fails(tmp_path):
@@ -365,7 +366,7 @@ def test_agent_setup_nonzero_exec_fails(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 7: agent run() — claude guarantee + allowlist child env + isolation
+# Task 7: agent run() — Pi guarantee + allowlist child env + isolation
 # ---------------------------------------------------------------------------
 
 
@@ -380,6 +381,8 @@ _BANNED = [
     "DAYDREAM_JUDGE_API_KEY",
     "DAYDREAM_JUDGE_MODEL",
     "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "PI_API_KEY",
 ]
 
 
@@ -388,9 +391,9 @@ def test_build_child_env_is_exact_allowlist():
 
     parent = {
         **{k: "secret" for k in _BANNED},
-        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "DAYDREAM_REVIEW_BACKEND": "pi",
         "DAYDREAM_REVIEW_API_KEY": "review-key",
-        "DAYDREAM_REVIEW_BASE_URL": "https://api.anthropic.com",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
         "PATH": "/usr/bin",
         "HOME": "/root",
         "LANG": "C.UTF-8",
@@ -431,13 +434,14 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path):
         import asyncio
 
         asyncio.run(agent.run("instruction", object(), AgentContext()))
-    assert "claude" in str(refused.value)
+    assert "pi" in str(refused.value)
 
     agent_ok = DaydreamReviewAgent(
         logs_dir=tmp_path,
         extra_env={
-            "DAYDREAM_REVIEW_BACKEND": "claude",
+            "DAYDREAM_REVIEW_BACKEND": "pi",
             "DAYDREAM_REVIEW_API_KEY": "k",
+            "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
         },
     )
 
@@ -613,7 +617,9 @@ def _end_env(repo: Path, tmp: Path, case_id: str) -> dict[str, str]:
         "DAYDREAM_REVIEW_ARTIFACT_PATH": str(tmp / "logs" / "artifacts" / "review.json"),
         "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(tmp / "logs" / "agent" / "trajectory.json"),
         "DAYDREAM_REVIEW_CASE_ID": case_id,
-        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "DAYDREAM_REVIEW_BACKEND": "pi",
+        "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
     }
 
 
@@ -735,7 +741,9 @@ def test_local_harbor_task_with_fake_backend(
     install_stub_backend(monkeypatch, repo)
     task_env = {
         "DAYDREAM_REVIEW_CASE_ID": key,
-        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "DAYDREAM_REVIEW_BACKEND": "pi",
+        "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
         "DAYDREAM_REVIEW_REPO_DIR": str(repo),
         "DAYDREAM_REVIEW_ARTIFACT_PATH": str(
             tmp_path / "logs" / "artifacts" / "review.json"
@@ -773,13 +781,13 @@ def test_local_harbor_task_with_fake_backend(
 
     # setup() executed: the in-container probe asserts this packaged release + SDK.
     assert agent.version() in executed.setup
-    assert "claude_agent_sdk" in executed.setup
+    assert "shutil.which('pi')" in executed.setup
     # run() executed with the allowlisted child env traversing to the entrypoint only.
     assert "daydream.benchmark.harbor.entrypoint" in executed.command
     assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
     assert "--findings-out" not in executed.command  # no live-PR emission path
     assert executed.child["DAYDREAM_REVIEW_CASE_ID"] == key
-    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == "claude"
+    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == "pi"
     assert set(executed.child) <= {"PATH", "HOME", "LANG"} | {
         k for k in executed.child if k.startswith("DAYDREAM_REVIEW_")
     }

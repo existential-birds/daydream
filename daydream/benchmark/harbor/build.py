@@ -861,6 +861,9 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
         for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
             dumped = doc.model_dump(mode="json")
             case_id = dumped["case_id"]
+            if (dumped.get("curation") or {}).get("state") == "excluded":
+                case_docs[case_id] = dumped
+                continue
             if not _is_compilable(dumped.get("curation") or {}):
                 curation = dumped.get("curation") or {}
                 raise CompileError(
@@ -887,6 +890,8 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
                         f"case {case_id} index row has no matching case document "
                         "(row case_id disagrees with the case document's own case_id)"
                     )
+                if (case_doc.get("curation") or {}).get("state") == "excluded":
+                    continue
                 row = _compile_case(
                     stage,
                     root,

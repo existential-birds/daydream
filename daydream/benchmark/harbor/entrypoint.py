@@ -3,8 +3,8 @@
 Invoked inside the Harbor task container (``python -m
 daydream.benchmark.harbor.entrypoint``) by :class:`DaydreamReviewAgent`'s
 ``run`` via ``environment.exec``. Owns the fail-closed review surface: it maps
-only the ``DAYDREAM_REVIEW_*`` reviewer config/credential into the Anthropic
-SDK env, refuses any unsupported backend *before* reviewing, runs the real
+only the ``DAYDREAM_REVIEW_*`` reviewer config/credential into Pi's native
+OpenRouter env, refuses any unsupported backend *before* reviewing, runs the real
 Daydream runner **in-process** against the frozen ``base``/``head`` snapshot
 with a fully controlled :class:`RunConfig` (review-only, non-interactive,
 archiving and eval disabled, empty file config), then publishes the canonical
@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -108,39 +109,60 @@ def build_run_config(
     return config
 
 
-def require_supported_backend() -> None:
-    """Refuse any backend other than ``claude``, before any reviewing.
+def require_supported_backend() -> str:
+    """Refuse any backend other than ``pi``, before any reviewing.
 
-    Reads ``DAYDREAM_REVIEW_BACKEND`` (default ``"claude"``). An unsupported
+    Reads ``DAYDREAM_REVIEW_BACKEND`` (default ``"pi"``). An unsupported
     backend raises :class:`EntrypointError` before tools are installed or
     network access is widened.
     """
-    backend = os.environ.get(_BACKEND_ENV, "claude").strip().lower()
-    if backend != "claude":
+    backend = os.environ.get(_BACKEND_ENV, "pi").strip().lower()
+    if backend != "pi":
         raise EntrypointError(
-            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'claude' is supported"
+            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'pi' is supported"
         )
+    return backend
 
 
 def apply_reviewer_env(env: Mapping[str, str] | None = None) -> None:
-    """Map only reviewer config/credential into the Claude SDK env.
+    """Map only reviewer config/credential into Pi's OpenRouter env.
 
-    Propagates ``DAYDREAM_REVIEW_API_KEY``/``DAYDREAM_REVIEW_BASE_URL`` into
-    ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL`` on ``os.environ``; never
-    silently substitutes a default credential.  Any pre-existing raw
-    ``ANTHROPIC_*``/``DAYDREAM_JUDGE_*`` credential is cleared first so a
-    host-inherited secret cannot leak into the reviewed scope.
+    The Harbor reviewer is intentionally OpenRouter-only. The control-plane
+    credential becomes Pi's generic ``PI_API_KEY`` and the Daydream Pi backend
+    maps it to ``OPENROUTER_API_KEY`` only in the child process. Any inherited
+    raw provider or judge credential is cleared first so it cannot leak into
+    the reviewed scope. A non-HTTPS or non-OpenRouter base URL fails closed.
     """
     source = dict(os.environ if env is None else env)
-    for prefix in ("DAYDREAM_JUDGE_", "ANTHROPIC_"):
+    for prefix in (
+        "DAYDREAM_JUDGE_",
+        "ANTHROPIC_",
+        "MARTIAN_",
+        "OPENAI_",
+        "OPENROUTER_",
+        "PI_",
+    ):
         for key in [k for k in os.environ if k.startswith(prefix)]:
             os.environ.pop(key, None)
-    api_key = source.get(_API_KEY_ENV)
-    if api_key:
-        os.environ["ANTHROPIC_API_KEY"] = api_key
-    base_url = source.get(_BASE_URL_ENV)
-    if base_url:
-        os.environ["ANTHROPIC_BASE_URL"] = base_url
+    api_key = (source.get(_API_KEY_ENV) or "").strip()
+    base_url = (source.get(_BASE_URL_ENV) or "").strip()
+    parsed = urllib.parse.urlsplit(base_url)
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() != "openrouter.ai"
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise EntrypointError(
+            "DAYDREAM_REVIEW_BASE_URL must be an HTTPS openrouter.ai endpoint"
+        )
+    if not api_key:
+        raise EntrypointError(
+            "missing required environment variable 'DAYDREAM_REVIEW_API_KEY'"
+        )
+    os.environ["PI_PROVIDER"] = "openrouter"
+    os.environ["PI_API_KEY"] = api_key
+    os.environ["PI_TELEMETRY"] = "0"
 
 
 def _required_env(name: str) -> str:
@@ -207,7 +229,7 @@ async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
             os.environ[key] = value
     try:
         apply_reviewer_env()
-        require_supported_backend()
+        backend = require_supported_backend()
         case_id = _required_env(_CASE_ID_ENV)
         repo_dir = os.environ.get(_REPO_DIR_ENV, _DEFAULT_REPO_DIR)
         artifact_path = os.environ.get(_ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)
@@ -217,7 +239,7 @@ async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
         config = build_run_config(
             repo_dir=repo_dir,
             trajectory_path=trajectory_path,
-            backend="claude",
+            backend=backend,
             model=os.environ.get("DAYDREAM_REVIEW_MODEL"),
             base_ref=base_ref,
         )

@@ -16,6 +16,15 @@ _resolver_fixture = (
 )
 
 
+def _judge_env(**extra: str) -> dict[str, str]:
+    return {
+        "DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
+        "DAYDREAM_JUDGE_MODEL": "openrouter/test-model",
+        "DAYDREAM_JUDGE_BASE_URL": "https://openrouter.ai/api/v1",
+        **extra,
+    }
+
+
 def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch):
     # Malicious target config / ambient env must NOT change the Harbor candidate.
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE", "/tmp/user-evil.toml")
@@ -42,7 +51,7 @@ def test_entrypoint_parses_and_validates_candidate_before_runconfig(tmp_path, mo
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(good))
     cfg = entrypoint.build_run_config(
         repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
-        backend="claude", model="sonnet",
+        backend="pi", model="deepseek/deepseek-v4-flash-0731",
     )
     assert cfg.review_profile.name == "g"  # candidate parsed+validated into RunConfig
 
@@ -76,7 +85,7 @@ def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path, monkey
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(good))
     cfg = entrypoint.build_run_config(
         repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
-        backend="claude", model="sonnet",
+        backend="pi", model="deepseek/deepseek-v4-flash-0731",
     )
     assert cfg.review_profile.name == "g"  # candidate wins; target config ignored
 
@@ -106,7 +115,7 @@ def test_receipt_invalidation_inputs_include_candidate_digest():
     # receipt contract (run.py's former duplicating helper is gone).
     sr = calibrate._load_judge_template()
     inputs = calibrate._invalidation_inputs(
-        {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "xyz"}, pairs=[], sr=sr
+        _judge_env(DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST="xyz"), pairs=[], sr=sr
     )
     assert "profile_digest" in inputs and inputs["profile_digest"] == "xyz"
 
@@ -122,11 +131,11 @@ def test_calibrate_invalidation_inputs_folds_candidate_digest():
     sr = calibrate._load_judge_template()
     # With a candidate digest -> receipt contract includes profile_digest.
     inputs = calibrate._invalidation_inputs(
-        {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "abc"}, pairs=[], sr=sr
+        _judge_env(DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST="abc"), pairs=[], sr=sr
     )
     assert inputs["profile_digest"] == "abc"
     # Without a candidate digest -> legacy contract stays byte-stable.
-    legacy = calibrate._invalidation_inputs({}, pairs=[], sr=sr)
+    legacy = calibrate._invalidation_inputs(_judge_env(), pairs=[], sr=sr)
     assert "profile_digest" not in legacy
 
 
@@ -139,7 +148,7 @@ def test_candidate_scoped_receipt_matches_preflight_inputs(tmp_path):
     """
     from daydream.benchmark.harbor import calibrate
 
-    env = {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "abc123"}
+    env = _judge_env(DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST="abc123")
     # Use the same real fixture + judge template the receipt paths load internally.
     sr = calibrate._load_judge_template()
     pairs = calibrate._load_fixture()

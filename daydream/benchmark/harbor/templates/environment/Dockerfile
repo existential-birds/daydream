@@ -1,4 +1,15 @@
-FROM __BASE_IMAGE__
+FROM __BASE_IMAGE__ AS environment-base
+
+FROM __PI_BASE_IMAGE__ AS pi-runtime
+RUN npm install --global --omit=dev __PI_PACKAGE__
+
+FROM environment-base
+
+COPY --from=pi-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=pi-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi \
+    && node --version \
+    && pi --version
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \

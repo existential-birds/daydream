@@ -1,9 +1,9 @@
-"""Packaging and Harbor 0.21 integration tests for compiled benchmarks."""
+"""Packaging and Harbor 0.22 integration tests for compiled benchmarks."""
 
 from pathlib import Path
 
 
-def test_benchmark_extra_pins_harbor_021_and_not_base():
+def test_benchmark_extra_pins_harbor_022_and_not_base():
     import tomllib
 
     root = Path(__file__).resolve().parents[1]
@@ -11,7 +11,7 @@ def test_benchmark_extra_pins_harbor_021_and_not_base():
     deps = data["project"]["dependencies"]
     assert "harbor" not in " ".join(deps)
     extra = data["project"]["optional-dependencies"]["benchmark"]
-    assert "harbor>=0.21,<0.22" in extra
+    assert "harbor>=0.22,<0.23" in extra
     include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["include"]
     assert "daydream/benchmark/harbor/templates/**" in include
     assert "daydream/benchmark/harbor/runtime-requirements.lock" in include
@@ -93,7 +93,7 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch):
 
     from daydream.benchmark.harbor import package as pkg
 
-    monkeypatch.setattr(pkg.importlib.metadata, "version", lambda d: "0.21.0")
+    monkeypatch.setattr(pkg.importlib.metadata, "version", lambda d: "0.22.0")
     exe = pkg.resolve_harbor()
     assert exe == str(Path(sys.executable).parent / "harbor")
 
@@ -105,10 +105,10 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch):
         pkg.resolve_harbor()
     assert "pip install 'daydream[benchmark]'" in str(missing.value)
 
-    monkeypatch.setattr(pkg.importlib.metadata, "version", lambda d: "0.20.0")
+    monkeypatch.setattr(pkg.importlib.metadata, "version", lambda d: "0.21.0")
     with pytest.raises(pkg.PackageError) as wrong:
         pkg.resolve_harbor()
-    assert "[0.21, 0.22)" in str(wrong.value)
+    assert "[0.22, 0.23)" in str(wrong.value)
 
 
 def test_render_task_toml_threads_reviewer_and_judge_hosts():
@@ -230,6 +230,8 @@ def test_render_environment_dockerfile_clones_bundle_no_remote():
     assert "checkout" in dockerfile and "base" in dockerfile and "head" in dockerfile
     assert "rm" in dockerfile and "repository.bundle" in dockerfile
     assert "WORKDIR /workspace/repo" in dockerfile
+    assert "@earendil-works/pi-coding-agent@" in dockerfile
+    assert "node --version" in dockerfile and "pi --version" in dockerfile
     assert "remote remove" in dockerfile
     assert "--require-hashes" in dockerfile and "--no-deps" in dockerfile
     for forbidden in ("Task.md", "solution/", "tests/score_review", "COPY .."):
@@ -243,7 +245,9 @@ def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned():
     assert text.startswith("FROM " + pkg.VERIFIER_BASE_IMAGE)
     assert "ENTRYPOINT" not in text and "CMD" not in text
     assert "/verifier" not in text
+    assert "WORKDIR /tests" in text
     assert "test.sh" in text and "score_review.py" in text
+    assert "verifier-metadata.json" in text
     assert "httpx" in text and "httpx>=" not in text and "httpx==0.28.1" in text
 
 
@@ -258,10 +262,15 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs():
     assert job["environment"] == {"type": "docker", "delete": True}
     agent = job["agents"][0]
     assert agent["import_path"] == "daydream.benchmark.harbor.agent:DaydreamReviewAgent"
+    assert agent["env"]["DAYDREAM_REVIEW_BACKEND"] == "${DAYDREAM_REVIEW_BACKEND:-pi}"
     assert "DAYDREAM_REVIEW_API_KEY" in agent["env"]
+    assert agent["env"]["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] == (
+        "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}"
+    )
     assert job["datasets"] == [{"path": "."}]
     assert job["metrics"] == [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}]
     assert "DAYDREAM_JUDGE_API_KEY" in job["verifier"]["env"]
+    assert job["verifier"]["env"]["DAYDREAM_JUDGE_PROVIDER"] == "${DAYDREAM_JUDGE_PROVIDER}"
 
     oracle = yaml.safe_load(pkg.render_job_config(oracle=True))
     assert oracle["agents"] == [{"name": "oracle"}]
@@ -339,7 +348,7 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path, f
     from harbor.models.job.config import JobConfig
     try:
         from harbor.models.task import Task
-    except ImportError:  # Harbor 0.21 wheel exposes task as a namespace package.
+    except ImportError:  # Harbor exposes task as a namespace package in some wheels.
         from harbor.models.task.task import Task
 
     from daydream.benchmark.harbor import build

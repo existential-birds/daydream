@@ -397,6 +397,26 @@ def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
         raise VerifierError(
             f"Judge response was not valid JSON: {_bounded_error(str(exc))}"
         ) from exc
+    error = parsed_body.get("error") if isinstance(parsed_body, dict) else None
+    if isinstance(error, dict):
+        raw_code = error.get("code")
+        if isinstance(raw_code, int) and not isinstance(raw_code, bool):
+            error_code = raw_code
+        elif isinstance(raw_code, str):
+            try:
+                error_code = int(raw_code)
+            except ValueError:
+                error_code = -1
+        else:
+            error_code = -1
+        message = _bounded_error(error.get("message") or "upstream judge error")
+        if error_code == 429 or error_code >= 500:
+            # OpenRouter can wrap an upstream 429/5xx in an HTTP-200 JSON
+            # envelope. Treat that envelope like the corresponding transport
+            # failure so transient free-provider overloads use the shared retry
+            # budget instead of aborting the whole calibration.
+            raise _Retryable(f"Judge upstream error {error_code}: {message}")
+        raise VerifierError(f"Judge response error {error_code}: {message}")
     text = content(parsed_body)
     try:
         parsed = json.loads(text)
@@ -557,17 +577,13 @@ _CHAT_COMPLETIONS_PATH = "/chat/completions"
 def resolve_base_url(api_key: str, base_url_env: str | None) -> str:
     """Resolve the Chat Completions base URL from the environment.
 
-    An explicit base URL always wins; an ``sk-or-`` OpenRouter key with no pin
-    routes to OpenRouter; anything else defaults to OpenAI direct. The resolved
-    URL is only a candidate: it is validated against the effective judge-host
-    allowlist (scheme/host/form) at the client build and initial-request sites
-    before any judge call.
+    A configured base URL is required. The resolved URL is validated against
+    the effective judge-host allowlist (scheme/host/form) at the client build
+    and initial-request sites before any judge call.
     """
-    if base_url_env:
-        return base_url_env
-    if api_key.startswith(_OPENROUTER_KEY_PREFIX):
-        return _OPENROUTER_BASE_URL
-    return _OPENAI_DEFAULT_BASE_URL
+    if not base_url_env:
+        raise VerifierError("missing DAYDREAM_JUDGE_BASE_URL")
+    return base_url_env
 
 
 def _openai_content(body: dict[str, Any]) -> str:
@@ -634,6 +650,32 @@ class OpenAIJudgeClient:
                 {"role": "user", "content": user},
             ],
         }
+        # Keep reasoning enabled because some OpenRouter models require it,
+        # but exclude it from the response so it cannot consume the bounded
+        # judge output budget. Generic OpenAI-compatible endpoints are unchanged.
+        if (urllib.parse.urlsplit(self.base_url).hostname or "").lower() == "openrouter.ai":
+            payload["reasoning"] = {"exclude": True}
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "verdict",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "match": {"type": "boolean"},
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
+                            "reasoning": {"type": "string"},
+                        },
+                        "required": ["match", "confidence", "reasoning"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "content-type": "application/json",
@@ -711,7 +753,7 @@ _ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
 _ENV_ALLOWED_HOSTS = "DAYDREAM_JUDGE_ALLOWED_HOSTS"
 _ENV_ARTIFACT_PATH = "DAYDREAM_JUDGE_ARTIFACT_PATH"
 _ENV_OUT_PATH = "DAYDREAM_JUDGE_OUT_PATH"
-_DEFAULT_PROVIDER = "anthropic"
+_DEFAULT_PROVIDER = ""
 
 
 class _CountingClient:
@@ -1088,11 +1130,11 @@ def _build_client(env: dict[str, Any]) -> Any:
     """Build the judge client from the DAYDREAM_JUDGE_* env surface.
 
     Provider is fail-closed: exactly ``anthropic`` | ``openai-compatible`` is
-    accepted (absent -> default ``anthropic``); anything else raises before any
+    accepted when explicit; absent or unsupported values raise before any
     request. The provider's base URL is resolved and the initial request URL is
     validated against the effective judge-host allowlist at build time.
     """
-    provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+    provider = env.get(_ENV_PROVIDER) or ""
     model = env.get(_ENV_MODEL)
     api_key = env.get(_ENV_API_KEY)
     if not model or not api_key:
