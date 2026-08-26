@@ -13,6 +13,21 @@ from pathlib import Path
 from daydream.benchmark.harbor import entrypoint
 
 
+def test_openrouter_reviewer_env_uses_anthropic_auth_token(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "stale-url")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-token")
+
+    entrypoint.apply_reviewer_env({
+        "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
+    })
+
+    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "sk-or-test"
+    assert os.environ["ANTHROPIC_API_KEY"] == ""
+    assert os.environ["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+
+
 def test_entrypoint_skill_free_python_case(tmp_path, monkeypatch):
     # A Python diff resolves through the controlled entrypoint with no backend
     # network dependency (the runner is stubbed at the production seam): the run

@@ -130,6 +130,24 @@ async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_modul
     assert raw == {"match": False, "confidence": 0.2, "reasoning": "no"}
     assert calls[0][0] == "https://openrouter.ai/api/v1/chat/completions"
     assert calls[0][1]["Authorization"] == "Bearer sk-or-abc"
+    assert calls[0][2]["reasoning"] == {"effort": "none"}
+    assert calls[0][2]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "verdict",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "match": {"type": "boolean"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["match", "confidence", "reasoning"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -173,6 +191,57 @@ async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustio
             Always5xx(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"}
         )
     assert len(attempts) == 3  # 3 attempts then fail
+
+
+@pytest.mark.asyncio
+async def test_retry_policy_retries_openrouter_error_envelope(sr_module) -> None:
+    sr = sr_module
+    attempts = []
+
+    class FlakyOpenRouter:
+        async def post(self, url, *, headers, json, timeout):
+            attempts.append(1)
+            if len(attempts) < 3:
+                return type(
+                    "R",
+                    (),
+                    {
+                        "status_code": 200,
+                        "text": "upstream error",
+                        "json": lambda self: {
+                            "error": {
+                                "code": 502,
+                                "message": "Upstream provider temporarily overloaded",
+                            }
+                        },
+                    },
+                )()
+            return type(
+                "R",
+                (),
+                {
+                    "status_code": 200,
+                    "text": "ok",
+                    "json": lambda self: {
+                        "choices": [{
+                            "message": {
+                                "content": '{"match": true, "confidence": 0.8, "reasoning": "x"}'
+                            }
+                        }]
+                    },
+                },
+            )()
+
+    raw = await sr._complete_json_with_http(
+        FlakyOpenRouter(),
+        url="https://openrouter.ai/api/v1/chat/completions",
+        payload={},
+        headers={},
+        content=sr._openai_content,
+        allowlist={"openrouter.ai"},
+    )
+    assert raw["match"] is True
+    assert len(attempts) == 3
 
 
 @pytest.mark.asyncio

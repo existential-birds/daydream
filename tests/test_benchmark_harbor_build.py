@@ -1014,6 +1014,23 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
         assert case_id in str(exc)
 
 
+def test_compile_skips_excluded_cases(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.harbor import build
+
+    ws, included_case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    excluded_case_id = _seed_second_ready_case(ws, tmp_path, fake_gh)
+    cu.exclude_case(ws, excluded_case_id, reason="duplicate_case")
+
+    lock = build.compile_workspace(ws)
+
+    included_key = build.derive_task_key(included_case_id)
+    excluded_key = build.derive_task_key(excluded_case_id)
+    assert set(lock["cases"]) == {included_key}
+    assert (ws / "harbor" / included_key).is_dir()
+    assert not (ws / "harbor" / excluded_key).exists()
+
+
 def test_compiled_findings_oracle_scores_reward_1(sr_module, tmp_path, fake_gh) -> None:
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)

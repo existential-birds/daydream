@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -126,21 +127,27 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None) -> None:
     """Map only reviewer config/credential into the Claude SDK env.
 
     Propagates ``DAYDREAM_REVIEW_API_KEY``/``DAYDREAM_REVIEW_BASE_URL`` into
-    ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL`` on ``os.environ``; never
-    silently substitutes a default credential.  Any pre-existing raw
-    ``ANTHROPIC_*``/``DAYDREAM_JUDGE_*`` credential is cleared first so a
-    host-inherited secret cannot leak into the reviewed scope.
+    the Claude SDK's ``ANTHROPIC_*`` variables on ``os.environ``; OpenRouter
+    uses its required ``ANTHROPIC_AUTH_TOKEN`` route and an explicitly empty
+    ``ANTHROPIC_API_KEY``.  Any pre-existing raw ``ANTHROPIC_*``/
+    ``DAYDREAM_JUDGE_*`` credential is cleared first so a host-inherited secret
+    cannot leak into the reviewed scope.
     """
     source = dict(os.environ if env is None else env)
     for prefix in ("DAYDREAM_JUDGE_", "ANTHROPIC_"):
         for key in [k for k in os.environ if k.startswith(prefix)]:
             os.environ.pop(key, None)
     api_key = source.get(_API_KEY_ENV)
-    if api_key:
-        os.environ["ANTHROPIC_API_KEY"] = api_key
     base_url = source.get(_BASE_URL_ENV)
     if base_url:
         os.environ["ANTHROPIC_BASE_URL"] = base_url
+    host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    if host == "openrouter.ai":
+        if api_key:
+            os.environ["ANTHROPIC_AUTH_TOKEN"] = api_key
+        os.environ["ANTHROPIC_API_KEY"] = ""
+    elif api_key:
+        os.environ["ANTHROPIC_API_KEY"] = api_key
 
 
 def _required_env(name: str) -> str:

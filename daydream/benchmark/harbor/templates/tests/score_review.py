@@ -397,6 +397,21 @@ def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
         raise VerifierError(
             f"Judge response was not valid JSON: {_bounded_error(str(exc))}"
         ) from exc
+    error = parsed_body.get("error") if isinstance(parsed_body, dict) else None
+    if isinstance(error, dict):
+        raw_code = error.get("code")
+        try:
+            error_code = int(raw_code)
+        except (TypeError, ValueError):
+            error_code = -1
+        message = _bounded_error(error.get("message") or "upstream judge error")
+        if error_code == 429 or error_code >= 500:
+            # OpenRouter can wrap an upstream 429/5xx in an HTTP-200 JSON
+            # envelope. Treat that envelope like the corresponding transport
+            # failure so transient free-provider overloads use the shared retry
+            # budget instead of aborting the whole calibration.
+            raise _Retryable(f"Judge upstream error {error_code}: {message}")
+        raise VerifierError(f"Judge response error {error_code}: {message}")
     text = content(parsed_body)
     try:
         parsed = json.loads(text)
@@ -634,6 +649,33 @@ class OpenAIJudgeClient:
                 {"role": "user", "content": user},
             ],
         }
+        # OpenRouter reasoning models can spend the entire small judge budget
+        # on hidden reasoning, truncating the JSON verdict. The verifier only
+        # needs the bounded decision object, so disable reasoning on this
+        # provider while leaving generic OpenAI-compatible endpoints unchanged.
+        if (urllib.parse.urlsplit(self.base_url).hostname or "").lower() == "openrouter.ai":
+            payload["reasoning"] = {"effort": "none"}
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "verdict",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "match": {"type": "boolean"},
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
+                            "reasoning": {"type": "string"},
+                        },
+                        "required": ["match", "confidence", "reasoning"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "content-type": "application/json",
