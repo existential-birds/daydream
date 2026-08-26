@@ -33,8 +33,8 @@ from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import (
     DEFAULT_ARCHIVE_ROOT,
-    GIT_DIFF_HARDENING_FLAGS,
     candidate_diff_cmd,
+    candidate_quiet_diff_cmd,
     fetch_run_dir,
     verify_seal,
 )
@@ -186,18 +186,7 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     # commit daydream's own artifacts into the tree, but they are never a fix
     # signal.
     diff = await runtime.run(
-        [
-            "git",
-            "-C",
-            repo,
-            "diff",
-            *GIT_DIFF_HARDENING_FLAGS,
-            "--quiet",
-            head_sha,
-            "HEAD",
-            "--",
-            DAYDREAM_EXCLUDE,
-        ],
+        candidate_quiet_diff_cmd(repo, head_sha, [DAYDREAM_EXCLUDE], include_head=True),
         {},
     )
     return diff.exit_code == 1
@@ -292,17 +281,7 @@ async def _protected_test_paths_unchanged(
 
     probes = [
         (
-            [
-                "git",
-                "-C",
-                repo,
-                "diff",
-                *GIT_DIFF_HARDENING_FLAGS,
-                "--quiet",
-                head_sha,
-                "--",
-                *oracle_pathspecs,
-            ],
+            candidate_quiet_diff_cmd(repo, head_sha, oracle_pathspecs),
             diff_changed,
         ),
         (
