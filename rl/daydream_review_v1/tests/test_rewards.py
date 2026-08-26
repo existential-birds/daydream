@@ -1692,3 +1692,62 @@ async def test_verify_checkout_textconv_ignored(
     assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
         "the repo patch must still be applied despite the attribute-selected diff.evil"
     )
+
+
+async def test_fixes_applied_quiet_probe_carries_hardening_flags() -> None:
+    from conftest import FakeRuntime
+
+    from daydream_review_v1 import taskset
+
+    rt = FakeRuntime(exit_code=0)
+    await taskset._fixes_applied(rt, "/work/repo", "deadbeef")
+    # rt.commands[0] is the git status probe; [1] is the git diff --quiet probe.
+    assert rt.commands[1] == [
+        "git", "-C", "/work/repo", "diff",
+        "--no-ext-diff", "--no-textconv", "--quiet",
+        "deadbeef", "HEAD", "--", taskset.DAYDREAM_EXCLUDE,
+    ]
+
+
+async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags() -> None:
+    from conftest import FakeRuntime
+
+    from daydream_review_v1 import taskset
+
+    rt = FakeRuntime(exit_code=0)
+    await taskset._protected_test_paths_unchanged(rt, "/work/repo", "deadbeef", ["tests"])
+    # rt.commands[0] is the first probe row: the git diff --quiet oracle probe.
+    assert rt.commands[0] == [
+        "git", "-C", "/work/repo", "diff",
+        "--no-ext-diff", "--no-textconv", "--quiet",
+        "deadbeef", "--", *["tests"], *taskset.ORACLE_IGNORE_PATHSPECS,
+    ]
+
+
+async def test_fixes_applied_ignores_trusted_external_helper(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A trusted always-successful diff.external cannot hide a clean committed fix."""
+    from daydream_review_v1 import taskset
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    subprocess.run(["git", "-C", str(repo), "config", "diff.external", "/bin/true"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "diff.trustExitCode", "true"], check=True)
+    assert await taskset._fixes_applied(runtime, str(repo), task.data.head_sha) is True
+
+
+async def test_protected_test_paths_unchanged_ignores_trusted_external_helper(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A trusted always-successful diff.external cannot hide tampered protected paths."""
+    from daydream_review_v1 import taskset
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha)
+    (repo / "tests" / "test_calc.py").write_text("gutted\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "config", "diff.external", "/bin/true"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "diff.trustExitCode", "true"], check=True)
+    assert await taskset._protected_test_paths_unchanged(
+        runtime, str(repo), task.data.head_sha, task.data.protected_test_paths
+    ) is False

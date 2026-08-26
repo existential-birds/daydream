@@ -174,8 +174,8 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     # at a moved HEAD is the successful-fix case, not the untouched one. But
     # "moved" is not enough — an empty commit advances HEAD while leaving the
     # committed tree identical to the baked snapshot, so compare the committed
-    # contents, not the ref. `git diff --quiet` exits 1 when the trees differ
-    # (a fix) and 0 when they are identical (no fix); any other exit (e.g. 128
+    # contents, not the ref. `git diff --no-ext-diff --no-textconv --quiet` exits
+    # 1 when the trees differ (a fix) and 0 when they are identical (no fix); any other exit (e.g. 128
     # for an unresolvable baked SHA) is treated as no-fix, preserving the
     # deliberate false-negative bias. Both checks exclude `.daydream/` — the
     # agent may commit daydream's own artifacts into the tree, but they are
@@ -186,6 +186,8 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
             "-C",
             repo,
             "diff",
+            "--no-ext-diff",
+            "--no-textconv",
             "--quiet",
             head_sha,
             "HEAD",
@@ -216,7 +218,8 @@ async def _protected_test_paths_unchanged(
     run -> fail-closed-check shape, expressed as a table of ``(argv, changed)``
     pairs over :func:`_probe`.
 
-    - ``git diff --quiet <head_sha> -- <paths>`` compares the baked head against
+    - ``git diff --no-ext-diff --no-textconv --quiet <head_sha> -- <paths>``
+      compares the baked head against
       the WORKING TREE (no ``HEAD`` argument — that form would miss uncommitted
       tampering, the exact attack). Exit 0 means no tracked difference
       (committed, staged, unstaged, deleted, or renamed); any other exit — a
@@ -282,7 +285,18 @@ async def _protected_test_paths_unchanged(
 
     probes = [
         (
-            ["git", "-C", repo, "diff", "--quiet", head_sha, "--", *oracle_pathspecs],
+            [
+                "git",
+                "-C",
+                repo,
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--quiet",
+                head_sha,
+                "--",
+                *oracle_pathspecs,
+            ],
             diff_changed,
         ),
         (
