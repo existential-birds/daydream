@@ -43,7 +43,7 @@ daydream --non-interactive /path/to/project        # unattended/harness run
 ```
 
 The rest of the surface — `post-findings`, `setup`, `summarize`, `ext validate`, `corpus *` — is in
-README "Additional Commands" / "Corpus Commands"; `daydream bench` is in `docs/benchmark.md`.
+README "Additional Commands" / "Corpus Commands"; `daydream benchmark` is in `docs/benchmark.md`.
 
 ## Testing standard (mandatory)
 
@@ -222,7 +222,7 @@ Full contract: `docs/extensions.md`.
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Attempts default 20, all backends |
 | `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex | Parallel `execute()` hint (default 8; bad value warns). Pi uses `DAYDREAM_PI_FANOUT_CONCURRENCY` (default 10) |
 | `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (default 2700; `0` disables) |
-| `MARTIAN_API_KEY` / `_BASE_URL` / `_MODEL`, `ANTHROPIC_API_KEY` | Benchmark | Judge endpoint/model (`martian` / `anthropic-direct`) |
+| `DAYDREAM_REVIEW_API_KEY` / `DAYDREAM_JUDGE_API_KEY` | Benchmark | Harbor reviewer/judge OpenRouter keys; read from the launching env, never written into the workspace or task |
 
 Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).
 

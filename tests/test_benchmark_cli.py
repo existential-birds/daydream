@@ -369,18 +369,6 @@ def test_compiled_entrypoint_preflights_credentials(tmp_path, route_args, env_ov
     assert r.returncode != 0 and credential in (r.stdout + r.stderr)
 
 
-def test_benchmark_docs_name_direct_anthropic_judge_route():
-    text = Path("docs/benchmark.md").read_text()
-    assert "--judge-route anthropic-direct" in text
-    assert "ANTHROPIC_API_KEY" in text
-    assert "`MARTIAN_BASE_URL` is invalid" in text
-    assert "--reviewer-backend" in text and "--model" in text
-    # The in-process OpenAI-compatible route is documented too.
-    assert "--judge-route openai-compatible" in text
-    assert "OPENAI_API_KEY" in text
-    assert "OPENAI_BASE_URL" in text
-
-
 def test_bench_dotenv_autoloads_credential_through_compiled_entrypoint(tmp_path):
     (tmp_path / ".env").write_text("MARTIAN_API_KEY=sk-from-dotenv\n")
     env = {**os.environ}
