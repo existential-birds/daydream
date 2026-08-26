@@ -851,16 +851,12 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
         except ValidationError as exc:
             raise CompileError(f"{root}: invalid benchmark.yaml: {exc}") from exc
         # The compiled network policy is sourced from the workspace's persisted
-        # privacy allowlists -- never a hardcoded default. The pydantic model
-        # already rejects empty lists, but re-raise fail-closed so a private
-        # workspace can never silently compile an unsafe (or hostless) policy.
+        # privacy allowlists -- never a hardcoded default. The Privacy field
+        # validators (_normalize_host_list) already reject empty/malformed
+        # lists during model_validate, surfacing above as CompileError, so an
+        # unsafe (or hostless) policy can never reach the task render.
         reviewer_hosts = list(manifest_model.privacy.reviewer_allowed_hosts)
         judge_hosts = list(manifest_model.privacy.judge_allowed_hosts)
-        if not reviewer_hosts or not judge_hosts:
-            raise CompileError(
-                "network policy requires non-empty privacy reviewer_allowed_hosts "
-                "and judge_allowed_hosts in benchmark.yaml"
-            )
         case_docs: dict[str, dict] = {}
         for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
             dumped = doc.model_dump(mode="json")

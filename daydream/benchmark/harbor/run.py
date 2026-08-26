@@ -2,7 +2,7 @@
 
 A thin safety wrapper around Harbor 0.21 that fail-closes on every preflight
 before Harbor starts (same-interpreter Harbor, compiled-tree presence,
-endpoint hosts vs the workspace allowlists, telemetry/upload rejection,
+endpoint hosts vs the compiled network policy, telemetry/upload rejection,
 and Docker allowlist support), prints a pre-run spend summary, and
 records every run in a private ``runtime/harbor.json`` cleanup ledger. Harbor
 remains the only orchestrator/results implementation; this module only
@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -64,13 +65,46 @@ def _load_workspace_privacy(workspace: Path) -> dict[str, Any]:
     return privacy
 
 
-def _normalize_allowlist(values: Any, what: str) -> list[str]:
-    """Normalize a workspace allowlist with the schema's hostname rules."""
-    from daydream.benchmark.schema import normalize_hostname
+def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | None:
+    """The reviewer/judge egress allowlists Harbor will actually enforce.
 
-    if not isinstance(values, list) or not values:
-        raise RunBlocked(f"privacy {what} must be a non-empty host list")
-    return [normalize_hostname(str(v)) for v in values]
+    Harbor applies the policy written into each compiled case's ``task.toml``
+    -- ``[agent].allowed_hosts`` (reviewer boundary) and
+    ``[verifier.environment].allowed_hosts`` (judge boundary) -- not the raw
+    ``benchmark.yaml``, which may be stale relative to the compiled tree
+    (``compile_workspace`` threads one reviewer/judge allowlist into every
+    compiled case; the task hashed digest is locked into ``compiled_lock_sha256``).
+    Reading the compiled cases enumerated by ``benchmark.lock.json`` keeps the
+    preflight checking the same artifact Harbor executes, ignoring any runtime
+    ``jobs/`` trial copies of ``task.toml`` that may linger from earlier runs.
+    Returns ``None`` when there are no compiled cases (nothing Harbor runs, so
+    no egress boundary to enforce). Fail-closed: a listed case without a
+    readable ``task.toml`` raises ``RunBlocked`` -- the egress check is never
+    skipped when a policy exists.
+    """
+    compiled = workspace / "harbor"
+    lock_path = compiled / "benchmark.lock.json"
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunBlocked(f"cannot read compiled lock at {lock_path}: {exc}") from exc
+    cases = lock.get("cases") if isinstance(lock, dict) else None
+    keys = list(cases.keys()) if isinstance(cases, dict) else []
+    if not keys:
+        return None
+    task_tomls = sorted((compiled / str(key) / "task.toml").resolve() for key in keys)
+    reviewer: set[str] = set()
+    judge: set[str] = set()
+    for path in task_tomls:
+        try:
+            doc = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise RunBlocked(f"cannot read compiled network policy at {path}: {exc}") from exc
+        reviewer.update(doc.get("agent", {}).get("allowed_hosts") or [])
+        judge.update(
+            doc.get("verifier", {}).get("environment", {}).get("allowed_hosts") or []
+        )
+    return sorted(reviewer), sorted(judge)
 
 
 def _reviewer_host_from_env(env: dict[str, Any]) -> str:
@@ -359,7 +393,7 @@ def _preflight(
 
     Checks, in order, without stopping at the first failure:
       1. same-interpreter Harbor resolution + compiled-tree presence
-      2. judge/reviewer egress hosts vs the workspace allowlists
+      2. judge/reviewer egress hosts vs the compiled network policy
       3. telemetry/upload rejection (archive + uploads must be ``disabled``)
       4. Docker allowlist support (no public-networking fallback)
     """
@@ -376,22 +410,12 @@ def _preflight(
             failures.append(f"missing compiled Harbor tree file: harbor/{required}")
 
     try:
-        privacy = _load_workspace_privacy(workspace)
-    except storage.WorkspaceCorrupt as exc:
+        compiled_hosts = _compiled_allowed_hosts(workspace)
+    except RunError as exc:
         failures.append(str(exc))
-        privacy = {}
-
-    if privacy:
-        try:
-            reviewer_hosts = _normalize_allowlist(
-                privacy.get("reviewer_allowed_hosts"), "reviewer_allowed_hosts"
-            )
-            judge_hosts = _normalize_allowlist(
-                privacy.get("judge_allowed_hosts"), "judge_allowed_hosts"
-            )
-        except RunBlocked as exc:
-            failures.append(str(exc))
-            reviewer_hosts, judge_hosts = [], []
+        compiled_hosts = None
+    if compiled_hosts is not None:
+        reviewer_hosts, judge_hosts = compiled_hosts
         for label, resolve, hosts in (
             ("judge", calibrate._judge_host_from_env, judge_hosts),
             ("reviewer", _reviewer_host_from_env, reviewer_hosts),
@@ -403,9 +427,16 @@ def _preflight(
                 continue
             if host and host not in hosts:
                 failures.append(
-                    f"{label} host {host!r} is not in the workspace "
-                    f"{label}_allowed_hosts allowlist ({sorted(hosts)})"
+                    f"{label} host {host!r} is not in the compiled "
+                    f"{label} allowed_hosts policy ({sorted(hosts)})"
                 )
+
+    try:
+        privacy = _load_workspace_privacy(workspace)
+    except storage.WorkspaceCorrupt as exc:
+        failures.append(str(exc))
+        privacy = {}
+    if privacy:
         for field in ("archive", "uploads"):
             value = privacy.get(field)
             if value != "disabled":

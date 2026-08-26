@@ -55,6 +55,9 @@ def _ws(tmp_path, **privacy):
          "reviewer_allowed_hosts": ["review.example"], "judge_data": "finding_text_and_location_only",
          "judge_allowed_hosts": ["127.0.0.1"], "archive": "disabled", "uploads": "disabled"}
     p.update(privacy)
+    _seed_compiled_task(
+        ws, reviewer=p["reviewer_allowed_hosts"], judge=p["judge_allowed_hosts"]
+    )
     (ws / "benchmark.yaml").write_text(json.dumps({
         "schema_version": 1, "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
         "created_at": "2026-08-21T12:00:00Z",
@@ -80,6 +83,26 @@ def _seed_compiled_lock(ws, wheel=_WHEEL):
     lock = {"schema_version": 1, "cases": {"case-a": {"key": "case-a"}}, "files": {},
             "daydream": wheel}
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
+
+
+def _seed_compiled_task(ws, *, reviewer, judge):
+    """Write the compiled task.toml egress policy Harbor will enforce.
+
+    Mirrors what ``compile_workspace`` threads into ``harbor/case-*/task.toml``
+    (reviewer -> ``[agent].allowed_hosts``, judge -> ``[verifier.environment].allowed_hosts``)
+    so the preflight, which now reads the compiled tree (not raw benchmark.yaml),
+    has the same artifact Harbor executes.
+    """
+    case = ws / "harbor" / "case-a"
+    case.mkdir(parents=True, exist_ok=True)
+    (case / "task.toml").write_text(
+        "[agent]\n"
+        f"allowed_hosts = {json.dumps(reviewer)}\n"
+        "\n"
+        "[verifier.environment]\n"
+        f"allowed_hosts = {json.dumps(judge)}\n",
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +167,23 @@ def test_preflight_blocks_reviewer_host_outside_allowlist(tmp_path):
     errs = run_mod._preflight(_ws(tmp_path), oracle=True,
                               env=_env(DAYDREAM_REVIEW_BASE_URL="http://other.example"), docker_ok=lambda: True)
     assert any("reviewer host" in e and "other.example" in e for e in errs)
+
+
+def test_preflight_enforces_compiled_task_policy_not_raw_manifest(tmp_path):
+    """Preflight reads the compiled task.toml Harbor enforces, not raw yaml.
+
+    A host ``benchmark.yaml`` permits but the compiled tree rejects (the tree
+    predates the manifest edit) must still block the run, because the stale
+    compiled task.toml is the artifact Harbor actually executes.
+    """
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path, judge_allowed_hosts=["127.0.0.1", "stale.example"])
+    # simulate a compiled tree produced before the manifest added stale.example
+    _seed_compiled_task(ws, reviewer=["review.example"], judge=["127.0.0.1"])
+    errs = run_mod._preflight(ws, oracle=True,
+                              env=_env(DAYDREAM_JUDGE_BASE_URL="http://stale.example"), docker_ok=lambda: True)
+    assert any("judge host" in e and "stale.example" in e for e in errs)
 
 
 def test_preflight_blocks_uploads_enabled(tmp_path):

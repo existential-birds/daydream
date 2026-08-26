@@ -130,21 +130,30 @@ def test_calibrate_invalidation_inputs_folds_candidate_digest():
     assert "profile_digest" not in legacy
 
 
-def test_candidate_scoped_receipt_matches_preflight_inputs():
-    """A candidate-scoped receipt produced through the shared invalidation-inputs
-    producer serializes deterministically (byte-exact is_receipt_current
-    contract)."""
+def test_candidate_scoped_receipt_matches_preflight_inputs(tmp_path):
+    """A candidate-scoped receipt round-trips write -> read as current.
+
+    Builds the receipt through _build_receipt/_write_receipt with the candidate
+    digest folded in, then asserts is_receipt_current returns True when the
+    preflight recomputes inputs from the shared _invalidation_inputs producer.
+    """
     from daydream.benchmark.harbor import calibrate
 
     env = {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "abc123"}
     # Use the same real fixture + judge template the receipt paths load internally.
     sr = calibrate._load_judge_template()
     pairs = calibrate._load_fixture()
-    # Receipt write path and the read-path preflight share the one producer
-    # (calibrate._invalidation_inputs), so both must serialize identically.
-    write_inputs = calibrate._invalidation_inputs(env, pairs, sr)
-    check_inputs = calibrate._invalidation_inputs(env, pairs, sr)
-    assert calibrate._serialize_inputs(write_inputs) == calibrate._serialize_inputs(check_inputs)
+    receipt = calibrate._build_receipt(
+        sr, pairs, env, passed=True,
+        balanced_accuracy=0.9583,
+        confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
+        disagreements=[],
+    )
+    receipt_path = calibrate._write_receipt(tmp_path, receipt)
+    # The read-path preflight recomputes the candidate-scoped inputs through the
+    # one shared producer and must accept the written receipt as current.
+    current = calibrate._invalidation_inputs(env, pairs, sr)
+    assert calibrate.is_receipt_current(receipt_path, current) is True
 # Issue #885 R1 items 2/10: the control-plane benchmark handler must thread the
 # candidate profile digest into the env dict it hands to run_run, because run.py
 # reads DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from that env dict and the
