@@ -34,7 +34,13 @@ FORBIDDEN_LEGACY_TOKENS = ("martian", "MARTIAN", "CodeRabbit", "anthropic-direct
 
 
 def _parser_choices() -> set[str]:
-    return set(_build_benchmark_parser()._subparsers._group_actions[0].choices)
+    subparsers = _build_benchmark_parser()._subparsers
+    if subparsers is None:
+        raise AssertionError("benchmark parser has no subparsers")
+    choices = subparsers._group_actions[0].choices
+    if choices is None:
+        raise AssertionError("benchmark parser subcommands are empty")
+    return set(choices)
 
 
 def _code_lines(text: str) -> list[str]:
