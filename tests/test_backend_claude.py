@@ -262,6 +262,24 @@ async def test_max_turns_result_raises_typed_error(patch_sdk):
     ("git log; rm x", False),            # semicolon chain
     ("echo $(rm x)", False),             # command substitution
     ("git logfoo", False),               # prefix must be word-bounded
+    ("git status > status.txt", False),  # output redirection creates/truncates a file
+    ("cat README.md >> copy.txt", False),# append redirection
+    ("cat < README.md", False),          # input redirection
+    ("git log foo# > status.txt", False),# mid-word '#' must not blind the redirect scan
+    ("cat a#b > f", False),               # mid-word '#' hidden in an arg, then redirect
+    ("git log foo#; rm x", False),        # mid-word '#' then a chaining operator
+    ("git diff --output=diff.patch", False),  # git output-file option, equals form
+    ("git log --output log.txt", False), # git output-file option, separated form
+    ("( rm x )", False),                 # command-leading subshell group executes
+    ("(rm x)", False),                   # spacing-free subshell at command start still denies
+    ("(git status > out.txt)", False),   # subshell wrapping a redirect still denies
+    ("ls -la ( x )", True),              # mid-command parens: bash syntax error, nothing runs
+    ("git log --format=%C(red)%h", True),# git color placeholder: parens glued to a word
+    ("cat foo(1).txt", True),            # parens glued into a filename word
+    ("git log\nrm x", False),           # newline command separator -> fail closed
+    ("git log 'unclosed", False),        # malformed quoting -> fail closed
+    ("git log --grep='fix|bug'", True),  # quoted | is argument content, not an operator
+    ("git diff HEAD~1 HEAD -- --output", True),  # --output after -- is a path arg; scan stops at --
     ("", False),                          # empty → fail closed
 ])
 def test_read_only_bash_guard_decision(cmd, allowed):
@@ -347,6 +365,11 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
         {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}
     )
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    deny_git_output = await decide(
+        {"tool_name": "Bash", "tool_input": {"command": "git diff --output=diff.patch"}}
+    )
+    assert deny_git_output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     allow_bash = await decide(
         {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}
