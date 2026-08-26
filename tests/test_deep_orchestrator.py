@@ -3406,11 +3406,22 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     assert exit_code == 0
     assert len(captured) == 1, "pre-flight notice must fire exactly once"
     notice = captured[0]
-    assert len(notice["stages"]) == 5
+    assert notice["stages"] == [
+        "TTT intent",
+        "TTT alternative-review",
+        "per-stack reviews",
+        "structural review (parallel with per-stack reviews)",
+        "cross-stack merge",
+        "optional fix gate",
+    ]
     # Agent count = 2 TTT + N per-stack + N parse + 1 merge + 1 arbiter;
     # fixture yields N=4 (python + react + generic + structure), so 2 + 2*4 + 1 + 1 = 12.
     assert notice["agent_count"] == 12
-    assert len(notice["stack_lines"]) >= 1
+    assert notice["stack_lines"] == [
+        "python: 1 file(s)",
+        "react: 1 file(s)",
+        "generic: 1 file(s)",
+    ]
     # Issue #309 finding 8: the sweep is enabled by default, so the pre-flight
     # estimate appends an upper-bound note. The fixture changes 3 files, so the
     # sweep could add up to 2 x min(3, max_files=10) = 6 review+parse agents.
