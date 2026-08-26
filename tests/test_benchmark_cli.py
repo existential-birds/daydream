@@ -28,6 +28,14 @@ def test_benchmark_parser_has_build_harbor_and_compiled():
     assert validate_args.compiled is True
 
 
+def test_calibrate_judge_help_describes_diagnostic_agreement():
+    parser = _build_benchmark_parser()
+    help_text = parser._subparsers._group_actions[0].choices["calibrate-judge"].format_help()
+    assert "diagnostic" in help_text.lower() or "agreement" in help_text.lower()
+    assert "calibrat" in help_text.lower()          # still called calibrate-judge
+    assert "unverified" in help_text.lower()
+
+
 def test_benchmark_build_harbor_real_cli_entry(tmp_path, fake_gh, capsys):
     import importlib.metadata
 

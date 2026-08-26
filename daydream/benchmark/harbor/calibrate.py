@@ -1,13 +1,18 @@
-"""Calibration gate for configured semantic-match judges.
+"""Optional diagnostic of a configured semantic-match judge's agreement with a labeled fixture.
 
-Drives the exact packaged Harbor judge path (``score_review.judge_pairs``,
+Runs the exact packaged Harbor judge path (``score_review.judge_pairs``,
 loaded via importlib from ``templates/tests/`` so the bare ``import
 verifier_core`` resolves to the sibling copy) against a fixed 24-pair labeled
-fixture, three times per pair (72 judge calls). Computes a three-part pass
-gate — majority correctness, balanced accuracy, and per-pair retained-edge
-threshold-flip stability — and, on pass, records a private deterministic
-invalidation-aware receipt at ``<workspace>/runtime/calibration-receipt.json``.
-Measuring, never tuning: no weights or thresholds are derived here.
+fixture, three times per pair (72 judge calls). Computes a three-part
+agreement metric — majority correctness, balanced accuracy, and per-pair
+retained-edge threshold-flip stability — and, on pass, records a private
+deterministic invalidation-aware receipt at
+``<workspace>/runtime/calibration-receipt.json``.
+
+A passing result means only that the configured judge agrees with this
+unverified fixture; it is not calibrated or correct, and this module is not
+an authorization gate for any other path. Measuring, never tuning: no
+weights or thresholds are derived here.
 """
 
 from __future__ import annotations
@@ -459,13 +464,14 @@ def run_calibration(
     http: Any = None,
     confirm: Callable[[str], bool] | None = None,
 ) -> int:
-    """Drive the calibration gate end-to-end and return an exit code.
+    """Run the diagnostic judge-agreement check end-to-end and return an exit code.
 
     Order: manifest/host validation -> fixture + template load -> confirmation
-    gate -> client build -> 72-call judge driver -> three-part pass gate.
-    On pass a private receipt is written; on failure (or refusal) no receipt is
-    written and the exit code is nonzero (fail-closed). Never measures by
-    tuning anything.
+    gate -> client build -> 72-call judge driver -> three-part agreement
+    metric. A passing result means the configured judge agrees with the
+    unverified fixture — it is not calibrated or correct. On pass a private
+    receipt is written; on failure (or refusal) no receipt is written and the
+    exit code is nonzero (fail-closed). Never measures by tuning anything.
     """
 
     env = dict(env) if env is not None else dict(os.environ)
