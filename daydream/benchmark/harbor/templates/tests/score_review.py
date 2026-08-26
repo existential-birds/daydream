@@ -577,17 +577,13 @@ _CHAT_COMPLETIONS_PATH = "/chat/completions"
 def resolve_base_url(api_key: str, base_url_env: str | None) -> str:
     """Resolve the Chat Completions base URL from the environment.
 
-    An explicit base URL always wins; an ``sk-or-`` OpenRouter key with no pin
-    routes to OpenRouter; anything else defaults to OpenAI direct. The resolved
-    URL is only a candidate: it is validated against the effective judge-host
-    allowlist (scheme/host/form) at the client build and initial-request sites
-    before any judge call.
+    A configured base URL is required. The resolved URL is validated against
+    the effective judge-host allowlist (scheme/host/form) at the client build
+    and initial-request sites before any judge call.
     """
-    if base_url_env:
-        return base_url_env
-    if api_key.startswith(_OPENROUTER_KEY_PREFIX):
-        return _OPENROUTER_BASE_URL
-    return _OPENAI_DEFAULT_BASE_URL
+    if not base_url_env:
+        raise VerifierError("missing DAYDREAM_JUDGE_BASE_URL")
+    return base_url_env
 
 
 def _openai_content(body: dict[str, Any]) -> str:
@@ -654,12 +650,11 @@ class OpenAIJudgeClient:
                 {"role": "user", "content": user},
             ],
         }
-        # OpenRouter reasoning models can spend the entire small judge budget
-        # on hidden reasoning, truncating the JSON verdict. The verifier only
-        # needs the bounded decision object, so disable reasoning on this
-        # provider while leaving generic OpenAI-compatible endpoints unchanged.
+        # Keep reasoning enabled because some OpenRouter models require it,
+        # but exclude it from the response so it cannot consume the bounded
+        # judge output budget. Generic OpenAI-compatible endpoints are unchanged.
         if (urllib.parse.urlsplit(self.base_url).hostname or "").lower() == "openrouter.ai":
-            payload["reasoning"] = {"effort": "none"}
+            payload["reasoning"] = {"exclude": True}
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {

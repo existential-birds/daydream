@@ -105,6 +105,13 @@ def test_judge_host_resolved_from_env():
     assert _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "anthropic"}) == "api.anthropic.com"
     with pytest.raises(ValueError, match="missing DAYDREAM_JUDGE_PROVIDER"):
         _judge_host_from_env({})
+    with pytest.raises(ValueError, match="unsupported DAYDREAM_JUDGE_PROVIDER"):
+        _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "bogus"})
+    with pytest.raises(ValueError, match="missing DAYDREAM_JUDGE_BASE_URL"):
+        _judge_host_from_env({
+            "DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
+            "DAYDREAM_JUDGE_API_KEY": "sk-or-key",
+        })
 
 
 def test_out_of_allowlist_host_rejected(tmp_path):
@@ -348,6 +355,13 @@ def ws_factory():
         return ws
 
     return _build
+
+
+def test_run_calibration_reports_missing_judge_provider(ws_factory, tmp_path, capsys):
+    from daydream.benchmark.harbor.calibrate import run_calibration
+
+    assert run_calibration(ws_factory(tmp_path), yes=True, env={}) == 1
+    assert "missing DAYDREAM_JUDGE_PROVIDER" in capsys.readouterr().err
 
 
 def _scripted_http(responses):

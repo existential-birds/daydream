@@ -149,16 +149,23 @@ def _judge_host_from_env(env: dict[str, Any]) -> str:
     """Return the normalized-lowercase judge host for ``env``.
 
     An explicit anthropic provider routes to ``api.anthropic.com``; the
-    openai-compatible provider resolves its base URL via the packaged
-    ``resolve_base_url`` and returns that URL's host. Missing providers fail
-    closed rather than selecting an implicit API.
+    openai-compatible provider requires an explicit base URL, resolves it via
+    the packaged ``resolve_base_url``, and returns that URL's host. Missing
+    providers fail closed rather than selecting an implicit API.
     """
     sr = _load_judge_template()
     provider = env.get("DAYDREAM_JUDGE_PROVIDER") or ""
     if not provider:
         raise ValueError("missing DAYDREAM_JUDGE_PROVIDER")
+    if provider not in {"anthropic", "openai-compatible"}:
+        raise ValueError(
+            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; "
+            "expected anthropic or openai-compatible"
+        )
     if provider == "anthropic":
         return "api.anthropic.com"
+    if not env.get("DAYDREAM_JUDGE_BASE_URL"):
+        raise ValueError("missing DAYDREAM_JUDGE_BASE_URL for openai-compatible provider")
     base_url = sr.resolve_base_url(
         env.get("DAYDREAM_JUDGE_API_KEY") or "", env.get("DAYDREAM_JUDGE_BASE_URL")
     )
@@ -502,8 +509,8 @@ def run_calibration(
     except storage.WorkspaceCorrupt as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    host = _judge_host_from_env(env)
     try:
+        host = _judge_host_from_env(env)
         _validate_workspace_host(allowlist, host)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

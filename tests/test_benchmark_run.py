@@ -153,6 +153,19 @@ def test_preflight_ok_when_all_checks_pass(tmp_path):
     assert errs == []
 
 
+def test_preflight_requires_explicit_judge_endpoint(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    errs = run_mod._preflight(
+        _ws(tmp_path),
+        oracle=True,
+        env=_env(DAYDREAM_JUDGE_API_KEY="sk-or-abc", DAYDREAM_JUDGE_BASE_URL=None),
+        docker_ok=lambda: True,
+    )
+
+    assert any("missing DAYDREAM_JUDGE_BASE_URL" in error for error in errs)
+
+
 def test_preflight_blocks_judge_host_outside_allowlist(tmp_path):
     import daydream.benchmark.harbor.run as run_mod
 

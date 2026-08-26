@@ -99,8 +99,10 @@ async def test_anthropic_client_posts_messages_and_returns_verdict(sr_module) ->
 @pytest.mark.asyncio
 async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_module) -> None:
     sr = sr_module
-    assert sr.resolve_base_url("sk-or-abc", None) == "https://openrouter.ai/api/v1"
-    assert sr.resolve_base_url("sk-xyz", None) == "https://api.openai.com/v1"
+    with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_BASE_URL"):
+        sr.resolve_base_url("sk-or-abc", None)
+    with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_BASE_URL"):
+        sr.resolve_base_url("sk-xyz", None)
     assert sr.resolve_base_url("sk-xyz", "https://custom.example/v1") == "https://custom.example/v1"
 
     calls = []
@@ -122,7 +124,7 @@ async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_modul
 
     client = sr.OpenAIJudgeClient(
         api_key="sk-or-abc",
-        model="m",
+        model="google/gemini-3.5-flash",
         base_url="https://openrouter.ai/api/v1",
         http=FakeClient(),
     )
@@ -130,7 +132,7 @@ async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_modul
     assert raw == {"match": False, "confidence": 0.2, "reasoning": "no"}
     assert calls[0][0] == "https://openrouter.ai/api/v1/chat/completions"
     assert calls[0][1]["Authorization"] == "Bearer sk-or-abc"
-    assert calls[0][2]["reasoning"] == {"effort": "none"}
+    assert calls[0][2]["reasoning"] == {"exclude": True}
     assert calls[0][2]["response_format"] == {
         "type": "json_schema",
         "json_schema": {
