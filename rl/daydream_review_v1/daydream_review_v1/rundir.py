@@ -51,6 +51,16 @@ RUN_DIR_FILES: tuple[str, ...] = (
 
 DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
 
+#: Flags disabling git's two repository-configurable diff-rewrite mechanisms: a
+#: ``diff.external`` helper (optionally with ``diff.trustExitCode``) configured
+#: in ``.git/config`` and per-path ``.gitattributes`` ``diff.*.textconv``
+#: drivers. The supervisor derives every load-bearing diff as (the root) host
+#: identity, while a repo-local external helper would execute under the repo's
+#: own untrusted identity. Single-sourced here so every load-bearing ``git diff``
+#: deriv site carries the identical pair, and a future hardening flag added
+#: once cannot silently leave another deriv site unhardened.
+GIT_DIFF_HARDENING_FLAGS: tuple[str, str] = ("--no-ext-diff", "--no-textconv")
+
 
 def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     """Argv for re-deriving the rollout's committed diff against the baked head.
@@ -68,7 +78,7 @@ def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     """
     return [
         "git", "-C", repo, "diff",
-        "--no-ext-diff", "--no-textconv",
+        *GIT_DIFF_HARDENING_FLAGS,
         head_sha, "HEAD",
     ]
 

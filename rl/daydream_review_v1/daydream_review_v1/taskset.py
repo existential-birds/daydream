@@ -33,6 +33,7 @@ from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import (
     DEFAULT_ARCHIVE_ROOT,
+    GIT_DIFF_HARDENING_FLAGS,
     candidate_diff_cmd,
     fetch_run_dir,
     verify_seal,
@@ -175,19 +176,22 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     # "moved" is not enough — an empty commit advances HEAD while leaving the
     # committed tree identical to the baked snapshot, so compare the committed
     # contents, not the ref. `git diff --no-ext-diff --no-textconv --quiet` exits
-    # 1 when the trees differ (a fix) and 0 when they are identical (no fix); any other exit (e.g. 128
-    # for an unresolvable baked SHA) is treated as no-fix, preserving the
-    # deliberate false-negative bias. Both checks exclude `.daydream/` — the
-    # agent may commit daydream's own artifacts into the tree, but they are
-    # never a fix signal.
+    # 1 when the trees differ (a fix) and 0 when they are identical (no fix);
+    # any other exit (e.g. 128 for an unresolvable baked SHA) is treated as
+    # no-fix, preserving the deliberate false-negative bias. The hardening flags
+    # are defense-in-depth here, not a present-forgery fix: on the pinned git
+    # (2.43.0) `--quiet` never invokes diff.external or textconv, so no exit
+    # code can be forged through them; they bind a future git that changes
+    # `--quiet` semantics. Both checks exclude `.daydream/` — the agent may
+    # commit daydream's own artifacts into the tree, but they are never a fix
+    # signal.
     diff = await runtime.run(
         [
             "git",
             "-C",
             repo,
             "diff",
-            "--no-ext-diff",
-            "--no-textconv",
+            *GIT_DIFF_HARDENING_FLAGS,
             "--quiet",
             head_sha,
             "HEAD",
@@ -221,7 +225,10 @@ async def _protected_test_paths_unchanged(
     - ``git diff --no-ext-diff --no-textconv --quiet <head_sha> -- <paths>``
       compares the baked head against
       the WORKING TREE (no ``HEAD`` argument — that form would miss uncommitted
-      tampering, the exact attack). Exit 0 means no tracked difference
+      tampering, the exact attack). The hardening flags are defense-in-depth:
+      on the pinned git (2.43.0) ``--quiet`` never invokes diff.external or
+      textconv, so they bind a future git that changes ``--quiet`` semantics,
+      not a present exit-code-forgery vector. Exit 0 means no tracked difference
       (committed, staged, unstaged, deleted, or renamed); any other exit — a
       tracked diff (1) or a Git error such as 128 for an unresolvable baked SHA —
       means the oracle changed. A tracked ``.gitignore`` edit is itself a
@@ -290,8 +297,7 @@ async def _protected_test_paths_unchanged(
                 "-C",
                 repo,
                 "diff",
-                "--no-ext-diff",
-                "--no-textconv",
+                *GIT_DIFF_HARDENING_FLAGS,
                 "--quiet",
                 head_sha,
                 "--",

@@ -1724,30 +1724,14 @@ async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flag
     ]
 
 
-async def test_fixes_applied_ignores_trusted_external_helper(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
-) -> None:
-    """A trusted always-successful diff.external cannot hide a clean committed fix."""
-    from daydream_review_v1 import taskset
-
-    task = _task(corpus_mini_dir, fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    subprocess.run(["git", "-C", str(repo), "config", "diff.external", "/bin/true"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "diff.trustExitCode", "true"], check=True)
-    assert await taskset._fixes_applied(runtime, str(repo), task.data.head_sha) is True
-
-
-async def test_protected_test_paths_unchanged_ignores_trusted_external_helper(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
-) -> None:
-    """A trusted always-successful diff.external cannot hide tampered protected paths."""
-    from daydream_review_v1 import taskset
-
-    task = _task(corpus_mini_dir, fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha)
-    (repo / "tests" / "test_calc.py").write_text("gutted\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "config", "diff.external", "/bin/true"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "diff.trustExitCode", "true"], check=True)
-    assert await taskset._protected_test_paths_unchanged(
-        runtime, str(repo), task.data.head_sha, task.data.protected_test_paths
-    ) is False
+# There is deliberately no real-path "trusted diff.external" attack test for
+# the --quiet oracle probes: on the pinned git (2.43.0) ``git diff --quiet``
+# never invokes diff.external or textconv, so the exit-code forgery such a
+# test would stage cannot fire and the test would pass identically with or
+# without the hardening flags -- vacuous either way. The flags' presence on
+# both probes is pinned by the argv-contract tests above
+# (test_fixes_applied_quiet_probe_carries_hardening_flags and
+# test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags);
+# the genuine repo-configurable-helper surface is the non-quiet candidate-diff
+# path, covered by test_verify_checkout_external_diff_ignored and
+# test_verify_checkout_textconv_ignored.
