@@ -36,7 +36,7 @@ body:
       label: How do you handle this today?
       description: Describe any current workarounds, manual processes, or alternative tools you use. What are the limitations of these approaches?
       placeholder: |
-        Currently I use --review-only and manually apply the fixes I agree with. This is time-consuming and defeats the purpose of automation.
+        Currently I use --review and manually apply the fixes I agree with. This is time-consuming and defeats the purpose of automation.
     validations:
       required: true
 
@@ -56,9 +56,10 @@ body:
       label: Constraints and considerations
       description: Are there any technical limitations, compatibility requirements, or edge cases to consider? What shouldn't change?
       placeholder: |
-        - Should work with all review skill types (Python, TypeScript, etc.)
+        - Should work with any review profile and stack routing
         - Must not break existing CLI interface
         - Should be configurable per-project or globally
+        - If backend/profile-sensitive, include the review-profile name, schema version, digest, source kind, and selected/auto-detected stacks where applicable
     validations:
       required: false
 
@@ -86,9 +87,11 @@ body:
         - Parse feedback phase
         - Fix phase
         - Test and heal phase
+        - Improve phase
+        - Review profile
+        - Benchmark
         - Agent SDK integration
         - UI (terminal output)
-        - Beagle skills integration
         - Configuration
         - New component
         - Other
