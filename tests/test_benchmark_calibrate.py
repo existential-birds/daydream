@@ -19,14 +19,16 @@ _CRED = re.compile(r"sk-ant-|sk-or-|Bearer |x-api-key")
 
 
 def test_fixture_is_24_pairs_12_12():
-    pairs = json.loads((_FIXTURE / "pairs.json").read_text())
+    from daydream.benchmark.harbor.calibrate import _load_fixture
+    pairs = _load_fixture()
     assert len(pairs) == 24
     labels = [p["label"] for p in pairs]
     assert labels.count("match") == 12 and labels.count("nonmatch") == 12
 
 
 def test_fixture_covers_all_eight_categories():
-    pairs = json.loads((_FIXTURE / "pairs.json").read_text())
+    from daydream.benchmark.harbor.calibrate import _load_fixture
+    pairs = _load_fixture()
     assert {p["category"] for p in pairs} >= REQUIRED_CATEGORIES
 
 
@@ -40,9 +42,14 @@ def test_fixture_is_source_free():
         assert tok not in text
 
 
-def test_fixture_has_provenance_note():
-    note = (_FIXTURE / "PROVENANCE.md").read_text()
-    assert "reviewer" in note.lower() and "source-free" in note.lower()
+def test_fixture_provenance_declares_unverified_llm_origin():
+    from daydream.benchmark.harbor.calibrate import _load_fixture, _load_provenance
+
+    prov = _load_provenance()
+    assert prov["origin"] == "llm_generated"
+    assert prov["human_reviewed"] is False
+    assert prov["labels"] == "unverified"
+    assert len(_load_fixture()) == 24          # the 24 pairs survive the shape change
 
 
 def test_every_pair_renders_within_24kib():

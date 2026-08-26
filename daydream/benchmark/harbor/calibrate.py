@@ -73,16 +73,41 @@ def _load_judge_template() -> Any:
     return _load_template_asset(_TEMPLATES / "tests" / "score_review.py", "score_review")
 
 
-def _load_fixture() -> list[dict[str, Any]]:
-    """Read and return the fixed 24-pair calibration fixture."""
+def _load_fixture_document() -> dict[str, Any]:
+    """Read and return the full calibration fixture document.
+
+    The fixture is a top-level object with a ``schema_version``, a
+    machine-readable ``provenance`` block, and the ``pairs`` array.
+    """
     path = _CALIBRATION_DIR / "pairs.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         raise ValueError(f"could not parse calibration fixture at {path}: {exc}") from exc
-    if not isinstance(data, list):
-        raise ValueError(f"calibration fixture at {path} must be a JSON list")
+    if not isinstance(data, dict):
+        raise ValueError(f"calibration fixture at {path} must be a JSON object")
     return data
+
+
+def _load_fixture() -> list[dict[str, Any]]:
+    """Read and return the fixed 24-pair calibration fixture."""
+    data = _load_fixture_document()
+    pairs = data.get("pairs")
+    if not isinstance(pairs, list):
+        raise ValueError('calibration fixture must contain a "pairs" list')
+    return pairs
+
+
+def _load_provenance() -> dict[str, Any]:
+    """Read and return the fixture's machine-readable provenance block.
+
+    Raises ``ValueError`` if the provenance block is absent or not an object.
+    """
+    data = _load_fixture_document()
+    provenance = data.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError('calibration fixture must contain a "provenance" object')
+    return provenance
 
 
 def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
