@@ -3,12 +3,11 @@
 This runbook is the operator's guide to Daydream's **private PR benchmark** — a
 GitHub-only, crash-consistent workspace where the repository's own PR-review
 cases are imported, curated, built into a Harbor dataset, and scored. It is the
-single authoritative reference for the shipped `daydream benchmark` surface and
-replaces the legacy scoring path (see [section 7](#7-legacy-path-and-failurecleanup-states)).
+single authoritative reference for the shipped `daydream benchmark` surface.
 
 The workflow is split into seven sections: prerequisites/privacy → initialize/
 import/validate → build/run → inspect/objective/aggregate → candidate-profile
-trust → upgrade path → legacy transition + failure/cleanup.
+trust → upgrade path → failure/cleanup.
 
 The shipped `daydream benchmark` surface is: `daydream benchmark init`,
 `daydream benchmark status`, `daydream benchmark validate`,
@@ -407,12 +406,6 @@ run. `daydream benchmark upgrade <dir>` (and `--dry-run`) is that repair path:
   as **corrupt**.
 
 ## 7. Legacy path and failure/cleanup states
-
-### Legacy transition note
-
-`daydream bench` is a deprecated, legacy scoring path pending deletion in
-#785. `daydream benchmark` is the supported private Harbor workflow documented
-throughout this runbook. This sentence is the only mention of the legacy path.
 
 ### Failure / recovery states
 

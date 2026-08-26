@@ -117,9 +117,9 @@ def test_benchmark_help_lists_all_subcommands():
 
 # --- Legacy cutover (MH-2, MH-12) ---
 
-def test_exactly_one_legacy_transition_note():
+def test_no_legacy_transition_note():
     text = RUNBOOK.read_text(encoding="utf-8")
-    assert len(re.findall(r"\bdaydream bench\b", text)) == 1
+    assert len(re.findall(r"\bdaydream bench\b", text)) == 0
 
 
 def test_no_active_legacy_instructions():
