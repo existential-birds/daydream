@@ -643,6 +643,38 @@ def test_oracle_receipt_has_no_calibration_state(tmp_path):
     assert "calibration_receipt_sha256" not in mapping
 
 
+def test_oracle_writes_receipt_without_calibration_file(tmp_path):
+    import hashlib
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    job_dir = ws / "harbor" / "jobs" / "j1"
+    trial = job_dir / "t1" / "verifier"
+    trial.mkdir(parents=True)
+    (trial / "reward.json").write_text(json.dumps(_score(1.0)))  # gold reproduced
+    lock_sha = hashlib.sha256(
+        (ws / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+    code = run_mod._write_oracle_receipt(ws, job_dir=job_dir,
+                                         compiled_lock_sha256=lock_sha, env=_env())
+    assert code == 0
+    receipt = json.loads((ws / "harbor" / "oracle-receipt.json").read_text())
+    assert "calibration_receipt_sha256" not in receipt
+    assert receipt["compiled_lock_sha256"] == lock_sha
+
+
+def test_default_run_still_blocks_without_oracle_receipt(tmp_path):
+    import hashlib
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    lock_sha = hashlib.sha256(
+        (ws / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
+    reason = run_mod._default_run_gate(ws, env=_env(), compiled_lock_sha256=lock_sha)
+    assert reason is not None and "no matching oracle receipt" in reason
+
+
 def test_ledger_reviewer_effort_defaults_none_when_omitted(tmp_path):
     import daydream.benchmark.harbor.run as run_mod
 
