@@ -1,6 +1,6 @@
 """Taskset: one task per harvested-corpus pull request.
 
-Tasks come from a ``daydream bench harvest``-format corpus directory — never from
+Tasks come from a harvested-corpus directory — never from
 the pinned Martian-5 held-out benchmark, whose five repositories are exactly the
 SPEC C5 exclusion list. :meth:`DaydreamReviewTaskset.load` enforces that
 unconditionally: there is no bypass parameter and no split exception. Train and
@@ -806,16 +806,16 @@ def _load_golden_comments(corpus_dir: Path) -> dict[str, list[GoldenComment]]:
     """Read ``results/benchmark_data.json``, keyed by golden URL.
 
     Raises:
-        ValueError: If the file is absent. ``daydream bench harvest`` always
-            writes it (``daydream/benchmark/harvest.py:379``), so its absence
-            means a truncated or hand-rolled corpus — defaulting to no golden
-            comments would silently zero the ``golden_overlap`` metric instead.
+        ValueError: If the file is absent. The corpus build always writes it,
+            so its absence means a truncated or hand-rolled corpus — defaulting
+            to no golden comments would silently zero the ``golden_overlap``
+            metric instead.
     """
     path = corpus_dir / "results" / "benchmark_data.json"
     if not path.exists():
         raise ValueError(
             f"corpus {corpus_dir} has no results/benchmark_data.json; "
-            "re-run `daydream bench harvest` to produce a complete corpus"
+            "re-build the corpus to produce a complete one"
         )
     corpus: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     return {
@@ -841,9 +841,9 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
         source = harvested_corpus(config.corpus_dir)
         prs = sorted(source.prs, key=lambda pr: (_repo_slug(pr.clone_url), pr.pr_number))
 
-        # harvested_corpus() drops records with no review_commit_id (daydream
-        # benchmark/corpus.py:73) — there is no snapshot to replay. Say so out loud
-        # rather than letting a corpus quietly shrink between harvest and rollout.
+        # harvested_corpus() drops records with no review_commit_id (in the
+        # vendored corpus.py loader) — there is no snapshot to replay. Say so out
+        # loud rather than letting a corpus quietly shrink between harvest and rollout.
         indexed = len(json.loads((config.corpus_dir / "index.json").read_text(encoding="utf-8")).get("prs", []))
         if indexed > len(prs):
             logger.warning(
@@ -872,7 +872,7 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
             raise ValueError(
                 f"corpus {config.corpus_dir} has record(s) with no base_sha: {', '.join(unbased)}. "
                 "A PR with no pinned base has no reviewable diff and no image to build; re-harvest "
-                "the corpus so base_sha is captured (daydream/benchmark/harvest.py:355)."
+                "the corpus so base_sha is captured."
             )
 
         manifest = load_manifest(config.manifest_path)
