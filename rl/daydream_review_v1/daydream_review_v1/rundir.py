@@ -59,8 +59,18 @@ def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     verifier re-applies, so it must be derived identically everywhere it is
     needed (seal production, seal verification, and the verify-checkout
     construction). Single-sourcing the command keeps those sites from drifting.
+
+    The ``--no-ext-diff --no-textconv`` flags harden the derivation against a
+    repository-configured external diff helper or text conversion driver: the
+    supervisor runs as root, while a repo-local ``diff.external`` / textconv
+    runs under the repo's own (untrusted) identity, so neither may execute
+    during the load-bearing diff.
     """
-    return ["git", "-C", repo, "diff", head_sha, "HEAD"]
+    return [
+        "git", "-C", repo, "diff",
+        "--no-ext-diff", "--no-textconv",
+        head_sha, "HEAD",
+    ]
 
 
 async def _session_dir(runtime: vf.Runtime, archive_root: str) -> str | None:
