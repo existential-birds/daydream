@@ -400,9 +400,14 @@ def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
     error = parsed_body.get("error") if isinstance(parsed_body, dict) else None
     if isinstance(error, dict):
         raw_code = error.get("code")
-        try:
-            error_code = int(raw_code)
-        except (TypeError, ValueError):
+        if isinstance(raw_code, int) and not isinstance(raw_code, bool):
+            error_code = raw_code
+        elif isinstance(raw_code, str):
+            try:
+                error_code = int(raw_code)
+            except ValueError:
+                error_code = -1
+        else:
             error_code = -1
         message = _bounded_error(error.get("message") or "upstream judge error")
         if error_code == 429 or error_code >= 500:
