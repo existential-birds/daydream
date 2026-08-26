@@ -833,7 +833,9 @@ async def run_agent(
                 raise
 
     except _ToolSupervisorFailure as exc:
-        print_error(console, "Extension Failure", f"{type(exc.original).__name__}: {exc.original}")
+        print_error(
+            console, "Extension Failure", redact_text(f"{type(exc.original).__name__}: {exc.original}")
+        )
         raise exc.original from None
     except Exception as exc:
         category = getattr(exc, "category", None)

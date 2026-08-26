@@ -484,7 +484,8 @@ async def _run_tool_case(
                 "    class RetryableSupervisorError(RuntimeError):\n"
                 "        retryable = True\n"
                 "    def _supervise(name, tool_input, *, phase):\n"
-                "        raise RetryableSupervisorError('supervisor failed')\n"
+                "        _credential = 'ZAI_API_KEY' + chr(61) + 'credential-shaped-supervisor-value'\n"
+                "        raise RetryableSupervisorError('supervisor failed ' + _credential)\n"
                 "    r.register_tool_supervisor(_supervise)\n"
             )
         else:
@@ -588,8 +589,10 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
     multi_stack_target: Path,
     install_backend: InstallBackend,
     make_config: MakeConfig,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A retryable supervisor error propagates without entering backend retry."""
+    """A retryable supervisor error propagates without entering backend retry,
+    and the displayed failure diagnostic is redacted at the host boundary."""
     backends: list[DeferredWriteBackend] = []
 
     with pytest.raises(RuntimeError, match="supervisor failed") as exc_info:
@@ -602,6 +605,13 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
             supervisor_raises=True,
             backend_capture=backends,
         )
+
+    out = capsys.readouterr().out
+    assert "Extension Failure" in out
+    assert "RetryableSupervisorError" in out
+    assert "supervisor failed" in out
+    assert "[REDACTED_ENV_VAR]" in out
+    assert "credential-shaped-supervisor-value" not in out
 
     assert getattr(exc_info.value, "retryable", False) is True
     assert len(backends) == 1
