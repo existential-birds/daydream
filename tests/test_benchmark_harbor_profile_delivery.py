@@ -100,19 +100,22 @@ def test_ledger_entry_records_candidate_digest(tmp_path):
 
 
 def test_receipt_invalidation_inputs_include_candidate_digest():
-    from daydream.benchmark.harbor import run
+    from daydream.benchmark.harbor import calibrate
 
-    inputs = run._calibration_invalidation_inputs(
-        {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "xyz"}
+    # calibrate._invalidation_inputs is the single source of truth for the
+    # receipt contract (run.py's former duplicating helper is gone).
+    sr = calibrate._load_judge_template()
+    inputs = calibrate._invalidation_inputs(
+        {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "xyz"}, pairs=[], sr=sr
     )
     assert "profile_digest" in inputs and inputs["profile_digest"] == "xyz"
 
 
 # Issue #885 R2 finding 4 (HIGH): the calibration RECEIPT WRITE side
 # (calibrate._invalidation_inputs) must fold the candidate digest too, so a
-# candidate-scoped receipt is producible and byte-matches run.py's preflight
-# _calibration_invalidation_inputs. Legacy default runs (no digest) stay
-# byte-stable. Without this the oracle preflight always fails under a candidate.
+# candidate-scoped receipt is producible from the single shared producer.
+# Legacy default runs (no digest) stay byte-stable. Without this the oracle
+# preflight always fails under a candidate.
 def test_calibrate_invalidation_inputs_folds_candidate_digest():
     from daydream.benchmark.harbor import calibrate
 
@@ -127,21 +130,30 @@ def test_calibrate_invalidation_inputs_folds_candidate_digest():
     assert "profile_digest" not in legacy
 
 
-def test_candidate_scoped_receipt_matches_preflight_inputs():
-    """A receipt written by the calibrate path under a candidate is byte-identical
-    to the preflight inputs run.py checks, so is_receipt_current passes."""
-    from daydream.benchmark.harbor import calibrate, run
+def test_candidate_scoped_receipt_matches_preflight_inputs(tmp_path):
+    """A candidate-scoped receipt round-trips write -> read as current.
+
+    Builds the receipt through _build_receipt/_write_receipt with the candidate
+    digest folded in, then asserts is_receipt_current returns True when the
+    preflight recomputes inputs from the shared _invalidation_inputs producer.
+    """
+    from daydream.benchmark.harbor import calibrate
 
     env = {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "abc123"}
-    # Use the same real fixture + judge template both paths load internally.
+    # Use the same real fixture + judge template the receipt paths load internally.
     sr = calibrate._load_judge_template()
     pairs = calibrate._load_fixture()
-    # Receipt write path folds the digest (via calibrate._invalidation_inputs).
-    write_inputs = calibrate._invalidation_inputs(env, pairs, sr)
-    # run.py's preflight check folds the same digest (via its own producer).
-    check_inputs = run._calibration_invalidation_inputs(env)
-    # Both must serialize identically (byte-exact is_receipt_current contract).
-    assert calibrate._serialize_inputs(write_inputs) == calibrate._serialize_inputs(check_inputs)
+    receipt = calibrate._build_receipt(
+        sr, pairs, env, passed=True,
+        balanced_accuracy=0.9583,
+        confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
+        disagreements=[],
+    )
+    receipt_path = calibrate._write_receipt(tmp_path, receipt)
+    # The read-path preflight recomputes the candidate-scoped inputs through the
+    # one shared producer and must accept the written receipt as current.
+    current = calibrate._invalidation_inputs(env, pairs, sr)
+    assert calibrate.is_receipt_current(receipt_path, current) is True
 # Issue #885 R1 items 2/10: the control-plane benchmark handler must thread the
 # candidate profile digest into the env dict it hands to run_run, because run.py
 # reads DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from that env dict and the

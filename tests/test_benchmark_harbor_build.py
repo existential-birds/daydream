@@ -1178,3 +1178,80 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh)
     assert env_files == {
         "repository.bundle", "Dockerfile", "runtime-requirements.lock"
     }, f"unexpected environment files: {env_files}"
+
+
+def test_compiled_policy_comes_from_workspace_allowlists(tmp_path, fake_gh):
+    """The compiled task TOML's agent/verifier host policies are populated from the
+    workspace's persisted privacy allowlists (reviewer -> [agent].allowed_hosts,
+    judge -> [verifier.environment].allowed_hosts), kept as separate boundaries."""
+    import tomllib
+
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    lock = build.compile_workspace(ws)                 # h1.example.com / h2.example.com
+    key = next(iter(lock["cases"]))
+    toml = (ws / "harbor" / key / "task.toml").read_bytes()
+    doc = tomllib.loads(toml.decode())
+    assert doc["agent"]["allowed_hosts"] == ["h1.example.com"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["h2.example.com"]
+    assert "h1.example.com" not in doc["verifier"]["environment"]["allowed_hosts"]
+    assert "h2.example.com" not in doc["agent"]["allowed_hosts"]
+
+
+def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path, fake_gh):
+    """The OpenRouter workspace resolves both persisted allowlists to
+    ``openrouter.ai``; the compiled task.toml carries that host in both egress
+    boundaries and the control-plane leakage scan does not flag a bare
+    legitimate hostname.
+    """
+    import tomllib
+
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    raw = storage.load_yaml_strict(ws / "benchmark.yaml")
+    raw["privacy"]["reviewer_allowed_hosts"] = ["openrouter.ai"]
+    raw["privacy"]["judge_allowed_hosts"] = ["openrouter.ai"]
+    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    lock = build.compile_workspace(ws)          # must not raise a leakage CompileError
+    key = next(iter(lock["cases"]))
+    doc = tomllib.loads((ws / "harbor" / key / "task.toml").read_bytes().decode())
+    assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
+
+
+def test_compile_rejects_disallowed_judge_host(tmp_path, fake_gh):
+    """A malformed judge host must fail compilation (fail closed), never be
+    silently normalized or defaulted.
+    """
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    raw = storage.load_yaml_strict(ws / "benchmark.yaml")
+    raw["privacy"]["judge_allowed_hosts"] = ["no-dot-segment"]   # normalize_hostname rejects
+    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    with pytest.raises(build.CompileError):
+        build.compile_workspace(ws)
+
+
+def test_policy_change_alters_compiled_digest(tmp_path, fake_gh):
+    """Changing a persisted privacy allowlist changes the compiled task.toml bytes
+    (and thus the lock's files inventory -> lock bytes -> compiled_lock_sha256), so
+    an existing Oracle receipt is invalidated by a network-policy change."""
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    lock_a = build.compile_workspace(ws)
+    digest_a = lock_a["files"][next(iter(lock_a["cases"])) + "/task.toml"]
+    # change the reviewer allowlist in benchmark.yaml
+    raw = storage.load_yaml_strict(ws / "benchmark.yaml")
+    raw["privacy"]["reviewer_allowed_hosts"] = ["other.example"]
+    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    lock_b = build.compile_workspace(ws)
+    digest_b = lock_b["files"][next(iter(lock_b["cases"])) + "/task.toml"]
+    assert digest_a != digest_b
+    assert lock_a != lock_b          # lock bytes differ -> compiled_lock_sha256 differs

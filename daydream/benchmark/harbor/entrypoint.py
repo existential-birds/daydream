@@ -200,7 +200,9 @@ async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
     environment from the caller; production defaults remain the fixed
     in-container paths.
     """
+    saved_env = None
     if monkeypatch_env is not None:
+        saved_env = os.environ.copy()
         for key, value in monkeypatch_env.items():
             os.environ[key] = value
     try:
@@ -237,6 +239,12 @@ async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    finally:
+        # Test-only seam hygiene: never leak monkeypatched vars (or the
+        # reviewer env vars) into the surrounding process after main returns.
+        if saved_env is not None:
+            os.environ.clear()
+            os.environ.update(saved_env)
 
 
 if __name__ == "__main__":

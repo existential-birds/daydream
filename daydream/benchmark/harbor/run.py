@@ -2,9 +2,8 @@
 
 A thin safety wrapper around Harbor 0.21 that fail-closes on every preflight
 before Harbor starts (same-interpreter Harbor, compiled-tree presence,
-endpoint hosts vs the workspace allowlists, telemetry/upload rejection,
-Docker allowlist support, and — for the Oracle pass — a current
-``runtime/calibration-receipt.json``), prints a pre-run spend summary, and
+endpoint hosts vs the compiled network policy, telemetry/upload rejection,
+and Docker allowlist support), prints a pre-run spend summary, and
 records every run in a private ``runtime/harbor.json`` cleanup ledger. Harbor
 remains the only orchestrator/results implementation; this module only
 selects the already-compiled config, drives ``harbor run -c <config>`` with
@@ -26,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -65,13 +65,46 @@ def _load_workspace_privacy(workspace: Path) -> dict[str, Any]:
     return privacy
 
 
-def _normalize_allowlist(values: Any, what: str) -> list[str]:
-    """Normalize a workspace allowlist with the schema's hostname rules."""
-    from daydream.benchmark.schema import normalize_hostname
+def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | None:
+    """The reviewer/judge egress allowlists Harbor will actually enforce.
 
-    if not isinstance(values, list) or not values:
-        raise RunBlocked(f"privacy {what} must be a non-empty host list")
-    return [normalize_hostname(str(v)) for v in values]
+    Harbor applies the policy written into each compiled case's ``task.toml``
+    -- ``[agent].allowed_hosts`` (reviewer boundary) and
+    ``[verifier.environment].allowed_hosts`` (judge boundary) -- not the raw
+    ``benchmark.yaml``, which may be stale relative to the compiled tree
+    (``compile_workspace`` threads one reviewer/judge allowlist into every
+    compiled case; the task hashed digest is locked into ``compiled_lock_sha256``).
+    Reading the compiled cases enumerated by ``benchmark.lock.json`` keeps the
+    preflight checking the same artifact Harbor executes, ignoring any runtime
+    ``jobs/`` trial copies of ``task.toml`` that may linger from earlier runs.
+    Returns ``None`` when there are no compiled cases (nothing Harbor runs, so
+    no egress boundary to enforce). Fail-closed: a listed case without a
+    readable ``task.toml`` raises ``RunBlocked`` -- the egress check is never
+    skipped when a policy exists.
+    """
+    compiled = workspace / "harbor"
+    lock_path = compiled / "benchmark.lock.json"
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunBlocked(f"cannot read compiled lock at {lock_path}: {exc}") from exc
+    cases = lock.get("cases") if isinstance(lock, dict) else None
+    keys = list(cases.keys()) if isinstance(cases, dict) else []
+    if not keys:
+        return None
+    task_tomls = sorted((compiled / str(key) / "task.toml").resolve() for key in keys)
+    reviewer: set[str] = set()
+    judge: set[str] = set()
+    for path in task_tomls:
+        try:
+            doc = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise RunBlocked(f"cannot read compiled network policy at {path}: {exc}") from exc
+        reviewer.update(doc.get("agent", {}).get("allowed_hosts") or [])
+        judge.update(
+            doc.get("verifier", {}).get("environment", {}).get("allowed_hosts") or []
+        )
+    return sorted(reviewer), sorted(judge)
 
 
 def _reviewer_host_from_env(env: dict[str, Any]) -> str:
@@ -349,22 +382,6 @@ def ledger_mark(
         raise RunError(f"run {run_id!r} not found in cleanup ledger {path}")
 
 
-def _calibration_invalidation_inputs(env: dict[str, Any]) -> dict[str, Any]:
-    """The calibration-receipt invalidation inputs for ``env`` (reused verbatim)."""
-    sr = calibrate._load_judge_template()
-    pairs = calibrate._load_fixture()
-    inputs = calibrate._invalidation_inputs(env, pairs, sr)
-    # Candidate review-profile digest (issue #885/R12): when the control plane
-    # supplies a ``DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST``, a change of
-    # candidate invalidates the calibration receipt (benchmark attribution
-    # requires per-candidate invalidation). Omitted when absent so the
-    # legacy receipt contract stays byte-stable for default-profile runs.
-    digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
-    if digest:
-        inputs["profile_digest"] = str(digest)
-    return inputs
-
-
 def _preflight(
     workspace: Path,
     *,
@@ -376,10 +393,9 @@ def _preflight(
 
     Checks, in order, without stopping at the first failure:
       1. same-interpreter Harbor resolution + compiled-tree presence
-      2. judge/reviewer egress hosts vs the workspace allowlists
+      2. judge/reviewer egress hosts vs the compiled network policy
       3. telemetry/upload rejection (archive + uploads must be ``disabled``)
       4. Docker allowlist support (no public-networking fallback)
-      5. (oracle only) a current passed calibration receipt
     """
     failures: list[str] = []
 
@@ -394,22 +410,12 @@ def _preflight(
             failures.append(f"missing compiled Harbor tree file: harbor/{required}")
 
     try:
-        privacy = _load_workspace_privacy(workspace)
-    except storage.WorkspaceCorrupt as exc:
+        compiled_hosts = _compiled_allowed_hosts(workspace)
+    except RunError as exc:
         failures.append(str(exc))
-        privacy = {}
-
-    if privacy:
-        try:
-            reviewer_hosts = _normalize_allowlist(
-                privacy.get("reviewer_allowed_hosts"), "reviewer_allowed_hosts"
-            )
-            judge_hosts = _normalize_allowlist(
-                privacy.get("judge_allowed_hosts"), "judge_allowed_hosts"
-            )
-        except RunBlocked as exc:
-            failures.append(str(exc))
-            reviewer_hosts, judge_hosts = [], []
+        compiled_hosts = None
+    if compiled_hosts is not None:
+        reviewer_hosts, judge_hosts = compiled_hosts
         for label, resolve, hosts in (
             ("judge", calibrate._judge_host_from_env, judge_hosts),
             ("reviewer", _reviewer_host_from_env, reviewer_hosts),
@@ -421,9 +427,16 @@ def _preflight(
                 continue
             if host and host not in hosts:
                 failures.append(
-                    f"{label} host {host!r} is not in the workspace "
-                    f"{label}_allowed_hosts allowlist ({sorted(hosts)})"
+                    f"{label} host {host!r} is not in the compiled "
+                    f"{label} allowed_hosts policy ({sorted(hosts)})"
                 )
+
+    try:
+        privacy = _load_workspace_privacy(workspace)
+    except storage.WorkspaceCorrupt as exc:
+        failures.append(str(exc))
+        privacy = {}
+    if privacy:
         for field in ("archive", "uploads"):
             value = privacy.get(field)
             if value != "disabled":
@@ -436,21 +449,6 @@ def _preflight(
             "Docker allowlist is unsupported on the selected runtime; "
             "refusing to fall back to public networking"
         )
-
-    if oracle:
-        receipt_path = workspace / "runtime" / "calibration-receipt.json"
-        try:
-            current = calibrate.is_receipt_current(
-                receipt_path, _calibration_invalidation_inputs(env)
-            )
-        except Exception as exc:  # noqa: BLE001 - surfaced as a preflight failure
-            current = False
-            failures.append(f"calibration receipt check failed: {exc}")
-        if not current:
-            failures.append(
-                "no current calibration receipt at runtime/calibration-receipt.json "
-                "(run 'daydream benchmark calibrate-judge' first)"
-            )
     return failures
 
 
@@ -547,8 +545,7 @@ def _environment_from_trial(trial: Path) -> dict[str, Any]:
 
 
 def _current_state_mapping(
-    *, workspace: Path, compiled_lock_sha256: str, env: dict[str, Any],
-    calibration_digest: str,
+    workspace: Path, *, compiled_lock_sha256: str, env: dict[str, Any],
 ) -> dict[str, Any]:
     """The current Oracle/Harbor state an oracle receipt must match.
 
@@ -571,7 +568,6 @@ def _current_state_mapping(
         "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
         "threshold": verifier_core.CONFIDENCE_THRESHOLD,
         "attempts": config.get("n_attempts", 1),
-        "calibration_receipt_sha256": calibration_digest,
     }
     # Daydream wheel provenance (issue #888): bind the exact compiled wheel
     # digest/version the run was built under from the authoritative lock. An
@@ -598,12 +594,11 @@ def _current_state_mapping(
 
 def _oracle_receipt_document(
     *, workspace: Path, compiled_lock_sha256: str, env: dict[str, Any],
-    calibration_digest: str, result_dir: Path,
+    result_dir: Path,
 ) -> dict[str, Any]:
     """Assemble the private deterministic Oracle receipt (mode-0600)."""
     doc = _current_state_mapping(
         workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
-        calibration_digest=calibration_digest,
     )
     doc["result_dir"] = str(Path(result_dir).resolve())
     doc["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -612,7 +607,7 @@ def _oracle_receipt_document(
 
 def _write_oracle_receipt(
     workspace: Path, *, job_dir: Path, compiled_lock_sha256: str,
-    env: dict[str, Any], calibration_digest: str,
+    env: dict[str, Any],
 ) -> int:
     """Write the oracle-receipt only when the Oracle run reproduced gold."""
     ok, _ = _parse_job_results(Path(job_dir))
@@ -625,7 +620,7 @@ def _write_oracle_receipt(
         return 1
     doc = _oracle_receipt_document(
         workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
-        calibration_digest=calibration_digest, result_dir=Path(job_dir),
+        result_dir=Path(job_dir),
     )
     storage.atomic_write_json(
         workspace / "harbor" / "oracle-receipt.json", doc, mode=0o600
@@ -635,7 +630,6 @@ def _write_oracle_receipt(
 
 def _default_run_gate(
     workspace: Path, *, env: dict[str, Any], compiled_lock_sha256: str,
-    calibration_digest: str,
 ) -> str | None:
     """Gate a default (non-Oracle) run behind a matching Oracle receipt."""
     receipt_path = workspace / "harbor" / "oracle-receipt.json"
@@ -649,7 +643,6 @@ def _default_run_gate(
         return f"malformed oracle receipt at {receipt_path}"
     current = _current_state_mapping(
         workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
-        calibration_digest=calibration_digest,
     )
     for key, value in current.items():
         if receipt.get(key) != value:
@@ -683,15 +676,6 @@ def _default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, Any]) -> dict[st
     """Default Harbor subprocess spawn (the real production seam)."""
     completed = subprocess.run(cmd, cwd=str(cwd), env=dict(env))
     return {"returncode": completed.returncode}
-
-
-def _calibration_digest(workspace: Path) -> str:
-    """sha256 of ``runtime/calibration-receipt.json`` bytes (empty when absent)."""
-    path = workspace / "runtime" / "calibration-receipt.json"
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return ""
 
 
 def _ledger_job_dir(workspace: Path, run_id: str) -> Path:
@@ -754,7 +738,6 @@ def run_run(
     if not oracle:
         gate_reason = _default_run_gate(
             workspace, env=env, compiled_lock_sha256=compiled_lock_sha,
-            calibration_digest=_calibration_digest(workspace),
         )
         if gate_reason is not None:
             print(gate_reason, file=sys.stderr)
@@ -809,7 +792,7 @@ def run_run(
                 return returncode or 1
             write_code = _write_oracle_receipt(
                 workspace, job_dir=actual_dir, compiled_lock_sha256=compiled_lock_sha,
-                env=env, calibration_digest=_calibration_digest(workspace),
+                env=env,
             )
             ledger_mark(workspace, run_id, state="complete",
                         environments=environments)

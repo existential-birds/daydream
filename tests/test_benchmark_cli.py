@@ -28,6 +28,23 @@ def test_benchmark_parser_has_build_harbor_and_compiled():
     assert validate_args.compiled is True
 
 
+def test_calibrate_judge_help_describes_diagnostic_agreement():
+    parser = _build_benchmark_parser()
+    help_text = parser._subparsers._group_actions[0].choices["calibrate-judge"].format_help()
+    assert "diagnostic" in help_text.lower() or "agreement" in help_text.lower()
+    assert "calibrat" in help_text.lower()          # still called calibrate-judge
+    assert "unverified" in help_text.lower()
+
+
+def test_docs_distinguish_diagnostics_from_oracle_gate():
+    changelog = Path(__file__).parents[1] / "CHANGELOG.md"
+    bench_doc = Path(__file__).parents[1] / "docs" / "benchmark.md"
+    text = changelog.read_text() + bench_doc.read_text()
+    assert "Oracle" in text and "diagnostic" in text.lower()
+    assert "self-match" in text.lower() or "reward" in text.lower()
+    assert "OpenRouter" in text and "data-handling" in text.lower()
+
+
 def test_benchmark_build_harbor_real_cli_entry(tmp_path, fake_gh, capsys):
     import importlib.metadata
 

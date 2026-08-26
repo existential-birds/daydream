@@ -99,7 +99,7 @@ def test_fresh_install_docs_have_no_plugin_step() -> None:
 
 def test_historical_records_preserved() -> None:
     expected = {
-        "CHANGELOG.md": "53bf5caac1cceaeef3cb14a1e9d7cb7cbf56f02844e0ddb41a23ddaa8f53c0f5",
+        "CHANGELOG.md": "7ee332b93b0b5db68eebf87cc85db063dd3ebdfde2c5130e34073b49f857373b",
         "benchmark/corpora/osprey-coderabbit/index.json": (
             "ff6e5f43443c1181c8b2b51c3d662c7bc2d37615cdd54240919fabe300a3c0b8"
         ),

@@ -534,7 +534,15 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
         help="apply a reviewed gold YAML draft (derive all forbidden fields, never ready)",
     )
 
-    calibrate_p = sub.add_parser("calibrate-judge", help="calibrate the configured semantic-match judge")
+    calibrate_p = sub.add_parser(
+        "calibrate-judge",
+        help="diagnostic: measure the configured judge's agreement with the unverified fixture",
+        description=(
+            "diagnostic: measure the configured judge's agreement with the unverified "
+            "labeled fixture. A passing result only means the judge agrees with this "
+            "unverified fixture — it is not calibrated or correct."
+        ),
+    )
     calibrate_p.add_argument("dir", type=Path, help="workspace directory")
     calibrate_p.add_argument(
         "--yes", action="store_true", help="confirm the paid 72-call calibration run"
@@ -742,11 +750,13 @@ def _is_interactive_tty() -> bool:
 
 
 def _handle_benchmark_calibrate(args) -> int:
-    """Calibrate the configured judge against the fixed 24-pair fixture.
+    """Diagnostic: measure the configured judge's agreement with the unverified fixture.
 
-    Requires ``--yes`` or an interactive TTY before any paid judge call. Lazy
-    imports the calibrate module (mirroring the other handlers); build failures
-    and refusals print to stderr and return exit ``1`` — never a bare traceback.
+    A passing result only means the judge agrees with this unverified labeled
+    fixture — it is not calibrated or correct. Requires ``--yes`` or an
+    interactive TTY before any paid judge call. Lazy imports the calibrate
+    module (mirroring the other handlers); build failures and refusals print to
+    stderr and return exit ``1`` — never a bare traceback.
     """
     if not args.yes and not _is_interactive_tty():
         print(
@@ -768,9 +778,9 @@ def _handle_benchmark_calibrate(args) -> int:
     }
 
     # Issue #885/R12: thread the control-plane candidate profile digest so a
-    # candidate-scoped calibration can be produced (run.py's oracle preflight
-    # compares the receipt against inputs that fold the digest). Fail-closed on
-    # an invalid candidate, matching run.py's handling. None for default runs.
+    # candidate-scoped diagnostic receipt can be produced (its invalidation
+    # inputs fold the digest). Fail-closed on an invalid candidate. None for
+    # default runs. The receipt is diagnostic-only — it is not read by run.py.
     env["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] = _candidate_profile_digest()
 
     return calibrate.run_calibration(

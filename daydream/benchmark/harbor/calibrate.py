@@ -1,13 +1,18 @@
-"""Calibration gate for configured semantic-match judges.
+"""Optional diagnostic of a configured semantic-match judge's agreement with a labeled fixture.
 
-Drives the exact packaged Harbor judge path (``score_review.judge_pairs``,
+Runs the exact packaged Harbor judge path (``score_review.judge_pairs``,
 loaded via importlib from ``templates/tests/`` so the bare ``import
 verifier_core`` resolves to the sibling copy) against a fixed 24-pair labeled
-fixture, three times per pair (72 judge calls). Computes a three-part pass
-gate — majority correctness, balanced accuracy, and per-pair retained-edge
-threshold-flip stability — and, on pass, records a private deterministic
-invalidation-aware receipt at ``<workspace>/runtime/calibration-receipt.json``.
-Measuring, never tuning: no weights or thresholds are derived here.
+fixture, three times per pair (72 judge calls). Computes a three-part
+agreement metric — majority correctness, balanced accuracy, and per-pair
+retained-edge threshold-flip stability — and, on pass, records a private
+deterministic invalidation-aware receipt at
+``<workspace>/runtime/calibration-receipt.json``.
+
+A passing result means only that the configured judge agrees with this
+unverified fixture; it is not calibrated or correct, and this module is not
+an authorization gate for any other path. Measuring, never tuning: no
+weights or thresholds are derived here.
 """
 
 from __future__ import annotations
@@ -73,16 +78,55 @@ def _load_judge_template() -> Any:
     return _load_template_asset(_TEMPLATES / "tests" / "score_review.py", "score_review")
 
 
-def _load_fixture() -> list[dict[str, Any]]:
-    """Read and return the fixed 24-pair calibration fixture."""
+def _load_fixture_document() -> dict[str, Any]:
+    """Read and return the full calibration fixture document.
+
+    The fixture is a top-level object with a ``schema_version``, a
+    machine-readable ``provenance`` block, and the ``pairs`` array.
+    """
     path = _CALIBRATION_DIR / "pairs.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         raise ValueError(f"could not parse calibration fixture at {path}: {exc}") from exc
-    if not isinstance(data, list):
-        raise ValueError(f"calibration fixture at {path} must be a JSON list")
+    if not isinstance(data, dict):
+        raise ValueError(f"calibration fixture at {path} must be a JSON object")
     return data
+
+
+def _load_fixture() -> list[dict[str, Any]]:
+    """Read and return the fixed 24-pair calibration fixture."""
+    data = _load_fixture_document()
+    pairs = data.get("pairs")
+    if not isinstance(pairs, list):
+        raise ValueError('calibration fixture must contain a "pairs" list')
+    return pairs
+
+
+def _load_provenance(pairs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the fixture's provenance declaration bound to the passed pairs.
+
+    The declaration (``origin``, ``human_reviewed``, ``labels``, notes) comes
+    from the fixture document, while the pair-attestable facts
+    (``class_balance``, ``categories``) are computed from the passed ``pairs``
+    argument, so the provenance describes exactly the pairs a receipt was
+    built from and a synthetic or subset-pairs caller gets a matching
+    declaration. Raises ``ValueError`` if the provenance block is absent or
+    not an object.
+    """
+    data = _load_fixture_document()
+    provenance = data.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError('calibration fixture must contain a "provenance" object')
+    balance: dict[str, int] = {}
+    for pair in pairs:
+        label = pair.get("label") or ""
+        balance[label] = balance.get(label, 0) + 1
+    return {
+        **provenance,
+        "class_balance": balance,
+        "categories": len({pair.get("category") for pair in pairs}),
+    }
 
 
 def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
@@ -267,7 +311,11 @@ def _pass_gate(
 
 
 def _label_sha256(pairs: list[dict[str, Any]]) -> str:
-    """Canonical sha256 over the ordered gold/candidate/label triples."""
+    """Canonical sha256 over the ordered gold/candidate/label triples.
+
+    Retained as a compatibility field; the full-content ``fixture_sha256`` is
+    the authoritative invalidation digest.
+    """
     triples = [
         {
             "gold": p["gold"]["finding_id"],
@@ -278,6 +326,23 @@ def _label_sha256(pairs: list[dict[str, Any]]) -> str:
     ]
     canonical = json.dumps(
         triples, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _fixture_sha256(pairs: list[dict[str, Any]]) -> str:
+    """Canonical sha256 over the full passed fixture pairs.
+
+    Digests the ``pairs`` argument — every pair field (gold/candidate content,
+    category, label), not just the ordered triples covered by ``label_sha256`` —
+    so the authoritative invalidation digest is bound to exactly what was
+    judged. A caller passing synthetic or subset pairs binds the digest to
+    those pairs rather than to a fixed on-disk file; any fixture content change
+    moves the digest even without a triple reorder and invalidates existing
+    receipts.
+    """
+    canonical = json.dumps(
+        pairs, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -298,7 +363,14 @@ def _serialize_inputs(inputs: dict[str, Any]) -> bytes:
 def _invalidation_inputs(
     env: dict[str, Any], pairs: list[dict[str, Any]], sr: Any
 ) -> dict[str, Any]:
-    """The receipt's invalidation contract: a deterministic byte-stable dict."""
+    """The receipt's invalidation contract: a deterministic byte-stable dict.
+
+    ``fixture_sha256`` digests the passed ``pairs`` (all content, not just the
+    ordered triples covered by ``label_sha256``), and ``fixture_provenance``
+    mirrors the provenance declaration bound to those pairs, so a fixture
+    content or provenance change invalidates existing receipts — not just a
+    reorder of the ordered triples.
+    """
     inputs = {
         "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
         "model": env.get("DAYDREAM_JUDGE_MODEL") or "",
@@ -306,14 +378,15 @@ def _invalidation_inputs(
         "judge_prompt_sha256": _render_judge_prompt_digest(sr),
         "threshold": sr.verifier_core.CONFIDENCE_THRESHOLD,
         "label_sha256": _label_sha256(pairs),
+        "fixture_sha256": _fixture_sha256(pairs),
+        "fixture_provenance": _load_provenance(pairs),
         "attempts": 3,
         "request_timeout": sr._REQUEST_TIMEOUT,
     }
     # Candidate review-profile digest (issue #885/R12): a change of candidate
     # invalidates the calibration receipt (per-candidate attribution). Omitted
     # when absent so the legacy receipt contract stays byte-stable for default
-    # runs. Mirrors run._calibration_invalidation_inputs so the receipt built
-    # here and the preflight check in run.py produce identical inputs.
+    # runs.
     digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
     if digest:
         inputs["profile_digest"] = str(digest)
@@ -330,12 +403,17 @@ def _build_receipt(
     confusion: dict[str, int],
     disagreements: list[Any],
 ) -> dict[str, Any]:
-    """Build the private deterministic calibration receipt document."""
+    """Build the private deterministic calibration receipt document.
+
+    The receipt mirrors the fixture's machine-readable provenance, so a future
+    re-verification of the fixture is visible in every receipt built from it.
+    """
     return {
         "schema_version": 1,
         "type": "judge-calibration",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "inputs": _invalidation_inputs(env, pairs, sr),
+        "provenance": _load_provenance(pairs),
         "result": {
             "passed": passed,
             "balanced_accuracy": balanced_accuracy,
@@ -354,12 +432,35 @@ def _write_receipt(workspace: Path, receipt: dict[str, Any]) -> Path:
 
 
 def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bool:
-    """Fail-closed invalidation check: True only on a byte-exact inputs match."""
+    """Fail-closed invalidation check for diagnostic receipts.
+
+    True only when the stored inputs byte-match the current inputs AND the
+    document satisfies the diagnostic-receipt contract: ``schema_version`` 1,
+    ``type`` ``judge-calibration``, ``result.passed`` True, and a provenance
+    block declaring the fixture ``llm_generated`` and not ``human_reviewed``.
+    Any violation — including a fixture content change, which moves
+    ``fixture_sha256``, or a provenance change, which moves
+    ``fixture_provenance`` — returns False.
+    """
     try:
         raw = json.loads(Path(receipt_path).read_bytes())
     except (ValueError, OSError):
         return False
     if not isinstance(raw, dict) or not isinstance(raw.get("inputs"), dict):
+        return False
+    if raw.get("schema_version") != 1:
+        return False
+    if raw.get("type") != "judge-calibration":
+        return False
+    result = raw.get("result")
+    if not isinstance(result, dict) or result.get("passed") is not True:
+        return False
+    provenance = raw.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    if provenance.get("origin") != "llm_generated":
+        return False
+    if provenance.get("human_reviewed") is not False:
         return False
     return _serialize_inputs(raw["inputs"]) == _serialize_inputs(current_inputs)
 
@@ -381,13 +482,14 @@ def run_calibration(
     http: Any = None,
     confirm: Callable[[str], bool] | None = None,
 ) -> int:
-    """Drive the calibration gate end-to-end and return an exit code.
+    """Run the diagnostic judge-agreement check end-to-end and return an exit code.
 
     Order: manifest/host validation -> fixture + template load -> confirmation
-    gate -> client build -> 72-call judge driver -> three-part pass gate.
-    On pass a private receipt is written; on failure (or refusal) no receipt is
-    written and the exit code is nonzero (fail-closed). Never measures by
-    tuning anything.
+    gate -> client build -> 72-call judge driver -> three-part agreement
+    metric. A passing result means the configured judge agrees with the
+    unverified fixture — it is not calibrated or correct. On pass a private
+    receipt is written; on failure (or refusal) no receipt is written and the
+    exit code is nonzero (fail-closed). Never measures by tuning anything.
     """
 
     env = dict(env) if env is not None else dict(os.environ)

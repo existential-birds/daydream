@@ -21,6 +21,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 
@@ -630,8 +632,19 @@ def _compile_case(
     *,
     runtime_lock: bytes,
     wheel: Path | None,
+    reviewer_hosts: list[str],
+    judge_hosts: list[str],
 ) -> dict:
-    """Compile one case tree into ``stage/<key>/`` and return its lock row."""
+    """Compile one case tree into ``stage/<key>/`` and return its lock row.
+
+    The network policy is threaded from the workspace's persisted privacy
+    allowlists: ``reviewer_hosts`` become ``[agent].allowed_hosts`` and
+    ``judge_hosts`` become ``[verifier.environment].allowed_hosts``, keeping
+    the two egress boundaries separate. Because the policy lands in
+    ``task.toml`` and that file's digest is inventoried in the lock, a policy
+    change propagates to the lock bytes / ``compiled_lock_sha256`` and thereby
+    invalidates any existing Oracle receipt.
+    """
     case_id = case_doc["case_id"]
     key = derive_task_key(case_id)
     case_stage = stage / key
@@ -654,7 +667,13 @@ def _compile_case(
         render_task_toml,
     )
 
-    (case_stage / "task.toml").write_bytes(render_task_toml(key))
+    (case_stage / "task.toml").write_bytes(
+        render_task_toml(
+            key,
+            reviewer_hosts=reviewer_hosts,
+            judge_hosts=judge_hosts,
+        )
+    )
     (case_stage / "environment").mkdir(exist_ok=True)
     (case_stage / "environment" / "Dockerfile").write_bytes(
         render_environment_dockerfile(
@@ -823,8 +842,21 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
         # Every indexed case is loaded through the shared model-gated loader
         # (same ``_schema_ready`` + ``CaseDocument`` validation as the
         # validate/status read path); a present-but-corrupt case raises
-        # ``WorkspaceCorrupt`` before any staging begins.
-        manifest_model = schema.BenchmarkManifest.model_validate(manifest)
+        # ``WorkspaceCorrupt`` before any staging begins. The manifest model
+        # validation (which rejects malformed/empty privacy host lists) is
+        # surfaced as ``CompileError`` so a disallowed-host policy fails the
+        # compile closed through the documented rejection type.
+        try:
+            manifest_model = schema.BenchmarkManifest.model_validate(manifest)
+        except ValidationError as exc:
+            raise CompileError(f"{root}: invalid benchmark.yaml: {exc}") from exc
+        # The compiled network policy is sourced from the workspace's persisted
+        # privacy allowlists -- never a hardcoded default. The Privacy field
+        # validators (_normalize_host_list) already reject empty/malformed
+        # lists during model_validate, surfacing above as CompileError, so an
+        # unsafe (or hostless) policy can never reach the task render.
+        reviewer_hosts = list(manifest_model.privacy.reviewer_allowed_hosts)
+        judge_hosts = list(manifest_model.privacy.judge_allowed_hosts)
         case_docs: dict[str, dict] = {}
         for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
             dumped = doc.model_dump(mode="json")
@@ -862,6 +894,8 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
                     repo_slug,
                     runtime_lock=runtime_lock,
                     wheel=wheel,
+                    reviewer_hosts=reviewer_hosts,
+                    judge_hosts=judge_hosts,
                 )
                 case_rows.append(row)
                 key = row["key"]
