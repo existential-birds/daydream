@@ -358,7 +358,7 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
 
     The manifest ``test_command`` must never run against the agent-mutable tree.
     This clones the current tree, detaches at the baked head, applies the
-    candidate product diff (the rollout's own committed diff against
+    candidate product diff (the rollout's own current tracked diff against
     ``head_sha``), and makes the result root-owned and read-only — the reward
     re-runs the suite there under the distinct non-root verifier identity.
 

@@ -1567,13 +1567,14 @@ async def test_verify_checkout_failed_diff_fails_closed(
 async def test_verify_checkout_empty_diff_is_clean_noop(
     tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
 ) -> None:
-    """A review-only rollout (no committed fix) has an empty candidate diff; it
-    must apply cleanly as a no-op, never failing _prepare_verify_checkout.
+    """A review-only rollout (no committed fix) has an empty candidate diff; its
+    committed, staged, AND unstaged tracked contents all match the baked head,
+    so the diff must apply cleanly as a no-op, never failing _prepare_verify_checkout.
     """
     from daydream_review_v1 import taskset
 
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # --allow-empty commit: HEAD advances, tree identical -> genuinely empty diff
+    # --allow-empty commit: HEAD advances, committed tree identical -> genuinely empty diff
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, commit=True)
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     if os.geteuid() == 0:

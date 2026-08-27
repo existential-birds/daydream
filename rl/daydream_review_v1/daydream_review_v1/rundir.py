@@ -63,12 +63,17 @@ GIT_DIFF_HARDENING_FLAGS: tuple[str, str] = ("--no-ext-diff", "--no-textconv")
 
 
 def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
-    """Argv for re-deriving the rollout's committed diff against the baked head.
+    """Argv for re-deriving the rollout's candidate diff against the baked head.
 
     The candidate diff is the load-bearing contract the seal binds and the
     verifier re-applies, so it must be derived identically everywhere it is
     needed (seal production, seal verification, and the verify-checkout
     construction). Single-sourcing the command keeps those sites from drifting.
+
+    The one-revision form (``git diff <flags> <head_sha>``) compares the
+    current tracked tree — committed, staged, and unstaged — against the
+    baked ``head_sha``, excluding untracked files. This matches the working-
+    tree semantics ``_fixes_applied`` uses to accept a fix.
 
     The ``--no-ext-diff --no-textconv`` flags harden the derivation against a
     repository-configured external diff helper or text conversion driver: the
@@ -228,7 +233,7 @@ async def verify_seal(
     # Re-derive the candidate diff from the sandbox exactly as the seal
     # producer did (and as the verifier checkout will apply it): the seal's
     # embedded copy is an audit record, never the verification input, so a
-    # committed diff rewritten after sealing fails the digest check.
+    # tracked change rewritten after sealing fails the digest check.
     try:
         diff_result = await runtime.run(candidate_diff_cmd(repo, head_sha), {})
     except Exception:
@@ -254,8 +259,8 @@ async def seal_archived_run(
 
     The supervisor (harness) runs this after the launch returns, so the seal is
     produced outside the agent's write window and the reward can verify the
-    staged copy against it. The candidate diff is the rollout's own committed
-    diff against the baked head (``b""`` when the runner cannot produce one).
+    staged copy against it. The candidate diff is the rollout's own current
+    tracked diff against the baked head (``b""`` when the runner cannot produce one).
 
     Returns:
         ``True`` when a seal was written (and, under docker, the run dir
