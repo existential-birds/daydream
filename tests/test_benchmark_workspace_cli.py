@@ -108,13 +108,16 @@ def test_benchmark_init_status_validate_roundtrip(tmp_path):
     assert r3.returncode == 2  # fresh workspace: structurally valid but incomplete
 
 
-def test_legacy_bench_still_works_alongside_benchmark():
-    # The old `bench` verb must remain registered and dispatch to its own help,
-    # proving coexistence (issue 15 owns removal).
+def test_legacy_bench_is_rejected_not_routed():
+    # The old `bench` verb is removed; it must exit non-zero with a clear error
+    # instead of falling through to the review path (issue-785). Assert the
+    # rejection rather than the former coexistence.
     r = subprocess.run(  # noqa: S603
         ["daydream", "bench", "--help"], capture_output=True, text=True  # noqa: S607
     )
-    assert r.returncode == 0 and "--benchmark-repo" in r.stdout
+    assert r.returncode == 2
+    assert "no longer a command" in r.stderr
+    assert "daydream benchmark" in r.stderr
 
 
 def test_validate_diagnostics_never_disclose_evidence_bodies(tmp_path, capsys):

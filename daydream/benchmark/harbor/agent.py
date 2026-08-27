@@ -50,7 +50,6 @@ _BANNED_VARS = (
 _BANNED_PREFIXES = (
     "DAYDREAM_JUDGE_",
     "ANTHROPIC_",
-    "MARTIAN_",
     "OPENAI_",
     "OPENROUTER_",
     "PI_",

@@ -43,8 +43,7 @@ import tempfile
 from pathlib import Path
 from typing import cast
 
-from daydream.benchmark.corpus import harvested_corpus
-
+from daydream_review_v1.corpus import harvested_corpus
 from daydream_review_v1.fixture import (
     FIXTURE_BASE_SHA,
     FIXTURE_PR1_HEAD_SHA,
@@ -398,7 +397,7 @@ def _resolve_base_image(args: argparse.Namespace) -> tuple[int, str | None]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the daydream-review-v1 rollout images.")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="images/manifest.toml")
-    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS, help="`daydream bench harvest` corpus dir")
+    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS, help="harvested-corpus directory")
     parser.add_argument("--only", metavar="SLUG", help="build only this repo slug (owner/name)")
     base = parser.add_mutually_exclusive_group()
     base.add_argument(

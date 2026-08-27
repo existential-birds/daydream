@@ -25,9 +25,8 @@ this gate passes):
    detected set, drawn from changed files that carry no seeded finding, so the
    metric tracks the documented 10% contract without a dominating floor.
 
-The harness reads the corpus read-only (mirroring
-``bench/benchmark-report/build.py``'s discipline) and writes a JSON report to a
-fresh folder under ``bench/benchmark-report/runs/``. It never mutates the
+The harness reads the corpus read-only and writes a JSON report to a fresh
+folder under ``bench/sharding-runs/``. It never mutates the
 corpus. A full gate run needs the offline benchmark corpus (and optionally a
 real backend for observed wall-clock) and is a **release activity**, not CI.
 A missing or empty ``ground-truth.json`` is a hard error (exit non-zero) -- the
@@ -273,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=Path,
         default=None,
-        help="Report dir (default: a fresh run dir under bench/benchmark-report/runs/)",
+        help="Report dir (default: a fresh run dir under bench/sharding-runs/)",
     )
     parser.add_argument(
         "--concurrency",
@@ -287,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     if not corpus.is_dir():
         print(f"error: corpus dir not found: {corpus}", file=sys.stderr)
         return 2
-    out = args.out or Path("bench/benchmark-report/runs") / (
+    out = args.out or Path("bench/sharding-runs") / (
         datetime.now(UTC).strftime("%Y%m%d-%H%M%S") + "-sharding"
     )
     try:

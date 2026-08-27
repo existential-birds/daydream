@@ -12,6 +12,8 @@ import pytest
 from daydream.benchmark.harbor import objective
 from daydream.benchmark.harbor import run as run_mod
 
+harbor = pytest.importorskip("harbor", reason="harbor is an optional benchmark extra")
+
 _WHEEL = {"distribution": "daydream", "version": "0.1.0", "sha256": "c" * 64}
 
 

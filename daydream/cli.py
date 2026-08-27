@@ -12,7 +12,6 @@ top-level ``TARGET`` positional):
 - ``daydream improve <target>`` — audit a repository and write advisory artifacts
     - ``improve plan <description> <target>`` — investigate and write one plan
 - ``daydream summarize <path>`` — print run-info markdown for a trajectory
-- ``daydream bench`` — score deep-review findings against the offline benchmark
 - ``daydream post-findings <artifact>`` — validate a Phase A findings artifact
   against event-derived facts and post new findings to the PR (the privileged,
   unattended Phase B poster for the Actions trigger surface)
@@ -42,7 +41,7 @@ from daydream.agent import (
     console,
     get_current_backends,
 )
-from daydream.benchmark.cli import _handle_bench_command, _handle_benchmark_command
+from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.phases import UnconfinedFindingError
 from daydream.runner import RunConfig, run
@@ -68,7 +67,6 @@ KNOWN_VERBS = {
     "improve",
     "summarize",
     "corpus",
-    "bench",
     "post-findings",
     "setup",
     "benchmark",
@@ -1737,7 +1735,6 @@ def main() -> None:
     Verbs:
         - ``review`` (default) — the review/fix loop (bare ``daydream <target>``)
         - ``summarize`` — print run-info markdown for a trajectory
-        - ``bench`` — score deep-review findings against the offline benchmark
         - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
         - ``post-findings`` — validate a findings artifact and post new
           findings to the PR (privileged Phase B poster; unattended)
@@ -1759,6 +1756,16 @@ def main() -> None:
     # Verb-first dispatch: non-``review`` verbs are short-circuited here (each
     # owns its parser and exit code); everything else flows into ``_parse_args``.
     argv = sys.argv[1:]
+    # ``bench`` was the legacy benchmark verb, removed in favor of
+    # ``daydream benchmark``. Reject it explicitly instead of letting
+    # ``_first_verb`` fall through to the review path with ``bench`` as a
+    # bare target.
+    if argv and argv[0] == "bench":
+        print(
+            "error: the 'bench' command is no longer a command; use 'daydream benchmark'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     verb = _first_verb(argv)
     try:
         # ``summarize`` is sync — short-circuit before anyio.run kicks in.
@@ -1771,9 +1778,6 @@ def main() -> None:
         # filesystem, no agent work), so short-circuit before anyio.run.
         if verb == "corpus":
             sys.exit(_handle_corpus_command(argv[1:]))
-
-        if verb == "bench":
-            sys.exit(_handle_bench_command(argv[1:]))
 
         if verb == "benchmark":
             sys.exit(_handle_benchmark_command(argv[1:]))
@@ -1804,7 +1808,7 @@ def main() -> None:
             sys.exit(_handle_list_reanchor(config))
 
         # ``improve list-reanchored`` is a sync, read-only one-purpose command
-        # (mirroring the corpus/bench/ext short-circuits), so it never spins up
+        # (mirroring the corpus/ext short-circuits), so it never spins up
         # a flow through ``_parse_improve_args``/``anyio.run``.
         if verb == "improve" and len(argv) > 1 and argv[1] == "list-reanchored":
             sys.exit(_handle_list_reanchored_command(argv[2:]))

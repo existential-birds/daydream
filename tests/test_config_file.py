@@ -134,14 +134,19 @@ def test_per_key_merge_preserves_pyproject_phase(tmp_path: Path) -> None:
     assert cfg.backend == "claude"
 
 
-def test_load_file_config_reads_bench_table(tmp_path: Path) -> None:
+def test_config_has_no_bench_field(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     (tmp_path / "pyproject.toml").write_text(
-        '[tool.daydream.bench]\nbenchmark-repo = "/b"\nmodel = "anthropic/claude-opus-4-5-20251101"\n'
-        '[tool.daydream.bench.reviewers.glm]\nbackend = "pi"\nmodel = "z-ai/glm-5.2"\nprovider = "openrouter"\n'
+        '[tool.daydream.bench]\nmodel = "claude-opus-4-5-20251101"\n'
     )
     cfg = load_file_config(tmp_path)
-    assert cfg.bench["benchmark-repo"] == "/b"
-    assert cfg.bench["reviewers"]["glm"] == {"backend": "pi", "model": "z-ai/glm-5.2", "provider": "openrouter"}
+    assert not hasattr(cfg, "bench")
+    # A stale [tool.daydream.bench] table is ignored, not silently dropped: the
+    # loader warns, mirroring the removed legacy `bench` verb's loud CLI
+    # rejection (issue-785).
+    assert any(
+        "no longer a supported daydream config section" in rec.message
+        for rec in caplog.records
+    )
 
 
 def test_precision_mode_true_parses_as_bool(tmp_path: Path) -> None:

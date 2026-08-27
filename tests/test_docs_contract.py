@@ -100,12 +100,6 @@ def test_fresh_install_docs_have_no_plugin_step() -> None:
 def test_historical_records_preserved() -> None:
     expected = {
         "CHANGELOG.md": "7ee332b93b0b5db68eebf87cc85db063dd3ebdfde2c5130e34073b49f857373b",
-        "benchmark/corpora/osprey-coderabbit/index.json": (
-            "ff6e5f43443c1181c8b2b51c3d662c7bc2d37615cdd54240919fabe300a3c0b8"
-        ),
-        "benchmark/corpora/osprey-coderabbit/manifest.json": (
-            "12be2b049b4b609721286e57ce8dc88059ed1a7bf396384ee28c82bee29d3c5e"
-        ),
         "benchmark/corpora/sharding/ground-truth.json": (
             "4aa4858a98dc128aced5385ee93d17c94566192913db4ab61784060ae08c4bd0"
         ),

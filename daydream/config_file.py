@@ -128,7 +128,6 @@ class DaydreamFileConfig:
     backend: str | None = None
     reasoning_effort: str | None = None
     phases: dict[str, dict[str, str]] = field(default_factory=dict)
-    bench: dict[str, Any] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
     precision_mode: bool | None = None
     approve_on_clean: bool | None = None
@@ -230,24 +229,6 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
             merged["phases"] = phases
         elif key == "improve" and isinstance(value, dict) and isinstance(merged.get("improve"), dict):
             merged["improve"] = {**merged["improve"], **value}
-        elif key == "bench" and isinstance(value, dict) and isinstance(merged.get("bench"), dict):
-            bench: dict[str, Any] = dict(merged["bench"])
-            for bench_key, bench_value in value.items():
-                if (
-                    bench_key == "reviewers"
-                    and isinstance(bench_value, dict)
-                    and isinstance(bench.get("reviewers"), dict)
-                ):
-                    reviewers: dict[str, Any] = dict(bench["reviewers"])
-                    for reviewer_name, reviewer_table in bench_value.items():
-                        if isinstance(reviewer_table, dict) and isinstance(reviewers.get(reviewer_name), dict):
-                            reviewers[reviewer_name] = {**reviewers[reviewer_name], **reviewer_table}
-                        else:
-                            reviewers[reviewer_name] = reviewer_table
-                    bench["reviewers"] = reviewers
-                else:
-                    bench[bench_key] = bench_value
-            merged["bench"] = bench
         else:
             merged[key] = value
     return merged
@@ -375,6 +356,16 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
 
     merged = _merge_section(base, dotfile)
 
+    # The legacy `bench` table was removed with the Martian benchmark stack
+    # (issue-785). A stale `[tool.daydream.bench]` section is now ignored; warn
+    # so the upgrade path is not silent, mirroring cli.py's loud rejection of the
+    # removed legacy `bench` verb.
+    if "bench" in merged:
+        logger.warning(
+            "daydream: [tool.daydream.bench] is no longer a supported daydream "
+            "config section (legacy benchmark verb removed); ignoring it"
+        )
+
     model = merged.get("model")
     backend = merged.get("backend")
     reasoning_effort = merged.get("reasoning_effort")
@@ -429,7 +420,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         backend=str(backend) if backend is not None else None,
         reasoning_effort=str(reasoning_effort) if reasoning_effort is not None else None,
         phases=_coerce_phases(merged.get("phases")),
-        bench=dict(merged["bench"]) if isinstance(merged.get("bench"), dict) else {},
         shallow_fanout_threshold=threshold,
         precision_mode=precision,
         approve_on_clean=approve_on_clean,

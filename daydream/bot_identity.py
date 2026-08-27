@@ -4,10 +4,8 @@
 the REST/GraphQL ``[bot]`` suffix mismatch. They live here — a zero-dependency
 leaf mirroring the ``daydream/prompts/<name>.py`` one-constant-per-module
 precedent — so ``daydream.reconcile`` (the author-filter fix for forged
-``daydream-finding`` markers) and ``daydream.benchmark.harvest`` (PR-history
-ingestion) can share one definition without ``reconcile`` pulling benchmark
-deps or risking an import cycle. Relocated verbatim from
-``daydream/benchmark/harvest.py`` (formerly lines 65-77); behavior unchanged.
+``daydream-finding`` markers) can consume the comparator without ``reconcile``
+pulling benchmark deps or risking an import cycle.
 
 Exports:
     bot_login_matches: ``[bot]``-suffix-tolerant login comparison.
