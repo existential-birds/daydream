@@ -814,10 +814,9 @@ def improve_fixture_service(apps_dir: Path) -> str:
 #
 # The generated Harbor verifier assets are non-package `.py` files that use a
 # bare `import verifier_core` and must never import daydream. Tests load them
-# via the repo's established importlib pattern (see
-# tests/test_run_demo_python.py._load_script_module) with the sibling template
-# copy on `sys.path`, so the bare import resolves to the same-dir copy —
-# identical to how the compiled task resolves it.
+# via the repo's established importlib pattern — load a module from a file
+# path with the sibling template copy on `sys.path`, so the bare import
+# resolves to the same-dir copy — identical to how the compiled task resolves it.
 _TEMPLATES = Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "harbor" / "templates"
 
 
