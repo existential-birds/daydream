@@ -12,7 +12,7 @@ def test_check_definition_stays_in_sync_with_makefile():
     """The commands block must list every dep from Makefile's check: target,
     in order, minus lockcheck which is named first."""
     check_line = next(
-        l for l in (REPO / "Makefile").read_text().splitlines() if l.startswith("check:")
+        line for line in (REPO / "Makefile").read_text().splitlines() if line.startswith("check:")
     )
     deps = check_line.removeprefix("check:").strip().split()
     assert deps[0] == "lockcheck"
