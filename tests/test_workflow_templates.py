@@ -44,7 +44,6 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
 REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
-PR_TEMPLATE_PATH = _REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 # The digest below matches the immutable rhysd/actionlint:1.7.7 manifest digest
 # verified against the live OCI registry (`docker buildx imagetools inspect
 # rhysd/actionlint:1.7.7` / `docker manifest inspect …@sha256:887a…147e9`;
@@ -769,15 +768,16 @@ def test_ci_and_pr_template_pin_actionlint_image_by_digest() -> None:
     actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
 
     ci_refs = _ACTIONLINT_REF_RE.findall(actionlint["run"])
-    pr_refs = _ACTIONLINT_REF_RE.findall(PR_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    makefile_text = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    make_refs = _ACTIONLINT_REF_RE.findall(makefile_text)
 
     assert ci_refs == [_ACTIONLINT_IMAGE], (
         "CI actionlint step must reference the digest-pinned image exactly once: "
         f"found {ci_refs}"
     )
-    assert pr_refs == [_ACTIONLINT_IMAGE], (
-        "PR template Actionlint checklist must reference the digest-pinned image "
-        f"exactly once: found {pr_refs}"
+    assert make_refs == [_ACTIONLINT_IMAGE], (
+        "Makefile actionlint target must carry the digest-pinned image exactly "
+        f"once: found {make_refs}"
     )
 
 
@@ -788,6 +788,35 @@ def test_ci_and_pr_template_pin_actionlint_image_by_digest() -> None:
 # actionlint step and expands them, so a selector that stops covering a shipped
 # file (or a newly nested template) fails this test rather than silently
 # shipping un-linted workflows.
+
+
+def test_makefile_actionlint_selectors_match_ci() -> None:
+    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
+    steps = job_steps(wf, "check")
+    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
+    ci_selectors = [
+        tok for tok in actionlint["run"].split()
+        if tok.endswith(".yml") and not tok.startswith("-")
+    ]
+    mk = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "rhysd/actionlint" in mk
+    # Every CI selector appears verbatim in the Makefile's actionlint recipe,
+    # and vice versa: adding a directory on either side strands the other gate.
+    for sel in ci_selectors:
+        assert sel in mk, f"selector {sel!r} missing from Makefile actionlint target"
+    # Parse ONLY the actionlint target's recipe (between the target line and the
+    # next top-level target), not comments, which may mention ci.yml in prose.
+    mk_lines = mk.splitlines()
+    start = next(i for i, line in enumerate(mk_lines) if line.strip() == "actionlint:")
+    recipe: list[str] = []
+    for line in mk_lines[start + 1:]:
+        if line and not line.startswith(("\t", " ")):
+            break
+        recipe.append(line)
+    mk_toks = [t.strip("\\\t ") for t in " ".join(recipe).split()]
+    mk_selectors = {t for t in mk_toks if t.endswith(".yml") and t != "\\"}
+    for sel in mk_selectors:
+        assert sel in ci_selectors, f"Makefile-only selector {sel!r} escapes CI"
 
 
 def test_ci_actionlint_covers_all_workflow_sources() -> None:
