@@ -26,8 +26,10 @@ def test_root_vulture_config_pins_conventions():
     cfg = _tool_block(_ROOT / "pyproject.toml")
     assert cfg["min_confidence"] == 80
     assert cfg["exclude"] == ["*/atif/*"]
-    assert "silence_ui" in cfg["ignore_names"]
-    assert any("console_arg" in n for n in cfg["ignore_names"])
+    # No tree-wide ignore_names: fixture/lambda params are suppressed per-line
+    # at their def site, so a future dead symbol sharing a generic name is never
+    # masked by a blanket name list.
+    assert "ignore_names" not in cfg
 
 
 def test_rl_vulture_config_is_scoped_to_own_tree():

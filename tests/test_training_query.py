@@ -96,12 +96,12 @@ def test_include_all_labels_overrides_default(archive: Path, tmp_path: Path) -> 
     assert "bbb-react-rejected" in _emitted_ids(out)
 
 
-def test_query_copyleft_skipped_by_default(archive: Path, copyleft_seeded: None) -> None:
+def test_query_copyleft_skipped_by_default(archive: Path, copyleft_seeded: None) -> None:  # noqa
     rows = _query_index(archive, CorpusFilters(include_all_labels=True))
     assert "eee-copyleft" not in _ids(rows)
 
 
-def test_query_copyleft_opt_in(archive: Path, copyleft_seeded: None) -> None:
+def test_query_copyleft_opt_in(archive: Path, copyleft_seeded: None) -> None:  # noqa
     rows = _query_index(
         archive,
         CorpusFilters(allow_copyleft=frozenset({"gnu/coreutils"}), include_all_labels=True),
@@ -153,3 +153,4 @@ def test_query_warns_on_unknown_skill(
 
     assert any(row["session_id"] == "zzz-mystery" and row["stack"] is None for row in rows)
     assert "beagle-zig:review-zig" in captured.out
+

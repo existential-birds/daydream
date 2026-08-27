@@ -2642,7 +2642,7 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
     warnings_captured: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_warning",
-        lambda console_arg, message: warnings_captured.append(message),
+        lambda console_arg, message: warnings_captured.append(message),  # noqa
     )
 
     backend = _HealBackend(script=[
@@ -2822,13 +2822,13 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
     infos: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_info",
-        lambda console_arg, message: infos.append(message),
+        lambda console_arg, message: infos.append(message),  # noqa
     )
     # Track prompt_user — must NOT be called for clipboard confirmation
     user_prompts: list[str] = []
     answers = iter(["4"])
 
-    def fake_prompt(console_arg, message, default=""):
+    def fake_prompt(console_arg, message, default=""):  # noqa
         user_prompts.append(message)
         return next(answers, "n")
 
@@ -3207,7 +3207,7 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     warnings: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_warning",
-        lambda console_arg, message: warnings.append(message),
+        lambda console_arg, message: warnings.append(message),  # noqa
     )
 
     backend = _HealBackend(script=[
@@ -3508,7 +3508,7 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
     infos: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_info",
-        lambda console_arg, message: infos.append(message),
+        lambda console_arg, message: infos.append(message),  # noqa
     )
 
     # Capture the order: info messages relative to the y/n prompt.
@@ -4247,3 +4247,4 @@ def test_merge_validates_finding_locations_before_write(tmp_path: Path):
     items = json.loads(merged_items_path(dd).read_text())["items"]
     assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped
     assert "location_note" in items[0]  # demoted-with-annotation
+

@@ -203,7 +203,7 @@ Found 1 issue to address.
 
 
 @pytest.mark.asyncio
-async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path, make_config):
+async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path, make_config):  # noqa
     """Test the complete review -> parse -> fix -> test flow."""
     config = make_config(target_project, stack="python", quiet=True, shallow=True)
 
@@ -842,3 +842,4 @@ async def test_exploration_enriched_output_both_flows(tmp_path, make_work):
         assert issues
         assert "confidence" in issues[0]
         assert "rationale" in issues[0]
+

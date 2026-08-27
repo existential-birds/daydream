@@ -9,8 +9,7 @@ def test_claude_md_commands_list_deadcode():
 
 
 def test_check_definition_stays_in_sync_with_makefile():
-    """The commands block must list every dep from Makefile's check: target,
-    in order, minus lockcheck which is named first."""
+    """The commands block must list every dep from Makefile's check: target, in order."""
     check_line = next(
         line for line in (REPO / "Makefile").read_text().splitlines() if line.startswith("check:")
     )

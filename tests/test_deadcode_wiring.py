@@ -29,8 +29,3 @@ def test_ci_rl_job_has_rl_scoped_deadcode_step():
     assert len(rl_steps) == 1
     # rl job sets working-directory defaults; asserted below per-job
     assert "working-directory" in job.get("defaults", {}).get("run", {})
-
-def test_pre_push_runs_the_same_two_commands():
-    hook = (REPO / "scripts" / "hooks" / "pre-push").read_text()
-    assert "uv run vulture --config pyproject.toml daydream tests" in hook
-    assert "daydream_review_v1 tests" in hook

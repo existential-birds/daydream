@@ -95,4 +95,7 @@ markers = [
 [tool.vulture]
 min_confidence = 80
 exclude = ["*/atif/*"]
-ignore_names = ["silence_ui", "silence_runner_ui", "console_arg", "mock_ui_loop", "mock_ui", "mock_backend", "since_sha", "copyleft_seeded"]
+# Fixture/lambda params referenced only by name are suppressed per-line with
+# `# noqa` at their exact definition site, never tree-wide via `ignore_names`
+# (a flat name list would mask any future genuinely-dead symbol that happened
+# to share a generic name across daydream and tests).
