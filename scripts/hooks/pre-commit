@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 #
 # Pre-commit hook: fast staged-changes gate — runs ruff on the staged Python
-# files only (CI-parity `uv run ruff check` command, scoped to the index).
-# The full local CI gate remains `make check` at push time.
+# files only, scoped to the index. The full local CI gate remains
+# `make check` at push time.
+#
+# Index-scoping: each staged file is linted from its INDEX content
+# (`git show :<path>`), never the working tree, so the gate is authoritative
+# for exactly what will be committed even when a path carries unstaged edits.
 #
 # Install with: make hooks
 #
@@ -13,20 +17,31 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 # Collect Added/Copied/Modified/Renamed staged Python files. Deletions are
-# excluded (nothing to lint); renames surface under their new path.
-staged_py=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
-if [ -z "$staged_py" ]; then
+# excluded (nothing to lint); renames surface under their new path. The
+# NUL-delimited form (`-z`) emits raw, unquoted paths even under
+# core.quotepath=true, so non-ASCII/space/quote filenames reach ruff intact
+# instead of as C-quoted wrappers.
+mapfile -d '' -t py_files < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.py')
+if [ "${#py_files[@]}" -eq 0 ]; then
     exit 0
 fi
 
 echo "→ Running ruff on staged Python files..."
-# Paths from git are newline-separated; mapfile keeps them intact even when
-# they contain spaces, and the array expansion keeps ruff's argv exact.
-mapfile -t py_files <<< "$staged_py"
-set +e
-uv run ruff check "${py_files[@]}"
-status=$?
-set -e
+# Lint each file from its pre-commit (index) content, never the working tree:
+# `git show :<path>` emits the exact blob that will be committed, so a file with
+# both staged and unstaged edits is judged only on the staged state.
+status=0
+for path in "${py_files[@]}"; do
+    # --stdin-filename keeps ruff's per-path config resolution (pyproject.toml
+    # discovery) on the real file name while the bytes come from the index.
+    set +e
+    git show ":$path" | uv run ruff check --stdin-filename "$path" -
+    rc=$?
+    set -e
+    if [ "$rc" -gt "$status" ]; then
+        status=$rc
+    fi
+done
 if [ "$status" -ne 0 ]; then
     echo ""
     echo "✗ ruff found problems in staged files — fix them or run 'make lint' for the full check"

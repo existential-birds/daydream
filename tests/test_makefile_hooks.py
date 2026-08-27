@@ -105,9 +105,16 @@ def _install_recording_commands(
     shim_body = (
         "import json, os, sys\n"
         "log = os.environ['DAYDREAM_COMMAND_LOG']\n"
+        "# Capture piped stdin (e.g. `git show :path | uv ...`) so tests can assert\n"
+        "# ruff was fed the INDEX content rather than the working tree. Skipped for\n"
+        "# git (which must pass its real stdin through to the delegated binary) and\n"
+        "# when stdin is a tty (nothing piped).\n"
+        "stdin = (sys.stdin.read() if (os.path.basename(sys.argv[0]) != 'git'\n"
+        "        and not sys.stdin.isatty()) else None)\n"
         "with open(log, 'a', encoding='utf-8') as f:\n"
         "    json.dump({'command': os.path.basename(sys.argv[0]),\n"
         "               'cwd': os.getcwd(), 'args': sys.argv[1:],\n"
+        "               'stdin': stdin,\n"
         "               'env': {k: os.environ.get(k) for k in\n"
         "                       ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',\n"
         "                        'GIT_COMMITTER_NAME',\n"
@@ -284,8 +291,54 @@ def test_pre_commit_runs_ruff_only_on_staged_python_files(
     _stage_file(worktree, "daydream/spike_a.py", "x = 1\n")
     _stage_file(worktree, "tests/spike_b.py", "y = 2\n")
     _stage_file(worktree, "notes.md", "not python\n")
-    # An unstaged python edit must NOT reach ruff: only the index is linted.
+    # An unstaged python edit in a different file must NOT reach ruff: only
+    # the index is linted.
     (worktree / "daydream" / "unstaged.py").write_text("z = 3\n", encoding="utf-8")
+    # A non-ASCII filename, the core.quotepath trap: git would C-quote it in
+    # newline output, but the hook's NUL-delimited listing must hand the raw
+    # name to ruff.
+    _stage_file(worktree, "daydream/\u00e9t\u00e9.py", "x = 4\n")
+
+    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
+    proc = subprocess.run(
+        [str(worktree / "scripts" / "hooks" / "pre-commit")],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    recs = _read_command_records(log)
+    uv_calls = [r for r in recs if r["command"] == "uv"]
+    # One ruff invocation per staged .py file, each fed that file's INDEX
+    # content via stdin (--stdin-filename; nothing is read from the working
+    # tree). Unstaged and non-Python files are excluded.
+    assert len(uv_calls) == 3
+    by_path = {r["args"][4]: r for r in uv_calls}
+    assert set(by_path) == {"daydream/spike_a.py", "tests/spike_b.py", "daydream/\u00e9t\u00e9.py"}
+    for path, r in by_path.items():
+        assert r["args"] == ["run", "ruff", "check", "--stdin-filename", path, "-"]
+        assert r["cwd"] == str(worktree)
+    # Each ruff feed carries exactly the staged bytes, never the working tree.
+    assert by_path["daydream/spike_a.py"]["stdin"] == "x = 1\n"
+    assert by_path["tests/spike_b.py"]["stdin"] == "y = 2\n"
+    assert by_path["daydream/\u00e9t\u00e9.py"]["stdin"] == "x = 4\n"
+    # The non-ASCII path reaches ruff unquoted (no C-quote/escape wrapper).
+    assert by_path["daydream/\u00e9t\u00e9.py"]["args"][4] == "daydream/\u00e9t\u00e9.py"
+    # No other commands may appear.
+    assert {r["command"] for r in recs} <= {"uv", "git"}
+
+
+def test_pre_commit_lints_index_content_not_working_tree(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _main_repo, worktree = linked_worktree
+    _copy_pre_commit_hook(worktree)
+    # Stage a clean file, then leave a DIFFERENT (lint-breaking) state in the
+    # working tree un-staged. The gate must lint the STAGED bytes, so the
+    # un-staged experiment cannot block (or wrongly clear) the commit.
+    scope_py = worktree / "daydream" / "scope.py"
+    _stage_file(worktree, "daydream/scope.py", "STAGED_VALUE = 1\n")
+    scope_py.write_text("STAGED_VALUE = import os  # unstaged experiment\n", encoding="utf-8")
 
     log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
     proc = subprocess.run(
@@ -298,14 +351,11 @@ def test_pre_commit_runs_ruff_only_on_staged_python_files(
     recs = _read_command_records(log)
     uv_calls = [r for r in recs if r["command"] == "uv"]
     assert len(uv_calls) == 1
-    # Exactly the staged .py paths, relative to the worktree root, passed to
-    # the CI-parity `uv run ruff check` invocation. Unstaged and non-Python
-    # files are excluded.
-    assert uv_calls[0]["args"] == ["run", "ruff", "check", "daydream/spike_a.py", "tests/spike_b.py"]
-    assert uv_calls[0]["cwd"] == str(worktree)
-    # Exactly one command family observed: uv (ruff) plus the hook's own git
-    # plumbing. No mypy/pytest/docker/make/lockcheck may appear.
-    assert {r["command"] for r in recs} <= {"uv", "git"}
+    call = uv_calls[0]
+    assert call["args"][4] == "daydream/scope.py"
+    # The index blob, not the file's working-tree bytes: a live unstaged edit
+    # under the SAME path is excluded from the lint feed.
+    assert call["stdin"] == "STAGED_VALUE = 1\n"
 
 
 def test_pre_commit_exits_zero_without_staged_python(
