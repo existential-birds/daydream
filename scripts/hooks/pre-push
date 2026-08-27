@@ -58,6 +58,13 @@ uv run ruff check daydream tests
 echo "→ Type checking with mypy..."
 uv run mypy daydream tests
 
+echo "→ Detecting dead code with vulture..."
+uv run vulture --config pyproject.toml daydream tests
+(
+    cd rl/daydream_review_v1 &&
+    uv run vulture --config pyproject.toml daydream_review_v1 tests
+)
+
 echo "→ Running tests..."
 uv run pytest -n auto
 
