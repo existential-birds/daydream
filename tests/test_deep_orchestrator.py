@@ -3729,8 +3729,9 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
         pl = prompt.lower()
         if "you are reviewing the react stack" in pl:
             async def _fail():
-                raise RuntimeError("simulated react failure")
-                yield  # pragma: no cover -- unreachable; satisfies async-gen typing
+                async def _raise() -> None:
+                    raise RuntimeError("simulated react failure")
+                yield (await _raise())
             return _fail()
         return original_execute(
             cwd, prompt, output_schema, continuation, agents,
