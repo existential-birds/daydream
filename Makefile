@@ -17,16 +17,27 @@ test:
 # Docker-backed actionlint over every workflow the project ships (repo-owned
 # plus all template files, nested included). Image is digest-pinned exactly as
 # .github/workflows/ci.yml does; mounting $(CURDIR) at /repo so the selectors
-# expand to the same set CI checks. Requires a running Docker daemon.
+# expand to the same set CI checks. Enforced whenever a Docker daemon is
+# available; skipped with a note when it is not, so the local/pre-push gate is
+# not a hard Docker-daemon requirement (CI always runs it).
 actionlint:
-	docker run --rm \
-	  -v "$(CURDIR)":/repo -w /repo \
-	  rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
-	  -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml
+	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then \
+	  docker run --rm \
+	    -v "$(CURDIR)":/repo -w /repo \
+	    rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+	    -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml; \
+	else \
+	  echo "actionlint skipped: Docker daemon is not available"; \
+fi
 
 # Standalone RL project gates, run from its own directory via per-line cd
-# (each recipe line is its own shell).
+# (each recipe line is its own shell). Mirrors ci.yml's rl-check job, including
+# its 'Configure git identity' step: the suite's negative-gate tests commit into
+# throwaway fixtures with no per-repo identity, so without a global identity a
+# contributor machine would fail where CI (which sets it) passes.
 rl-check:
+	git config --global user.email "ci@daydream.invalid"
+	git config --global user.name "daydream CI"
 	cd rl/daydream_review_v1 && uv lock --check
 	cd rl/daydream_review_v1 && uv sync
 	cd rl/daydream_review_v1 && uv run ruff check .
@@ -39,8 +50,9 @@ rl-check:
 lockcheck:
 	uv lock --check
 
-# Run all CI checks locally (lockcheck first — before uv heals the lock)
-check: lockcheck lint typecheck test actionlint rl-check
+# Run all CI checks locally: lockcheck and the root uv sync --all-extras install
+# step first (both before any uv run heals the lock), matching ci.yml's check job.
+check: lockcheck install lint typecheck test actionlint rl-check
 
 # Install git hooks
 hooks:

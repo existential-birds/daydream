@@ -115,7 +115,7 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "docker"))
+    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "docker", "git"))
 
     # Strip make's jobserver/MAKELEVEL chatter so the shim children don't get
     # tangled in an inherited parallel-make env.
@@ -133,26 +133,31 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     rl_root = repo_root / "rl" / "daydream_review_v1"
     cmds = [(r["command"], r["cwd"]) for r in recs]
     assert cmds == (
-        [("uv", str(repo_root))] * 4
-        + [("docker", str(repo_root))]
+        [("uv", str(repo_root))] * 5
+        + [("docker", str(repo_root))] * 2
+        + [("git", str(repo_root))] * 2
         + [("uv", str(rl_root))] * 5
     )
 
     argvs = [r["args"] for r in recs]
-    # Root suite: uv lock --check, ruff, mypy, pytest (-n auto parallel).
+    # Root suite mirrors ci.yml's check job: uv lock --check, the uv sync
+    # --all-extras install, ruff, mypy, pytest (-n auto parallel).
     assert argvs[0] == ["lock", "--check"]
-    assert argvs[1] == ["run", "ruff", "check", "daydream", "tests"]
-    assert argvs[2] == ["run", "mypy", "daydream", "tests"]
-    assert argvs[3] == ["run", "pytest", "-n", "auto"]
+    assert argvs[1] == ["sync", "--all-extras"]
+    assert argvs[2] == ["run", "ruff", "check", "daydream", "tests"]
+    assert argvs[3] == ["run", "mypy", "daydream", "tests"]
+    assert argvs[4] == ["run", "pytest", "-n", "auto"]
 
-    # actionlint: docker invocation shaped exactly like ci.yml's, with the
-    # image digest read LIVE from the CI workflow (never hardcoded here).
+    # actionlint: the recipe first probes the Docker daemon (docker info), then
+    # runs the container when available, invocation shaped exactly like ci.yml's
+    # with the image digest read LIVE from the CI workflow (never hardcoded).
     wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
     steps = job_steps(wf, "check")
     actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
     (image_ref,) = _ACTIONLINT_REF_RE.findall(actionlint["run"])
 
-    docker = argvs[4]
+    assert argvs[5] == ["info"]  # availability guard probes the daemon
+    docker = argvs[6]
     assert docker[0:2] == ["run", "--rm"]
     mount_at = docker.index("-v")
     assert docker[mount_at + 1] == f"{repo_root}:/repo"
@@ -172,13 +177,17 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     assert set(file_args) == expected_files
     assert len(file_args) == len(expected_files)
 
-    # Standalone RL project: its own lock/sync/lint/types/tests, run from its
-    # dir (mirroring ci.yml's rl-check job, which runs an explicit `uv sync`).
-    assert argvs[5] == ["lock", "--check"]
-    assert argvs[6] == ["sync"]
-    assert argvs[7] == ["run", "ruff", "check", "."]
-    assert argvs[8] == ["run", "mypy", "daydream_review_v1", "tests"]
-    assert argvs[9] == ["run", "pytest"]
+    # Standalone RL project: first configures the same neutral git identity as
+    # ci.yml's 'Configure git identity' step (the suite commits into throwaway
+    # fixtures with no per-repo identity), then its lock/sync/lint/types/tests,
+    # run from its dir (mirroring ci.yml's rl-check job's explicit `uv sync`).
+    assert argvs[7] == ["config", "--global", "user.email", "ci@daydream.invalid"]
+    assert argvs[8] == ["config", "--global", "user.name", "daydream CI"]
+    assert argvs[9] == ["lock", "--check"]
+    assert argvs[10] == ["sync"]
+    assert argvs[11] == ["run", "ruff", "check", "."]
+    assert argvs[12] == ["run", "mypy", "daydream_review_v1", "tests"]
+    assert argvs[13] == ["run", "pytest"]
 
 
 def test_pre_push_delegates_quality_gate_to_make_check(

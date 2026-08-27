@@ -20,7 +20,7 @@ cannot verify and that a careless edit could silently break:
 - The repository workflow README declares these files as repository-only Codex
   dogfood configuration and points to the packaged install guide (never copies
   ``ANTHROPIC_API_KEY``).
-- The CI actionlint step and the contributor PR checklist both reference the
+- The CI actionlint step and the Makefile actionlint target both reference the
   actionlint image by immutable OCI digest (``rhysd/actionlint:1.7.7@sha256:…``),
   so a revert to a mutable tag, or drift between the two, fails the suite.
 - The CI actionlint step covers every workflow the project ships — the repo's
@@ -754,7 +754,7 @@ def test_repo_workflow_readme_declares_codex_and_points_to_canonical_install() -
         assert stale not in text
 
 
-def test_ci_and_pr_template_pin_actionlint_image_by_digest() -> None:
+def test_makefile_and_ci_pin_actionlint_image_by_digest() -> None:
     # Caveat (matches _PINNED_ACTION_VERSIONS, which also cannot verify a
     # SHA-->release mapping against its upstream): these assertions only prove the
     # three copies agree with one another. They cannot, and are not intended to,
