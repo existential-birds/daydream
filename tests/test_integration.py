@@ -872,3 +872,4 @@ async def test_exploration_enriched_output_both_flows(tmp_path: Path, make_work:
         assert issues
         assert "confidence" in issues[0]
         assert "rationale" in issues[0]
+

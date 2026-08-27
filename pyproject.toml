@@ -32,6 +32,7 @@ dev = [
     "ruff>=0.9",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0",
+    "vulture>=2.13",
 ]
 
 [project.scripts]
@@ -124,3 +125,14 @@ markers = [
     "live_codex: requires the real `codex` CLI on $PATH with valid auth; skipped automatically when codex is absent. Used by the real-CLI live smoke test in tests/test_codex_real_cli_contract.py.",
     "live_gh: requires the installed gh with working auth; env-gated (DAYDREAM_LIVE_GH=1) so CI never needs network credentials. Used by the opt-in live preflight smoke test in tests/test_benchmark_gh_smoke.py.",
 ]
+
+# Whole-project dead-code detection (#935). Scans pkg+tests together so test
+# references count; min_confidence and exclude mirror the baseline that this
+# gate enforces as clean at merge time.
+[tool.vulture]
+min_confidence = 80
+exclude = ["*/atif/*"]
+# Fixture/lambda params referenced only by name are suppressed per-line with
+# `# noqa` at their exact definition site, never tree-wide via `ignore_names`
+# (a flat name list would mask any future genuinely-dead symbol that happened
+# to share a generic name across daydream and tests).

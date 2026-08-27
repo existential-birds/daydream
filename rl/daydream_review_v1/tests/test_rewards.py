@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import verifiers.v1 as vf
@@ -350,17 +351,17 @@ _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 def _seal_run(run_dir: Path, task: DaydreamReviewTask, repo_path: Path) -> Path:
     """Harness-side seal production over a staged committed-fix repo.
 
-    Stages the fixture repo with the fix COMMITTED (the seal binds the committed
-    diff the verifier re-derives at scoring time, never the working tree),
-    hashes the archive members the harness recorded, and writes ``seal.json``
-    into *run_dir*. Returns the staged repo path.
+    Stages the fixture repo with the fix committed, derives the candidate diff
+    through the shared :func:`~daydream_review_v1.rundir.candidate_diff_cmd`
+    helper, hashes the archive members the harness recorded, and writes
+    ``seal.json`` into *run_dir*. Returns the staged repo path.
     """
-    from daydream_review_v1.rundir import RUN_DIR_FILES
+    from daydream_review_v1.rundir import RUN_DIR_FILES, candidate_diff_cmd
     from daydream_review_v1.verifier import seal_artifacts
 
     repo = _stage_repo(repo_path, task.data.head_sha, edit=_CALC_FIXED, commit=True)
     diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
+        candidate_diff_cmd(str(repo), task.data.head_sha),
         capture_output=True,
         check=True,
     ).stdout
@@ -532,7 +533,9 @@ async def test_green_suite_records_non_regression(
     assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
+@pytest.mark.parametrize("stage_edit", [False, True], ids=["unstaged", "staged"])
 async def test_verifier_identity_branch_executes_and_fails_closed(
+    stage_edit: bool,
     tmp_path: Path,
     runtime: SubprocessRuntime,
     corpus_mini_dir: Path,
@@ -559,10 +562,15 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # The fix is COMMITTED: the verifier checkout's candidate diff is
-    # ``git diff <head_sha> HEAD``, i.e. the committed contents, never the
-    # working tree.
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    if stage_edit:
+        subprocess.run(["git", "-C", str(repo), "add", "calc.py"], check=True)
+    # HEAD must stay exactly at the baked snapshot in both rows.
+    assert subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip() == task.data.head_sha
+    expected_status = "M  calc.py\n" if stage_edit else " M calc.py\n"
+    assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+                          capture_output=True, text=True, check=True).stdout == expected_status
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     # Keep the real host probe (setpriv + verifier user) before it is replaced:
@@ -1573,13 +1581,14 @@ async def test_verify_checkout_failed_diff_fails_closed(
 async def test_verify_checkout_empty_diff_is_clean_noop(
     tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
-    """A review-only rollout (no committed fix) has an empty candidate diff; it
-    must apply cleanly as a no-op, never failing _prepare_verify_checkout.
+    """A review-only rollout (no committed fix) has an empty candidate diff; its
+    committed, staged, AND unstaged tracked contents all match the baked head,
+    so the diff must apply cleanly as a no-op, never failing _prepare_verify_checkout.
     """
     from daydream_review_v1 import taskset
 
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # --allow-empty commit: HEAD advances, tree identical -> genuinely empty diff
+    # --allow-empty commit: HEAD advances, committed tree identical -> genuinely empty diff
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, commit=True)
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     if os.geteuid() == 0:
@@ -1642,13 +1651,13 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
 
 
 def test_candidate_diff_cmd_carries_hardening_flags() -> None:
-    from daydream_review_v1.rundir import candidate_diff_cmd
+    from daydream_review_v1.rundir import DAYDREAM_EXCLUDE, candidate_diff_cmd
 
     argv = candidate_diff_cmd("/work/repo", "deadbeef")
     assert argv == [
         "git", "-C", "/work/repo", "diff",
         "--no-ext-diff", "--no-textconv",
-        "deadbeef", "HEAD",
+        "deadbeef", "--", DAYDREAM_EXCLUDE,
     ]
 
 
@@ -1741,3 +1750,81 @@ async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flag
 # the genuine repo-configurable-helper surface is the non-quiet candidate-diff
 # path, covered by test_verify_checkout_external_diff_ignored and
 # test_verify_checkout_textconv_ignored.
+
+
+# --- oracle / candidate-diff working-tree equivalence (issue #725 pin) ---
+#
+# Round 2 of the issue-#725 review found that the acceptance oracle
+# (``_fixes_applied``) and the load-bearing candidate-diff derivation
+# (``candidate_diff_cmd``) share ``DAYDREAM_EXCLUDE`` but encode their
+# working-tree semantics independently: convergence is exact today, but only
+# by docstring reasoning, and a future edit to either side silently re-opens
+# the drift class of issue #725 (oracle accepts a state whose candidate diff
+# is empty, or vice versa). These tests are the executable form of that
+# reasoning: over every canonical repo state a rollout can produce, the
+# oracle's verdict and the derived diff's emptiness must agree.
+
+@pytest.mark.parametrize(
+    ("stage_kwargs", "expected"),
+    [
+        pytest.param({}, False, id="clean-tree-at-baked-head"),
+        pytest.param({"edit": _CALC_FIXED}, True, id="uncommitted-edit"),
+        pytest.param({"edit": _CALC_FIXED, "commit": True}, True, id="committed-fix"),
+        pytest.param({"commit": True}, False, id="empty-commit-moves-head-only"),
+        pytest.param(
+            {"patch": "not-a-fix-signal", "commit": True, "commit_patch": True},
+            False,
+            id="committed-daydream-artifacts-only",
+        ),
+        pytest.param(
+            {
+                "edit": _CALC_FIXED,
+                "patch": "not-a-fix-signal",
+                "commit": True,
+                "commit_patch": True,
+            },
+            True,
+            id="committed-fix-plus-daydream-artifacts",
+        ),
+    ],
+)
+async def test_oracle_acceptance_matches_candidate_diff_semantics(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    stage_kwargs: dict[str, Any], expected: bool,
+) -> None:
+    """Whichever repo state the oracle accepts, the candidate diff must show.
+
+    Regression pin for the issue-#725 drift class, round-2 findings 1+2: the
+    single-sourced ``DAYDREAM_EXCLUDE`` keeps both probes honest about
+    ``.daydream/``, but each probe still encodes its own tracked-tree
+    semantics (status OR committed quiet diff versus ``git diff <head>``).
+    Equivalence across the canonical states below is exact today — committed,
+    staged, and unstaged tracked edits read identically through both probes
+    while untracked files (including daydream's own committed-but-excluded
+    artifacts and the never-staged recommended.patch) read as no-op through
+    both — and this test turns any future divergence into a CI failure
+    instead of docstring archaeology.
+    """
+    from daydream_review_v1 import rundir as rundir_mod
+    from daydream_review_v1 import taskset
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, **stage_kwargs)
+
+    accepted = await taskset._fixes_applied(runtime, str(repo), task.data.head_sha)
+    assert accepted == expected, (
+        f"oracle verdict {accepted!r} contradicts canonical state "
+        f"{stage_kwargs!r}: the acceptance probe drifted from the "
+        f"tracked-tree contract"
+    )
+
+    proc = subprocess.run(
+        rundir_mod.candidate_diff_cmd(str(repo), task.data.head_sha),
+        capture_output=True,
+    )
+    produced_fix = bool(proc.stdout.strip())
+    assert produced_fix == expected, (
+        f"derived candidate diff {'showed changes' if produced_fix else 'was empty'} "
+        f"against canonical state {stage_kwargs!r}: the deriv site drifted "
+        f"from the tracked-tree contract"
+    )

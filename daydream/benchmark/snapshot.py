@@ -260,7 +260,7 @@ def build_bundle(
     non-zero step raises :class:`GitError` so the caller maps it to
     ``bundle_failure``.
     """
-    bundle_path = Path(bundle_path)
+    bundle_path = Path(bundle_path).resolve()
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     env = _synthetic_env()
     base_tree = rev_parse(mirror_repo, f"{base_sha}^{{tree}}")
@@ -284,7 +284,7 @@ def build_bundle(
 
 def bundle_heads(bundle_path: Path) -> set[str]:
     """The list of refs a bundle exposes."""
-    bundle_path = Path(bundle_path)
+    bundle_path = Path(bundle_path).resolve()
     proc = git_ops._run_git(
         bundle_path.parent, ["bundle", "list-heads", str(bundle_path)], retries=0, timeout=30
     )
@@ -316,7 +316,7 @@ def validate_offline_clone(
     unexpected ref set, ancestry/parent mismatch, tree mismatch, or diff-digest
     mismatch. Returns ``None``.
     """
-    bundle_path = Path(bundle_path)
+    bundle_path = Path(bundle_path).resolve()
     import tempfile
 
     clone_dir = Path(tempfile.mkdtemp(prefix="clone-", dir=str(workdir)))

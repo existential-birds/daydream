@@ -44,6 +44,9 @@ jobs:
       - name: Lint with ruff
         run: uv run ruff check daydream tests
 
+      - name: Run vulture
+        run: uv run vulture --config pyproject.toml daydream tests
+
       - name: Type check with mypy
         run: uv run mypy daydream tests
 
@@ -99,6 +102,9 @@ jobs:
 
       - name: Type check with mypy
         run: uv run mypy daydream_review_v1 tests
+
+      - name: Run vulture
+        run: uv run vulture --config pyproject.toml daydream_review_v1 tests
 
       # The full documented standalone gate (rl/daydream_review_v1/README.md:17-21),
       # including the two `slow` Docker-baseline image tests. The runner's daemon

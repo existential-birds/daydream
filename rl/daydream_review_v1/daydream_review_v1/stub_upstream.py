@@ -78,7 +78,7 @@ class StubUpstreamHandler(BaseHTTPRequestHandler):
 
     reply: str = CANNED_REPLY
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
+    def log_message(self, _format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
         return
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib signature

@@ -444,6 +444,7 @@ dev = [
     { name = "ruff", specifier = ">=0.9" },
     { name = "types-jsonschema", specifier = ">=4.26" },
     { name = "types-pyyaml", specifier = ">=6.0" },
+    { name = "vulture", specifier = ">=2.13" },
 ]
 
 [[package]]
@@ -461,6 +462,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "vulture" },
 ]
 
 [package.metadata]
@@ -475,6 +477,7 @@ dev = [
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.9" },
+    { name = "vulture", specifier = ">=2.13" },
 ]
 
 [[package]]
@@ -2331,6 +2334,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5d/50/66d6571470240006caec392361d9f20e863acf39361bda325e53e235dbed/verifiers-0.2.1.tar.gz", hash = "sha256:e68c2b22a7fdbc2590a7cb8f59db685295be7999b9a75b12fffc00b2ac7c5aa1", size = 739478, upload-time = "2026-07-20T20:15:52.117Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8c/ce/1d17f06a311fb904a4032f417dc00ee0b855baa773efdfb694cfba3b7792/verifiers-0.2.1-py3-none-any.whl", hash = "sha256:6b31b20a0d2b42ec7dbcd6824124d085535aaaed2be36fe6b4fdf59ebf65a42f", size = 759473, upload-time = "2026-07-20T20:15:50.364Z" },
+]
+
+[[package]]
+name = "vulture"
+version = "2.16"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/3e/4d08c5903b2c0c70cad583c170cc4a663fc6a61e2ad00b711fcda61358cd/vulture-2.16.tar.gz", hash = "sha256:f8d9f6e2af03011664a3c6c240c9765b3f392917d3135fddca6d6a68d359f717", size = 52680, upload-time = "2026-03-25T14:41:27.141Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/be/f935130312330614811dae2ea9df3f395f6d63889eb6c2e68c14507152ee/vulture-2.16-py3-none-any.whl", hash = "sha256:6e0f1c312cef1c87856957e5c2ca9608834a7c794c2180477f30bf0e4cc58eee", size = 26993, upload-time = "2026-03-25T14:41:26.21Z" },
 ]
 
 [[package]]

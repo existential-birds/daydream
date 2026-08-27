@@ -1531,7 +1531,7 @@ class TrajectoryRecorder:
         _ACTIVE_RECORDERS.append(self)
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, _exc_tb: Any) -> None:
         try:
             if exc_type is not None:
                 self._aborted = True
@@ -2115,7 +2115,7 @@ class _ForkCM:
         self._entered_at = now_iso()
         return child
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, _exc_tb: Any) -> None:
         child = self._child
         if child is None:
             return
@@ -2187,7 +2187,7 @@ class _InvocationCM:
         self._recorder._active_invocations.append(self._invocation)
         return self._invocation
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, _exc_tb: Any) -> None:
         if self._invocation is not None:
             # A fatal error propagating out of run_agent's event loop (e.g. a
             # backend raising MaxTurnsError on error_max_turns) would otherwise

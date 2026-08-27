@@ -126,7 +126,7 @@ def install_mock_backend(monkeypatch: pytest.MonkeyPatch) -> MockBackend:
 async def test_default_loop_on_base_branch_raises_wrong_branch_error(
     repo_with_origin: Path,
     install_mock_backend: MockBackend,
-    silence_ui: None,
+    silence_ui: None,  # noqa
 ) -> None:
     """Default loop (no --branch, no --worktree) on the base branch errors loudly.
 
@@ -155,7 +155,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
-    silence_ui: None,
+    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``daydream --branch feat/X`` (X only on origin) fetches, runs, cleans up."""
@@ -218,7 +218,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
-    silence_ui: None,
+    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When --branch X is also checked out locally and stale, warn + use origin/X."""
@@ -283,7 +283,7 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
-    silence_ui: None,
+    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--comment --branch feat/Z`` with no open PR runs the deep flow.
@@ -333,7 +333,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
-    silence_ui: None,
+    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An open PR's ``baseRefName`` is what ``open_workspace`` resolves as base."""
@@ -392,7 +392,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
 async def test_review_mode_on_base_branch_does_not_error(
     repo_with_origin: Path,
     install_mock_backend: MockBackend,
-    silence_ui: None,
+    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--review`` on base branch must NOT raise WrongBranchError.
@@ -432,3 +432,4 @@ async def test_review_mode_on_base_branch_does_not_error(
     # _run_loop_deep was reached.
     assert routed["base_branch"] == "main"
     assert routed["head_branch"] == "main"
+

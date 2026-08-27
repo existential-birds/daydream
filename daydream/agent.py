@@ -132,7 +132,7 @@ class _EventStreamScope:
         self,
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
-        traceback: TracebackType | None,
+        _traceback: TracebackType | None,
     ) -> None:
         await self.aclose()
 

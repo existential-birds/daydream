@@ -34,8 +34,7 @@
 
 <!-- Verify before requesting review. -->
 
-- [ ] Repository checks pass locally (`make check`)
-- [ ] Actionlint passes for workflow YAML changes (if applicable): `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml`
+- [ ] Root, workflow, and standalone RL checks pass locally via `make check` (requires Docker daemon for actionlint)
 - [ ] Documentation updated (if applicable)
 
 ## Additional Context

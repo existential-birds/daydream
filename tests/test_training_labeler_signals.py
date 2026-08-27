@@ -208,7 +208,7 @@ def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: ["c1"],
+        commits_since_fetcher=lambda repo, branch, since_sha: ["c1"],  # noqa
         file_at_fetcher=lambda repo, path, sha: "foo = 1\n",
     )
     assert sig == LocalCommitAppliedSignal(verdict="applied")
@@ -266,7 +266,7 @@ def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path:
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: [],
+        commits_since_fetcher=lambda repo, branch, since_sha: [],  # noqa
         file_at_fetcher=lambda repo, path, sha: "",
     )
     assert sig == LocalCommitAppliedSignal(verdict="rejected")
@@ -291,7 +291,7 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
         file_at_fetcher=lambda repo, path, sha: "",
     )
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
@@ -320,7 +320,7 @@ def test_local_commit_applied_signal_unreadable_window_falls_back_to_base_branch
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
         file_at_fetcher=_file_at,
     )
     assert sig == LocalCommitAppliedSignal(verdict="applied")
@@ -353,7 +353,7 @@ def test_local_commit_applied_signal_base_branch_fallback_prefers_remote_over_st
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
         file_at_fetcher=_file_at,
     )
     assert sig == LocalCommitAppliedSignal(verdict="applied")
@@ -377,7 +377,7 @@ def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_p
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: None,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
         file_at_fetcher=lambda repo, path, ref: "anything at all\n",
     )
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
@@ -491,3 +491,4 @@ def test_per_finding_resolution_signal_no_pr() -> None:
     row = {"pr_repo": None, "pr_number": None}
     result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A], gh_api=_fake_gh_responder({}))
     assert result == []
+

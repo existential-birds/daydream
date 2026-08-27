@@ -437,7 +437,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
 async def test_review_run_does_not_mint_app_identity(
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: WorkContext,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa
     tmp_path: Path,
     make_config: Callable[..., RunConfig],
 ) -> None:
@@ -1118,12 +1118,12 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     warnings: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_warning",
-        lambda console_arg, message: warnings.append(message),
+        lambda console_arg, message: warnings.append(message),  # noqa
     )
     successes: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_success",
-        lambda console_arg, message: successes.append(message),
+        lambda console_arg, message: successes.append(message),  # noqa
     )
 
     observed_timeouts: list[Any] = []
@@ -1513,3 +1513,4 @@ def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
     assert m.review_backend is None
     assert m.fix_backend == "claude"
     assert m.test_backend == "claude"
+
