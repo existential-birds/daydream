@@ -1015,7 +1015,7 @@ class PlanWriteSession:
         self._reanchor_worktree: Path | None = None
         self._planned_at_errors: tuple[str, ...] = ()
         try:
-            if not git_ops.ref_exists(self._repo, planned_at):
+            if not git_ops.commit_exists(self._repo, planned_at):
                 self._planned_at_errors = ("PLANNED_AT_INVALID",)
             elif not git_ops.is_ancestor(self._repo, planned_at, "HEAD"):
                 self._planned_at_errors = ("PLANNED_AT_NOT_ANCESTOR",)

@@ -1574,6 +1574,40 @@ def test_planned_at_from_an_unrelated_root_is_rejected(repo: Path, head_sha: str
     ).read_text()
 
 
+def test_planned_at_naming_only_remote_branch_is_invalid(
+    repo: Path, tmp_path: Path
+) -> None:
+    """A planned_at that exists only as origin/<name> must report PLANNED_AT_INVALID.
+
+    Regression: routing the existence probe through ref_exists (which delegates
+    to branch_exists and therefore accepts refs/remotes/origin/<ref>) turned a
+    remote-only name into PLANNED_AT_NOT_ANCESTOR. The old cat-file -e
+    {plan}^{commit} probe did not resolve such a short name, so it must be
+    reported as an invalid anchor.
+    """
+    from tests.harness.git_helpers import bare_remote as _bare_remote
+
+    bare = _bare_remote(tmp_path / "remote.git")
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "-u", "origin", "main")
+    git(repo, "checkout", "-b", "only-remote")
+    (repo / "notes.txt").write_text("only-remote\n")
+    git(repo, "add", "notes.txt")
+    commit(repo, "only-remote commit")
+    git(repo, "push", "-u", "origin", "only-remote")
+    git(repo, "checkout", "main")
+    git(repo, "branch", "-D", "only-remote")
+
+    result = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **_assembled(repo)}],
+        planned_at="only-remote",
+    )
+
+    assert result["written"] == []
+    assert "PLANNED_AT_INVALID" in (repo / "daydream_plans/README.md").read_text()
+
+
 @pytest.mark.parametrize(
     "probe_argv",
     [

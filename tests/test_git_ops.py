@@ -238,6 +238,53 @@ def test_ref_exists_rejects_leading_dash(tmp_path: Path) -> None:
     assert git_ops.ref_exists(repo, "--exec=evil") is False
 
 
+# --- commit_exists -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "build_ref",
+    [_ref_raw_sha, _ref_abbreviated_sha, _ref_tag, _ref_relative_commit_ish, _ref_named_branch],
+    ids=["raw_sha", "abbreviated_sha", "tag", "relative_commit_ish", "named_branch"],
+)
+def test_commit_exists_true(tmp_path: Path, build_ref: Any) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.commit_exists(repo, build_ref(repo)) is True
+
+
+def test_commit_exists_rejects_origin_only(tmp_path: Path) -> None:
+    """A bare name present only as origin/<name> does NOT resolve (old behavior).
+
+    branch_exists/ref_exists accept it via refs/remotes/origin/<ref>, but a
+    plain name has no local commit-ish, so commit_exists (the cat-file -e
+    probe) must report it as not existing.
+    """
+    bare = _bare_remote(tmp_path / "remote.git")
+    repo = _make_repo_with_main(tmp_path, name="repo")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "-u", "origin", "main")
+    _git(repo, "checkout", "-b", "remote-only")
+    (repo / "r.txt").write_text("r\n")
+    _git(repo, "add", "r.txt")
+    _commit(repo, "remote-only commit")
+    _git(repo, "push", "-u", "origin", "remote-only")
+    _git(repo, "checkout", "main")
+    _git(repo, "branch", "-D", "remote-only")
+    assert git_ops.branch_exists(repo, "remote-only") is True
+    assert git_ops.commit_exists(repo, "remote-only") is False
+
+
+def test_commit_exists_missing(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.commit_exists(repo, "nonexistent") is False
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    assert git_ops.commit_exists(repo, tree) is False
+
+
+def test_commit_exists_rejects_leading_dash(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.commit_exists(repo, "-not-a-ref") is False
+
+
 @pytest.mark.parametrize(
     ("ancestor", "descendant", "expected"),
     [

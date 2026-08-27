@@ -671,6 +671,16 @@ def branch_exists(repo: Path, ref: str) -> bool:
     return remote.returncode == 0
 
 
+def _has_leading_dash(*refs: str) -> bool:
+    """True if any *refs* starts with ``-``, which git would mis-parse as an option flag.
+
+    No valid branch name or commit-ish starts with ``-``, so callers reject
+    these early rather than letting an attacker-controlled string reach the
+    shell.
+    """
+    return any(ref.startswith("-") for ref in refs)
+
+
 def ref_exists(repo: Path, ref: str) -> bool:
     """Check whether *ref* resolves to a commit git can name.
 
@@ -687,9 +697,34 @@ def ref_exists(repo: Path, ref: str) -> bool:
     # No valid commit-ish (SHA, tag, relative expression) starts with '-'.
     # A leading dash would be mis-parsed by git as an option flag; reject it
     # early rather than letting an attacker-controlled string reach the shell.
-    if ref.startswith("-"):
+    if _has_leading_dash(ref):
         return False
     commit = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+    return commit.returncode == 0
+
+
+def commit_exists(repo: Path, revision: str) -> bool:
+    """Check whether *revision* resolves locally to a named commit.
+
+    This is the ``git cat-file -e <revision>^{commit}`` probe: only commits
+    git can name via normal revision resolution are accepted. Unlike
+    :func:`ref_exists`, it does NOT treat a bare branch name that exists only
+    as a remote-tracking ``origin/<revision>`` as existing -- git's short-name
+    resolution does not fall back to ``refs/remotes/origin`` for a name without
+    a slash, so such a name fails this probe and callers report it "invalid".
+
+    Returns ``False`` (rather than raising) on the soft-failure modes: missing
+    ref, a tree/blob that is not a commit, or a leading-dash ref that would be
+    mis-parsed as an option flag.
+
+    Raises:
+        GitError: Only for unexpected subprocess failures (timeout, missing
+            git binary). The documented soft-failure modes return ``False``.
+    """
+    # Same guard as ref_exists: no valid commit-ish starts with '-'.
+    if _has_leading_dash(revision):
+        return False
+    commit = _run_git(repo, ["rev-parse", "--verify", f"{revision}^{{commit}}"], timeout=5)
     return commit.returncode == 0
 
 
@@ -707,7 +742,7 @@ def is_ancestor(repo: Path, ancestor: str, descendant: str = "HEAD") -> bool:
     # Same guard as ref_exists and merge_base: a leading '-' would be
     # mis-parsed by git as an option flag. No valid branch name or commit-ish
     # starts with '-'.
-    if ancestor.startswith("-") or descendant.startswith("-"):
+    if _has_leading_dash(ancestor, descendant):
         return False
 
     proc = _run_git(repo, ["merge-base", "--is-ancestor", ancestor, descendant], timeout=5)
@@ -734,7 +769,7 @@ def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
     """
     # Same guard as ref_exists: a leading '-' would be mis-parsed as a git
     # option flag.  No valid branch name or commit-ish starts with '-'.
-    if head.startswith("-") or base.startswith("-"):
+    if _has_leading_dash(head, base):
         return None
 
     head_proc = _run_git(repo, ["rev-parse", "--verify", head], timeout=5)
