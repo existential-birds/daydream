@@ -206,8 +206,8 @@ Found 1 issue to address.
 
 @pytest.mark.asyncio
 async def test_full_fix_flow(
-    mock_backend: Any,
-    mock_ui: Any,
+    mock_backend: Any,  # noqa: F841
+    mock_ui: Any,  # noqa: F841
     target_project: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:

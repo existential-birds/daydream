@@ -660,9 +660,9 @@ class _HelpAllAction(argparse.Action):
     def __call__(
         self,
         parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Any,
-        option_string: str | None = None,
+        _namespace: argparse.Namespace,
+        _values: Any,
+        _option_string: str | None = None,
     ) -> None:
         _build_main_parser(full_help=True).print_help()
         parser.exit()

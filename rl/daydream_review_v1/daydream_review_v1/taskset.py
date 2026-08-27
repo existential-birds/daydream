@@ -32,7 +32,9 @@ from verifiers.v1.errors import boundary
 
 from daydream_review_v1.corpus import harvested_corpus
 from daydream_review_v1.rundir import (
-    DAYDREAM_EXCLUDE,
+    DAYDREAM_EXCLUDE as DAYDREAM_EXCLUDE,
+)
+from daydream_review_v1.rundir import (
     DEFAULT_ARCHIVE_ROOT,
     candidate_diff_cmd,
     candidate_quiet_diff_cmd,

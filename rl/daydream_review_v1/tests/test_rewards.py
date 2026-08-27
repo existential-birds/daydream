@@ -1789,7 +1789,7 @@ async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flag
     ],
 )
 async def test_oracle_acceptance_matches_candidate_diff_semantics(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Any, runtime: Any, corpus_mini_dir: Any, fixture_manifest_path: Any,
     stage_kwargs: dict[str, Any], expected: bool,
 ) -> None:
     """Whichever repo state the oracle accepts, the candidate diff must show.

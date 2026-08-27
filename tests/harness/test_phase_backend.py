@@ -28,7 +28,7 @@ def mock_ui_loop(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_shared_phase_backend_drives_shallow_pass(
     feature_branch_repo: Path,
-    mock_ui_loop: Any,
+    mock_ui_loop: Any,  # noqa: F841
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One issue on the single pass → the shallow deep run completes and exits 0."""

@@ -3056,7 +3056,7 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
     user_prompts: list[str] = []
     answers = iter(["4"])
 
-    def fake_prompt(console_arg: Any, message: Any, default: Any="") -> Any:
+    def fake_prompt(_console_arg: Any, message: Any, default: Any="") -> Any:
         user_prompts.append(message)
         return next(answers, "n")
 

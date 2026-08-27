@@ -59,6 +59,16 @@ def _write(repo: Path, name: str, content: str | bytes) -> None:
     _git(repo, "add", name)
 
 
+@contextlib.contextmanager
+def monkeypatch_relative_cwd(cwd: Path) -> Any:
+    old = os.getcwd()
+    os.chdir(cwd)
+    try:
+        yield
+    finally:
+        os.chdir(old)
+
+
 def _seed_origin(tmp_path: Path) -> str:
     """Bare origin: main (base1->base2->base3) + "refs/pull/1/head" off base2."""
     repo = tmp_path / "seed_wt"
@@ -253,7 +263,7 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
     assert storage.sha256_file(bundle) == first
 
 
-def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path):
+def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path) -> None:
     import os
 
     from daydream.benchmark import snapshot as sn

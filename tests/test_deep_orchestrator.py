@@ -3832,8 +3832,11 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     ) -> Any:
         pl = prompt.lower()
         if "you are reviewing the react stack" in pl:
-            async def _fail() -> AsyncIterator[Any]:
+            async def _raise() -> None:
                 raise RuntimeError("simulated react failure")
+
+            async def _fail() -> AsyncIterator[Any]:
+                await _raise()
                 yield  # pragma: no cover -- unreachable; satisfies async-gen typing
             return _fail()
         return original_execute(

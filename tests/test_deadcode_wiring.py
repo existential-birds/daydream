@@ -1,17 +1,18 @@
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 
-def _ci():
+def _ci() -> dict[str, Any]:
     wf = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text())
     return {name.lower(): job for name, job in wf["jobs"].items()}
 
-def _root_vulture_step(steps):
+def _root_vulture_step(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [s for s in steps if "vulture" in s.get("run", "") and "rl/" not in s.get("run", "")]
 
-def test_ci_check_job_has_deadcode_step_mirroring_makefile():
+def test_ci_check_job_has_deadcode_step_mirroring_makefile() -> None:
     steps = _ci()["check"]["steps"]
     found = _root_vulture_step(steps)
     assert len(found) == 1
@@ -20,7 +21,7 @@ def test_ci_check_job_has_deadcode_step_mirroring_makefile():
     lint_idx = next(i for i, s in enumerate(steps) if "ruff" in s.get("run", ""))
     assert steps.index(found[0]) > lint_idx  # slots after lint, mirroring check order
 
-def test_ci_rl_job_has_rl_scoped_deadcode_step():
+def test_ci_rl_job_has_rl_scoped_deadcode_step() -> None:
     job = next(j for name, j in _ci().items() if "rl" in name)
     rl_steps = [
         s for s in job["steps"]

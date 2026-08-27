@@ -190,7 +190,7 @@ async def test_run_dispatches_to_expected_flow(
     expected_value: Any,
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: Any,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa: F841
     tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -227,7 +227,7 @@ async def test_run_dispatches_to_expected_flow(
 async def test_run_rejects_head_mismatch_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: Any,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa: F841
     tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -254,7 +254,7 @@ async def test_run_rejects_head_mismatch_before_dispatch(
 async def test_run_allows_matching_approved_head(
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: Any,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa: F841
     tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -280,7 +280,7 @@ async def test_run_allows_matching_approved_head(
 @pytest.mark.asyncio
 async def test_run_rejects_head_mismatch_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa: F841
     deep_target: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -313,7 +313,7 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
 @pytest.mark.asyncio
 async def test_run_allows_matching_approved_head_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa: F841
     deep_target: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -437,7 +437,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
 async def test_review_run_does_not_mint_app_identity(
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: WorkContext,
-    silence_runner_ui: None,  # noqa
+    silence_runner_ui: None,  # noqa: F841  # noqa
     tmp_path: Path,
     make_config: Callable[..., RunConfig],
 ) -> None:
@@ -497,7 +497,7 @@ def test_run_posts_to_github_matches_dispatch(config: RunConfig, expected: bool)
 async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: Any,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa: F841
     tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -804,7 +804,7 @@ async def test_run_threads_non_interactive_into_agent_state(
     config_kwargs: Any,
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: Any,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa: F841
     tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
 ) -> None:

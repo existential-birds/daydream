@@ -878,7 +878,7 @@ def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path,
 
 
 def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.benchmark import storage
+    from daydream.benchmark import storage  # noqa: F401
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1002,8 +1002,8 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: 
 
 
 def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
-    tmp_path, fake_gh, monkeypatch
-):
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The same workspace compiled via an absolute root and via a relative root
     (from a different CWD) yields byte-identical ``harbor/benchmark.lock.json``
     output, and ``compile_workspace`` acquires ``WorkspaceLock`` under the
@@ -1038,23 +1038,25 @@ def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
     # class-level ``_held`` registry onto the real dict: the genuine lock's
     # methods resolve ``WorkspaceLock`` through this patched module global, so
     # the mirror keeps their bookkeeping working unchanged.
-    real_lock_cls = build.storage.WorkspaceLock
+    from daydream.benchmark import storage as _storage
+
+    real_lock_cls = _storage.WorkspaceLock
     constructed_roots: list[object] = []
 
     class _RecordingLock:
         _held = real_lock_cls._held
 
-        def __init__(self, root, **kwargs):
+        def __init__(self, root: object, **kwargs: object) -> None:
             constructed_roots.append(root)
-            self._inner = real_lock_cls(root, **kwargs)
+            self._inner = real_lock_cls(root, **kwargs)  # type: ignore[arg-type]
 
-        def __enter__(self):
+        def __enter__(self) -> object:
             return self._inner.__enter__()
 
-        def __exit__(self, *_exc):
-            return self._inner.__exit__(*_exc)
+        def __exit__(self, *_exc: object) -> None:
+            self._inner.__exit__(*_)
 
-    monkeypatch.setattr(build.storage, "WorkspaceLock", _RecordingLock)
+    monkeypatch.setattr(_storage, "WorkspaceLock", _RecordingLock)
 
     old = os.getcwd()
     os.chdir(outside)
@@ -1078,7 +1080,7 @@ def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
 
 
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import storage
+    from daydream.benchmark import storage  # noqa: F401
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)   # mark_ready done
