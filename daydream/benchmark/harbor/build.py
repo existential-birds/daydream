@@ -813,8 +813,14 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
     writes the lock + root control-plane, runs the leakage scan, then swaps the
     stage in place only on full success. On any rejection the exception
     re-raises and the prior ``harbor/`` is left untouched.
+
+    The root is resolved to a canonical absolute path before the workspace
+    lock is acquired, so callers passing ``.``, a relative path, or the literal
+    resolved path for the same workspace converge on the same reentrancy key
+    and all downstream-derived paths (stage, bundle sources/destinations,
+    storage digests) inherit canonical form. Absolute inputs are unchanged.
     """
-    root = Path(root)
+    root = Path(root).resolve()
     from daydream.benchmark.harbor import package as pkg
 
     daydream_version = importlib.metadata.version("daydream")

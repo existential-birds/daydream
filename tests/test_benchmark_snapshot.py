@@ -9,6 +9,7 @@ against the real object store. Only the import-gating tests (in
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -56,6 +57,16 @@ def _write(repo: Path, name: str, content: str | bytes) -> None:
     else:
         path.write_text(content)
     _git(repo, "add", name)
+
+
+@contextlib.contextmanager
+def monkeypatch_relative_cwd(cwd: Path):
+    old = os.getcwd()
+    os.chdir(cwd)
+    try:
+        yield
+    finally:
+        os.chdir(old)
 
 
 def _seed_origin(tmp_path: Path) -> Path:
@@ -249,6 +260,26 @@ def test_bundle_two_refs_deterministic(tmp_path):
     assert sn.storage.sha256_file(bundle) == first
 
 
+def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path):
+    import os
+
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
+    rel_bundle = Path(os.path.relpath(bundle, tmp_path))
+    with monkeypatch_relative_cwd(tmp_path):
+        heads_rel = sn.bundle_heads(rel_bundle)
+        heads_abs = sn.bundle_heads(bundle)
+    assert heads_rel == {"refs/heads/base", "refs/heads/head"}
+    assert heads_abs == {"refs/heads/base", "refs/heads/head"}
+
+
 # ---------------------------------------------------------------------------
 # Task 6: offline-clone validation
 # ---------------------------------------------------------------------------
@@ -315,6 +346,25 @@ def test_offline_clone_validates(tmp_path):
     bad.write_bytes(bundle.read_bytes()[: len(bundle.read_bytes()) // 2])
     with pytest.raises(git_ops.GitError):
         sn.validate_offline_clone(bad, _seed_base_tree(), _seed_head_tree(), diff_sha,
+                                  workdir=tmp_path)
+
+
+def test_build_bundle_and_offline_clone_accept_relative_paths(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    abs_bundle = tmp_path / "snapshots" / "rel.bundle"
+    with monkeypatch_relative_cwd(m):
+        sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, abs_bundle)
+    assert abs_bundle.is_file()
+    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
+    with monkeypatch_relative_cwd(m):
+        rel = Path(os.path.relpath(abs_bundle, m))
+        sn.validate_offline_clone(rel, _seed_base_tree(), _seed_head_tree(), diff_sha,
                                   workdir=tmp_path)
 
 
