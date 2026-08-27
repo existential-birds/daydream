@@ -137,3 +137,28 @@ exclude = ["*/atif/*"]
 # `# noqa` at their exact definition site, never tree-wide via `ignore_names`
 # (a flat name list would mask any future genuinely-dead symbol that happened
 # to share a generic name across daydream and tests).
+
+# Enforced branch-coverage gate (#932). Measured over the first-party
+# daydream package only; run `make coverage-report` and docs/coverage.md
+# for the measurement + ratchet procedure. fail_under is the measured
+# full-suite baseline, rounded down to a whole percent — raise it only
+# via the documented ratchet, never lower it.
+[tool.coverage.run]
+branch = true
+source = ["daydream"]
+omit = [
+    # Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/atif/NOTICE);
+    # mechanical-edit-only policy (D-03) forbids touching it to add tests, so
+    # including it would set the floor from code no one may edit.
+    # Mirrors the mypy and ruff exemptions above.
+    "daydream/atif/*",
+]
+
+[tool.coverage.report]
+# Measured full-suite baseline (pytest -n auto, branch mode), set by the
+# baseline task in this change; see docs/coverage.md for the ratchet.
+fail_under = 87
+xml = true
+
+[tool.coverage.xml]
+output = "coverage.xml"

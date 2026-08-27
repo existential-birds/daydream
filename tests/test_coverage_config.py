@@ -20,3 +20,24 @@ def pyproject() -> dict:
 def test_pytest_cov_is_exact_pinned_in_dev_group(pyproject: dict) -> None:
     pins = [d for d in pyproject["dependency-groups"]["dev"] if d.startswith("pytest-cov")]
     assert pins == ["pytest-cov==7.1.0"], f"expected exact pin 7.1.0, got {pins}"
+
+
+def test_coverage_config_targets_daydream_branch_and_omits_atif(pyproject: dict) -> None:
+    cov = pyproject["tool"]["coverage"]
+    run = cov["run"]
+    assert run["branch"] is True
+    assert run["source"] == ["daydream"]
+    assert run["omit"] == ["daydream/atif/*"]
+    # XML report lands where CI's upload step expects it.
+    assert cov["report"]["xml"] is True or "xml" in cov
+
+
+def test_fail_under_is_enforced_in_single_config_location(pyproject: dict) -> None:
+    report = pyproject["tool"]["coverage"]["report"]
+    value = report["fail_under"]
+    assert isinstance(value, int) and 0 < value < 100
+    # fail_under must NOT also be passed on any CLI surface — one config location.
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+    assert "fail_under" not in makefile and "--cov-fail-under" not in makefile
+    assert "fail_under" not in ci and "--cov-fail-under" not in ci
