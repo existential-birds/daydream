@@ -32,6 +32,21 @@ def test_coverage_config_targets_daydream_branch_and_omits_atif(pyproject: dict)
     assert cov["report"]["xml"] is True or "xml" in cov
 
 
+def test_pytest_addopts_keeps_strict_markers_and_adds_cov(pyproject: dict) -> None:
+    addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
+    assert "--strict-markers" in addopts, "existing strictness must be preserved"
+    assert "--cov" in addopts
+    assert "--cov-branch" in addopts
+    assert "--cov-report=term-missing" in addopts
+    assert "--cov-report=xml" in addopts
+
+
+def test_coverage_artifacts_are_gitignored() -> None:
+    gitignore = (REPO_ROOT / ".gitignore").read_text()
+    assert ".coverage" in gitignore
+    assert "coverage.xml" in gitignore
+
+
 def test_fail_under_is_enforced_in_single_config_location(pyproject: dict) -> None:
     report = pyproject["tool"]["coverage"]["report"]
     value = report["fail_under"]
