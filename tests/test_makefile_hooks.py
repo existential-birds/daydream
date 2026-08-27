@@ -73,15 +73,24 @@ def test_hooks_installs_pre_push_from_worktree(
 
 
 def _install_recording_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    names: tuple[str, ...],
+    exit_code: dict[str, int] | None = None,
 ) -> Path:
     """Prepend a fakebin of PATH-shim recorders for ``names`` to PATH.
 
     Each shim appends ``{"command": <basename>, "cwd": os.getcwd(),
-    "args": sys.argv[1:]}`` to the JSONL log at ``$DAYDREAM_COMMAND_LOG`` and
-    exits 0, so the real Makefile graph can be observed without any real
-    tooling. The shebang is pinned to ``sys.executable`` (never the ambient
-    python). Returns the log path.
+    "args": sys.argv[1:]}`` to the JSONL log at ``$DAYDREAM_COMMAND_LOG``. The
+    shebang is pinned to ``sys.executable`` (never the ambient python).
+    Returns the log path.
+
+    Exit behavior: every shim exits 0 by default, so the real Makefile graph
+    can be observed without any real tooling — except ``git``, which always
+    delegates to the real binary (passing stdout/stderr and the exit code
+    through) because hook scripts need real git plumbing output (worktree
+    topology, staged-file listings). ``exit_code`` overrides the exit status
+    per shim name, e.g. ``{"uv": 1}`` to simulate ruff finding lint errors.
     """
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
@@ -99,9 +108,19 @@ def _install_recording_commands(
         "                        'GIT_COMMITTER_EMAIL')}}, f)\n"
         "    f.write('\\n')\n"
     )
+    real_git = shutil.which("git")
     for name in names:
         shim = fakebin / name
-        shim.write_text(f"#!{sys.executable}\n{shim_body}", encoding="utf-8")
+        if name == "git":
+            tail = (
+                "import subprocess\n"
+                f"sys.exit(subprocess.run([{real_git!r}, *sys.argv[1:]])"
+                ".returncode)\n"
+            )
+        else:
+            status = (exit_code or {}).get(name, 0)
+            tail = f"sys.exit({status})\n"
+        shim.write_text(f"#!{sys.executable}\n{shim_body}{tail}", encoding="utf-8")
         shim.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fakebin}:{os.environ.get('PATH', '')}")
     return log
@@ -229,6 +248,95 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
         rec["command"] != "git" or rec["args"][:2] != ["config", "--global"]
         for rec in recs
     ), "no command may mutate the global git configuration"
+
+
+def _stage_file(worktree: Path, relpath: str, content: str) -> None:
+    p = worktree / relpath
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    _git(worktree, "add", relpath)
+
+
+def _copy_pre_commit_hook(worktree: Path) -> Path:
+    """Drop the real pre-commit script into a throwaway worktree."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_dir = worktree / "scripts" / "hooks"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    hook = script_dir / "pre-commit"
+    shutil.copy(repo_root / "scripts" / "hooks" / "pre-commit", hook)
+    hook.chmod(0o755)
+    return hook
+
+
+def test_pre_commit_runs_ruff_only_on_staged_python_files(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _main_repo, worktree = linked_worktree
+    _copy_pre_commit_hook(worktree)
+    # Stage scratch files BEFORE the shims shadow `git` on PATH (the shim
+    # delegates anyway, but this keeps the staging setup unrecorded).
+    _stage_file(worktree, "daydream/spike_a.py", "x = 1\n")
+    _stage_file(worktree, "tests/spike_b.py", "y = 2\n")
+    _stage_file(worktree, "notes.md", "not python\n")
+    # An unstaged python edit must NOT reach ruff: only the index is linted.
+    (worktree / "daydream" / "unstaged.py").write_text("z = 3\n", encoding="utf-8")
+
+    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
+    proc = subprocess.run(
+        [str(worktree / "scripts" / "hooks" / "pre-commit")],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    recs = _read_command_records(log)
+    uv_calls = [r for r in recs if r["command"] == "uv"]
+    assert len(uv_calls) == 1
+    # Exactly the staged .py paths, relative to the worktree root, passed to
+    # the CI-parity `uv run ruff check` invocation. Unstaged and non-Python
+    # files are excluded.
+    assert uv_calls[0]["args"] == ["run", "ruff", "check", "daydream/spike_a.py", "tests/spike_b.py"]
+    assert uv_calls[0]["cwd"] == str(worktree)
+    # Exactly one command family observed: uv (ruff) plus the hook's own git
+    # plumbing. No mypy/pytest/docker/make/lockcheck may appear.
+    assert {r["command"] for r in recs} <= {"uv", "git"}
+
+
+def test_pre_commit_exits_zero_without_staged_python(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _main_repo, worktree = linked_worktree
+    _copy_pre_commit_hook(worktree)
+    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
+    proc = subprocess.run(
+        [str(worktree / "scripts" / "hooks" / "pre-commit")],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # No ruff invocation when nothing relevant is staged — the speed contract.
+    assert not [r for r in _read_command_records(log) if r["command"] == "uv"]
+
+
+def test_pre_commit_propagates_ruff_failure(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _main_repo, worktree = linked_worktree
+    _copy_pre_commit_hook(worktree)
+    _stage_file(worktree, "daydream/broken.py", "x = 1\n")
+    # The uv shim exits 1 like ruff does on a lint error; the hook must
+    # propagate that status, never swallow it.
+    _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"), exit_code={"uv": 1})
+    proc = subprocess.run(
+        [str(worktree / "scripts" / "hooks" / "pre-commit")],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    # Failure output names the gate and how to fix it:
+    assert "ruff" in proc.stdout.lower() or "ruff" in proc.stderr.lower()
 
 
 def test_pre_push_delegates_quality_gate_to_make_check(

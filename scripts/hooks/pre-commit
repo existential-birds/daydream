@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: fast staged-changes gate — runs ruff on the staged Python
+# files only (CI-parity `uv run ruff check` command, scoped to the index).
+# The full local CI gate remains `make check` at push time.
+#
+# Install with: make hooks
+#
+set -euo pipefail
+
+# Anchor path collection and ruff's pyproject.toml resolution at the repo
+# root, whatever directory the commit was made from.
+cd "$(git rev-parse --show-toplevel)"
+
+# Collect Added/Copied/Modified/Renamed staged Python files. Deletions are
+# excluded (nothing to lint); renames surface under their new path.
+staged_py=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+if [ -z "$staged_py" ]; then
+    exit 0
+fi
+
+echo "→ Running ruff on staged Python files..."
+# Paths from git are newline-separated; mapfile keeps them intact even when
+# they contain spaces, and the array expansion keeps ruff's argv exact.
+mapfile -t py_files <<< "$staged_py"
+set +e
+uv run ruff check "${py_files[@]}"
+status=$?
+set -e
+if [ "$status" -ne 0 ]; then
+    echo ""
+    echo "✗ ruff found problems in staged files — fix them or run 'make lint' for the full check"
+    exit "$status"
+fi
