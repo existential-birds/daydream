@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Pre-push hook: lint + typecheck + the full test suite.
+# Pre-push hook: verify signed commits, then run the full local CI gate (make check).
 #
 # Install with: make hooks
 #
@@ -45,20 +45,7 @@ done
 
 echo "All commits carry a valid signature."
 
-# Must run before any `uv run` below: `uv run`/`uv sync` silently re-lock a
-# drifted uv.lock, which would mask a release that bumped the version but forgot
-# `uv lock`. `--check` is read-only and errors on drift. CI re-runs this on a
-# fresh checkout of the pushed commit, so a stale lock can never merge.
-echo "→ Verifying uv.lock is in sync..."
-uv lock --check
-
-echo "→ Linting with ruff..."
-uv run ruff check daydream tests
-
-echo "→ Type checking with mypy..."
-uv run mypy daydream tests
-
-echo "→ Running tests..."
-uv run pytest -n auto
+echo "→ Running all CI checks..."
+make check
 
 echo "✓ All checks passed"
