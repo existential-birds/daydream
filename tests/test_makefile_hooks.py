@@ -177,3 +177,29 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     assert argvs[6] == ["run", "ruff", "check", "."]
     assert argvs[7] == ["run", "mypy", "daydream_review_v1", "tests"]
     assert argvs[8] == ["run", "pytest"]
+
+
+def test_pre_push_delegates_quality_gate_to_make_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    _install_recording_commands(tmp_path, monkeypatch, ("make", "uv", "docker"))
+    log = tmp_path / "command-log.jsonl"
+
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
+    proc = subprocess.run(
+        [str(repo_root / "scripts" / "hooks" / "pre-push")],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        input="",
+        env=clean_env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "✓ All checks passed" in proc.stdout
+
+    recs = _read_command_records(log)
+    assert len(recs) == 1
+    assert recs[0]["command"] == "make"
+    assert recs[0]["cwd"] == str(repo_root)
+    assert recs[0]["args"] == ["check"]
