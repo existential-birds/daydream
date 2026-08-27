@@ -28,6 +28,7 @@ actionlint:
 # (each recipe line is its own shell).
 rl-check:
 	cd rl/daydream_review_v1 && uv lock --check
+	cd rl/daydream_review_v1 && uv sync
 	cd rl/daydream_review_v1 && uv run ruff check .
 	cd rl/daydream_review_v1 && uv run mypy daydream_review_v1 tests
 	cd rl/daydream_review_v1 && uv run pytest

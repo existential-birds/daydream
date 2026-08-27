@@ -135,7 +135,7 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     assert cmds == (
         [("uv", str(repo_root))] * 4
         + [("docker", str(repo_root))]
-        + [("uv", str(rl_root))] * 4
+        + [("uv", str(rl_root))] * 5
     )
 
     argvs = [r["args"] for r in recs]
@@ -172,11 +172,13 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     assert set(file_args) == expected_files
     assert len(file_args) == len(expected_files)
 
-    # Standalone RL project: its own lock/lint/types/tests, run from its dir.
+    # Standalone RL project: its own lock/sync/lint/types/tests, run from its
+    # dir (mirroring ci.yml's rl-check job, which runs an explicit `uv sync`).
     assert argvs[5] == ["lock", "--check"]
-    assert argvs[6] == ["run", "ruff", "check", "."]
-    assert argvs[7] == ["run", "mypy", "daydream_review_v1", "tests"]
-    assert argvs[8] == ["run", "pytest"]
+    assert argvs[6] == ["sync"]
+    assert argvs[7] == ["run", "ruff", "check", "."]
+    assert argvs[8] == ["run", "mypy", "daydream_review_v1", "tests"]
+    assert argvs[9] == ["run", "pytest"]
 
 
 def test_pre_push_delegates_quality_gate_to_make_check(
