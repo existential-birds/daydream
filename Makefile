@@ -6,10 +6,10 @@ install:
 	uv sync --all-extras
 
 lint:
-	uv run ruff check daydream tests bench
+	uv run ruff check daydream tests
 
 typecheck:
-	uv run mypy daydream tests bench
+	uv run mypy daydream tests
 
 test:
 	uv run pytest -n auto

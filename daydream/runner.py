@@ -212,8 +212,8 @@ class RunConfig:
             pipeline. ``None`` falls through to ``file_config.deep_shard_enabled``
             then the built-in default ``False``
             (``DEFAULT_DEEP_SHARD_ENABLED``; precedence CLI > file > default,
-            resolved by ``_deep_shard_enabled``). Default-off until the
-            sharding/coversweep benchmark gate passes.
+            resolved by ``_deep_shard_enabled``). Default-off preserves the
+            established single-agent-per-stack behavior.
         deep_shard_max_files: Issue #731. Per-shard cap on the number of files a
             stack may hold before it is split into shards. ``None`` falls through
             to file config then ``DEFAULT_DEEP_SHARD_MAX_FILES`` (5).
@@ -318,7 +318,7 @@ class RunConfig:
     # bounded, dependency-aware shards that ride the stack_name-keyed pipeline).
     # CLI-tier overrides; ``None`` falls through to the file-config scalar then
     # the orchestrator default. Default-off (DEFAULT_DEEP_SHARD_ENABLED=False)
-    # until the sharding/coversweep benchmark gate passes.
+    # preserves the established single-agent-per-stack behavior.
     deep_shard_enabled: bool | None = None
     deep_shard_max_files: int | None = None
     deep_shard_max_bytes: int | None = None

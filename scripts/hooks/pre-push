@@ -53,10 +53,10 @@ echo "→ Verifying uv.lock is in sync..."
 uv lock --check
 
 echo "→ Linting with ruff..."
-uv run ruff check daydream tests bench
+uv run ruff check daydream tests
 
 echo "→ Type checking with mypy..."
-uv run mypy daydream tests bench
+uv run mypy daydream tests
 
 echo "→ Running tests..."
 uv run pytest -n auto

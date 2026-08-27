@@ -83,9 +83,6 @@ daydream_plans/
 # Machine-local daydream config (benchmark-repo, reviewer presets)
 .daydream.toml
 
-# Transient benchmark sharding run output
-bench/sharding-runs/
-
 # Per-developer agent tooling config and session transcripts
 .codex/
 .cursor/

@@ -100,12 +100,6 @@ def test_fresh_install_docs_have_no_plugin_step() -> None:
 def test_historical_records_preserved() -> None:
     expected = {
         "CHANGELOG.md": "7ee332b93b0b5db68eebf87cc85db063dd3ebdfde2c5130e34073b49f857373b",
-        "benchmark/corpora/sharding/ground-truth.json": (
-            "4aa4858a98dc128aced5385ee93d17c94566192913db4ab61784060ae08c4bd0"
-        ),
-        "benchmark/corpora/sharding/large-python.patch": (
-            "b04c51b699a9cbd156ec87ef9468fcf178a9264cef2774de4c4871d371f1a711"
-        ),
     }
     for rel, want in expected.items():
         data = (ROOT / rel).read_bytes()

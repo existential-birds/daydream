@@ -337,10 +337,8 @@ DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES: int = 5
 
 # Issue #731: deep-review sharding + coverage-evidence gated uncovered sweep.
 # Splits oversized per-language stacks into bounded, dependency-aware shards
-# that ride the existing ``stack_name``-keyed pipeline. Default-OFF until the
-# sharding/coversweep benchmark gate passes (spec :42-44) -- forensic mode is
-# the default and must stay byte-identical; the benchmark harness lives in
-# ``bench/sharding-benchmark.py``.
+# that ride the existing ``stack_name``-keyed pipeline. Default-off preserves
+# the established single-agent-per-stack behavior unless explicitly enabled.
 DEFAULT_DEEP_SHARD_ENABLED: bool = False
 DEFAULT_DEEP_SHARD_MAX_FILES: int = 5
 DEFAULT_DEEP_SHARD_MAX_BYTES: int = 12288  # == INLINE_DIFF_BUDGET_BYTES
