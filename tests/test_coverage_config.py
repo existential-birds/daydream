@@ -72,3 +72,23 @@ def test_check_target_includes_test_and_coverage_report() -> None:
     assert "test" in check_line
     assert "coverage-report" in check_line
     assert makefile.count("coverage-report:") == 1
+
+
+def test_ci_uploads_coverage_xml_artifact() -> None:
+    ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+    assert "coverage.xml" in ci, "check job must upload coverage.xml"
+    assert "actions/upload-artifact@" in ci
+    # All actions in this repo are SHA-pinned; the artifact action must be too.
+    for line in ci.splitlines():
+        if "actions/upload-artifact@" in line:
+            assert "#" in line and len(line.split("#", 1)[1].strip().split(" ")[0]) == 40, (
+                f"upload-artifact must be SHA-pinned with version comment: {line!r}"
+            )
+
+
+def test_ci_test_step_unchanged_invocation_coverage_comes_from_addopts() -> None:
+    ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+    # The check job's Run tests step stays `uv run pytest -n auto` — enforcement
+    # arrives via pyproject addopts, identical to local (KD2: local == CI).
+    check_block = ci.split("Run tests", 1)[1].split("- name:", 1)[0]
+    assert "uv run pytest -n auto" in check_block

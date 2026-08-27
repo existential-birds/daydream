@@ -56,6 +56,17 @@ jobs:
       - name: Run tests
         run: uv run pytest -n auto
 
+      - name: Upload coverage report
+        # Machine-readable XML from pytest-cov (--cov-report=xml in pyproject
+        # addopts, #932). Uploaded on every check run so coverage results are
+        # inspectable after any run, not just green ones.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ea165f8d65b6e75b540449e92b4886f43607fa02 v4.6.2
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: error
+
   rl-check:
     runs-on: blacksmith-4vcpu-ubuntu-2404
 
