@@ -16,6 +16,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.9",
+    "vulture>=2.13",
 ]
 
 # daydream is consumed as a path dependency so the rewards import the SAME
@@ -49,3 +50,8 @@ addopts = "--strict-markers"
 markers = [
     "slow: builds real container images; skipped automatically when docker is not installed or the daemon is unavailable.",
 ]
+
+# Whole-project dead-code detection (#935). Scans pkg+tests together so test
+# references count; min_confidence mirrors the baseline that this gate enforces.
+[tool.vulture]
+min_confidence = 80

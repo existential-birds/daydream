@@ -24,7 +24,7 @@ def mock_ui_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, mock_ui_loop, monkeypatch):
+async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, mock_ui_loop, monkeypatch):  # noqa
     """One issue on the single pass → the shallow deep run completes and exits 0."""
     backend = PhaseDispatchBackend(parse_results=[[ISSUE]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None, **kwargs: backend)
@@ -46,3 +46,4 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, moc
     # the structural meta-stack.
     assert backend.parse_calls == 0
     assert len(backend.review_prompts) == 2
+

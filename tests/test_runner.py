@@ -190,7 +190,7 @@ async def test_run_dispatches_to_expected_flow(
     expected_value,
     monkeypatch,
     patch_workspace,
-    silence_runner_ui,
+    silence_runner_ui,  # noqa
     tmp_path,
     make_config,
 ):
@@ -225,7 +225,7 @@ async def test_run_dispatches_to_expected_flow(
 
 @pytest.mark.asyncio
 async def test_run_rejects_head_mismatch_before_dispatch(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,  # noqa
 ):
     """Head drift: run() returns 1 and no flow is dispatched."""
     called: list[str] = []
@@ -248,7 +248,7 @@ async def test_run_rejects_head_mismatch_before_dispatch(
 
 @pytest.mark.asyncio
 async def test_run_allows_matching_approved_head(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,  # noqa
 ):
     """Matching approved head: run() proceeds to the expected flow."""
     called: list[str] = []
@@ -271,7 +271,7 @@ async def test_run_allows_matching_approved_head(
 
 @pytest.mark.asyncio
 async def test_run_rejects_head_mismatch_on_real_worktree(
-    monkeypatch, silence_runner_ui, deep_target, make_config,
+    monkeypatch, silence_runner_ui, deep_target, make_config,  # noqa
 ):
     """Head drift on a real checkout: run() returns 1 and no flow is dispatched.
 
@@ -301,7 +301,7 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
 
 @pytest.mark.asyncio
 async def test_run_allows_matching_approved_head_on_real_worktree(
-    monkeypatch, silence_runner_ui, deep_target, make_config,
+    monkeypatch, silence_runner_ui, deep_target, make_config,  # noqa
 ):
     """Matching approved head on a real checkout: run() proceeds to the flow.
 
@@ -423,7 +423,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
 async def test_review_run_does_not_mint_app_identity(
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: WorkContext,
-    silence_runner_ui: None,
+    silence_runner_ui: None,  # noqa
     tmp_path: Path,
     make_config: Callable[..., RunConfig],
 ) -> None:
@@ -481,7 +481,7 @@ def test_run_posts_to_github_matches_dispatch(config: RunConfig, expected: bool)
 
 @pytest.mark.asyncio
 async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config  # noqa
 ):
     """``--comment --branch X`` with no open PR for X runs the deep flow.
 
@@ -776,7 +776,7 @@ def test_runconfig_defaults_non_interactive_false():
     ids=["deep_loop", "shallow", "comment", "improve"],
 )
 async def test_run_threads_non_interactive_into_agent_state(
-    dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path,
+    dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path,  # noqa
     make_config,
 ):
     """``config.non_interactive=True`` flips the agent singleton flag before any
@@ -1079,12 +1079,12 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     warnings: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_warning",
-        lambda console_arg, message: warnings.append(message),
+        lambda console_arg, message: warnings.append(message),  # noqa
     )
     successes: list[str] = []
     monkeypatch.setattr(
         "daydream.phases.print_success",
-        lambda console_arg, message: successes.append(message),
+        lambda console_arg, message: successes.append(message),  # noqa
     )
 
     observed_timeouts: list[Any] = []
@@ -1472,3 +1472,4 @@ def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
     assert m.review_backend is None
     assert m.fix_backend == "claude"
     assert m.test_backend == "claude"
+

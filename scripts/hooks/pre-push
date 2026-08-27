@@ -48,4 +48,5 @@ echo "All commits carry a valid signature."
 echo "→ Running all CI checks..."
 make check
 
+
 echo "✓ All checks passed"
