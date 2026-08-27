@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from copy import deepcopy
 from datetime import date
@@ -1571,6 +1572,91 @@ def test_planned_at_from_an_unrelated_root_is_rejected(repo: Path, head_sha: str
     assert "PLANNED_AT_NOT_ANCESTOR" in (
         repo / "daydream_plans/README.md"
     ).read_text()
+
+
+def test_planned_at_naming_only_remote_branch_is_invalid(
+    repo: Path, tmp_path: Path
+) -> None:
+    """A planned_at that exists only as origin/<name> must report PLANNED_AT_INVALID.
+
+    Regression: routing the existence probe through ref_exists (which delegates
+    to branch_exists and therefore accepts refs/remotes/origin/<ref>) turned a
+    remote-only name into PLANNED_AT_NOT_ANCESTOR. The old cat-file -e
+    {plan}^{commit} probe did not resolve such a short name, so it must be
+    reported as an invalid anchor.
+    """
+    from tests.harness.git_helpers import bare_remote as _bare_remote
+
+    bare = _bare_remote(tmp_path / "remote.git")
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "-u", "origin", "main")
+    git(repo, "checkout", "-b", "only-remote")
+    (repo / "notes.txt").write_text("only-remote\n")
+    git(repo, "add", "notes.txt")
+    commit(repo, "only-remote commit")
+    git(repo, "push", "-u", "origin", "only-remote")
+    git(repo, "checkout", "main")
+    git(repo, "branch", "-D", "only-remote")
+
+    result = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **_assembled(repo)}],
+        planned_at="only-remote",
+    )
+
+    assert result["written"] == []
+    assert "PLANNED_AT_INVALID" in (repo / "daydream_plans/README.md").read_text()
+
+
+@pytest.mark.parametrize(
+    "probe_argv",
+    [
+        pytest.param(
+            lambda sha: ["git", "rev-parse", "--verify", f"{sha}^{{commit}}"],
+            id="commit-existence",
+        ),
+        pytest.param(
+            lambda sha: ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+            id="ancestry",
+        ),
+    ],
+)
+def test_plan_anchor_git_timeout_blocks_plan(
+    repo: Path,
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_argv: Any,
+) -> None:
+    selection = _selection(repo)
+    timed_out = probe_argv(head_sha)
+    saved_run = subprocess.run
+
+    def stall_probe(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if args[0] == timed_out:
+            raise subprocess.TimeoutExpired(cmd=timed_out, timeout=5)
+        return saved_run(*args, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", stall_probe)
+
+    result = _write_plans(repo / "daydream_plans", [selection], planned_at=head_sha)
+
+    assert result["written"] == []
+    assert len(result["failed"]) == 1
+    assert not list((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
+    assert "BLOCKED (PLAN_VALIDATION_FAILED: PLANNED_AT_CHECK_FAILED)" in (
+        repo / "daydream_plans/README.md"
+    ).read_text()
+    assert len(result["diagnostics"]) == 1
+    diagnostic = result["diagnostics"][0]
+    assert diagnostic["stage"] == "semantic"
+    assert diagnostic["disposition"] == "blocked"
+    assert diagnostic["validation_errors"] == [
+        {"code": "PLANNED_AT_CHECK_FAILED", "pointer": "/"}
+    ]
+    sidecar = json.loads(
+        (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [entry["host_blocked"] for entry in sidecar["plans"]] == [True]
 
 
 def test_head_change_after_planning_reanchors_into_new_worktree(

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -313,16 +312,6 @@ def record_plan_write_diagnostics(
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
-    )
-
-
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
     )
 
 
@@ -1025,15 +1014,13 @@ class PlanWriteSession:
         self._reanchored: dict[int, PlanIndexEntry] = {}
         self._reanchor_worktree: Path | None = None
         self._planned_at_errors: tuple[str, ...] = ()
-        commit = _git(self._repo, "cat-file", "-e", f"{planned_at}^{{commit}}")
-        if commit.returncode != 0:
-            self._planned_at_errors = ("PLANNED_AT_INVALID",)
-        else:
-            ancestor = _git(
-                self._repo, "merge-base", "--is-ancestor", planned_at, "HEAD"
-            )
-            if ancestor.returncode != 0:
+        try:
+            if not git_ops.commit_exists(self._repo, planned_at):
+                self._planned_at_errors = ("PLANNED_AT_INVALID",)
+            elif not git_ops.is_ancestor(self._repo, planned_at, "HEAD"):
                 self._planned_at_errors = ("PLANNED_AT_NOT_ANCESTOR",)
+        except git_ops.GitError:
+            self._planned_at_errors = ("PLANNED_AT_CHECK_FAILED",)
 
     def reserve(
         self, findings: Sequence[dict[str, Any] | None]

@@ -1,5 +1,6 @@
 import hashlib
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +79,7 @@ def _tree_sha(root: Path) -> str:
 
 def test_benchmark_help_lists_subcommands() -> None:
     r = subprocess.run(  # noqa: S603 - args are not user-controlled
-        ["daydream", "benchmark", "--help"], capture_output=True, text=True  # noqa: S607 - trusted command
+        [sys.executable, "-m", "daydream", "benchmark", "--help"], capture_output=True, text=True
     )
     assert r.returncode == 0 and "init" in r.stdout and "status" in r.stdout and "validate" in r.stdout
 
@@ -87,12 +88,12 @@ def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     r = subprocess.run(  # noqa: S603
         [
-            "daydream", "benchmark", "init", str(ws),
+            sys.executable, "-m", "daydream", "benchmark", "init", str(ws),
             "--repo", "OWNER/REPO",
             "--reviewer-host", "api.anthropic.com",
             "--judge-host", "api.anthropic.com",
         ],
-        capture_output=True, text=True,  # noqa: S607
+        capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stdout + r.stderr
     assert "confidential" in r.stdout  # prints privacy classification
@@ -100,13 +101,13 @@ def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
     assert (ws / "benchmark.yaml").exists()
 
     r2 = subprocess.run(  # noqa: S603
-        ["daydream", "benchmark", "status", str(ws)],  # noqa: S607
+        [sys.executable, "-m", "daydream", "benchmark", "status", str(ws)],
         capture_output=True, text=True,
     )
     assert r2.returncode == 0 and "empty" in r2.stdout and "unresolved" in r2.stdout
 
     r3 = subprocess.run(  # noqa: S603
-        ["daydream", "benchmark", "validate", str(ws)],  # noqa: S607
+        [sys.executable, "-m", "daydream", "benchmark", "validate", str(ws)],
         capture_output=True, text=True,
     )
     assert r3.returncode == 2  # fresh workspace: structurally valid but incomplete
@@ -117,7 +118,7 @@ def test_legacy_bench_is_rejected_not_routed() -> None:
     # instead of falling through to the review path (issue-785). Assert the
     # rejection rather than the former coexistence.
     r = subprocess.run(  # noqa: S603
-        ["daydream", "bench", "--help"], capture_output=True, text=True  # noqa: S607
+        [sys.executable, "-m", "daydream", "bench", "--help"], capture_output=True, text=True
     )
     assert r.returncode == 2
     assert "no longer a command" in r.stderr
