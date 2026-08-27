@@ -26,7 +26,7 @@ make deadcode   # whole-project dead-code detection (vulture)
 make test       # pytest -n auto
 make actionlint # actionlint over live + packaged workflows (Docker)
 make rl-check   # standalone RL lockcheck + ruff + mypy + pytest
-make check      # lockcheck + deadcode + install + lint + types + actionlint + pytest + RL gates (the gate)
+make check      # lockcheck + install + lint + deadcode + typecheck + test + actionlint + rl-check (the gate)
 ```
 
 ```bash

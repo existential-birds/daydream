@@ -66,7 +66,7 @@ lockcheck:
 
 # Run all CI checks locally: lockcheck and the root uv sync --all-extras install
 # step first (both before any uv run heals the lock), matching ci.yml's check job.
-check: lockcheck deadcode install lint typecheck test actionlint rl-check
+check: lockcheck install lint deadcode typecheck test actionlint rl-check
 
 # Install git hooks
 hooks:

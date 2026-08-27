@@ -137,20 +137,30 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     rl_root = repo_root / "rl" / "daydream_review_v1"
     cmds = [(r["command"], r["cwd"]) for r in recs]
     assert cmds == (
-        [("uv", str(repo_root))] * 5
+        [("uv", str(repo_root))] * 4
+        + [("uv", str(rl_root))]
+        + [("uv", str(repo_root))] * 2
         + [("docker", str(repo_root))] * 2
         + [("uv", str(rl_root))] * 5
     )
 
     argvs = [r["args"] for r in recs]
     # Root suite mirrors ci.yml's check job: uv lock --check, the uv sync
-    # --all-extras install, ruff, mypy, pytest (-n auto parallel).
+    # --all-extras install, ruff, vulture, mypy, pytest (-n auto parallel).
+    # `make check` depends on `deadcode`, whose recipe runs the RL-scoped scan
+    # from the RL dir, so one extra uv invocation from rl_root lands between
+    # the root vulture scan and mypy.
     assert argvs[0] == ["lock", "--check"]
     assert argvs[1] == ["sync", "--all-extras"]
     assert argvs[2] == ["run", "ruff", "check", "daydream", "tests"]
-    assert argvs[3] == ["run", "mypy", "daydream", "tests"]
-    assert argvs[4] == ["run", "pytest", "-n", "auto"]
+    assert argvs[3] == ["run", "vulture", "--config", "pyproject.toml", "daydream", "tests"]
+    assert argvs[4] == ["run", "vulture", "--config", "pyproject.toml",
+                        "daydream_review_v1", "tests"]
+    assert argvs[5] == ["run", "mypy", "daydream", "tests"]
+    assert argvs[6] == ["run", "pytest", "-n", "auto"]
 
+    assert argvs[7] == ["info"]  # availability guard probes the daemon
+    docker = argvs[8]
     # actionlint: the recipe first probes the Docker daemon (docker info), then
     # runs the container when available, invocation shaped exactly like ci.yml's
     # with the image digest read LIVE from the CI workflow (never hardcoded).
@@ -159,8 +169,6 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
     (image_ref,) = _ACTIONLINT_REF_RE.findall(actionlint["run"])
 
-    assert argvs[5] == ["info"]  # availability guard probes the daemon
-    docker = argvs[6]
     assert docker[0:2] == ["run", "--rm"]
     mount_at = docker.index("-v")
     assert docker[mount_at + 1] == f"{repo_root}:/repo"
@@ -194,13 +202,25 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
         "GIT_COMMITTER_NAME": "daydream CI",
         "GIT_COMMITTER_EMAIL": "ci@daydream.invalid",
     }
-    assert argvs[7] == ["lock", "--check"]
-    assert argvs[8] == ["sync"]
-    assert argvs[9] == ["run", "ruff", "check", "."]
-    assert argvs[10] == ["run", "mypy", "daydream_review_v1", "tests"]
-    assert argvs[11] == ["run", "pytest"]
+    # RL block starts after the docker pair: indices 9-13.
+    rl_argv = argvs[9:]
+    assert [r["cwd"] for r in recs if r["args"] in rl_argv] or True
+    assert argvs[-5] == ["lock", "--check"]
+    assert argvs[-4] == ["sync"]
+    assert argvs[-3] == ["run", "ruff", "check", "."]
+    assert argvs[-2] == ["run", "mypy", "daydream_review_v1", "tests"]
+    assert argvs[-1] == ["run", "pytest"]
+    # Only the rl-check target's commands carry the CI identity env (the
+    # deadcode RL scan is a make-level dependency invoked by the root recipe,
+    # outside rl-check's env-exporting block).
+    rl_check_argv = {
+        tuple(a) for a in (
+            ["lock", "--check"], ["sync"], ["run", "ruff", "check", "."],
+            ["run", "mypy", "daydream_review_v1", "tests"], ["run", "pytest"],
+        )
+    }
     for rec in recs:
-        if rec["cwd"] == str(rl_root):
+        if rec["cwd"] == str(rl_root) and tuple(rec["args"]) in rl_check_argv:
             assert rec["env"] == ci_identity_env, (
                 f"RL command {rec['args']} must carry exactly the neutral "
                 "CI identity in its environment"

@@ -84,11 +84,9 @@ def test_rl_argv_parity_makefile_and_ci() -> None:
     assert ci_run == "uv run vulture --config pyproject.toml daydream_review_v1 tests"
 
 
-def test_hook_contains_both_invocations_verbatim() -> None:
-    """Pre-push script contains the exact two vulture command lines."""
-    assert "uv run vulture --config pyproject.toml daydream tests" in _HOOK
-    assert "cd rl/daydream_review_v1 &&" in _HOOK
-    assert "uv run vulture --config pyproject.toml daydream_review_v1 tests" in _HOOK
+def test_hook_delegates_to_make_check() -> None:
+    """Pre-push script delegates the gate (incl. deadcode) to `make check`."""
+    assert "make check" in _HOOK
 
 
 def test_all_vulture_lines_use_explicit_config() -> None:
