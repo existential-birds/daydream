@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **hooks:** add a pre-commit quality gate — `make hooks` now installs a commit-time ruff check over staged Python files alongside the existing pre-push hook (#928)
 - **benchmark:** add `daydream benchmark run <workspace> [--oracle] [--yes]` command (supervised Harbor runs behind the Oracle self-match gate, private `runtime/harbor.json` cleanup ledger)
 - **benchmark:** add `daydream benchmark calibrate-judge <workspace>` command (optional diagnostic of judge agreement against the unverified 24-pair fixture — it is not an authorization or correctness gate; writes an unverified `runtime/calibration-receipt.json`)
 
