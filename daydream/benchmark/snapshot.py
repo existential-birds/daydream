@@ -283,7 +283,7 @@ def build_bundle(
 
 def bundle_heads(bundle_path: Path) -> set[str]:
     """The list of refs a bundle exposes."""
-    bundle_path = Path(bundle_path)
+    bundle_path = Path(bundle_path).resolve()
     proc = git_ops._run_git(
         bundle_path.parent, ["bundle", "list-heads", str(bundle_path)], retries=0, timeout=30
     )
