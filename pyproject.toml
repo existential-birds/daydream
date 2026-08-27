@@ -30,6 +30,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.6",
     "ruff>=0.9",
+    "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0",
 ]
 
@@ -56,10 +57,35 @@ include = [
 
 [tool.mypy]
 python_version = "3.12"
-ignore_missing_imports = true
+strict = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "."
+[[tool.mypy.overrides]]
+# Sandbox template score_review.py does a bare `import verifier_core`, which
+# resolves at sandbox build time (golden byte-parity gate:
+# tests/test_benchmark_verifier_assets.py). Wiring mypy_path for it makes mypy
+# see the source twin under two module names ("Source file found twice"), so
+# tolerance is scoped to this one module instead.
+module = ["daydream.benchmark.harbor.templates.tests.score_review"]
+ignore_missing_imports = true
+
+
+[[tool.mypy.overrides]]
+# Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/atif/NOTICE);
+# mechanical-edit-only policy forbids hand-fixes. Mirrors ruff exemption above.
+module = ["daydream.atif.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Harbor ships without py.typed; no stub package exists. Narrow per-module,
+# not blanket-library, so future typed releases are picked up automatically.
+module = ["harbor.models.*", "harbor.agents.base", "harbor.environments.docker.*", "harbor.environments.base"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# No types-huggingface_hub exists on PyPI (verified); boundary stays Any-typed.
+module = ["huggingface_hub", "huggingface_hub.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py312"
