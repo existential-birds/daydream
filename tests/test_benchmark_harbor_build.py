@@ -998,32 +998,80 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path, fake_gh):
     assert all(r.startswith("case-") or r in root_files for r in rels)
 
 
-def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(tmp_path, fake_gh):
-    import json
+def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
+    tmp_path, fake_gh, monkeypatch
+):
+    """The same workspace compiled via an absolute root and via a relative root
+    (from a different CWD) yields byte-identical ``harbor/benchmark.lock.json``
+    output, and ``compile_workspace`` acquires ``WorkspaceLock`` under the
+    canonical absolute root either way.
+
+    Asserting the canonical lock root is the regression guard for the
+    root-canonicalization fix: the lock JSON is purely content-derived, so its
+    bytes cannot distinguish canonicalized from verbatim roots — only the
+    reentrancy key handed to ``WorkspaceLock`` can. If ``compile_workspace``
+    stopped resolving the root, a relative invocation from another CWD would key
+    the process-reentrant lock on the verbatim relative path, diverge from the
+    absolute spelling of the same workspace, and self-deadlock on nested
+    acquisition; this test fails on exactly that mutation instead of hanging.
+    """
     import os
 
     from daydream.benchmark.harbor import build
 
-    ws_a, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    (tmp_path / "b").mkdir()
-    ws_b, _, _ = _seed_ready_workspace(tmp_path / "b", fake_gh)
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ws_resolved = ws.resolve()
 
-    build.compile_workspace(ws_a)                      # absolute control run
+    build.compile_workspace(ws)                        # absolute control run
+    lock_path = ws / "harbor" / "benchmark.lock.json"
+    lock_bytes_abs = lock_path.read_bytes()
 
     outside = tmp_path / "outside"
     outside.mkdir()
+
+    # Record every WorkspaceLock construction during the relative-spelled compile
+    # so we can assert the lock key is the canonical absolute root, not whatever
+    # spelling the caller happened to pass. The wrapper mirrors WorkspaceLock's
+    # class-level ``_held`` registry onto the real dict: the genuine lock's
+    # methods resolve ``WorkspaceLock`` through this patched module global, so
+    # the mirror keeps their bookkeeping working unchanged.
+    real_lock_cls = build.storage.WorkspaceLock
+    constructed_roots: list[object] = []
+
+    class _RecordingLock:
+        _held = real_lock_cls._held
+
+        def __init__(self, root, **kwargs):
+            constructed_roots.append(root)
+            self._inner = real_lock_cls(root, **kwargs)
+
+        def __enter__(self):
+            return self._inner.__enter__()
+
+        def __exit__(self, *_exc):
+            return self._inner.__exit__(*_exc)
+
+    monkeypatch.setattr(build.storage, "WorkspaceLock", _RecordingLock)
+
     old = os.getcwd()
     os.chdir(outside)
     try:
-        rel_root = Path(os.path.relpath(ws_b, outside))
+        rel_root = Path(os.path.relpath(ws_resolved, outside))
         build.compile_workspace(Path(rel_root))         # relative, differing CWD
     finally:
         os.chdir(old)
 
-    lock_rel = json.loads((ws_b / "harbor" / "benchmark.lock.json").read_text())
-    lock_abs = json.loads((ws_a / "harbor" / "benchmark.lock.json").read_text())
-    assert lock_rel["authoring_input_digest"] == lock_abs["authoring_input_digest"]
-    assert set(lock_rel["cases"]) == set(lock_abs["cases"])
+    # Deterministic rebuild: second compile of the SAME workspace is byte-identical.
+    assert lock_path.read_bytes() == lock_bytes_abs
+
+    # Reentrancy-key convergence: even invoked relatively from a different CWD,
+    # the lock is keyed on the resolved workspace, so absolute/relative/"."
+    # spellings share one key.
+    assert constructed_roots, "WorkspaceLock was never constructed"
+    assert constructed_roots[-1] == ws_resolved, (
+        f"lock keyed on non-canonical root {constructed_roots[-1]!r}, "
+        f"expected resolved {ws_resolved!s}"
+    )
 
 
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
