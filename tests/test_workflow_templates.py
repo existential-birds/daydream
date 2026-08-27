@@ -45,6 +45,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
 REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 PR_TEMPLATE_PATH = _REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
+# The digest below matches the immutable rhysd/actionlint:1.7.7 manifest digest
+# verified against the live OCI registry (`docker buildx imagetools inspect
+# rhysd/actionlint:1.7.7` / `docker manifest inspect …@sha256:887a…147e9`;
+# both the tagged ref and the raw sha256 resolve to it). The registry is the only
+# authoritative source: this constant is a pin, not a verification of itself.
+# Any future edit to the digest MUST be re-verified against that registry before
+# landing, or CI `docker pull` will fail at run time.
 _ACTIONLINT_IMAGE = "rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9"
 
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
@@ -749,6 +756,14 @@ def test_repo_workflow_readme_declares_codex_and_points_to_canonical_install() -
 
 
 def test_ci_and_pr_template_pin_actionlint_image_by_digest() -> None:
+    # Caveat (matches _PINNED_ACTION_VERSIONS, which also cannot verify a
+    # SHA-->release mapping against its upstream): these assertions only prove the
+    # three copies agree with one another. They cannot, and are not intended to,
+    # re-derive the manifest digest from the registry. _ACTIONLINT_IMAGE is a
+    # golden pin whose correctness was verified against the live OCI registry at
+    # write time (see its definition comment); if it is ever changed to a
+    # different 64-hex value without such a re-verification, this suite stays
+    # green and the failure surfaces only at CI runtime on `docker pull`.
     wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
     steps = job_steps(wf, "check")
     actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
