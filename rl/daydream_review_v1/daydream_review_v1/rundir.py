@@ -61,25 +61,49 @@ DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
 #: once cannot silently leave another deriv site unhardened.
 GIT_DIFF_HARDENING_FLAGS: tuple[str, str] = ("--no-ext-diff", "--no-textconv")
 
+#: Git pathspec (passed as a bare argv element, never shell-interpolated)
+#: excluding daydream's own ``.daydream/`` artifacts from the candidate product
+#: diff. daydream may write its own tracked artifacts into the tree during a
+#: rollout, but they are never part of the candidate product; the load-bearing
+#: seal/verify diff must agree with the fix-acceptance oracle
+#: (``_fixes_applied``), which excludes ``.daydream/`` from both of its probes.
+#: Defined here, the single-sourced deriv helper, so the exclusion can only
+#: drift by intentional edit and never by one string falling out of sync.
+DAYDREAM_EXCLUDE = ":(exclude).daydream"
+
 
 def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
-    """Argv for re-deriving the rollout's committed diff against the baked head.
+    """Argv for re-deriving the rollout's candidate diff against the baked head.
 
     The candidate diff is the load-bearing contract the seal binds and the
     verifier re-applies, so it must be derived identically everywhere it is
     needed (seal production, seal verification, and the verify-checkout
     construction). Single-sourcing the command keeps those sites from drifting.
 
+    The one-revision form (``git diff <flags> <head_sha>``) compares the
+    current tracked tree — committed, staged, and unstaged — against the
+    baked ``head_sha``, excluding untracked files. This matches the working-
+    tree semantics ``_fixes_applied`` uses to accept a fix.
+
     The ``--no-ext-diff --no-textconv`` flags harden the derivation against a
     repository-configured external diff helper or text conversion driver: the
     supervisor runs as root, while a repo-local ``diff.external`` / textconv
     runs under the repo's own (untrusted) identity, so neither may execute
     during the load-bearing diff.
+
+    ``DAYDREAM_EXCLUDE`` (``:(exclude).daydream``) restricts the diff to the
+    candidate product only: daydream's own tracked artifacts under
+    ``.daydream/`` are never a fix signal, and this is the same exclusion the
+    fix-acceptance oracle ``_fixes_applied`` applies to both of its probes, so
+    the oracle and the load-bearing diff fully agree about what counts as the
+    candidate diff.
     """
     return [
         "git", "-C", repo, "diff",
         *GIT_DIFF_HARDENING_FLAGS,
-        head_sha, "HEAD",
+        head_sha,
+        "--",
+        DAYDREAM_EXCLUDE,
     ]
 
 
@@ -228,7 +252,7 @@ async def verify_seal(
     # Re-derive the candidate diff from the sandbox exactly as the seal
     # producer did (and as the verifier checkout will apply it): the seal's
     # embedded copy is an audit record, never the verification input, so a
-    # committed diff rewritten after sealing fails the digest check.
+    # tracked change rewritten after sealing fails the digest check.
     try:
         diff_result = await runtime.run(candidate_diff_cmd(repo, head_sha), {})
     except Exception:
@@ -254,8 +278,8 @@ async def seal_archived_run(
 
     The supervisor (harness) runs this after the launch returns, so the seal is
     produced outside the agent's write window and the reward can verify the
-    staged copy against it. The candidate diff is the rollout's own committed
-    diff against the baked head (``b""`` when the runner cannot produce one).
+    staged copy against it. The candidate diff is the rollout's own current
+    tracked diff against the baked head (``b""`` when the runner cannot produce one).
 
     Returns:
         ``True`` when a seal was written (and, under docker, the run dir
