@@ -22,8 +22,9 @@ make install   # uv sync
 make hooks     # install pre-push hook
 make lint      # ruff check daydream tests bench
 make typecheck # mypy daydream tests bench
+make deadcode  # whole-project dead-code detection (vulture)
 make test      # pytest -n auto
-make check     # lockcheck + lint + typecheck + full pytest (the gate)
+make check     # lockcheck + deadcode + lint + typecheck + test (the gate)
 ```
 
 ```bash
@@ -201,7 +202,7 @@ Full contract: `docs/extensions.md`.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
   `daydream/trajectory.py` only. **Module-bloat ban**: no ATIF construction in `phases.py` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
-- **`make check`** = `uv lock --check` + ruff/mypy over `daydream tests bench` + pytest;
+- **`make check`** = `uv lock --check` + vulture over `daydream tests` + ruff/mypy over `daydream tests bench` + pytest;
   `scripts/hooks/pre-push` runs the identical gate.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
