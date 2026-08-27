@@ -60,14 +60,15 @@ python_version = "3.12"
 strict = true
 namespace_packages = true
 explicit_package_bases = true
-[[tool.mypy.overrides]]
-# Sandbox template score_review.py does a bare `import verifier_core`, which
-# resolves at sandbox build time (golden byte-parity gate:
-# tests/test_benchmark_verifier_assets.py). Wiring mypy_path for it makes mypy
-# see the source twin under two module names ("Source file found twice"), so
-# tolerance is scoped to this one module instead.
-module = ["daydream.benchmark.harbor.templates.tests.score_review"]
-ignore_missing_imports = true
+# The sandbox score_review.py does a bare `import verifier_core` (the twin of
+# in-repo daydream.benchmark.harbor.verifier_core, copied beside it at sandbox
+# build time; golden byte-parity gate: tests/test_benchmark_verifier_assets.py).
+# That top-level name is not on sys.path, so mypy_stubs/verifier_core.py shims it
+# by re-exporting the source twin's public API. Pointing mypy_path at harbour/
+# itself would discover the twin twice ("Source file found twice"), so the shim
+# lives on its own mypy_path root -- the sandbox still checks against the real
+# signatures, never Any.
+mypy_path = "mypy_stubs"
 
 
 [[tool.mypy.overrides]]
