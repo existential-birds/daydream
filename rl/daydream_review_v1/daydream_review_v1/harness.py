@@ -115,7 +115,7 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         runtime: vf.Runtime,
         endpoint: str,
         secret: str,
-        _mcp_urls: dict[str, str],
+        mcp_urls: dict[str, str],  # noqa: override param name pinned by verifiers 0.2.1 vf.Harness.launch
     ) -> vf.ProgramResult:
         data: DaydreamReviewData = trace.task.data
         strategy = self.strategy

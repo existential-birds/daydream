@@ -650,7 +650,7 @@ class _HelpAllAction(argparse.Action):
             help=help,
         )
 
-    def __call__(self, parser, _namespace, values, _option_string=None):
+    def __call__(self, parser, _namespace, _values, _option_string=None):
         _build_main_parser(full_help=True).print_help()
         parser.exit()
 
