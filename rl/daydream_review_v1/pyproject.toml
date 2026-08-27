@@ -16,6 +16,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.9",
+    "vulture>=2.13",
 ]
 
 # daydream is consumed as a path dependency so the rewards import the SAME
