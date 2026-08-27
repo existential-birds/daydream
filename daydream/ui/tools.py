@@ -625,7 +625,7 @@ def _build_tool_header(
     return content
 
 
-def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
+def _build_tool_body_extras(name: str, args: dict[str, object]) -> list[Markdown]:
     """Return extra renderables to display between header and result.
 
     Used for the Task tool, whose `description` and `prompt` arguments are
@@ -638,7 +638,7 @@ def _build_tool_body_extras(name: str, args: dict[str, object]) -> list:
         return [Markdown(description)] if description else []
     if name != "Task":
         return []
-    extras: list = []
+    extras: list[Markdown] = []
     description = str(args.get("description", "")).strip()
     prompt = str(args.get("prompt", "")).strip()
     if description:

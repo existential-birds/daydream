@@ -667,6 +667,8 @@ def _normalize_authored(
     _dedup_scope(normalized, repo=repo)
     _relocate_existing_new_paths(normalized, repo=repo)
     _clamp_excerpt_end_lines(normalized, repo=repo)
+    if not isinstance(normalized, dict):
+        return None
     return normalized
 
 

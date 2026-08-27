@@ -32,9 +32,10 @@ import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
+from rich.console import Console
 
 from daydream import git_ops
 from daydream.agent import (
@@ -641,7 +642,13 @@ class _HelpAllAction(argparse.Action):
     any of them parse.
     """
 
-    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):  # noqa: A002 - `help` is argparse.Action's API parameter name
+    def __init__(  # noqa: A002 - `help` is argparse.Action's API parameter name
+        self,
+        option_strings: list[str],
+        dest: str = argparse.SUPPRESS,
+        default: Any = argparse.SUPPRESS,
+        help: str | None = None,
+    ):
         super().__init__(
             option_strings=option_strings,
             dest=dest,
@@ -650,7 +657,13 @@ class _HelpAllAction(argparse.Action):
             help=help,
         )
 
-    def __call__(self, parser, namespace, values, option_string=None):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
         _build_main_parser(full_help=True).print_help()
         parser.exit()
 
@@ -1707,7 +1720,7 @@ def _handle_list_reanchor(config: RunConfig) -> int:
     return 0
 
 
-def _shutdown_and_exit(console, title: str, message: str) -> None:
+def _shutdown_and_exit(console: Console, title: str, message: str) -> None:
     """Finish the shutdown panel, print ``title``/``message``, and exit 1.
 
     Shared by :func:`main`'s error handlers so the panel-finish sequence

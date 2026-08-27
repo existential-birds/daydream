@@ -47,7 +47,7 @@ import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Generator
+from typing import Any, Callable, Generator, Literal, overload
 
 _logger = logging.getLogger(__name__)
 
@@ -323,6 +323,32 @@ def _gh_retries() -> int:
         is_valid=lambda value: value >= 0,
         invalid_msg="is negative",
     )
+
+
+@overload
+def _run_git(
+    repo: Path,
+    args: list[str],
+    *,
+    timeout: int = 5,
+    capture_bytes: Literal[True],
+    retries: int = _GIT_TIMEOUT_RETRIES,
+    env_cmd: Any | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Binary-capture variant: ``capture_bytes=True`` reads bytes stdout."""
+
+
+@overload
+def _run_git(
+    repo: Path,
+    args: list[str],
+    *,
+    timeout: int = 5,
+    capture_bytes: Literal[False] = False,
+    retries: int = _GIT_TIMEOUT_RETRIES,
+    env_cmd: Any | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Text-capture variant (the default): decoded ``str`` stdout."""
 
 
 def _run_git(
@@ -1947,7 +1973,7 @@ def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
 # --- gh wrappers -------------------------------------------------------------
 
 
-def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
+def gh_pr_view(repo: Path, pr: int | None = None) -> dict[str, Any] | None:
     """Return ``gh pr view`` output as a dict, or ``None`` on failure.
 
     When *pr* is ``None``, ``gh pr view`` infers the PR from the currently
@@ -1980,7 +2006,7 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict]:
+def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict[str, Any]]:
     """List open PRs whose head ref is *branch*.
 
     Returns:

@@ -255,7 +255,7 @@ async def pre_scan(
         effective_fanout_concurrency(10, backend)
     )
 
-    async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
+    async def _run_specialist(name: str, prompt: str, schema: dict[str, Any]) -> None:
         nonlocal specialist_failed
         async with limiter, maybe_fork(recorder, f"explore-{name}"):
             try:

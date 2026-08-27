@@ -319,7 +319,7 @@ def _read_session_bound_json_artifact(
     data = _read_json_artifact(resolver(target_dir / ".daydream" / "deep"), dict)
     if data is None:
         return None
-    if data.get("session_id") != session_id:
+    if not isinstance(data, dict) or data.get("session_id") != session_id:
         return None
     return data
 

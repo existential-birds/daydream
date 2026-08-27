@@ -73,7 +73,7 @@ def _assemble_body(fields: Any) -> str:
     return "\n\n".join(parts)
 
 
-def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
+def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> list[dict[str, Any]]:
     """Convert canonical merged items into candidate findings.
 
     Each item is mapped through ``pr_review.extract_item_fields`` (the shared
@@ -142,11 +142,11 @@ def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
 
 def build_candidate_artifact(
     case_id: str,
-    findings: list[dict],
+    findings: list[dict[str, Any]],
     *,
     base_ref: str = "base",
     head_ref: str = "head",
-) -> dict:
+) -> dict[str, Any]:
     """Assemble the strict §9 candidate artifact, enforcing the caps fail-closed.
 
     Returns ``{"schema_version": 1, "case_id": case_id, "base_ref": base_ref,
@@ -178,7 +178,7 @@ def build_candidate_artifact(
     return artifact
 
 
-def write_candidate_artifact_atomic(dest, artifact: dict) -> None:
+def write_candidate_artifact_atomic(dest: str | Path, artifact: dict[str, Any]) -> None:
     """Write *artifact* to *dest* atomically (temp + rename).
 
     Writes to a sibling ``.tmp-<uuid>`` file in the destination directory then

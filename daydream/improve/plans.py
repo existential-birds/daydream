@@ -18,8 +18,10 @@ from daydream.improve.prioritize import member_alias, plan_priority
 from daydream.improve.render import (
     _redact_model_value,
     markdown_cell,
-    plan_slug,
     render_plan,
+)
+from daydream.improve.render import (
+    plan_slug as plan_slug,
 )
 from daydream.trajectory import redact_text
 from daydream.workspace import _prune_stale_locked_worktrees

@@ -22,6 +22,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,17 +37,20 @@ from daydream.benchmark import curation as cu
 from daydream.benchmark import schema, snapshot, storage
 
 
-def _run_gh_preflight_status(root: Path):
-    """Run ``gh auth status --hostname github.com`` (exit code is the contract)."""
+def _run_gh_preflight_status(root: Path) -> subprocess.CompletedProcess[str]:
+    """Run ``git auth status --hostname github.com`` (exit code is the contract)."""
     return git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"])
 
 
-def _run_gh_api_user(root: Path) -> dict:
+def _run_gh_api_user(root: Path) -> dict[str, Any]:
     """Return the authenticated GitHub user record from ``gh api user``."""
     proc = git_ops._run_gh(root, ["api", "user"])
     if proc.returncode != 0:
         raise git_ops.GitError(f"gh api user failed: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)
+    data = json.loads(proc.stdout)
+    if not isinstance(data, dict):
+        raise git_ops.GitError("gh api user returned a non-object payload")
+    return data
 
 
 def _git_ls_remote(root: Path, url: str) -> str:
@@ -422,12 +426,12 @@ class _ImportRateLimitError(Exception):
     """A fetch exhausted its rate-limit retries; the PR becomes ``fetch_failed``."""
 
 
-def _as_author(raw: dict) -> dict:
+def _as_author(raw: dict[str, Any]) -> dict[str, Any]:
     author = raw.get("user") or {}
     return {"login": author.get("login", ""), "type": author.get("type", "User")}
 
 
-def _record_common(author: dict, body: str) -> dict[str, Any]:
+def _record_common(author: dict[str, Any], body: str) -> dict[str, Any]:
     """The author + body-hash + bot block shared by every evidence record builder."""
     return {
         "author": {"login": author.get("login", ""), "type": author.get("type", "User")},
@@ -675,7 +679,7 @@ def _graphql_with_rate_limit_retry(
                 idempotent=True,
                 input_data={"query": query, "variables": variables},
             )
-            return resp
+            return cast(dict[str, Any], resp)  # gh_api returns raw JSON; the GraphQL body is a dict
         except git_ops.RateLimitError as exc:
             last_rate_limit = exc
             if attempt < _RATE_LIMIT_ATTEMPTS - 1:
@@ -699,7 +703,7 @@ def _next_cursor(page_info: dict[str, Any], *, context: str) -> str | None:
     after = page_info.get("endCursor")
     if after is None:
         raise git_ops.GitError(f"graphql {context} hasNextPage without an endCursor")
-    return after
+    return str(after)
 
 
 def _graphql_thread_comments(
@@ -1313,14 +1317,14 @@ def _stages_failed(raw: dict[str, Any], number: int, code: str, message: str) ->
 def _pending_pr_state(raw: dict[str, Any], number: int) -> str:
     for entry in raw.get("pull_requests", []):
         if entry.get("number") == number:
-            return entry.get("import_state", "pending")
+            return str(entry.get("import_state", "pending"))
     return "pending"
 
 
 def _manifest_entry(raw: dict[str, Any], number: int) -> dict[str, Any] | None:
     """The ledger entry for *number*, or None when not yet imported."""
     for entry in raw.get("pull_requests", []):
-        if entry.get("number") == number:
+        if isinstance(entry, dict) and entry.get("number") == number:
             return entry
     return None
 

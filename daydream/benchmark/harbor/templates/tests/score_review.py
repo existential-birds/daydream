@@ -279,7 +279,7 @@ def _render_filled(
     )
 
 
-def render_pair_prompt(gold: dict, candidate: dict, *, template: str) -> str:
+def render_pair_prompt(gold: dict[str, Any], candidate: dict[str, Any], *, template: str) -> str:
     """Render a bounded, untrusted-fenced prompt for one gold/candidate pair.
 
     The untrusted finding fields are escaped by ``_render_filled`` so injected
@@ -499,10 +499,10 @@ def _anthropic_text(body: dict[str, Any]) -> str:
     if not isinstance(content, list):
         raise VerifierError("Judge response missing content blocks")
     for block in content:
-        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-            text = block["text"].strip()
-            if text:
-                return text
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
     raise VerifierError("Judge response contained no text block")
 
 
@@ -806,6 +806,8 @@ def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         raise VerifierError(f"candidate artifact is not valid JSON: {Path(path)}") from None
+    if not isinstance(parsed, dict):
+        raise VerifierError("candidate artifact must be a JSON object")
     return parsed
 
 

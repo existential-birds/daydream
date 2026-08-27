@@ -8,7 +8,7 @@ deep-mode stage/verification/preflight notices.
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich import box
 from rich.console import Console, Group
@@ -143,7 +143,7 @@ def print_summary(console: Console, data: SummaryData) -> None:
     console.print(table)
 
 
-def print_issues_table(console: Console, issues: list[dict]) -> None:
+def print_issues_table(console: Console, issues: list[dict[str, Any]]) -> None:
     """Display issues as a numbered Rich table.
 
     Args:

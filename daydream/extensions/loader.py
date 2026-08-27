@@ -20,6 +20,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
+from typing import cast
 
 from daydream.extensions.api import (
     EXTENSION_API_VERSION,
@@ -93,7 +94,9 @@ def _require_register(module: ModuleType, source: str) -> Callable[[Registry], N
         raise ExtensionError(
             f"extension module at {source} does not export a callable 'register(registry)' (see {_CONTRACT_DOC})"
         )
-    return register
+    # callable() narrows an Any attr to Callable[..., Any]; reassert the Registry
+    # 0-arg contract through the annotation instead of smuggle Any downstream.
+    return cast(Callable[[Registry], None], register)
 
 
 def build_registry() -> Registry:

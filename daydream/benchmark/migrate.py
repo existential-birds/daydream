@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -42,7 +43,7 @@ class UpgradeReport:
     errors: list[str] = field(default_factory=list)
 
 
-def _backfill_requested_base_sha(doc: dict) -> bool:
+def _backfill_requested_base_sha(doc: dict[str, Any]) -> bool:
     """Backfill ``requested_base_sha`` on a ready/imported snapshot that lacks it.
 
     Pre-provenance-split workspaces recorded only ``original_base_sha``; the
@@ -63,7 +64,7 @@ def _backfill_requested_base_sha(doc: dict) -> bool:
     return True
 
 
-def _upgrade_case(raw: dict, case_id: str) -> tuple[dict, int]:
+def _upgrade_case(raw: dict[str, Any], case_id: str) -> tuple[dict[str, Any], int]:
     """Return a copy of *raw* with case-scoped finding ids and schema_version 2.
 
     Only ``finding_id`` values, ``schema_version`` and a missing

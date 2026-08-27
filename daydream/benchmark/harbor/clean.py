@@ -262,7 +262,7 @@ def _clean_curated(root: Path, report: CleanReport) -> None:
 
 
 def clean_workspace(
-    root,
+    root: Path,
     *,
     cache: bool = False,
     jobs: bool = False,

@@ -49,7 +49,7 @@ def _merge_state(target_dir: Path) -> dict[str, Any]:
     return {"ran": False, "status": _ABSENT}
 
 
-def _fix_state(target_dir: Path, phase_events: list) -> dict[str, Any]:
+def _fix_state(target_dir: Path, phase_events: list[Any]) -> dict[str, Any]:
     """Derive the fix terminal state from ``fix-failures.json`` + phase events.
 
     A present non-empty ``fix-failures.json`` means fix groups were
@@ -88,11 +88,11 @@ def _absent() -> dict[str, Any]:
 def derive_phase_states(
     target_dir: Path,
     *,
-    phase_events: list,
+    phase_events: list[Any],
     runs_merge: bool = True,
     runs_fix: bool = True,
     runs_test: bool = True,
-) -> dict[str, dict]:
+) -> dict[str, dict[str, Any]]:
     """Return per-phase terminal states for ``merge``, ``fix``, and ``test``.
 
     Each entry is ``{"ran": bool, "status": str}`` with status one of
@@ -116,7 +116,7 @@ def derive_phase_states(
     }
 
 
-def _phase(phase_states: dict, name: str) -> dict:
+def _phase(phase_states: dict[str, Any], name: str) -> dict[str, Any]:
     """Return a phase's state dict, defaulting to ``{}`` when absent/malformed.
 
     Unifies the two key styles used across ``derive_pipeline_status`` (reading
@@ -129,8 +129,8 @@ def _phase(phase_states: dict, name: str) -> dict:
 
 def derive_pipeline_status(
     archive_status: str,
-    fix_failures: dict | None,
-    phase_states: dict,
+    fix_failures: dict[str, Any] | None,
+    phase_states: dict[str, Any],
     *,
     runs_fix: bool = False,
     runs_test: bool = False,

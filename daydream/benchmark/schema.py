@@ -284,7 +284,7 @@ def head_sha_from_case_id(case_id: str) -> str:
     return case_id.rsplit("-", 1)[-1]
 
 
-def _loc_parts(loc: "Location | dict | None") -> tuple[str, str, str]:
+def _loc_parts(loc: "Location | dict[str, Any] | None") -> tuple[str, str, str]:
     if loc is None:
         return ("", "", "")
     if isinstance(loc, dict):
@@ -296,13 +296,13 @@ def _loc_parts(loc: "Location | dict | None") -> tuple[str, str, str]:
     return (str(loc.path), str(loc.start_line), str(loc.end_line))
 
 
-def _field_of(value: "Finding | dict", name: str) -> Any:
+def _field_of(value: "Finding | dict[str, Any]", name: str) -> Any:
     if isinstance(value, dict):
         return value.get(name)
     return getattr(value, name, None)
 
 
-def derive_finding_id(finding: "Finding | dict", *, case_id: str) -> str:
+def derive_finding_id(finding: "Finding | dict[str, Any]", *, case_id: str) -> str:
     """sha256 over the case-scoped canonical (case_id, title, body, severity,
     path, start/end) tuple.
 
@@ -1049,8 +1049,8 @@ def validate_case_transition(frm: str, to: str) -> None:
 
 def derive_workspace_state(
     *,
-    pull_requests: list[dict] | None = None,
-    cases: list[dict] | None = None,
+    pull_requests: list[dict[str, Any]] | None = None,
+    cases: list[dict[str, Any]] | None = None,
 ) -> str:
     """Derive the workspace state from ledger + case index.
 

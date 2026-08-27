@@ -64,7 +64,7 @@ def collect_trajectory_paths(run_dir: Path) -> list[Path]:
     return paths
 
 
-def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict:
+def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict[str, Any]:
     """Load trajectory files for a single session from a .daydream directory.
 
     New layout: ``runs/<session_id>/trajectory.json`` plus
@@ -80,7 +80,7 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
         subagent trajectories belonging to the same session).
     """
     main = None
-    forked: list[dict] = []
+    forked: list[dict[str, Any]] = []
     runs_dir = daydream_dir / "runs"
 
     # --- Resolve the run directory ------------------------------------------
@@ -145,8 +145,8 @@ def _agent_label(filename: str) -> str:
     return filename.replace(".json", "")
 
 
-def _extract_tool_calls(trajectory: dict) -> list[dict]:
-    calls: list[dict] = []
+def _extract_tool_calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
     for step in trajectory.get("steps", []):
         for tc in step.get("tool_calls") or []:
             calls.append({
@@ -421,7 +421,7 @@ def _paths_from_command(command: str) -> set[str]:
     return paths
 
 
-def _read_paths_for_call(tc: dict) -> list[str]:
+def _read_paths_for_call(tc: dict[str, Any]) -> list[str]:
     """All file paths a single tool call reads, across backends.
 
     ``function_name`` is case-folded so ``Bash`` (Claude) / ``bash`` (pi) /
@@ -452,7 +452,7 @@ def _read_paths_for_call(tc: dict) -> list[str]:
     return []
 
 
-def _files_read(tool_calls: list[dict]) -> set[str]:
+def _files_read(tool_calls: list[dict[str, Any]]) -> set[str]:
     paths: set[str] = set()
     for tc in tool_calls:
         paths.update(_read_paths_for_call(tc))
@@ -466,15 +466,15 @@ def _path_matches(absolute: str, relative: str) -> bool:
 
 # Analysis functions
 
-def _all_trajectories(trajectories: dict) -> list[dict]:
-    all_trajs: list[dict] = []
+def _all_trajectories(trajectories: dict[str, Any]) -> list[dict[str, Any]]:
+    all_trajs: list[dict[str, Any]] = []
     if trajectories["main"]:
         all_trajs.append(trajectories["main"])
     all_trajs.extend(trajectories["forked"])
     return all_trajs
 
 
-def analyze_costs(trajectories: dict) -> dict:
+def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
     """Cost and token breakdown across all agents.
 
     Run totals come from the root trajectory's ``final_metrics`` alone: the
@@ -488,7 +488,7 @@ def analyze_costs(trajectories: dict) -> dict:
     ``total_input_tokens`` is the prompt-token total without adding the cache
     hit subset again.
     """
-    agents: list[dict] = []
+    agents: list[dict[str, Any]] = []
     forked = trajectories.get("forked") or []
     forks_by_source = {fork["_source_file"]: fork for fork in forked}
     for traj in _all_trajectories(trajectories):
@@ -548,11 +548,11 @@ def analyze_costs(trajectories: dict) -> dict:
     }
 
 
-def analyze_tools(trajectories: dict) -> dict:
+def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
     """Tool call counts, per-agent breakdown, and redundancy detection."""
-    total_counts: Counter = Counter()
-    by_agent: dict[str, dict] = {}
-    redundant_reads: list[dict] = []
+    total_counts: Counter[str] = Counter()
+    by_agent: dict[str, dict[str, Any]] = {}
+    redundant_reads: list[dict[str, Any]] = []
 
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
@@ -582,7 +582,7 @@ def analyze_tools(trajectories: dict) -> dict:
     }
 
 
-def analyze_coverage(trajectories: dict, daydream_dir: Path) -> dict:
+def analyze_coverage(trajectories: dict[str, Any], daydream_dir: Path) -> dict[str, Any]:
     """File review coverage: files in diff vs files read by review agents."""
     diff_files = _files_from_diff(daydream_dir / "diff.patch")
 
@@ -638,7 +638,7 @@ def _records_issues_or_empty(records: Any) -> list[Any]:
     """
     issues = _records_issues(records)
     if issues is None:
-        return [] if isinstance(records, dict) else records  # type: ignore[return-value]
+        return [] if isinstance(records, dict) else records
     return issues
 
 
@@ -682,7 +682,7 @@ def _bucketed_lens_counts(deep_dir: Path) -> dict[str, int]:
 
 
 def _shipped_counts(
-    deep_dir: Path, all_findings: list[dict], merged_review: dict
+    deep_dir: Path, all_findings: list[dict[str, Any]], merged_review: dict[str, Any]
 ) -> tuple[int, dict[str, int]]:
     """Select the shipped review set and report (total, by_confidence) together.
 
@@ -733,7 +733,7 @@ def _shipped_counts(
     )
 
 
-def analyze_findings(daydream_dir: Path) -> dict:
+def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
     """Parse per-stack records, dedup stats, and merged review.
 
     ``total``/``by_confidence`` report the shipped review set: ``merged-items.json``
@@ -756,8 +756,8 @@ def analyze_findings(daydream_dir: Path) -> dict:
             "per_lens": dict(_EMPTY_PER_LENS),
         }
 
-    all_findings: list[dict] = []
-    stacks: list[dict] = []
+    all_findings: list[dict[str, Any]] = []
+    stacks: list[dict[str, Any]] = []
 
     per_lens = _bucketed_lens_counts(deep_dir)
 
@@ -769,7 +769,7 @@ def analyze_findings(daydream_dir: Path) -> dict:
             r["_stack"] = stack_name
             all_findings.append(r)
 
-    dedup_stats: dict = {}
+    dedup_stats: dict[str, Any] = {}
     dedup_path = deep_dir / "dedup-candidates.json"
     if dedup_path.exists():
         dedup = json.loads(dedup_path.read_text())
@@ -782,7 +782,7 @@ def analyze_findings(daydream_dir: Path) -> dict:
             "avg_overlap_similarity": round(avg_sim, 4),
         }
 
-    merged_review: dict = {}
+    merged_review: dict[str, Any] = {}
     review_path = deep_dir / "review-output.md"
     if review_path.exists():
         text = review_path.read_text()
@@ -803,7 +803,7 @@ def analyze_findings(daydream_dir: Path) -> dict:
     }
 
 
-def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
+def analyze_grounding(trajectories: dict[str, Any], findings: list[dict[str, Any]]) -> dict[str, Any]:
     """Tier 1 grounding: verify cited files were actually read by the agent.
 
     The denominator is the pre-merge per-stack finding list held in
@@ -823,8 +823,8 @@ def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
         label = _agent_label(traj["_source_file"])
         agent_reads[label] = _files_read(_extract_tool_calls(traj))
 
-    grounded: list[dict] = []
-    ungrounded: list[dict] = []
+    grounded: list[dict[str, Any]] = []
+    ungrounded: list[dict[str, Any]] = []
 
     for finding in findings:
         stack = finding.get("_stack", "")
@@ -863,7 +863,7 @@ def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
     }
 
 
-def analyze_exploration_utilization(trajectories: dict) -> dict:
+def analyze_exploration_utilization(trajectories: dict[str, Any]) -> dict[str, Any]:
     """Check whether review agents read the exploration-path artifacts.
 
     Any tool call contributing a read path beneath an ``exploration/`` directory
@@ -872,7 +872,7 @@ def analyze_exploration_utilization(trajectories: dict) -> dict:
     performed the read — ``Read``/``Grep`` tool calls and ``shell``/``bash``
     commands alike route through ``_read_paths_for_call``.
     """
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
 
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
@@ -910,10 +910,10 @@ def analyze_exploration_utilization(trajectories: dict) -> dict:
     }
 
 
-def analyze_timing(trajectories: dict) -> dict:
+def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
     """Wall-clock timing from step timestamps."""
     all_timestamps: list[datetime] = []
-    agent_timings: list[dict] = []
+    agent_timings: list[dict[str, Any]] = []
 
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
@@ -938,12 +938,12 @@ def analyze_timing(trajectories: dict) -> dict:
 
 
 def analyze_training_signals(
-    trajectories: dict,
-    findings: list[dict],
-    grounding: dict,
-) -> dict:
+    trajectories: dict[str, Any],
+    findings: list[dict[str, Any]],
+    grounding: dict[str, Any],
+) -> dict[str, Any]:
     """Assess trajectory quality for ML training purposes."""
-    signals: list[dict] = []
+    signals: list[dict[str, Any]] = []
 
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
@@ -1055,7 +1055,7 @@ _QUALITY_CALIBRATION = {
 
 
 @lru_cache(maxsize=1)
-def _quality_python_parser():
+def _quality_python_parser() -> Any | None:
     """Cached tree-sitter Python parser.
 
     Lazy factory mirroring ``daydream/tree_sitter_index.py``; returns ``None``
@@ -1209,7 +1209,7 @@ def _file_quality_from_tree(
     root: Any,
     lines: list[str],
     cross_file_flagged: set[int] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Erosion + verbosity metrics from an already-parsed file.
 
     *cross_file_flagged* carries line rows (0-based) that duplicate a block also
@@ -1324,7 +1324,7 @@ def _empty_guard_variable(if_node: Any) -> str | None:
     if cond.type == "not_operator":
         arg = cond.child_by_field_name("argument")
         if arg is not None and arg.type == "identifier":
-            return arg.text.decode()
+            return str(arg.text.decode())
         return None
     if cond.type == "comparison_operator":
         call = None
@@ -1343,7 +1343,7 @@ def _empty_guard_variable(if_node: Any) -> str | None:
         arg_ids = [child for child in args.children if child.type == "identifier"]
         if len(arg_ids) != 1:
             return None
-        return arg_ids[0].text.decode()
+        return str(arg_ids[0].text.decode())
     return None
 
 
@@ -1357,7 +1357,7 @@ def _len_call_argument(node: Any) -> str | None:
         return None
     arg_ids = [child for child in args.children if child.type == "identifier"]
     if len(arg_ids) == 1:
-        return arg_ids[0].text.decode()
+        return str(arg_ids[0].text.decode())
     return None
 
 
@@ -1373,7 +1373,7 @@ def _empty_guard_collection(condition: Any) -> str | None:
     if condition is None:
         return None
     if condition.type == "identifier":
-        return condition.text.decode()
+        return str(condition.text.decode())
     name = _len_call_argument(condition)
     if name is not None:
         return name
@@ -1713,7 +1713,7 @@ def _aggregate_per_file(
     parsed: dict[Path, Any],
     parsed_lines: dict[Path, list[str]],
     cross_file_flagged: dict[Path, set[int]],
-) -> tuple[dict[str, dict], float, float, int, int]:
+) -> tuple[dict[str, dict[str, Any]], float, float, int, int]:
     """Terminal per-file aggregation over the parsed candidates.
 
     Walks the candidate list once, folding each successfully parsed file's
@@ -1721,7 +1721,7 @@ def _aggregate_per_file(
     stays in ``scoped_files`` but contributes nothing here (Finding #1).
     Returns ``(per_file, total_mass, high_mass, total_flagged, total_loc)``.
     """
-    per_file: dict[str, dict] = {}
+    per_file: dict[str, dict[str, Any]] = {}
     total_mass = 0.0
     high_mass = 0.0
     total_flagged = 0
@@ -1745,7 +1745,7 @@ def _aggregate_per_file(
 
 def analyze_quality(
     daydream_dir: str | Path, candidate_paths: set[str] | None = None
-) -> dict:
+) -> dict[str, Any]:
     """Structural erosion and verbosity of the post-fix workspace (issue #316).
 
     Computes SlopCodeBench-style metrics (arXiv:2603.24755) over every scoped
@@ -1860,7 +1860,7 @@ def analyze_quality(
 
 # Top-level entry point
 
-def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> dict:
+def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> dict[str, Any]:
     """Run full quantitative analysis on a .daydream directory.
 
     Args:
@@ -1902,7 +1902,7 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
         else None
     )
 
-    result: dict = {
+    result: dict[str, Any] = {
         "session_id": session_id,
         "agent": agent_info,
         "daydream_dir": str(daydream_dir),

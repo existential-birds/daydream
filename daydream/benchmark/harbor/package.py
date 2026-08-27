@@ -128,12 +128,14 @@ def _ensure_harbor_egress_sidecar_image() -> str:
 
     async def ensure() -> str:
         platform = await default_docker_platform()
-        return await ensure_docker_image_built(
-            docker_name=DockerEnvironment._EGRESS_CONTROL_SIDECAR_DOCKER_NAME,
-            docker_build_context=DockerEnvironment._EGRESS_CONTROL_SIDECAR_CONTEXT_PATH,
-            dockerfile_path=DockerEnvironment._egress_control_sidecar_dockerfile_path(),
-            build_args={},
-            platform=platform,
+        return str(
+            await ensure_docker_image_built(
+                docker_name=DockerEnvironment._EGRESS_CONTROL_SIDECAR_DOCKER_NAME,
+                docker_build_context=DockerEnvironment._EGRESS_CONTROL_SIDECAR_CONTEXT_PATH,
+                dockerfile_path=DockerEnvironment._egress_control_sidecar_dockerfile_path(),
+                build_args={},
+                platform=platform,
+            )
         )
 
     return asyncio.run(ensure())
@@ -240,7 +242,7 @@ def template_text(rel: str) -> str:
     )
 
 
-def build_harbor(root: Path, *, wheel: Path) -> dict:
+def build_harbor(root: Path, *, wheel: Path) -> dict[str, Any]:
     """Validate all preconditions, then atomically compile a runnable dataset."""
     from daydream.benchmark.harbor import build
     from daydream.benchmark.workspace import validate_workspace

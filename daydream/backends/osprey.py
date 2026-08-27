@@ -151,6 +151,7 @@ def _optional_int(event: dict[str, Any], key: str) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise OspreyProtocolError(f"event {event.get('event')!r} has invalid integer {key!r}")
+    assert isinstance(value, int)
     return value
 
 

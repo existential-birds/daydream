@@ -71,6 +71,7 @@ import sqlite3
 import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from daydream.archive._schema import (
     _CREATE_INDEXES,
@@ -186,7 +187,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     return conn
 
 
-def _project_daydream(daydream) -> dict:
+def _project_daydream(daydream: Any) -> dict[str, Any]:
     """Project the ``manifest.daydream`` provenance onto per-column values.
 
     Collapses the guarded-ternary projection ladder into one place so the five
@@ -474,7 +475,7 @@ def latest_label_observation(
     session_id: str,
     *,
     as_of: str | None = None,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Return the highest-precedence (human-first, then most recent) label observation for ``session_id``.
 
     Human-sourced observations win over automated ones regardless of timing;
@@ -488,7 +489,7 @@ def latest_label_observation(
             normalizes once; this lexical cutoff assumes canonical input).
     """
     cutoff = "AND observed_at <= ? " if as_of is not None else ""
-    params: tuple = (session_id,) if as_of is None else (session_id, as_of)
+    params: tuple[Any, ...] = (session_id,) if as_of is None else (session_id, as_of)
     conn = _get_connection(archive_dir)
     try:
         cursor = conn.execute(
@@ -507,7 +508,7 @@ def bulk_latest_label_observations(
     session_ids: list[str],
     *,
     as_of: str | None = None,
-) -> dict[str, dict]:
+) -> dict[str, dict[str, Any]]:
     """Return the highest-precedence (human-first, then most recent) label observation for each session.
 
     Human-sourced observations win over automated ones regardless of timing;
@@ -615,7 +616,7 @@ def reviewer_set_penalty_prior(
     alias = " lo" if repo_slug is not None else ""
     join = "\n                JOIN runs r ON r.session_id = lo.session_id" if repo_slug is not None else ""
     repo_filter = "\n                  AND r.repo_slug = ?" if repo_slug is not None else ""
-    params: tuple = (exclude_session, before_valid_at, *logins)
+    params: tuple[Any, ...] = (exclude_session, before_valid_at, *logins)
     if repo_slug is not None:
         params = (*params, repo_slug)
     sql = f"""
@@ -676,7 +677,7 @@ def reviewer_set_penalty_prior(
     return sum(penalties) / len(penalties), len(penalties)
 
 
-def label_observation_history(archive_dir: Path, session_id: str) -> list[dict]:
+def label_observation_history(archive_dir: Path, session_id: str) -> list[dict[str, Any]]:
     """Return the full label history for ``session_id`` in chronological order.
 
     Returns:
@@ -765,7 +766,7 @@ def set_run_pr_link(archive_dir: Path, session_id: str, pr_number: int, pr_repo:
         conn.close()
 
 
-def query_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> list[dict]:
+def query_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     """Query the runs index with an optional WHERE clause.
 
     Args:
@@ -870,7 +871,7 @@ def label_count_summary(
         when the archive is non-empty.
     """
     cutoff = "   WHERE observed_at <= ?" if as_of is not None else ""
-    params: tuple = (as_of,) if as_of is not None else ()
+    params: tuple[Any, ...] = (as_of,) if as_of is not None else ()
     best_sql = (
         f"SELECT session_id, labels FROM ("
         f"  SELECT session_id, labels, "
@@ -908,7 +909,7 @@ def label_count_summary(
         conn.close()
 
 
-def count_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> int:
+def count_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ()) -> int:
     """Return the number of runs matching an optional WHERE clause.
 
     Uses ``SELECT COUNT(*)`` so no rows are materialised.
@@ -923,6 +924,6 @@ def count_runs(archive_dir: Path, where: str = "", params: tuple = ()) -> int:
         if where:
             sql += f" WHERE {where}"  # noqa: S608 - caller-supplied SQL fragment with bound params
         cursor = conn.execute(sql, params)
-        return cursor.fetchone()[0]
+        return int(cursor.fetchone()[0])
     finally:
         conn.close()
