@@ -20,10 +20,12 @@ Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark}.md
 ```bash
 make install   # uv sync
 make hooks     # install pre-push hook
-make lint      # ruff check daydream tests bench
-make typecheck # mypy daydream tests bench
+make lint      # ruff check daydream tests
+make typecheck # mypy daydream tests
 make test      # pytest -n auto
-make check     # lockcheck + lint + typecheck + full pytest (the gate)
+make actionlint # actionlint over live + packaged workflows (Docker)
+make rl-check   # standalone RL lockcheck + ruff + mypy + pytest
+make check     # lockcheck + lint + types + actionlint + pytest + RL gates (the gate)
 ```
 
 ```bash
@@ -201,8 +203,7 @@ Full contract: `docs/extensions.md`.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
   `daydream/trajectory.py` only. **Module-bloat ban**: no ATIF construction in `phases.py` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
-- **`make check`** = `uv lock --check` + ruff/mypy over `daydream tests bench` + pytest;
-  `scripts/hooks/pre-push` runs the identical gate.
+- **`make check`** = root `uv lock --check` + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest + standalone RL lockcheck/ruff/mypy/pytest (`cd rl/daydream_review_v1`); `scripts/hooks/pre-push` verifies signatures then delegates to it.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.

@@ -421,8 +421,14 @@ make hooks      # install git hooks
 make lint       # ruff linter
 make typecheck  # mypy
 make test       # pytest
-make check      # all CI checks
+make actionlint # workflow YAML checks via Docker
+make rl-check   # standalone RL: lockcheck + ruff + mypy + pytest
+make check      # all root + workflow + RL CI checks
 ```
+
+`make check` is the quality-gate portion of the installed pre-push hook (the hook
+verifies commit signatures first, then delegates to it). Docker with a running
+daemon is required for `make check`, because actionlint runs the pinned container.
 
 ## License
 
