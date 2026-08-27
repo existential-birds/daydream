@@ -101,3 +101,12 @@ def test_ci_test_step_unchanged_invocation_coverage_comes_from_addopts() -> None
     # arrives via pyproject addopts, identical to local (KD2: local == CI).
     check_block = ci.split("Run tests", 1)[1].split("- name:", 1)[0]
     assert "uv run pytest -n auto" in check_block
+
+
+def test_coverage_docs_present_with_ratchet_and_local_command() -> None:
+    docs = (REPO_ROOT / "docs" / "coverage.md").read_text()
+    assert "uv run pytest -n auto" in docs, "local coverage command must be documented"
+    assert "fail_under" in docs and "ratchet" in docs.lower()
+    assert "daydream/atif" in docs, "rationale for the vendored exclusion must be restated"
+    readme = (REPO_ROOT / "README.md").read_text()
+    assert "docs/coverage.md" in readme

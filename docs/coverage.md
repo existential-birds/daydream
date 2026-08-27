@@ -1,25 +1,39 @@
-# Coverage baseline and ratchet procedure
+# Coverage reporting and ratchet
 
-## Baseline history
+## What runs where
 
-| Date       | Git SHA  | Raw coverage | `fail_under` | Machine context              |
-|------------|----------|--------------|--------------|------------------------------|
-| 2026-08-27 | 480c76a  | 87.65%       | 87           | blacksmith-4vcpu-ubuntu-2404 |
+`make check` (and therefore the pre-push hook and CI's check job) runs the test suite with coverage flags from the pytest `addopts` in `pyproject.toml`. The terminal report shows missing lines. `coverage.xml` is written and uploaded as the `coverage-report` CI artifact.
 
-## Local coverage report
+## Local coverage
 
-Run the full test suite to generate `coverage.xml`:
+Run the same command that CI uses:
 
 ```bash
-make test
+make install
+uv run pytest -n auto
 ```
 
-The terminal term-missing report and XML artifact are produced automatically via pytest addopts. The `make coverage-report` target verifies the XML exists.
+The terminal term-missing report is produced automatically via addopts. The `coverage.xml` file is written in the repository root and is gitignored — do not commit it.
+
+## The floor
+
+The current `fail_under` value is:
+
+| Measured % | Raw value | Git SHA | Date | Machine context |
+|------------|-----------|---------|------|-----------------|
+| 87 | 87.65% | 480c76a | 2026-08-27 | blacksmith-4vcpu-ubuntu-2404 |
 
 ## Ratchet procedure
 
-1. Run `make test` and note the `TOTAL` coverage percentage.
-2. If it exceeds the current `fail_under`, round down to a whole percent.
-3. Update `pyproject.toml` `[tool.coverage.report] fail_under` to the new floor.
-4. Update the comment and this baseline table with the new value, date, SHA, and context.
-5. Open a dedicated PR so the coverage-only diff is reviewable in isolation.
+1. `git pull` latest main.
+2. `make install`.
+3. `uv run pytest -n auto` and read the `TOTAL` percentage from the terminal report (or `uv run coverage report` to re-read the last `.coverage`).
+4. Round **down** to a whole percent.
+5. If the new percentage is greater than the current `fail_under`, edit `[tool.coverage.report] fail_under` in `pyproject.toml` and update the baseline table above with the new value, date, SHA, and context.
+6. Commit with the measured evidence in the commit message.
+
+The floor only ever rises. Lowering it requires a documented regression in the PR description.
+
+## Why atif is excluded
+
+`daydream/atif/` is vendored from the Harbor framework (see `daydream/atif/NOTICE`). The mechanical-edit-only policy (D-03) forbids hand-fixes, so including it in coverage would set the floor from code no one may edit. This exclusion mirrors the mypy, ruff, and vulture exemptions.
