@@ -693,6 +693,27 @@ def ref_exists(repo: Path, ref: str) -> bool:
     return commit.returncode == 0
 
 
+def is_ancestor(repo: Path, ancestor: str, descendant: str = "HEAD") -> bool:
+    """Check whether *ancestor* is an ancestor of *descendant*.
+
+    Returns ``False`` (rather than raising) on the soft-failure modes:
+    missing ref, unrelated histories, or a leading-dash ref that would be
+    mis-parsed by git as an option flag.
+
+    Raises:
+        GitError: Only for unexpected subprocess failures (timeout, missing
+            git binary). The documented soft-failure modes return ``False``.
+    """
+    # Same guard as ref_exists and merge_base: a leading '-' would be
+    # mis-parsed by git as an option flag. No valid branch name or commit-ish
+    # starts with '-'.
+    if ancestor.startswith("-") or descendant.startswith("-"):
+        return False
+
+    proc = _run_git(repo, ["merge-base", "--is-ancestor", ancestor, descendant], timeout=5)
+    return proc.returncode == 0
+
+
 def merge_base(repo: Path, base: str, head: str = "HEAD") -> str | None:
     """Compute the merge-base between *head* and *base*, preferring upstream.
 

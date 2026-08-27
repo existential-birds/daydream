@@ -238,6 +238,25 @@ def test_ref_exists_rejects_leading_dash(tmp_path: Path) -> None:
     assert git_ops.ref_exists(repo, "--exec=evil") is False
 
 
+@pytest.mark.parametrize(
+    ("ancestor", "descendant", "expected"),
+    [
+        pytest.param("HEAD~1", "HEAD", True, id="ancestor_of_head"),
+        pytest.param("HEAD", "HEAD~1", False, id="reversed_is_not_ancestor"),
+        pytest.param("missing", "HEAD", False, id="missing_ref"),
+        pytest.param("-not-a-ref", "HEAD", False, id="leading_dash_ref"),
+    ],
+)
+def test_is_ancestor_reports_relationship(
+    tmp_path: Path, ancestor: str, descendant: str, expected: bool
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "second.txt").write_text("second\n")
+    _git(repo, "add", "second.txt")
+    _commit(repo, "second")
+    assert git_ops.is_ancestor(repo, ancestor, descendant) is expected
+
+
 # --- merge_base -------------------------------------------------------------
 
 
