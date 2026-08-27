@@ -23,6 +23,7 @@ import verifiers.v1 as vf
 from daydream.atif import validate
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
+from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
 from daydream_review_v1.fixture import build_fixture_repo
 from daydream_review_v1.taskset import (
@@ -411,7 +412,7 @@ def test_rundir_golden_user_messages_are_inert(rundir_golden: Path) -> None:
 
 
 async def test_intrinsic_composite_parity(
-    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """The online reward is byte-equal to the offline pipeline's own scorer."""
     archive_root = tmp_path / "archive"
@@ -430,7 +431,7 @@ async def test_intrinsic_composite_parity(
 
 
 async def test_intrinsic_composite_carries_the_grounding_axis(
-    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """grounding_rate lives under ``metrics`` in the archive; reading the manifest
     verbatim would null the axis. The expectation comes from evaluation.json, so
@@ -453,7 +454,7 @@ async def test_intrinsic_composite_carries_the_grounding_axis(
 
 
 async def test_zero_finding_rollout_scores_no_intrinsic_reward(
-    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """Saying nothing must not be the cheapest path to a perfect reward.
 
@@ -499,7 +500,7 @@ async def test_zero_finding_rollout_scores_no_intrinsic_reward(
 
 
 async def test_missing_run_dir_scores_zero(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """A crashed daydream still gets a gradient — zero, not an exception."""
     archive_root = tmp_path / "archive"
@@ -515,7 +516,7 @@ async def test_missing_run_dir_scores_zero(
 
 
 async def test_green_suite_records_non_regression(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
@@ -533,7 +534,7 @@ async def test_green_suite_records_non_regression(
 
 async def test_verifier_identity_branch_executes_and_fails_closed(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -594,7 +595,7 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
 
 
 async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
-    corpus_mini_dir, fixture_manifest_path,
+    corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """_prepare_verify_checkout must derive its candidate diff through
     rundir.candidate_diff_cmd (the single source) and apply it behind an
@@ -620,7 +621,7 @@ async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
 
 
 async def test_green_unrelated_edit_gets_no_suite_reward(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """Starting green and making an unrelated edit earns no suite credit."""
     archive_root = tmp_path / "archive"
@@ -642,7 +643,7 @@ async def test_green_unrelated_edit_gets_no_suite_reward(
 
 
 async def test_red_suite_records_no_non_regression(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
@@ -657,7 +658,7 @@ async def test_red_suite_records_no_non_regression(
 
 
 async def test_suite_result_is_telemetry_not_reward(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A green suite no longer sums into the reward: only intrinsic_composite remains."""
     archive_root = tmp_path / "archive"
@@ -676,7 +677,7 @@ async def test_suite_result_is_telemetry_not_reward(
 
 
 async def test_tampered_suite_never_records_honest_non_regression(
-    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A gutted test oracle records suite_non_regression 0.0 and no suite reward."""
     archive_root = tmp_path / "archive"
@@ -711,7 +712,7 @@ async def test_suite_rejects_protected_test_path_changes(
     tamper_rel: str,
     tamper_content: str,
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -740,7 +741,7 @@ async def test_suite_rejects_protected_test_path_changes(
 
 async def _score_fail_closed(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     archive_root: Path,
     rundir_golden: Path,
     corpus_mini_dir: Path,
@@ -774,7 +775,7 @@ async def _score_fail_closed(
 
 async def test_oracle_gate_fails_closed_on_git_error(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -796,7 +797,7 @@ async def test_oracle_gate_fails_closed_on_git_error(
 
 async def test_assert_gate_held_raises_when_claim_absent(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -825,7 +826,7 @@ async def test_assert_gate_held_raises_when_claim_absent(
 
 async def test_gate_held_raises_when_a_second_run_dir_is_claim_less(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -864,7 +865,7 @@ async def test_gate_held_raises_when_a_second_run_dir_is_claim_less(
 async def test_oracle_gate_rejects_flag_tampered_tracked_file(
     flag: str,
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -896,7 +897,7 @@ async def test_oracle_gate_rejects_flag_tampered_tracked_file(
 
 async def test_oracle_gate_rejects_tracked_gitignore_edit(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -925,7 +926,7 @@ async def test_oracle_gate_rejects_tracked_gitignore_edit(
 
 async def test_oracle_gate_rejects_info_exclude_rule(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -953,7 +954,7 @@ async def test_oracle_gate_rejects_info_exclude_rule(
 
 async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -987,7 +988,7 @@ async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
 
 async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -1020,7 +1021,7 @@ async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
 
 async def test_oracle_gate_rejects_root_sitecustomize(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -1055,7 +1056,12 @@ async def test_oracle_gate_rejects_root_sitecustomize(
     ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree", "empty-commit"],
 )
 async def test_no_fixes_records_no_non_regression(
-    patch: str | None, commit: bool, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    patch: str | None,
+    commit: bool,
+    tmp_path: Path,
+    runtime: SubprocessRuntime,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
 ) -> None:
     """An untouched tree records suite_non_regression 0.0 however recommended.patch looks.
 
@@ -1083,7 +1089,7 @@ async def test_no_fixes_records_no_non_regression(
 
 @pytest.mark.parametrize("head_sha", ["0" * 40], ids=["unresolvable-head"])
 async def test_unresolvable_head_sha_scores_no_fix(
-    head_sha: str, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    head_sha: str, tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """A baked snapshot object that no longer resolves must read as no fix.
 
@@ -1112,7 +1118,7 @@ async def test_unresolvable_head_sha_scores_no_fix(
 async def test_no_fixes_still_records_the_test_claim(
     claimed: bool,
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -1145,11 +1151,11 @@ async def test_no_fixes_still_records_the_test_claim(
 
 async def test_score_reuses_one_archived_run_snapshot(
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One score call fetches the archived run dir exactly once; all consumers share it.
 
@@ -1198,7 +1204,7 @@ async def test_metric_claim_mismatch_fires(
     red: bool,
     expected: float,
     tmp_path: Path,
-    runtime,
+    runtime: SubprocessRuntime,
     rundir_golden: Path,
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
@@ -1226,7 +1232,7 @@ async def test_metric_claim_mismatch_fires(
 
 
 async def test_review_shape_metrics(
-    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """n_findings mirrors merged-items.json; golden_overlap is a path fraction."""
     archive_root = tmp_path / "archive"
@@ -1263,7 +1269,7 @@ async def test_review_shape_metrics(
 
 
 async def test_review_shape_survives_a_non_object_merged_items(
-    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """merged-items.json is written inside the rollout, so a corrupt one must not crash scoring."""
     archive_root = tmp_path / "archive"
@@ -1279,7 +1285,7 @@ async def test_review_shape_survives_a_non_object_merged_items(
 
 
 async def test_committed_fix_counts_even_with_a_clean_tree(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """The deep flow commits once the suite is green, leaving nothing to `git diff`.
 
@@ -1300,7 +1306,7 @@ async def test_committed_fix_counts_even_with_a_clean_tree(
 
 
 async def test_committed_daydream_artifacts_not_a_fix(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """Committing daydream's own .daydream/ artifacts must not read as a fix.
 
@@ -1328,7 +1334,7 @@ async def test_committed_daydream_artifacts_not_a_fix(
 
 
 async def test_unresolvable_snapshot_sha_reads_as_no_fix(
-    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """A fix signal that cannot be evaluated reads as no-fix, not a free win.
 
@@ -1361,7 +1367,7 @@ async def test_unresolvable_snapshot_sha_reads_as_no_fix(
 
 
 async def test_reward_version_is_pinned(
-    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """AC-3: pin the scorer version the parity test cannot see move — both stamps.
 
@@ -1398,7 +1404,7 @@ async def test_reward_version_is_pinned(
 
 
 async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A tampered sealed artifact makes the only reward zero and non-regression dishonest."""
     archive_root = tmp_path / "archive"
@@ -1420,7 +1426,7 @@ async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
 
 
 async def test_untampered_sealed_run_scores_normally(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """An intact seal leaves scoring unchanged."""
     archive_root = tmp_path / "archive"
@@ -1441,7 +1447,7 @@ async def test_untampered_sealed_run_scores_normally(
 
 
 async def test_seal_detects_committed_diff_changed_after_sealing(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """The seal binds the diff applied at scoring time, not a self-consistent record.
 
@@ -1469,7 +1475,7 @@ async def test_seal_detects_committed_diff_changed_after_sealing(
 
 
 async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A harness-sealed run whose seal vanished is a tamper, never legacy unsealed.
 
@@ -1494,7 +1500,7 @@ async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
 
 
 async def test_git_failure_at_verify_time_fails_closed(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A scoring-time diff re-derivation failure must not hash as the empty diff.
 
@@ -1530,7 +1536,7 @@ async def test_git_failure_at_verify_time_fails_closed(
 
 
 async def test_verify_checkout_failed_diff_fails_closed(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A failed candidate-diff derivation must not pipe raw/partial output into
     git apply: _prepare_verify_checkout returns None, never a partially-built
@@ -1565,7 +1571,7 @@ async def test_verify_checkout_failed_diff_fails_closed(
 
 
 async def test_verify_checkout_empty_diff_is_clean_noop(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A review-only rollout (no committed fix) has an empty candidate diff; it
     must apply cleanly as a no-op, never failing _prepare_verify_checkout.
@@ -1593,7 +1599,7 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
 
 
 async def test_verify_checkout_applies_exactly_the_candidate_diff(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """The verify-checkout and the seal bind the same candidate diff.
 
@@ -1647,7 +1653,7 @@ def test_candidate_diff_cmd_carries_hardening_flags() -> None:
 
 
 async def test_verify_checkout_external_diff_ignored(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A repo-local diff.external that cannot run must not abort verifier-checkout."""
     from daydream_review_v1 import taskset
@@ -1669,7 +1675,7 @@ async def test_verify_checkout_external_diff_ignored(
 
 
 async def test_verify_checkout_textconv_ignored(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime: SubprocessRuntime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """An attribute-selected textconv that cannot run must not abort verifier-checkout."""
     from daydream_review_v1 import taskset

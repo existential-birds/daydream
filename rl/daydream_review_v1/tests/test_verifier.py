@@ -9,9 +9,10 @@ make verification fail. These tests pin the round-trip and every tamper shape.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 
-def test_seal_verify_roundtrip(tmp_path):
+def test_seal_verify_roundtrip(tmp_path: Path) -> None:
     from daydream_review_v1.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
@@ -26,7 +27,7 @@ def test_seal_verify_roundtrip(tmp_path):
     assert verify(seal, [a, b], candidate_diff=diff) is True
 
 
-def test_verify_detects_tampered_artifact(tmp_path):
+def test_verify_detects_tampered_artifact(tmp_path: Path) -> None:
     from daydream_review_v1.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
@@ -37,7 +38,7 @@ def test_verify_detects_tampered_artifact(tmp_path):
     assert verify(seal, [a], candidate_diff=b"") is False
 
 
-def test_verify_detects_altered_candidate_diff(tmp_path):
+def test_verify_detects_altered_candidate_diff(tmp_path: Path) -> None:
     from daydream_review_v1.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
@@ -47,7 +48,7 @@ def test_verify_detects_altered_candidate_diff(tmp_path):
     assert verify(seal, [a], candidate_diff=b"patch-v2") is False
 
 
-def test_verify_detects_missing_artifact(tmp_path):
+def test_verify_detects_missing_artifact(tmp_path: Path) -> None:
     from daydream_review_v1.verifier import seal_artifacts, verify
 
     a = tmp_path / "a.json"
@@ -58,7 +59,7 @@ def test_verify_detects_missing_artifact(tmp_path):
     assert verify(seal, [a], candidate_diff=b"") is False
 
 
-def test_seal_json_roundtrip(tmp_path):
+def test_seal_json_roundtrip(tmp_path: Path) -> None:
     """The seal serializes to JSON and parses back to the same verification result."""
     from daydream_review_v1.verifier import SealResult, seal_artifacts, verify
 
@@ -73,7 +74,7 @@ def test_seal_json_roundtrip(tmp_path):
     assert verify(parsed, [a], candidate_diff=b"candidate-diff") is True
 
 
-def test_validate_rejects_unsupported_algorithm():
+def test_validate_rejects_unsupported_algorithm() -> None:
     """A seal.json with a downgraded algorithm (e.g. md5) must fail closed."""
     import pytest
 
@@ -91,7 +92,7 @@ def test_validate_rejects_unsupported_algorithm():
         SealResult.model_validate_json(raw)
 
 
-def test_validate_rejects_malformed_json():
+def test_validate_rejects_malformed_json() -> None:
     """Garbage seal.json content must fail closed as a verification failure."""
     import pytest
 

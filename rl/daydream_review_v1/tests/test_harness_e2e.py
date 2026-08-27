@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import PROJECT_ROOT
@@ -64,10 +65,11 @@ def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None) -> su
     return subprocess.run(argv, cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
 
 
-def _sole_trace(paths: dict[str, Path]) -> dict:
+def _sole_trace(paths: dict[str, Path]) -> dict[str, Any]:
     lines = (paths["out"] / "traces.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1, f"expected one rollout, got {len(lines)}"
-    return json.loads(lines[0])
+    # json.loads yields Any; we only need a shallow dict view.
+    return dict(json.loads(lines[0]))
 
 
 @pytest.mark.skipif(shutil.which("claude") is None, reason="the claude CLI is not on PATH")

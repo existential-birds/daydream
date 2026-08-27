@@ -24,6 +24,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import PROJECT_ROOT, assert_docstring_guards, docker_daemon_is_available
@@ -194,7 +195,9 @@ def test_main_uses_immutable_base_for_repository_builds(
 
     received: list[str] = []
 
-    def _record(entry, *, head_sha, base_sha, base_image, red):
+    def _record(
+        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool
+    ) -> str:
         received.append(base_image)
         return f"{entry.image}:{head_sha[:12]}"
 

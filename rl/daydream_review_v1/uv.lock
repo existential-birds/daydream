@@ -442,6 +442,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-xdist", specifier = ">=3.6" },
     { name = "ruff", specifier = ">=0.9" },
+    { name = "types-jsonschema", specifier = ">=4.26" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 

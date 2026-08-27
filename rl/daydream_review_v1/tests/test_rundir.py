@@ -55,7 +55,7 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
         rel = Path(path).relative_to(str(staged)).as_posix()
         if rel == "trajectory.json" or rel.startswith("trajectories/"):
             raise AssertionError(f"trajectory path forwarded to collector: {rel}")
-        return await saved_read(path)
+        return bytes(await saved_read(path))
 
     monkeypatch.setattr(runtime, "read", guarded_read)
 
@@ -79,7 +79,11 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
 
 
 async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path,
+    runtime: SubprocessRuntime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
 ) -> None:
     """verify_seal must fail closed when the candidate diff cannot be re-derived.
 

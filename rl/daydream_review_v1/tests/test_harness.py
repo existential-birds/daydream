@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 import verifiers.v1 as vf
@@ -17,14 +18,18 @@ from verifiers.v1.graph import MessageNode
 
 from daydream_review_v1.backends import STRATEGIES
 from daydream_review_v1.harness import DaydreamReviewHarness, DaydreamReviewHarnessConfig
-from daydream_review_v1.taskset import DaydreamReviewConfig, DaydreamReviewTaskset
+from daydream_review_v1.taskset import (
+    DaydreamReviewConfig,
+    DaydreamReviewTask,
+    DaydreamReviewTaskset,
+)
 
 ENDPOINT = "http://127.0.0.1:54321/v1"
 SECRET = "rollout-secret"
 MODEL = "some-org/some-policy-model"
 
 
-def _task(corpus_mini_dir, fixture_manifest_path):
+def _task(corpus_mini_dir: Path, fixture_manifest_path: Path) -> DaydreamReviewTask:
     taskset = DaydreamReviewTaskset(
         DaydreamReviewConfig(
             id="daydream-review-v1",
@@ -35,7 +40,7 @@ def _task(corpus_mini_dir, fixture_manifest_path):
     return list(taskset.load())[0]
 
 
-def _trace(task, *, turns: int = 1) -> vf.Trace:
+def _trace(task: DaydreamReviewTask, *, turns: int = 1) -> vf.Trace:
     """A trace carrying *turns* captured model turns.
 
     The harness refuses a rollout that captured none, so the default is one: a
@@ -79,7 +84,7 @@ class _ArchiveRuntime(FakeRuntime):
 
 @pytest.mark.parametrize("backend", sorted(STRATEGIES))
 async def test_launch_passes_the_selected_backend_to_the_cli(
-    backend: str, corpus_mini_dir, fixture_manifest_path
+    backend: str, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     task = _task(corpus_mini_dir, fixture_manifest_path)
     trace = _trace(task)
@@ -104,7 +109,9 @@ async def test_launch_passes_the_selected_backend_to_the_cli(
     assert trace.info["daydream_exit_code"] == 0
 
 
-async def test_launch_carries_extra_args_before_the_target(corpus_mini_dir, fixture_manifest_path) -> None:
+async def test_launch_carries_extra_args_before_the_target(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(
         DaydreamReviewHarnessConfig(backend="codex", extra_args=["--reasoning-effort", "high"])
@@ -119,7 +126,7 @@ async def test_launch_carries_extra_args_before_the_target(corpus_mini_dir, fixt
 
 
 async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(
-    corpus_mini_dir, fixture_manifest_path
+    corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """Tests still red after the fix pass is an outcome to score, not a crash."""
     task = _task(corpus_mini_dir, fixture_manifest_path)
@@ -137,7 +144,9 @@ async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(
     assert trace.stop_condition == "daydream_completed_nonzero"
 
 
-async def test_launch_leaves_a_crash_to_raise(corpus_mini_dir, fixture_manifest_path) -> None:
+async def test_launch_leaves_a_crash_to_raise(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
     """No artifacts means infrastructure failure: let HarnessError fire."""
     task = _task(corpus_mini_dir, fixture_manifest_path)
     trace = _trace(task)
@@ -149,7 +158,9 @@ async def test_launch_leaves_a_crash_to_raise(corpus_mini_dir, fixture_manifest_
     assert trace.stop_condition is None
 
 
-async def test_launch_does_not_stop_on_a_half_written_archive(corpus_mini_dir, fixture_manifest_path) -> None:
+async def test_launch_does_not_stop_on_a_half_written_archive(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
     """final_metrics is written last; without it the pipeline did not finish."""
     task = _task(corpus_mini_dir, fixture_manifest_path)
     trace = _trace(task)
@@ -165,7 +176,9 @@ async def test_launch_does_not_stop_on_a_half_written_archive(corpus_mini_dir, f
     assert trace.stop_condition is None
 
 
-async def test_setup_names_the_missing_binaries(corpus_mini_dir, fixture_manifest_path) -> None:
+async def test_setup_names_the_missing_binaries(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
     class MissingBinaries(_DockerLikeRuntime):
         """Docker-shaped runtime whose image is missing every required binary."""
 
@@ -183,7 +196,7 @@ async def test_setup_names_the_missing_binaries(corpus_mini_dir, fixture_manifes
 
 
 async def test_launch_refuses_a_rollout_that_captured_no_model_calls(
-    corpus_mini_dir, fixture_manifest_path
+    corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """Capture loss must be loud: a bypassed interception server would otherwise
     produce a normal-looking archive and a positive reward."""
@@ -230,7 +243,7 @@ class _OrderingDockerRuntime(_DockerLikeRuntime):
 
 
 async def test_launch_uses_run_as_agent_wrapper_under_docker(
-    corpus_mini_dir, fixture_manifest_path
+    corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """Container launches drop to the non-root agent identity via run-as-agent.
 
@@ -273,7 +286,7 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
 
 
 async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
-    corpus_mini_dir, fixture_manifest_path
+    corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """The docker deep flow's first write succeeds because the harness hands the
     checkout + in-container mirror to the agent uid before the privilege drop.
@@ -372,7 +385,7 @@ class _ArchivingDockerRuntime(_DockerLikeRuntime):
 
 
 async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(
-    corpus_mini_dir, fixture_manifest_path
+    corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """The sealed run dir is re-chowned root-owned read-only at seal time.
 
@@ -395,7 +408,7 @@ async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(
 
 
 async def test_seal_failure_is_fail_closed_and_recorded(
-    corpus_mini_dir, fixture_manifest_path
+    corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """A seal-production failure is fail-closed, never silently unsealed.
 
