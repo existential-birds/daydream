@@ -155,8 +155,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Measured full-suite baseline (pytest -n auto, branch mode), set by the
-# baseline task in this change; see docs/coverage.md for the ratchet.
+# measured 87.65% at 480c76a on 2026-08-27; ratchet via docs/coverage.md
 fail_under = 87
 xml = true
 

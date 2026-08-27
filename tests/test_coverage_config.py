@@ -6,6 +6,7 @@ make-check / pre-push / CI pipeline, which cannot be asserted in-process.
 
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,16 +14,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
-def pyproject() -> dict:
+def pyproject() -> dict[str, Any]:
     return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
 
 
-def test_pytest_cov_is_exact_pinned_in_dev_group(pyproject: dict) -> None:
+def test_pytest_cov_is_exact_pinned_in_dev_group(pyproject: dict[str, Any]) -> None:
     pins = [d for d in pyproject["dependency-groups"]["dev"] if d.startswith("pytest-cov")]
     assert pins == ["pytest-cov==7.1.0"], f"expected exact pin 7.1.0, got {pins}"
 
 
-def test_coverage_config_targets_daydream_branch_and_omits_atif(pyproject: dict) -> None:
+def test_coverage_config_targets_daydream_branch_and_omits_atif(pyproject: dict[str, Any]) -> None:
     cov = pyproject["tool"]["coverage"]
     run = cov["run"]
     assert run["branch"] is True
@@ -32,7 +33,7 @@ def test_coverage_config_targets_daydream_branch_and_omits_atif(pyproject: dict)
     assert cov["report"]["xml"] is True or "xml" in cov
 
 
-def test_pytest_addopts_keeps_strict_markers_and_adds_cov(pyproject: dict) -> None:
+def test_pytest_addopts_keeps_strict_markers_and_adds_cov(pyproject: dict[str, Any]) -> None:
     addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
     assert "--strict-markers" in addopts, "existing strictness must be preserved"
     assert "--cov" in addopts
@@ -47,7 +48,7 @@ def test_coverage_artifacts_are_gitignored() -> None:
     assert "coverage.xml" in gitignore
 
 
-def test_fail_under_is_enforced_in_single_config_location(pyproject: dict) -> None:
+def test_fail_under_is_enforced_in_single_config_location(pyproject: dict[str, Any]) -> None:
     report = pyproject["tool"]["coverage"]["report"]
     value = report["fail_under"]
     assert isinstance(value, int) and 0 < value < 100
@@ -84,6 +85,14 @@ def test_ci_uploads_coverage_xml_artifact() -> None:
             assert "#" in line and len(line.split("#", 1)[1].strip().split(" ")[0]) == 40, (
                 f"upload-artifact must be SHA-pinned with version comment: {line!r}"
             )
+
+
+def test_fail_under_is_a_measured_whole_percent(pyproject: dict[str, Any]) -> None:
+    value = pyproject["tool"]["coverage"]["report"]["fail_under"]
+    # Provisional 0 from Task 2 must never ship; the floor is a measured value.
+    assert isinstance(value, int) and 1 <= value <= 99, (
+        f"fail_under={value!r} is not a measured whole percent — run the Task 6 baseline"
+    )
 
 
 def test_ci_test_step_unchanged_invocation_coverage_comes_from_addopts() -> None:
