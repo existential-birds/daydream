@@ -1642,7 +1642,7 @@ def test_candidate_diff_cmd_carries_hardening_flags() -> None:
     assert argv == [
         "git", "-C", "/work/repo", "diff",
         "--no-ext-diff", "--no-textconv",
-        "deadbeef", "HEAD",
+        "deadbeef",
     ]
 
 

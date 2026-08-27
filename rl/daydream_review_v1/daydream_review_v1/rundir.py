@@ -79,7 +79,7 @@ def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     return [
         "git", "-C", repo, "diff",
         *GIT_DIFF_HARDENING_FLAGS,
-        head_sha, "HEAD",
+        head_sha,
     ]
 
 
