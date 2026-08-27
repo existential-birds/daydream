@@ -34,10 +34,16 @@ fi
 # (each recipe line is its own shell). Mirrors ci.yml's rl-check job, including
 # its 'Configure git identity' step: the suite's negative-gate tests commit into
 # throwaway fixtures with no per-repo identity, so without a global identity a
-# contributor machine would fail where CI (which sets it) passes.
+# contributor machine would fail where CI (which sets it) passes. The identity
+# is injected as rl-check-scoped process environment, never via
+# `git config --global`, which would silently overwrite the invoking user's
+# own identity (a side effect no local gate may cause).
+rl-check: export GIT_AUTHOR_NAME = daydream CI
+rl-check: export GIT_AUTHOR_EMAIL = ci@daydream.invalid
+rl-check: export GIT_COMMITTER_NAME = daydream CI
+rl-check: export GIT_COMMITTER_EMAIL = ci@daydream.invalid
+
 rl-check:
-	git config --global user.email "ci@daydream.invalid"
-	git config --global user.name "daydream CI"
 	cd rl/daydream_review_v1 && uv lock --check
 	cd rl/daydream_review_v1 && uv sync
 	cd rl/daydream_review_v1 && uv run ruff check .

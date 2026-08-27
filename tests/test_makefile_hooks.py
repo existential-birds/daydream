@@ -92,7 +92,11 @@ def _install_recording_commands(
         "log = os.environ['DAYDREAM_COMMAND_LOG']\n"
         "with open(log, 'a', encoding='utf-8') as f:\n"
         "    json.dump({'command': os.path.basename(sys.argv[0]),\n"
-        "               'cwd': os.getcwd(), 'args': sys.argv[1:]}, f)\n"
+        "               'cwd': os.getcwd(), 'args': sys.argv[1:],\n"
+        "               'env': {k: os.environ.get(k) for k in\n"
+        "                       ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',\n"
+        "                        'GIT_COMMITTER_NAME',\n"
+        "                        'GIT_COMMITTER_EMAIL')}}, f)\n"
         "    f.write('\\n')\n"
     )
     for name in names:
@@ -135,7 +139,6 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     assert cmds == (
         [("uv", str(repo_root))] * 5
         + [("docker", str(repo_root))] * 2
-        + [("git", str(repo_root))] * 2
         + [("uv", str(rl_root))] * 5
     )
 
@@ -177,17 +180,35 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     assert set(file_args) == expected_files
     assert len(file_args) == len(expected_files)
 
-    # Standalone RL project: first configures the same neutral git identity as
+    # Standalone RL project: carries the same neutral git identity as
     # ci.yml's 'Configure git identity' step (the suite commits into throwaway
-    # fixtures with no per-repo identity), then its lock/sync/lint/types/tests,
-    # run from its dir (mirroring ci.yml's rl-check job's explicit `uv sync`).
-    assert argvs[7] == ["config", "--global", "user.email", "ci@daydream.invalid"]
-    assert argvs[8] == ["config", "--global", "user.name", "daydream CI"]
-    assert argvs[9] == ["lock", "--check"]
-    assert argvs[10] == ["sync"]
-    assert argvs[11] == ["run", "ruff", "check", "."]
-    assert argvs[12] == ["run", "mypy", "daydream_review_v1", "tests"]
-    assert argvs[13] == ["run", "pytest"]
+    # fixtures with no per-repo identity) as rl-check-scoped PROCESS
+    # ENVIRONMENT — never as `git config --global`, which would silently
+    # overwrite the invoking user's own identity — then its lock/sync/lint/
+    # types/tests, run from its dir (mirroring ci.yml's rl-check job's
+    # explicit `uv sync`). No `git config` subprocess may appear anywhere in
+    # the walk.
+    ci_identity_env = {
+        "GIT_AUTHOR_NAME": "daydream CI",
+        "GIT_AUTHOR_EMAIL": "ci@daydream.invalid",
+        "GIT_COMMITTER_NAME": "daydream CI",
+        "GIT_COMMITTER_EMAIL": "ci@daydream.invalid",
+    }
+    assert argvs[7] == ["lock", "--check"]
+    assert argvs[8] == ["sync"]
+    assert argvs[9] == ["run", "ruff", "check", "."]
+    assert argvs[10] == ["run", "mypy", "daydream_review_v1", "tests"]
+    assert argvs[11] == ["run", "pytest"]
+    for rec in recs:
+        if rec["cwd"] == str(rl_root):
+            assert rec["env"] == ci_identity_env, (
+                f"RL command {rec['args']} must carry exactly the neutral "
+                "CI identity in its environment"
+            )
+    assert all(
+        rec["command"] != "git" or rec["args"][:2] != ["config", "--global"]
+        for rec in recs
+    ), "no command may mutate the global git configuration"
 
 
 def test_pre_push_delegates_quality_gate_to_make_check(
