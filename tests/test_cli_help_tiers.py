@@ -6,7 +6,7 @@ import pytest
 from daydream.cli import _parse_args
 
 
-def test_default_help_hides_advanced(capsys):
+def test_default_help_hides_advanced(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         _parse_args(["--help"])
     out = capsys.readouterr().out
@@ -16,7 +16,7 @@ def test_default_help_hides_advanced(capsys):
     assert "--approve-on-clean" not in out  # #343: opt-in auto-approval is an advanced flag
 
 
-def test_help_all_shows_advanced(capsys):
+def test_help_all_shows_advanced(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         _parse_args(["--help-all"])
     out = capsys.readouterr().out
@@ -29,11 +29,11 @@ def test_help_all_shows_advanced(capsys):
     assert "raw agent events" not in out    # #438: raw wording removed
 
 
-def test_advanced_flags_still_parse():
+def test_advanced_flags_still_parse() -> None:
     assert _parse_args(["--start-at", "fix", "/t"]).start_at == "fix"
 
 
-def test_precision_flag_activates_precision_mode():
+def test_precision_flag_activates_precision_mode() -> None:
     """#232: ``--precision`` is the activation path into RunConfig.precision_mode.
 
     Absent the flag the field stays ``False`` (byte-identical default); with it,

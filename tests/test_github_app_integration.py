@@ -7,24 +7,27 @@ loop. Mocks only the Backend (no real AI) and the github_app network helpers
 from __future__ import annotations
 
 import subprocess
+from collections.abc import AsyncIterator
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 
 
 @pytest.fixture(autouse=True)
-def _block_real_gh(monkeypatch):
+def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail instead of contacting GitHub if an integration seam is missed."""
     real_run = subprocess.run
 
-    def guarded_run(args, *pargs, **kwargs):
+    def guarded_run(args: list[Any], *pargs: Any, **kwargs: Any) -> Any:
         if args and args[0] == "gh":
             raise AssertionError("test attempted to execute the real gh CLI")
         return real_run(args, *pargs, **kwargs)
@@ -35,8 +38,16 @@ def _block_real_gh(monkeypatch):
 class _MinimalBackend:
     model = "mock"
 
-    async def execute(self, cwd, prompt, output_schema=None, continuation=None,
-                       agents=None, max_turns=None, read_only=False):
+    async def execute(
+        self,
+        cwd: Any,
+        prompt: Any,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
+    ) -> AsyncIterator[AgentEvent]:
         # Alternative-review structured call → emit empty issue list so the
         # review-only flow reports "no issues" and exits 0 fast.
         if output_schema is not None:
@@ -48,7 +59,10 @@ class _MinimalBackend:
 
     def cancel(self) -> None: ...
 
-async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkeypatch):
+async def test_app_identity_shown_and_token_injected(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
 
@@ -79,7 +93,11 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkey
     assert exit_code == 0
 
 
-async def test_fallback_identity_without_app_creds(feature_branch_repo, monkeypatch, capsys):
+async def test_fallback_identity_without_app_creds(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -98,7 +116,11 @@ async def test_fallback_identity_without_app_creds(feature_branch_repo, monkeypa
     assert exit_code == 0
 
 
-async def test_fallback_clears_stale_token_from_previous_run(feature_branch_repo, monkeypatch, capsys):
+async def test_fallback_clears_stale_token_from_previous_run(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
@@ -118,7 +140,11 @@ async def test_fallback_clears_stale_token_from_previous_run(feature_branch_repo
     assert exit_code == 0
 
 
-async def test_posting_aborts_when_owner_repo_undeterminable(feature_branch_repo, monkeypatch, capsys):
+async def test_posting_aborts_when_owner_repo_undeterminable(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
 
@@ -139,7 +165,11 @@ async def test_posting_aborts_when_owner_repo_undeterminable(feature_branch_repo
     assert git_ops.get_gh_token_env() is None
 
 
-async def test_minting_failure_aborts_run(feature_branch_repo, monkeypatch, capsys):
+async def test_minting_failure_aborts_run(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
 

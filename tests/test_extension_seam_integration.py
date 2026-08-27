@@ -7,18 +7,17 @@ definitions (remove/insert steps); assertions are on the prompts the backend
 actually received and the exit code. Grows across Tasks 9-15 of the
 extension-seam plan, one flow migration at a time.
 """
-
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from daydream import git_ops, pr_review, runner
-from daydream.backends import ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolStartEvent
 from daydream.deep.orchestrator import _step_post_review
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
@@ -163,7 +162,8 @@ async def test_post_review_uses_published_items_path(
 
 
 async def test_report_only_review_mode_never_enters_pr_posting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = _post_context(
         dd=tmp_path / "private-deep",
@@ -278,7 +278,7 @@ class DeferredWriteBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncGenerator[AgentEvent, None]:
         self.execute_calls += 1
         yield ToolStartEvent(
             id="write-1",
@@ -346,7 +346,7 @@ class ShallowRecordingBackend(PhaseDispatchBackend):
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncGenerator[AgentEvent, None]:
         self.prompts.append(prompt)
         async for event in super().execute(
             cwd, prompt, output_schema, continuation, agents, max_turns, read_only
@@ -422,7 +422,11 @@ async def test_fork_disables_arbiter_in_deep(
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
     async def _no_post(
-        target_dir: Path, report_path: Path, *, console: Any, post: bool = False,
+        target_dir: Path,
+        report_path: Path,
+        *,
+        console: Any,
+        post: bool = False,
         approve_on_clean: bool = False,
     ) -> None:
         return None
@@ -481,7 +485,7 @@ def _step_for_tool(trajectory: dict[str, Any], tool_name: str) -> dict[str, Any]
             call.get("function_name") == tool_name
             for call in step.get("tool_calls", [])
         ):
-            return step
+            return cast(dict[str, Any], step)
     raise AssertionError(f"no trajectory step recorded tool {tool_name!r}")
 
 
@@ -644,8 +648,12 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
 
 
 async def test_custom_flow_dispatches_and_dumps_artifacts(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend,
-    make_config: MakeConfig, archive_dir: Path, tmp_path: Path,
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
+    archive_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """A fork-registered custom flow selected via flow_name runs end-to-end and
     --dump-artifacts writes the bundle (must-haves 1 + 2)."""
@@ -667,7 +675,9 @@ async def test_custom_flow_dispatches_and_dumps_artifacts(
 
 
 async def test_unknown_flow_name_errors(
-    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend,
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
     """An unregistered flow name fails with exit 1 (Extension Error panel; must-have 3)."""
@@ -681,7 +691,9 @@ async def test_unknown_flow_name_errors(
 
 
 async def test_pr_feedback_not_selectable_via_flow(
-    multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """--flow pr-feedback errors (needs PR number + bot; must-have 5)."""
     install_backend(ScriptedBackend(events=_EMPTY_TURN, model="mock-model"))
@@ -727,7 +739,11 @@ async def test_custom_phase_full_stack(
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
     async def _no_post(
-        target_dir: Path, report_path: Path, *, console: Any, post: bool = False,
+        target_dir: Path,
+        report_path: Path,
+        *,
+        console: Any,
+        post: bool = False,
         approve_on_clean: bool = False,
     ) -> None:
         return None
@@ -746,7 +762,9 @@ async def test_custom_phase_full_stack(
 
 
 async def test_flow_deep_routes_to_deep_helper(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """--flow deep runs the real deep pipeline (must-have 4): the intent prompt
     reaches the backend via the deep flow, exit 0."""
@@ -756,7 +774,11 @@ async def test_flow_deep_routes_to_deep_helper(
     _silence(monkeypatch)
 
     async def _no_post(
-        target_dir: Path, report_path: Path, *, console, post: bool = False,
+        target_dir: Path,
+        report_path: Path,
+        *,
+        console: Any,
+        post: bool = False,
         approve_on_clean: bool = False,
     ) -> None:
         return None
@@ -770,7 +792,9 @@ async def test_flow_deep_routes_to_deep_helper(
 
 
 async def test_flow_review_routes_to_review_helper(
-    tiny_diff_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
+    tiny_diff_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """--flow review runs the real review pipeline: the alternatives prompt
     reaches the backend via the review flow, exit 0."""
@@ -784,7 +808,9 @@ async def test_flow_review_routes_to_review_helper(
 
 
 async def test_flow_shallow_routes_to_shallow_helper(
-    multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """--flow shallow runs the real shallow pipeline: the parse phase fires,
     exit 0."""

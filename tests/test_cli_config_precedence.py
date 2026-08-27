@@ -7,11 +7,13 @@ Backend. The source tiers are (highest first): explicit per-phase field, global
 the terminal default (``PHASE_DEFAULT_MODELS`` table / ``"claude"``). There is no
 environment-variable tier — ``DAYDREAM_MODEL``/``DAYDREAM_BACKEND`` are not read.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from daydream.backends import Backend
 from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import (
@@ -25,7 +27,7 @@ from daydream.runner import (
 )
 
 
-def test_model_precedence_cli_over_file_over_table(monkeypatch, tmp_path: Path) -> None:
+def test_model_precedence_cli_over_file_over_table(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fc = DaydreamFileConfig(model="file-model", backend=None, phases={"fix": {"model": "file-fix"}})
     cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
     assert _resolved_model(cfg, "fix") == "file-fix"        # file phase override, nothing higher
@@ -80,7 +82,7 @@ def test_backend_precedence_mirrors_model(tmp_path: Path) -> None:
     assert _resolved_backend_name(cfg2, "parse") == "claude"       # terminal fallback
 
 
-def test_env_vars_are_not_a_precedence_tier(monkeypatch, tmp_path: Path) -> None:
+def test_env_vars_are_not_a_precedence_tier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Regression guard: ``DAYDREAM_MODEL``/``DAYDREAM_BACKEND`` must be ignored.
 
     The env tier was removed to collapse precedence to ``CLI > config > default``.
@@ -121,7 +123,11 @@ def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
     assert _resolved_reasoning_effort(cfg2, "not_a_phase") is None
 
 
-def _codex_backend(cfg: RunConfig, phase: str, cache: dict | None = None) -> CodexBackend:
+def _codex_backend(
+    cfg: RunConfig,
+    phase: str,
+    cache: dict[tuple[str, str | None, str | None], Backend] | None = None,
+) -> CodexBackend:
     """Resolve ``phase`` and narrow to the concrete Codex backend under test."""
     backend = _resolve_backend(cfg, phase, cache)
     assert isinstance(backend, CodexBackend), f"{phase} should resolve to a CodexBackend, got {type(backend)}"
@@ -180,7 +186,7 @@ def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:
     and ``xhigh`` respectively, so the cache key must keep them distinct.
     """
     cfg = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
-    cache: dict = {}
+    cache: dict[tuple[str, str | None, str | None], Backend] = {}
     review = _codex_backend(cfg, "review", cache)
     arbiter = _codex_backend(cfg, "arbiter", cache)
     assert review.model == arbiter.model == "gpt-5.6-sol"

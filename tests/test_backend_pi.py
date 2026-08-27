@@ -14,12 +14,11 @@ import shutil
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import daydream.backends.pi as pi
 from daydream.backends import (
     ContinuationToken,
     CostEvent,
@@ -60,7 +59,13 @@ MakeConfig = Callable[..., "RunConfig"]
 Mute = Callable[..., None]
 
 
-async def _run_and_capture_args(backend, prompt="p", *, fixture="simple_text.jsonl", **kwargs):
+async def _run_and_capture_args(
+    backend: Any,
+    prompt: Any="p",
+    *,
+    fixture: Any="simple_text.jsonl",
+    **kwargs: Any,
+) -> tuple[Any, ...]:
     """Drive ``execute`` over a canned fixture and return the subprocess argv.
 
     Consolidates the recurring pattern of patching ``create_subprocess_exec``,
@@ -75,7 +80,7 @@ async def _run_and_capture_args(backend, prompt="p", *, fixture="simple_text.jso
 
 
 @pytest.mark.asyncio
-async def test_simple_text_events():
+async def test_simple_text_events() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
@@ -113,7 +118,7 @@ async def test_simple_text_events():
 
 
 @pytest.mark.asyncio
-async def test_thinking_and_tool_use_events():
+async def test_thinking_and_tool_use_events() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
 
@@ -145,7 +150,7 @@ async def test_thinking_and_tool_use_events():
 
 
 @pytest.mark.asyncio
-async def test_structured_output():
+async def test_structured_output() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
@@ -170,7 +175,7 @@ async def test_structured_output():
 
 
 @pytest.mark.asyncio
-async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost():
+async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("multi_turn.jsonl")
 
@@ -199,7 +204,7 @@ async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost():
 
 
 @pytest.mark.asyncio
-async def test_error_turn_raises_pi_error():
+async def test_error_turn_raises_pi_error() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("error_turn.jsonl")
 
@@ -210,7 +215,7 @@ async def test_error_turn_raises_pi_error():
 
 
 @pytest.mark.asyncio
-async def test_continuation_token_uses_session_id_flag():
+async def test_continuation_token_uses_session_id_flag() -> None:
     """A pi continuation token maps to --session-id <id> (not --no-session)."""
     backend = PiBackend(model="glm-5.2")
     token = ContinuationToken(backend="pi", data={"session_id": "pi_resume_me"})
@@ -222,7 +227,7 @@ async def test_continuation_token_uses_session_id_flag():
 
 
 @pytest.mark.asyncio
-async def test_fresh_run_uses_session_id_not_no_session():
+async def test_fresh_run_uses_session_id_not_no_session() -> None:
     """No continuation → --session-id <uuid> (persistent); never --no-session.
 
     Fresh runs must not use --no-session: that flag is ephemeral (pi docs:
@@ -243,7 +248,7 @@ async def test_fresh_run_uses_session_id_not_no_session():
 
 
 @pytest.mark.asyncio
-async def test_ephemeral_pi_call_uses_no_session():
+async def test_ephemeral_pi_call_uses_no_session() -> None:
     backend = PiBackend(model="glm-5.2")
 
     flat_args, _ = await _run_and_capture_args(
@@ -271,7 +276,7 @@ async def test_ephemeral_pi_call_uses_no_session():
 
 
 @pytest.mark.asyncio
-async def test_read_only_restricts_tools():
+async def test_read_only_restricts_tools() -> None:
     """read_only=True adds --tools read,find,ls,grep (excludes mutating tools)."""
     backend = PiBackend(model="glm-5.2")
 
@@ -283,7 +288,7 @@ async def test_read_only_restricts_tools():
 
 
 @pytest.mark.asyncio
-async def test_pi_api_key_never_enters_process_argv(monkeypatch):
+async def test_pi_api_key_never_enters_process_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     sentinel = "synthetic-pi-api-key-sentinel"
     monkeypatch.setenv("PI_PROVIDER", "zai")
     monkeypatch.setenv("PI_API_KEY", sentinel)
@@ -300,7 +305,10 @@ async def test_pi_api_key_never_enters_process_argv(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pi_api_key_unknown_provider_warns_and_skips(monkeypatch, caplog):
+async def test_pi_api_key_unknown_provider_warns_and_skips(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """An unmapped provider warns and proceeds; the key never reaches argv or any env var."""
     sentinel = "synthetic-unknown-provider-key"
     monkeypatch.setenv("PI_PROVIDER", "custom-provider")
@@ -325,7 +333,7 @@ async def test_pi_api_key_unknown_provider_warns_and_skips(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_cwd_passed_to_subprocess():
+async def test_cwd_passed_to_subprocess() -> None:
     """The target dir is passed as the process cwd (Pi reads it natively)."""
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
@@ -368,7 +376,7 @@ async def test_execute_finally_closes_transport_after_process_exit() -> None:
     mock_proc._transport = MagicMock()
     terminated: list[asyncio.subprocess.Process] = []
 
-    real_terminate = pi.terminate_process
+    from daydream.backends._subprocess import terminate_process as real_terminate
 
     async def recording_terminate(proc: asyncio.subprocess.Process, timeout: float | None = None) -> None:
         terminated.append(proc)
@@ -387,7 +395,7 @@ async def test_execute_finally_closes_transport_after_process_exit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_raises_on_agents():
+async def test_execute_raises_on_agents() -> None:
     """PiBackend refuses agents= with NotImplementedError (plan §5)."""
     backend = PiBackend(model="glm-5.2")
     mock_agent = {"description": "test", "prompt": "test"}
@@ -398,7 +406,7 @@ async def test_execute_raises_on_agents():
 
 
 @pytest.mark.asyncio
-async def test_agent_end_always_finalizes_when_stream_ends_without_it():
+async def test_agent_end_always_finalizes_when_stream_ends_without_it() -> None:
     """Guard (plan §10): stream ending mid-turn still emits Cost + Result."""
     backend = PiBackend(model="glm-5.2")
     # Stream ends after a turn_end but with NO agent_end line.
@@ -422,11 +430,13 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it():
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(cost_events) == 1
     assert len(result_events) == 1
-    assert result_events[0].continuation.data["session_id"] == "pi_ses_truncated"
+    cont = result_events[0].continuation
+    assert cont is not None
+    assert cont.data["session_id"] == "pi_ses_truncated"
 
 
 @pytest.mark.asyncio
-async def test_cancel_terminates_then_kills():
+async def test_cancel_terminates_then_kills() -> None:
     """cancel() sends SIGTERM to all tracked processes, SIGKILL on timeout."""
     backend = PiBackend(model="glm-5.2")
 
@@ -444,14 +454,14 @@ async def test_cancel_terminates_then_kills():
 
 
 @pytest.mark.asyncio
-async def test_cancel_no_op_when_no_processes():
+async def test_cancel_no_op_when_no_processes() -> None:
     backend = PiBackend(model="glm-5.2")
     backend._processes = []
     await backend.cancel()  # Must not raise.
 
 
 @pytest.mark.asyncio
-async def test_stdout_limit_allows_large_jsonl_events():
+async def test_stdout_limit_allows_large_jsonl_events() -> None:
     """Large message_end lines must not trip asyncio's chunk-length guard."""
     backend = PiBackend(model="glm-5.2")
     large_text = "x" * (70 * 1024)
@@ -514,7 +524,7 @@ async def test_stdout_limit_allows_large_jsonl_events():
 
 
 @pytest.mark.asyncio
-async def test_missing_usage_skips_metrics_but_keeps_turn_end():
+async def test_missing_usage_skips_metrics_but_keeps_turn_end() -> None:
     """A turn_end without usage emits no MetricsEvent but still closes the step."""
     backend = PiBackend(model="glm-5.2")
     lines = [
@@ -543,7 +553,7 @@ async def test_missing_usage_skips_metrics_but_keeps_turn_end():
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_raises_with_captured_output():
+async def test_nonzero_exit_raises_with_captured_output() -> None:
     """Non-zero exit surfaces pi's diagnostic output in the PiError message."""
     backend = PiBackend(model="glm-5.2")
     lines = [
@@ -566,7 +576,7 @@ async def test_nonzero_exit_raises_with_captured_output():
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_with_no_output_still_informative():
+async def test_nonzero_exit_with_no_output_still_informative() -> None:
     """If pi crashes with zero output, the error says so explicitly."""
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process([])
@@ -581,7 +591,7 @@ async def test_nonzero_exit_with_no_output_still_informative():
 
 
 @pytest.mark.asyncio
-async def test_concurrent_execute_calls_do_not_share_stdout_reader():
+async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     """Overlapping runs on one backend keep reading their own process."""
     backend = PiBackend(model="glm-5.2")
 
@@ -672,11 +682,11 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader():
     ],
     ids=["text-blocks", "string-content", "details-fallback", "non-dict-str", "non-dict-none"],
 )
-def test_render_tool_result(result, expected):
+def test_render_tool_result(result: Any, expected: Any) -> None:
     assert _render_tool_result(result) == expected
 
 
-def test_schema_instruction_contains_schema_json():
+def test_schema_instruction_contains_schema_json() -> None:
     schema = {"type": "object", "properties": {"x": {"type": "string"}}}
     instruction = _schema_instruction(schema)
     assert "JSON schema" in instruction
@@ -684,7 +694,7 @@ def test_schema_instruction_contains_schema_json():
 
 
 @pytest.mark.asyncio
-async def test_execute_always_passes_no_skills_never_skill(tmp_path, monkeypatch):
+async def test_execute_always_passes_no_skills_never_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """M15/M16: Pi disables skills even when ambient skill mirrors exist (#727)."""
     monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
     monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(tmp_path / "env-skills"))
@@ -706,7 +716,7 @@ async def test_execute_always_passes_no_skills_never_skill(tmp_path, monkeypatch
     assert "--skill" not in args
 
 
-def test_create_backend_pi_returns_pi_backend_with_default_model():
+def test_create_backend_pi_returns_pi_backend_with_default_model() -> None:
     from daydream.backends import create_backend
     from daydream.config import DEFAULT_PI_MODEL
 
@@ -719,7 +729,7 @@ def test_create_backend_pi_returns_pi_backend_with_default_model():
     assert custom.model == "glm-4.5-air"
 
 
-def test_create_backend_invalid_includes_pi_in_message():
+def test_create_backend_invalid_includes_pi_in_message() -> None:
     from daydream.backends import create_backend
 
     with pytest.raises(ValueError, match="pi"):
@@ -741,7 +751,7 @@ _PI_LIVE_OPT_IN = os.environ.get("DAYDREAM_PI_LIVE") == "1"
     reason="live pi smoke test; set DAYDREAM_PI_LIVE=1 (and ensure `pi` is on $PATH and logged in) to run",
 )
 @pytest.mark.asyncio
-async def test_live_pi_smoke():
+async def test_live_pi_smoke() -> None:
     """Smoke test against a real `pi` binary (opt-in via DAYDREAM_PI_LIVE=1).
 
     Asserts an observable success signal (actual assistant text), not mere
@@ -772,7 +782,7 @@ async def test_live_pi_smoke():
 
 
 @pytest.mark.asyncio
-async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
+async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path) -> None:
     """A Pi-driven run must produce a trajectory.json that passes the ATIF v1.6
     validator (plan §8.3) — the replay/trajectory proof."""
     from daydream.atif import validate
@@ -828,7 +838,7 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
     ids=["default-nous", "PI_PROVIDER-override"],
 )
 @pytest.mark.asyncio
-async def test_provider_flag(monkeypatch, env_provider, expected):
+async def test_provider_flag(monkeypatch: pytest.MonkeyPatch, env_provider: Any, expected: Any) -> None:
     """--provider defaults to ``nous`` (matches DEFAULT_PI_MODEL) unless PI_PROVIDER overrides it.
 
     The nous provider is configured via pi's ``~/.pi/agent/models.json``
@@ -847,7 +857,7 @@ async def test_provider_flag(monkeypatch, env_provider, expected):
 
 
 @pytest.mark.asyncio
-async def test_default_model_does_not_override_pi_settings(tmp_path, monkeypatch):
+async def test_default_model_does_not_override_pi_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A Pi-configured default wins when daydream did not select a model."""
     settings = tmp_path / ".pi" / "settings.json"
     settings.parent.mkdir()
@@ -869,7 +879,7 @@ async def test_default_model_does_not_override_pi_settings(tmp_path, monkeypatch
     assert "--provider" not in flat_args
 
 
-def test_public_model_reflects_pi_settings_before_execute(tmp_path):
+def test_public_model_reflects_pi_settings_before_execute(tmp_path: Path) -> None:
     """The public model is resolved from the target workspace at construction."""
     settings = tmp_path / ".pi" / "settings.json"
     settings.parent.mkdir()
@@ -881,7 +891,7 @@ def test_public_model_reflects_pi_settings_before_execute(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_explicit_model_overrides_pi_settings(tmp_path, monkeypatch):
+async def test_explicit_model_overrides_pi_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit daydream model still wins over Pi's configured default."""
     settings = tmp_path / ".pi" / "settings.json"
     settings.parent.mkdir()
@@ -901,7 +911,10 @@ async def test_explicit_model_overrides_pi_settings(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(tmp_path, monkeypatch):
+async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """DeepSeek on the nous provider remains the fallback when neither daydream nor Pi selects a model."""
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
@@ -919,7 +932,10 @@ async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_glm_pin_warning_fires_with_unset_provider(monkeypatch, caplog):
+async def test_glm_pin_warning_fires_with_unset_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """An explicit glm-* model with PI_PROVIDER unset warns about the zai->nous default change."""
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
@@ -935,7 +951,10 @@ async def test_glm_pin_warning_fires_with_unset_provider(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_glm_pin_warning_silent_when_provider_set(monkeypatch, caplog):
+async def test_glm_pin_warning_silent_when_provider_set(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """PI_PROVIDER=zai opts back into the zai provider: no warning, provider honored."""
     monkeypatch.setenv("PI_PROVIDER", "zai")
     monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
@@ -949,7 +968,10 @@ async def test_glm_pin_warning_silent_when_provider_set(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_glm_pin_warning_fires_once_across_executes(monkeypatch, caplog):
+async def test_glm_pin_warning_fires_once_across_executes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The migration warning is once-guarded, not re-logged per phase or retry."""
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
@@ -964,7 +986,11 @@ async def test_glm_pin_warning_fires_once_across_executes(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_zai_provider_with_fallback_model_warns(tmp_path, monkeypatch, caplog):
+async def test_zai_provider_with_fallback_model_warns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """PI_PROVIDER=zai with no configured model pairs the old provider with the new fallback model and warns."""
     monkeypatch.setenv("PI_PROVIDER", "zai")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
@@ -985,7 +1011,7 @@ async def test_zai_provider_with_fallback_model_warns(tmp_path, monkeypatch, cap
 # ---------------------------------------------------------------------------
 
 
-def _capture_pi_subprocess(monkeypatch, captured: list[list[str]]) -> None:
+def _capture_pi_subprocess(monkeypatch: pytest.MonkeyPatch, captured: list[list[str]]) -> None:
     """Replace only the pi subprocess spawn; keep the real PiBackend/create_backend.
 
     Each pi spawn captures its argv and replays a canned no-op session so the
@@ -1007,7 +1033,7 @@ def _capture_pi_subprocess(monkeypatch, captured: list[list[str]]) -> None:
         if args and args[0] == "pi":
             captured.append([str(a) for a in args])
             return make_mock_process_from_fixture("simple_text.jsonl")
-        return await real_exec(*args, **kwargs)
+        return cast(MagicMock, await real_exec(*args, **kwargs))
 
     monkeypatch.setattr(
         "daydream.backends.pi.asyncio.create_subprocess_exec", _fake_exec
@@ -1078,7 +1104,7 @@ async def test_runner_real_path_pi_provider_axis(
 
 
 @pytest.mark.asyncio
-async def test_append_system_prompt_preamble_in_args():
+async def test_append_system_prompt_preamble_in_args() -> None:
     """The tool-efficiency preamble is passed via --append-system-prompt.
 
     Pi's built-in system prompt is minimal compared to Claude Code / Codex; the
@@ -1104,7 +1130,7 @@ async def test_append_system_prompt_preamble_in_args():
 # ---------------------------------------------------------------------------
 
 
-def test_pierror_retryable_default_and_kwarg_and_message():
+def test_pierror_retryable_default_and_kwarg_and_message() -> None:
     assert PiError("something went wrong").retryable is False
     assert PiError("429 rate limit", retryable=True).retryable is True
     assert str(PiError("auth failed", retryable=False)) == "auth failed"
@@ -1279,7 +1305,7 @@ async def test_pi_stream_timeout_is_retryable() -> None:
         "unknown",
     ],
 )
-def test_is_retryable_error_message(message, expected):
+def test_is_retryable_error_message(message: Any, expected: Any) -> None:
     assert _is_retryable_error_message(message) is expected
 
 
@@ -1293,7 +1319,7 @@ def test_is_retryable_error_message(message, expected):
     [(-9, True), (137, True), (1, False), (2, False), (0, False)],
     ids=["sigkill", "oom-137", "exit-1", "exit-2", "zero"],
 )
-def test_is_retryable_exit_code(code, expected):
+def test_is_retryable_exit_code(code: Any, expected: Any) -> None:
     assert _is_retryable_exit_code(code) is expected
 
 
@@ -1312,7 +1338,7 @@ def test_is_retryable_exit_code(code, expected):
     ids=["429-retryable", "502-retryable", "auth-non-retryable"],
 )
 @pytest.mark.asyncio
-async def test_error_turn_sets_retryable_via_classifier(error_message, expected_retryable):
+async def test_error_turn_sets_retryable_via_classifier(error_message: Any, expected_retryable: Any) -> None:
     """The turn_end errorMessage is run through the retryable classifier."""
     backend = PiBackend(model="glm-5.2")
     lines = [
@@ -1341,7 +1367,11 @@ async def test_error_turn_sets_retryable_via_classifier(error_message, expected_
     ids=["oom-sigkill-retryable", "exit-1-non-retryable"],
 )
 @pytest.mark.asyncio
-async def test_nonzero_exit_sets_retryable_via_exit_code(returncode, output_lines, expected_retryable):
+async def test_nonzero_exit_sets_retryable_via_exit_code(
+    returncode: Any,
+    output_lines: Any,
+    expected_retryable: Any,
+) -> None:
     """The subprocess return code is run through the exit-code retryable classifier."""
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process(output_lines)
@@ -1365,7 +1395,12 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(returncode, output_line
     [(None, _PI_DEFAULT_RETRY_ATTEMPTS), ("5", 5), ("", _PI_DEFAULT_RETRY_ATTEMPTS)],
     ids=["default", "env-override", "empty-warns-and-falls-back"],
 )
-def test_pi_retry_attempts(monkeypatch, caplog, env_value, expected):
+def test_pi_retry_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    env_value: str,
+    expected: Any,
+) -> None:
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", env_value)
     assert _pi_retry_attempts() == expected
@@ -1387,7 +1422,12 @@ def test_pi_retry_attempts(monkeypatch, caplog, env_value, expected):
     ],
     ids=["default", "env-override", "nan-falls-back", "inf-falls-back", "empty-warns"],
 )
-def test_pi_retry_base_delay(monkeypatch, caplog, env_value, expected):
+def test_pi_retry_base_delay(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    env_value: str,
+    expected: Any,
+) -> None:
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", env_value)
     assert _pi_retry_base_delay() == pytest.approx(expected)
@@ -1409,7 +1449,12 @@ def test_pi_retry_base_delay(monkeypatch, caplog, env_value, expected):
     ],
     ids=["default", "env-override", "invalid-warns", "negative-warns", "empty-warns"],
 )
-def test_pi_retry_max_delay(monkeypatch, caplog, env_value, expected):
+def test_pi_retry_max_delay(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    env_value: Any,
+    expected: Any,
+) -> None:
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", env_value)
     assert _pi_retry_max_delay() == pytest.approx(expected)
@@ -1422,7 +1467,7 @@ def test_pi_retry_max_delay(monkeypatch, caplog, env_value, expected):
 # ---------------------------------------------------------------------------
 
 
-def test_pi_fanout_concurrency_defaults_to_ten(monkeypatch):
+def test_pi_fanout_concurrency_defaults_to_ten(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DAYDREAM_PI_FANOUT_CONCURRENCY", raising=False)
     backend = PiBackend(model="glm-5.2")
     assert backend.fanout_concurrency == 10
@@ -1439,8 +1484,11 @@ def test_pi_fanout_concurrency_defaults_to_ten(monkeypatch):
     ],
 )
 def test_pi_fanout_concurrency_env_validation(
-    monkeypatch, caplog, env_value, expected
-):
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    env_value: Any,
+    expected: int,
+) -> None:
     monkeypatch.setenv("DAYDREAM_PI_FANOUT_CONCURRENCY", env_value)
     assert PiBackend(model="glm-5.2").fanout_concurrency == expected
     if expected == 10:
@@ -1448,7 +1496,7 @@ def test_pi_fanout_concurrency_env_validation(
 
 
 @pytest.mark.asyncio
-async def test_pi_reasoning_effort_forwards_as_thinking_flag(monkeypatch):
+async def test_pi_reasoning_effort_forwards_as_thinking_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """The resolved per-phase effort arrives as ``--thinking <level>``."""
     monkeypatch.delenv("PI_THINKING", raising=False)
     backend = PiBackend(model="glm-5.2", reasoning_effort="max")
@@ -1458,7 +1506,7 @@ async def test_pi_reasoning_effort_forwards_as_thinking_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pi_reasoning_effort_outranks_pi_thinking_env(monkeypatch):
+async def test_pi_reasoning_effort_outranks_pi_thinking_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit per-phase level beats Pi's ambient PI_THINKING default."""
     monkeypatch.setenv("PI_THINKING", "low")
     backend = PiBackend(model="glm-5.2", reasoning_effort="xhigh")
@@ -1469,7 +1517,7 @@ async def test_pi_reasoning_effort_outranks_pi_thinking_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pi_falls_back_to_pi_thinking_when_no_effort_resolved(monkeypatch):
+async def test_pi_falls_back_to_pi_thinking_when_no_effort_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PI_THINKING", "high")
     backend = PiBackend(model="glm-5.2")
 

@@ -117,13 +117,13 @@ class PhaseDispatchBackend:
 
     async def execute(
         self,
-        cwd,
-        prompt,
-        output_schema=None,
-        continuation=None,
-        agents=None,
-        max_turns=None,
-        read_only=False,
+        cwd: Any,
+        prompt: str,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
     ) -> AsyncGenerator[AgentEvent, None]:
         self.last_prompt = prompt
         self.call_count += 1

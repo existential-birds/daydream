@@ -3,10 +3,10 @@
 Each signal is a pure function over ``(manifest_row, fetcher)`` — no LLM,
 no I/O beyond fetchers.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,8 +28,8 @@ from daydream.training.labeler_signals import (
 from tests.harness.trajectory import diff_adding
 
 
-def _fake_gh_responder(responses):
-    def responder(repo, endpoint, **kwargs):
+def _fake_gh_responder(responses: Any) -> Any:
+    def responder(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
         return responses[(repo, endpoint)]
 
     return responder
@@ -183,7 +183,7 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
     ],
 )
 def test_comment_resolution_signal(
-    comments: list[dict],
+    comments: list[dict[str, Any]],
     expected: CommentResolutionSignal,
 ) -> None:
     """Classify resolution from bot, human, empty, and mixed review threads."""
@@ -214,7 +214,7 @@ def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
     assert sig == LocalCommitAppliedSignal(verdict="applied")
 
 
-def _fake_gh_reviews():
+def _fake_gh_reviews() -> Any:
     """gh_api stub mirroring the reviews + comments endpoints.
 
     /reviews → alice (human, approved) + octobot[bot] (commented).
@@ -242,7 +242,7 @@ def _fake_gh_reviews():
         ],
     }
 
-    def responder(repo, endpoint, **kwargs):
+    def responder(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
         return responses[(repo, endpoint)]
 
     return responder
@@ -383,9 +383,9 @@ def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_p
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
 
 
-def _fake_commits_pulls(pulls):
+def _fake_commits_pulls(pulls: Any) -> Any:
     # pulls: list returned by repos/{slug}/commits/{sha}/pulls
-    def responder(repo, endpoint, **kwargs):
+    def responder(repo: Any, endpoint: str, **kwargs: Any) -> Any:
         assert endpoint == "repos/org/repo/commits/abc123/pulls"
         return pulls
 
@@ -402,7 +402,7 @@ def _fake_commits_pulls(pulls):
         ),
     ],
 )
-def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict]) -> None:
+def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict[str, Any]]) -> None:
     """Identify the matching PR by head SHA when branch names are ambiguous."""
     row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
     gh = _fake_commits_pulls(pulls)
@@ -425,7 +425,7 @@ _FP_B = "b" * 64
 _FP_C = "c" * 64
 
 
-def _daydream_finding_comment(comment_id: int, fingerprint: str) -> dict:
+def _daydream_finding_comment(comment_id: int, fingerprint: str) -> dict[str, Any]:
     """A top-level daydream review comment carrying the footer + finding marker."""
     return {
         "id": comment_id,

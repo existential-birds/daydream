@@ -1,11 +1,13 @@
 """Cross-stack merge prompt + invocation tests (D-23..D-27, D-38)."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.prompts import build_merge_prompt
 from daydream.phases import phase_cross_stack_merge
+from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 
 
@@ -111,7 +113,10 @@ _MERGE_TURN: Turn = [
 ]
 
 
-async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path, make_work) -> None:
+async def test_phase_cross_stack_merge_returns_output_path(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     """D-24: merged report path is work.repo / REVIEW_OUTPUT_FILE."""
     from daydream.config import REVIEW_OUTPUT_FILE
 
@@ -127,7 +132,7 @@ async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path, make_
     assert result == tmp_path / REVIEW_OUTPUT_FILE
 
 
-async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work) -> None:
+async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """D-38: no agents= kwarg (Codex compatibility)."""
     backend = ScriptedBackend(events=_MERGE_TURN)
     await phase_cross_stack_merge(

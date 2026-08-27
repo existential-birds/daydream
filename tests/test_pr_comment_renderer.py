@@ -125,7 +125,8 @@ def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Pa
 
 # M6b — user price override synthesizes cost for an otherwise-unknown model (#156)
 def test_m6b_user_override_synthesizes_cost_for_unknown_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A user-supplied price (via DAYDREAM_PRICES_FILE) for an unknown Codex
     model produces a SYNTHESIZED cost — not a dash and not the unavailable

@@ -51,7 +51,7 @@ class MockResultMessageWithUsage(MockResultMessage):
     usage: dict[str, Any] | None = None
 
 
-async def _collect_events(monkeypatch, messages: list[Any]) -> list[Any]:
+async def _collect_events(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) -> list[Any]:
     """Drive ClaudeBackend.execute with a canned message sequence; return events."""
     patch_claude_sdk(
         monkeypatch,
@@ -67,7 +67,7 @@ async def _collect_events(monkeypatch, messages: list[Any]) -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_dropped_token_bug_fixed(monkeypatch):
+async def test_dropped_token_bug_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
     """ResultMessage with usage produces CostEvent with non-None tokens (EVNT-04, EVNT-05)."""
     events = await _collect_events(
         monkeypatch,
@@ -92,7 +92,7 @@ async def test_dropped_token_bug_fixed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_metrics_event_emitted_per_assistant_message(monkeypatch):
+async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """AssistantMessage with usage produces a MetricsEvent with EVNT-02 field names (EVNT-06)."""
     events = await _collect_events(
         monkeypatch,
@@ -116,7 +116,7 @@ async def test_metrics_event_emitted_per_assistant_message(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch):
+async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     """prompt_tokens folds input + cache_read + cache_creation into the true total input."""
     # Fully-cached turn: raw input_tokens is the uncached remainder (22); the total
     # input the model actually processed is 22 + 20000 read = 20022.
@@ -224,7 +224,7 @@ async def test_prompt_tokens_include_cache_read_and_creation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_prompt_tokens_is_total_of_all_input_buckets(monkeypatch):
+async def test_prompt_tokens_is_total_of_all_input_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
     """prompt_tokens is the total (uncached + read + creation); cached_tokens is the read subset."""
     events = await _collect_events(
         monkeypatch,
@@ -250,7 +250,7 @@ async def test_prompt_tokens_is_total_of_all_input_buckets(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_metrics_event_when_usage_is_none(monkeypatch):
+async def test_no_metrics_event_when_usage_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """AssistantMessage.usage None => no MetricsEvent emitted, but TextEvent still flows."""
     events = await _collect_events(
         monkeypatch,
@@ -268,7 +268,7 @@ async def test_no_metrics_event_when_usage_is_none(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_partial_usage_data(monkeypatch):
+async def test_partial_usage_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing input/output_tokens => no MetricsEvent (EVNT-02 types prompt/completion as int)."""
     events = await _collect_events(
         monkeypatch,
@@ -295,7 +295,7 @@ async def test_partial_usage_data(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cost_event_emitted_on_usage_only(monkeypatch):
+async def test_cost_event_emitted_on_usage_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """ResultMessage with usage but total_cost_usd=None still emits CostEvent."""
     events = await _collect_events(
         monkeypatch,

@@ -88,6 +88,19 @@ ignore_missing_imports = true
 module = ["huggingface_hub", "huggingface_hub.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# Sample-repo/symbol fixture modules are literal demo data (a sample project the
+# CLI treks, symbol tables a matcher parses), not test logic. Strict annotations
+# would rewrite the sample itself, so they are exempted from the untyped-def
+# wave (disallow_untyped_defs=false). Other fixtures/training helpers stay
+# checked. Lift when these fixtures carry real signatures. Ref: issue-931 task 4.
+module = [
+    "tests.fixtures.real_cli_sample_repo.hello",
+    "tests.fixtures.symbols.config",
+    "tests.fixtures.symbols.widget",
+]
+disallow_untyped_defs = false
+
 [tool.ruff]
 target-version = "py312"
 line-length = 120

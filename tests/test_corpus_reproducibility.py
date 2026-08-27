@@ -13,17 +13,24 @@ SQLite index (no archive-layer mocking). The PR posterior fetch is stubbed via
 the ``daydream.training.harvest._gh_api`` monkeypatch — the same seam the other
 harvest tests use — so the run never touches the network or the ``gh`` CLI.
 """
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
 
 from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
 from daydream.training.harvest import HarvestConfig, run_harvest
 from tests.test_training_harvest import _fake_gh_merged, _seed_archived_deep_run
 
 
-async def test_rescore_preserves_old_as_of_byte_for_byte(tmp_path, archive_dir, monkeypatch):
+async def test_rescore_preserves_old_as_of_byte_for_byte(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
     monkeypatch.setattr("daydream.training.harvest._gh_api", _fake_gh_merged("2026-02-01T00:00:00+00:00"))
     monkeypatch.setattr("daydream.training.reward.REWARD_VERSION", "r1")

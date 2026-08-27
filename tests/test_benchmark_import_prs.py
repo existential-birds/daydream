@@ -9,15 +9,17 @@ acceptance paths including partial-failure persistence. All ``gh`` calls route
 through the ``fake_gh`` router; freeze mirror fetches hit a real local bare
 origin (no network).
 """
-
 import hashlib
 import json
 import os
 import subprocess
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.harness import github_schema as gs
+from tests.harness.fake_gh import FakeGh
 
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_snapshot.py::_SEED_ENV).
@@ -56,7 +58,7 @@ _REPO_VIEW = {
 }
 
 
-def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path, fake_gh):
+def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -73,7 +75,7 @@ def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path, fake_gh
     assert ls.env is not None and ls.env.get("GIT_TERMINAL_PROMPT") == "0"
 
 
-def test_fetch_persists_complete_pr_header(tmp_path, fake_gh):
+def test_fetch_persists_complete_pr_header(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -98,7 +100,7 @@ def test_fetch_persists_complete_pr_header(tmp_path, fake_gh):
     assert pr.number == 101 and pr.author.login == "alice"
 
 
-def test_materialized_case_carries_full_pr_header(tmp_path, fake_gh):
+def test_materialized_case_carries_full_pr_header(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -113,7 +115,7 @@ def test_materialized_case_carries_full_pr_header(tmp_path, fake_gh):
     assert "merged_at" in pr and "closed_at" in pr and "html_url" in pr
 
 
-def test_import_only_snapshot_records_requested_base_sha(tmp_path, fake_gh):
+def test_import_only_snapshot_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Import-only (root=None, no freeze) writes SnapshotImported with both
     SHAs = the PR base tip (origin/head SHAs are the PR-known values; the merge
     base is not yet computed and diverges on imported -> ready).
@@ -133,7 +135,7 @@ def test_import_only_snapshot_records_requested_base_sha(tmp_path, fake_gh):
     assert snapshot["requested_base_sha"] == "b" * 40
 
 
-def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
+def test_fetch_normalizes_null_body_to_empty_string(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -155,7 +157,7 @@ def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
     ("line1\nline2\nline3", "line1\nline2\nline3"),        # newlines preserved
     ("x" * 50000, "x" * 50000),      # over context-limit body (never bounded here; persisted whole)
 ])
-def test_import_body_shape_preserved(tmp_path, fake_gh, body_field, expected):
+def test_import_body_shape_preserved(tmp_path: Path, fake_gh: FakeGh, body_field: Any, expected: str) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -176,7 +178,14 @@ def test_import_body_shape_preserved(tmp_path, fake_gh, body_field, expected):
     ("closed", None, "2026-01-02T00:00:00Z", False),     # closed-unmerged
     ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", True),  # merged
 ])
-def test_import_merged_state_distinction(tmp_path, fake_gh, state, merged_at, closed_at, expect_merged):
+def test_import_merged_state_distinction(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    state: Any,
+    merged_at: Any,
+    closed_at: Any,
+    expect_merged: Any,
+) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -196,7 +205,7 @@ def test_import_merged_state_distinction(tmp_path, fake_gh, state, merged_at, cl
     assert (pr.closed_at is not None) == (closed_at is not None)
 
 
-def test_import_no_comments_pr(tmp_path, fake_gh):
+def test_import_no_comments_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -211,10 +220,10 @@ def test_import_no_comments_pr(tmp_path, fake_gh):
     assert doc.evidence == [] and doc.pull_request.body == "no comments here"
 
 
-def test_payload_digest_spans_header_and_evidence(tmp_path, fake_gh):
+def test_payload_digest_spans_header_and_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
-    def fetch_with(title):
+    def fetch_with(title: Any) -> Any:
         ws = tmp_path / "ws"
         (ws / "imports").mkdir(parents=True, exist_ok=True)
         header = dict(_PR_HEADER)
@@ -232,7 +241,7 @@ def test_payload_digest_spans_header_and_evidence(tmp_path, fake_gh):
     assert gi._evidence_signature_from_doc(a) == gi._evidence_signature_from_doc(b)
 
 
-def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
+def test_fetch_normalizes_all_rest_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -282,7 +291,7 @@ def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
     assert all("--paginate" in (a or []) for a in collection_args)
 
 
-def test_review_thread_queries_request_only_schema_fields():
+def test_review_thread_queries_request_only_schema_fields() -> None:
     """Both GraphQL queries may only request fields GitHub's schema defines.
 
     Aliases (`side: diffSide`, `type: __typename`) are allowed — the extractor
@@ -293,7 +302,7 @@ def test_review_thread_queries_request_only_schema_fields():
     assert gs.unknown_query_fields(gi._THREAD_COMMENTS_QUERY) == set()
 
 
-def test_fake_gh_rejects_invented_review_thread_fields(tmp_path):
+def test_fake_gh_rejects_invented_review_thread_fields(tmp_path: Path) -> None:
     """Reintroducing a field GitHub's schema does not define fails CI through the fake gh."""
     from tests.harness.fake_gh import _handle_api
     state = tmp_path / "state"
@@ -309,7 +318,7 @@ def test_fake_gh_rejects_invented_review_thread_fields(tmp_path):
     assert "isBot" in err
 
 
-def test_fake_gh_accepts_fixed_review_threads_query(tmp_path):
+def test_fake_gh_accepts_fixed_review_threads_query(tmp_path: Path) -> None:
     """The fixed production query routes through the fake without a schema rejection."""
     from daydream.benchmark import github_import as gi
     from tests.harness.fake_gh import _handle_api
@@ -324,7 +333,7 @@ def test_fake_gh_accepts_fixed_review_threads_query(tmp_path):
     assert rc == 0 and "schema" not in err
 
 
-def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
+def test_graphql_threads_and_replies_normalized(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -370,7 +379,7 @@ def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
     assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
 
-def test_candidate_projection_right_file_body_left(tmp_path, fake_gh):
+def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.schema import Location
 
@@ -426,7 +435,7 @@ def test_candidate_projection_right_file_body_left(tmp_path, fake_gh):
     assert "github:review:6" not in by_src                          # pure approval: no candidate
 
 
-def test_parse_targets_dedupes_and_orders(tmp_path):
+def test_parse_targets_dedupes_and_orders(tmp_path: Path) -> None:
     from daydream.benchmark import github_import as gi
 
     pf = tmp_path / "prs.txt"
@@ -440,7 +449,7 @@ def test_parse_targets_dedupes_and_orders(tmp_path):
     assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
 
 
-def test_parse_head_pr_sha_grammar_and_binding(tmp_path):
+def test_parse_head_pr_sha_grammar_and_binding(tmp_path: Path) -> None:
     """``--head PR=<40-hex>`` binds the explicit head to that PR only.
 
     A bare 40-hex stays a back-compat superset; an unparseable RHS raises
@@ -464,7 +473,7 @@ def test_parse_head_pr_sha_grammar_and_binding(tmp_path):
         gi.parse_import_targets(["100"], [], [f"101={sha}"])
 
 
-def test_parse_heads_bound_per_pr_in_multi_import(tmp_path):
+def test_parse_heads_bound_per_pr_in_multi_import(tmp_path: Path) -> None:
     """A ``PR=<sha>`` head is honored for that PR only, never spread to others.
 
     Regression guard for the bug where ``--pr 100 --pr 101 --head 101=<sha>``
@@ -479,7 +488,7 @@ def test_parse_heads_bound_per_pr_in_multi_import(tmp_path):
     assert targets.requested_heads == ["final", sha]
 
 
-def _seed_manifest(ws):
+def _seed_manifest(ws: Path) -> None:
     """Build an initialized private workspace with an unresolved Source (o/r).
 
     Idempotent: a caller may explicitly :func:`init_workspace` first (e.g. the
@@ -493,7 +502,7 @@ def _seed_manifest(ws):
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
 
 
-def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path, fake_gh):
+def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -512,7 +521,7 @@ def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path, fake_gh):
     assert out2.repository_id == _REPO_ID
 
 
-def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path, fake_gh):
+def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -534,7 +543,7 @@ def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path, f
     assert raw["source"]["repository_id"] == _REPO_ID    # unchanged: no mutation staged
 
 
-def test_preflight_rejects_numeric_node_id(tmp_path, fake_gh):
+def test_preflight_rejects_numeric_node_id(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -546,7 +555,7 @@ def test_preflight_rejects_numeric_node_id(tmp_path, fake_gh):
     assert ex.value.code == "repo_unresolved"
 
 
-def test_preflight_rejects_numeric_string_node_id(tmp_path, fake_gh):
+def test_preflight_rejects_numeric_string_node_id(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -560,7 +569,11 @@ def test_preflight_rejects_numeric_string_node_id(tmp_path, fake_gh):
     assert ex.value.code == "repo_unresolved"
 
 
-def test_status_reports_last_preflight_verification(tmp_path, fake_gh, capsys):
+def test_status_reports_last_preflight_verification(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.cli import _handle_benchmark_status
     from daydream.benchmark.storage import load_json_strict
@@ -591,10 +604,13 @@ def test_status_reports_last_preflight_verification(tmp_path, fake_gh, capsys):
 
 
 
-def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
+def test_rate_limit_retries_three_then_fails_pr(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import subprocess
 
-    from daydream import git_ops as _git_ops
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -606,9 +622,9 @@ def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     slept: list[float] = []
     monkeypatch.setattr("daydream.benchmark.github_import.time.sleep", lambda s: slept.append(s))
-    real_run = _git_ops.subprocess.run
+    real_run = subprocess.run
 
-    def flaky_gh(args, *pargs, **kwargs):
+    def flaky_gh(args: Any, *pargs: Any, **kwargs: Any) -> Any:
         argv = list(args)
         joined = " ".join(argv)
         if (
@@ -633,7 +649,7 @@ def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
     assert slept and all(w <= 60 for w in slept)  # Retry-After honored, 60s cap
 
 
-def _seed_preflight(ws, fake_gh, *, pull_header=_PR_HEADER):
+def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) -> None:
     """Seed an unresolved workspace + canned preflight/REST data for pr 101."""
     _seed_manifest(ws)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
@@ -649,7 +665,7 @@ def _seed_preflight(ws, fake_gh, *, pull_header=_PR_HEADER):
 # ---------------------------------------------------------------------------
 
 
-def _seed_git(repo, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
+def _seed_git(repo: Path, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
     """Run git in *repo*, returning stripped stdout."""
     proc = subprocess.run(
         ["git", *args], cwd=repo, capture_output=True, text=True,
@@ -660,19 +676,19 @@ def _seed_git(repo, *args: str, check: bool = True, env: dict[str, str] | None =
     return proc.stdout.strip()
 
 
-def _seed_write(repo, name: str, content: str) -> None:
+def _seed_write(repo: Path, name: str, content: str) -> None:
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     _seed_git(repo, "add", name)
 
 
-def _seed_commit(repo, message: str) -> str:
+def _seed_commit(repo: Path, message: str) -> str:
     _seed_git(repo, "commit", "-m", message, env=_SEED_ENV)
     return _seed_git(repo, "rev-parse", "HEAD")
 
 
-def _seed_local_origin(tmp_path, fake_gh) -> tuple[str, str, str]:
+def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str]:
     """Build a real local bare origin whose base/head are the PR's SHAs.
 
     Uses the deterministic seed identity (same content/env as the snapshot
@@ -717,7 +733,7 @@ def _seed_local_origin(tmp_path, fake_gh) -> tuple[str, str, str]:
     return str(bare), base_sha, head_sha
 
 
-def test_import_freezes_cases_ready_with_bundle(tmp_path, fake_gh):
+def test_import_freezes_cases_ready_with_bundle(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict, sha256_file
     from daydream.benchmark.workspace import init_workspace
@@ -742,7 +758,7 @@ def test_import_freezes_cases_ready_with_bundle(tmp_path, fake_gh):
     assert sha256_file(bundle) == case["snapshot"]["bundle_sha256"]
 
 
-def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path, fake_gh):
+def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Same PR via import is idempotent; a distinct explicit head is a new case.
 
     Also proves one shared ``cache/repository.git`` serves both without ref
@@ -774,7 +790,7 @@ def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path
     assert sn.rev_parse(ws / "cache/repository.git", "refs/pull/101/head") == head_sha
 
 
-def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path, fake_gh):
+def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict, sha256_file
 
@@ -792,7 +808,7 @@ def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path, fake_gh):
     assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()
 
 
-def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path, fake_gh):
+def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -808,7 +824,7 @@ def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path, fake_gh):
     assert not (ws / "imports" / "pr-000101.json").exists()
 
 
-def test_status_reflects_fetched_import_and_resolved_identity(tmp_path, fake_gh):
+def test_status_reflects_fetched_import_and_resolved_identity(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.workspace import workspace_status
 
@@ -821,7 +837,7 @@ def test_status_reflects_fetched_import_and_resolved_identity(tmp_path, fake_gh)
     assert st.repository_identity_resolved is True
 
 
-def test_cli_import_prs_drives_command(tmp_path, fake_gh, capsys):
+def test_cli_import_prs_drives_command(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
     from daydream.benchmark.cli import _handle_benchmark_command
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -837,7 +853,7 @@ def test_cli_import_prs_drives_command(tmp_path, fake_gh, capsys):
     assert str(ws / "imports") in out                      # local destination
 
 
-def _curate_case(ws, case_file):
+def _curate_case(ws: Path, case_file: Any) -> None:
     """Mark a materialized case ready + attested with one historical finding."""
     import yaml
 
@@ -867,7 +883,7 @@ def _curate_case(ws, case_file):
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
 
-def test_refresh_body_only_change_stales_gold(tmp_path, fake_gh):
+def test_refresh_body_only_change_stales_gold(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -884,7 +900,7 @@ def test_refresh_body_only_change_stales_gold(tmp_path, fake_gh):
     assert case["curation"]["state"] == "stale"        # task-input contract changed -> stale
 
 
-def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path, fake_gh):
+def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -911,7 +927,7 @@ def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path
     assert case["pull_request"]["html_url"] == "https://github.com/o/r/pull/101"
 
 
-def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path, fake_gh):
+def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A predate import file (no body, no head.ref) must not stale gold on the
     first post-upgrade refresh: its task-input contract cannot be reconstructed,
     so only an evidence change can stale it until it is re-persisted."""
@@ -950,7 +966,7 @@ def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path, fake_gh
     assert case["curation"]["findings"]                  # curated gold preserved
 
 
-def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path, fake_gh):
+def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A first ``--refresh`` after the canonical-record format change must NOT
     flip prior curated cases stale on pure format drift. Pre-canonicalization
     files persisted a comment that existed in both feeds twice (REST
@@ -1001,7 +1017,7 @@ def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path, fake_gh
     # and the thread-only comment (db 2) under the thread_comment kind.
     import_path = ws / "imports" / "pr-000101.json"
     raw = load_json_strict(import_path)
-    old_evidence: list[dict] = []
+    old_evidence: list[dict[str, Any]] = []
     for e in raw["evidence"]:
         if e.get("thread_id"):
             if e.get("commit_id"):
@@ -1034,7 +1050,7 @@ def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path, fake_gh
     assert {e["kind"] for e in refreshed["evidence"]} == {"inline_comment"}
 
 
-def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
+def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -1063,20 +1079,20 @@ def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
     assert case["curation"]["findings"]              # prior curated findings preserved
 
 
-def _pr_header(number: int) -> dict:
+def _pr_header(number: int) -> dict[str, Any]:
     header = dict(_PR_HEADER)
     header["number"] = number
     header["url"] = f"https://github.com/o/r/pull/{number}"
     return header
 
 
-def _seed_identity(fake_gh) -> None:
+def _seed_identity(fake_gh: FakeGh) -> None:
     """Seed the preflight identity + repo-access responses (no PR data)."""
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
 
 
-def _seed_rest(gh, number: int, *, reviews, comments, issue_comments) -> None:
+def _seed_rest(gh: Any, number: int, *, reviews: Any, comments: Any, issue_comments: Any) -> None:
     """Seed one PR's REST evidence into the fake router."""
     gh.set_response("GET", f"repos/o/r/pulls/{number}", _pr_header(number))
     gh.set_response("GET", f"repos/o/r/pulls/{number}/reviews", reviews)
@@ -1084,7 +1100,7 @@ def _seed_rest(gh, number: int, *, reviews, comments, issue_comments) -> None:
     gh.set_response("GET", f"repos/o/r/issues/{number}/comments", issue_comments)
 
 
-def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path, fake_gh):
+def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.cli import _handle_benchmark_command
     from daydream.benchmark.storage import load_json_strict, load_yaml_strict
 
@@ -1153,7 +1169,7 @@ def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path, fake_gh):
     assert load_json_strict(ws / "imports/pr-000102.json")["evidence"] == []  # no-comment PR retained
 
 
-def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path, fake_gh):
+def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.cli import _handle_benchmark_command
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -1175,12 +1191,12 @@ def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path, fake_gh
     assert not (ws / "imports/pr-000102.json").exists()   # failed fetch: no import file
 
 
-def test_benchmark_help_lists_import_prs():
+def test_benchmark_help_lists_import_prs() -> None:
     import subprocess
 
     r = subprocess.run(["daydream", "benchmark", "--help"], capture_output=True, text=True)
     assert r.returncode == 0 and "import-prs" in r.stdout
-def test_reimport_does_not_duplicate_cases_rows(tmp_path, fake_gh):
+def test_reimport_does_not_duplicate_cases_rows(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Re-importing the same PR (unchanged evidence) must not duplicate cases[] rows."""
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -1198,7 +1214,7 @@ def test_reimport_does_not_duplicate_cases_rows(tmp_path, fake_gh):
     assert ids[0] == "pr-000101-aaaaaaaaaaaa"
 
 
-def test_reimport_unchanged_evidence_preserves_curation(tmp_path, fake_gh):
+def test_reimport_unchanged_evidence_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Re-import with unchanged evidence must not wipe curated findings/attestation."""
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -1218,7 +1234,7 @@ def test_reimport_unchanged_evidence_preserves_curation(tmp_path, fake_gh):
     assert after["snapshot_attested"] is True, "unchanged re-import must keep attestation"
 
 
-def test_refresh_unchanged_signature_preserves_curation(tmp_path, fake_gh):
+def test_refresh_unchanged_signature_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Refresh with an UNCHANGED evidence signature must keep curated findings."""
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -1235,7 +1251,11 @@ def test_refresh_unchanged_signature_preserves_curation(tmp_path, fake_gh):
     assert after["state"] != "draft", "curation must not reset to draft on unchanged refresh"
 
 
-def test_graphql_review_threads_retries_rate_limit_then_fails(tmp_path, fake_gh, monkeypatch):
+def test_graphql_review_threads_retries_rate_limit_then_fails(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """GraphQL reviewThreads honors the rate-limit retry policy (3x)."""
     import daydream.benchmark.github_import as gi_mod
     from daydream.git_ops import RateLimitError
@@ -1245,29 +1265,29 @@ def test_graphql_review_threads_retries_rate_limit_then_fails(tmp_path, fake_gh,
 
     calls = {"n": 0}
 
-    def flaky_gh_api(*a, **kw):
+    def flaky_gh_api(*a: Any, **kw: Any) -> dict[str, Any]:
         calls["n"] += 1
         if calls["n"] < 3:
             raise RateLimitError("graphql rate limited", retry_after=0.0)
         ok = {"repository": {"pullRequest": {"reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}}
         return {"data": ok}
 
-    monkeypatch.setattr(gi_mod.git_ops, "gh_api", flaky_gh_api)
+    monkeypatch.setattr("daydream.git_ops.gh_api", flaky_gh_api)
     monkeypatch.setattr(gi_mod, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
     threads = gi_mod._graphql_review_threads(ws, "o/r", 101)
     assert threads == []
     assert calls["n"] == 3, "rate-limit retry should make 3 attempts"
 
 
-def test_spike_nested_comments_paginate_past_100(tmp_path, fake_gh):
+def test_spike_nested_comments_paginate_past_100(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
     (ws / "imports").mkdir(parents=True)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    for ep, val in [("repos/o/r/pulls/101/reviews", []),
-                    ("repos/o/r/pulls/101/comments", []),
-                    ("repos/o/r/issues/101/comments", [])]:
+    for ep, val in [("repos/o/r/pulls/101/reviews", list[Any]()),
+                    ("repos/o/r/pulls/101/comments", list[Any]()),
+                    ("repos/o/r/issues/101/comments", list[Any]())]:
         fake_gh.set_response("GET", ep, val)
     # thread "thread_1" carries 150 replies split across nested pages of 100+50
     comments = [{"id": f"c{i}", "databaseId": 1000 + i, "body": f"r{i}",
@@ -1285,7 +1305,7 @@ def test_spike_nested_comments_paginate_past_100(tmp_path, fake_gh):
     assert len([e for e in doc.evidence if 1000 <= e.database_id <= 1150]) == 150
 
 
-def test_graphql_threads_replies_collect_past_100(tmp_path, fake_gh):
+def test_graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -1313,7 +1333,7 @@ def test_graphql_threads_replies_collect_past_100(tmp_path, fake_gh):
            == sorted(range(2001, 2251))
 
 
-def test_reconcile_inline_and_thread_into_one_record(tmp_path, fake_gh):
+def test_reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -1359,7 +1379,7 @@ def test_reconcile_inline_and_thread_into_one_record(tmp_path, fake_gh):
     assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
 
-def test_evidence_order_deterministic_across_page_sizes(tmp_path, fake_gh):
+def test_evidence_order_deterministic_across_page_sizes(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -1394,7 +1414,7 @@ def test_evidence_order_deterministic_across_page_sizes(tmp_path, fake_gh):
     assert doc2.fetch.payload_sha256 == payload
 
 
-def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path, fake_gh):
+def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -1426,7 +1446,7 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path, fake_gh)
     assert cand.not_exact_reason == "outdated"
 
 
-def test_fixture_matrix_evidence_preserved_and_historical(tmp_path, fake_gh):
+def test_fixture_matrix_evidence_preserved_and_historical(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
 
     ws = tmp_path / "ws"
@@ -1470,7 +1490,11 @@ def test_fixture_matrix_evidence_preserved_and_historical(tmp_path, fake_gh):
     assert "github:review:2" not in cands                              # pure approval: evidence only
 
 
-def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
+def test_graphql_review_threads_records_rate_limit_after_retries(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Exhausting GraphQL rate-limit retries surfaces _ImportRateLimitError (ledger rate_limit)."""
     import pytest
 
@@ -1480,21 +1504,20 @@ def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
 
-    def always_limited(*a, **kw):
+    def always_limited(*a: Any, **kw: Any) -> None:
         raise RateLimitError("graphql rate limited", retry_after=0.0)
 
-    monkeypatch.setattr(gi_mod.git_ops, "gh_api", always_limited)
+    monkeypatch.setattr("daydream.git_ops.gh_api", always_limited)
     monkeypatch.setattr(gi_mod, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
     with pytest.raises(gi_mod._ImportRateLimitError):
         gi_mod._graphql_review_threads(ws, "o/r", 101)
 
 
-def test_corrupt_prior_import_fails_before_network(tmp_path, fake_gh):
+def test_corrupt_prior_import_fails_before_network(tmp_path: Path, fake_gh: FakeGh) -> None:
     # Seed a fetched ledger entry + a corrupt prior import, then refresh.
-    from test_benchmark_curation import _seed_ready_case
-
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+    from tests.test_benchmark_curation import _seed_ready_case
 
     ws, case_id, head = _seed_ready_case(tmp_path, fake_gh)     # valid prior state
     imp = next((ws / "imports").glob("*.json"))
@@ -1503,11 +1526,10 @@ def test_corrupt_prior_import_fails_before_network(tmp_path, fake_gh):
         gi._prior_import_state(ws, load_yaml_strict(ws / "benchmark.yaml"), 101)
 
 
-def test_corrupt_prior_curation_fails_not_healed(tmp_path, fake_gh):
-    from test_benchmark_curation import _seed_ready_case
-
+def test_corrupt_prior_curation_fails_not_healed(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+    from tests.test_benchmark_curation import _seed_ready_case
 
     ws, case_id, head = _seed_ready_case(tmp_path, fake_gh)
     case = ws / "cases" / f"{case_id}.yaml"
@@ -1516,7 +1538,7 @@ def test_corrupt_prior_curation_fails_not_healed(tmp_path, fake_gh):
         gi._prior_import_state(ws, load_yaml_strict(ws / "benchmark.yaml"), 101)
 
 
-def test_missing_prior_import_is_nonfatal_first_run(tmp_path):
+def test_missing_prior_import_is_nonfatal_first_run(tmp_path: Path) -> None:
     # A never-imported PR (no ledger fetch) must not fail on prior-state discovery.
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -1538,7 +1560,7 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path):
     assert prior_pinned == {} and prior_policy == {} and prior_heads == []
 
 
-def test_refresh_stale_clears_task_spec_approval(tmp_path, fake_gh):
+def test_refresh_stale_clears_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
     ws = tmp_path / "ws"
@@ -1565,7 +1587,7 @@ def test_refresh_stale_clears_task_spec_approval(tmp_path, fake_gh):
 # ---------------------------------------------------------------------------
 
 
-def _one_evidence() -> dict:
+def _one_evidence() -> dict[str, Any]:
     """One canonical inline-comment evidence record dict (projection fields)."""
     return {"database_id": 1, "body_sha256": "a" * 64, "body": "please fix",
             "path": "a.py", "line": 4, "commit_id": "a" * 40, "outdated": False,
@@ -1575,20 +1597,20 @@ def _one_evidence() -> dict:
             "author": {"login": "alice", "type": "User"}}
 
 
-def _sig(ev: dict):
+def _sig(ev: dict[str, Any]) -> Any:
     """Signature over one raw evidence record: ``{"evidence": [ev]}`` wrapper."""
     from daydream.benchmark import github_import as gi
 
     return gi._evidence_signature_from_raw({"evidence": [ev]})
 
 
-def test_signature_changes_on_anchor_move():
+def test_signature_changes_on_anchor_move() -> None:
     base = _one_evidence()
     moved = {**base, "line": 7}                     # same body, moved anchor
     assert _sig(base) != _sig(moved)
 
 
-def test_signature_changes_on_resolution_state():
+def test_signature_changes_on_resolution_state() -> None:
     base = _one_evidence()
     assert _sig(base) != _sig({**base, "resolved": True})
     assert _sig(base) != _sig({**base, "outdated": True})
@@ -1597,13 +1619,13 @@ def test_signature_changes_on_resolution_state():
     assert _sig(base) != _sig({**base, "author": {"login": "bob", "type": "User"}})
 
 
-def test_signature_ignores_metadata_only_change():
+def test_signature_ignores_metadata_only_change() -> None:
     base = _one_evidence()
     meta = {**base, "updated_at": "2026-01-02T00:00:00Z", "url": "https://e.example/2"}
     assert _sig(base) == _sig(meta)
 
 
-def test_signature_ignores_format_drift_duplicate_and_kind():
+def test_signature_ignores_format_drift_duplicate_and_kind() -> None:
     from daydream.benchmark import github_import as gi
 
     base = _one_evidence()
@@ -1620,7 +1642,7 @@ def test_signature_ignores_format_drift_duplicate_and_kind():
 # ---------------------------------------------------------------------------
 
 
-def _seed_discussion(db_id: int, body: str = "please fix", line: int = 4) -> dict:
+def _seed_discussion(db_id: int, body: str = "please fix", line: int = 4) -> dict[str, Any]:
     """One canonical REST inline-comment dict for the fake router."""
     return {"id": db_id, "node_id": f"DIFF_{db_id}", "user": {"login": "bot[bot]", "type": "Bot"},
             "body": body, "commit_id": "a" * 40, "original_commit_id": "a" * 40,
@@ -1629,7 +1651,7 @@ def _seed_discussion(db_id: int, body: str = "please fix", line: int = 4) -> dic
             "html_url": f"https://github.com/o/r/pull/101#discussion_r{db_id}"}
 
 
-def test_refresh_unrelated_new_comment_does_not_stale(tmp_path, fake_gh):
+def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
     # PR 101 imported with one referenced comment (db 1) and curated ready; a NEW
     # unrelated comment (db 99) must not stale the referenced case on refresh.
     from daydream.benchmark import github_import as gi
@@ -1650,7 +1672,7 @@ def test_refresh_unrelated_new_comment_does_not_stale(tmp_path, fake_gh):
     assert case["curation"]["findings"]
 
 
-def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path, fake_gh):
+def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
     # Same body, moved anchor on the REFERENCED comment (db 1) -> the case stales
     # while its curated findings stay preserved.
     from daydream.benchmark import github_import as gi
@@ -1675,7 +1697,7 @@ def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path, fake_gh)
 # ---------------------------------------------------------------------------
 
 
-def test_refresh_after_head_advance_keeps_case_id(tmp_path, fake_gh):
+def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeGh) -> None:
     # Import + curate PR 101 at head a*40, then change the live head to b*40
     # (the branch advanced) and refresh: the SAME case_id is reproduced, no
     # new case, no orphan, and the untouched pinned case stays ready.
@@ -1704,7 +1726,7 @@ def test_refresh_after_head_advance_keeps_case_id(tmp_path, fake_gh):
 # ---------------------------------------------------------------------------
 
 
-def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path, fake_gh):
+def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, fake_gh: FakeGh) -> None:
     # Import + curate PR 101 successfully, then make the refresh fetch fail: the
     # last-good import_file/import_sha256/case_ids are preserved and the attempt
     # is recorded separately in latest_error (NOT reset to fetch_failed).
@@ -1730,7 +1752,7 @@ def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path, fake_gh
     assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
 
 
-def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path, fake_gh):
+def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A refresh whose re-freeze of a curated pinned head goes unreplayable
     (force-push/rebased branch made the head unreachable) must fail the refresh
     (rc != 0) and keep the curated ready case + its bundle intact and indexed —
@@ -1777,7 +1799,7 @@ def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path,
     assert code == 0                                    # no orphan bundle corruption
 
 
-def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path, fake_gh):
+def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A hand-edited/externally-mutated curation whose referenced source_id is
     non-canonical must fail the re-import (rc != 0) instead of being silently
     dropped from the per-case stale gate — never fail open (issue #813)."""
@@ -1811,7 +1833,7 @@ def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path, fake_g
     ]   # curation was NOT rewritten by the failed refresh
 
 
-def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path, fake_gh):
+def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
     """reply_to_id gates candidacy (replies are evidence, never candidates), so it
     must sit in the projection hash: a comment gaining reply status shifts the
     candidate set and must flip the signature, staling a referencing case."""
@@ -1835,7 +1857,7 @@ def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path, fake_g
     assert case["curation"]["findings"]               # curated gold preserved
 
 
-def test_reimport_changed_referenced_evidence_stales(tmp_path, fake_gh):
+def test_reimport_changed_referenced_evidence_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A plain re-import (refresh=False) with changed referenced evidence must not
     silently keep the curated case ready — it routes through the same per-case
     stale decision as refresh (issue #813)."""
@@ -1877,7 +1899,7 @@ def test_reimport_changed_referenced_evidence_stales(tmp_path, fake_gh):
     assert case["curation"]["findings"]                # curated findings preserved
 
 
-def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path, fake_gh):
+def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A legacy raw import file storing the same database_id twice - a REST
     inline copy WITH ``commit_id`` and a GraphQL thread copy WITHOUT it (the
     pre-canonicalization duplicate) - must yield ONE deterministic changed

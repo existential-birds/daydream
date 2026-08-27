@@ -34,15 +34,15 @@ class _PromptCapturingBackend:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    async def execute(  # type: ignore[no-untyped-def]
+    async def execute(
         self,
-        cwd,
-        prompt,
-        output_schema=None,
-        continuation=None,
-        agents=None,
-        max_turns=None,
-        read_only=False,
+        cwd: Any,
+        prompt: Any,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
         persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         self.prompts.append(prompt)

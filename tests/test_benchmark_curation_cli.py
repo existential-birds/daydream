@@ -6,14 +6,23 @@ leaves a ready-snapshot case draft and un-attested, and expected workspace error
 map to stderr + exit code ``1`` (no bare traceback). The in-process route is
 exercised with no terminal mocks.
 """
+import sys
+from pathlib import Path
+from typing import Any
 
+import pytest
 import yaml
 
 from daydream.benchmark.storage import load_yaml_strict
+from tests.harness.fake_gh import FakeGh
 from tests.test_benchmark_curation import _seed_ready_case
 
 
-def test_cli_curate_apply_gold_writes_0600_and_never_ready(tmp_path, fake_gh, capsys):
+def test_cli_curate_apply_gold_writes_0600_and_never_ready(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from daydream.benchmark import curation as cu
     from daydream.benchmark.cli import _handle_benchmark_command
 
@@ -39,7 +48,11 @@ def test_cli_curate_apply_gold_writes_0600_and_never_ready(tmp_path, fake_gh, ca
     assert raw["curation"]["findings"][0]["provenance"]["kind"] == "historical"
 
 
-def test_cli_curate_apply_gold_malformed_fragment_clean_exit(tmp_path, fake_gh, capsys):
+def test_cli_curate_apply_gold_malformed_fragment_clean_exit(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """A malformed fragment (missing required keys) maps to exit 1, no traceback."""
     from daydream.benchmark.cli import _handle_benchmark_command
 
@@ -57,7 +70,11 @@ def test_cli_curate_apply_gold_malformed_fragment_clean_exit(tmp_path, fake_gh, 
     assert "Traceback" not in capsys.readouterr().err
 
 
-def test_cli_curate_without_apply_gold_rejects_on_non_tty(tmp_path, fake_gh, capsys):
+def test_cli_curate_without_apply_gold_rejects_on_non_tty(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from daydream.benchmark.cli import _handle_benchmark_command
 
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
@@ -66,11 +83,11 @@ def test_cli_curate_without_apply_gold_rejects_on_non_tty(tmp_path, fake_gh, cap
     assert "apply-gold" in capsys.readouterr().err.lower()
 
 
-def test_curate_on_tty_dispatches_to_tui(tmp_path, fake_gh, monkeypatch):
+def test_curate_on_tty_dispatches_to_tui(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark import cli
 
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    called = {}
+    called: dict[str, Any] = {}
     monkeypatch.setattr(cli, "_is_interactive_tty", lambda: True)
     monkeypatch.setattr(
         "daydream.benchmark.curate_tui.run_curate_tui",
@@ -80,7 +97,12 @@ def test_curate_on_tty_dispatches_to_tui(tmp_path, fake_gh, monkeypatch):
     assert rc == 0 and called == {"root": str(ws), "cid": case_id}
 
 
-def test_curate_non_tty_keeps_guidance_and_exit_1(tmp_path, fake_gh, monkeypatch, capsys):
+def test_curate_non_tty_keeps_guidance_and_exit_1(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from daydream.benchmark import cli
     ws, case, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
     monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
@@ -88,10 +110,10 @@ def test_curate_non_tty_keeps_guidance_and_exit_1(tmp_path, fake_gh, monkeypatch
     assert rc == 1 and "apply-gold" in capsys.readouterr().err.lower()
 
 
-def test_is_interactive_tty_detects_stdin_and_stdout(monkeypatch):
+def test_is_interactive_tty_detects_stdin_and_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark import cli
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     assert cli._is_interactive_tty() is True
-    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
     assert cli._is_interactive_tty() is False

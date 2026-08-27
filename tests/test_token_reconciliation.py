@@ -94,7 +94,7 @@ async def _run_tool_agent(
 
 
 @pytest.mark.asyncio
-async def test_claude_shape_final_reflects_session_total(tmp_path):
+async def test_claude_shape_final_reflects_session_total(tmp_path: Path) -> None:
     """Claude-shaped stream: per-message single-digit completion + authoritative
     CostEvent session total -> final.total_completion_tokens == session total,
     not the collapsed sum of per-message digits."""
@@ -107,7 +107,7 @@ async def test_claude_shape_final_reflects_session_total(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_claude_shape_step_sum_equals_final(tmp_path):
+async def test_claude_shape_step_sum_equals_final(tmp_path: Path) -> None:
     """The whole-run session total is distributed so SUM(steps) == final, keeping
     the final == Σ steps invariant after per-turn steps + reconciliation."""
     recorder = make_recorder(tmp_path)
@@ -122,7 +122,7 @@ async def test_claude_shape_step_sum_equals_final(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_multi_turn_turns_each_own_step(tmp_path):
+async def test_multi_turn_turns_each_own_step(tmp_path: Path) -> None:
     """run_agent forwards TurnEndEvent (fix B): a 24-tool-call, 3-turn agent
     records >2 steps and one metrics-bearing step per turn (not one collapsed)."""
     traj = await _run_tool_agent(tmp_path, turns=3, tools_per_turn=8)
@@ -137,7 +137,7 @@ async def test_multi_turn_turns_each_own_step(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_pi_shape_no_step_level_double_count(tmp_path):
+async def test_pi_shape_no_step_level_double_count(tmp_path: Path) -> None:
     """Pi-shaped stream (per-turn MetricsEvent w/ cost + restated final CostEvent)
     must not double-count at the step level once per-turn steps are enabled."""
     recorder = make_recorder(tmp_path)
@@ -164,7 +164,7 @@ async def test_pi_shape_no_step_level_double_count(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_16kb_write_reports_real_completion(tmp_path):
+async def test_16kb_write_reports_real_completion(tmp_path: Path) -> None:
     """A Write-heavy agent (16 KB content in tool arguments) reports a real
     total_completion_tokens magnitude, not double digits (the pre-fix bug)."""
     traj = await _run_write_agent(tmp_path, content="x" * 16_000)
@@ -172,7 +172,7 @@ async def test_16kb_write_reports_real_completion(tmp_path):
     assert completion >= 1_000   # right order of magnitude; pre-fix it was ~50
 
 
-def _tool_argument_floor(traj):
+def _tool_argument_floor(traj: dict[str, Any]) -> Any:
     """floor = SUM(len(json.dumps(tool_call['arguments'])) / 4) over recorded calls."""
     total = 0
     for s in traj["steps"]:
@@ -182,13 +182,13 @@ def _tool_argument_floor(traj):
 
 
 @pytest.mark.asyncio
-async def test_tool_argument_invariant_holds_real_path(tmp_path):
+async def test_tool_argument_invariant_holds_real_path(tmp_path: Path) -> None:
     """total_completion_tokens >= floor on a real-path Write-heavy run (passes post-fix)."""
     traj = await _run_write_agent(tmp_path, content="y" * 16_000)
     assert traj["final_metrics"]["total_completion_tokens"] >= _tool_argument_floor(traj)
 
 
-def test_tool_argument_invariant_fails_pre_fix_bundle():
+def test_tool_argument_invariant_fails_pre_fix_bundle() -> None:
     """The gate is non-trivial: a hand-built pre-fix bundle (collapsed total) FAILS it."""
     traj = _pre_fix_bundle()   # total_completion_tokens=50, one Write call with 16KB args
     completion = traj["final_metrics"]["total_completion_tokens"]
@@ -210,7 +210,7 @@ def _pre_fix_bundle() -> dict[str, Any]:
     }
 
 @pytest.mark.asyncio
-async def test_metrics_no_agent_step_folds_to_minted_step(tmp_path):
+async def test_metrics_no_agent_step_folds_to_minted_step(tmp_path: Path) -> None:
     """Round-2 #747: a MetricsEvent arriving with no open Step and no existing
     agent Step (self.steps contains only a user/context step) must fold onto a
     minted agent Step so the recorder-level tally still sums to final

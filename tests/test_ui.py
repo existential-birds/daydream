@@ -1,17 +1,19 @@
 """Tests for daydream.ui helpers."""
-
 from __future__ import annotations
 
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from daydream.ui.panels import LiveToolPanelRegistry
 
-def test_format_verdict_join_renders_table_counts():
+
+def test_format_verdict_join_renders_table_counts() -> None:
     from rich.console import Console
 
-    from daydream.ui import format_verdict_join  # type: ignore[attr-defined]
+    from daydream.ui import format_verdict_join
 
     table = format_verdict_join(matched=[1, 2], unmatched=[3], structural=[4, 5], other=[], total=5)
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
@@ -34,7 +36,7 @@ def _run_renderer_and_count_panels(width: int, height: int, text_lines: list[str
     panel_prints: list[Panel] = []
     original_print = console.print
 
-    def spy_print(*args, **kwargs):
+    def spy_print(*args: Any, **kwargs: Any) -> Any:
         for arg in args:
             if isinstance(arg, Panel):
                 panel_prints.append(arg)
@@ -51,7 +53,7 @@ def _run_renderer_and_count_panels(width: int, height: int, text_lines: list[str
     return len(panel_prints), renderer
 
 
-def test_agent_text_renderer_overflow_single_panel():
+def test_agent_text_renderer_overflow_single_panel() -> None:
     lines = [f"line {i} with some content to fill horizontally\n" for i in range(200)]
     panel_count, renderer = _run_renderer_and_count_panels(80, 20, lines)
 
@@ -61,11 +63,11 @@ def test_agent_text_renderer_overflow_single_panel():
     assert renderer._buffer == []  # type: ignore[attr-defined]
 
 
-def test_render_exploration_summary_shows_content_not_json():
+def test_render_exploration_summary_shows_content_not_json() -> None:
     from rich.console import Console
 
     from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
-    from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
+    from daydream.ui import render_exploration_summary
 
     ctx = ExplorationContext(
         affected_files=[FileInfo(path="services/library/openapi.yaml", role="modified")],
@@ -82,11 +84,11 @@ def test_render_exploration_summary_shows_content_not_json():
     assert "{" not in out  # no raw JSON
 
 
-def test_render_exploration_summary_empty_is_quiet():
+def test_render_exploration_summary_empty_is_quiet() -> None:
     from rich.console import Console
 
     from daydream.exploration import ExplorationContext
-    from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
+    from daydream.ui import render_exploration_summary
 
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ExplorationContext()))
@@ -94,7 +96,7 @@ def test_render_exploration_summary_empty_is_quiet():
     assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
 
 
-def test_prompt_user_returns_default_on_eof(monkeypatch):
+def test_prompt_user_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import Mock
 
     from rich.console import Console
@@ -112,7 +114,7 @@ def test_prompt_user_returns_default_on_eof(monkeypatch):
     assert "EOF" in output, f"expected EOF warning in output, got: {output!r}"
 
 
-def test_prompt_user_non_interactive_skips_stdin(monkeypatch):
+def test_prompt_user_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import Mock
 
     from rich.console import Console
@@ -128,7 +130,7 @@ def test_prompt_user_non_interactive_skips_stdin(monkeypatch):
     reset_state()
 
 
-def test_prompt_user_returns_typed_value_interactively(monkeypatch):
+def test_prompt_user_returns_typed_value_interactively(monkeypatch: pytest.MonkeyPatch) -> None:
     from rich.console import Console
 
     from daydream.agent import reset_state
@@ -150,7 +152,7 @@ def test_prompt_user_returns_typed_value_interactively(monkeypatch):
         "Commit and push changes? [y/N]",  # phases.py:1788 (git push)
     ],
 )
-def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch, message):
+def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch: pytest.MonkeyPatch, message: Any) -> None:
     from unittest.mock import Mock
 
     from rich.console import Console
@@ -163,7 +165,7 @@ def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch, message):
     assert prompt_user(Console(file=StringIO(), record=True), message, default="n") == "n"
 
 
-def test_parse_background_task_id_from_launch_string():
+def test_parse_background_task_id_from_launch_string() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -181,7 +183,7 @@ def test_parse_background_task_id_from_launch_string():
     assert reg.resolve_label("TaskCreate", "1") == "Find tool-call render code"
 
 
-def test_bash_panel_shows_command_drops_mechanical_keys():
+def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -193,15 +195,17 @@ def test_bash_panel_shows_command_drops_mechanical_keys():
     assert "block" not in out and "timeout" not in out
 
 
-def _render_panel_text(reg, tool_use_id):
+def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
     from rich.console import Console
 
     c = Console(file=StringIO(), record=True)
-    c.print(reg.get(tool_use_id)._render_panel())
+    panel = reg.get(tool_use_id)
+    assert panel is not None
+    c.print(panel._render_panel())
     return c.export_text()
 
 
-def test_taskoutput_header_leads_with_label_demotes_id():
+def test_taskoutput_header_leads_with_label_demotes_id() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -215,7 +219,7 @@ def test_taskoutput_header_leads_with_label_demotes_id():
     assert "block" not in out and "timeout" not in out
 
 
-def test_taskoutput_header_unknown_id_falls_back_to_bare_id():
+def test_taskoutput_header_unknown_id_falls_back_to_bare_id() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -226,7 +230,7 @@ def test_taskoutput_header_unknown_id_falls_back_to_bare_id():
     assert "zzz999" in out and "block" not in out
 
 
-def test_taskcreate_header_shows_subject_and_body():
+def test_taskcreate_header_shows_subject_and_body() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -237,7 +241,7 @@ def test_taskcreate_header_shows_subject_and_body():
     assert "Fix auth bug" in out and "details here" in out
 
 
-def test_taskupdate_resolves_subject_and_shows_status():
+def test_taskupdate_resolves_subject_and_shows_status() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -250,7 +254,7 @@ def test_taskupdate_resolves_subject_and_shows_status():
     assert "Fix auth bug" in out and "completed" in out
 
 
-def test_tasklist_header_omits_empty_id_suffix():
+def test_tasklist_header_omits_empty_id_suffix() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -262,7 +266,7 @@ def test_tasklist_header_omits_empty_id_suffix():
     assert "(#)" not in out and "()" not in out
 
 
-def test_taskoutput_result_shows_output_snippet():
+def test_taskoutput_result_shows_output_snippet() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -272,13 +276,15 @@ def test_taskoutput_result_shows_output_snippet():
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
     reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
     result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
-    reg.get("c2").set_result(result, is_error=False)
+    c2_panel = reg.get("c2")
+    assert c2_panel is not None
+    c2_panel.set_result(result, is_error=False)
     out = _render_panel_text(reg, "c2")
     assert "done-with-bg-work" in out  # the <output> snippet surfaces
     assert "<retrieval_status>" not in out  # tag plumbing is stripped
 
 
-def test_task_prompt_truncation_uses_named_limit():
+def test_task_prompt_truncation_uses_named_limit() -> None:
     from rich.console import Console
 
     from daydream.ui import LiveToolPanelRegistry
@@ -292,7 +298,7 @@ def test_task_prompt_truncation_uses_named_limit():
     assert "l39" not in out
 
 
-def _taskoutput_backend():
+def _taskoutput_backend() -> Any:
     """Build a backend stream containing a background task and its final output."""
     from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
     from tests.test_agent_recorder_integration import MockBackend
@@ -324,7 +330,7 @@ def _taskoutput_backend():
     )
 
 
-async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
+async def test_run_agent_renders_taskoutput_with_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Render TaskOutput with its task label while hiding mechanical arguments."""
     from rich.console import Console
 
@@ -342,7 +348,7 @@ async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
     assert "block=True" not in out and "timeout=120000" not in out
 
 
-async def test_run_agent_callback_path_labels_taskoutput(tmp_path):
+async def test_run_agent_callback_path_labels_taskoutput(tmp_path: Path) -> None:
     from rich.text import Text
 
     from daydream.agent import run_agent
@@ -363,7 +369,7 @@ async def test_run_agent_callback_path_labels_taskoutput(tmp_path):
     assert "TaskOutput a066168" not in joined  # opaque bare-id dump form is gone
 
 
-async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path):
+async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) -> None:
     """The parallel-fix callback line names the edited file, never a stray flag.
 
     Regression: the old blind ``next(iter(args.values()))`` surfaced a leading

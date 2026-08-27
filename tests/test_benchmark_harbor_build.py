@@ -3,8 +3,11 @@ import hashlib
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+from tests.harness.fake_gh import FakeGh
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -21,7 +24,7 @@ _SEED_ENV = {
 }
 
 
-def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict:
+def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict[str, Any]:
     """A canned GitHub PR-header response for *number*."""
     return {
         "number": number,
@@ -38,7 +41,7 @@ def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "
     }
 
 
-def _seed_git(repo, *args: str, check: bool = True) -> str:
+def _seed_git(repo: Any, *args: str, check: bool = True) -> str:
     proc = subprocess.run(
         ["git", *args], cwd=repo, capture_output=True, text=True,
         env={**os.environ, **_SEED_ENV}, check=check,
@@ -48,19 +51,19 @@ def _seed_git(repo, *args: str, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
-def _seed_write(repo, name: str, content: str) -> None:
+def _seed_write(repo: Any, name: str, content: str) -> None:
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     _seed_git(repo, "add", name)
 
 
-def _seed_commit(repo, message: str) -> str:
+def _seed_commit(repo: Any, message: str) -> str:
     _seed_git(repo, "commit", "-m", message)
     return _seed_git(repo, "rev-parse", "HEAD")
 
 
-def _seed_preflight(fake_gh, *, number: int = 101) -> None:
+def _seed_preflight(fake_gh: FakeGh, *, number: int = 101) -> None:
     """Seed canned identity + preflight/REST responses for one PR."""
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response(
@@ -74,7 +77,7 @@ def _seed_preflight(fake_gh, *, number: int = 101) -> None:
     fake_gh.set_response("GET", f"repos/o/r/issues/{number}/comments", [])
 
 
-def _seed_local_origin(tmp_path: Path, fake_gh, *, number: int = 101, lines: int = 3) -> tuple[str, str, str]:
+def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, lines: int = 3) -> tuple[str, str, str]:
     """Build a real local bare origin whose base/head are the PR's SHAs.
 
     The feature head adds ``feature.py`` with exactly *lines* lines. Returns
@@ -118,7 +121,7 @@ def _seed_local_origin(tmp_path: Path, fake_gh, *, number: int = 101, lines: int
     return str(bare), base_sha, head_sha
 
 
-def _seed_candidate(fake_gh, *, number: int = 101, head_sha: str) -> None:
+def _seed_candidate(fake_gh: FakeGh, *, number: int = 101, head_sha: str) -> None:
     """Seed one REST inline comment so the case has one exact-acceptable candidate."""
     comment = {
         "id": number,
@@ -157,7 +160,7 @@ def _mark_ready(ws: Path, case_id: str, head_sha: str) -> None:
     cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
 
 
-def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[Path, str, str]:
+def _seed_ready_workspace(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tuple[Path, str, str]:
     """Seed a genuine frozen ``ready`` workspace for one imported PR.
 
     Builds a real bare origin, runs the real import (freezing a ready snapshot
@@ -187,7 +190,7 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[P
     return ws, case_id, head_sha
 
 
-def _seed_clean_workspace(tmp_path: Path, fake_gh, *, ready: bool = True) -> tuple[Path, str, str]:
+def _seed_clean_workspace(tmp_path: Path, fake_gh: FakeGh, *, ready: bool = True) -> tuple[Path, str, str]:
     """Seed a reviewed-clean workspace: import with no comments, then attest clean.
 
     With *ready* True (default), the clean-attested case is also final-attested
@@ -212,7 +215,7 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh, *, ready: bool = True) -> tup
     return ws, case_id, head_sha
 
 
-def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh, *, lines: int = 3) -> str:
+def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> str:
     """Import a second PR (102, a different head) into *ws* and mark it ready.
 
     Returns the second case id.
@@ -226,7 +229,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh, *, lines: int = 3
     _seed_candidate(fake_gh, number=102, head_sha=head_sha)
     assert gi.run_import_prs(ws, pr_numbers=[102], heads=[], origin_url=origin_url) == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
-    case_id = next(c["case_id"] for c in raw["cases"] if c["pr_number"] == 102)
+    case_id: str = next(c["case_id"] for c in raw["cases"] if c["pr_number"] == 102)
     candidate = next(
         c for c in cu.get_case(ws, case_id)["candidates"]
         if c["exact_acceptable"]
@@ -251,7 +254,7 @@ def _inject_body(ws: Path, case_id: str, body: str) -> None:
     storage.atomic_write_yaml(path, raw)
 
 
-def _compile(ws: Path):
+def _compile(ws: Path) -> Any:
     from daydream.benchmark.harbor import build
     return build.compile_workspace(ws)
 
@@ -312,7 +315,7 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     return m, bundle.read_bytes()
 
 
-def test_persisted_pull_request_field_set_is_validated():
+def test_persisted_pull_request_field_set_is_validated() -> None:
     """The import persists pull_request as a typed strict submodel; the full additive
     header field set (body, digests, html_url, merged/closed, head.ref) is present
     on a freshly built import and validated by the schema (predate reads empty)."""
@@ -327,7 +330,7 @@ def test_persisted_pull_request_field_set_is_validated():
     assert fields["head"].annotation is not None
 
 
-def test_spike_bundle_heads_is_exactly_base_head(tmp_path):
+def test_spike_bundle_heads_is_exactly_base_head(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot
     m, bundle_bytes = _seed_bare_bundle(tmp_path)
     (tmp_path / "b.bundle").write_bytes(bundle_bytes)
@@ -335,7 +338,7 @@ def test_spike_bundle_heads_is_exactly_base_head(tmp_path):
     assert heads == {"refs/heads/base", "refs/heads/head"}
 
 
-def test_derive_task_key_is_opaque_and_deterministic():
+def test_derive_task_key_is_opaque_and_deterministic() -> None:
     from daydream.benchmark.harbor import build
     case_id = "pr-000101-1a2b3c4d5e6f"
     k = build.derive_task_key(case_id)
@@ -346,7 +349,7 @@ def test_derive_task_key_is_opaque_and_deterministic():
     assert all(c in "0123456789abcdef" for c in k[len("case-"):])  # hex suffix
 
 
-def test_bounded_pr_context_short_no_truncation():
+def test_bounded_pr_context_short_no_truncation() -> None:
     from daydream.benchmark.harbor import build
     ctx = build.bounded_pr_context({"title": "Fix cache", "body": "narrowly scoped"})
     assert ctx == (
@@ -356,7 +359,7 @@ def test_bounded_pr_context_short_no_truncation():
     assert "[truncated" not in ctx
 
 
-def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks():
+def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     from daydream.benchmark.harbor import build
     emoji = "😀"  # 4 UTF-8 bytes
     body = "a" * 1000 + emoji * 50 + "Z" * 500            # ends on a 4-byte char
@@ -383,7 +386,7 @@ def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks():
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()   # stored normalized-body digest
 
 
-def test_bounded_pr_context_marker_emits_persisted_body_sha256():
+def test_bounded_pr_context_marker_emits_persisted_body_sha256() -> None:
     from daydream.benchmark.harbor import build
     body = "a" * 1000 + "\U0001F600" * 50 + "Z" * 500
     stored = hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -395,7 +398,7 @@ def test_bounded_pr_context_marker_emits_persisted_body_sha256():
     assert digest == stored                  # persisted normalized-body digest, not re-derived
 
 
-def test_bounded_pr_context_marker_falls_back_deterministically_without_digest():
+def test_bounded_pr_context_marker_falls_back_deterministically_without_digest() -> None:
     from daydream.benchmark.harbor import build
     body = "a" * 1000 + "Z" * 500
     ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=1021)
@@ -405,7 +408,7 @@ def test_bounded_pr_context_marker_falls_back_deterministically_without_digest()
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # predate: sha256(stored body)
 
 
-def test_bounded_pr_context_marker_never_interpolates_unvalidated_digest():
+def test_bounded_pr_context_marker_never_interpolates_unvalidated_digest() -> None:
     from daydream.benchmark.harbor import build
     body = "a" * 1000 + "\U0001F600" * 50 + "Z" * 500
     # a hand-edited raw case doc can set body_sha256 to anything (the compile
@@ -430,7 +433,7 @@ def test_bounded_pr_context_marker_never_interpolates_unvalidated_digest():
         assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def test_bounded_pr_context_marker_drops_inconsistent_persisted_digest():
+def test_bounded_pr_context_marker_drops_inconsistent_persisted_digest() -> None:
     from daydream.benchmark.harbor import build
     body = "a" * 1000 + "Z" * 500
     # a well-shaped digest that does not match the stored body (body edited
@@ -449,13 +452,13 @@ def test_bounded_pr_context_marker_drops_inconsistent_persisted_digest():
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def test_bounded_pr_context_missing_body_is_empty():
+def test_bounded_pr_context_missing_body_is_empty() -> None:
     from daydream.benchmark.harbor import build
     ctx = build.bounded_pr_context({"title": "Fix cache"})          # no body key
     assert "body: \n" in ctx and "[truncated" not in ctx
 
 
-def test_build_gold_list_is_provenance_free():
+def test_build_gold_list_is_provenance_free() -> None:
     from daydream.benchmark.harbor import build
     findings = [
         {"finding_id": "c" * 64, "title": "Cache", "body": "collides", "severity": "high",
@@ -467,7 +470,7 @@ def test_build_gold_list_is_provenance_free():
     ]
     gold = build.build_gold_list(findings, key="case-key")
     # compiled gold ids are the task-key-scoped digests, not the raw workspace ids
-    def _id(f):
+    def _id(f: dict[str, Any]) -> Any:
         loc = f["location"]
         payload = "\x1f".join(["case-key", str(f["title"]), str(f["body"]),
                                 str(f["severity"]), str(loc["path"]),
@@ -480,12 +483,12 @@ def test_build_gold_list_is_provenance_free():
     assert gold[0]["path"] == "src/render.py" and gold[0]["start_line"] == 10
 
 
-def test_build_gold_list_clean_is_empty():
+def test_build_gold_list_clean_is_empty() -> None:
     from daydream.benchmark.harbor import build
     assert build.build_gold_list([], key="case-key") == []
 
 
-def test_build_gold_list_accepts_locationless_and_emits_nulls():
+def test_build_gold_list_accepts_locationless_and_emits_nulls() -> None:
     from daydream.benchmark.harbor import build
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
     finding = {
@@ -505,7 +508,7 @@ def test_build_gold_list_accepts_locationless_and_emits_nulls():
     assert entry["finding_id"] != "a" * 64
 
 
-def test_build_gold_list_rejects_partially_populated_location():
+def test_build_gold_list_rejects_partially_populated_location() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
     with pytest.raises(CompileError):
@@ -516,7 +519,7 @@ def test_build_gold_list_rejects_partially_populated_location():
         }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
 
 
-def test_build_oracle_artifact_locationless_passes_validation():
+def test_build_oracle_artifact_locationless_passes_validation() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor import verifier_core as vc
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
@@ -530,10 +533,10 @@ def test_build_oracle_artifact_locationless_passes_validation():
     assert vc.validate_candidate_artifact(art)  # round-trips; candidate_id matches derived
 
 
-def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids():
+def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor import verifier_core as vc
-    findings = [
+    findings: list[dict[str, Any]] = [
         {"finding_id": "b" * 64, "title": "Cache", "body": "collides", "severity": "high",
          "location": {"path": "src/cache.py", "start_line": 42, "end_line": 42},
          "provenance": {"kind": "historical", "source_ids": ["github:review:1"]}},
@@ -553,7 +556,7 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids():
         for f in sorted(findings, key=lambda f: f["finding_id"])
     ]
     expected_ids = []
-    groups: dict[tuple, int] = {}
+    groups: dict[tuple[Any, ...], int] = {}
     for f in flat:
         canon = (f["title"], f["body"], f["severity"] or "", f["path"], f["start_line"], f["end_line"])
         ordinal = groups.get(canon, 0)
@@ -568,7 +571,7 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids():
     assert vc.validate_candidate_artifact(art)
 
 
-def test_build_oracle_artifact_clean_has_empty_findings():
+def test_build_oracle_artifact_clean_has_empty_findings() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor import verifier_core as vc
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
@@ -577,7 +580,7 @@ def test_build_oracle_artifact_clean_has_empty_findings():
     assert vc.validate_candidate_artifact(art) == []
 
 
-def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp_path):
+def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import build
     dst = tmp_path / "case"
     build._copy_assets(dst)
@@ -594,12 +597,12 @@ def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp
         build._TEMPLATE_DIR / "tests" / "score_review.py").read_bytes()
 
 
-def _load_json(path: Path):
+def _load_json(path: Path) -> Any:
     import json as _json
     return _json.loads(path.read_bytes())
 
 
-def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh):
+def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor import verifier_core as vc
@@ -666,7 +669,7 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
         assert lock["files"][rel] == hashlib.sha256(data).hexdigest()
 
 
-def test_compile_lock_records_requested_base_sha(tmp_path, fake_gh):
+def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The compiled lock row + authoring-input digest carry the corrected base provenance:
     ``requested_base_sha`` alongside the merge-base ``original_base_sha``, with the
     digest deterministic across recomputes.
@@ -697,14 +700,14 @@ def test_compile_lock_records_requested_base_sha(tmp_path, fake_gh):
     assert build._authoring_input_digest({case_id: moved}, manifest) != lock["authoring_input_digest"]
 
 
-def test_clean_attested_draft_does_not_compile(tmp_path, fake_gh):
+def test_clean_attested_draft_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean
     with pytest.raises(build.CompileError):
         build.compile_workspace(ws)
 
 
-def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):
+def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor import verifier_core as vc
@@ -718,7 +721,7 @@ def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):
     assert lock["cases"][key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
 
 
-def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path, fake_gh):
+def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A ready empty-gold case with no clean attestation must not compile.
 
     mark_ready refuses to final-attest an empty gold set that was never
@@ -744,7 +747,7 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path, f
     assert not (ws / "harbor").exists()    # failed compile leaves no bundle
 
 
-def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path, fake_gh):
+def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor.build import compile_workspace
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     # inject a long, Unicode, delimiter-bearing body into the case doc
@@ -769,7 +772,7 @@ def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path, fake_gh):
             assert "secret-sentinel-7f3c" not in p.read_text(errors="replace")
 
 
-def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path, fake_gh):
+def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor.build import CompileError, compile_workspace
     from daydream.benchmark.storage import WorkspaceCorrupt
@@ -810,12 +813,12 @@ def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path, fake_g
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # truthful attestation
 
 
-def test_compile_never_refetches_live_pr_text(tmp_path, fake_gh, monkeypatch):
+def test_compile_never_refetches_live_pr_text(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.harbor.build import compile_workspace
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
 
-    def boom(*a, **k):
+    def boom(*a: Any, **k: Any) -> None:
         raise AssertionError("compile must not fetch live PR text")
 
     monkeypatch.setattr(gi, "fetch_and_normalize", boom)
@@ -823,7 +826,7 @@ def test_compile_never_refetches_live_pr_text(tmp_path, fake_gh, monkeypatch):
     assert lock["cases"]
 
 
-def test_compile_fails_closed_on_missing_pr_number(tmp_path, fake_gh):
+def test_compile_fails_closed_on_missing_pr_number(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor.build import CompileError, compile_workspace
     from daydream.benchmark.storage import WorkspaceCorrupt
@@ -836,7 +839,7 @@ def test_compile_fails_closed_on_missing_pr_number(tmp_path, fake_gh):
         compile_workspace(ws)
 
 
-def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path, fake_gh):
+def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor import build
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock1 = build.compile_workspace(ws)
@@ -850,7 +853,7 @@ def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path, fake_
     assert "created_at" not in lock_text and "timestamp" not in lock_text
 
 
-def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path, fake_gh):
+def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -874,7 +877,7 @@ def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path, fake_
     assert list(lock_a["cases"].keys()) == sorted(lock_a["cases"].keys())
 
 
-def test_staging_failure_preserves_prior_tree(tmp_path, fake_gh, monkeypatch):
+def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
@@ -893,7 +896,7 @@ def test_staging_failure_preserves_prior_tree(tmp_path, fake_gh, monkeypatch):
     assert not (ws / "cache" / "harbor-build-stage").exists()  # no stage residue at the output
 
 
-def test_leakage_scan_covers_task_toml_and_job_configs():
+def test_leakage_scan_covers_task_toml_and_job_configs() -> None:
     from daydream.benchmark.harbor import build
 
     cases = {
@@ -908,7 +911,7 @@ def test_leakage_scan_covers_task_toml_and_job_configs():
     assert "harbor-job.yaml" in str(rejected.value)
 
 
-def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token():
+def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
     cases = {
@@ -931,7 +934,7 @@ def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token():
         assert "pr-000101" in msg or "gold_status" in msg     # names a forbidden token
 
 
-def test_leakage_scan_permits_bounded_block_raw_text():
+def test_leakage_scan_permits_bounded_block_raw_text() -> None:
     from daydream.benchmark.harbor import build
     instr = (
         "assignment text\n"
@@ -943,7 +946,7 @@ def test_leakage_scan_permits_bounded_block_raw_text():
     build.leakage_scan({"case-x/instruction.md": instr}, repository_slug="o/r")   # no raise
 
 
-def test_leakage_scan_rejects_clean_readme():
+def test_leakage_scan_rejects_clean_readme() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
     # clean marker leaks into a README
@@ -955,7 +958,7 @@ def test_leakage_scan_rejects_clean_readme():
         assert "clean_attested" in str(exc)
 
 
-def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path):
+def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import build
     m, bundle_bytes = _seed_bare_bundle(tmp_path)
     bp = tmp_path / "b.bundle"
@@ -963,7 +966,7 @@ def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path):
     build.validate_bundle_inventory(bp)
 
 
-def test_validate_bundle_inventory_rejects_extra_ref(tmp_path):
+def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
     import subprocess as _subprocess
 
     from daydream.benchmark.harbor import build
@@ -984,7 +987,7 @@ def test_validate_bundle_inventory_rejects_extra_ref(tmp_path):
         assert "ref" in str(exc)
 
 
-def test_compiled_tree_contains_no_raw_authoring_files(tmp_path, fake_gh):
+def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     build.compile_workspace(ws)
@@ -998,7 +1001,7 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path, fake_gh):
     assert all(r.startswith("case-") or r in root_files for r in rels)
 
 
-def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
+def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
@@ -1014,7 +1017,7 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
         assert case_id in str(exc)
 
 
-def test_compile_skips_excluded_cases(tmp_path, fake_gh):
+def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
     from daydream.benchmark.harbor import build
 
@@ -1031,7 +1034,7 @@ def test_compile_skips_excluded_cases(tmp_path, fake_gh):
     assert not (ws / "harbor" / excluded_key).exists()
 
 
-def test_compiled_findings_oracle_scores_reward_1(sr_module, tmp_path, fake_gh) -> None:
+def test_compiled_findings_oracle_scores_reward_1(sr_module: Any, tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     key = build.derive_task_key(case_id)
@@ -1039,7 +1042,7 @@ def test_compiled_findings_oracle_scores_reward_1(sr_module, tmp_path, fake_gh) 
     case = ws / "harbor" / key
 
     class MatchClient:
-        async def complete_json(self, *, user, system, max_tokens):
+        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
             return {"match": True, "confidence": 1.0, "reasoning": "identical"}
 
     gold_path = case / "tests" / "golden-review.json"
@@ -1054,7 +1057,11 @@ def test_compiled_findings_oracle_scores_reward_1(sr_module, tmp_path, fake_gh) 
     assert reward.reward == 1.0 and reward.verifier_error == 0
 
 
-def test_compile_uses_shared_model_gated_loader(tmp_path, fake_gh, monkeypatch):
+def test_compile_uses_shared_model_gated_loader(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Prove the compile path now loads cases through the workspace shared loader.
     import daydream.benchmark.workspace as ws_mod
     from daydream.benchmark.harbor import build
@@ -1062,7 +1069,7 @@ def test_compile_uses_shared_model_gated_loader(tmp_path, fake_gh, monkeypatch):
     calls = []
     orig = ws_mod.load_case_documents
 
-    def spy(root, manifest):
+    def spy(root: Any, manifest: Any) -> Any:
         calls.append(1)
         return orig(root, manifest)
 
@@ -1077,7 +1084,7 @@ def test_compile_uses_shared_model_gated_loader(tmp_path, fake_gh, monkeypatch):
     assert lock["cases"][key]["case_id"] == case_id
 
 
-def test_render_task_spec_is_deterministic_and_sectioned(tmp_path, fake_gh):
+def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)  # after Task 4, this already sets a digest
@@ -1104,7 +1111,7 @@ def test_render_task_spec_is_deterministic_and_sectioned(tmp_path, fake_gh):
     assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
 
 
-def test_compile_writes_task_md_and_inventories_its_digest(tmp_path, fake_gh):
+def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_gh: FakeGh) -> None:
     import hashlib
 
     from daydream.benchmark import storage
@@ -1129,7 +1136,7 @@ def test_compile_writes_task_md_and_inventories_its_digest(tmp_path, fake_gh):
     assert not any(r.startswith("environment/") and r.endswith("Task.md") for r in rels)
 
 
-def test_spec_change_forces_recompile(tmp_path, fake_gh):
+def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
     import hashlib
 
     from daydream.benchmark import curation as cu
@@ -1163,7 +1170,7 @@ def test_spec_change_forces_recompile(tmp_path, fake_gh):
     assert lock2["cases"][key]["task_spec_sha256"] != lock1["cases"][key]["task_spec_sha256"]
 
 
-def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers():
+def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> None:
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
     prose = ("## Purpose\nreview the change\n## Scoring contract\n"
@@ -1178,7 +1185,7 @@ def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers():
         assert "Task.md" in str(exc)
 
 
-def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh):
+def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     build.compile_workspace(ws)
@@ -1197,7 +1204,7 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh)
     }, f"unexpected environment files: {env_files}"
 
 
-def test_compiled_policy_comes_from_workspace_allowlists(tmp_path, fake_gh):
+def test_compiled_policy_comes_from_workspace_allowlists(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The compiled task TOML's agent/verifier host policies are populated from the
     workspace's persisted privacy allowlists (reviewer -> [agent].allowed_hosts,
     judge -> [verifier.environment].allowed_hosts), kept as separate boundaries."""
@@ -1216,7 +1223,7 @@ def test_compiled_policy_comes_from_workspace_allowlists(tmp_path, fake_gh):
     assert "h2.example.com" not in doc["agent"]["allowed_hosts"]
 
 
-def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path, fake_gh):
+def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The OpenRouter workspace resolves both persisted allowlists to
     ``openrouter.ai``; the compiled task.toml carries that host in both egress
     boundaries and the control-plane leakage scan does not flag a bare
@@ -1239,7 +1246,7 @@ def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path, fake_gh):
     assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
 
 
-def test_compile_rejects_disallowed_judge_host(tmp_path, fake_gh):
+def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A malformed judge host must fail compilation (fail closed), never be
     silently normalized or defaulted.
     """
@@ -1254,7 +1261,7 @@ def test_compile_rejects_disallowed_judge_host(tmp_path, fake_gh):
         build.compile_workspace(ws)
 
 
-def test_policy_change_alters_compiled_digest(tmp_path, fake_gh):
+def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Changing a persisted privacy allowlist changes the compiled task.toml bytes
     (and thus the lock's files inventory -> lock bytes -> compiled_lock_sha256), so
     an existing Oracle receipt is invalidated by a network-policy change."""

@@ -1,16 +1,18 @@
 """Privacy-safe Daydream Harbor review agent (issue #780) tests."""
-
 from __future__ import annotations
 
 import importlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from tests.harness.fake_gh import FakeGh
 
-def test_spike_task_toml_env_carries_case_key(tmp_path, fake_gh):
+
+def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Task 0 spike: a per-case task.toml [environment].env block transmits the
     opaque case key through a real compile, stays byte-deterministic, and is
     accepted by Harbor's Task model (skip-guarded: Harbor is an optional extra)."""
@@ -49,7 +51,7 @@ def test_spike_task_toml_env_carries_case_key(tmp_path, fake_gh):
 # ---------------------------------------------------------------------------
 
 
-def test_build_candidate_findings_maps_and_skips():
+def test_build_candidate_findings_maps_and_skips() -> None:
     from daydream.benchmark.harbor import candidate
     from daydream.benchmark.harbor import verifier_core as vc
 
@@ -83,7 +85,7 @@ def test_build_candidate_findings_maps_and_skips():
     assert findings[1]["candidate_id"] != findings[2]["candidate_id"]
 
 
-def test_build_candidate_findings_enforces_verifier_bounds_fail_closed():
+def test_build_candidate_findings_enforces_verifier_bounds_fail_closed() -> None:
     from daydream.benchmark.harbor import candidate
 
     case_id = "case-abc123def456"
@@ -115,7 +117,7 @@ def test_build_candidate_findings_enforces_verifier_bounds_fail_closed():
 # ---------------------------------------------------------------------------
 
 
-def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path):
+def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import candidate
     from daydream.benchmark.harbor import verifier_core as vc
 
@@ -139,7 +141,7 @@ def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path):
     assert list(dest.parent.glob("review.json*")) == [dest]
 
 
-def test_artifact_write_failure_raises(tmp_path):
+def test_artifact_write_failure_raises(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import candidate
 
     dest = tmp_path / "adir"                                # a directory -> replace fails
@@ -154,7 +156,7 @@ def test_artifact_write_failure_raises(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_render_task_toml_host_policy_and_case_env():
+def test_render_task_toml_host_policy_and_case_env() -> None:
     from daydream.benchmark.harbor import package as pkg
 
     toml = pkg.render_task_toml(
@@ -181,7 +183,7 @@ def test_render_task_toml_host_policy_and_case_env():
     assert "DAYDREAM_JUDGE" not in toml and "HF_TOKEN" not in toml and "GITHUB_TOKEN" not in toml
 
 
-def test_render_task_toml_keeps_agent_verifier_host_boundaries():
+def test_render_task_toml_keeps_agent_verifier_host_boundaries() -> None:
     from daydream.benchmark.harbor import package as pkg
 
     toml = pkg.render_task_toml(
@@ -202,7 +204,7 @@ def test_render_task_toml_keeps_agent_verifier_host_boundaries():
 # ---------------------------------------------------------------------------
 
 
-def test_entrypoint_build_run_config_is_controlled():
+def test_entrypoint_build_run_config_is_controlled() -> None:
     from daydream.benchmark.harbor import entrypoint
     from daydream.config_file import DaydreamFileConfig
 
@@ -224,7 +226,7 @@ def test_entrypoint_build_run_config_is_controlled():
     assert cfg.file_config == DaydreamFileConfig()
 
 
-def test_entrypoint_backend_fail_closed(monkeypatch):
+def test_entrypoint_backend_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark.harbor import entrypoint
 
     monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "codex")
@@ -238,7 +240,7 @@ def test_entrypoint_backend_fail_closed(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_entrypoint_publish_failure_modes(tmp_path):
+def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import candidate, entrypoint
 
     # missing merged output -> fail-closed, never a silent clean review
@@ -296,7 +298,7 @@ def test_entrypoint_publish_failure_modes(tmp_path):
 import subprocess  # noqa: E402
 
 
-def test_agent_package_import_does_not_pull_harbor():
+def test_agent_package_import_does_not_pull_harbor() -> None:
     """Importing the daydream.benchmark package must not import Harbor (a lazy,
     optional extra); ``daydream/benchmark/__init__.py`` keeps exporting only stable
     schema/service types."""
@@ -309,7 +311,7 @@ def test_agent_package_import_does_not_pull_harbor():
     assert out.returncode == 0, f"harbor imported eagerly:\n{out.stdout}{out.stderr}"
 
 
-def test_agent_lifecycle_and_lazy_harbor():
+def test_agent_lifecycle_and_lazy_harbor() -> None:
     from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     assert DaydreamReviewAgent.SUPPORTS_ATIF is True
@@ -318,7 +320,7 @@ def test_agent_lifecycle_and_lazy_harbor():
     assert isinstance(DaydreamReviewAgent.version(), str)
 
 
-def test_agent_setup_confirms_version_and_backend(tmp_path):
+def test_agent_setup_confirms_version_and_backend(tmp_path: Path) -> None:
     import pytest
 
     pytest.importorskip("harbor")
@@ -331,7 +333,7 @@ def test_agent_setup_confirms_version_and_backend(tmp_path):
     )
 
     class Env:
-        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
             self.captured = command
             return ExecResult(return_code=0, stdout="ok", stderr="")
 
@@ -343,7 +345,7 @@ def test_agent_setup_confirms_version_and_backend(tmp_path):
     assert "shutil.which('pi')" in env.captured      # and the required Pi CLI
 
 
-def test_agent_setup_nonzero_exec_fails(tmp_path):
+def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
     """A failed setup probe surfaces as a typed failure, never a silent pass."""
     import pytest
 
@@ -355,7 +357,7 @@ def test_agent_setup_nonzero_exec_fails(tmp_path):
     agent = DaydreamReviewAgent(logs_dir=tmp_path)
 
     class Env:
-        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
             self.captured = command
             return ExecResult(return_code=1, stdout="", stderr="boom")
 
@@ -386,7 +388,7 @@ _BANNED = [
 ]
 
 
-def test_build_child_env_is_exact_allowlist():
+def test_build_child_env_is_exact_allowlist() -> None:
     from daydream.benchmark.harbor.agent import build_child_env
 
     parent = {
@@ -417,7 +419,7 @@ def test_build_child_env_is_exact_allowlist():
     )
 
 
-def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path):
+def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: Path) -> None:
     import pytest
 
     pytest.importorskip("harbor")
@@ -446,7 +448,7 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path):
     )
 
     class Env:
-        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
             self.captured = (command, cwd, env)
             return ExecResult(return_code=0, stdout="", stderr="")
 
@@ -466,7 +468,7 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_populate_context_from_trajectory_final_metrics(tmp_path):
+def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
     import pytest
 
     pytest.importorskip("harbor")
@@ -498,7 +500,7 @@ def test_populate_context_from_trajectory_final_metrics(tmp_path):
     assert ctx.cost_usd == 0.42
 
 
-def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path):
+def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
     import pytest
 
     pytest.importorskip("harbor")
@@ -512,7 +514,7 @@ def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path):
     assert ctx.is_empty()  # metrics stay unset; no fabricated values
 
 
-def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path):
+def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
     import pytest
 
     pytest.importorskip("harbor")
@@ -534,7 +536,11 @@ def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_validate_compiled_imports_agent_path_same_interpreter(tmp_path, fake_gh, monkeypatch):
+def test_validate_compiled_imports_agent_path_same_interpreter(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import importlib
 
     import pytest
@@ -554,7 +560,7 @@ def test_validate_compiled_imports_agent_path_same_interpreter(tmp_path, fake_gh
     # A separate/missing environment fails before a trial with remediation.
     real_import = importlib.import_module
 
-    def broken(name, *a, **k):
+    def broken(name: str, *a: Any, **k: Any) -> Any:
         if name == "daydream.benchmark.harbor.agent":
             raise ModuleNotFoundError("no module named 'daydream.benchmark.harbor.agent'")
         return real_import(name, *a, **k)
@@ -623,7 +629,7 @@ def _end_env(repo: Path, tmp: Path, case_id: str) -> dict[str, str]:
     }
 
 
-def test_end_to_end_findings_and_clean_review(tmp_path, monkeypatch):
+def test_end_to_end_findings_and_clean_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A real temp git repo/task plus a fake backend drives the production entrypoint
     through the in-process runner and publishes the exact findings and an explicit
     empty review (AC 3 / AC 5 gate)."""
@@ -690,7 +696,9 @@ class Executed:
 
 
 def test_local_harbor_task_with_fake_backend(
-    tmp_path: Path, fake_gh: object, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AC 5 gate: compile a real Harbor task with the custom agent, validate it
     in the same interpreter, then execute a local fake-backend Harbor trial
@@ -762,7 +770,12 @@ def test_local_harbor_task_with_fake_backend(
 
     class Env:
         async def exec(
-            self, command, cwd=None, env=None, timeout_sec=None, user=None
+            self,
+            command: Any,
+            cwd: Any=None,
+            env: Any=None,
+            timeout_sec: Any=None,
+            user: Any=None,
         ) -> ExecResult:
             if "entrypoint" in command:
                 # Harbor injects the per-case child env into the container;

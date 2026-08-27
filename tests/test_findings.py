@@ -1,15 +1,17 @@
 """Tests for the findings artifact (build/write/load) in `daydream/findings.py`."""
-
 import json
 import re
 import subprocess
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from daydream import git_ops
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.findings import (
     FINDINGS_SCHEMA_VERSION,
     MAX_ARTIFACT_BYTES,
@@ -23,7 +25,7 @@ from daydream.runner import RunConfig, run
 from tests.harness.phase_backend import PhaseDispatchBackend
 
 
-def test_build_artifact_declares_target_envelope(tmp_path) -> None:
+def test_build_artifact_declares_target_envelope(tmp_path: Path) -> None:
     """build_findings_artifact stamps the PR identity envelope and passes each
     issue's fingerprint through. A cross-stack issue routes to body placement
     without touching the diff, so no git/collaborator mocking is needed; inline
@@ -39,7 +41,7 @@ def test_build_artifact_declares_target_envelope(tmp_path) -> None:
     assert (f["fingerprint"], f["placement"], f["line"]) == ("f" * 64, "body", None)
 
 
-def test_write_artifact_round_trips(tmp_path) -> None:
+def test_write_artifact_round_trips(tmp_path: Path) -> None:
     path = tmp_path / "findings.json"
     write_findings_artifact(path, {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r",
                                    "pr_number": 7, "head_sha": "h" * 40, "findings": []})
@@ -50,7 +52,7 @@ def test_write_artifact_round_trips(tmp_path) -> None:
 
 
 @pytest.fixture
-def valid_artifact() -> dict:
+def valid_artifact() -> dict[str, Any]:
     """Artifact dict with one inline finding."""
     return {
         "schema_version": FINDINGS_SCHEMA_VERSION,
@@ -81,7 +83,12 @@ def valid_artifact() -> dict:
     (lambda a: a.update(unexpected=1), "schema"),
     (lambda a: a["findings"][0].update(fingerprint="nope"), "schema"),
 ])
-def test_load_rejects_invalid_artifacts(tmp_path, valid_artifact, mutate, match) -> None:
+def test_load_rejects_invalid_artifacts(
+    tmp_path: Path,
+    valid_artifact: dict[str, Any],
+    mutate: Any,
+    match: Any,
+) -> None:
     mutate(valid_artifact)
     p = tmp_path / "f.json"
     p.write_text(json.dumps(valid_artifact))
@@ -90,7 +97,7 @@ def test_load_rejects_invalid_artifacts(tmp_path, valid_artifact, mutate, match)
                                expected_head_sha="h" * 40)
 
 
-def test_load_rejects_oversized_artifact(tmp_path) -> None:
+def test_load_rejects_oversized_artifact(tmp_path: Path) -> None:
     p = tmp_path / "f.json"
     p.write_text("[" + " " * MAX_ARTIFACT_BYTES)
     with pytest.raises(FindingsValidationError, match="size"):
@@ -102,7 +109,13 @@ def test_load_rejects_oversized_artifact(tmp_path) -> None:
 
 
 @contextmanager
-def _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr):
+def _review_run_env(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    out: Any,
+    backend: Any,
+    pr: Any,
+) -> Iterator[Any]:
     """Shared `--review --findings-out` real-path setup: env, config, patch stack.
 
     Clears the GitHub App env, builds the review-mode RunConfig, and patches the
@@ -119,7 +132,11 @@ def _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr):
         yield config
 
 
-async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeypatch, tmp_path):
+async def test_review_mode_writes_findings_artifact(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """`--review --findings-out` writes a fingerprinted artifact pinned to the PR.
 
     Enters from ``runner.run`` with a real temp git repo and a scripted backend
@@ -174,8 +191,10 @@ async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeyp
 
 
 async def test_review_mode_errored_agent_never_writes_clean_artifact(
-    feature_branch_repo, monkeypatch, tmp_path
-):
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """A backend error must abort the review run, not produce an empty artifact.
 
     Regression guard for the sandbox acceptance failure: with an invalid
@@ -193,14 +212,22 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
     class ErroringBackend:
         model = None
 
-        async def execute(self, cwd, prompt, output_schema=None, continuation=None,
-                          agents=None, max_turns=None, read_only=False):
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: Any,
+            output_schema: Any=None,
+            continuation: Any=None,
+            agents: Any=None,
+            max_turns: Any=None,
+            read_only: Any=False,
+        ) -> AsyncIterator[AgentEvent]:
             yield TextEvent(text="Invalid API key · Fix external API key")
             raise ClaudeAgentError(
                 "Claude agent run failed: Invalid API key · Fix external API key"
             )
 
-        async def cancel(self):
+        async def cancel(self) -> None:
             pass
 
     head = git_ops.head_sha(feature_branch_repo)

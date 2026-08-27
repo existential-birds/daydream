@@ -18,11 +18,11 @@ Public surface:
 * ``force_interactive`` -- pin a TTY stdin and unset ``CI`` so a test drives the
   real interactive prompt path.
 """
-
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ import anyio
 import pytest
 
 from daydream.backends import (
+    AgentEvent,
     ContinuationToken,
     MaxTurnsError,
     ResultEvent,
@@ -334,7 +335,7 @@ class StubBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         call = {
             "cwd": cwd,
             "prompt": prompt,

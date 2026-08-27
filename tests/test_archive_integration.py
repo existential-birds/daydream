@@ -5,13 +5,13 @@ Verifies that the on_write callback fires at the right times, that the full
 archive round-trip produces valid bundles, and that CLI flags for --no-archive
 and --no-eval are parsed correctly into RunConfig.
 """
-
 from __future__ import annotations
 
 import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -160,7 +160,9 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("run_flow", [DaydreamRunFlow.NORMAL, DaydreamRunFlow.IMPROVE])
 async def test_full_archive_round_trip_fix_test_backend_columns(
-    tmp_path: Path, archive_dir: Path, run_flow: DaydreamRunFlow,
+    tmp_path: Path,
+    archive_dir: Path,
+    run_flow: DaydreamRunFlow,
 ) -> None:
     """Real-path round-trip: IMPROVE omits fix/test_backend (keys + NULL SQL
     columns); NORMAL (deep-family) records both (keys present + non-NULL)."""
@@ -229,12 +231,14 @@ def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # HF upload hook fires through the archive callback when configured
 async def test_archive_callback_uploads_to_hub_when_configured(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A configured trajectory_hub_repo makes _archive_run_inner call the uploader after manifest write."""
     from daydream.runner import RunConfig, _make_archive_callback
 
-    uploaded: list[tuple] = []
+    uploaded: list[tuple[Any, ...]] = []
 
     def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
         uploaded.append((str(run_dir), repo_id, session_id))
@@ -279,8 +283,12 @@ async def test_archive_callback_uploads_to_hub_when_configured(
     (".daydream.toml", 'trajectory_hub_repo = "evil/repo"\n', True),
 ])
 async def test_archive_callback_does_not_upload_when_unconfigured(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
-    filename: str | None, body: str | None, set_hf_token: bool,
+    tmp_path: Path,
+    archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str | None,
+    body: str | None,
+    set_hf_token: bool,
 ) -> None:
     """Without an operator-configured trajectory_hub_repo, the uploader is never called.
 
@@ -292,7 +300,7 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
     from tests.harness.trajectory import make_recorder
     from tests.test_archive_integration import _add_user_step
 
-    calls: list = []
+    calls: list[Any] = []
     if set_hf_token:
         monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
@@ -323,14 +331,16 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
 
 # Signal-flush (partial) archives must never trigger the blocking HF upload
 async def test_archive_callback_partial_status_skips_hf_upload(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A partial (signal-flush) archive never uploads; a complete one does."""
     from daydream.runner import RunConfig, _make_archive_callback
     from tests.harness.trajectory import make_recorder
     from tests.test_archive_integration import _add_user_step
 
-    uploaded: list[tuple] = []
+    uploaded: list[tuple[Any, ...]] = []
 
     def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
         uploaded.append((str(run_dir), repo_id, session_id))
@@ -372,14 +382,16 @@ async def test_archive_callback_partial_status_skips_hf_upload(
 
 # --no-archive + --dump-artifacts: bundle still dumped, upload never fires
 async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--no-archive with --dump-artifacts still copies the bundle to the dump dir but never uploads."""
     from daydream.runner import RunConfig, _make_archive_callback
     from tests.harness.trajectory import make_recorder
     from tests.test_archive_integration import _add_user_step
 
-    uploaded: list = []
+    uploaded: list[Any] = []
 
     def _fake_upload(*args: object, **kwargs: object) -> bool:
         uploaded.append(args)
@@ -417,7 +429,8 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
 
 # Recorder → archive redaction parity (issue #455, Task 3)
 async def test_runner_archive_round_trip_redacts_structured_tool_credentials(
-    tmp_path: Path, archive_dir: Path,
+    tmp_path: Path,
+    archive_dir: Path,
 ) -> None:
     """A structured tool call under a sensitive key is redacted identically in the
     live trajectory and the archived copy; both pass the ATIF validator."""

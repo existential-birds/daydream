@@ -5,11 +5,12 @@ phase while a ``rec.invocation(...)`` scope is open, and returns ``None`` outsid
 any invocation. No private-list (``_active_invocations``) access in the test —
 this is the public read-seam the replay harness keys on.
 """
+from pathlib import Path
 
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
 
-async def test_current_phase_tracks_active_invocation(tmp_path):
+async def test_current_phase_tracks_active_invocation(tmp_path: Path) -> None:
     rec = TrajectoryRecorder(
         path=tmp_path / "t.json",
         run_flow=DaydreamRunFlow.NORMAL,

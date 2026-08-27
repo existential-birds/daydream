@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import anyio
 import pytest
 
+from daydream.runner import RunConfig
 from tests.harness.stub_backend import install_stub_backend, silence
 
 
@@ -30,8 +32,11 @@ def _test_step_stop_reasons(run_root: Path, traj: Path) -> list[str]:
 
 
 async def test_budget_truncated_stack_lands_in_failed_stacks(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config, mute_side_effects,
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """A truncated per-stack review is recorded as a failure, not a success."""
     from daydream.runner import run
@@ -56,8 +61,11 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
 
 
 async def test_runaway_test_turn_is_bounded_and_reaches_abort(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config, mute_side_effects,
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """A hung test turn is capped, so the run reaches the heal/abort path."""
     from daydream.runner import run

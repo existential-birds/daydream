@@ -590,7 +590,7 @@ def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
         "daydream.runner.prompt_user", lambda *a, **kw: "n", raising=False,
     )
 
-    def _agent_prompt(console, message: str, default: str = "") -> str:  # noqa: ARG001
+    def _agent_prompt(console: Any, message: str, default: str = "") -> str:  # noqa: ARG001
         # Decline the fix gate (proceed to PR post without fixes); approve PR post.
         if "apply fixes" in message.lower() or "apply fix" in message.lower():
             return "n"

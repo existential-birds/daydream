@@ -6,7 +6,6 @@ exactly what the deterministic commits produce, so every freeze path runs
 against the real object store. Only the import-gating tests (in
 ``test_benchmark_import_prs``) go through the ``fake_gh`` network boundary.
 """
-
 from __future__ import annotations
 
 import os
@@ -14,6 +13,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,7 +58,7 @@ def _write(repo: Path, name: str, content: str | bytes) -> None:
     _git(repo, "add", name)
 
 
-def _seed_origin(tmp_path: Path) -> Path:
+def _seed_origin(tmp_path: Path) -> str:
     """Bare origin: main (base1->base2->base3) + "refs/pull/1/head" off base2."""
     repo = tmp_path / "seed_wt"
     repo.mkdir()
@@ -81,10 +81,10 @@ def _seed_origin(tmp_path: Path) -> Path:
     _git(repo, "remote", "add", "origin", str(bare))
     _git(repo, "push", "origin", "main:main")
     _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
-    return bare
+    return str(bare)
 
 
-def _seed_two_pr_origin(tmp_path: Path) -> tuple[Path, str, str]:
+def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     """Bare origin with two PRs on unrelated ancestries: main(base1->base2->base3)
     with refs/pull/1/head off base2, plus a diverged `dev` branch (off base1) whose
     first commit is PR2's base tip and second commit is PR2's head. Returns
@@ -119,7 +119,7 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[Path, str, str]:
     _git(repo, "push", "origin", "main:main", "dev:dev")
     _git(repo, "push", "origin", f"{pr1_head}:refs/pull/1/head", check=False)
     _git(repo, "push", "origin", f"{pr2_head}:refs/pull/2/head", check=False)
-    return bare, dev_tip, pr2_head
+    return str(bare), dev_tip, pr2_head
 
 
 # Deterministic SHAs/trees produced by ``_seed_origin`` (verified at seed build).
@@ -146,7 +146,7 @@ def _seed_head_tree() -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_mirror_and_fetch_pr_head(tmp_path):
+def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
@@ -168,7 +168,7 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_ancestor_of_pr_head_enforced(tmp_path):
+def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)   # base3 reachable via main, NOT an ancestor of the PR head
@@ -188,7 +188,7 @@ def test_ancestor_of_pr_head_enforced(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_base_and_trees(tmp_path):
+def test_resolve_base_and_trees(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
@@ -198,7 +198,9 @@ def test_resolve_base_and_trees(tmp_path):
     m = sn.mirror(tmp_path)
     base = sn.resolve_original_base(m, "refs/heads/base_tip", _SHA_HEAD)
     assert base == _SHA_BASE2
-    bt, ht = sn.resolve_trees(m, base, _SHA_HEAD)
+    trees = sn.resolve_trees(m, base, _SHA_HEAD)
+    assert isinstance(trees, tuple)
+    bt, ht = trees
     assert bt == _seed_base_tree() and ht == _seed_head_tree()
     assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
 
@@ -208,7 +210,7 @@ def test_resolve_base_and_trees(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_degenerate_equal_trees_and_canonical_diff(tmp_path):
+def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
@@ -227,8 +229,9 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_bundle_two_refs_deterministic(tmp_path):
+def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
+    from daydream.benchmark import storage
 
     origin = _seed_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -244,9 +247,9 @@ def test_bundle_two_refs_deterministic(tmp_path):
     assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _seed_head_tree()
     assert sn.rev_parse(m, f"{head_commit}^") == base_commit           # single parent
     # determinism: rebuild and compare bytes against the first build's hash
-    first = sn.storage.sha256_file(bundle)
+    first = storage.sha256_file(bundle)
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    assert sn.storage.sha256_file(bundle) == first
+    assert storage.sha256_file(bundle) == first
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +257,7 @@ def test_bundle_two_refs_deterministic(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_canonical_diff_digest_is_abbreviation_stable(tmp_path):
+def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
     """The same base/head pair hashes identically whether the diff runs in a
     mirror whose effective core.abbrev is widened past the clone's. Failing-by-
     construction: pre-fix the mirror's 12-hex index lines mismatch the clone's
@@ -276,7 +279,7 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path):
                               workdir=tmp_path)
 
 
-def test_git_fetch_wires_command_scoped_credential_helper(tmp_path, monkeypatch):
+def test_git_fetch_wires_command_scoped_credential_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
@@ -284,9 +287,9 @@ def test_git_fetch_wires_command_scoped_credential_helper(tmp_path, monkeypatch)
     git_ops._run_git(tmp_path, ["init", "--bare", str(mirror)], retries=0)
     captured: dict[str, list[str]] = {}
 
-    real_run = git_ops.subprocess.run
+    real_run = subprocess.run
 
-    def spy(args, *pargs, **kwargs):
+    def spy(args: Any, *pargs: Any, **kwargs: Any) -> Any:
         grg = list(args)
         if grg[:1] == ["git"] and "fetch" in grg:
             captured["argv"] = grg
@@ -298,7 +301,7 @@ def test_git_fetch_wires_command_scoped_credential_helper(tmp_path, monkeypatch)
     assert "-c" in argv and any(a.startswith("credential.helper=!gh auth git-credential") for a in argv)
 
 
-def test_offline_clone_validates(tmp_path):
+def test_offline_clone_validates(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     origin = _seed_origin(tmp_path)
@@ -318,7 +321,7 @@ def test_offline_clone_validates(tmp_path):
                                   workdir=tmp_path)
 
 
-def test_offline_clone_fidelity_rejects_tampering(tmp_path):
+def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
     """Acceptance (b/c) at unit level: the offline-clone fidelity contract
     rejects every structurally-distinct tampered bundle shape (extra ref,
     extra reachable commit, wrong parent, wrong tree) while a valid bundle
@@ -400,7 +403,7 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_freeze_one_ready_and_reasons(tmp_path):
+def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
     from daydream.benchmark.schema import case_id_for
 
@@ -436,7 +439,7 @@ def test_freeze_one_ready_and_reasons(tmp_path):
     assert ur2["bundle_file"] is None
 
 
-def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path):
+def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path: Path) -> None:
     """The forced +{base_tip} refspec lets two PRs with unrelated, non-fast-forward
     base tips both freeze ready in one shared mirror (regression for defect 3)."""
     from daydream.benchmark import snapshot as sn
@@ -454,7 +457,7 @@ def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path):
     assert sn.rev_parse(m, "refs/heads/base_tip") == dev_tip
 
 
-def test_freeze_one_base_advanced_two_sha(tmp_path):
+def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
     """Acceptance (a): a base branch advanced past the PR fork records the true
     merge base as original_base_sha and the selected base tip as
     requested_base_sha — two distinct SHAs."""
@@ -474,7 +477,7 @@ def test_freeze_one_base_advanced_two_sha(tmp_path):
     assert isinstance(bundle, bytes) and bundle.startswith(b"# v2 git bundle")
 
 
-def test_freeze_distinct_base_vs_head_unreachable(tmp_path):
+def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path) -> None:
     """A base-tip fetch failure classifies ``base_unreachable``; a PR-head fetch
     failure classifies ``head_unreachable`` — never collapsed to one reason."""
     from daydream.benchmark import snapshot as sn
@@ -498,7 +501,7 @@ def test_freeze_distinct_base_vs_head_unreachable(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_freeze_crash_recovers_whole_before_or_after(tmp_path):
+def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
     """A crash at any freeze {bundle, case, manifest} boundary heals whole.
 
     Mirrors the import-crash transaction test, substituting the snapshot bundle
@@ -545,7 +548,7 @@ def test_freeze_crash_recovers_whole_before_or_after(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _seed_rich_origin(tmp_path: Path):
+def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
     """A rich bare origin; returns ``(origin, base, head, base_tree, head_tree)``.
 
     base: text file + 100755 executable + 120000 symlink + binary blob.
@@ -584,11 +587,12 @@ def _seed_rich_origin(tmp_path: Path):
     _git(repo, "remote", "add", "origin", str(bare))
     _git(repo, "push", "origin", "main:main")
     _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
-    return bare, base_sha, head_sha, base_tree, head_tree
+    return str(bare), base_sha, head_sha, base_tree, head_tree
 
 
-def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path):
+def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
+    from daydream.benchmark import storage
 
     origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
@@ -605,9 +609,9 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path):
     diff = sn.canonical_diff_sha256(m, base, head)
     sn.validate_offline_clone(bundle, base_tree, head_tree, diff, workdir=tmp_path)
     # repeatable bytes
-    first = sn.storage.sha256_file(bundle)
+    first = storage.sha256_file(bundle)
     sn.build_bundle(m, base, head, bundle)
-    assert sn.storage.sha256_file(bundle) == first
+    assert storage.sha256_file(bundle) == first
     # no origin remote and only the two refs in an offline clone
     clone = _clone_offline(bundle, tmp_path)
     try:

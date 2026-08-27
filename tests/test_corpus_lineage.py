@@ -10,17 +10,18 @@ survives after an empty rebuild. These tests drive
 :func:`run_build_corpus` against a real SQLite index (no archive-layer mocking)
 and assert on the manifest the user would inspect on disk (or its absence).
 """
-
 from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+from typing import Any
 
 from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
 from tests.test_training_corpus import _seed_run_with_annotation
 
 
-def test_build_corpus_emits_lineage_manifest(tmp_path, archive_dir):
+def test_build_corpus_emits_lineage_manifest(tmp_path: Path, archive_dir: Any) -> None:
     _seed_run_with_annotation(archive_dir, "s1", label="accepted",
                               reward_version="r1", observed_at="2026-03-01T00:00:00+00:00",
                               valid_at="2026-03-01T00:00:00+00:00")
@@ -34,7 +35,7 @@ def test_build_corpus_emits_lineage_manifest(tmp_path, archive_dir):
     assert man["as_of"] == "2026-04-01T00:00:00+00:00"
 
 
-def test_emit_schema_only_removes_stale_lineage(tmp_path, archive_dir):
+def test_emit_schema_only_removes_stale_lineage(tmp_path: Path, archive_dir: Any) -> None:
     _seed_run_with_annotation(archive_dir, "s1", label="accepted",
                               reward_version="r1", observed_at="2026-03-01T00:00:00+00:00",
                               valid_at="2026-03-01T00:00:00+00:00")
@@ -54,7 +55,7 @@ def test_emit_schema_only_removes_stale_lineage(tmp_path, archive_dir):
     assert not (tmp_path / "lineage.json").exists()
 
 
-def test_build_corpus_removes_stale_lineage_when_rebuilt_empty(tmp_path, archive_dir):
+def test_build_corpus_removes_stale_lineage_when_rebuilt_empty(tmp_path: Path, archive_dir: Any) -> None:
     _seed_run_with_annotation(archive_dir, "s1", label="accepted",
                               reward_version="r1", observed_at="2026-03-01T00:00:00+00:00",
                               valid_at="2026-03-01T00:00:00+00:00")

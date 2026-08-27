@@ -6,12 +6,12 @@ Docker, or paid hosted-model command is ever executed here; paid commands
 gates and are never run in CI. Mirrors the existing doc-contract patterns in
 tests/test_docs_contract.py and tests/test_benchmark_cli.py.
 """
-
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,19 +58,19 @@ def _code_lines(text: str) -> list[str]:
     return out
 
 
-def _json_blocks(text: str) -> list[dict]:
+def _json_blocks(text: str) -> list[dict[str, Any]]:
     blocks = re.findall(r"```json\n(.*?)```", text, re.S)
     return [json.loads(b) for b in blocks if b.strip()]
 
 
-def _objective_example() -> dict:
+def _objective_example() -> dict[str, Any]:
     for block in _json_blocks(RUNBOOK.read_text(encoding="utf-8")):
         if "objective" in block and "identity" in block:
             return block
     pytest.fail("runbook has no ```json objective example with an identity block")
 
 
-def _suite_manifest_example() -> dict:
+def _suite_manifest_example() -> dict[str, Any]:
     for block in _json_blocks(RUNBOOK.read_text(encoding="utf-8")):
         if "entries" in block:
             return block
@@ -79,7 +79,7 @@ def _suite_manifest_example() -> dict:
 
 # --- CLI / runbook command set (MH-3, MH-15) ---
 
-def test_runbook_documents_every_shipped_subcommand():
+def test_runbook_documents_every_shipped_subcommand() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     for sub in EXPECTED_SUBCOMMANDS:
         assert re.search(rf"`daydream benchmark {sub}(`|\s|$)", text), (
@@ -87,13 +87,13 @@ def test_runbook_documents_every_shipped_subcommand():
         )
 
 
-def test_every_documented_verb_exists_in_parser():
+def test_every_documented_verb_exists_in_parser() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     documented = {m.group(1) for m in re.finditer(r"daydream benchmark ([\w-]+)", text)}
     assert documented <= _parser_choices()
 
 
-def test_free_command_examples_parse():
+def test_free_command_examples_parse() -> None:
     parser = _build_benchmark_parser()
     bad: list[str] = []
     for line in _code_lines(RUNBOOK.read_text(encoding="utf-8")):
@@ -109,7 +109,7 @@ def test_free_command_examples_parse():
     assert not bad, "documented command examples failed to parse:\n" + "\n".join(bad)
 
 
-def test_benchmark_help_lists_all_subcommands():
+def test_benchmark_help_lists_all_subcommands() -> None:
     help_text = _build_benchmark_parser().format_help()
     for sub in EXPECTED_SUBCOMMANDS:
         assert sub in help_text, f"`daydream benchmark --help` must list {sub}"
@@ -117,12 +117,12 @@ def test_benchmark_help_lists_all_subcommands():
 
 # --- Legacy cutover (MH-2, MH-12) ---
 
-def test_no_legacy_transition_note():
+def test_no_legacy_transition_note() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert len(re.findall(r"\bdaydream bench\b", text)) == 0
 
 
-def test_no_active_legacy_instructions():
+def test_no_active_legacy_instructions() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     for token in FORBIDDEN_LEGACY_TOKENS:
         assert token not in text, f"legacy token {token!r} must not appear in the runbook"
@@ -130,7 +130,7 @@ def test_no_active_legacy_instructions():
 
 # --- Privacy (MH-7) ---
 
-def test_privacy_placeholders_only():
+def test_privacy_placeholders_only() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert "OWNER/REPO" in text
     assert re.search(r"sk-[A-Za-z0-9]", text) is None
@@ -140,7 +140,7 @@ def test_privacy_placeholders_only():
 
 # --- Objectives & suites (MH-9, MH-10) ---
 
-def test_objective_example_matches_shipped_schema():
+def test_objective_example_matches_shipped_schema() -> None:
     obj = _objective_example()
     assert obj["schema_version"] == 1
     assert set(obj) == {"run_id", "mode", "schema_version", "identity", "objective"}
@@ -151,13 +151,13 @@ def test_objective_example_matches_shipped_schema():
         assert key in o, f"objective JSON missing {key!r}"
 
 
-def test_objective_example_is_privacy_safe():
+def test_objective_example_is_privacy_safe() -> None:
     blob = json.dumps(_objective_example())
     assert "OWNER" not in blob and "github.com" not in blob
     assert not re.search(r"pull/\d+|pr-\d", blob)
 
 
-def test_suite_example_pools_counts_never_averages_f1():
+def test_suite_example_pools_counts_never_averages_f1() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert "pool" in text.lower()
     assert "micro" in text.lower()
@@ -166,14 +166,14 @@ def test_suite_example_pools_counts_never_averages_f1():
     assert suite["schema_version"] == 1 and "entries" in suite
 
 
-def test_objective_aggregate_are_read_only():
+def test_objective_aggregate_are_read_only() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert re.search(r"read-only|does not run Harbor|does not call a judge", text, re.I)
 
 
 # --- Candidate-profile trust boundary (MH-8) ---
 
-def test_profile_trust_boundary_documented():
+def test_profile_trust_boundary_documented() -> None:
     text = RUNBOOK.read_text(encoding="utf-8").lower()
     assert "packaged default" in text
     assert "control plane" in text or "control-plane" in text
@@ -184,7 +184,7 @@ def test_profile_trust_boundary_documented():
 
 # --- Upgrade path (#857, MH-11) ---
 
-def test_upgrade_path_documented():
+def test_upgrade_path_documented() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert "--dry-run" in text
     assert "requested_base_sha" in text
@@ -196,7 +196,7 @@ def test_upgrade_path_documented():
 
 # --- Prerequisites & privacy boundary (MH-4, MH-5, MH-6) ---
 
-def test_prerequisites_documented():
+def test_prerequisites_documented() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert "0.22" in text and "0.23" in text
     assert "Docker Desktop" in text
@@ -209,7 +209,7 @@ def test_prerequisites_documented():
 
 # --- Paid gates (MH-13) ---
 
-def test_paid_gates_visibly_marked():
+def test_paid_gates_visibly_marked() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     assert text.lower().count("paid") >= 2
     assert "calibrate-judge" in text and "run --oracle" in text
@@ -218,14 +218,14 @@ def test_paid_gates_visibly_marked():
 
 # --- Reconciliation (MH-14) ---
 
-def test_readme_harbor_is_supported_evaluator():
+def test_readme_harbor_is_supported_evaluator() -> None:
     readme = README.read_text(encoding="utf-8")
     assert "Harbor" in readme
     assert "offline benchmark" not in readme
     assert "daydream_review_profile" in readme.lower()  # #889-owned wording preserved
 
 
-def test_claude_has_no_active_legacy_benchmark_reference():
+def test_claude_has_no_active_legacy_benchmark_reference() -> None:
     text = CLAUDE.read_text(encoding="utf-8")
     assert re.search(r"\bdaydream bench\b", text) is None
     assert "docs/benchmark.md" in text
@@ -235,9 +235,9 @@ def test_claude_has_no_active_legacy_benchmark_reference():
 
 # --- Change-scope guards (out-of-scope) ---
 
-def test_removed_docs_not_recreated():
+def test_removed_docs_not_recreated() -> None:
     assert not (ROOT / "docs" / "evaluation-framework.md").exists()
 
 
-def test_no_project_local_skill_instruction():
+def test_no_project_local_skill_instruction() -> None:
     assert "SKILL.md" not in RUNBOOK.read_text(encoding="utf-8")

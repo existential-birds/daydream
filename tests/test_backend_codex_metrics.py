@@ -36,7 +36,7 @@ from tests.harness.codex_replay import make_mock_process_from_fixture as _make_m
 
 
 @pytest.mark.asyncio
-async def test_metrics_event_emitted_at_turn_completed():
+async def test_metrics_event_emitted_at_turn_completed() -> None:
     """turn.completed with full usage produces MetricsEvent with EVNT-02 field names (EVNT-07).
 
     Model gpt-5.3-codex is in MODEL_PRICES, so #194 synthesizes cost at the
@@ -68,7 +68,7 @@ async def test_metrics_event_emitted_at_turn_completed():
 
 
 @pytest.mark.asyncio
-async def test_cost_event_still_emitted():
+async def test_cost_event_still_emitted() -> None:
     """The legacy CostEvent emission is preserved (so FinalMetrics aggregation works for Codex too).
 
     Model ``fixture-model`` is unknown to the price table, so cost_usd stays
@@ -90,7 +90,7 @@ async def test_cost_event_still_emitted():
 
 
 @pytest.mark.asyncio
-async def test_partial_usage_skips_metrics_event():
+async def test_partial_usage_skips_metrics_event() -> None:
     """usage missing output_tokens => no MetricsEvent emitted (EVNT-02 requires both as int)."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_partial_usage.jsonl")

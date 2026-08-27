@@ -13,11 +13,11 @@ Label admission (C9 accepted-only / min-reward) moved into
 silver annotation, not the denormalized ``runs.outcome_labels`` cache — so the
 label tests assert against the projection output, not ``_query_index``.
 """
-
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,7 +46,7 @@ def copyleft_seeded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("daydream.training.exclusion.COPYLEFT_PATH", copyleft_file)
 
 
-def _ids(rows: list[dict]) -> list[str]:
+def _ids(rows: list[dict[str, Any]]) -> list[str]:
     return [row["session_id"] for row in rows]
 
 

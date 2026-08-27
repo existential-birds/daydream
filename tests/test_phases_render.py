@@ -14,19 +14,18 @@ importing module's binding via ``monkeypatch.setattr("daydream.phases.console", 
 accounts for ``run_agent``'s keyword-only ``phase`` argument (passed by the
 phases themselves, not the backend).
 """
-
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import pytest
 from rich.console import Console
-from test_agent_recorder_integration import MockBackend
 
-from daydream.backends import AgentEvent, ContinuationToken, ResultEvent
+from daydream.backends import AgentEvent, Backend, ContinuationToken, ResultEvent
 from daydream.deep.detection import StackAssignment
 from daydream.phases import (
     phase_arbiter_review,
@@ -34,6 +33,8 @@ from daydream.phases import (
     phase_parse_feedback,
     phase_per_stack_reviews,
 )
+from daydream.workspace import WorkContext
+from tests.test_agent_recorder_integration import MockBackend
 
 
 def _rec(monkeypatch: Any) -> Console:
@@ -42,7 +43,11 @@ def _rec(monkeypatch: Any) -> Console:
     return rec
 
 
-async def test_parse_feedback_renders_issue_table(monkeypatch, tmp_path, make_work):
+async def test_parse_feedback_renders_issue_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     rec = _rec(monkeypatch)
     payload = {
         "issues": [
@@ -69,7 +74,11 @@ async def test_parse_feedback_renders_issue_table(monkeypatch, tmp_path, make_wo
     assert "{" not in out
 
 
-async def test_merge_prints_item_count(monkeypatch, tmp_path, make_work):
+async def test_merge_prints_item_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     rec = _rec(monkeypatch)
     items = [
         {
@@ -110,7 +119,11 @@ async def test_merge_prints_item_count(monkeypatch, tmp_path, make_work):
     assert "{" not in out
 
 
-async def test_arbiter_prints_kept_dropped(monkeypatch, tmp_path, make_work):
+async def test_arbiter_prints_kept_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     rec = _rec(monkeypatch)
     selected = [
         {
@@ -195,7 +208,11 @@ class _PerStackBackend:
         return None
 
 
-async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path, make_work):
+async def test_per_stack_failures_summarized_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     rec = _rec(monkeypatch)
     work = make_work(tmp_path)
     (tmp_path / ".daydream" / "deep").mkdir(parents=True, exist_ok=True)
@@ -214,7 +231,7 @@ async def test_per_stack_failures_summarized_once(monkeypatch, tmp_path, make_wo
     backend = _PerStackBackend(fail_for={"stack-a", "stack-b"})
 
     successes, failures = await phase_per_stack_reviews(
-        backend,
+        cast(Backend, backend),
         work,
         stacks,
         diff_path=diff,

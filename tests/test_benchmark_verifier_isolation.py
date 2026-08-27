@@ -13,6 +13,9 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any, cast
+
+import pytest
 
 _TEMPLATES_TESTS = (
     Path(__file__).resolve().parents[1]
@@ -30,22 +33,22 @@ _JUDGE_KEY = "sk-or-isolation-only-7f1e"
 
 
 class _JudgeServer(HTTPServer):
-    def __init__(self, *args):
+    def __init__(self, *args: Any) -> None:
         super().__init__(*args)
         self.posted_bodies: list[bytes] = []
 
 
 class _Judge(BaseHTTPRequestHandler):
-    def do_POST(self):
+    def do_POST(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        self.server.posted_bodies.append(body)  # observed by the leakage assertions below
+        cast(Any, self.server).posted_bodies.append(body)  # observed by the leakage assertions below
         resp = json.dumps({"choices": [{"message": {"content":
             '{"match": true, "confidence": 1.0, "reasoning": "identical"}'}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(resp)
-    def log_message(self, *a): pass
+    def log_message(self, *a: Any) -> None: pass
 
 
 def _serve() -> _JudgeServer:
@@ -54,7 +57,7 @@ def _serve() -> _JudgeServer:
     return srv
 
 
-def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path, monkeypatch) -> None:
+def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # host workspace carries credentials + source + reviewer config + agent outputs
     for name, val in _SENTINELS.items():
         monkeypatch.setenv(name, val)
@@ -128,7 +131,7 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path, monkeypa
         assert p.read_bytes() == digest             # host files untouched (no writes outside out_dir)
 
 
-def test_verifier_asset_set_never_includes_task_md(tmp_path, monkeypatch):
+def test_verifier_asset_set_never_includes_task_md(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The verifier image/asset set is fixed and must not read Task.md (R12/R13 constraint)."""
     # The fixed verifier asset set is exactly what templates/tests/Dockerfile COPYs:
     # score_review.py verifier_core.py judge_prompt.md golden-review.json test.sh

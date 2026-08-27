@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import jsonschema
 
@@ -151,10 +151,10 @@ def _cfg(tmp_path: Path, **overrides: Any) -> BuildCorpusConfig:
 
 
 def _load_schema() -> dict[str, Any]:
-    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    return cast(dict[str, Any], json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
 
 
-def test_build_corpus_reads_as_of_annotation_and_embeds_reward(tmp_path, archive_dir):
+def test_build_corpus_reads_as_of_annotation_and_embeds_reward(tmp_path: Path, archive_dir: Any) -> None:
     _seed_run_with_annotation(archive_dir, "s1", label="accepted",
                               reward_json='{"composite":0.7}', composite_reward=0.7,
                               observed_at="2026-03-01T00:00:00+00:00",
@@ -167,7 +167,7 @@ def test_build_corpus_reads_as_of_annotation_and_embeds_reward(tmp_path, archive
     assert rec["composite_reward"] == 0.7 and rec["reward"]["composite"] == 0.7
 
 
-def test_record_with_reward_validates_against_schema(tmp_path, archive_dir):
+def test_record_with_reward_validates_against_schema(tmp_path: Path, archive_dir: Any) -> None:
     import jsonschema
     schema = json.loads(Path("daydream/training/schema/v1.json").read_text())
     _seed_run_with_annotation(archive_dir, "s1", label="accepted",
@@ -523,7 +523,7 @@ def test_build_record_emits_posterior_discriminator_only_for_labeled(tmp_path: P
     assert rec_intrinsic["composite_reward"] == 0.6
 
 
-def test_corpus_can_filter_on_pipeline_status(tmp_path, archive_dir):
+def test_corpus_can_filter_on_pipeline_status(tmp_path: Path, archive_dir: Any) -> None:
     """The status gate (default 'complete') must be able to exclude failed pipelines.
 
     ``BuildCorpusConfig`` gains a ``pipeline_status`` knob that flows into the
@@ -544,7 +544,7 @@ def test_corpus_can_filter_on_pipeline_status(tmp_path, archive_dir):
     assert "pipeline_status = ?" in where2 and "succeeded" in params2
 
 
-def test_build_corpus_pipeline_status_gate_excludes_failed_pipelines(tmp_path, archive_dir):
+def test_build_corpus_pipeline_status_gate_excludes_failed_pipelines(tmp_path: Path, archive_dir: Any) -> None:
     """Real-path: a corpus built with pipeline_status='succeeded' drops failed runs.
 
     Seeds one succeeded and one failed pipeline run in the index; the emitted
@@ -578,7 +578,7 @@ def test_build_corpus_pipeline_status_gate_excludes_failed_pipelines(tmp_path, a
     assert len(lines2) == 2
 
 
-def test_cli_build_corpus_default_excludes_failed_pipelines(tmp_path, archive_dir):
+def test_cli_build_corpus_default_excludes_failed_pipelines(tmp_path: Path, archive_dir: Any) -> None:
     """Finding #8: the corpus build CLI gates on pipeline_status='succeeded' by
     default, so a default build drops merge-failed runs (archived status=complete
     but pipeline_status=failed) rather than admitting them into training data.

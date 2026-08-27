@@ -1,8 +1,12 @@
 import hashlib
 import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
 
 
-def _write_curated_workspace_with_sensitive_evidence(tmp_path):
+def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
     """The Task-2 curated fixture + evidence/finding bodies carrying a secret.
 
     Plants ``SUPER_SECRET_EVIDENCE`` in the import's ``evidence[].body`` and in
@@ -12,7 +16,7 @@ def _write_curated_workspace_with_sensitive_evidence(tmp_path):
     """
     import json
 
-    from test_benchmark_workspace import _write_curated_workspace
+    from tests.test_benchmark_workspace import _write_curated_workspace
 
     root = _write_curated_workspace(tmp_path, "ready")
     imp = next((root / "imports").glob("pr-*.json"))
@@ -61,7 +65,7 @@ def _write_curated_workspace_with_sensitive_evidence(tmp_path):
     return root
 
 
-def _tree_sha(root) -> str:
+def _tree_sha(root: Path) -> str:
     """Deterministic sha256 over a workspace tree's file bytes (read-only check)."""
     import hashlib as _h
 
@@ -72,14 +76,14 @@ def _tree_sha(root) -> str:
     return digest.hexdigest()
 
 
-def test_benchmark_help_lists_subcommands():
+def test_benchmark_help_lists_subcommands() -> None:
     r = subprocess.run(  # noqa: S603 - args are not user-controlled
         ["daydream", "benchmark", "--help"], capture_output=True, text=True  # noqa: S607 - trusted command
     )
     assert r.returncode == 0 and "init" in r.stdout and "status" in r.stdout and "validate" in r.stdout
 
 
-def test_benchmark_init_status_validate_roundtrip(tmp_path):
+def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     r = subprocess.run(  # noqa: S603
         [
@@ -108,7 +112,7 @@ def test_benchmark_init_status_validate_roundtrip(tmp_path):
     assert r3.returncode == 2  # fresh workspace: structurally valid but incomplete
 
 
-def test_legacy_bench_is_rejected_not_routed():
+def test_legacy_bench_is_rejected_not_routed() -> None:
     # The old `bench` verb is removed; it must exit non-zero with a clear error
     # instead of falling through to the review path (issue-785). Assert the
     # rejection rather than the former coexistence.
@@ -120,7 +124,10 @@ def test_legacy_bench_is_rejected_not_routed():
     assert "daydream benchmark" in r.stderr
 
 
-def test_validate_diagnostics_never_disclose_evidence_bodies(tmp_path, capsys):
+def test_validate_diagnostics_never_disclose_evidence_bodies(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from daydream.benchmark.cli import _handle_benchmark_command
 
     ws = _write_curated_workspace_with_sensitive_evidence(tmp_path)
@@ -134,10 +141,12 @@ def test_validate_diagnostics_never_disclose_evidence_bodies(tmp_path, capsys):
     assert _tree_sha(ws) == before                  # validate is read-only: nothing written
 
 
-def test_validate_exit_code_contract_preserved(tmp_path):
-    from test_benchmark_workspace import _write_curated_workspace, _write_minimal_invalid_workspace
-
+def test_validate_exit_code_contract_preserved(tmp_path: Path) -> None:
     from daydream.benchmark.workspace import validate_workspace
+    from tests.test_benchmark_workspace import (  # noqa: F401
+        _write_curated_workspace,
+        _write_minimal_invalid_workspace,
+    )
 
     assert validate_workspace(_write_curated_workspace(tmp_path / "r1", "ready"))[0] == 0
     assert validate_workspace(_write_curated_workspace(tmp_path / "r2", "draft"))[0] == 2
@@ -145,7 +154,7 @@ def test_validate_exit_code_contract_preserved(tmp_path):
     assert validate_workspace(_write_curated_workspace(tmp_path / "r4", "ready", resolved=False))[0] == 2
 
 
-def test_private_benchmark_docs_document_the_new_verb():
+def test_private_benchmark_docs_document_the_new_verb() -> None:
     # The new verb must be documented so users can discover init/status/validate.
     from pathlib import Path
 

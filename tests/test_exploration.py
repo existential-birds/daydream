@@ -1,9 +1,10 @@
 # tests/test_exploration.py
 """Tests for exploration context data structures and prompt rendering."""
-
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -12,28 +13,28 @@ from daydream.exploration import Convention, Dependency, ExplorationContext, Fil
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 
-def test_file_info_creates_valid_instance():
+def test_file_info_creates_valid_instance() -> None:
     info = FileInfo("src/app.py", "modified", "Main entry point")
     assert info.path == "src/app.py"
     assert info.role == "modified"
     assert info.summary == "Main entry point"
 
 
-def test_convention_creates_valid_instance():
+def test_convention_creates_valid_instance() -> None:
     conv = Convention("snake_case", "All functions use snake_case", "CLAUDE.md")
     assert conv.name == "snake_case"
     assert conv.description == "All functions use snake_case"
     assert conv.source == "CLAUDE.md"
 
 
-def test_dependency_creates_valid_instance():
+def test_dependency_creates_valid_instance() -> None:
     dep = Dependency("app.py", "utils.py", "imports")
     assert dep.source == "app.py"
     assert dep.target == "utils.py"
     assert dep.relationship == "imports"
 
 
-def test_empty_exploration_context():
+def test_empty_exploration_context() -> None:
     ctx = ExplorationContext()
     assert ctx.affected_files == []
     assert ctx.conventions == []
@@ -42,12 +43,12 @@ def test_empty_exploration_context():
     assert ctx.raw_notes == ""
 
 
-def test_empty_context_produces_empty_string():
+def test_empty_context_produces_empty_string() -> None:
     ctx = ExplorationContext()
     assert ctx.to_prompt_section() == ""
 
 
-def test_populated_context_produces_markdown():
+def test_populated_context_produces_markdown() -> None:
     ctx = ExplorationContext(
         affected_files=[FileInfo("src/app.py", "modified", "Main entry point")],
         conventions=[Convention("snake_case", "All functions use snake_case", "CLAUDE.md")],
@@ -101,12 +102,12 @@ def test_populated_context_produces_markdown():
         ),
     ],
 )
-def test_to_prompt_section_includes_populated_content(context, expected_content):
+def test_to_prompt_section_includes_populated_content(context: Any, expected_content: Any) -> None:
     output = context.to_prompt_section()
     assert expected_content in output
 
 
-def test_partial_context_only_includes_populated_sections():
+def test_partial_context_only_includes_populated_sections() -> None:
     ctx = ExplorationContext(
         affected_files=[FileInfo("a.py", "modified", "Entry point")],
     )
@@ -117,7 +118,7 @@ def test_partial_context_only_includes_populated_sections():
     assert "## Project Guidelines" not in output
 
 
-async def test_safe_explore_returns_result_on_success():
+async def test_safe_explore_returns_result_on_success() -> None:
     expected = ExplorationContext(
         affected_files=[FileInfo("main.py", "modified", "App entry")],
         guidelines=["Use type hints"],
@@ -132,7 +133,7 @@ async def test_safe_explore_returns_result_on_success():
     assert result.affected_files == expected.affected_files
 
 
-async def test_safe_explore_returns_empty_on_failure():
+async def test_safe_explore_returns_empty_on_failure() -> None:
     async def failing_explore() -> ExplorationContext:
         raise RuntimeError("SDK timeout")
 
@@ -147,7 +148,7 @@ async def test_safe_explore_returns_empty_on_failure():
 
 @patch("daydream.ui.print_warning")
 @patch("daydream.ui.create_console")
-async def test_safe_explore_shows_warning_on_failure(mock_create_console, mock_print_warning):
+async def test_safe_explore_shows_warning_on_failure(mock_create_console: Any, mock_print_warning: Any) -> None:
     mock_console = object()
     mock_create_console.return_value = mock_console
 
@@ -158,7 +159,7 @@ async def test_safe_explore_shows_warning_on_failure(mock_create_console, mock_p
     mock_print_warning.assert_called_once_with(mock_console, "Exploration failed -- proceeding with review only")
 
 
-def test_merge_pattern_scanner_result():
+def test_merge_pattern_scanner_result() -> None:
     partial = ExplorationContext(
         conventions=[Convention(name="snake_case", description="use snake_case for functions", source="inferred")]
     )
@@ -167,7 +168,7 @@ def test_merge_pattern_scanner_result():
     assert merged.conventions[0].name == "snake_case"
 
 
-def test_merge_contexts_empty():
+def test_merge_contexts_empty() -> None:
     merged = merge_contexts()
     assert merged.affected_files == []
     assert merged.conventions == []
@@ -176,14 +177,14 @@ def test_merge_contexts_empty():
     assert merged.raw_notes == ""
 
 
-def test_merge_contexts_single_returns_fresh_lists():
+def test_merge_contexts_single_returns_fresh_lists() -> None:
     original = ExplorationContext(guidelines=["a", "b"])
     merged = merge_contexts(original)
     assert merged.guidelines == ["a", "b"]
     assert merged.guidelines is not original.guidelines
 
 
-def test_merge_contexts_dedups_file_info():
+def test_merge_contexts_dedups_file_info() -> None:
     a = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "short")])
     b = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "this is a much longer summary")])
     merged = merge_contexts(a, b)
@@ -191,7 +192,7 @@ def test_merge_contexts_dedups_file_info():
     assert merged.affected_files[0].summary == "this is a much longer summary"
 
 
-def test_merge_contexts_prefers_static_provenance_on_tie():
+def test_merge_contexts_prefers_static_provenance_on_tie() -> None:
     static = ExplorationContext(
         affected_files=[FileInfo("a.py", "modified", "", provenance="static")]
     )
@@ -204,7 +205,7 @@ def test_merge_contexts_prefers_static_provenance_on_tie():
     assert merged.affected_files[0].provenance == "static"
 
 
-def test_merge_contexts_restores_source_file_on_static_tie():
+def test_merge_contexts_restores_source_file_on_static_tie() -> None:
     """A winning static row must not net out an empty source_file when a
     duplicate (the deterministic row carries none, but the LLM test-mapper
     duplicate does) has one recorded, or the test-map filter drops the mapping."""
@@ -230,7 +231,7 @@ def test_merge_contexts_restores_source_file_on_static_tie():
     assert row.source_file == "daydream/a.py"
 
 
-def test_merge_contexts_dedups_dependencies():
+def test_merge_contexts_dedups_dependencies() -> None:
     dep = Dependency("a.py", "b.py", "imports")
     a = ExplorationContext(dependencies=[dep])
     b = ExplorationContext(dependencies=[Dependency("a.py", "b.py", "imports")])
@@ -238,7 +239,7 @@ def test_merge_contexts_dedups_dependencies():
     assert len(merged.dependencies) == 1
 
 
-def test_merge_contexts_dedups_conventions_and_guidelines():
+def test_merge_contexts_dedups_conventions_and_guidelines() -> None:
     a = ExplorationContext(
         conventions=[Convention("snake", "desc1", "CLAUDE.md")],
         guidelines=["use type hints"],
@@ -252,7 +253,7 @@ def test_merge_contexts_dedups_conventions_and_guidelines():
     assert len(merged.guidelines) == 2
 
 
-def test_merge_contexts_joins_raw_notes():
+def test_merge_contexts_joins_raw_notes() -> None:
     a = ExplorationContext(raw_notes="first")
     b = ExplorationContext(raw_notes="")
     c = ExplorationContext(raw_notes="second")
@@ -260,7 +261,7 @@ def test_merge_contexts_joins_raw_notes():
     assert merged.raw_notes == "first\n\nsecond"
 
 
-def test_write_to_dir_creates_all_files(tmp_path):
+def test_write_to_dir_creates_all_files(tmp_path: Path) -> None:
     ctx = ExplorationContext(
         affected_files=[FileInfo("src/app.py", "modified", "Main entry point")],
         conventions=[Convention("snake_case", "All functions use snake_case", "CLAUDE.md")],
@@ -301,7 +302,7 @@ def test_write_to_dir_creates_all_files(tmp_path):
     assert affected.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < affected.index("src/app.py")
 
 
-def test_write_to_dir_emits_exploration_json_with_provenance(tmp_path):
+def test_write_to_dir_emits_exploration_json_with_provenance(tmp_path: Path) -> None:
     ctx = ExplorationContext(
         affected_files=[
             FileInfo("src/app.py", "modified", "Main entry point", provenance="static"),
@@ -320,7 +321,7 @@ def test_write_to_dir_emits_exploration_json_with_provenance(tmp_path):
     assert data["dependencies"][0]["target"] == "utils.py"
 
 
-def test_write_to_dir_empty_context(tmp_path):
+def test_write_to_dir_empty_context(tmp_path: Path) -> None:
     ctx = ExplorationContext()
     exploration_dir = tmp_path / "exploration"
     ctx.write_to_dir(exploration_dir)
@@ -337,7 +338,7 @@ def test_write_to_dir_empty_context(tmp_path):
         assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in (exploration_dir / name).read_text()
 
 
-def test_write_to_dir_creates_directory(tmp_path):
+def test_write_to_dir_creates_directory(tmp_path: Path) -> None:
     ctx = ExplorationContext()
     nested = tmp_path / "a" / "b" / "exploration"
     ctx.write_to_dir(nested)
@@ -345,14 +346,14 @@ def test_write_to_dir_creates_directory(tmp_path):
     assert (nested / "summary.md").exists()
 
 
-def test_write_to_dir_returns_path(tmp_path):
+def test_write_to_dir_returns_path(tmp_path: Path) -> None:
     ctx = ExplorationContext()
     exploration_dir = tmp_path / "exploration"
     result = ctx.write_to_dir(exploration_dir)
     assert result == exploration_dir
 
 
-def test_write_to_dir_partial_context(tmp_path):
+def test_write_to_dir_partial_context(tmp_path: Path) -> None:
     ctx = ExplorationContext(
         affected_files=[FileInfo("a.py", "modified", "Entry point")],
     )

@@ -14,13 +14,13 @@ canonicalize it to ``+00:00`` before it reaches the lexical ``observed_at <=
 as_of`` SQL pin (stored ``observed_at`` is always ``+00:00``-spelled), so a
 correct record set also proves the boundary normalization feeds the SQL pin.
 """
-
 from __future__ import annotations
 
 import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 from daydream.archive.index import append_label_observation
 from tests.test_training_corpus import _seed_run_with_annotation
@@ -103,7 +103,7 @@ def _seed_divergent_archive(archive_dir: Path) -> None:
         conn.close()
 
 
-def test_gold_reads_only_the_as_of_pinned_silver_rows(tmp_path, archive_dir):
+def test_gold_reads_only_the_as_of_pinned_silver_rows(tmp_path: Path, archive_dir: Any) -> None:
     _seed_divergent_archive(archive_dir)
     out = tmp_path / "corpus.jsonl"
 
@@ -135,7 +135,7 @@ def test_gold_reads_only_the_as_of_pinned_silver_rows(tmp_path, archive_dir):
     assert SILVER_RUBRIC_NEWER["marker"].encode() not in raw
 
 
-def test_cli_rejects_invalid_as_of_through_main(tmp_path, archive_dir):
+def test_cli_rejects_invalid_as_of_through_main(tmp_path: Path, archive_dir: Any) -> None:
     out = tmp_path / "corpus.jsonl"
     rc = _run_cli(["corpus", "build", "--out", str(out), "--as-of", "2026-04-01T05:00:00+05:00"])
     assert rc == 1

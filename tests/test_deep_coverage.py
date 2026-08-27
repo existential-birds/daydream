@@ -4,11 +4,11 @@ Covers ``daydream/deep/coverage.py``: coverage computation against a crafted
 ``.daydream`` dir, the hunk-size + capacity budget filter, and the sweep prompt
 builder. The real-path sweep behavior lives in ``tests/test_deep_orchestrator.py``.
 """
-
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from daydream import review_profile as rp
 from daydream.deep.coverage import (
@@ -41,7 +41,7 @@ _DIFF = (
 )
 
 
-def _write_fork_calls(run_dir: Path, name: str, calls: list[dict]) -> None:
+def _write_fork_calls(run_dir: Path, name: str, calls: list[dict[str, Any]]) -> None:
     """Write one completed sibling step whose tool calls are all completed.
 
     Each tool call carries a matching ``observation.results[].source_call_id``
@@ -94,7 +94,7 @@ def _write_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
     )
 
 
-def _write_claude_fork(run_dir: Path, name: str, calls: list[dict]) -> None:
+def _write_claude_fork(run_dir: Path, name: str, calls: list[dict[str, Any]]) -> None:
     """Write one completed sibling trajectory with arbitrary Claude-spelled calls.
 
     ``_write_fork`` is hardcoded to emit ``function_name: "Read"`` with

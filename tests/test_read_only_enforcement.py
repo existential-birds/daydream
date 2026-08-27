@@ -16,6 +16,7 @@ import os
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -67,7 +68,7 @@ def _install_committing_codex(
     monkeypatch.setenv("COMMIT_MARKER", str(marker))
 
 
-def test_claude_read_only_profile_refuses_mutation():
+def test_claude_read_only_profile_refuses_mutation() -> None:
     """Claude's observable refusal is the Bash-guard decision."""
     from daydream.backends.claude import _is_read_only_command
 
@@ -84,19 +85,21 @@ def test_claude_read_only_profile_refuses_mutation():
 
 
 @pytest.mark.asyncio
-async def test_claude_read_only_guard_blocks_write_tool():
+async def test_claude_read_only_guard_blocks_write_tool() -> None:
     """Under read_only, the guard denies the Write tool outright (not just Bash)."""
     from daydream.backends.claude import _read_only_guard
 
-    decision = await _read_only_guard(
+    decision = cast(dict[str, Any], await _read_only_guard(
         {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
-    )
+    ))
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.asyncio
 async def test_codex_read_only_commit_cannot_change_source_head_or_index(
-    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    linked_worktree: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real fake Codex commits in its isolated cwd; the caller's linked-worktree
     HEAD and cached index stay byte-for-byte identical."""

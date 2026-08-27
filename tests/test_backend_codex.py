@@ -34,7 +34,7 @@ from tests.harness.git_helpers import git as _git
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
 
-async def _run_fixture(backend, prompt, fixture, **kwargs):
+async def _run_fixture(backend: Any, prompt: Any, fixture: Any, **kwargs: Any) -> Any:
     """Drive ``execute`` over a canned fixture and collect the event list."""
     mock_proc = make_mock_process_from_fixture(fixture)
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
@@ -42,7 +42,7 @@ async def _run_fixture(backend, prompt, fixture, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_simple_text_events():
+async def test_simple_text_events() -> None:
     backend = CodexBackend(model="gpt-5.3-codex")
     events = await _run_fixture(backend, "Say hello", "simple_text.jsonl")
 
@@ -73,7 +73,7 @@ async def test_simple_text_events():
 
 
 @pytest.mark.asyncio
-async def test_tool_use_events():
+async def test_tool_use_events() -> None:
     backend = CodexBackend(model="fixture-model")
     events = await _run_fixture(backend, "Run ls", "tool_use.jsonl")
 
@@ -125,7 +125,7 @@ async def test_tool_use_events():
     ids=["item-completed", "streamed-item-updated", "output-text-blocks", "turn-completed-result"],
 )
 @pytest.mark.asyncio
-async def test_structured_output(fixture, expected_output, expected_text_count):
+async def test_structured_output(fixture: Any, expected_output: Any, expected_text_count: Any) -> None:
     """Structured output is extracted across the Codex delivery shapes."""
     backend = CodexBackend(model="fixture-model")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
@@ -139,7 +139,7 @@ async def test_structured_output(fixture, expected_output, expected_text_count):
 
 
 @pytest.mark.asyncio
-async def test_turn_failed_raises():
+async def test_turn_failed_raises() -> None:
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("turn_failed.jsonl")
 
@@ -153,7 +153,7 @@ async def test_turn_failed_raises():
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_raises_with_captured_output():
+async def test_nonzero_exit_raises_with_captured_output() -> None:
     """Non-zero exit surfaces codex's diagnostic output as a PROCESS_EXIT CodexError."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process(
@@ -175,7 +175,7 @@ async def test_nonzero_exit_raises_with_captured_output():
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_with_no_output_still_informative():
+async def test_nonzero_exit_with_no_output_still_informative() -> None:
     """If codex crashes with zero output, the error says so explicitly."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process([])
@@ -191,7 +191,7 @@ async def test_nonzero_exit_with_no_output_still_informative():
 
 
 @pytest.mark.asyncio
-async def test_continuation_token_resumes():
+async def test_continuation_token_resumes() -> None:
     """Test that continuation token is passed as 'resume' argument."""
     from daydream.backends import ContinuationToken
 
@@ -234,7 +234,7 @@ async def test_codex_read_only_uses_read_only_sandbox(
     captured: dict[str, Any] = {}
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    async def fake_exec(*args, **kwargs):
+    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
         flat = list(args)
         cd = flat[flat.index("--cd") + 1]
         isolated = Path(cd)
@@ -278,7 +278,9 @@ async def test_codex_read_only_uses_read_only_sandbox(
 
 @pytest.mark.asyncio
 async def test_codex_read_only_isolation_failure_is_fail_closed(
-    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    linked_worktree: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Isolation preparation failure raises CodexError and leaves source Git state untouched."""
     _main, source = linked_worktree
@@ -289,7 +291,7 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
     before_head = git_ops.head_sha(source)
     before_patch = git_ops.staged_patch(source)
 
-    def boom(*args, **kwargs):
+    def boom(*args: Any, **kwargs: Any) -> None:
         raise git_ops.GitError("isolation probe failure")
 
     monkeypatch.setattr("daydream.backends.codex.git_ops.clone", boom)
@@ -303,7 +305,7 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
     assert git_ops.staged_patch(source) == before_patch
 
 
-def test_rebind_source_paths_preserves_sibling_paths():
+def test_rebind_source_paths_preserves_sibling_paths() -> None:
     """The prompt rebind is anchored at path boundaries (issues #1/#9): sibling
     paths that merely share the source prefix survive, while sub-paths, the exact
     path, and ``//``-doubled renderings all map onto the isolated checkout."""
@@ -338,7 +340,7 @@ def test_rebind_source_paths_preserves_sibling_paths():
     assert "/work//inner" not in out3
 
 
-def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch):
+def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     """_isolated_child_env returns None when no isolation and strips the
     repo-redirect env vars (PWD/$GIT_*) when running in the disposable clone."""
     from daydream.backends.codex import _isolated_child_env
@@ -382,7 +384,8 @@ async def test_codex_read_only_resume_is_refused(
 
 @pytest.mark.asyncio
 async def test_codex_read_only_parallel_calls_share_one_clone(
-    linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+    linked_worktree: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent read-only calls on one backend build a single disposable clone
     (parallel fan-out must not clone the monorepo once per call) and remove it
@@ -401,7 +404,7 @@ async def test_codex_read_only_parallel_calls_share_one_clone(
     seen: list[str] = []
     entered = asyncio.Event()
 
-    async def fake_exec(*args, **kwargs):
+    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
         flat = list(args)
         seen.append(flat[flat.index("--cd") + 1])
         if not entered.is_set():
@@ -454,7 +457,7 @@ async def test_codex_read_only_mirrors_symlinks_and_unstaged_deletions(
     captured: dict[str, Any] = {}
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    async def fake_exec(*args, **kwargs):
+    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
         flat = list(args)
         isolated = Path(flat[flat.index("--cd") + 1])
         captured["isolated"] = isolated
@@ -478,7 +481,7 @@ async def test_codex_read_only_mirrors_symlinks_and_unstaged_deletions(
 
 
 @pytest.mark.asyncio
-async def test_codex_default_uses_full_access_sandbox():
+async def test_codex_default_uses_full_access_sandbox() -> None:
     """read_only=False (default) keeps the existing danger-full-access sandbox."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
@@ -519,7 +522,7 @@ async def test_codex_default_full_access_at_worktree_skips_isolation(
 
 
 @pytest.mark.asyncio
-async def test_codex_reasoning_effort_appends_config_override():
+async def test_codex_reasoning_effort_appends_config_override() -> None:
     """reasoning_effort forwards as -c model_reasoning_effort=<value>."""
     backend = CodexBackend(model="fixture-model", reasoning_effort="high")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
@@ -533,7 +536,7 @@ async def test_codex_reasoning_effort_appends_config_override():
 
 
 @pytest.mark.asyncio
-async def test_codex_no_reasoning_effort_omits_config_override():
+async def test_codex_no_reasoning_effort_omits_config_override() -> None:
     """reasoning_effort=None (default) never adds a -c flag."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
@@ -636,7 +639,7 @@ async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_toplevel_text_field():
+async def test_toplevel_text_field() -> None:
     """Real Codex format: text directly on item, not in content blocks."""
     backend = CodexBackend(model="fixture-model")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
@@ -664,7 +667,7 @@ async def test_toplevel_text_field():
 
 
 @pytest.mark.asyncio
-async def test_turn_completed_cached_input_tokens():
+async def test_turn_completed_cached_input_tokens() -> None:
     """Codex emits cached_input_tokens on turn.completed.usage; surface it on
     MetricsEvent and CostEvent so cache-hit ratios work for the Codex backend
     (refs #65, K4 — fix for the historical hardcoded cached_tokens=None)."""
@@ -866,49 +869,49 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 class TestUnwrapShellCommand:
     """Tests for _unwrap_shell_command helper."""
 
-    def test_zsh_wrapper_with_cd(self):
+    def test_zsh_wrapper_with_cd(self) -> None:
         cmd = '/bin/zsh -lc "cd /home/user/project && make test"'
         assert _unwrap_shell_command(cmd) == "make test"
 
-    def test_bash_wrapper_with_cd(self):
+    def test_bash_wrapper_with_cd(self) -> None:
         cmd = '/bin/bash -lc "cd /tmp/work && pytest -x"'
         assert _unwrap_shell_command(cmd) == "pytest -x"
 
-    def test_sh_wrapper_with_cd(self):
+    def test_sh_wrapper_with_cd(self) -> None:
         cmd = '/bin/sh -lc "cd /app && echo hello"'
         assert _unwrap_shell_command(cmd) == "echo hello"
 
-    def test_wrapper_without_cd(self):
+    def test_wrapper_without_cd(self) -> None:
         cmd = '/bin/zsh -lc "ls -la"'
         assert _unwrap_shell_command(cmd) == "ls -la"
 
-    def test_plain_command_passthrough(self):
+    def test_plain_command_passthrough(self) -> None:
         assert _unwrap_shell_command("ls -la") == "ls -la"
 
-    def test_empty_command(self):
+    def test_empty_command(self) -> None:
         assert _unwrap_shell_command("") == ""
 
-    def test_single_quotes(self):
+    def test_single_quotes(self) -> None:
         cmd = "/bin/zsh -lc 'cd /project && git status'"
         assert _unwrap_shell_command(cmd) == "git status"
 
-    def test_unquoted_simple(self):
+    def test_unquoted_simple(self) -> None:
         """Real Codex format: no quotes around simple commands."""
         assert _unwrap_shell_command("/bin/zsh -lc ls") == "ls"
 
-    def test_single_quoted_git_diff(self):
+    def test_single_quoted_git_diff(self) -> None:
         """Real Codex format: single-quoted multi-word command."""
         cmd = "/bin/zsh -lc 'git diff main...HEAD'"
         assert _unwrap_shell_command(cmd) == "git diff main...HEAD"
 
-    def test_double_quoted_sed(self):
+    def test_double_quoted_sed(self) -> None:
         """Real Codex format: double-quoted command with inner single quotes."""
         cmd = """/bin/zsh -lc "sed -n '1,260p' amelia/agents/architect.py\""""
         assert _unwrap_shell_command(cmd) == "sed -n '1,260p' amelia/agents/architect.py"
 
 
 @pytest.mark.asyncio
-async def test_execute_raises_on_agents():
+async def test_execute_raises_on_agents() -> None:
     """CodexBackend refuses agents= with NotImplementedError (Plan 02-04)."""
     backend = CodexBackend(model="fixture-model")
     mock_agent = {"description": "test", "prompt": "test"}
@@ -1058,7 +1061,10 @@ def test_text_extraction_top_level_wins_over_content_blocks() -> None:
     [(None, 10, 8), ("3", 10, 3), ("8", 2, 2), ("0", 10, 8), ("-1", 10, 8), ("notanint", 10, 8)],
 )
 def test_codex_fanout_concurrency_honours_the_shared_env_override(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None, ceiling: int, expected: int
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str | None,
+    ceiling: int,
+    expected: int,
 ) -> None:
     from daydream.backends import effective_fanout_concurrency
     from daydream.backends.codex import CodexBackend

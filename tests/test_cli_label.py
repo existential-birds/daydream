@@ -5,6 +5,10 @@ thin one-liner). Assertions pin observable state — the denormalized ``runs``
 cache value, the human-sourced observation in history, and the prior label
 echoed to stdout — not mere dispatch.
 """
+from pathlib import Path
+from typing import Any
+
+import pytest
 
 from daydream import cli
 from daydream.archive.index import (
@@ -16,7 +20,11 @@ from daydream.archive.index import (
 from tests.harness.trajectory import make_manifest
 
 
-def test_label_command_sets_human_label_and_shows_prior(tmp_path, archive_dir, capsys):
+def test_label_command_sets_human_label_and_shows_prior(
+    tmp_path: Path,
+    archive_dir: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     upsert_run(archive_dir, make_manifest(session_id="sess-0001"))
     append_label_observation(
         archive_dir,
@@ -36,10 +44,10 @@ def test_label_command_sets_human_label_and_shows_prior(tmp_path, archive_dir, c
     assert "rejected" in capsys.readouterr().out  # shows what it overrode (Should-Have)
 
 
-def test_label_command_accepts_unknown(tmp_path, archive_dir):
+def test_label_command_accepts_unknown(tmp_path: Path, archive_dir: Any) -> None:
     upsert_run(archive_dir, make_manifest(session_id="sess-0002"))
     assert cli._handle_label_command(["sess-0002", "--outcome", "unknown"]) == 0
 
 
-def test_label_command_unknown_session_returns_1(tmp_path, archive_dir):
+def test_label_command_unknown_session_returns_1(tmp_path: Path, archive_dir: Any) -> None:
     assert cli._handle_label_command(["no-such", "--outcome", "accepted"]) == 1

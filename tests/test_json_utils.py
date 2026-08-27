@@ -80,7 +80,7 @@ class TestExtractJson:
         """Extract supported JSON wrappers while preserving expected Python values."""
         assert extract_json(text) == expected
 
-    def test_stray_prose_bracket_does_not_beat_the_real_object(self):
+    def test_stray_prose_bracket_does_not_beat_the_real_object(self) -> None:
         # Regression for the sentry-67876 arbiter crash. The model's prose
         # referenced a code snippet `metadata["sender"]` BEFORE its real fenced
         # answer. The earliest-bracket rule parsed `["sender"]` (a valid 1-element

@@ -20,7 +20,10 @@ BackendLoader = Callable[..., AsyncIterator[AgentEvent]]
 
 
 async def _run_backend_against_canonical(
-    backend_loader: BackendLoader, tmp_path: Path, *, read_only: bool = False
+    backend_loader: BackendLoader,
+    tmp_path: Path,
+    *,
+    read_only: bool = False,
 ) -> list[Step]:
     script = json.loads(CANONICAL.read_text())
     recorder = TrajectoryRecorder(

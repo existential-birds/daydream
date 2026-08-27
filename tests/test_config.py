@@ -1,4 +1,5 @@
 """Tests for daydream.config module."""
+from typing import Any
 
 import pytest
 
@@ -97,18 +98,18 @@ def test_audit_skill_map_values_are_plugin_skill_names() -> None:
         assert "skill" not in category
 
 
-def test_phase_default_models_covers_all_backends():
+def test_phase_default_models_covers_all_backends() -> None:
     assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex"}
 
 
-def test_phase_default_models_covers_every_phase_for_each_backend():
+def test_phase_default_models_covers_every_phase_for_each_backend() -> None:
     for backend_name in ("claude", "codex"):
         assert set(PHASE_DEFAULT_MODELS[backend_name].keys()) == PHASE_NAMES, (
             f"{backend_name} default table missing phase entries"
         )
 
 
-def test_phase_default_models_claude_tier_assignments():
+def test_phase_default_models_claude_tier_assignments() -> None:
     claude = PHASE_DEFAULT_MODELS["claude"]
     # PARSE is the cheap tier
     assert claude["parse"] == "claude-haiku-4-5"
@@ -120,7 +121,7 @@ def test_phase_default_models_claude_tier_assignments():
         assert claude[phase] == "claude-sonnet-5"
 
 
-def test_per_stack_review_and_arbiter_split():
+def test_per_stack_review_and_arbiter_split() -> None:
     """#168: per-stack fan-out defaults to Sonnet; the arbiter stays on Opus."""
     claude = PHASE_DEFAULT_MODELS["claude"]
     assert claude["per_stack_review"] == "claude-sonnet-5"
@@ -130,14 +131,14 @@ def test_per_stack_review_and_arbiter_split():
     assert codex["arbiter"] == "gpt-5.6-sol"
 
 
-def test_suppression_uses_cheap_tier():
+def test_suppression_uses_cheap_tier() -> None:
     """#232: the precision-mode suppression pass defaults to the cheap mid tier
     (never per-finding Opus)."""
     assert PHASE_DEFAULT_MODELS["claude"]["suppression"] == "claude-sonnet-5"
     assert PHASE_DEFAULT_MODELS["codex"]["suppression"] == "gpt-5.6-terra"
 
 
-def test_phase_default_models_codex_tier_assignments():
+def test_phase_default_models_codex_tier_assignments() -> None:
     """Codex mirrors the Claude cheap/mid/heavy tiering across the GPT-5.6 lineup."""
     codex = PHASE_DEFAULT_MODELS["codex"]
     assert codex["parse"] == "gpt-5.6-luna"
@@ -158,7 +159,7 @@ def test_phase_default_models_codex_tier_assignments():
         assert codex[phase] == "gpt-5.6-sol", f"codex phase {phase} should default to the heavy tier"
 
 
-def test_deep_effort_table_stays_codex_only():
+def test_deep_effort_table_stays_codex_only() -> None:
     """Improve tiering must not move deep-review behavior for claude/pi.
 
     Claude and Pi have no deep-phase entry, so those phases resolve to None and
@@ -171,14 +172,14 @@ def test_deep_effort_table_stays_codex_only():
             assert phase not in PHASE_DEFAULT_EFFORT[backend], f"{backend}/{phase}"
 
 
-def test_improve_effort_table_covers_every_backend():
+def test_improve_effort_table_covers_every_backend() -> None:
     """The improve advisor is tiered on all three drivers."""
     assert set(IMPROVE_PHASE_DEFAULT_EFFORT.keys()) == {"claude", "codex", "pi"}
     for backend, table in IMPROVE_PHASE_DEFAULT_EFFORT.items():
         assert set(table.keys()) == IMPROVE_PHASE_NAMES, backend
 
 
-def test_merged_table_is_the_union_of_its_two_halves():
+def test_merged_table_is_the_union_of_its_two_halves() -> None:
     assert PHASE_DEFAULT_EFFORT["codex"] == {
         **DEEP_PHASE_DEFAULT_EFFORT["codex"],
         **IMPROVE_PHASE_DEFAULT_EFFORT["codex"],
@@ -186,7 +187,7 @@ def test_merged_table_is_the_union_of_its_two_halves():
     assert PHASE_DEFAULT_EFFORT["claude"] == IMPROVE_PHASE_DEFAULT_EFFORT["claude"]
 
 
-def test_phase_default_effort_levels_are_valid_for_every_driver():
+def test_phase_default_effort_levels_are_valid_for_every_driver() -> None:
     """Only the five levels every driver accepts may appear in the table."""
     assert REASONING_EFFORT_LEVELS == ("low", "medium", "high", "xhigh", "max")
     for backend, table in PHASE_DEFAULT_EFFORT.items():
@@ -194,7 +195,7 @@ def test_phase_default_effort_levels_are_valid_for_every_driver():
             assert level in REASONING_EFFORT_LEVELS, f"{backend}/{phase}={level}"
 
 
-def test_deep_phase_effort_tier_assignments():
+def test_deep_phase_effort_tier_assignments() -> None:
     effort = DEEP_PHASE_DEFAULT_EFFORT["codex"]
     for phase in ("parse", "exploration"):
         assert effort[phase] == "low", f"{phase} should be latency-tier effort"
@@ -207,7 +208,7 @@ def test_deep_phase_effort_tier_assignments():
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "pi"])
-def test_improve_phase_effort_tier_assignments(backend):
+def test_improve_phase_effort_tier_assignments(backend: Any) -> None:
     effort = IMPROVE_PHASE_DEFAULT_EFFORT[backend]
     assert effort["recon"] == "low"
     assert effort["audit"] == "high"
@@ -215,23 +216,23 @@ def test_improve_phase_effort_tier_assignments(backend):
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "pi"])
-def test_plan_write_is_pinned_to_max_reasoning_on_every_backend(backend):
+def test_plan_write_is_pinned_to_max_reasoning_on_every_backend(backend: Any) -> None:
     """Plan authoring and plan repair both ride the plan_write key."""
     assert PHASE_DEFAULT_EFFORT[backend]["plan_write"] == "max"
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex"])
-def test_plan_write_is_pinned_to_the_top_model_tier(backend):
+def test_plan_write_is_pinned_to_the_top_model_tier(backend: Any) -> None:
     """plan_write shares the top tier with the heaviest review phases."""
     models = PHASE_DEFAULT_MODELS[backend]
     assert models["plan_write"] == models["review"] == models["arbiter"]
 
 
-def test_default_pi_model_is_nous_deepseek_flash():
+def test_default_pi_model_is_nous_deepseek_flash() -> None:
     assert DEFAULT_PI_MODEL == "deepseek/deepseek-v4-flash-0731"
 
 
-def test_default_exploration_model_matches_claude_phase_default():
+def test_default_exploration_model_matches_claude_phase_default() -> None:
     # EXPLORE precedent: DEFAULT_EXPLORATION_MODEL is the fallback when no flag
     # is set and table lookup misses; keep it consistent with the table for Claude.
     assert DEFAULT_EXPLORATION_MODEL == PHASE_DEFAULT_MODELS["claude"]["exploration"]

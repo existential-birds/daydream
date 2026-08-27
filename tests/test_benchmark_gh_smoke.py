@@ -6,10 +6,11 @@ through the real ``gh auth git-credential`` helper, and no credential leaks into
 ``benchmark.yaml``. Off by default — CI never runs this (no ``DAYDREAM_LIVE_GH``)
 so the suite requires no network credentials.
 """
-
 import json
 import os
 import shutil
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,11 +27,11 @@ pytestmark = pytest.mark.skipif(
 _SMOKE_PRS = os.environ.get("DAYDREAM_SMOKE_PRS", "")
 
 
-def _seed_manifest(ws, repository: str) -> None:
+def _seed_manifest(ws: Any, repository: str) -> None:
     init_workspace(ws, repository, ["h1.example.com"], ["h2.example.com"])
 
 
-def test_private_preflight_smoke_with_installed_gh(tmp_path):
+def test_private_preflight_smoke_with_installed_gh(tmp_path: Path) -> None:
     """A public repo the operator can read; proves the real authenticated path."""
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -43,7 +44,7 @@ def test_private_preflight_smoke_with_installed_gh(tmp_path):
     assert "password=" not in json.dumps(raw)     # no credential leakage into the manifest
 
 
-def test_import_prs_two_prs_smoke_with_installed_gh(tmp_path):
+def test_import_prs_two_prs_smoke_with_installed_gh(tmp_path: Path) -> None:
     """Opt-in: import two PRs from an accessible repo with the installed gh; both
     frozen snapshots must classify ready. Operator sets DAYDREAM_SMOKE_PRS to a
     comma-separated pair (e.g. '841,842'); skipped when absent."""

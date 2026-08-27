@@ -1,6 +1,8 @@
 import fcntl
 import os
 import stat
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,52 +22,52 @@ from daydream.benchmark.storage import (
 )
 
 
-def test_load_yaml_rejects_duplicate_keys(tmp_path):
+def test_load_yaml_rejects_duplicate_keys(tmp_path: Path) -> None:
     p = tmp_path / "dup.yaml"
     p.write_text("a: 1\na: 2\n")
     with pytest.raises(WorkspaceCorrupt):
         load_yaml_strict(p)
 
 
-def test_load_yaml_rejects_unknown_keys_at_schema_layer(tmp_path):
+def test_load_yaml_rejects_unknown_keys_at_schema_layer(tmp_path: Path) -> None:
     p = tmp_path / "m.yaml"
     p.write_text("schema_version: 1\nbogus: true\n")
     assert "schema_version" in load_yaml_strict(p)  # raw load is permissive; schema is strict
 
 
-def test_load_yaml_safe_load_no_object_execution(tmp_path):
+def test_load_yaml_safe_load_no_object_execution(tmp_path: Path) -> None:
     p = tmp_path / "unsafe.yaml"
     p.write_text("!!python/object/apply:os.system ['true']\n")
     with pytest.raises(WorkspaceCorrupt):
         load_yaml_strict(p)
 
 
-def test_atomic_write_json_0600_and_readback(tmp_path):
+def test_atomic_write_json_0600_and_readback(tmp_path: Path) -> None:
     dest = tmp_path / "out" / "nested" / "data.json"
     atomic_write_json(dest, {"k": 1})
     assert load_json_strict(dest) == {"k": 1}
     assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
 
-def test_atomic_write_yaml_0600_and_readback(tmp_path):
+def test_atomic_write_yaml_0600_and_readback(tmp_path: Path) -> None:
     dest = tmp_path / "benchmark.yaml"
     atomic_write_yaml(dest, {"schema_version": 1})
     assert load_yaml_strict(dest) == {"schema_version": 1}
     assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
 
-def test_ensure_private_dir_is_0700(tmp_path):
+def test_ensure_private_dir_is_0700(tmp_path: Path) -> None:
     d = tmp_path / "private" / "nested"
     ensure_private_dir(d)
     assert stat.S_IMODE(d.stat().st_mode) == 0o700
 
 
-def test_sha256_file(tmp_path):
+def test_sha256_file(tmp_path: Path) -> None:
     p = tmp_path / "f.bin"
     p.write_bytes(b"hello")
     assert sha256_file(p) == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
-def test_workspace_lock_acquire_release(tmp_path):
+def test_workspace_lock_acquire_release(tmp_path: Path) -> None:
     with WorkspaceLock(tmp_path):
         lock_file = tmp_path / ".benchmark.lock"
         assert lock_file.exists()
@@ -74,7 +76,7 @@ def test_workspace_lock_acquire_release(tmp_path):
         pass
 
 
-def test_workspace_lock_contention_is_explicit(tmp_path):
+def test_workspace_lock_contention_is_explicit(tmp_path: Path) -> None:
     # A second exclusive holder on a SEPARATE open file description must be
     # surfaced explicitly, never silently ignored. Use a non-blocking probe so
     # this cannot deadlock against the first holder's flock (flock conflicts
@@ -92,7 +94,7 @@ def test_workspace_lock_contention_is_explicit(tmp_path):
         first.__exit__(None, None, None)
 
 
-def test_workspace_lock_contention_raises(tmp_path):
+def test_workspace_lock_contention_raises(tmp_path: Path) -> None:
     lock_path = tmp_path / ".benchmark.lock"
     with open(lock_path, "w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
@@ -100,11 +102,11 @@ def test_workspace_lock_contention_raises(tmp_path):
             WorkspaceLock(tmp_path, blocking=False).__enter__()
 
 
-def _stage(ctx, path, content):
+def _stage(ctx: Any, path: Any, content: str) -> None:
     ctx.stage(path, content.encode())
 
 
-def test_transaction_commit_replaces_all_and_manifest_last(tmp_path):
+def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path) -> None:
     data_a = tmp_path / "cases" / "a.yaml"
     manifest = tmp_path / "benchmark.yaml"
     (tmp_path / "cases").mkdir(parents=True, exist_ok=True)
@@ -117,7 +119,7 @@ def test_transaction_commit_replaces_all_and_manifest_last(tmp_path):
     assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
 
-def test_prepared_journal_rolls_back_on_startup(tmp_path):
+def test_prepared_journal_rolls_back_on_startup(tmp_path: Path) -> None:
     data = tmp_path / "cases" / "b.yaml"
     data.parent.mkdir(parents=True)
     with Transaction(tmp_path, op_id="op-2", kind="write") as tx:
@@ -127,7 +129,7 @@ def test_prepared_journal_rolls_back_on_startup(tmp_path):
     assert not data.exists()
 
 
-def test_committing_journal_rolls_back_in_reverse(tmp_path):
+def test_committing_journal_rolls_back_in_reverse(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
     target.write_text("old")
     with Transaction(tmp_path, op_id="op-3", kind="write") as tx:
@@ -140,7 +142,7 @@ def test_committing_journal_rolls_back_in_reverse(tmp_path):
     assert target.read_text() == "old"  # restored from backup
 
 
-def test_complete_journal_is_verified_and_cleaned(tmp_path):
+def test_complete_journal_is_verified_and_cleaned(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
     target.write_text("old")
     with Transaction(tmp_path, op_id="op-4", kind="write") as tx:
@@ -151,7 +153,7 @@ def test_complete_journal_is_verified_and_cleaned(tmp_path):
     assert target.read_text() == "new"  # after state verified, journal cleaned
 
 
-def test_no_journal_orphan_is_corruption(tmp_path):
+def test_no_journal_orphan_is_corruption(tmp_path: Path) -> None:
     orphan = tmp_path / "cases" / "pr-000001-abcdef012345.yaml"
     orphan.parent.mkdir(parents=True)
     orphan.write_text("case")
@@ -159,14 +161,14 @@ def test_no_journal_orphan_is_corruption(tmp_path):
         recover_startup(tmp_path, indexed=set(), on_disk={orphan})
 
 
-def test_referenced_missing_file_is_corruption(tmp_path):
+def test_referenced_missing_file_is_corruption(tmp_path: Path) -> None:
     manifest = tmp_path / "benchmark.yaml"
     manifest.write_text("references a missing case\n")
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path, indexed={"cases/pr-000001-abcdef012345.yaml"}, on_disk=set())
 
 
-def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path):
+def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Path) -> None:
     # For each named boundary, drive a transaction that injects a crash there,
     # then recover_startup and assert the workspace is either the complete
     # before-state or the complete after-state — never checksum drift. Each
@@ -195,7 +197,7 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path):
         )
 
 
-def test_prejournal_stage_residue_is_removed(tmp_path):
+def test_prejournal_stage_residue_is_removed(tmp_path: Path) -> None:
     target = tmp_path / "t.yaml"
     target.write_text("before")
     with Transaction(tmp_path, op_id="op-pre", kind="write") as tx:
@@ -207,7 +209,7 @@ def test_prejournal_stage_residue_is_removed(tmp_path):
     assert not txn.exists() or not list(txn.iterdir())  # residue gone
 
 
-def test_prejournal_backup_residue_is_removed(tmp_path):
+def test_prejournal_backup_residue_is_removed(tmp_path: Path) -> None:
     target = tmp_path / "t.yaml"
     target.write_text("before")
     with Transaction(tmp_path, op_id="op-pre2", kind="write") as tx:
@@ -218,7 +220,7 @@ def test_prejournal_backup_residue_is_removed(tmp_path):
     assert not txn.exists() or not list(txn.iterdir())
 
 
-def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path):
+def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path: Path) -> None:
     op = tmp_path / "transactions" / "op-x"
     op.mkdir(parents=True)
     (op / "foreign.txt").write_text("not residue")
@@ -227,7 +229,7 @@ def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path):
     assert (op / "foreign.txt").read_text() == "not residue"  # left untouched, never guessed/deleted
 
 
-def test_import_crash_transaction_restores_before_or_after(tmp_path):
+def test_import_crash_transaction_restores_before_or_after(tmp_path: Path) -> None:
     # The import writes {import file, case, benchmark.yaml} as one atomic unit.
     # Driving crater recovery across that whole set proves a crash at any
     # boundary leaves the complete before- or after-state, never a mix.
@@ -259,7 +261,7 @@ def test_import_crash_transaction_restores_before_or_after(tmp_path):
             )
 
 
-def test_stage_rejects_rel_escape(tmp_path):
+def test_stage_rejects_rel_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / "escaped.bin"
     outside.unlink(missing_ok=True)
     with Transaction(tmp_path, op_id="op-esc", kind="write") as tx:
@@ -268,7 +270,7 @@ def test_stage_rejects_rel_escape(tmp_path):
     assert not outside.exists()
 
 
-def test_stage_rejects_absolute_outside(tmp_path):
+def test_stage_rejects_absolute_outside(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"outside-{tmp_path.name}" / "evil.bin"
     outside.parent.mkdir(parents=True, exist_ok=True)
     with Transaction(tmp_path, op_id="op-abs", kind="write") as tx:
@@ -277,7 +279,7 @@ def test_stage_rejects_absolute_outside(tmp_path):
     assert not outside.exists()
 
 
-def test_stage_rejects_symlink_parent_escape(tmp_path):
+def test_stage_rejects_symlink_parent_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"outside-{tmp_path.name}"
     outside.mkdir(parents=True, exist_ok=True)
     (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
@@ -287,7 +289,7 @@ def test_stage_rejects_symlink_parent_escape(tmp_path):
     assert not (outside / "x.yaml").exists()
 
 
-def test_stage_accepts_absolute_inside_root(tmp_path):
+def test_stage_accepts_absolute_inside_root(tmp_path: Path) -> None:
     target = tmp_path / "cases" / "a.yaml"
     target.parent.mkdir(parents=True)
     with Transaction(tmp_path, op_id="op", kind="write") as tx:
@@ -296,7 +298,7 @@ def test_stage_accepts_absolute_inside_root(tmp_path):
     assert target.read_text() == "ok"
 
 
-def _write_corrupt_journal(tmp_path, op_id, mutate):
+def _write_corrupt_journal(tmp_path: Path, op_id: Any, mutate: Any) -> None:
     """Build a valid prepared transaction, then corrupt its journal doc."""
     target = tmp_path / "target.yaml"
     target.write_text("old")  # pre-existing target so "untouched" is observable
@@ -309,20 +311,20 @@ def _write_corrupt_journal(tmp_path, op_id, mutate):
     atomic_write_json(jf, doc)
 
 
-def test_journal_invalid_state_fails_closed(tmp_path):
+def test_journal_invalid_state_fails_closed(tmp_path: Path) -> None:
     _write_corrupt_journal(tmp_path, "op-1", lambda d: d.__setitem__("state", "bogus"))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
     assert (tmp_path / "target.yaml").read_text() == "old"  # target untouched
 
 
-def test_journal_opid_mismatch_fails_closed(tmp_path):
+def test_journal_opid_mismatch_fails_closed(tmp_path: Path) -> None:
     _write_corrupt_journal(tmp_path, "op-2", lambda d: d.__setitem__("op_id", "other-dir"))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
 
 
-def test_journal_rel_escape_fails_closed(tmp_path):
+def test_journal_rel_escape_fails_closed(tmp_path: Path) -> None:
     outside = tmp_path.parent / "escaped-by-journal.bin"
     outside.unlink(missing_ok=True)
     _write_corrupt_journal(tmp_path, "op-3",
@@ -332,33 +334,33 @@ def test_journal_rel_escape_fails_closed(tmp_path):
     assert not outside.exists()  # no path outside the workspace changed
 
 
-def test_journal_stage_with_separator_fails_closed(tmp_path):
+def test_journal_stage_with_separator_fails_closed(tmp_path: Path) -> None:
     _write_corrupt_journal(tmp_path, "op-4", lambda d: d["targets"][0].__setitem__("stage", "sub/stage-0000.bin"))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
 
 
-def test_journal_duplicate_target_rel_fails_closed(tmp_path):
+def test_journal_duplicate_target_rel_fails_closed(tmp_path: Path) -> None:
     _write_corrupt_journal(tmp_path, "op-5",
         lambda d: d["targets"].append(dict(d["targets"][0])))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
 
 
-def test_journal_applied_count_out_of_bounds_fails_closed(tmp_path):
+def test_journal_applied_count_out_of_bounds_fails_closed(tmp_path: Path) -> None:
     _write_corrupt_journal(tmp_path, "op-6", lambda d: d.__setitem__("applied_count", 99))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
 
 
-def test_journal_replacement_order_unknown_target_fails_closed(tmp_path):
+def test_journal_replacement_order_unknown_target_fails_closed(tmp_path: Path) -> None:
     _write_corrupt_journal(tmp_path, "op-7",
         lambda d: d.__setitem__("replacement_order", ["not-a-target"]))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
 
 
-def test_cross_transaction_target_conflict_is_corruption(tmp_path):
+def test_cross_transaction_target_conflict_is_corruption(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
     target.write_text("before")
     for i in (1, 2):
@@ -370,7 +372,7 @@ def test_cross_transaction_target_conflict_is_corruption(tmp_path):
     assert target.read_text() == "before"  # neither journal applied; no last-writer-wins
 
 
-def test_disjoint_transactions_both_recover(tmp_path):
+def test_disjoint_transactions_both_recover(tmp_path: Path) -> None:
     t1 = tmp_path / "a.yaml"
     t2 = tmp_path / "b.yaml"
     t1.write_text("a-before")
@@ -385,7 +387,7 @@ def test_disjoint_transactions_both_recover(tmp_path):
     assert t1.read_text() == "a-before" and t2.read_text() == "b-before"
 
 
-def test_empty_transactions_never_follows_symlink(tmp_path):
+def test_empty_transactions_never_follows_symlink(tmp_path: Path) -> None:
     # A journaled op dir exists so recover_startup reaches _empty_transactions,
     # plus a symlink under transactions/ that must NOT be followed or deleted.
     outside = tmp_path / "outside"
@@ -401,7 +403,7 @@ def test_empty_transactions_never_follows_symlink(tmp_path):
     assert (tmp_path / "transactions" / "op-link").is_symlink()  # never removed
 
 
-def test_empty_transactions_removes_only_positive_residue(tmp_path):
+def test_empty_transactions_removes_only_positive_residue(tmp_path: Path) -> None:
     # Journaled dir is cleaned by _recover_one_journal; a leftover positively-
     # identified residue dir is removed; a foreign file is left untouched.
     with Transaction(tmp_path, op_id="op-j", kind="write") as tx:
@@ -418,7 +420,7 @@ def test_empty_transactions_removes_only_positive_residue(tmp_path):
     assert (foreign / "note.txt").read_text() == "keep"  # foreign left untouched
 
 
-def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path):
+def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path: Path) -> None:
     # 3 targets; inject a crash after each individual rename/fsync boundary.
     for n in range(0, 4):  # after applying 0, 1, 2, 3 of the 3 targets
         root = tmp_path / f"ws-{n}"
@@ -440,7 +442,7 @@ def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path):
         assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
 
 
-def test_single_target_target_boundary(tmp_path):
+def test_single_target_target_boundary(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     root.mkdir()
     t = root / "t.yaml"
@@ -453,7 +455,7 @@ def test_single_target_target_boundary(tmp_path):
     assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
 
 
-def test_verify_complete_preserves_0600_target(tmp_path):
+def test_verify_complete_preserves_0600_target(tmp_path: Path) -> None:
     t = tmp_path / "target.yaml"
     t.write_text("old")
     os.chmod(t, 0o600)
@@ -465,7 +467,7 @@ def test_verify_complete_preserves_0600_target(tmp_path):
     assert stat.S_IMODE(t.stat().st_mode) == 0o600
 
 
-def test_rollback_preserves_0700_scaffold_dir(tmp_path):
+def test_rollback_preserves_0700_scaffold_dir(tmp_path: Path) -> None:
     with Transaction(tmp_path, op_id="op-i", kind="init") as tx:
         tx.create_dir("cases")
         tx.stage("cases/keep.yaml", b"keep")
@@ -476,7 +478,7 @@ def test_rollback_preserves_0700_scaffold_dir(tmp_path):
         assert stat.S_IMODE((tmp_path / "cases").stat().st_mode) == 0o700
 
 
-def test_rollback_committing_restored_target_is_0600(tmp_path):
+def test_rollback_committing_restored_target_is_0600(tmp_path: Path) -> None:
     t = tmp_path / "target.yaml"
     t.write_text("old")
     os.chmod(t, 0o600)
@@ -489,7 +491,7 @@ def test_rollback_committing_restored_target_is_0600(tmp_path):
     assert stat.S_IMODE(t.stat().st_mode) == 0o600
 
 
-def test_restart_recovery_is_idempotent(tmp_path):
+def test_restart_recovery_is_idempotent(tmp_path: Path) -> None:
     t = tmp_path / "target.yaml"
     t.write_text("old")
     with Transaction(tmp_path, op_id="op-idem", kind="write") as tx:
@@ -504,7 +506,7 @@ def test_restart_recovery_is_idempotent(tmp_path):
     assert txn == first_txn                              # no leftover residue, no second-pass failure
 
 
-def test_complete_restart_recovery_is_idempotent(tmp_path):
+def test_complete_restart_recovery_is_idempotent(tmp_path: Path) -> None:
     t = tmp_path / "target.yaml"
     t.write_text("old")
     with Transaction(tmp_path, op_id="op-idem2", kind="write") as tx:
@@ -516,7 +518,7 @@ def test_complete_restart_recovery_is_idempotent(tmp_path):
     assert t.read_text() == "new"
 
 
-def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path):
+def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path: Path) -> None:
     """Recovery consumes the canonical rel the validator computed, never the
     raw journal string -- a crafted non-canonical-but-inside-root target rel
     must still be rolled back, not silently skipped (all-or-nothing)."""
@@ -540,7 +542,7 @@ def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path):
     assert target.read_text() == "old"  # restored from backup, not skipped
 
 
-def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path):
+def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path: Path) -> None:
     """A genuinely empty dir under transactions/ is not positively-identified
     residue -- recovery fails closed and never deletes what it can't identify."""
     op = tmp_path / "transactions" / "op-empty"
@@ -550,19 +552,19 @@ def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path):
     assert op.is_dir()  # left untouched
 
 
-def test_resolve_authoring_path_rejects_absolute(tmp_path):
+def test_resolve_authoring_path_rejects_absolute(tmp_path: Path) -> None:
     p = tmp_path / "cases" / "x.yaml"
     p.parent.mkdir(parents=True)
     with pytest.raises(WorkspaceCorrupt):
         resolve_authoring_path(tmp_path, str(p))  # absolute even inside root
 
 
-def test_resolve_authoring_path_rejects_traversal(tmp_path):
+def test_resolve_authoring_path_rejects_traversal(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceCorrupt):
         resolve_authoring_path(tmp_path, "../cases/x.yaml")
 
 
-def test_resolve_authoring_path_rejects_symlink_escape(tmp_path):
+def test_resolve_authoring_path_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"esc-{tmp_path.name}"
     outside.mkdir(exist_ok=True)
     (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
@@ -570,7 +572,7 @@ def test_resolve_authoring_path_rejects_symlink_escape(tmp_path):
         resolve_authoring_path(tmp_path, "cases/x.yaml")
 
 
-def test_resolve_authoring_path_accepts_relative_inside(tmp_path):
+def test_resolve_authoring_path_accepts_relative_inside(tmp_path: Path) -> None:
     (tmp_path / "cases").mkdir(parents=True)
     (tmp_path / "cases" / "x.yaml").write_text("x")
     assert resolve_authoring_path(tmp_path, "cases/x.yaml").is_absolute()
@@ -579,7 +581,7 @@ def test_resolve_authoring_path_accepts_relative_inside(tmp_path):
     ).resolve()
 
 
-def test_apply_orphan_rule_rejects_absolute_indexed(tmp_path):
+def test_apply_orphan_rule_rejects_absolute_indexed(tmp_path: Path) -> None:
     (tmp_path / "cases").mkdir(parents=True)
     f = tmp_path / "cases" / "pr-000001-abcdef012345.yaml"
     f.write_text("case")

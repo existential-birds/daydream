@@ -12,10 +12,10 @@ but violated ``output_schema`` leaked out unvalidated. These tests drive
 real-path pattern in ``test_agent_structured_render.py`` /
 ``test_agent_recorder_integration.py``.
 """
-
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent
@@ -29,7 +29,7 @@ _FILE_SCHEMA = {
 }
 
 
-async def test_primary_path_schema_violation_degrades_to_fallback(tmp_path) -> None:
+async def test_primary_path_schema_violation_degrades_to_fallback(tmp_path: Path) -> None:
     backend = MockBackend([
         TextEvent(text='{"file": "src/a.py"}'),
         ResultEvent(structured_output={"line": 3}, continuation=None),
@@ -43,7 +43,7 @@ async def test_primary_path_schema_violation_degrades_to_fallback(tmp_path) -> N
     assert isinstance(result, dict)
 
 
-async def test_primary_path_unusable_text_and_structured_degrade_to_plain_text(tmp_path) -> None:
+async def test_primary_path_unusable_text_and_structured_degrade_to_plain_text(tmp_path: Path) -> None:
     # The reachable codex/pi route: structured output is parsed from the agent
     # text itself (codex.py:641, pi.py:910), so text and structured carry
     # the same payload. When that payload violates output_schema, both gates
@@ -58,7 +58,7 @@ async def test_primary_path_unusable_text_and_structured_degrade_to_plain_text(t
     assert isinstance(result, str)
 
 
-async def test_primary_path_salvages_partial_dict(tmp_path) -> None:
+async def test_primary_path_salvages_partial_dict(tmp_path: Path) -> None:
     schema = {"type": "object", "required": ["verdicts"], "properties": {
         "verdicts": {"type": "array", "items": {
             "type": "object", "required": ["issue_id", "verdict", "evidence"]}}}}
@@ -76,7 +76,7 @@ async def test_primary_path_salvages_partial_dict(tmp_path) -> None:
     assert isinstance(result, dict)
 
 
-async def test_primary_path_bare_array_reaches_merge_shape(tmp_path) -> None:
+async def test_primary_path_bare_array_reaches_merge_shape(tmp_path: Path) -> None:
     schema = {"type": "object", "required": ["items"], "properties": {
         "items": {"type": "array", "items": {"type": "object"}}}}
     items = [{"id": 1, "description": "x"}]
@@ -90,7 +90,7 @@ async def test_primary_path_bare_array_reaches_merge_shape(tmp_path) -> None:
     assert isinstance(result, list)
 
 
-async def test_primary_path_respects_validate_structured_output_false(tmp_path) -> None:
+async def test_primary_path_respects_validate_structured_output_false(tmp_path: Path) -> None:
     backend = MockBackend([ResultEvent(structured_output={"line": 3}, continuation=None)])
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.RECON,
@@ -99,7 +99,7 @@ async def test_primary_path_respects_validate_structured_output_false(tmp_path) 
     assert isinstance(result, dict)
 
 
-async def test_primary_path_valid_structured_output_returned(tmp_path) -> None:
+async def test_primary_path_valid_structured_output_returned(tmp_path: Path) -> None:
     schema = {"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}}}
     payload = {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]}
     backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])

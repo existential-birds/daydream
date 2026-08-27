@@ -2,6 +2,8 @@
 
 Covers ``daydream.deep.detection.detect_stacks`` implemented in plan 05-01.
 """
+from pathlib import Path
+from typing import Any
 
 
 def test_stack_assignment_has_no_skill_field() -> None:
@@ -196,7 +198,7 @@ def test_shard_stacks_deterministic_names_and_assignments() -> None:
 
     stack = StackAssignment(stack_name="python", files=[f"src/m{i}.py" for i in range(5)])
 
-    def _split() -> list:
+    def _split() -> list[Any]:
         return shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
 
     a = _split()
@@ -299,7 +301,7 @@ def test_shard_stacks_fanout_cap_irreducible_when_unsplit_stacks_outnumber_cap()
     assert sorted(union) == sorted([f"f{i}.py" for i in range(18)])
 
 
-def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path) -> None:
+def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path: Path) -> None:
     """Issue #731: files sharing an import edge stay in the same shard when it
     fits within the bounds. The graph comes from ``build_import_graph`` over
     real on-disk files, and the edge pair (a.py, d.py) is non-adjacent in sorted
@@ -344,7 +346,7 @@ def test_shard_stacks_fail_open_without_graph() -> None:
     assert len(set(union)) == len(union)  # no duplicate primary assignment
 
 
-def test_shard_stacks_populates_bounded_frontier(tmp_path) -> None:
+def test_shard_stacks_populates_bounded_frontier(tmp_path: Path) -> None:
     """Issue #731: cross-shard shared files surface as a bounded frontier,
     derived from a real ``build_import_graph`` over on-disk files."""
     from pathlib import Path
@@ -366,7 +368,7 @@ def test_shard_stacks_populates_bounded_frontier(tmp_path) -> None:
     assert all(len(s.frontier_files) <= 3 for s in out)   # bounded
 
 
-def test_build_import_graph_resolves_python_edges(tmp_path) -> None:
+def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
     """Issue #731: tree-sitter resolves python import edges, absolute and
     relative; unknown grammars fail open to singletons."""
     from pathlib import Path
@@ -386,7 +388,7 @@ def test_build_import_graph_resolves_python_edges(tmp_path) -> None:
     assert "notes.txt" in graph             # unknown grammar -> fail-open singleton
 
 
-def test_build_import_graph_resolves_multilanguage_edges(tmp_path) -> None:
+def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None:
     """Issue #731: tree-sitter resolves .ts/.go/.rs import edges too, so the
     dependency graph is not inert outside python."""
     from pathlib import Path
@@ -437,7 +439,7 @@ def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
         assert inline_grounded_files(diff, shard.files) == set(shard.files)
 
 
-def test_detect_stacks_registry_independent_same_scopes():
+def test_detect_stacks_registry_independent_same_scopes() -> None:
     from daydream.deep.detection import GENERIC_STACK, detect_stacks
 
     # Same files, absent vs empty vs populated registry -> same ordered scopes.
@@ -450,7 +452,7 @@ def test_detect_stacks_registry_independent_same_scopes():
     assert names[-1] == "structure"
 
 
-def test_detect_stacks_never_degrades_to_generic_without_registry():
+def test_detect_stacks_never_degrades_to_generic_without_registry() -> None:
     from daydream.deep.detection import GENERIC_STACK, detect_stacks
 
     # D-16 removed: a python stack never becomes generic merely because no

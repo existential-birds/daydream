@@ -1,7 +1,7 @@
 """Tests for the extension Registry (daydream/extensions)."""
 
 from dataclasses import FrozenInstanceError
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -11,6 +11,7 @@ from daydream.extensions import (
     LoopGroup,
     Registry,
     ToolDecision,
+    ToolSupervisor,
     UnresolvedExtensionError,
 )
 
@@ -77,14 +78,14 @@ def test_remove_loop_internal_step_raises_descriptive_error() -> None:
 def test_tool_supervisor_registration_is_exclusive() -> None:
     reg = Registry()
 
-    def supervisor(name, tool_input, *, phase):
+    def supervisor(name: str, tool_input: Any, *, phase: Any) -> Any:
         return ToolDecision(veto=name == "Write", reason="protected path")
 
-    reg.register_tool_supervisor(supervisor)
+    reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
     assert reg.tool_supervisor_if_registered() is supervisor
     assert supervisor("Write", {}, phase="fix").veto is True
     with pytest.raises(ExtensionError, match="tool supervisor.*already registered"):
-        reg.register_tool_supervisor(supervisor)
+        reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
     with pytest.raises(ValueError, match="veto.*reason"):
         ToolDecision(veto=True, reason="")
 
@@ -92,22 +93,22 @@ def test_tool_supervisor_registration_is_exclusive() -> None:
 def test_tool_supervisor_registration_rejects_async_function() -> None:
     reg = Registry()
 
-    async def supervisor(name, tool_input, *, phase):
+    async def supervisor(name: Any, tool_input: Any, *, phase: Any) -> Any:
         return ToolDecision(veto=False)
 
     with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
-        reg.register_tool_supervisor(supervisor)
+        reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
     assert reg.tool_supervisor_if_registered() is None
 
 
 def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
     class AsyncSupervisor:
-        async def __call__(self, name, tool_input, *, phase):
+        async def __call__(self, name: Any, tool_input: Any, *, phase: Any) -> Any:
             return ToolDecision(veto=False)
 
     reg = Registry()
     with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
-        reg.register_tool_supervisor(AsyncSupervisor())
+        reg.register_tool_supervisor(cast(ToolSupervisor, AsyncSupervisor()))
     assert reg.tool_supervisor_if_registered() is None
 
 
@@ -142,7 +143,7 @@ def test_renderer_slot_override_and_lookup() -> None:
     assert reg.renderer_if_registered("finding") is None
     with pytest.raises(UnresolvedExtensionError):
         reg.renderer("finding")
-    def fn(finding, ctx):
+    def fn(finding: Any, ctx: Any) -> str:
         return "X"
     reg.override_renderer("finding", fn)
     assert reg.renderer("finding") is fn

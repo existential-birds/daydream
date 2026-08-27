@@ -7,6 +7,8 @@ fixture. The PARSE phase's structured-output ``id == 1`` (produced by the REAL
 backend parser) proves the keying — a mis-keyed factory would serve REVIEW's
 lines and the structured output would be absent.
 """
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -18,7 +20,7 @@ from tests.harness.phase_replay import codex_subprocess_for_phases
 
 
 @pytest.fixture
-def recorder(tmp_path):
+def recorder(tmp_path: Path) -> Any:
     """A real, un-entered ``TrajectoryRecorder`` (mirrors the accessor test).
 
     The test enters it with ``async with`` so ``get_current_recorder()`` —
@@ -34,7 +36,7 @@ def recorder(tmp_path):
     )
 
 
-async def test_side_effect_serves_per_phase(tmp_path, recorder):
+async def test_side_effect_serves_per_phase(tmp_path: Path, recorder: Any) -> None:
     rev_script = {"turns": [{"message_id": "r1", "text": "reviewed"}]}
     parse_script = {
         "turns": [{"message_id": "p1", "text": ""}],
@@ -51,20 +53,22 @@ async def test_side_effect_serves_per_phase(tmp_path, recorder):
             ]
         },
     }
-    phase_scripts = {DaydreamPhase.REVIEW: rev_script, DaydreamPhase.PARSE: parse_script}
+    phase_scripts: dict[DaydreamPhase, dict[str, Any]] = {
+        DaydreamPhase.REVIEW: rev_script, DaydreamPhase.PARSE: parse_script,
+    }
 
     async with recorder:
         with codex_subprocess_for_phases(phase_scripts):
             await run_agent(
                 CodexBackend("m"), tmp_path, "go", phase=DaydreamPhase.REVIEW
             )
-            par, _, _ = await run_agent(
+            par = cast(dict[str, Any], (await run_agent(
                 CodexBackend("m"),
                 tmp_path,
                 "go",
                 output_schema=FEEDBACK_SCHEMA,
                 phase=DaydreamPhase.PARSE,
-            )
+            ))[0])
 
     # PARSE fixture's structured output — proves the factory keyed on the
     # firing phase, not REVIEW's (text-only) lines.

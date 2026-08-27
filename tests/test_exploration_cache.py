@@ -98,7 +98,8 @@ async def test_diff_change_invalidates_cache(
 
 
 async def test_uncommitted_edit_reuses_an_exact_cache_key(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An exact key hit remains reusable when the worktree is dirty."""
     silence(monkeypatch)
@@ -120,7 +121,8 @@ async def test_uncommitted_edit_reuses_an_exact_cache_key(
 
 
 async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unignored Daydream output alone does not make a rebuilt cache ineligible."""
     from daydream.runner import RunConfig, run
@@ -165,7 +167,8 @@ async def test_depth_change_invalidates_cache(
 
 
 async def test_corrupt_key_file_is_a_miss_not_a_crash(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A truncated/garbage key file re-runs the pre-scan instead of failing."""
     silence(monkeypatch)
@@ -198,7 +201,8 @@ async def test_missing_key_file_is_a_miss(
 
 
 async def test_failed_exploration_is_not_durably_cached(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A degraded pre-scan is materialized for this run but cannot be reused."""
     silence(monkeypatch)

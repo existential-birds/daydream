@@ -177,7 +177,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     captured: dict[str, Any] = {}
     worktree_path_at_dispatch: dict[str, Path] = {}
 
-    async def fake_run_loop_deep(work, config):
+    async def fake_run_loop_deep(work: Any, config: Any) -> int:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
@@ -246,7 +246,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work, config):
+    async def fake_run_loop_deep(work: Any, config: Any) -> int:
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
@@ -304,7 +304,7 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     )
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work, config):
+    async def fake_run_loop_deep(work: Any, config: Any) -> int:
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
         captured["output_mode"] = config.output_mode
@@ -365,7 +365,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work, config):
+    async def fake_run_loop_deep(work: Any, config: Any) -> int:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         return 0
@@ -412,7 +412,7 @@ async def test_review_mode_on_base_branch_does_not_error(
     # WrongBranchError guard into the deep flow.
     routed: dict[str, Any] = {}
 
-    async def fake_run_loop_deep(work, config):
+    async def fake_run_loop_deep(work: Any, config: Any) -> int:
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
         return 0

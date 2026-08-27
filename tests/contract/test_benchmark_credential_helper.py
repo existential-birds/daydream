@@ -2,6 +2,9 @@ import http.server
 import subprocess
 import threading
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from daydream import git_ops
 
@@ -27,7 +30,7 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
                    check=True, capture_output=True)
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
+        def do_GET(self) -> None:
             if self.path.split("?")[0].rstrip("/") != "/repo.git/info/refs":
                 self.send_response(404)
                 self.end_headers()
@@ -45,7 +48,7 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, *a):
+        def log_message(self, *a: Any) -> None:
             pass
 
     srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
@@ -53,7 +56,7 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
     return str(bare), f"http://127.0.0.1:{srv.server_address[1]}/repo.git"
 
 
-def test_git_ls_remote_drives_credential_helper_contract(tmp_path, monkeypatch):
+def test_git_ls_remote_drives_credential_helper_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))

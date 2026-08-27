@@ -5,7 +5,7 @@ import pytest
 from daydream import review_profile as rp
 
 
-def test_new_model_bearing_stage_without_strategy_and_classification_fails():
+def test_new_model_bearing_stage_without_strategy_and_classification_fails() -> None:
     # All production STAGE_KEYS carry a strategy key + explicit envelope
     # classification (M14 completeness guard is currently satisfied).
     registered = set(rp.STAGE_KEYS)
@@ -21,7 +21,7 @@ def test_new_model_bearing_stage_without_strategy_and_classification_fails():
     assert new_stage - set(rp.ENVELOPE_CLASSIFICATION) == new_stage
 
 
-def test_profile_cannot_alter_invariant_host_owned_keys():
+def test_profile_cannot_alter_invariant_host_owned_keys() -> None:
     for field in ("findings_schema", "verifier", "judge", "scoring", "gold", "skill_name", "model"):
         with pytest.raises(rp.ProfileError):
             rp.parse_profile(f'schema_version = 1\nname = "p"\n{field} = "x"', source="s")

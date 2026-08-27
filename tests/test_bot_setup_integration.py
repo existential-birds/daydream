@@ -6,9 +6,9 @@ callback) is isolated behind :class:`daydream.bot_setup._ManifestListener` so
 the code-exchange behavior is testable without real GitHub: the test drives
 ``_handle_code`` directly, monkeypatching only the manifest-code exchange.
 """
-
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -29,7 +29,7 @@ def _real_pem() -> str:
     ).decode()
 
 
-def test_callback_listener_captures_code_then_exchanges(monkeypatch):
+def test_callback_listener_captures_code_then_exchanges(monkeypatch: pytest.MonkeyPatch) -> None:
     """The callback seam exchanges the manifest code for creds + slug."""
     monkeypatch.setattr(
         "daydream.bot_setup.exchange_manifest_code",
@@ -58,11 +58,11 @@ def test_app_manifest_requests_issue_write_for_improve_publication() -> None:
     assert permissions["issues"] == "write"
 
 
-def test_callback_listener_passes_repo_dir_and_code_through(monkeypatch):
+def test_callback_listener_passes_repo_dir_and_code_through(monkeypatch: pytest.MonkeyPatch) -> None:
     """The seam threads the listener's repo_dir and the callback code unchanged."""
     captured: dict[str, object] = {}
 
-    def fake_exchange(repo, code):
+    def fake_exchange(repo: Any, code: Any) -> tuple[Any, ...]:
         captured["repo"] = repo
         captured["code"] = code
         return AppCredentials(42, "pem"), "slug-x"
@@ -75,11 +75,11 @@ def test_callback_listener_passes_repo_dir_and_code_through(monkeypatch):
     assert creds.app_id == 42 and slug == "slug-x"
 
 
-def test_missing_code_raises_cancelled_and_never_exchanges(monkeypatch):
+def test_missing_code_raises_cancelled_and_never_exchanges(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty/missing callback code (user declined) aborts with a clear error."""
     called = False
 
-    def fake_exchange(repo, code):
+    def fake_exchange(repo: Any, code: Any) -> tuple[Any, ...]:
         nonlocal called
         called = True
         return AppCredentials(1, "pem"), "slug"
@@ -153,7 +153,9 @@ def test_verify_reports_missing_secret_with_remediation(fake_gh: FakeGh, git_rep
 
 
 def test_verify_healthy_install_passes_all_checks(
-    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh,
+    repo_with_origin: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A complete install (creds + secrets + var + installed App + workflows) → ok is True.
 
@@ -166,7 +168,8 @@ def test_verify_healthy_install_passes_all_checks(
     The workflows are committed to local ``main`` and pushed to origin so the
     check passes.
     """
-    from tests.conftest import _commit, _git
+    from tests.harness.git_helpers import commit as _commit
+    from tests.harness.git_helpers import git as _git
 
     pem = _real_pem()
     monkeypatch.setenv(APP_ID_ENV, "7")
@@ -200,7 +203,8 @@ def test_verify_healthy_install_passes_all_checks(
 def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     """A present but stale workflow — one that lost the approval gate — fails the doctor."""
     from daydream.templates import workflow_template_files
-    from tests.conftest import _commit, _git
+    from tests.harness.git_helpers import commit as _commit
+    from tests.harness.git_helpers import git as _git
 
     workflows_dir = repo_with_origin / ".github/workflows"
     workflows_dir.mkdir(parents=True)
@@ -237,7 +241,8 @@ def test_verify_accepts_customized_workflow_with_intact_gate(
     fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
     fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
     from daydream.templates import workflow_template_files
-    from tests.conftest import _commit, _git
+    from tests.harness.git_helpers import commit as _commit
+    from tests.harness.git_helpers import git as _git
 
     workflows_dir = repo_with_origin / ".github/workflows"
     workflows_dir.mkdir(parents=True)
@@ -261,11 +266,14 @@ def test_verify_accepts_customized_workflow_with_intact_gate(
 
 
 def test_land_workflows_warns_before_overwriting_customized_workflow(
-    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh,
+    repo_with_origin: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """land_workflows warns that customization is unsupported before replacing it."""
     from daydream.templates import workflow_template_files
-    from tests.conftest import _commit, _git
+    from tests.harness.git_helpers import commit as _commit
+    from tests.harness.git_helpers import git as _git
 
     workflows_dir = repo_with_origin / ".github/workflows"
     workflows_dir.mkdir(parents=True)
@@ -310,7 +318,9 @@ def cli_main(argv: list[str]) -> int:
 
 
 def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
-    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh,
+    repo_with_origin: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end ``daydream setup`` (full-auto) through cli.main: secrets land, PR opens.
 
@@ -343,7 +353,9 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
 
 
 def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
-    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh,
+    repo_with_origin: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No key + a non-interactive stdin → clean pre-flight exit 1, nothing deposited.
 

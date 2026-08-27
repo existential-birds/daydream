@@ -27,7 +27,7 @@ import os
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -98,7 +98,7 @@ def assert_stalled_and_reaped(spawner: Any, *, expected_spawns: int = 1) -> Fake
     proc = spawner.procs[-1]
     assert proc.returncode is not None, "subprocess was never killed — leaked"
     assert proc.reaped, "subprocess was killed but never wait()ed — zombie"
-    return proc
+    return cast(FakeCliProcess, proc)
 
 
 async def drain(backend: Any, cwd: Path) -> list[Any]:
@@ -112,7 +112,8 @@ async def drain(backend: Any, cwd: Path) -> list[Any]:
 
 @pytest.mark.asyncio
 async def test_pi_silent_stream_trips_idle_timeout_and_reaps_subprocess(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``pi`` that emits two lines then goes silent forever ends the turn.
 
@@ -133,7 +134,8 @@ async def test_pi_silent_stream_trips_idle_timeout_and_reaps_subprocess(
 
 @pytest.mark.asyncio
 async def test_codex_silent_stream_trips_idle_timeout_and_reaps_subprocess(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``codex`` that emits two lines then goes silent forever ends the turn."""
     spawner = install_fake_cli_process(monkeypatch, "codex", lines=CODEX_LINES[:2], hang=True)
@@ -264,7 +266,8 @@ async def test_pi_flowing_stream_does_not_trip_a_tiny_window(
 
 @pytest.mark.asyncio
 async def test_codex_flowing_stream_does_not_trip_a_tiny_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spawner = install_fake_cli_process(monkeypatch, "codex", lines=CODEX_LINES)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
@@ -350,7 +353,8 @@ def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.asyncio
 async def test_stall_retry_is_limited_below_backend_retry_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A persistent stall gets one fresh process, not every transport retry."""
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
@@ -388,7 +392,8 @@ async def test_stall_retry_is_limited_below_backend_retry_budget(
 
 @pytest.mark.asyncio
 async def test_wall_budget_still_aborts_while_blocked_in_the_idle_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The wall budget must still fire while the read sits inside the idle window.
 

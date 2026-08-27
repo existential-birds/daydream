@@ -1,3 +1,5 @@
+from typing import Any
+
 from daydream.pr_review import (
     ParsedIssue,
     alt_issues_to_parsed,
@@ -7,24 +9,24 @@ from daydream.pr_review import (
 )
 
 
-def test_fingerprint_is_stable_sha256():
+def test_fingerprint_is_stable_sha256() -> None:
     fp1 = compute_fingerprint("src/auth.py", "Missing null check on `user_email`", "NPE rationale")
     fp2 = compute_fingerprint("src/auth.py", "Missing null check on `user_email`", "NPE rationale")
     assert fp1 == fp2
     assert len(fp1) == 64
 
 
-def test_fingerprint_differs_on_file():
+def test_fingerprint_differs_on_file() -> None:
     assert compute_fingerprint("a.py", "bug `tok`", "") != compute_fingerprint("b.py", "bug `tok`", "")
 
 
-def test_fingerprint_differs_on_description():
+def test_fingerprint_differs_on_description() -> None:
     a = compute_fingerprint("a.py", "bug `tok`", "first rationale")
     b = compute_fingerprint("a.py", "bug `tok`", "second rationale")
     assert a != b
 
 
-def test_fingerprint_ignores_line_number():
+def test_fingerprint_ignores_line_number() -> None:
     base = {
         "file": "a.py",
         "description": "bug `tok`",
@@ -36,14 +38,14 @@ def test_fingerprint_ignores_line_number():
     assert issues[0].fingerprint == issues[1].fingerprint
 
 
-def test_fingerprint_differs_on_title_word_order():
+def test_fingerprint_differs_on_title_word_order() -> None:
     """Description word order is preserved so differently-worded findings don't collide."""
     a = compute_fingerprint("a.py", "`alpha` and `bravo`", "")
     b = compute_fingerprint("a.py", "`bravo` and `alpha`", "")
     assert a != b
 
 
-def test_fingerprint_ignores_severity_and_confidence():
+def test_fingerprint_ignores_severity_and_confidence() -> None:
     base = {
         "file": "src/auth.py",
         "line": 10,
@@ -55,7 +57,7 @@ def test_fingerprint_ignores_severity_and_confidence():
     assert run1[0].fingerprint == run2[0].fingerprint
 
 
-def test_fingerprint_anchors_exclude_rendering_markup():
+def test_fingerprint_anchors_exclude_rendering_markup() -> None:
     """Anchors come from raw description + rationale, never the rendered body."""
     anchors = extract_anchors("Token `token_env` leaks\nrationale explains leaks")
     assert "Severity" not in anchors
@@ -63,8 +65,8 @@ def test_fingerprint_anchors_exclude_rendering_markup():
     assert "token_env" in anchors
 
 
-def test_parsed_issues_carry_fingerprint():
-    items = [
+def test_parsed_issues_carry_fingerprint() -> None:
+    items: list[dict[str, Any]] = [
         {
             "file": "src/auth.py",
             "line": 10,
@@ -94,7 +96,7 @@ def test_parsed_issues_carry_fingerprint():
     assert issues[0].fingerprint != issues[1].fingerprint
 
 
-def test_parsed_issue_fingerprint_defaults_none():
+def test_parsed_issue_fingerprint_defaults_none() -> None:
     """Other construction sites (parse_report etc.) are unaffected."""
     assert ParsedIssue(path="a.py", line=1, title="t", body="b").fingerprint is None
 

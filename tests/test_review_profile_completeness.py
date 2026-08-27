@@ -10,7 +10,7 @@ classification; a stage added to the spine without either trips it.
 from daydream import review_profile as rp
 
 
-def test_every_registered_model_bearing_stage_has_strategy_and_classification():
+def test_every_registered_model_bearing_stage_has_strategy_and_classification() -> None:
     # The production spine registry (STAGE_KEYS) is the model of truth here:
     # every model-bearing stage must carry a profile strategy and a host-
     # envelope classification. Iterating STAGE_KEYS directly (not a hardcoded
@@ -22,13 +22,13 @@ def test_every_registered_model_bearing_stage_has_strategy_and_classification():
         assert stage in rp.ENVELOPE_CLASSIFICATION, f"stage {stage} has no host-envelope classification"
 
 
-def test_classification_is_strategy_plus_host_envelope():
+def test_classification_is_strategy_plus_host_envelope() -> None:
     for key in rp.STAGE_KEYS:
         cls = rp.ENVELOPE_CLASSIFICATION[key]
         assert cls["strategy"] and cls["envelope"]  # both nonempty, one per stage
 
 
-def test_audit_stages_track_production_playbook():
+def test_audit_stages_track_production_playbook() -> None:
     # The guard must not be purely self-referential: every audit category in the
     # production playbook (daydream.improve.prompts) is itself a model-bearing
     # stage, so it must already be registered as a profile strategy + envelope

@@ -7,15 +7,16 @@ outcomes (returned output, call count) never on internal implementation details.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiError, _is_retryable_error_message
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -23,7 +24,11 @@ from tests.harness.backend import ScriptedBackend
 
 
 def _fail_then_succeed(
-    error: BaseException, *, text: str, partial: str | None = None, **attrs: Any
+    error: BaseException,
+    *,
+    text: str,
+    partial: str | None = None,
+    **attrs: Any,
 ) -> ScriptedBackend:
     """Attempt 1 emits *partial* (when given) then raises *error*; attempt 2 yields *text*."""
     first: list[Any] = [TextEvent(text=partial)] if partial is not None else []
@@ -77,7 +82,10 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
 )
 @pytest.mark.asyncio
 async def test_run_agent_retries_and_returns_the_successful_attempt(
-    monkeypatch, tmp_path: Path, make_backend: Any, expected_output: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_backend: Any,
+    expected_output: str,
 ) -> None:
     """A retryable first attempt is re-run; the second attempt's output is what returns."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
@@ -90,7 +98,7 @@ async def test_run_agent_retries_and_returns_the_successful_attempt(
 
 
 @pytest.mark.asyncio
-async def test_run_agent_no_retry_on_non_retryable(monkeypatch, tmp_path: Path) -> None:
+async def test_run_agent_no_retry_on_non_retryable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Non-retryable PiError propagates immediately without any retry."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
     backend = _always_raises(PiError("auth failed", retryable=False))
@@ -102,7 +110,7 @@ async def test_run_agent_no_retry_on_non_retryable(monkeypatch, tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_run_agent_ignores_malformed_retry_environment(monkeypatch, tmp_path: Path) -> None:
+async def test_run_agent_ignores_malformed_retry_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Malformed Pi retry environment values fall back without blocking a backend call."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "not-an-integer")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "nan")
@@ -124,7 +132,7 @@ async def test_run_agent_ignores_malformed_retry_environment(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_run_agent_surfaces_backend_error_message(monkeypatch, tmp_path: Path) -> None:
+async def test_run_agent_surfaces_backend_error_message(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A categoryless backend error surfaces its MESSAGE to the user, not a bare class name."""
     from rich.console import Console
 
@@ -148,7 +156,7 @@ async def test_run_agent_surfaces_backend_error_message(monkeypatch, tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_run_agent_retry_exhausted(monkeypatch, tmp_path: Path) -> None:
+async def test_run_agent_retry_exhausted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Always-retryable backend is called max_attempts+1 times total, then raises."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "2")
@@ -183,7 +191,8 @@ async def test_stream_stall_gets_only_one_fresh_attempt(
 
 @pytest.mark.asyncio
 async def test_concurrent_retry_does_not_kill_sibling_invocations(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Shared-backend concurrency shape: a retryable failure on one concurrent invocation
     must not abort sibling invocations that share the same backend instance.
@@ -228,7 +237,7 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
             max_turns: Any = None,
             read_only: bool = False,
             persist_session: bool = True,
-        ):
+        ) -> AsyncIterator[AgentEvent]:
             key = (
                 "fail-once"
                 if "fail-once" in prompt
@@ -251,7 +260,7 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
 
     async def _run(prompt: str) -> None:
         output, _, _ = await run_agent(
-            backend, tmp_path, prompt, phase=DaydreamPhase.REVIEW
+            cast(Backend, backend), tmp_path, prompt, phase=DaydreamPhase.REVIEW
         )
         results.append((prompt, output))
 
@@ -284,7 +293,8 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
 
 @pytest.mark.asyncio
 async def test_run_agent_retry_exhausted_marks_trajectory_partial(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Retry-exhaustion → trajectory ``partial`` composition (PR headline).
 

@@ -5,17 +5,17 @@ The real end-to-end Python + mixed-stack Harbor run is the #783-dependent e2e in
 ``DAYDREAM_SKILLS_DIR``, no Beagle probe, and the candidate profile still
 resolves via the explicit-only Harbor resolver.
 """
-
 import asyncio
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream.benchmark.harbor import entrypoint
 
 
-def test_openrouter_reviewer_env_uses_pi_provider(monkeypatch):
+def test_openrouter_reviewer_env_uses_pi_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "stale-url")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-token")
@@ -34,7 +34,7 @@ def test_openrouter_reviewer_env_uses_pi_provider(monkeypatch):
     assert not any(key.startswith("ANTHROPIC_") for key in os.environ)
 
 
-def test_reviewer_env_rejects_non_openrouter_endpoint():
+def test_reviewer_env_rejects_non_openrouter_endpoint() -> None:
     with pytest.raises(entrypoint.EntrypointError, match="openrouter.ai"):
         entrypoint.apply_reviewer_env({
             "DAYDREAM_REVIEW_API_KEY": "key",
@@ -42,7 +42,7 @@ def test_reviewer_env_rejects_non_openrouter_endpoint():
         })
 
 
-def test_entrypoint_skill_free_python_case(tmp_path, monkeypatch):
+def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A Python diff resolves through the controlled entrypoint with no backend
     # network dependency (the runner is stubbed at the production seam): the run
     # completes, publishes the canonical artifact, and never emits a ProfileError.
@@ -50,10 +50,17 @@ def test_entrypoint_skill_free_python_case(tmp_path, monkeypatch):
     artifact = tmp_path / "logs" / "artifacts" / "review.json"
     artifact.parent.mkdir(parents=True)
 
-    async def _fake_run(config):
+    async def _fake_run(config: Any) -> int:
         return 0
 
-    def _fake_publish(*, repo_dir, artifact_path, case_id, base_ref="base", head_ref="head"):
+    def _fake_publish(
+        *,
+        repo_dir: Any,
+        artifact_path: Any,
+        case_id: Any,
+        base_ref: Any="base",
+        head_ref: Any="head",
+    ) -> None:
         Path(artifact_path).write_text("{}")
 
     monkeypatch.setattr("daydream.runner.run", _fake_run)
@@ -72,16 +79,23 @@ def test_entrypoint_skill_free_python_case(tmp_path, monkeypatch):
     assert "ProfileError" not in text
 
 
-def test_entrypoint_env_has_no_skill_dirs(tmp_path, monkeypatch):
+def test_entrypoint_env_has_no_skill_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The controlled entrypoint must never inject a skill-registry env var.
     monkeypatch.delenv("DAYDREAM_SKILLS_DIR", raising=False)
     artifact = tmp_path / "logs" / "artifacts" / "review.json"
     artifact.parent.mkdir(parents=True)
 
-    async def _fake_run(config):
+    async def _fake_run(config: Any) -> int:
         return 0
 
-    def _fake_publish(*, repo_dir, artifact_path, case_id, base_ref="base", head_ref="head"):
+    def _fake_publish(
+        *,
+        repo_dir: Any,
+        artifact_path: Any,
+        case_id: Any,
+        base_ref: Any="base",
+        head_ref: Any="head",
+    ) -> None:
         Path(artifact_path).write_text("{}")
 
     monkeypatch.setattr("daydream.runner.run", _fake_run)
