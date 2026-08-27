@@ -998,6 +998,34 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path, fake_gh):
     assert all(r.startswith("case-") or r in root_files for r in rels)
 
 
+def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(tmp_path, fake_gh):
+    import json
+    import os
+
+    from daydream.benchmark.harbor import build
+
+    ws_a, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    (tmp_path / "b").mkdir()
+    ws_b, _, _ = _seed_ready_workspace(tmp_path / "b", fake_gh)
+
+    build.compile_workspace(ws_a)                      # absolute control run
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    old = os.getcwd()
+    os.chdir(outside)
+    try:
+        rel_root = Path(os.path.relpath(ws_b, outside))
+        build.compile_workspace(Path(rel_root))         # relative, differing CWD
+    finally:
+        os.chdir(old)
+
+    lock_rel = json.loads((ws_b / "harbor" / "benchmark.lock.json").read_text())
+    lock_abs = json.loads((ws_a / "harbor" / "benchmark.lock.json").read_text())
+    assert lock_rel["authoring_input_digest"] == lock_abs["authoring_input_digest"]
+    assert set(lock_rel["cases"]) == set(lock_abs["cases"])
+
+
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
