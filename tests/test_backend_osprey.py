@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -42,14 +43,40 @@ class _FakeStdout:
             return b""
 
 
+class _FakeStderr:
+    def __init__(self, lines: list[str], held_open: asyncio.Event | None = None) -> None:
+        self._lines = iter(line.encode() + b"\n" for line in lines)
+        self._held_open = held_open
+
+    async def readline(self) -> bytes:
+        try:
+            return next(self._lines)
+        except StopIteration:
+            if self._held_open is not None:
+                await self._held_open.wait()
+            return b""
+
+
 class _FakeProcess:
-    def __init__(self, lines: list[dict[str, object]], returncode: int = 0) -> None:
+    def __init__(
+        self,
+        lines: list[dict[str, object]],
+        returncode: int = 0,
+        stderr_lines: list[str] | None = None,
+        stderr_held_open: bool = False,
+    ) -> None:
         self.stdout = _FakeStdout(lines)
+        self._stderr_eof = asyncio.Event() if stderr_held_open else None
+        self.stderr = _FakeStderr(stderr_lines or [], self._stderr_eof)
         self.returncode = returncode
         self.pid = 137
 
     async def wait(self) -> int:
         return self.returncode
+
+    def close_stderr(self) -> None:
+        if self._stderr_eof is not None:
+            self._stderr_eof.set()
 
 
 def _stream(
@@ -98,12 +125,20 @@ async def _collect(
     max_turns: int | None = None,
     read_only: bool = False,
     persist_session: bool = True,
+    stderr_lines: list[str] | None = None,
+    stderr_held_open: bool = False,
 ) -> tuple[list[AgentEvent], AsyncMock]:
-    process = _FakeProcess(lines, returncode=returncode)
+    process = _FakeProcess(
+        lines,
+        returncode=returncode,
+        stderr_lines=stderr_lines,
+        stderr_held_open=stderr_held_open,
+    )
     exec_mock = AsyncMock(return_value=process)
+    terminate_mock = AsyncMock(side_effect=lambda _process: process.close_stderr())
     with (
         patch("daydream.backends.osprey.asyncio.create_subprocess_exec", exec_mock),
-        patch("daydream.backends.osprey.terminate_process", new=AsyncMock()),
+        patch("daydream.backends.osprey.terminate_process", new=terminate_mock),
     ):
         events = [
             event
@@ -119,6 +154,39 @@ async def _collect(
             )
         ]
     return events, exec_mock
+
+
+@pytest.mark.asyncio
+async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
+    lines, _ = _stream()
+
+    events, exec_mock = await _collect(
+        OspreyBackend(osprey_binary="fake"),
+        lines,
+        stderr_lines=[
+            "2026-08-27T23:07:54Z INFO osprey_cli::headless: "
+            "restoring remembered model preference"
+        ],
+    )
+
+    assert [type(event) for event in events] == [ResultEvent]
+    assert exec_mock.call_args.kwargs["stderr"] is asyncio.subprocess.PIPE
+
+
+@pytest.mark.asyncio
+async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof() -> None:
+    lines, _ = _stream()
+
+    events, _ = await asyncio.wait_for(
+        _collect(
+            OspreyBackend(osprey_binary="fake"),
+            lines,
+            stderr_held_open=True,
+        ),
+        timeout=0.5,
+    )
+
+    assert [type(event) for event in events] == [ResultEvent]
 
 
 def test_factory_builds_verified_osprey_jsonl_command() -> None:
@@ -367,6 +435,19 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
     with pytest.raises(OspreyError, match="return code 1") as exc_info:
         await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1)
     assert exc_info.value.category == "PROCESS_EXIT"
+
+
+@pytest.mark.asyncio
+async def test_nonzero_process_exit_includes_stderr_diagnostics() -> None:
+    lines, _ = _stream()
+
+    with pytest.raises(OspreyError, match="provider authentication failed"):
+        await _collect(
+            OspreyBackend(osprey_binary="fake"),
+            lines,
+            returncode=1,
+            stderr_lines=["provider authentication failed"],
+        )
 
 
 @pytest.mark.asyncio

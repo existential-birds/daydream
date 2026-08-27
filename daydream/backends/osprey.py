@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
@@ -177,6 +179,14 @@ def _bounded_diagnostics(lines: Iterable[str]) -> str:
     if not cleaned:
         return "no diagnostic output captured"
     return "\n".join(cleaned)
+
+
+async def _drain_stderr(stderr: asyncio.StreamReader, diagnostics: list[str]) -> None:
+    """Drain Osprey diagnostics without allowing its stderr pipe to fill."""
+    while line := await stderr.readline():
+        raw = line.decode(errors="replace").strip()
+        if raw and len(diagnostics) < _MAX_DIAGNOSTIC_LINES:
+            diagnostics.append(raw)
 
 
 @dataclass(frozen=True)
@@ -515,7 +525,8 @@ class OspreyBackend:
         turn_durations_ms: list[int] = []
         total_cost: float | None = None
         saw_metric_cost = False
-        non_json_lines: list[str] = []
+        stderr_lines: list[str] = []
+        stderr_task: asyncio.Task[None] | None = None
         terminal_outcome: str | None = None
         terminal_exit_code: int | None = None
         terminal_structured_output: Any = None
@@ -539,12 +550,15 @@ class OspreyBackend:
                 cwd=str(cwd),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
                 limit=_OSPREY_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 start_new_session=True,
             )
             self._processes.append(proc)
+            if proc.stderr is None:
+                raise OspreyError("Osprey stderr pipe is unavailable", category="PROCESS_START")
+            stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, stderr_lines))
             while True:
                 if proc.stdout is None:
                     break
@@ -559,11 +573,9 @@ class OspreyBackend:
                 try:
                     event = json.loads(raw)
                 except json.JSONDecodeError as exc:
-                    if len(non_json_lines) < _MAX_DIAGNOSTIC_LINES:
-                        non_json_lines.append(raw)
                     raise OspreyProtocolError(
                         "Osprey emitted a non-JSON line in JSONL mode: "
-                        f"{_bounded_diagnostics(non_json_lines)}"
+                        f"{_bounded_diagnostics([raw])}"
                     ) from exc
                 if not isinstance(event, dict):
                     raise OspreyProtocolError("Osprey JSONL event must be an object")
@@ -719,10 +731,15 @@ class OspreyBackend:
                     raise OspreyProtocolError(f"unknown Osprey JSONL event {event_name!r}")
 
             await proc.wait()
+            # A descendant can outlive Osprey while retaining the inherited
+            # stderr fd. Reap the process group and close its transports before
+            # awaiting EOF so the diagnostic drain cannot hang indefinitely.
+            await terminate_process(proc)
+            await stderr_task
             returncode = proc.returncode
             if returncode not in (None, 0):
                 raise OspreyError(
-                    f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(non_json_lines)}",
+                    f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(stderr_lines)}",
                     category="PROCESS_EXIT",
                 )
             if not saw_header:
@@ -764,8 +781,13 @@ class OspreyBackend:
                 ),
             )
         finally:
-            if proc is not None:
-                await terminate_process(proc)
+            with anyio.CancelScope(shield=True):
+                if proc is not None:
+                    await terminate_process(proc)
+                if stderr_task is not None:
+                    if not stderr_task.done():
+                        stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
             self._processes = [active for active in self._processes if active is not proc]
             if schema_path is not None:
                 Path(schema_path).unlink(missing_ok=True)
