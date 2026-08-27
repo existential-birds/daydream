@@ -349,6 +349,25 @@ def test_offline_clone_validates(tmp_path):
                                   workdir=tmp_path)
 
 
+def test_build_bundle_and_offline_clone_accept_relative_paths(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    abs_bundle = tmp_path / "snapshots" / "rel.bundle"
+    with monkeypatch_relative_cwd(m):
+        sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, abs_bundle)
+    assert abs_bundle.is_file()
+    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
+    with monkeypatch_relative_cwd(m):
+        rel = Path(os.path.relpath(abs_bundle, m))
+        sn.validate_offline_clone(rel, _seed_base_tree(), _seed_head_tree(), diff_sha,
+                                  workdir=tmp_path)
+
+
 def test_offline_clone_fidelity_rejects_tampering(tmp_path):
     """Acceptance (b/c) at unit level: the offline-clone fidelity contract
     rejects every structurally-distinct tampered bundle shape (extra ref,
