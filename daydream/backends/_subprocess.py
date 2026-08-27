@@ -34,12 +34,12 @@ logger = logging.getLogger(__name__)
 #    stream is legitimately dead for the whole duration of any single tool call
 #    or generation block.
 #
-# 2700s is 2.7x codex's largest observed turn span and 1.4x pi's, and it sits
-# deliberately ABOVE ``config.DEFAULT_WALL_BUDGET_S`` (1800s) so it can never
-# act as a second, shorter turn cap on phases that already carry a wall budget.
-# It is a backstop for the turns nothing else bounds — the improve phases run
-# with no wall budget at all — and for stalls that outlive the process.
+# 2700s is 2.7x codex's largest observed turn span and remains the tool-active
+# window for pi, where an output-silent build or test may legitimately run for
+# most of a phase's wall budget. Pi model responses use a shorter default below:
+# unlike codex, pi emits token-level message updates while the model is alive.
 DEFAULT_STREAM_IDLE_TIMEOUT_S = 2700.0
+DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S = 300.0
 STREAM_IDLE_TIMEOUT_ENV = "DAYDREAM_STREAM_IDLE_TIMEOUT_S"
 
 # Grace between SIGTERM and SIGKILL when reaping a subprocess. A cooperative CLI
@@ -56,6 +56,7 @@ class StreamStalledError(Exception):
     """
 
     retryable = True
+    max_retries = 1
 
     def __init__(self, cli: str, timeout_s: float) -> None:
         super().__init__(
@@ -67,12 +68,14 @@ class StreamStalledError(Exception):
         self.timeout_s = timeout_s
 
 
-def stream_idle_timeout_s() -> float | None:
+def stream_idle_timeout_s(
+    *, default: float = DEFAULT_STREAM_IDLE_TIMEOUT_S
+) -> float | None:
     """Resolve the stdout idle timeout in seconds.
 
     Returns ``None`` when idle detection is disabled — an explicit ``0`` in
     ``$DAYDREAM_STREAM_IDLE_TIMEOUT_S``. A malformed, non-finite, or negative
-    value logs a warning and falls back to the default (mirroring
+    value logs a warning and falls back to *default* (mirroring
     ``DAYDREAM_PI_RETRY_ATTEMPTS`` handling in :mod:`daydream.backends.pi`).
     """
     raw = os.environ.get(STREAM_IDLE_TIMEOUT_ENV)
@@ -82,24 +85,24 @@ def stream_idle_timeout_s() -> float | None:
         except ValueError:
             logger.warning(
                 "%s=%r is not a valid float; using default %g",
-                STREAM_IDLE_TIMEOUT_ENV, raw, DEFAULT_STREAM_IDLE_TIMEOUT_S,
+                STREAM_IDLE_TIMEOUT_ENV, raw, default,
             )
         else:
             if not math.isfinite(value):
                 logger.warning(
                     "%s=%r is not finite; using default %g",
-                    STREAM_IDLE_TIMEOUT_ENV, raw, DEFAULT_STREAM_IDLE_TIMEOUT_S,
+                    STREAM_IDLE_TIMEOUT_ENV, raw, default,
                 )
             elif value < 0:
                 logger.warning(
                     "%s=%r is negative; using default %g",
-                    STREAM_IDLE_TIMEOUT_ENV, raw, DEFAULT_STREAM_IDLE_TIMEOUT_S,
+                    STREAM_IDLE_TIMEOUT_ENV, raw, default,
                 )
             elif value == 0:
                 return None
             else:
                 return value
-    return DEFAULT_STREAM_IDLE_TIMEOUT_S
+    return default
 
 
 async def readline_with_idle_timeout(

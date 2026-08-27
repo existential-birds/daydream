@@ -16,6 +16,7 @@ import pytest
 
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent
+from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiError, _is_retryable_error_message
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.backend import ScriptedBackend
@@ -158,6 +159,26 @@ async def test_run_agent_retry_exhausted(monkeypatch, tmp_path: Path) -> None:
 
     # 1 original attempt + 2 retries = 3 total
     assert backend.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_stall_gets_only_one_fresh_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Repeated dead-air windows cannot multiply into hours of retries."""
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+    backend = ScriptedBackend(
+        events=[StreamStalledError("pi", 300)],
+        retry_attempts=5,
+        retry_base_delay_s=0,
+        retry_max_delay_s=0,
+    )
+
+    with pytest.raises(StreamStalledError):
+        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+
+    assert backend.call_count == 2
 
 
 @pytest.mark.asyncio

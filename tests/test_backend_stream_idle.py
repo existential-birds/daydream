@@ -29,11 +29,13 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent
 from daydream.backends._subprocess import (
+    DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
     STREAM_IDLE_TIMEOUT_ENV,
     StreamStalledError,
@@ -159,6 +161,86 @@ async def test_pi_stalls_before_first_line(
     assert_stalled_and_reaped(spawner)
 
 
+@pytest.mark.asyncio
+async def test_pi_response_stall_uses_shorter_default_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silence after a completed tool result is a model-response stall.
+
+    The archived failure this covers completed a bounded source read and then
+    emitted nothing for the rest of the 30-minute wall budget. Pi streams model
+    deltas, so once no tool is active its response-specific idle window should
+    preempt the generic subprocess window and surface a retryable stall.
+    """
+    lines = [
+        json.dumps({"type": "session", "id": "sess-response-stall"}),
+        json.dumps({"type": "agent_start"}),
+        json.dumps({"type": "turn_start"}),
+        json.dumps(
+            {
+                "type": "tool_execution_start",
+                "toolCallId": "read-1",
+                "toolName": "read",
+                "args": {"path": "src/lib.rs"},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "tool_execution_end",
+                "toolCallId": "read-1",
+                "result": {"content": [{"type": "text", "text": "done"}]},
+            }
+        ),
+    ]
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
+    monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
+    monkeypatch.setattr(
+        "daydream.backends.pi.DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S", 0.05, raising=False
+    )
+
+    with anyio.fail_after(1):
+        with pytest.raises(StreamStalledError) as excinfo:
+            await drain(PiBackend(model="test-model"), tmp_path)
+
+    assert excinfo.value.timeout_s == pytest.approx(0.05)
+    assert_stalled_and_reaped(spawner)
+
+
+@pytest.mark.asyncio
+async def test_pi_active_tool_keeps_long_subprocess_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An output-silent tool may legitimately outlive the response window."""
+    lines = [
+        json.dumps({"type": "session", "id": "sess-active-tool"}),
+        json.dumps({"type": "agent_start"}),
+        json.dumps({"type": "turn_start"}),
+        json.dumps(
+            {
+                "type": "tool_execution_start",
+                "toolCallId": "cargo-1",
+                "toolName": "bash",
+                "args": {"command": "cargo build --quiet"},
+            }
+        ),
+    ]
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
+    monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
+    monkeypatch.setattr(
+        "daydream.backends.pi.DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S", 0.05, raising=False
+    )
+    monkeypatch.setattr(
+        "daydream.backends.pi.DEFAULT_STREAM_IDLE_TIMEOUT_S", 0.2, raising=False
+    )
+
+    with anyio.fail_after(1):
+        with pytest.raises(StreamStalledError) as excinfo:
+            await drain(PiBackend(model="test-model"), tmp_path)
+
+    assert excinfo.value.timeout_s == pytest.approx(0.2)
+    assert_stalled_and_reaped(spawner)
+
+
 # --------------------------------------------------------------------------
 # A stream with data flowing must NOT trip, however small the window. This is
 # the regression that keeps a genuinely slow-but-alive model from being killed
@@ -242,19 +324,22 @@ def test_malformed_override_falls_back_to_default(
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
 
 
-def test_default_exceeds_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The idle window must never act as a shorter, second turn cap.
+def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pi responses preempt the wall; tools and codex retain the long window.
 
-    Budgeted phases are bounded by ``DEFAULT_WALL_BUDGET_S``; the idle timeout is
-    a backstop for the turns nothing else bounds (the improve phases run with no
-    wall budget). Keeping it strictly above the wall budget is what guarantees
-    this change cannot shorten any phase that works today.
+    Pi's response stream is live while the model generates, so five minutes of
+    silence is a stall. Codex generations and output-silent tools can legitimately
+    remain quiet much longer and must still be bounded by the phase wall budget.
     """
     from daydream.config import DEFAULT_WALL_BUDGET_S
 
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
-    assert DEFAULT_STREAM_IDLE_TIMEOUT_S > DEFAULT_WALL_BUDGET_S
+    assert (
+        DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
+        < DEFAULT_WALL_BUDGET_S
+        < DEFAULT_STREAM_IDLE_TIMEOUT_S
+    )
 
 
 # --------------------------------------------------------------------------
@@ -264,10 +349,10 @@ def test_default_exceeds_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_stall_is_retried_within_bounded_budget(
+async def test_stall_retry_is_limited_below_backend_retry_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A persistently-stalling ``pi`` consumes only the bounded retry budget."""
+    """A persistent stall gets one fresh process, not every transport retry."""
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "3")
@@ -290,7 +375,7 @@ async def test_stall_is_retried_within_bounded_budget(
         async with recorder:
             await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
 
-    assert_stalled_and_reaped(spawner, expected_spawns=4)
+    assert_stalled_and_reaped(spawner, expected_spawns=2)
 
     trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
     assert trajectory["extra"]["partial"] is True
