@@ -855,14 +855,17 @@ async def run_agent(
             except _ToolSupervisorFailure:
                 raise
             except Exception as exc:
-                if attempt < max_attempts and getattr(exc, "retryable", False):
+                exception_max_retries = min(
+                    max_attempts, getattr(exc, "max_retries", max_attempts)
+                )
+                if attempt < exception_max_retries and getattr(exc, "retryable", False):
                     delay = min(
                         base_delay * (2 ** attempt) + random.uniform(0, 1),
                         max_delay,
                     )
                     retry_msg = (
                         f"Backend error ({type(exc).__name__}), retrying "
-                        f"attempt {attempt + 2}/{max_attempts + 1} after {delay:.1f}s..."
+                        f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
                     )
                     if _state.log_mode:
                         _print_log(f"[retry] {retry_msg}")

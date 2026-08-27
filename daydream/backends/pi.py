@@ -49,6 +49,8 @@ from daydream.backends import (
     resolve_fanout_concurrency,
 )
 from daydream.backends._subprocess import (
+    DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
+    DEFAULT_STREAM_IDLE_TIMEOUT_S,
     cancel_processes,
     readline_with_idle_timeout,
     stream_idle_timeout_s,
@@ -669,13 +671,25 @@ class PiBackend:
             )
             self._processes.append(proc)
 
-            idle_timeout_s = stream_idle_timeout_s()
+            response_idle_timeout_s = stream_idle_timeout_s(
+                default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
+            )
+            tool_idle_timeout_s = stream_idle_timeout_s(
+                default=DEFAULT_STREAM_IDLE_TIMEOUT_S
+            )
+            active_tool_calls = 0
             is_first_line = True
             while True:
                 if proc.stdout is None:
                     break
                 line = await readline_with_idle_timeout(
-                    proc.stdout, cli="pi", timeout_s=idle_timeout_s
+                    proc.stdout,
+                    cli="pi",
+                    timeout_s=(
+                        tool_idle_timeout_s
+                        if active_tool_calls > 0
+                        else response_idle_timeout_s
+                    ),
                 )
                 if not line:
                     break
@@ -738,6 +752,7 @@ class PiBackend:
                             last_assistant_text = "".join(text_parts)
 
                 elif event_type == "tool_execution_start":
+                    active_tool_calls += 1
                     yield ToolStartEvent(
                         id=event.get("toolCallId") or str(uuid.uuid4()),
                         name=event.get("toolName", "unknown"),
@@ -745,6 +760,7 @@ class PiBackend:
                     )
 
                 elif event_type == "tool_execution_end":
+                    active_tool_calls = max(0, active_tool_calls - 1)
                     yield ToolResultEvent(
                         id=event.get("toolCallId") or str(uuid.uuid4()),
                         output=_render_tool_result(event.get("result")),
@@ -752,6 +768,7 @@ class PiBackend:
                     )
 
                 elif event_type == "turn_end":
+                    active_tool_calls = 0
                     msg = event.get("message") or {}
                     stop_reason = msg.get("stopReason")
                     if stop_reason == "error":

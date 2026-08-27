@@ -121,7 +121,7 @@ recorder are backend-agnostic.
 | `DEFAULT_TOOL_CALL_BUDGET` | `None` | unlimited; per-call `tool_call_budget` still accepted |
 | `DEFAULT_GROUP_MAX_WALL_S` / `_SERIAL_ITEMS` | 600s / 6 | cumulative over all fix calls for one file group |
 | `EXPLORATION_MAX_TURNS` | 50 | exploration specialists — the only `max_turns` call site |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 2700s | pi/codex stdout silence before the subprocess is killed |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 300s / 2700s | pi response silence / active-tool and codex silence before the subprocess is killed |
 
 - Exhaustion emits a `TurnEndEvent` and marks the trajectory partial. **Truncation is never silently
   absorbed**: a truncated wonder or parse raises; a truncated per-stack review goes to `failed_stacks` so
@@ -129,9 +129,10 @@ recorder are backend-agnostic.
 - Do not add `max_turns` to fix or verify — it does not fail soft. The turn ends `error_max_turns`, the
   backend raises `MaxTurnsError`, and the fix group lands in `fix-failures.json` and is reverted, throwing
   a real fix away rather than trimming it.
-- `run_agent` retries any `retryable` backend error with exponential backoff, **20 attempts**, all backends
-  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides). Never retried: tool-supervisor veto,
-  non-transport logic error. A stall fires only on the *absence* of output, never on slow output.
+- `run_agent` retries retryable backend errors with exponential backoff, up to **20 attempts**, all backends
+  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides); a stream stall gets one fresh attempt. Never retried:
+  tool-supervisor veto, non-transport logic error. A stall fires only on the *absence* of output, never
+  on slow output; pi keeps the long window while a tool is active.
 
 ### Config and per-phase model overrides
 
@@ -221,7 +222,7 @@ Full contract: `docs/extensions.md`.
 | `PI_API_KEY` | Pi | Copied into the child's provider-native var (e.g. `ZAI_API_KEY`), **never onto argv**; warns and ignores if the provider has no mapped var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Attempts default 20, all backends |
 | `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex | Parallel `execute()` hint (default 8; bad value warns). Pi uses `DAYDREAM_PI_FANOUT_CONCURRENCY` (default 10) |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (default 2700; `0` disables) |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (pi response default 300; active-tool/codex default 2700; `0` disables) |
 | `DAYDREAM_REVIEW_API_KEY` / `DAYDREAM_JUDGE_API_KEY` | Benchmark | Harbor reviewer/judge OpenRouter keys; read from the launching env, never written into the workspace or task |
 
 Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).
