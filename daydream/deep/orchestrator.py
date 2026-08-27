@@ -353,12 +353,12 @@ def _deep_shard_enabled(config: RunConfig) -> bool:
     Precedence mirrors ``_resolve_config_value``: 1)
     ``RunConfig.deep_shard_enabled`` (CLI tier), 2)
     ``DaydreamFileConfig.deep_shard_enabled`` (file-config scalar), 3) built-in
-    default :data:`DEFAULT_DEEP_SHARD_ENABLED` (False -- forensic default until
-    the benchmark gate passes). Resolved via ``_resolve_config_value`` (``is
-    not None``, not truthiness) so an explicit set-to-False on the RunConfig
-    tier forces the feature off even when the file-config scalar enables it --
-    the CLI > file > default precedence holds for explicit False, per the
-    ``RunConfig.deep_shard_enabled`` field contract.
+    default :data:`DEFAULT_DEEP_SHARD_ENABLED` (False, preserving the established
+    single-agent-per-stack behavior). Resolved via ``_resolve_config_value``
+    (``is not None``, not truthiness) so an explicit set-to-False on the
+    RunConfig tier forces the feature off even when the file-config scalar
+    enables it -- the CLI > file > default precedence holds for explicit False,
+    per the ``RunConfig.deep_shard_enabled`` field contract.
     """
     return _resolve_config_value(config, "deep_shard_enabled", DEFAULT_DEEP_SHARD_ENABLED)
 
