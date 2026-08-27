@@ -549,6 +549,14 @@ def _stack_preflight_line(stack: StackAssignment) -> str:
     return f"{stack.stack_name}: {len(stack.files)} file(s){docs_suffix}"
 
 
+def _preflight_stage_names(stacks: list[StackAssignment]) -> list[str]:
+    """Return user-facing stages, including the structural review when active."""
+    stages = list(_PIPELINE_STAGE_NAMES)
+    if any(stack.stack_name == STRUCTURE_STACK_NAME for stack in stacks):
+        stages.insert(3, "structural review (parallel with per-stack reviews)")
+    return stages
+
+
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Attach verifier verdicts to feedback items by matching `id` to `issue_id`.
 
@@ -4189,7 +4197,11 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
         # skipped, so the estimate uses ``_single_stack_agent_count``.
-        stack_lines = [_stack_preflight_line(s) for s in stacks]
+        stack_lines = [
+            _stack_preflight_line(stack)
+            for stack in stacks
+            if stack.stack_name != STRUCTURE_STACK_NAME
+        ]
         notice_agent_count = (
             _single_stack_agent_count(len(stacks))
             if single_stack_mode
@@ -4197,7 +4209,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         )
         print_preflight_notice(
             console,
-            stages=_PIPELINE_STAGE_NAMES,
+            stages=_preflight_stage_names(stacks),
             stack_lines=stack_lines,
             agent_count=notice_agent_count,
             exploration_available=EXPLORATION_AVAILABLE,
