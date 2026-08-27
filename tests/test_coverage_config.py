@@ -30,7 +30,7 @@ def test_coverage_config_targets_daydream_branch_and_omits_atif(pyproject: dict[
     assert run["source"] == ["daydream"]
     assert run["omit"] == ["daydream/atif/*"]
     # XML report lands where CI's upload step expects it.
-    assert cov["report"]["xml"] is True or "xml" in cov
+    assert "xml" in cov and cov["xml"].get("output") == "coverage.xml"
 
 
 def test_pytest_addopts_keeps_strict_markers_and_adds_cov(pyproject: dict[str, Any]) -> None:

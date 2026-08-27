@@ -124,6 +124,11 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     # Strip make's jobserver/MAKELEVEL chatter so the shim children don't get
     # tangled in an inherited parallel-make env.
     clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
+    # coverage-report target verifies coverage.xml exists; create a dummy so the
+    # command-sequence test can observe the full dependency graph without
+    # requiring a real pytest run.
+    coverage_xml = repo_root / "coverage.xml"
+    coverage_xml.touch()
     proc = subprocess.run(
         ["make", "check"],
         cwd=repo_root,
@@ -131,6 +136,7 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
         text=True,
         env=clean_env,
     )
+    coverage_xml.unlink(missing_ok=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     recs = _read_command_records(log)

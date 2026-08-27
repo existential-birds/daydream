@@ -157,7 +157,6 @@ omit = [
 [tool.coverage.report]
 # measured 87.65% at 480c76a on 2026-08-27; ratchet via docs/coverage.md
 fail_under = 87
-xml = true
 
 [tool.coverage.xml]
 output = "coverage.xml"
