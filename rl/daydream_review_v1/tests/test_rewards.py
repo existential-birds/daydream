@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import verifiers.v1 as vf
@@ -1743,3 +1744,81 @@ async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flag
 # the genuine repo-configurable-helper surface is the non-quiet candidate-diff
 # path, covered by test_verify_checkout_external_diff_ignored and
 # test_verify_checkout_textconv_ignored.
+
+
+# --- oracle / candidate-diff working-tree equivalence (issue #725 pin) ---
+#
+# Round 2 of the issue-#725 review found that the acceptance oracle
+# (``_fixes_applied``) and the load-bearing candidate-diff derivation
+# (``candidate_diff_cmd``) share ``DAYDREAM_EXCLUDE`` but encode their
+# working-tree semantics independently: convergence is exact today, but only
+# by docstring reasoning, and a future edit to either side silently re-opens
+# the drift class of issue #725 (oracle accepts a state whose candidate diff
+# is empty, or vice versa). These tests are the executable form of that
+# reasoning: over every canonical repo state a rollout can produce, the
+# oracle's verdict and the derived diff's emptiness must agree.
+
+@pytest.mark.parametrize(
+    ("stage_kwargs", "expected"),
+    [
+        pytest.param({}, False, id="clean-tree-at-baked-head"),
+        pytest.param({"edit": _CALC_FIXED}, True, id="uncommitted-edit"),
+        pytest.param({"edit": _CALC_FIXED, "commit": True}, True, id="committed-fix"),
+        pytest.param({"commit": True}, False, id="empty-commit-moves-head-only"),
+        pytest.param(
+            {"patch": "not-a-fix-signal", "commit": True, "commit_patch": True},
+            False,
+            id="committed-daydream-artifacts-only",
+        ),
+        pytest.param(
+            {
+                "edit": _CALC_FIXED,
+                "patch": "not-a-fix-signal",
+                "commit": True,
+                "commit_patch": True,
+            },
+            True,
+            id="committed-fix-plus-daydream-artifacts",
+        ),
+    ],
+)
+async def test_oracle_acceptance_matches_candidate_diff_semantics(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    stage_kwargs: dict[str, Any], expected: bool,
+) -> None:
+    """Whichever repo state the oracle accepts, the candidate diff must show.
+
+    Regression pin for the issue-#725 drift class, round-2 findings 1+2: the
+    single-sourced ``DAYDREAM_EXCLUDE`` keeps both probes honest about
+    ``.daydream/``, but each probe still encodes its own tracked-tree
+    semantics (status OR committed quiet diff versus ``git diff <head>``).
+    Equivalence across the canonical states below is exact today — committed,
+    staged, and unstaged tracked edits read identically through both probes
+    while untracked files (including daydream's own committed-but-excluded
+    artifacts and the never-staged recommended.patch) read as no-op through
+    both — and this test turns any future divergence into a CI failure
+    instead of docstring archaeology.
+    """
+    from daydream_review_v1 import rundir as rundir_mod
+    from daydream_review_v1 import taskset
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, **stage_kwargs)
+
+    accepted = await taskset._fixes_applied(runtime, str(repo), task.data.head_sha)
+    assert accepted == expected, (
+        f"oracle verdict {accepted!r} contradicts canonical state "
+        f"{stage_kwargs!r}: the acceptance probe drifted from the "
+        f"tracked-tree contract"
+    )
+
+    proc = subprocess.run(
+        rundir_mod.candidate_diff_cmd(str(repo), task.data.head_sha),
+        capture_output=True,
+    )
+    produced_fix = bool(proc.stdout.strip())
+    assert produced_fix == expected, (
+        f"derived candidate diff {'showed changes' if produced_fix else 'was empty'} "
+        f"against canonical state {stage_kwargs!r}: the deriv site drifted "
+        f"from the tracked-tree contract"
+    )
