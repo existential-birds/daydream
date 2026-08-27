@@ -32,6 +32,13 @@ from daydream_review_v1.taskset import DEFAULT_REPO_PATH, DaydreamReviewData
 
 logger = logging.getLogger(__name__)
 
+_ROLLOUT_GITHUB_ENV_TO_UNSET = (
+    "DAYDREAM_APP_ID",
+    "DAYDREAM_APP_PRIVATE_KEY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+)
+
 
 class DaydreamReviewHarnessConfig(vf.HarnessConfig):
     backend: str = "claude"
@@ -132,7 +139,18 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         # which would make every rollout a review-only rollout. --review is never
         # set: with --yes it is a parse error (cli.py:978-981). Deep is the default
         # flow, so there is no --deep to pass (runner.py:812).
+        #
+        # The subprocess runtime inherits non-API-key host variables. Explicitly
+        # remove GitHub credentials so a developer's App configuration cannot
+        # divert or abort the hermetic fixture rollout before its first model call.
+        github_env_unsets = [
+            argument
+            for name in _ROLLOUT_GITHUB_ENV_TO_UNSET
+            for argument in ("-u", name)
+        ]
         argv = [
+            "env",
+            *github_env_unsets,
             "daydream",
             "--non-interactive",
             "--yes",

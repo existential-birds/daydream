@@ -94,7 +94,7 @@ async def test_launch_passes_the_selected_backend_to_the_cli(
     await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
 
     (argv, env), = runtime.programs
-    assert argv[0] == "daydream"
+    assert "daydream" in argv
     assert argv[argv.index("--backend") + 1] == backend
     assert argv[argv.index("--model") + 1] == MODEL
     assert argv[argv.index("--base") + 1] == task.data.base_sha
@@ -123,6 +123,30 @@ async def test_launch_carries_extra_args_before_the_target(
     (argv, _), = runtime.programs
     assert argv[argv.index("--reasoning-effort") + 1] == "high"
     assert argv.index("--reasoning-effort") < argv.index("/work/repo")
+
+
+async def test_launch_unsets_ambient_github_credentials(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
+    runtime = FakeRuntime(exit_code=0)
+
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+
+    (argv, _), = runtime.programs
+    assert argv[:10] == [
+        "env",
+        "-u",
+        "DAYDREAM_APP_ID",
+        "-u",
+        "DAYDREAM_APP_PRIVATE_KEY",
+        "-u",
+        "GH_TOKEN",
+        "-u",
+        "GITHUB_TOKEN",
+        "daydream",
+    ]
 
 
 async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(
@@ -270,7 +294,8 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
 
     (argv, _), = runtime.programs
     assert argv[0] == "run-as-agent"
-    assert argv[1] == "daydream"
+    assert argv[1] == "env"
+    assert "daydream" in argv
     assert argv[argv.index("--backend") + 1] == "claude"
 
     # Pin the terminal property of the seam by executing it: root must drop
