@@ -411,7 +411,7 @@ def test_gold_finding_id_rejects_non_string() -> None:
     # (reachable via _finding_id on the raw-dict path)
     gold = [{"finding_id": 123}]
     with pytest.raises(VerifierError, match="must be a string"):
-        reward_details(gold, [], [], set())  # type: ignore[list-item]
+        reward_details(gold, [], [], set())
 
 
 def test_candidate_id_rejects_non_string() -> None:
@@ -419,7 +419,7 @@ def test_candidate_id_rejects_non_string() -> None:
     # not a str (reachable via _candidate_id on the raw-dict path)
     cands = [{"candidate_id": 456}]
     with pytest.raises(VerifierError, match="must be a string"):
-        reward_details([_gold()], cands, [], set())  # type: ignore[list-item]
+        reward_details([_gold()], cands, [], set())
 
 
 def test_artifact_rejects_unknown_top_level_key() -> None:
