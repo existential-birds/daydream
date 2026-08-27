@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck actionlint rl-check check lockcheck hooks
+.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks
 
 install:
 	# All extras so `make check` runs the full suite (benchmark objective tests

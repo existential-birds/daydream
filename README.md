@@ -427,8 +427,11 @@ make check      # all root + workflow + RL CI checks
 ```
 
 `make check` is the quality-gate portion of the installed pre-push hook (the hook
-verifies commit signatures first, then delegates to it). Docker with a running
-daemon is required for `make check`, because actionlint runs the pinned container.
+verifies commit signatures first, then delegates to it). A running Docker daemon
+is required for `make actionlint` (the workflow YAML checks run the pinned
+container); when no daemon is available that target is skipped with a note and
+exits 0, so `make check` still succeeds without a daemon (CI always runs
+actionlint).
 
 ## License
 
