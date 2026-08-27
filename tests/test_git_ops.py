@@ -255,8 +255,8 @@ def test_commit_exists_rejects_origin_only(tmp_path: Path) -> None:
     """A bare name present only as origin/<name> does NOT resolve (old behavior).
 
     branch_exists/ref_exists accept it via refs/remotes/origin/<ref>, but a
-    plain name has no local commit-ish, so commit_exists (the cat-file -e
-    probe) must report it as not existing.
+    plain name has no local commit-ish, so commit_exists (the rev-parse --verify probe)
+    must report it as not existing.
     """
     bare = _bare_remote(tmp_path / "remote.git")
     repo = _make_repo_with_main(tmp_path, name="repo")

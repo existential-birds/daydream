@@ -706,7 +706,7 @@ def ref_exists(repo: Path, ref: str) -> bool:
 def commit_exists(repo: Path, revision: str) -> bool:
     """Check whether *revision* resolves locally to a named commit.
 
-    This is the ``git cat-file -e <revision>^{commit}`` probe: only commits
+    This is the ``git rev-parse --verify <revision>^{commit}`` probe: only commits
     git can name via normal revision resolution are accepted. Unlike
     :func:`ref_exists`, it does NOT treat a bare branch name that exists only
     as a remote-tracking ``origin/<revision>`` as existing -- git's short-name
