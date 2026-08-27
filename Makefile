@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode
+.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report
 
 install:
 	# All extras so `make check` runs the full suite (benchmark objective tests
@@ -21,6 +21,13 @@ deadcode:
 
 test:
 	uv run pytest -n auto
+
+# Machine-readable coverage report for humans who want the XML locally; the
+# terminal term-missing report + coverage floor enforcement already happen inside
+# `test` via pytest addopts (#932). docs/coverage.md documents the full flow.
+coverage-report:
+	@test -f coverage.xml || { echo "no coverage.xml — run make test first"; exit 1; }
+	@echo "coverage.xml present (uploaded as a CI artifact on the check job)."
 
 # Docker-backed actionlint over every workflow the project ships (repo-owned
 # plus all template files, nested included). Image is digest-pinned exactly as
@@ -66,7 +73,7 @@ lockcheck:
 
 # Run all CI checks locally: lockcheck and the root uv sync --all-extras install
 # step first (both before any uv run heals the lock), matching ci.yml's check job.
-check: lockcheck install lint deadcode typecheck test actionlint rl-check
+check: lockcheck install lint deadcode typecheck test actionlint rl-check coverage-report
 
 # Install git hooks
 hooks:

@@ -56,3 +56,19 @@ def test_fail_under_is_enforced_in_single_config_location(pyproject: dict) -> No
     ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
     assert "fail_under" not in makefile and "--cov-fail-under" not in makefile
     assert "fail_under" not in ci and "--cov-fail-under" not in ci
+
+
+def test_make_test_target_runs_coverage_enabled_pytest() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    test_recipe = makefile.split("test:\n", 1)[1].split("\n\n", 1)[0]
+    assert "uv run pytest -n auto" in test_recipe, (
+        "test target must keep xdist parallelism; coverage flags come from addopts"
+    )
+
+
+def test_check_target_includes_test_and_coverage_report() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    check_line = next(line for line in makefile.splitlines() if line.startswith("check:"))
+    assert "test" in check_line
+    assert "coverage-report" in check_line
+    assert makefile.count("coverage-report:") == 1
