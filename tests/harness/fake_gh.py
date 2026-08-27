@@ -48,7 +48,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -356,7 +356,7 @@ class GhCommandCall:
 
     kind: str
     argv: list[str]
-    env: dict | None = None
+    env: dict[str, Any] | None = None
 
 
 @dataclass
@@ -531,7 +531,9 @@ class FakeGh:
         self._write_threads(nodes)
 
     def serve_prior_threads_from(
-        self, call: GhCall, *,
+        self,
+        call: GhCall,
+        *,
         author: str | None = None,
         viewer_did_author: bool | None = None,
     ) -> None:
@@ -649,7 +651,7 @@ class FakeGh:
 
     def _read_responses(self) -> dict[str, Any]:
         if self._responses_path.exists():
-            return json.loads(self._responses_path.read_text(encoding="utf-8"))
+            return cast(dict[str, Any], json.loads(self._responses_path.read_text(encoding="utf-8")))
         return {}
 
 

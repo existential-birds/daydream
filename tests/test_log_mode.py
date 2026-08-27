@@ -11,7 +11,6 @@ These tests verify that --log mode:
 5. Still records full trajectory (recorder unaffected)
 6. Default behavior unchanged (Rich UI when --log not used)
 """
-
 from __future__ import annotations
 
 import io
@@ -32,6 +31,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.runner import RunConfig, run
+from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
 # Synthetic credential-shaped sentinel: the ``{6,}`` API-key rule requires at
@@ -311,15 +311,18 @@ class _CredentialSummarizerBackend(ScriptedBackend):
 
 @pytest.mark.asyncio
 async def test_log_mode_failure_handoff_redacts_credential_body(
-    git_repo: Path, make_work, capsys, monkeypatch,
+    git_repo: Path,
+    make_work: Callable[..., WorkContext],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Integration regression (issue #547): driving the REAL _emit_failure_handoff
     with a credential-bearing summarizer body under --log mode must not leak the
     raw token to stdout. The console-level _LogRedactingConsole boundary is the
     mechanism (RD-1); this proves it on the real handoff path."""
+    from daydream.agent import console as phases_console
     from daydream.agent import set_log_mode
     from daydream.phases import _emit_failure_handoff
-    from daydream.phases import console as phases_console
 
     # False-pass trap: the module console phases.py binds MUST be the redacting
     # console, otherwise a passing test would mean nothing.

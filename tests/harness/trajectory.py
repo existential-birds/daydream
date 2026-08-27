@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from daydream.archive.manifest import Manifest
 from daydream.backends import (
@@ -46,7 +46,7 @@ def make_recorder(
 
 def read_trajectory(path: Path) -> dict[str, Any]:
     """Load the produced trajectory JSON from disk."""
-    return json.loads(path.read_text(encoding="utf-8"))
+    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
 def step_token_sum(traj: dict[str, Any], key: str) -> int:

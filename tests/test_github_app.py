@@ -4,9 +4,9 @@ Covers credential resolution, JWT minting, installation token exchange,
 identity resolution, and gh token-env propagation through
 :mod:`daydream.git_ops`, with mocked environment and GitHub API calls.
 """
-
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -27,11 +27,11 @@ from daydream.github_app import (
 
 
 @pytest.fixture(autouse=True)
-def _block_real_gh(monkeypatch):
+def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep this suite hermetic even when the developer is authenticated."""
     real_run = subprocess.run
 
-    def guarded_run(args, *pargs, **kwargs):
+    def guarded_run(args: list[Any], *pargs: Any, **kwargs: Any) -> Any:
         if args and args[0] == "gh":
             raise AssertionError("test attempted to execute the real gh CLI")
         return real_run(args, *pargs, **kwargs)
@@ -39,11 +39,11 @@ def _block_real_gh(monkeypatch):
     monkeypatch.setattr(subprocess, "run", guarded_run)
 
 
-def test_run_gh_injects_token_env_when_set():
+def test_run_gh_injects_token_env_when_set() -> None:
     """When the token-env singleton is set, _run_gh passes it to subprocess.run."""
     captured = {}
 
-    def spy_run(*args, **kwargs):
+    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
         captured.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
 
@@ -57,17 +57,17 @@ def test_run_gh_injects_token_env_when_set():
     assert captured["env"]["GH_TOKEN"] == "ghs_test123"
 
 
-def test_run_gh_refreshes_expired_token_before_request():
+def test_run_gh_refreshes_expired_token_before_request() -> None:
     """An expired App token is replaced before the gh subprocess starts."""
     captured = {}
     refresh_calls = 0
 
-    def refresh():
+    def refresh() -> tuple[Any, ...]:
         nonlocal refresh_calls
         refresh_calls += 1
         return {"GH_TOKEN": "ghs_fresh"}, float("inf")
 
-    def spy_run(*args, **kwargs):
+    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
         captured.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
 
@@ -86,11 +86,11 @@ def test_run_gh_refreshes_expired_token_before_request():
     assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
-def test_run_gh_passes_none_env_when_unset():
+def test_run_gh_passes_none_env_when_unset() -> None:
     """With no token-env set, _run_gh passes env=None (parent inheritance)."""
     captured = {}
 
-    def spy_run(*args, **kwargs):
+    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
         captured.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
 
@@ -101,7 +101,7 @@ def test_run_gh_passes_none_env_when_unset():
     assert captured.get("env") is None
 
 
-def test_token_env_accessors_roundtrip():
+def test_token_env_accessors_roundtrip() -> None:
     """set/get/reset behave as a simple module singleton."""
     git_ops.reset_gh_token_env()
     assert git_ops.get_gh_token_env() is None
@@ -111,24 +111,24 @@ def test_token_env_accessors_roundtrip():
     assert git_ops.get_gh_token_env() is None
 
 
-def test_token_env_does_not_leak_across_tests_part1():
+def test_token_env_does_not_leak_across_tests_part1() -> None:
     """Set the singleton; the autouse fixture must clear it before part2 runs."""
     git_ops.set_gh_token_env({"GH_TOKEN": "leaky"})
     assert git_ops.get_gh_token_env() == {"GH_TOKEN": "leaky"}
 
 
-def test_token_env_does_not_leak_across_tests_part2():
+def test_token_env_does_not_leak_across_tests_part2() -> None:
     """If the fixture works, this test sees a clean singleton regardless of order."""
     assert git_ops.get_gh_token_env() is None
 
 
-def test_resolve_credentials_returns_none_when_unset(monkeypatch):
+def test_resolve_credentials_returns_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     assert resolve_credentials() is None
 
 
-def test_resolve_credentials_parses_both(monkeypatch):
+def test_resolve_credentials_parses_both(monkeypatch: pytest.MonkeyPatch) -> None:
     pem = "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----"
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", pem)
@@ -136,35 +136,35 @@ def test_resolve_credentials_parses_both(monkeypatch):
     assert creds == AppCredentials(app_id=12345, private_key=pem)
 
 
-def test_resolve_credentials_raises_on_partial_id_only(monkeypatch):
+def test_resolve_credentials_raises_on_partial_id_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     with pytest.raises(ValueError, match="DAYDREAM_APP_PRIVATE_KEY"):
         resolve_credentials()
 
 
-def test_resolve_credentials_raises_on_partial_key_only(monkeypatch):
+def test_resolve_credentials_raises_on_partial_key_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "x")
     with pytest.raises(ValueError, match="DAYDREAM_APP_ID"):
         resolve_credentials()
 
 
-def test_resolve_credentials_raises_on_non_integer_id(monkeypatch):
+def test_resolve_credentials_raises_on_non_integer_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_APP_ID", "not-an-int")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "x")
     with pytest.raises(ValueError, match="DAYDREAM_APP_ID"):
         resolve_credentials()
 
 
-def test_build_gh_env_returns_token_override_only():
+def test_build_gh_env_returns_token_override_only() -> None:
     # build_gh_env returns only the token override; os.environ is merged at
     # subprocess call time by git_ops._run_gh so callers see the live env.
     env = build_gh_env("ghs_tok")
     assert env == {"GH_TOKEN": "ghs_tok"}
 
 
-def test_mint_jwt_is_rs256_with_expected_claims():
+def test_mint_jwt_is_rs256_with_expected_claims() -> None:
     import jwt as pyjwt
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -193,11 +193,11 @@ def _real_pem() -> str:
     ).decode()
 
 
-def test_mint_installation_token_happy_path():
+def test_mint_installation_token_happy_path() -> None:
     pem = _real_pem()
     calls = []
 
-    def fake_gh_api(repo, endpoint, **kwargs):
+    def fake_gh_api(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
         calls.append((endpoint, kwargs))
         if "access_tokens" in endpoint:
             return {"token": "ghs_minted", "expires_at": "2099-01-01T00:00:00Z"}
@@ -220,11 +220,11 @@ def test_mint_installation_token_happy_path():
     assert exchange_kwargs["input_data"] == {"repositories": ["myrepo"]}
 
 
-def test_mint_installation_token_missing_app_slug_yields_unknown_identity():
+def test_mint_installation_token_missing_app_slug_yields_unknown_identity() -> None:
     """A missing/empty app_slug is cosmetic: the mint succeeds, identity is 'unknown'."""
     pem = _real_pem()
 
-    def fake_gh_api(repo, endpoint, **kwargs):
+    def fake_gh_api(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
         if "access_tokens" in endpoint:
             return {"token": "ghs_minted", "expires_at": "2099-01-01T00:00:00Z"}
         return [{"id": 999, "account": {"login": "myorg"}}]
@@ -236,7 +236,7 @@ def test_mint_installation_token_missing_app_slug_yields_unknown_identity():
     assert minted.identity == "unknown"
 
 
-def test_mint_installation_token_no_matching_installation():
+def test_mint_installation_token_no_matching_installation() -> None:
     pem = _real_pem()
 
     with patch("daydream.git_ops.gh_api", return_value=[{"id": 1, "account": {"login": "other"}}]):
@@ -244,7 +244,7 @@ def test_mint_installation_token_no_matching_installation():
             _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
 
-def test_mint_installation_token_wraps_gh_api_failure():
+def test_mint_installation_token_wraps_gh_api_failure() -> None:
     """A gh api failure (GitError) surfaces as the module's ValueError abort channel."""
     pem = _real_pem()
 
@@ -253,12 +253,12 @@ def test_mint_installation_token_wraps_gh_api_failure():
             _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
 
 
-def test_mint_installation_token_sets_and_clears_jwt_env():
+def test_mint_installation_token_sets_and_clears_jwt_env() -> None:
     """The JWT env must be active during the API calls and cleared afterward."""
     pem = _real_pem()
     seen_during = {}
 
-    def fake_gh_api(repo, endpoint, **kwargs):
+    def fake_gh_api(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
         seen_during["env"] = git_ops.get_gh_token_env()
         if "access_tokens" in endpoint:
             return {"token": "ghs_x", "expires_at": "2099-01-01T00:00:00Z"}
@@ -273,14 +273,17 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
     assert git_ops.get_gh_token_env() is None  # restored after minting
 
 
-def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypatch, tmp_path):
+def test_resolve_run_identity_refreshes_installation_token_after_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """A long-running review remints before its next GitHub request."""
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
     minted = 0
     captured = {}
 
-    def fake_gh_api(repo, endpoint, **kwargs):
+    def fake_gh_api(repo: Any, endpoint: str, **kwargs: Any) -> Any:
         nonlocal minted
         if endpoint == "/app/installations":
             return [{"id": 999, "account": {"login": "myorg"}, "app_slug": "daydream-bot"}]
@@ -290,7 +293,7 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
             return {"token": "ghs_expired", "expires_at": "1970-01-01T00:00:00Z"}
         return {"token": "ghs_fresh", "expires_at": "9999-01-01T00:00:00Z"}
 
-    def spy_run(*args, **kwargs):
+    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
         captured.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, stdout="{}", stderr="")
 
@@ -305,13 +308,13 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
     assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
-def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch, tmp_path):
+def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """With App credentials configured and owner/repo resolvable, is_posting=False
     must never attempt minting — a read-only run has no need for a scoped token."""
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
 
-    def fake_gh_api(repo, endpoint, **kwargs):
+    def fake_gh_api(repo: Any, endpoint: str, **kwargs: Any) -> dict[str, Any]:
         if endpoint == "/user":
             return {"login": "personal-user"}
         raise AssertionError(f"minting must not be attempted when is_posting=False (hit {endpoint})")
@@ -322,13 +325,13 @@ def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch, tmp_pa
     assert identity == "personal-user"
 
 
-def test_resolve_user_identity_returns_login(tmp_path):
+def test_resolve_user_identity_returns_login(tmp_path: Path) -> None:
     """resolve_user_identity reads the current gh-authenticated user."""
     with patch("daydream.git_ops.gh_api", return_value={"login": "personal-user"}):
         assert resolve_user_identity(tmp_path) == "personal-user"
 
 
-def test_resolve_user_identity_returns_unknown_on_failure(tmp_path):
+def test_resolve_user_identity_returns_unknown_on_failure(tmp_path: Path) -> None:
     """A failed user lookup is non-fatal — return 'unknown', never raise."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("boom")):
         assert resolve_user_identity(tmp_path) == "unknown"
@@ -337,10 +340,10 @@ def test_resolve_user_identity_returns_unknown_on_failure(tmp_path):
 _TEST_PEM = _real_pem()
 
 
-def test_exchange_manifest_code_returns_credentials_and_slug():
+def test_exchange_manifest_code_returns_credentials_and_slug() -> None:
     """POST the manifest code conversion and read id/pem/slug into AppCredentials."""
 
-    def fake_gh_api(repo, endpoint, **kw):
+    def fake_gh_api(repo: Any, endpoint: str, **kw: Any) -> dict[str, Any]:
         assert endpoint == "/app-manifests/abc123/conversions" and kw["method"] == "POST"
         return {"id": 42, "pem": "-----BEGIN RSA PRIVATE KEY-----\nx\n", "slug": "acme-bot"}
 
@@ -349,35 +352,35 @@ def test_exchange_manifest_code_returns_credentials_and_slug():
     assert creds.app_id == 42 and "BEGIN RSA" in creds.private_key and slug == "acme-bot"
 
 
-def test_exchange_manifest_code_raises_when_id_missing():
+def test_exchange_manifest_code_raises_when_id_missing() -> None:
     """A conversion missing the App id aborts naming the field — no placeholder."""
     with patch("daydream.git_ops.gh_api", return_value={"pem": "x", "slug": "acme-bot"}):
         with pytest.raises(GitHubAppError, match="id"):
             exchange_manifest_code(Path("."), "abc123")
 
 
-def test_exchange_manifest_code_raises_when_id_not_int():
+def test_exchange_manifest_code_raises_when_id_not_int() -> None:
     """A non-integer App id aborts naming the field — never coerce a placeholder."""
     with patch("daydream.git_ops.gh_api", return_value={"id": "not-int", "pem": "x", "slug": "s"}):
         with pytest.raises(GitHubAppError, match="id"):
             exchange_manifest_code(Path("."), "abc123")
 
 
-def test_exchange_manifest_code_raises_when_pem_missing():
+def test_exchange_manifest_code_raises_when_pem_missing() -> None:
     """A conversion missing the PEM aborts naming the field — no placeholder key."""
     with patch("daydream.git_ops.gh_api", return_value={"id": 42, "slug": "acme-bot"}):
         with pytest.raises(GitHubAppError, match="pem"):
             exchange_manifest_code(Path("."), "abc123")
 
 
-def test_exchange_manifest_code_wraps_gh_api_failure():
+def test_exchange_manifest_code_wraps_gh_api_failure() -> None:
     """A gh api failure (GitError) surfaces as GitHubAppError, never silent."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 422")):
         with pytest.raises(GitHubAppError):
             exchange_manifest_code(Path("."), "abc123")
 
 
-def test_get_app_metadata_returns_permissions():
+def test_get_app_metadata_returns_permissions() -> None:
     """get_app_metadata mints a JWT and returns the parsed /app object."""
     with patch(
         "daydream.git_ops.gh_api",
@@ -387,11 +390,11 @@ def test_get_app_metadata_returns_permissions():
     assert meta["permissions"]["pull_requests"] == "write"
 
 
-def test_get_app_metadata_uses_bearer_jwt_and_clears_env():
+def test_get_app_metadata_uses_bearer_jwt_and_clears_env() -> None:
     """The /app call carries an explicit Bearer JWT, and the token env is restored."""
     seen = {}
 
-    def fake_gh_api(repo, endpoint, **kw):
+    def fake_gh_api(repo: Any, endpoint: Any, **kw: dict[str, Any]) -> dict[str, Any]:
         seen["endpoint"] = endpoint
         seen["headers"] = kw.get("headers")
         seen["env"] = git_ops.get_gh_token_env()
@@ -407,17 +410,17 @@ def test_get_app_metadata_uses_bearer_jwt_and_clears_env():
     assert git_ops.get_gh_token_env() is None  # restored after
 
 
-def test_get_app_metadata_restores_refreshable_token_state():
+def test_get_app_metadata_restores_refreshable_token_state() -> None:
     """A scoped App JWT preserves the installation token's refresh behavior."""
     captured = {}
     refresh_calls = 0
 
-    def refresh():
+    def refresh() -> tuple[Any, ...]:
         nonlocal refresh_calls
         refresh_calls += 1
         return {"GH_TOKEN": "ghs_fresh"}, float("inf")
 
-    def spy_run(*args, **kwargs):
+    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
         captured.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
 
@@ -434,7 +437,7 @@ def test_get_app_metadata_restores_refreshable_token_state():
     assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
-def test_get_app_metadata_wraps_gh_api_failure():
+def test_get_app_metadata_wraps_gh_api_failure() -> None:
     """A gh api failure (GitError) surfaces as GitHubAppError, never silent."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 401")):
         with pytest.raises(GitHubAppError):

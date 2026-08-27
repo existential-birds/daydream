@@ -1,7 +1,9 @@
 import hashlib
 import uuid
 from pathlib import Path
+from typing import Any
 
+import pytest
 import yaml
 
 from daydream.benchmark import migrate, schema, storage
@@ -12,13 +14,13 @@ _CASE_ID = "pr-000101-0123456789ab"
 _TITLE = "Cache misses"
 
 
-def _legacy_finding_id(title, body, severity, path, start_line, end_line):
+def _legacy_finding_id(title: Any, body: Any, severity: Any, path: Any, start_line: Any, end_line: Any) -> Any:
     payload = "\x1f".join([str(title or ""), str(body or ""), str(severity or ""),
                            str(path or ""), str(start_line or ""), str(end_line or "")])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _seed_manifest():
+def _seed_manifest() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "benchmark_id": str(uuid.uuid4()),
@@ -40,7 +42,7 @@ def _seed_manifest():
     }
 
 
-def _seed_v1_case():
+def _seed_v1_case() -> dict[str, Any]:
     finding = {
         "title": _TITLE,
         "body": "The cache layers never populate.",
@@ -81,7 +83,7 @@ def _seed_v1_case():
     }
 
 
-def _seed_v1_workspace(tmp_path: Path):
+def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     ws = tmp_path / "ws"
     storage.ensure_private_dir(ws)
     storage.atomic_write_yaml(ws / "benchmark.yaml", _seed_manifest())
@@ -91,7 +93,7 @@ def _seed_v1_workspace(tmp_path: Path):
     return ws, _CASE_ID, _TITLE
 
 
-def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path):
+def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path: Path) -> None:
     ws, case_id, title = _seed_v1_workspace(tmp_path)
     report = migrate.migrate_workspace(ws)
     assert [c.case_id for c in report.cases] == [case_id]
@@ -103,11 +105,11 @@ def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path):
     assert f["finding_id"] == schema.derive_finding_id(f, case_id=case_id)  # now case-scoped
     assert f["title"] == title and f["provenance"]["kind"] == "authored"    # authored content preserved
     # migrated doc fully validates
-    from daydream.benchmark.curation import _schema_ready
+    from daydream.benchmark.schema import _schema_ready
     schema.CaseDocument.model_validate(_schema_ready(raw))
 
 
-def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path):
+def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path: Path) -> None:
     """A pre-provenance-split v1 workspace (ready snapshot without
     requested_base_sha) is repaired: the backfill copies the recorded
     original_base_sha so the migrated doc validates."""
@@ -123,11 +125,11 @@ def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path):
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["schema_version"] == 2
     assert raw["snapshot"]["requested_base_sha"] == raw["snapshot"]["original_base_sha"]
-    from daydream.benchmark.curation import _schema_ready
+    from daydream.benchmark.schema import _schema_ready
     schema.CaseDocument.model_validate(_schema_ready(raw))  # no longer corrupt
 
 
-def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path):
+def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path: Path) -> None:
     """A v2 workspace persisted before requested_base_sha became required is
     backfilled without touching finding ids (no recompute, no version bump),
     and a second run is a no-op."""
@@ -147,14 +149,14 @@ def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path):
     assert raw["schema_version"] == 2                  # no bump
     assert raw["snapshot"]["requested_base_sha"] == raw["snapshot"]["original_base_sha"]
     assert [f["finding_id"] for f in raw["curation"]["findings"]] == finding_ids
-    from daydream.benchmark.curation import _schema_ready
+    from daydream.benchmark.schema import _schema_ready
     schema.CaseDocument.model_validate(_schema_ready(raw))
 
     second = migrate.migrate_workspace(ws)              # idempotent
     assert second.cases == [] and second.errors == []
 
 
-def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path):
+def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path: Path) -> None:
     """Unreplayable snapshots carry requested_base_sha as nullable, so a v2
     case that omits it is left byte-unchanged (no repair needed, no rewrite)."""
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
@@ -178,7 +180,7 @@ def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path):
     assert "requested_base_sha" not in after["snapshot"]
 
 
-def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path):
+def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path: Path) -> None:
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     migrate.migrate_workspace(ws, dry_run=True)
     assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1
@@ -187,7 +189,7 @@ def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path):
     assert all(c.changed is False for c in second.cases)   # no-op second run
 
 
-def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path):
+def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None:
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     # corrupt the case: duplicate finding_id (uniqueness violated)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
@@ -198,7 +200,7 @@ def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path):
     assert any("duplicate" in e for e in report.errors)
     assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1  # untouched
 
-def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path, capsys):
+def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The ``upgrade`` verb drives migrate_workspace through the CLI seam (exit 0)."""
     from daydream.benchmark.cli import _handle_benchmark_command
 
@@ -221,7 +223,7 @@ def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path, capsys):
     assert rc == 0
 
 
-def test_upgrade_cli_error_returns_1(tmp_path, capsys):
+def test_upgrade_cli_error_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """An errored case surfaces on stderr and yields exit code 1."""
     from daydream.benchmark.cli import _handle_benchmark_command
 
@@ -234,7 +236,7 @@ def test_upgrade_cli_error_returns_1(tmp_path, capsys):
     assert "error" in capsys.readouterr().err
 
 
-def test_migrate_heals_interrupted_journal_under_lock(tmp_path):
+def test_migrate_heals_interrupted_journal_under_lock(tmp_path: Path) -> None:
     """migrate_workspace must recover_startup under the workspace lock (like every
     other locked writer) so a crashed curator journal is healed before it reads;
     and its transaction op_id must be flat so no residue is left that bricks a

@@ -63,10 +63,10 @@ def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -
     assert parse_finding_markers(body) == ["a" * 64]  # host still injects marker
 
 
-def test_finding_renderer_falls_back_and_warns_on_error(caplog) -> None:
+def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptureFixture) -> None:
     from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
-    def boom(finding, ctx):
+    def boom(finding: Any, ctx: Any) -> str:
         raise RuntimeError("boom")
     reg = Registry()
     register_builtins(reg)
@@ -86,12 +86,15 @@ def test_finding_renderer_falls_back_and_warns_on_error(caplog) -> None:
 _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
 
 
-def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr, monkeypatch) -> None:
+def test_custom_summary_renderer_can_build_collapsible_per_finding_list(
+    pr: PRInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
     monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
 
-    def summary_renderer(ctx):
+    def summary_renderer(ctx: Any) -> Any:
         rows = [f"<details><summary>{f.finding.path} — {f.finding.title}</summary>\n{f.body_block}\n</details>"
                 for f in ctx.findings]
         return "**Custom Summary**\n\n" + "\n".join(rows)
@@ -114,7 +117,7 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr, monk
     assert body.rstrip().endswith("</sub>")                  # host footer still last
 
 
-def test_custom_finding_renderer_flows_into_summary_section(pr, monkeypatch) -> None:
+def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
     monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
@@ -133,12 +136,16 @@ def test_custom_finding_renderer_flows_into_summary_section(pr, monkeypatch) -> 
     assert parse_finding_markers(body) == ["b" * 64]           # host marker still injected
 
 
-def test_summary_renderer_falls_back_and_warns_on_error(pr, monkeypatch, caplog) -> None:
+def test_summary_renderer_falls_back_and_warns_on_error(
+    pr: PRInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
     monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
 
-    def boom(ctx):
+    def boom(ctx: Any) -> str:
         raise RuntimeError("kaboom")
 
     reg = Registry()
@@ -159,7 +166,7 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr, monkeypatch, caplog)
     assert "summary" in caplog.text and "kaboom" in caplog.text
 
 
-def test_structural_item_becomes_parsed_issue():
+def test_structural_item_becomes_parsed_issue() -> None:
     items = [{"id": 1, "lens": "structural", "file": "big.py", "line": 1,
               "description": "1k-line file", "severity": "high",
               "confidence": "HIGH", "rationale": "r"}]
@@ -265,7 +272,7 @@ def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None
     calls = {"n": 0}
     real = hunk_index.parse_hunks
 
-    def spy(diff_text):
+    def spy(diff_text: Any) -> Any:
         calls["n"] += 1
         return real(diff_text)
 
@@ -629,7 +636,8 @@ def test_build_payload_keeps_comment_when_medium_finding(
 
 
 def test_build_payload_none_severity_does_not_crash_on_approve_check(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+    pr: PRInfo,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A None-severity issue must not crash the clean computation."""
     classified = pr_review._ClassifiedIssues(
@@ -651,7 +659,9 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(
 
 @pytest.mark.parametrize("off_vocabulary_severity", ["critical", "blocker"])
 def test_build_payload_keeps_comment_when_off_vocabulary_severity(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, off_vocabulary_severity: str
+    pr: PRInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    off_vocabulary_severity: str,
 ) -> None:
     """F1: approve_on_clean=True but an off-vocabulary severity -> event COMMENT.
 
@@ -845,7 +855,9 @@ async def test_post_succeeds_and_prints_url(
 
 @pytest.mark.asyncio
 async def test_post_payload_approves_when_clean_and_enabled(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pr: PRInfo,
 ) -> None:
     """_post with approve_on_clean=True + clean classified -> APPROVE payload."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
@@ -894,7 +906,9 @@ async def test_post_payload_approves_when_clean_and_enabled(
 
 @pytest.mark.asyncio
 async def test_post_warns_with_preserved_payload_path_on_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pr: PRInfo,
 ) -> None:
     """When submit returns an error, the warning surfaces git_ops's preserved-path text."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
@@ -966,7 +980,8 @@ async def test_post_skipped_when_user_declines(
 
 @pytest.mark.asyncio
 async def test_post_review_from_report_empty_items_is_nothing_to_post(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Empty merged items skip the post cleanly (NOTHING_TO_POST, not a failure)."""
     merged = tmp_path / "merged-items.json"

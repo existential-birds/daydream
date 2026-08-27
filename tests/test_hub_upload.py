@@ -1,7 +1,9 @@
 # tests/test_hub_upload.py
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +21,7 @@ class _RepoInfo:
 class _BaseFakeApi:
     """Fake ``HfApi`` defaults shared by upload tests: a private target repo."""
 
-    def create_repo(self, repo_id: str, **kw) -> None:
+    def create_repo(self, repo_id: str, **kw: Any) -> None:
         pass
 
     def repo_info(self, repo_id: str, *, repo_type: str) -> _RepoInfo:
@@ -85,10 +87,10 @@ def test_upload_run_bundle_creates_private_repo_and_uploads(
     hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: dict = {}
+    calls: dict[str, Any] = {}
 
     class FakeApi:
-        def __init__(self, token: str | None = None):
+        def __init__(self, token: str | None = None) -> None:
             calls["token"] = token
 
         def create_repo(self, repo_id: str, *, repo_type: str, private: bool, exist_ok: bool) -> None:
@@ -99,7 +101,13 @@ def test_upload_run_bundle_creates_private_repo_and_uploads(
             return _RepoInfo(private=True)
 
         def upload_folder(
-            self, *, folder_path: str, repo_id: str, repo_type: str, path_in_repo: str, commit_message: str
+            self,
+            *,
+            folder_path: str,
+            repo_id: str,
+            repo_type: str,
+            path_in_repo: str,
+            commit_message: str,
         ) -> None:
             calls["upload_folder"] = (folder_path, repo_id, repo_type, path_in_repo, commit_message)
 
@@ -114,17 +122,17 @@ def test_upload_run_bundle_warns_on_existing_public_repo(
     hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: dict = {}
+    calls: dict[str, Any] = {}
 
     class PublicRepoApi(_BaseFakeApi):
-        def create_repo(self, repo_id: str, **kw) -> None:
+        def create_repo(self, repo_id: str, **kw: Any) -> None:
             calls["create_repo"] = True
 
         def repo_info(self, repo_id: str, *, repo_type: str) -> _RepoInfo:
             calls["repo_info"] = (repo_id, repo_type)
             return _RepoInfo(private=False)
 
-        def upload_folder(self, **kw) -> None:
+        def upload_folder(self, **kw: Any) -> None:
             calls["upload_folder"] = True
 
     monkeypatch.setattr(hub, "HfApi", PublicRepoApi)
@@ -157,7 +165,7 @@ def test_upload_run_bundle_create_repo_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class CreateRepoBoomApi(_BaseFakeApi):
-        def create_repo(self, repo_id: str, **kw) -> None:
+        def create_repo(self, repo_id: str, **kw: Any) -> None:
             raise RuntimeError("401 Unauthorized: invalid token")
 
     monkeypatch.setattr(hub, "HfApi", CreateRepoBoomApi)
@@ -171,7 +179,7 @@ def test_upload_run_bundle_non_conflict_upload_error(
     attempts: list[int] = []
 
     class NonConflictApi(_BaseFakeApi):
-        def upload_folder(self, **kw) -> None:
+        def upload_folder(self, **kw: Any) -> None:
             attempts.append(1)
             raise RuntimeError("some unrelated error")
 
@@ -188,7 +196,7 @@ def test_upload_run_bundle_retry_exhaustion(
     monkeypatch.setattr(hub, "_UPLOAD_RETRY_BASE_DELAY_S", 0.0)
 
     class AlwaysConflictApi(_BaseFakeApi):
-        def upload_folder(self, **kw) -> None:
+        def upload_folder(self, **kw: Any) -> None:
             attempts.append(1)
             raise RuntimeError("Commit failed: concurrent update to refs/heads/main")
 
@@ -204,10 +212,10 @@ def test_upload_run_bundle_retries_commit_conflict(
     attempts: list[int] = []
     delays: list[float] = []
     monkeypatch.setattr(hub, "_UPLOAD_RETRY_BASE_DELAY_S", 0.01)
-    monkeypatch.setattr(hub.time, "sleep", lambda seconds: delays.append(seconds))
+    monkeypatch.setattr(time, "sleep", lambda seconds: delays.append(seconds))
 
     class ConflictApi(_BaseFakeApi):
-        def upload_folder(self, **kw) -> None:
+        def upload_folder(self, **kw: Any) -> None:
             attempts.append(1)
             if len(attempts) < 3:
                 raise RuntimeError("Commit failed: concurrent update to refs/heads/main")

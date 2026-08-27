@@ -12,6 +12,11 @@ benchmark argument-parsing logic with the rest of the benchmark package.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation-only; objective is imported lazily at runtime
+    from daydream.benchmark.harbor import objective
+
 import argparse
 import json
 import os
@@ -182,7 +187,7 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _handle_benchmark_import_prs(args) -> int:
+def _handle_benchmark_import_prs(args: argparse.Namespace) -> int:
     """Import explicit private PRs: parse targets, preflight, then run the import.
 
     Expected errors (mis-tokenized targets, preflight failure) print a message
@@ -253,7 +258,7 @@ def _handle_benchmark_status(dir_path: Path) -> int:
     return 0
 
 
-def _handle_benchmark_validate(args) -> int:
+def _handle_benchmark_validate(args: argparse.Namespace) -> int:
     """Print the human-readable classification and return the numeric code."""
     if args.compiled:
         from daydream.benchmark.harbor.build import CompileError
@@ -274,7 +279,7 @@ def _handle_benchmark_validate(args) -> int:
     return code
 
 
-def _handle_benchmark_build_harbor(args) -> int:
+def _handle_benchmark_build_harbor(args: argparse.Namespace) -> int:
     """Package a validated authoring workspace as a runnable Harbor dataset."""
     from daydream.benchmark.harbor.build import CompileError
     from daydream.benchmark.harbor.package import build_harbor
@@ -289,7 +294,7 @@ def _handle_benchmark_build_harbor(args) -> int:
     return 0
 
 
-def _handle_benchmark_upgrade(args) -> int:
+def _handle_benchmark_upgrade(args: argparse.Namespace) -> int:
     """Deterministically upgrade legacy v1 case documents to v2 in place.
 
     Prints the per-case report plus any surfaced errors. Returns ``0`` on a
@@ -316,7 +321,7 @@ def _is_interactive_tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _handle_benchmark_calibrate(args) -> int:
+def _handle_benchmark_calibrate(args: argparse.Namespace) -> int:
     """Diagnostic: measure the configured judge's agreement with the unverified fixture.
 
     A passing result only means the judge agrees with this unverified labeled
@@ -358,7 +363,7 @@ def _handle_benchmark_calibrate(args) -> int:
     )
 
 
-def _handle_benchmark_run(args) -> int:
+def _handle_benchmark_run(args: argparse.Namespace) -> int:
     """Supervise a Harbor run in the workspace behind the Oracle gate.
 
     Threads the reviewer/judge env vars into the supervisor (mirroring
@@ -412,7 +417,7 @@ def _candidate_profile_digest() -> str | None:
     return resolved.digest
 
 
-def _handle_benchmark_clean(args) -> int:
+def _handle_benchmark_clean(args: argparse.Namespace) -> int:
     """Handle ``daydream benchmark clean <dir> [--cache] [--jobs] [...]``.
 
     Resolves the ``--derived`` union into the three selection flags *before*
@@ -454,7 +459,7 @@ def _handle_benchmark_clean(args) -> int:
     return report.exit_code
 
 
-def _handle_benchmark_curate(args) -> int:
+def _handle_benchmark_curate(args: argparse.Namespace) -> int:
     """Curate a case: derive everything, never attests to ready.
 
     On an interactive TTY, ``curate`` dispatches into the resumable terminal
@@ -488,7 +493,7 @@ def _handle_benchmark_curate(args) -> int:
     return 0
 
 
-def _handle_benchmark_objective(args) -> int:
+def _handle_benchmark_objective(args: argparse.Namespace) -> int:
     """Resolve an exact completed run and emit its machine-readable objective.
 
     ``--json`` serializes the opaque privacy-safe objective via
@@ -532,7 +537,7 @@ def _handle_benchmark_objective(args) -> int:
     return 0
 
 
-def _suite_objective_to_json(suite) -> dict[str, object]:
+def _suite_objective_to_json(suite: objective.SuiteObjective) -> dict[str, object]:
     """Project a pooled ``SuiteObjective`` into opaque machine-readable JSON.
 
     Produces the stable ``experiment_id``, the shared ``profile_digest``, the
@@ -554,7 +559,7 @@ def _suite_objective_to_json(suite) -> dict[str, object]:
     }
 
 
-def _handle_benchmark_aggregate(args) -> int:
+def _handle_benchmark_aggregate(args: argparse.Namespace) -> int:
     """Pool a suite manifest of exact runs into one compatible objective JSON (issue #888).
 
     Loads the manifest through ``storage.load_json_strict``, then drives

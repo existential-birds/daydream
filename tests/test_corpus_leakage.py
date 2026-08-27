@@ -12,11 +12,11 @@ production ``upsert_run`` + ``append_label_observation`` helpers — reusing the
 ``_seed_run_with_annotation`` helper and ``archive_dir`` fixture established in
 ``tests/test_training_corpus.py``.
 """
-
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,7 +29,7 @@ from daydream.training.corpus import (
 from tests.test_training_corpus import _seed_run_with_annotation
 
 
-def test_posterior_dated_after_pin_is_excluded(tmp_path, archive_dir):
+def test_posterior_dated_after_pin_is_excluded(tmp_path: Path, archive_dir: Any) -> None:
     # annotation recorded before the pin, but its outcome became true AFTER it
     _seed_run_with_annotation(archive_dir, "s1", label="accepted",
                               observed_at="2026-03-01T00:00:00+00:00",
@@ -49,11 +49,11 @@ def test_posterior_dated_after_pin_is_excluded(tmp_path, archive_dir):
 AS_OF = "2026-04-01T00:00:00+00:00"
 
 
-def _ann(valid_at: str | None) -> dict:
+def _ann(valid_at: str | None) -> dict[str, Any]:
     return {"valid_at": valid_at}
 
 
-def test_leak_guard_equal_instant_is_not_a_leak():
+def test_leak_guard_equal_instant_is_not_a_leak() -> None:
     assert _is_posterior_leak(_ann(AS_OF), AS_OF) is False
 
 
@@ -87,13 +87,13 @@ def test_leak_guard_chronological_comparison(
     assert _is_posterior_leak(_ann(second_valid_at), AS_OF) is second_expected
 
 
-def test_leak_guard_none_inputs_never_leak():
+def test_leak_guard_none_inputs_never_leak() -> None:
     assert _is_posterior_leak(None, AS_OF) is False
     assert _is_posterior_leak(_ann(None), AS_OF) is False
     assert _is_posterior_leak(_ann("2026-09-01T00:00:00+00:00"), None) is False
 
 
-def test_leak_guard_mixed_z_and_offset_spellings_compare_chronologically():
+def test_leak_guard_mixed_z_and_offset_spellings_compare_chronologically() -> None:
     # Same instant spelled "Z" vs "+00:00", both directions: never a leak.
     assert _is_posterior_leak(_ann("2026-04-01T00:00:00Z"), AS_OF) is False
     assert _is_posterior_leak(_ann(AS_OF), "2026-04-01T00:00:00Z") is False
@@ -101,7 +101,7 @@ def test_leak_guard_mixed_z_and_offset_spellings_compare_chronologically():
     assert _is_posterior_leak(_ann("2026-04-01T00:00:01Z"), AS_OF) is True
 
 
-def test_leak_guard_subsecond_precision_compares_chronologically():
+def test_leak_guard_subsecond_precision_compares_chronologically() -> None:
     # ".000000" and no-fraction are the same instant — not a leak in either
     # direction. (A suffix-only lexical normalisation would have called the
     # fractional spelling "greater" and leaked a false exclusion.)

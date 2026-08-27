@@ -787,7 +787,13 @@ def _resolve_repo_for_row(
 
     remote_url = row.get("remote_url")
     repo_slug = row.get("repo_slug")
-    if not remote_url or not repo_slug or clone_cache is None:
+    if (
+        not isinstance(remote_url, str)
+        or not isinstance(repo_slug, str)
+        or not remote_url
+        or not repo_slug
+        or clone_cache is None
+    ):
         return None
 
     parts = repo_slug.split("/", 1)

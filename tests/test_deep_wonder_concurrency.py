@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
+from daydream.backends import AgentEvent
+from daydream.runner import RunConfig
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 
@@ -39,8 +42,11 @@ def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
 
 
 async def test_tool_heavy_wonder_completes_under_default_budget(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config, mute_side_effects,
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """The default tool-call budget is unlimited, so a tool-heavy wonder pass lands."""
     from daydream.runner import run
@@ -61,8 +67,11 @@ async def test_tool_heavy_wonder_completes_under_default_budget(
 
 
 async def test_root_trajectory_step_ids_survive_concurrent_wonder(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config, mute_side_effects,
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """A wonder turn outliving the per-stack fan-out still writes a valid trajectory."""
     from daydream.runner import run
@@ -83,8 +92,11 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
 
 
 async def test_budget_truncated_wonder_fails_loudly(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config, mute_side_effects,
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """A budget-truncated wonder pass fails the run instead of degrading to []."""
     from daydream.runner import run
@@ -114,10 +126,15 @@ class _WonderRendezvousStub(StubBackend):
         self.wonder_started = anyio.Event()
 
     async def execute(
-        self, cwd: Path, prompt: str, output_schema: Any = None,
-        continuation: Any = None, agents: Any = None, max_turns: Any = None,
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         pl = prompt.lower()
         if "you are reviewing the" in pl:
             self.per_stack_started.set()
@@ -133,7 +150,8 @@ class _WonderRendezvousStub(StubBackend):
 
 
 async def test_wonder_runs_concurrently_with_per_stack(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wonder and the fan-out overlap; alternatives.json lands before parse reads it."""
     silence(monkeypatch)
@@ -145,7 +163,8 @@ async def test_wonder_runs_concurrently_with_per_stack(
 
 
 async def test_concurrent_per_stack_prompts_omit_alternatives_pointer(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Multi-stack reviewers drop the pointer; adjudication prompts keep it."""
     silence(monkeypatch)
@@ -164,7 +183,8 @@ async def test_concurrent_per_stack_prompts_omit_alternatives_pointer(
 
 
 async def test_single_stack_keeps_serial_order_and_pointer(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Single-stack mode has no merge agent, so the reviewer pointer must survive."""
     silence(monkeypatch)
@@ -181,7 +201,8 @@ async def test_single_stack_keeps_serial_order_and_pointer(
 
 
 async def test_wonder_failure_fails_run_with_fanout_outputs_on_disk(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A held wonder exception is re-raised after the join, original type intact."""
     silence(monkeypatch)

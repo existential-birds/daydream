@@ -291,7 +291,8 @@ def test_load_user_prices_invalid_value_skips_entry(
 
 
 def test_load_user_prices_unresolvable_home_returns_empty(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """When the default path is used and Path.home() raises, yield {} — never raise."""
     monkeypatch.delenv("DAYDREAM_PRICES_FILE", raising=False)

@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
+import pytest
 
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
+from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 
 # The minimal turn a per-stack review agent has to emit to satisfy run_agent.
@@ -55,13 +58,13 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     return diff, intent, alts
 
 
-async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work) -> None:
+async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """D-17/D-18/D-38: fan-out preserves per-stack calls, paths, prompts, and isolation."""
     backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, failures = await phase_per_stack_reviews(
-        backend,  # type: ignore[arg-type]
+        cast(Backend, backend),
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,
@@ -100,7 +103,9 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work) -> None:
 
 
 async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stack(
-    tmp_path: Path, make_work, monkeypatch
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural stack flows through build_structural_prompt; language stacks do not."""
     from daydream.config import STRUCTURE_STACK_NAME
@@ -140,7 +145,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     ]
 
     await _phase(
-        backend,  # type: ignore[arg-type]
+        backend,
         make_work(tmp_path),
         stacks,
         diff_path=diff,
@@ -156,23 +161,34 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert per_stack_calls[0]["stack_name"] == "python"
 
 
-async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) -> None:
+async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """A single stack failure does not abort the whole fan-out, and is reported."""
 
     # Prompt-conditional, so it stays a dispatch fake: ScriptedBackend scripts by
     # call index and the fan-out completion order is not fixed.
     class _FlakyBackend(ScriptedBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncGenerator[AgentEvent, None]:
             if "react" in prompt.lower():
                 raise RuntimeError("simulated react failure")
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
+            async for event in super().execute(cwd, prompt, output_schema, continuation,
+                                               agents, max_turns, read_only, persist_session):
                 yield event
 
     backend = _FlakyBackend(events=_REVIEW_TURN)
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, failures = await phase_per_stack_reviews(
-        backend,
+        cast(Backend, backend),
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,
@@ -199,7 +215,7 @@ class _PiShapeBackend(ScriptedBackend):
 
 
 async def test_per_stack_prompts_are_skill_free(
-    tmp_path: Path, make_work
+    tmp_path: Path, make_work: Callable[..., WorkContext]
 ) -> None:
     """M12: built-in stacks dispatch native per-stack prompts with no /skill: token."""
     from daydream.config import STRUCTURE_STACK_NAME
@@ -226,7 +242,7 @@ async def test_per_stack_prompts_are_skill_free(
     ]
 
     results, failures = await phase_per_stack_reviews(
-        backend,
+        cast(Backend, backend),
         make_work(tmp_path),
         stacks,
         diff_path=diff,
@@ -251,7 +267,11 @@ async def test_per_stack_prompts_are_skill_free(
     assert "/skill:" not in generic_prompt
 
 
-async def test_fanout_default_concurrency(tmp_path: Path, make_work, monkeypatch) -> None:
+async def test_fanout_default_concurrency(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Backend without fanout_concurrency attribute → limiter defaults to 4."""
     captured: list[int] = []
     real_limiter = anyio.CapacityLimiter
@@ -270,7 +290,7 @@ async def test_fanout_default_concurrency(tmp_path: Path, make_work, monkeypatch
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
-        backend,  # type: ignore[arg-type]
+        backend,
         make_work(tmp_path),
         _mk_stacks(),
         diff_path=diff,
@@ -281,7 +301,11 @@ async def test_fanout_default_concurrency(tmp_path: Path, make_work, monkeypatch
     assert 4 in captured
 
 
-async def test_fanout_low_concurrency(tmp_path: Path, make_work, monkeypatch) -> None:
+async def test_fanout_low_concurrency(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Backend with fanout_concurrency=2 → limiter uses 2."""
     captured: list[int] = []
     real_limiter = anyio.CapacityLimiter

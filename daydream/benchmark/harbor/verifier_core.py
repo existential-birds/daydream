@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 MAX_ARTIFACT_BYTES = 1_048_576
@@ -283,7 +284,7 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
     if len(findings) > MAX_CANDIDATE_FINDINGS:
         raise VerifierError("candidate artifact exceeds 100 findings")
 
-    parsed = [parse_candidate_finding(f) for f in findings]  # type: ignore[arg-type]
+    parsed = [parse_candidate_finding(f) for f in findings]
 
     seen: dict[tuple[object, ...], int] = {}
     ids: set[str] = set()
@@ -478,10 +479,14 @@ def _finding_id(finding: object) -> str:
     """Read a gold finding's id from either a GoldFinding or a raw dict."""
     if isinstance(finding, dict):
         try:
-            return finding["finding_id"]
+            value = finding["finding_id"]
         except KeyError as exc:
             raise VerifierError("missing gold finding_id") from exc
-    return getattr(finding, "finding_id")
+    else:
+        value = getattr(finding, "finding_id")
+    if not isinstance(value, str):
+        raise VerifierError("gold finding_id must be a string")
+    return value
 
 
 def _empty_side_error(gold_count: int) -> Reward:
@@ -552,15 +557,19 @@ def reward_to_json(reward: Reward) -> str:
 def _candidate_id(finding: object) -> str:
     if isinstance(finding, dict):
         try:
-            return finding["candidate_id"]
+            value = finding["candidate_id"]
         except KeyError as exc:
             raise VerifierError("missing candidate_id") from exc
-    return getattr(finding, "candidate_id")
+    else:
+        value = getattr(finding, "candidate_id")
+    if not isinstance(value, str):
+        raise VerifierError("candidate_id must be a string")
+    return value
 
 
 def reward_details(
-    gold: list[object],
-    candidates: list[object],
+    gold: Sequence[object],
+    candidates: Sequence[object],
     verdicts: list[Verdict],
     matches: set[tuple[str, str]],
 ) -> dict[str, object]:

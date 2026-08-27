@@ -1,8 +1,8 @@
 """Integration tests for the full review-fix-test flow."""
-
 import json
 import re
 import time
+from collections.abc import AsyncGenerator, Callable
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,7 @@ import pytest
 from rich.console import Console
 
 from daydream.backends import (
+    AgentEvent,
     CostEvent,
     ResultEvent,
     TextEvent,
@@ -18,9 +19,10 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.runner import run
+from daydream.runner import RunConfig, run
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
+from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
@@ -152,7 +154,7 @@ async def test_five_thinking_panels_render_in_under_two_seconds(monkeypatch: pyt
 
 
 @pytest.fixture
-def mock_backend(install_backend):
+def mock_backend(install_backend: Callable[[object], object]) -> Any:
     """Patch create_backend to return the shared phase-dispatch fake."""
     return install_backend(
         PhaseDispatchBackend(parse_results=[[_FULL_FLOW_ISSUE]], emit_cost=True)
@@ -160,7 +162,7 @@ def mock_backend(install_backend):
 
 
 @pytest.fixture
-def mock_ui(monkeypatch):
+def mock_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch UI functions that require user input."""
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *args, **kwargs: "n")
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *args, **kwargs: "n")
@@ -203,7 +205,12 @@ Found 1 issue to address.
 
 
 @pytest.mark.asyncio
-async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path, make_config):  # noqa
+async def test_full_fix_flow(
+    mock_backend: Any,  # noqa: F841
+    mock_ui: Any,  # noqa: F841
+    target_project: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Test the complete review -> parse -> fix -> test flow."""
     config = make_config(target_project, stack="python", quiet=True, shallow=True)
 
@@ -223,14 +230,14 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
 
     async def execute(
         self,
-        cwd,
-        prompt,
-        output_schema=None,
-        continuation=None,
-        agents=None,
-        max_turns=None,
-        read_only=False,
-    ):
+        cwd: Path,
+        prompt: str,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
+    ) -> AsyncGenerator[AgentEvent, None]:
         if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
             (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
         elif prompt.startswith("The daydream changes are already staged"):
@@ -256,12 +263,12 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
 
 @pytest.mark.asyncio
 async def test_shallow_commits_when_operator_ignores_red_suite(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     feature_branch_repo: Path,
-    install_backend,
-    make_config,
-    silence_console,
-):
+    install_backend: Callable[[object], object],
+    make_config: Callable[..., 'RunConfig'],
+    silence_console: Callable[..., None],
+) -> None:
     """Heal-menu choice "3" keeps the shallow deep run going all the way to a real commit.
 
     Drives the deep shallow flow through the REAL ``phase_test_and_heal`` and
@@ -306,7 +313,7 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
 
 
 @pytest.mark.asyncio
-async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
+async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test the full tool panel lifecycle in normal mode shows file count and list.
 
     This test exercises the actual run_agent() flow by providing a scripted backend
@@ -351,7 +358,7 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_glob_tool_panel_singular_file_count(monkeypatch):
+async def test_glob_tool_panel_singular_file_count(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that LiveToolPanel shows singular 'file' for 1 result in normal mode."""
     tool_use_id = "test-glob-singular-456"
     glob_result = "/project/main.py"
@@ -374,7 +381,7 @@ async def test_glob_tool_panel_singular_file_count(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_glob_tool_panel_truncates_long_results(monkeypatch):
+async def test_glob_tool_panel_truncates_long_results(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that LiveToolPanel truncates long Glob results in normal mode."""
     tool_use_id = "test-glob-truncate-789"
     # 25 files exceeds max_lines=20 from _build_result_content_internal.
@@ -396,7 +403,7 @@ async def test_glob_tool_panel_truncates_long_results(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_quiet_mode_shows_header_only(monkeypatch):
+async def test_quiet_mode_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that quiet mode shows header only (no output section)."""
     tool_use_id = "test-output-panel-001"
     read_result = "def hello():\n    return 'world'"
@@ -423,7 +430,7 @@ async def test_quiet_mode_shows_header_only(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_quiet_mode_empty_result_shows_header_only(monkeypatch):
+async def test_quiet_mode_empty_result_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that quiet mode shows header only for empty results (no output section)."""
     tool_use_id = "test-empty-result-002"
 
@@ -442,7 +449,7 @@ async def test_quiet_mode_empty_result_shows_header_only(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch):
+async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that quiet mode shows header only with red border for errors."""
     tool_use_id = "test-error-result-003"
 
@@ -465,7 +472,7 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_skill_tool_panel_collapses_output(monkeypatch):
+async def test_skill_tool_panel_collapses_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that Skill tool calls don't show an Output panel.
 
     The skill name already appears in the tool call header, so the
@@ -492,7 +499,7 @@ async def test_skill_tool_panel_collapses_output(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_tool_panels_display_results(monkeypatch):
+async def test_concurrent_tool_panels_display_results(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that concurrent tool panels (e.g. Codex parallel commands) all show results.
 
     When multiple ToolStartEvents arrive before any ToolResultEvents (as happens
@@ -537,7 +544,11 @@ def _two_commit_repo(repo: Path, filename: str, before: str, after: str, branch:
 
 
 @pytest.mark.asyncio
-async def test_run_comment_full_flow(tmp_path, monkeypatch, make_config):
+async def test_run_comment_full_flow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Integration test: full --comment flow through the deep pipeline."""
     from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
@@ -550,7 +561,14 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch, make_config):
     posted: list[dict[str, Any]] = []
     posted_posts: list[bool] = []
 
-    async def fake_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
+    async def fake_post(
+        target_dir: Any,
+        merged_items_path: Path,
+        *,
+        console: Any,
+        post: Any,
+        approve_on_clean: Any=False,
+    ) -> None:
         posted.extend(json.loads(merged_items_path.read_text())["items"])
         posted_posts.append(post)
 
@@ -572,8 +590,12 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch, make_config):
 
 @pytest.mark.asyncio
 async def test_run_comment_does_not_prompt_for_skill(
-    tmp_path, monkeypatch, install_backend, silence_console, make_config
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
+    silence_console: Callable[..., None],
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """--comment mode should never prompt for skill selection."""
     _two_commit_repo(tmp_path, "f.txt", "a", "b", "feat")
 
@@ -590,7 +612,7 @@ async def test_run_comment_does_not_prompt_for_skill(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")  # confirm intent
 
     # Trap: skill selection must never prompt in --comment mode.
-    def runner_prompt_trap(*args, **kwargs):
+    def runner_prompt_trap(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("Should not prompt for skill selection in --comment mode")
     monkeypatch.setattr("daydream.runner.prompt_user", runner_prompt_trap)
 
@@ -601,8 +623,10 @@ async def test_run_comment_does_not_prompt_for_skill(
 
 @pytest.mark.asyncio
 async def test_run_comment_missing_pr_exits_nonzero(
-    tmp_path, monkeypatch, make_config
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Comment mode chose posting as its deliverable: no open PR -> exit 1.
 
     Drives ``runner.run`` for real (real temp worktree, stub backend only);
@@ -626,8 +650,10 @@ async def test_run_comment_missing_pr_exits_nonzero(
 
 @pytest.mark.asyncio
 async def test_run_comment_submission_failure_exits_nonzero(
-    tmp_path, monkeypatch, make_config
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Comment mode: a failed GitHub review post -> exit 1.
 
     Only ``_submit_review`` is mocked to fail; everything else (the review
@@ -665,8 +691,10 @@ async def test_run_comment_submission_failure_exits_nonzero(
 
 @pytest.mark.asyncio
 async def test_run_loop_submission_failure_warns_and_continues(
-    tmp_path, monkeypatch, make_config
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Default deep loop: a failed review post warns-and-continues (exit 0).
 
     Posting is optional in loop mode, so a failed GitHub post must not abort the
@@ -699,7 +727,7 @@ async def test_run_loop_submission_failure_warns_and_continues(
 
     # Approve the PR-post gate but decline the apply-fixes gate so the run ends
     # after the report is written (no fix cycle / commit).
-    def _gate_prompt(console, message: str, default: str = "") -> str:
+    def _gate_prompt(console: Any, message: str, default: str = "") -> str:
         if "apply fix" in message.lower():
             return "n"
         return "y"
@@ -721,8 +749,10 @@ async def test_run_loop_submission_failure_warns_and_continues(
 
 @pytest.mark.asyncio
 async def test_run_populates_exploration_context(
-    monkeypatch, multi_stack_target, make_config
-):
+    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """run() populates config.exploration_context before the review fan-out fires.
 
     Drives the deep shallow flow through ``runner.run`` with exploration left
@@ -742,7 +772,7 @@ async def test_run_populates_exploration_context(
 
     captured: dict[str, Any] = {}
 
-    async def fake_per_stack_reviews(backend, work, stacks, **kwargs):
+    async def fake_per_stack_reviews(backend: Any, work: Any, stacks: Any, **kwargs: dict[str, Any]) -> tuple[Any, ...]:
         captured["exploration_dir"] = kwargs.get("exploration_dir")
         # Issue #745: reviewers write PER_STACK_RECORD_SCHEMA records files that
         # the loader requires; the fake must do the same or the run stops.
@@ -772,7 +802,7 @@ async def test_run_populates_exploration_context(
 
 
 @pytest.mark.asyncio
-async def test_codex_backend_raises_on_agents(tmp_path: Path):
+async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
     """CodexBackend.execute() refuses agents= with NotImplementedError."""
     from daydream.backends.codex import CodexBackend
 
@@ -782,7 +812,7 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path):
             pass
 
 
-async def test_exploration_enriched_output_both_flows(tmp_path, make_work):
+async def test_exploration_enriched_output_both_flows(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """Both normal and TTT flows surface confidence + rationale on parsed issues.
 
     Exercises `phase_parse_feedback` (normal flow) and `phase_alternative_review`
@@ -811,7 +841,7 @@ async def test_exploration_enriched_output_both_flows(tmp_path, make_work):
         "rationale": "verified by Convention snake_case_modules",
     }
 
-    def _issue_backend(payload: dict) -> ScriptedBackend:
+    def _issue_backend(payload: dict[str, Any]) -> ScriptedBackend:
         return ScriptedBackend(
             events=[
                 TextEvent(text="ok"),

@@ -317,7 +317,9 @@ def test_copy_pyproject_non_table_tool_falls_back_to_defaults(tmp_path: Path) ->
 @pytest.mark.parametrize("source_kind", ["config", "extra"])
 @pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
 def test_copy_rejects_absolute_and_parent_entries_before_copy(
-    tmp_path: Path, source_kind: str, escape_kind: str
+    tmp_path: Path,
+    source_kind: str,
+    escape_kind: str,
 ) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     (repo / ".gitignore").write_text(".env\n")

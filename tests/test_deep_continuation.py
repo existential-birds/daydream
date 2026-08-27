@@ -39,7 +39,8 @@ async def test_merge_resumes_arbiter_session(
 
 
 async def test_merge_cold_when_arbiter_mints_no_token(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No arbiter token means merge runs cold with today's prompt, no addendum."""
     from tests.test_deep_orchestrator import _run_deep
@@ -55,7 +56,8 @@ async def test_merge_cold_when_arbiter_mints_no_token(
 
 
 async def test_merge_cold_when_arbiter_skipped_on_resume(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--start-at merge past a completed adjudication runs merge cold."""
     from tests.test_deep_orchestrator import _prime_merge_resume, _record, _run_deep

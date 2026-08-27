@@ -50,7 +50,7 @@ class _MockRecorder:
     pr_number: int | None = None
     pr_repo: str | None = None
     _wall_clock_seconds: float | None = None
-    _final_totals: dict = field(
+    _final_totals: dict[str, object] = field(
         default_factory=lambda: {
             "prompt": 100,
             "completion": 50,
@@ -95,11 +95,11 @@ class _MockConfig:
         pytest.param("not-a-url", None, id="invalid"),
     ],
 )
-def test_parse_repo_slug(remote_url: str, expected: str | None):
+def test_parse_repo_slug(remote_url: str, expected: str | None) -> None:
     assert _parse_repo_slug(remote_url) == expected
 
 
-def test_capture_git_context_real_repo(tmp_path: Path):
+def test_capture_git_context_real_repo(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
     subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
         ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
@@ -117,7 +117,7 @@ def test_capture_git_context_real_repo(tmp_path: Path):
     assert ctx.branch is not None
 
 
-def test_capture_git_context_no_repo(tmp_path: Path):
+def test_capture_git_context_no_repo(tmp_path: Path) -> None:
     ctx = capture_git_context(tmp_path)
     assert ctx.head_sha is None
     assert ctx.remote_url is None
@@ -126,7 +126,7 @@ def test_capture_git_context_no_repo(tmp_path: Path):
     assert ctx.changed_files == []
 
 
-def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path):
+def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path) -> None:
     """Real repo with a feature branch surfaces merge-base SHA + diff paths."""
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
     subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
@@ -178,7 +178,7 @@ def _build(
     )
 
 
-def test_build_manifest_basic(tmp_path: Path):
+def test_build_manifest_basic(tmp_path: Path) -> None:
     m = _build(
         tmp_path,
         git_ctx=GitContext(
@@ -253,7 +253,8 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
 
 
 def test_build_manifest_classifies_custom_flow_by_registered_pipeline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every ``--flow`` run is stamped CUSTOM regardless of step composition, so
     a fork flow is classified from its registered pipeline, not its label: one
@@ -284,7 +285,8 @@ def test_build_manifest_classifies_custom_flow_by_registered_pipeline(
 
 
 def test_build_manifest_classifies_fork_override_of_builtin_flow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Issue #648: fork overrides of built-in flow names are classified by
     the registry pipeline actually executed by ``run_flow``, not by the label.
@@ -531,7 +533,7 @@ def test_build_manifest_pi_deep_records_backend_default_model(tmp_path: Path) ->
     assert m.to_dict()["run"]["per_stack_review_model"] == DEFAULT_PI_MODEL
 
 
-def test_manifest_to_dict_structure(tmp_path: Path):
+def test_manifest_to_dict_structure(tmp_path: Path) -> None:
     m = _build(tmp_path)
 
     d = m.to_dict()
@@ -552,7 +554,7 @@ def test_manifest_to_dict_structure(tmp_path: Path):
     }
 
 
-def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path):
+def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path) -> None:
     m = _build(
         tmp_path,
         git_ctx=GitContext(
@@ -574,7 +576,7 @@ def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path):
     }
 
 
-def test_build_manifest_with_evaluation(tmp_path: Path):
+def test_build_manifest_with_evaluation(tmp_path: Path) -> None:
     m = _build(
         tmp_path,
         evaluation={
@@ -593,7 +595,7 @@ def test_build_manifest_with_evaluation(tmp_path: Path):
     assert m.cost_per_finding_usd == 0.007
 
 
-def test_build_manifest_with_quality(tmp_path: Path):
+def test_build_manifest_with_quality(tmp_path: Path) -> None:
     m = _build(
         tmp_path,
         evaluation={
@@ -608,7 +610,7 @@ def test_build_manifest_with_quality(tmp_path: Path):
     assert d["metrics"]["verbosity"] == 0.19
 
 
-def test_build_manifest_without_evaluation(tmp_path: Path):
+def test_build_manifest_without_evaluation(tmp_path: Path) -> None:
     m = _build(tmp_path)
 
     assert m.total_findings is None
@@ -619,7 +621,7 @@ def test_build_manifest_without_evaluation(tmp_path: Path):
     assert m.verbosity is None
 
 
-def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):
+def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
     """Wall-clock is derived from step timestamps even when --eval did not run."""
     m = _build(tmp_path, recorder=_MockRecorder(_wall_clock_seconds=12.3))
 
@@ -627,7 +629,7 @@ def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):
     assert m.total_findings is None
 
 
-def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path):
+def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path) -> None:
     """When --eval runs, its fork-inclusive timing takes precedence over the recorder span."""
     m = _build(
         tmp_path,
@@ -638,13 +640,13 @@ def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path):
     assert m.wall_clock_seconds == 42.5
 
 
-def test_upsert_run_creates_db(tmp_path: Path):
+def test_upsert_run_creates_db(tmp_path: Path) -> None:
     m = make_manifest()
     upsert_run(tmp_path, m)
     assert (tmp_path / "index.db").exists()
 
 
-def test_upsert_and_query_round_trip(tmp_path: Path):
+def test_upsert_and_query_round_trip(tmp_path: Path) -> None:
     m = make_manifest()
     upsert_run(tmp_path, m)
 
@@ -655,7 +657,7 @@ def test_upsert_and_query_round_trip(tmp_path: Path):
     assert rows[0]["status"] == "complete"
 
 
-def test_update_labels_exact(tmp_path: Path):
+def test_update_labels_exact(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest())
 
     ok = update_labels(tmp_path, "sess-0001", ["good", "fast"])
@@ -666,7 +668,7 @@ def test_update_labels_exact(tmp_path: Path):
     assert rows[0]["labeled_at"] is not None
 
 
-def test_update_labels_prefix(tmp_path: Path):
+def test_update_labels_prefix(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="abcd1234-full-uuid"))
 
     ok = update_labels(tmp_path, "abcd1234", ["label-a"])
@@ -676,14 +678,14 @@ def test_update_labels_prefix(tmp_path: Path):
     assert json.loads(rows[0]["outcome_labels"]) == ["label-a"]
 
 
-def test_update_labels_nonexistent(tmp_path: Path):
+def test_update_labels_nonexistent(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest())
 
     ok = update_labels(tmp_path, "no-such-session", [])
     assert ok is False
 
 
-def test_update_labels_ambiguous_prefix(tmp_path: Path):
+def test_update_labels_ambiguous_prefix(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="abc-001"))
     upsert_run(tmp_path, make_manifest(session_id="abc-002", archive_path="/tmp/x"))
 
@@ -691,14 +693,14 @@ def test_update_labels_ambiguous_prefix(tmp_path: Path):
         update_labels(tmp_path, "abc", ["x"])
 
 
-def test_set_run_pr_link_backfills_pr_columns(tmp_path: Path):
+def test_set_run_pr_link_backfills_pr_columns(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-orphan", pr_number=None, pr_repo=None))
     set_run_pr_link(tmp_path, "s-orphan", 7, "org/repo")
     row = query_runs(tmp_path, where="session_id = ?", params=("s-orphan",))[0]
     assert (row["pr_number"], row["pr_repo"]) == (7, "org/repo")
 
 
-def test_query_runs_with_where(tmp_path: Path):
+def test_query_runs_with_where(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s1", repo_slug="org/a"))
     upsert_run(tmp_path, make_manifest(session_id="s2", repo_slug="org/b", archive_path="/tmp/s2"))
     upsert_run(tmp_path, make_manifest(session_id="s3", repo_slug="org/a", archive_path="/tmp/s3"))
@@ -709,7 +711,7 @@ def test_query_runs_with_where(tmp_path: Path):
     assert ids == {"s1", "s3"}
 
 
-def test_upsert_run_persists_erosion_verbosity(tmp_path: Path):
+def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
     """erosion/verbosity round-trip through upsert_run -> query_runs, filterable and sortable."""
     upsert_run(tmp_path, make_manifest(session_id="s-q1", erosion=0.34, verbosity=0.19))
     upsert_run(tmp_path, make_manifest(session_id="s-q2", archive_path="/tmp/s-q2"))
@@ -735,7 +737,7 @@ def test_upsert_run_persists_erosion_verbosity(tmp_path: Path):
     assert ordered == ["s-q2", "s-q1", "s-q3"]
 
 
-def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path):
+def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path) -> None:
     """A pre-existing index.db without erosion/verbosity gains them via ALTER-ADD.
 
     Mirrors the source_path/composite_reward additive migration: a legacy runs
@@ -809,7 +811,7 @@ def test_runs_per_stack_review_columns_migrate_existing_db(tmp_path: Path) -> No
     assert row["per_stack_review_model"] == "gpt-psr"
 
 
-def test_build_manifest_carries_fix_quality_gate(tmp_path: Path):
+def test_build_manifest_carries_fix_quality_gate(tmp_path: Path) -> None:
     """Issue #315: the fix-phase quality-gate verdict round-trips on the manifest."""
     gate = {
         "enabled": True,
@@ -839,14 +841,14 @@ def test_build_manifest_carries_fix_quality_gate(tmp_path: Path):
     assert d["fix_quality_gate"]["rounds"][0]["per_file"]["api.py"]["flagged"] is True
 
 
-def test_manifest_fix_quality_gate_none_when_absent(tmp_path: Path):
+def test_manifest_fix_quality_gate_none_when_absent(tmp_path: Path) -> None:
     """No gate artifact => the manifest field stays null (additive, never invented)."""
     m = _build(tmp_path)
     assert m.fix_quality_gate is None
     assert m.to_dict()["fix_quality_gate"] is None
 
 
-def test_upsert_run_persists_fix_quality_gate(tmp_path: Path):
+def test_upsert_run_persists_fix_quality_gate(tmp_path: Path) -> None:
     """Issue #315: fix_quality_gate JSON round-trips through upsert_run -> query_runs."""
     gate = {"enabled": True, "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}]}
     upsert_run(tmp_path, make_manifest(session_id="s-gate", fix_quality_gate=gate))
@@ -854,7 +856,7 @@ def test_upsert_run_persists_fix_quality_gate(tmp_path: Path):
     assert json.loads(row["fix_quality_gate"]) == gate
 
 
-def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path):
+def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path) -> None:
     """A pre-existing index.db without fix_quality_gate gains it via ALTER-ADD.
 
     Mirrors the erosion/verbosity additive migration: a legacy runs table keeps
@@ -883,13 +885,13 @@ def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path):
     assert json.loads(row["fix_quality_gate"]) == gate
 
 
-def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path):
+def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-cap", recommended_patch_capture="post_test"))
     row = query_runs(tmp_path, where="session_id = ?", params=("s-cap",))[0]
     assert row["recommended_patch_capture"] == "post_test"
 
 
-def test_runs_recommended_patch_capture_column_migrates_existing_db(tmp_path: Path):
+def test_runs_recommended_patch_capture_column_migrates_existing_db(tmp_path: Path) -> None:
     from daydream.archive.index import _CREATE_TABLE
 
     legacy_ddl = _CREATE_TABLE.replace("    recommended_patch_capture TEXT,\n", "")
@@ -911,7 +913,7 @@ def test_runs_recommended_patch_capture_column_migrates_existing_db(tmp_path: Pa
     assert row["recommended_patch_capture"] == "pre_test"
 
 
-def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path):
+def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path) -> None:
     """#329: only an artifact bound to the current session is read.
 
     A gate verdict left behind by another session (e.g. a prior deep run on the
@@ -931,7 +933,7 @@ def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path):
     assert _read_fix_quality_gate(tmp_path, None) is None
 
 
-def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path):
+def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path) -> None:
     """#329: an artifact with no session_id key cannot be attributed to this run."""
     gate_p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
     gate_p.parent.mkdir(parents=True)
@@ -940,7 +942,7 @@ def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path):
     assert _read_fix_quality_gate(tmp_path, "sess-42") is None
 
 
-def test_read_recommended_capture_requires_matching_session(tmp_path: Path):
+def test_read_recommended_capture_requires_matching_session(tmp_path: Path) -> None:
     from daydream.archive import _read_recommended_capture
 
     cap = {"session_id": "sess-42", "capture_point": "post_test"}
@@ -953,28 +955,28 @@ def test_read_recommended_capture_requires_matching_session(tmp_path: Path):
     assert _read_recommended_capture(tmp_path, None) is None
 
 
-def test_read_recommended_capture_absent_is_none(tmp_path: Path):
+def test_read_recommended_capture_absent_is_none(tmp_path: Path) -> None:
     from daydream.archive import _read_recommended_capture
 
     assert _read_recommended_capture(tmp_path, "sess-42") is None
 
 
-def test_manifest_recommended_patch_capture_defaults_pre_test(tmp_path: Path):
+def test_manifest_recommended_patch_capture_defaults_pre_test(tmp_path: Path) -> None:
     m = _build(tmp_path)  # no recommended_capture arg => sidecar absent
     assert m.recommended_patch_capture == "pre_test"
     assert m.to_dict()["recommended_patch_capture"] == "pre_test"
 
 
-def test_manifest_recommended_patch_capture_omitted_when_none():
+def test_manifest_recommended_patch_capture_omitted_when_none() -> None:
     assert "recommended_patch_capture" not in Manifest().to_dict()
 
 
-def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path):
+def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path) -> None:
     m = _build(tmp_path, recommended_capture="post_test")
     assert m.to_dict()["recommended_patch_capture"] == "post_test"
 
 
-def test_feedback_run_leaves_recommended_patch_capture_none():
+def test_feedback_run_leaves_recommended_patch_capture_none() -> None:
     """PR/feedback runs never produce a pre-test fix-phase capture, so an
     absent sidecar must leave ``recommended_patch_capture`` ``None`` rather
     than defaulting to ``"pre_test"`` (feedback's ``_step_fix_items`` never
@@ -985,7 +987,7 @@ def test_feedback_run_leaves_recommended_patch_capture_none():
     assert "recommended_patch_capture" not in m.to_dict()
 
 
-def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
+def test_get_archive_dir_creates_structure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     target = tmp_path / "custom_archive"
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))
 
@@ -995,7 +997,7 @@ def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
     assert (target / "runs").is_dir()
 
 
-def test_get_archive_dir_default(monkeypatch, tmp_path: Path):
+def test_get_archive_dir_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("DAYDREAM_ARCHIVE_DIR", raising=False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
@@ -1005,7 +1007,7 @@ def test_get_archive_dir_default(monkeypatch, tmp_path: Path):
     assert expected.is_dir()
 
 
-def test_archive_dir_fixture_isolates_env(archive_dir: Path, tmp_path: Path):
+def test_archive_dir_fixture_isolates_env(archive_dir: Path, tmp_path: Path) -> None:
     """Verify the autouse archive_dir fixture's contract: env points at tmp_path/archive."""
     assert get_archive_dir() == archive_dir
     assert archive_dir == tmp_path / "archive"
@@ -1021,7 +1023,8 @@ def _make_recorder_mock(session_id: str, path: Path, *, explicit_path: bool = Fa
 
 
 def _setup_bundle(
-    tmp_path: Path, session_id: str = "abcd1234-0000-0000-0000-000000000000"
+    tmp_path: Path,
+    session_id: str = "abcd1234-0000-0000-0000-000000000000",
 ) -> tuple[Path, Path, MagicMock]:
     """Create a realistic target directory with artifacts and an empty run dir.
 
@@ -1060,7 +1063,7 @@ def _setup_bundle(
     return target, run_dir, recorder
 
 
-def test_copy_bundle_trajectory(tmp_path: Path):
+def test_copy_bundle_trajectory(tmp_path: Path) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
 
@@ -1068,7 +1071,7 @@ def test_copy_bundle_trajectory(tmp_path: Path):
     assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "test"
 
 
-def test_copy_bundle_partial_trajectory(tmp_path: Path):
+def test_copy_bundle_partial_trajectory(tmp_path: Path) -> None:
     """Partial trajectory file inside the live run dir is copied too."""
     session_id = "abcd1234-0000-0000-0000-000000000000"
     target, run_dir, recorder = _setup_bundle(tmp_path, session_id)
@@ -1090,7 +1093,7 @@ def test_copy_bundle_partial_trajectory(tmp_path: Path):
         pytest.param("diff.patch", "diff content", id="diff-patch"),
     ],
 )
-def test_copy_bundle_file_path(tmp_path: Path, relative_path: str, expected: str):
+def test_copy_bundle_file_path(tmp_path: Path, relative_path: str, expected: str) -> None:
     """Verify bundle copying preserves parameterized file contents and paths."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
@@ -1098,14 +1101,14 @@ def test_copy_bundle_file_path(tmp_path: Path, relative_path: str, expected: str
     assert (run_dir / relative_path).read_text() == expected
 
 
-def test_copy_bundle_deep_directory(tmp_path: Path):
+def test_copy_bundle_deep_directory(tmp_path: Path) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
 
 
-def test_copy_bundle_sub_trajectories_copied(tmp_path: Path):
+def test_copy_bundle_sub_trajectories_copied(tmp_path: Path) -> None:
     """Sibling trajectories under the live run dir copy verbatim — no prefix filtering."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
@@ -1116,7 +1119,7 @@ def test_copy_bundle_sub_trajectories_copied(tmp_path: Path):
     assert copied == ["deep-python.json"]
 
 
-def test_copy_bundle_explicit_trajectory_path(tmp_path: Path):
+def test_copy_bundle_explicit_trajectory_path(tmp_path: Path) -> None:
     """When --trajectory points outside the live run dir, the file is still archived."""
     session_id = "abcd1234-0000-0000-0000-000000000000"
     target, run_dir, _ = _setup_bundle(tmp_path, session_id)
@@ -1133,7 +1136,7 @@ def test_copy_bundle_explicit_trajectory_path(tmp_path: Path):
     assert archived["custom"] is True
 
 
-def test_copy_bundle_skips_missing(tmp_path: Path):
+def test_copy_bundle_skips_missing(tmp_path: Path) -> None:
     target = tmp_path / "empty_target"
     target.mkdir()
     (target / ".daydream").mkdir()
@@ -1149,7 +1152,7 @@ def test_copy_bundle_skips_missing(tmp_path: Path):
     assert not (run_dir / "diff.patch").exists()
 
 
-def test_copy_bundle_archives_findings_artifact(tmp_path: Path):
+def test_copy_bundle_archives_findings_artifact(tmp_path: Path) -> None:
     """findings.json from --findings-out is archived so harvest's per-finding join has a source."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     # Review-bot workflow writes findings.json under the repo root (CWD at run time).
@@ -1165,7 +1168,7 @@ def test_copy_bundle_archives_findings_artifact(tmp_path: Path):
     assert json.loads(archived.read_text())["findings"][0]["fingerprint"] == "abc"
 
 
-def test_copy_bundle_findings_artifact_skipped_without_findings_out(tmp_path: Path):
+def test_copy_bundle_findings_artifact_skipped_without_findings_out(tmp_path: Path) -> None:
     """No findings_out means no findings.json is archived (no source to copy)."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
@@ -1173,7 +1176,7 @@ def test_copy_bundle_findings_artifact_skipped_without_findings_out(tmp_path: Pa
     assert not (run_dir / "findings.json").exists()
 
 
-def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path):
+def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
     session_id = "abcd1234-0000-0000-0000-000000000000"
     config = _MockConfig()
 
@@ -1218,7 +1221,7 @@ def _seed_one_run(archive_dir: Path, session_id: str) -> None:
     )
 
 
-def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path):
+def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest())  # forces _get_connection to build schema
     conn = sqlite3.connect(str(tmp_path / "index.db"))
     lo_cols = {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
@@ -1273,7 +1276,7 @@ def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
         conn.close()
 
 
-def test_label_observations_source_column_migrates(tmp_path: Path):
+def test_label_observations_source_column_migrates(tmp_path: Path) -> None:
     # Build schema, then replace the table with the OLD DDL (no `source`) + a legacy row.
     upsert_run(tmp_path, make_manifest(session_id="s-mig"))
     _seed_legacy_label_observation(tmp_path, "s-mig")
@@ -1288,7 +1291,7 @@ def test_label_observations_source_column_migrates(tmp_path: Path):
     assert rows and rows[0]["source"] == "auto"  # existing row defaulted, non-destructive
 
 
-def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
+def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-prec"))
     append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
                              labeler_version="auto-v1", evidence_sha="sha1", source="auto")
@@ -1304,7 +1307,7 @@ def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
     assert label_count_summary(tmp_path) == {"accepted": 1}
 
 
-def test_append_cache_reflects_winning_human_label(tmp_path: Path):
+def test_append_cache_reflects_winning_human_label(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-cache"))
     append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
                              labeler_version="auto-v1", evidence_sha="sha1", source="auto")
@@ -1317,7 +1320,7 @@ def test_append_cache_reflects_winning_human_label(tmp_path: Path):
     assert row["outcome_labels"] == '["accepted"]'
 
 
-def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path):
+def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-dedup"))
     first = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
                                      labeler_version="rv1", evidence_sha="shaA", source="auto")
@@ -1333,7 +1336,7 @@ def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path):
     assert len(label_observation_history(tmp_path, "s-dedup")) == 2
 
 
-def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path):
+def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path) -> None:
     """A re-score that moves a row out of the posterior population must append.
 
     ``has_posterior`` is no longer a function of the label: a ``local_branch``
@@ -1359,7 +1362,7 @@ def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path):
                                     source="auto") is False
 
 
-def test_human_append_never_dedups(tmp_path: Path):
+def test_human_append_never_dedups(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-h"))
     append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
                              labeler_version="human", evidence_sha=None, source="human")
@@ -1368,7 +1371,7 @@ def test_human_append_never_dedups(tmp_path: Path):
     assert len(label_observation_history(tmp_path, "s-h")) == 2
 
 
-def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
+def test_append_observation_persists_valid_at_and_reward(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s1"))
     append_label_observation(
         tmp_path, "s1", labels=["accepted"], pr_state="merged",
@@ -1383,7 +1386,7 @@ def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
     assert query_runs(tmp_path, "session_id = ?", ("s1",))[0]["composite_reward"] == 0.5
 
 
-def test_append_observation_defaults_valid_at_to_observed_at(tmp_path: Path):
+def test_append_observation_defaults_valid_at_to_observed_at(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s2"))
     append_label_observation(tmp_path, "s2", labels=[], pr_state=None,
                              labeler_version="v1", evidence_sha=None, valid_at=None)
@@ -1482,7 +1485,8 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
 
 
 def test_same_microsecond_collision_keeps_clean_iso_timestamps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two appends frozen to the same microsecond must both persist with parseable
     ISO 8601 observed_at values, and an exact-boundary as_of must include the
@@ -1493,7 +1497,7 @@ def test_same_microsecond_collision_keeps_clean_iso_timestamps(
 
     class _FrozenDatetime(datetime):
         @classmethod
-        def now(cls, tz=None):  # type: ignore[override]
+        def now(cls, tz: Any=None) -> Any:
             return frozen if tz is None else frozen.astimezone(tz)
 
     monkeypatch.setattr("daydream.archive.index.datetime", _FrozenDatetime)
@@ -1639,7 +1643,7 @@ def _seed_reviewed_outcomes(archive_dir: Path) -> None:
     )
 
 
-def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp_path):
+def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp_path: Path) -> None:
     # Current reviewers={alice}, valid_at==t3 -> pool = alice-sharing runs, valid_at < t3:
     # only s_a (s_c @ t3 excluded by strict <; bob's run shares no reviewer).
     _seed_reviewed_outcomes(tmp_path)
@@ -1652,7 +1656,7 @@ def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp
     assert reviewer_set_penalty_prior(tmp_path, [], before_valid_at=T3, exclude_session="cur") == (None, 0)
 
 
-def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path):
+def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path: Path) -> None:
     # Two alice rows in distinct repos (s_a: repo-A rejected@T1; s_b: repo-B accepted@T2)
     # verify per-repo filtering. cur has no repo_slug, excluded by session_id.
     for sid, slug in (("s_a", "org/repo-A"), ("s_b", "org/repo-B"), ("cur", None)):
@@ -1706,7 +1710,7 @@ def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path):
     assert (prior_x, n_x) == (None, 0)
 
 
-def test_manifest_includes_source_path():
+def test_manifest_includes_source_path() -> None:
     """source_path appears in manifest dict under git section."""
     m = Manifest(
         session_id="test-session",
@@ -1718,7 +1722,7 @@ def test_manifest_includes_source_path():
     assert d["git"]["source_path"] == "/home/user/code/myrepo"
 
 
-def test_source_path_indexed_in_sqlite(tmp_path: Path):
+def test_source_path_indexed_in_sqlite(tmp_path: Path) -> None:
     """source_path round-trips through upsert_run → query_runs."""
     idx_dir = tmp_path / "idx"
     idx_dir.mkdir()
@@ -1735,7 +1739,7 @@ def test_source_path_indexed_in_sqlite(tmp_path: Path):
     assert rows[0]["source_path"] == "/original/repo/path"
 
 
-def test_source_path_defaults_to_none():
+def test_source_path_defaults_to_none() -> None:
     """Old manifests without source_path still work."""
     m = Manifest(session_id="old")
     assert m.source_path is None
@@ -1757,7 +1761,7 @@ def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
 # validation at the entry boundary, and legacy "Z" rows purged at bootstrap.
 
 
-def test_canonical_utc_iso_converts_and_rejects():
+def test_canonical_utc_iso_converts_and_rejects() -> None:
     assert canonical_utc_iso("2026-02-01T00:00:00Z") == "2026-02-01T00:00:00+00:00"
     assert canonical_utc_iso("2026-02-01T00:00:00+00:00") == "2026-02-01T00:00:00+00:00"
     # A foreign offset is an unambiguous instant — converted, not rejected.
@@ -1770,7 +1774,7 @@ def test_canonical_utc_iso_converts_and_rejects():
         canonical_utc_iso("not-a-timestamp")
 
 
-def test_normalize_as_of_is_strict_utc_only():
+def test_normalize_as_of_is_strict_utc_only() -> None:
     assert normalize_as_of("2026-04-01T00:00:00Z") == "2026-04-01T00:00:00+00:00"
     assert normalize_as_of("2026-04-01T00:00:00+00:00") == "2026-04-01T00:00:00+00:00"
     with pytest.raises(ValueError, match="must be a UTC timestamp"):
@@ -1781,7 +1785,7 @@ def test_normalize_as_of_is_strict_utc_only():
         normalize_as_of("yesterday")
 
 
-def test_append_label_observation_canonicalizes_valid_at_spelling(tmp_path: Path):
+def test_append_label_observation_canonicalizes_valid_at_spelling(tmp_path: Path) -> None:
     """The write chokepoint converges every caller (GitHub 'Z' merge timestamps
     included) on the '+00:00' isoformat spelling."""
     _seed_one_run(tmp_path, "sess-z")
@@ -1795,7 +1799,7 @@ def test_append_label_observation_canonicalizes_valid_at_spelling(tmp_path: Path
     assert row["valid_at"] == "2026-02-01T00:00:00+00:00"
 
 
-def test_append_label_observation_rejects_naive_valid_at(tmp_path: Path):
+def test_append_label_observation_rejects_naive_valid_at(tmp_path: Path) -> None:
     _seed_one_run(tmp_path, "sess-naive")
     with pytest.raises(ValueError, match="naive"):
         append_label_observation(
@@ -1805,7 +1809,7 @@ def test_append_label_observation_rejects_naive_valid_at(tmp_path: Path):
         )
 
 
-def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path):
+def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path) -> None:
     """A 'Z'-spelled before_valid_at bound is canonicalized before the lexical
     SQL cutoff, so it can never mis-order against the '+00:00' stored column.
 
@@ -1833,7 +1837,7 @@ def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path):
     assert prior2 == pytest.approx(1.0) and n2 == 1
 
 
-def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path):
+def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path) -> None:
     """A pre-convergence 'Z'-spelled row survives reconnection unchanged: the
     index never deletes or rewrites history at bootstrap (a destructive
     migration in a library code path would silently eat other users' data)."""
@@ -1907,7 +1911,7 @@ def test_archive_run_records_general_backend_and_override(tmp_path: Path, archiv
     assert rows[0]["review_backend"] == "codex"
 
 
-async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path):
+async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -> None:
     """Manifest totals are whole-run: the fork's tokens/cost are folded in."""
     from daydream.backends import MetricsEvent, ResultEvent, TextEvent
     from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
@@ -2015,7 +2019,7 @@ def test_build_manifest_omits_per_stack_review_on_merge_fix_resume(tmp_path: Pat
         assert "per_stack_review_model" not in run, f"start_at={start_at}"
 
 
-def test_manifest_splits_status_from_pipeline():
+def test_manifest_splits_status_from_pipeline() -> None:
     from daydream.archive.provenance import ExecutableProvenance
     m = Manifest(
         session_id="s-1", status="complete", archive_status="complete",
@@ -2039,7 +2043,7 @@ def test_manifest_splits_status_from_pipeline():
     assert "commit" not in d["git"]
 
 
-def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path):
+def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path) -> None:
     # A pre-#762 Manifest carries no archive_status/pipeline_status/phase_states/
     # daydream keys. Indexing it and reading it back through the production
     # query_runs path surfaces the new fields as explicit schema-default
@@ -2052,13 +2056,13 @@ def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path):
     assert row["daydream_version"] is None
 
 
-def _write_deep(target: Path, name: str, data):
+def _write_deep(target: Path, name: str, data: Any) -> None:
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     (deep / name).write_text(json.dumps(data), encoding="utf-8")
 
 
-def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path):
+def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path: Path) -> None:
     from daydream.archive import pipeline
     _write_deep(tmp_path, "merged-items.json", {"items": []})
     _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
@@ -2067,14 +2071,14 @@ def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path):
     assert states["merge"]["status"] == "failed"   # merged-items present is NOT sufficient
 
 
-def test_merge_succeeded_when_items_and_no_merge_key(tmp_path):
+def test_merge_succeeded_when_items_and_no_merge_key(tmp_path: Path) -> None:
     from daydream.archive import pipeline
     _write_deep(tmp_path, "merged-items.json", {"items": []})
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
     assert states["merge"]["status"] == "succeeded"
 
 
-def test_test_failed_from_verdict(tmp_path):
+def test_test_failed_from_verdict(tmp_path: Path) -> None:
     from daydream.archive import pipeline
     _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 1, "ignored": False})
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
@@ -2082,21 +2086,21 @@ def test_test_failed_from_verdict(tmp_path):
     assert states["test"]["status"] == "failed"
 
 
-def test_test_absent_when_no_verdict(tmp_path):
+def test_test_absent_when_no_verdict(tmp_path: Path) -> None:
     from daydream.archive import pipeline
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
     assert states["test"]["ran"] is False
     assert states["test"]["status"] == "absent"
 
 
-def test_fix_partial_from_failures(tmp_path):
+def test_fix_partial_from_failures(tmp_path: Path) -> None:
     from daydream.archive import pipeline
     _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])
     assert states["fix"]["status"] == "partial"
 
 
-def test_pipeline_status_precedence():
+def test_pipeline_status_precedence() -> None:
     from daydream.archive import pipeline
     # cancelled beats everything when archive partial with no fix failures
     assert pipeline.derive_pipeline_status("partial", None,
@@ -2137,7 +2141,7 @@ def test_pipeline_status_precedence():
          "test": {"ran": True, "status": "succeeded"}}) == "unknown"
 
 
-def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path):
+def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
     # Issue #336: derive_phase_states is flow-aware. A prior deep run left
     # session-agnostic merge/fix/test artifacts in target_dir/.daydream/deep;
     # a non-deep flow run afterwards must NOT inherit them as its own pipeline
@@ -2160,13 +2164,13 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path):
 
 
 
-def _deep(tmp_path: Path, name: str, data):
+def _deep(tmp_path: Path, name: str, data: Any) -> None:
     d = tmp_path / ".daydream" / "deep"
     d.mkdir(parents=True, exist_ok=True)
     (d / name).write_text(json.dumps(data), encoding="utf-8")
 
 
-def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: MakeConfig):
+def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: MakeConfig) -> None:
     from daydream.archive import _archive_run_inner
     from tests.harness.trajectory import make_recorder
     _deep(tmp_path, "merged-items.json", {"items": []})
@@ -2185,7 +2189,7 @@ def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: Make
     assert m["daydream"]["commit"]  # a real SHA or the "unknown" sentinel, never blank
 
 
-def test_schema_additive_columns_and_migration(tmp_path):
+def test_schema_additive_columns_and_migration(tmp_path: Path) -> None:
     from daydream.archive import _schema
     db = tmp_path / "index.db"
     conn = sqlite3.connect(db)
@@ -2199,7 +2203,7 @@ def test_schema_additive_columns_and_migration(tmp_path):
     assert "daydream_version" in cols and "daydream_commit" in cols and "daydream_dirty" in cols
 
 
-def test_upsert_run_persists_pipeline_fields(tmp_path):
+def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
     from daydream.archive import index
     from daydream.archive.manifest import Manifest
     from daydream.archive.provenance import ExecutableProvenance

@@ -1,12 +1,14 @@
+from typing import Any
+
 from daydream.deep.render import render_report
 
 
-def _item(id, lens, file, line, sev, desc):
+def _item(id: Any, lens: Any, file: Any, line: Any, sev: Any, desc: Any) -> dict[str, Any]:
     return {"id": id, "lens": lens, "file": file, "line": line, "severity": sev,
             "description": desc, "confidence": "HIGH", "rationale": "r"}
 
 
-def test_render_places_structural_above_issues_and_keeps_all_lenses():
+def test_render_places_structural_above_issues_and_keeps_all_lenses() -> None:
     md = render_report([
         _item(1, "structural", "big.py", 1, "high", "1k-line file"),
         _item(2, "per-stack", "a.py", 9, "medium", "bug"),

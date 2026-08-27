@@ -379,7 +379,7 @@ def _build_record(
     # Read rubric_json from the as_of-pinned annotation, NOT the runs.rubric_json
     # cache — the cache has no as_of constraint and would break reproducibility.
     raw_rubric = annotation.get("rubric_json") if annotation is not None else None
-    parsed_rubric: dict | None = None
+    parsed_rubric: dict[str, Any] | None = None
     if isinstance(raw_rubric, str) and raw_rubric:
         try:
             parsed_rubric = json.loads(raw_rubric)
@@ -614,7 +614,7 @@ def _query_index(archive_dir: Path, filters: CorpusFilters) -> list[dict[str, An
 # Stratification (Wave 5)
 
 
-def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
+def _stratify(records: list[dict[str, Any]], max_stack_share: float) -> list[dict[str, Any]]:
     """Apply a rough dominance cap so no single stack floods the corpus.
 
     Implements plan §6:
@@ -662,14 +662,14 @@ def _stratify(records: list[dict], max_stack_share: float) -> list[dict]:
     if not records:
         return []
 
-    groups: dict[str | None, list[dict]] = defaultdict(list)
+    groups: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         groups[record.get("stack")].append(record)
 
     total = len(records)
     cap_per_stack = max(1, math.floor(total * max_stack_share))
 
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for stack_key in sorted(groups.keys(), key=lambda k: "" if k is None else k):
         group = groups[stack_key]
         out.extend(group[:cap_per_stack])

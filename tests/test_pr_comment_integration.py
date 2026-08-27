@@ -27,11 +27,11 @@ The renderer aggregates **per-step** metrics, so even though
 silently understates cost and tokens. We assert against the rendered
 markdown to make the regression visible.
 """
-
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -128,7 +128,7 @@ class _FakeClientBase:
     async def query(self, prompt: str) -> None:
         self._prompt = prompt
 
-    async def receive_response(self):  # noqa: ANN201 - matches SDK shape
+    async def receive_response(self) -> AsyncIterator[Any]:  # noqa: ANN201 - matches SDK shape
         for msg in self.MESSAGES:
             yield msg
 
@@ -143,7 +143,7 @@ def _make_fake_client(messages: list[Any]) -> type[_FakeClientBase]:
 
 
 @pytest.fixture
-def patch_sdk(monkeypatch: pytest.MonkeyPatch):
+def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Patch every SDK symbol that ``ClaudeBackend.execute`` does isinstance on."""
 
     def _patch(messages: list[Any]) -> None:

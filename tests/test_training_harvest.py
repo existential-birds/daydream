@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import _commit, _git, _make_repo_with_main
 
 from daydream import git_ops
 from daydream.archive.index import (
@@ -33,6 +32,9 @@ from daydream.training.harvest import (
     run_harvest,
 )
 from daydream.training.reward import score_trajectory
+from tests.conftest import _make_repo_with_main
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import git as _git
 from tests.harness.trajectory import diff_adding, make_manifest
 
 
@@ -126,7 +128,7 @@ def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
     raise AssertionError(f"gh_api should not be called for a local row (endpoint={endpoint})")
 
 
-def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_path):
+def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_path: Path) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
     row = {"session_id": "s1", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
@@ -139,7 +141,7 @@ def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_pat
     assert ann.composite_reward == json.loads(ann.reward_json)["composite"]
 
 
-def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: str):
+def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: str) -> Any:
     """A merged PR with two daydream finding comments: one replied, one not.
 
     Reuses the labeler responder shape but the ``comments`` endpoint carries
@@ -167,7 +169,7 @@ def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: s
     )
 
 
-def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path):
+def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) -> None:
     """A merged PR with a findings.json in the archive yields per-finding labels
     joined by fingerprint: the replied finding is accepted, the unreplied one contested."""
     fp_a = "a" * 64
@@ -182,10 +184,11 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path):
     ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
                            gh_api=_fake_gh_merged_per_finding("2026-02-01T00:00:00+00:00", fp_a, fp_b),
                            repo_clone=tmp_path)
+    assert ann.rubric_json is not None
     assert json.loads(ann.rubric_json)["per_finding_outcomes"] == ["accepted", "contested"]
 
 
-def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
+def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Path) -> None:
     # Not-merged PR -> "rejected". Under C5 the reject penalty is a SIBLING field
     # (false_positive_penalty / posterior_cost), not a deduction from the stored
     # composite, which stays pure intrinsic.
@@ -210,7 +213,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path):
     assert payload.composite_reward == intrinsic_only_composite  # pure intrinsic
 
 
-def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path, archive_dir):
+def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Path, archive_dir: Any) -> None:
     # Production wiring of reviewer_set_penalty_prior (not monkeypatched): reviewer
     # "alice" makes the DB query run, but the fresh archive yields the empty-pool
     # path (None, 0), so the reducer applies the 0.5 default prior.
@@ -231,7 +234,7 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path, ar
     assert payload.reviewer_logins == ["alice"]
 
 
-def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path):
+def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()           # no deep/ → shallow
     row = {"session_id": "s2", "pr_repo": None, "pr_number": None, "branch": "feat",
@@ -244,7 +247,7 @@ def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_pat
     assert rb["axes_present"]["correctness"] is False         # shallow: no verdicts
 
 
-def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, archive_dir):
+def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path, archive_dir: Any) -> None:
     # Seed a past label_observation for "alice", then annotate a rejected PR with
     # the same reviewer: the DB query must find the seeded row (prior_n >= 1, pool
     # non-empty) even at n < 10. Exercises before_valid_at filtering against a
@@ -308,7 +311,10 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path, arch
     assert rb["posterior_cost"] == 0.5   # default prior applied
 
 
-def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path, monkeypatch):
+def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.8, 12))  # n>=10 -> empirical
     monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice", "carol"])
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
@@ -324,7 +330,10 @@ def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path, 
     assert p.has_posterior is True and p.reviewer_logins == ["alice", "carol"]
 
 
-def test_build_annotation_below_threshold_falls_back_to_default_prior(tmp_path, monkeypatch):
+def test_build_annotation_below_threshold_falls_back_to_default_prior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(harvest, "reviewer_set_penalty_prior", lambda *a, **k: (0.9, 4))  # n<10
     monkeypatch.setattr(harvest, "reviewer_logins_signal", lambda *a, **k: ["alice"])
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
@@ -339,7 +348,7 @@ def test_build_annotation_below_threshold_falls_back_to_default_prior(tmp_path, 
     assert rb["posterior_cost"] == 0.5
 
 
-def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch):
+def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR-less row -> reviewer_logins == [], prior query never consulted, and the
     # local verdict is withheld from the posterior axis: a local commit is not a
     # maintainer acting in a PR, so the label is kept but has_posterior is False.
@@ -366,9 +375,9 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path, monkeypatch)
     assert rb["composite"] is not None  # the intrinsic axes are unaffected
 
 
-def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
+def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Non-canonical reward_version -> the write must be refused.
-    def _custom_version_score(*args, **kwargs):
+    def _custom_version_score(*args: Any, **kwargs: Any) -> Any:
         from daydream.training.reward import RewardWeights
         return score_trajectory(*args, **{**kwargs, "weights": RewardWeights(w_correctness=0.99)})
 
@@ -382,7 +391,7 @@ def test_build_annotation_asserts_canonical_version(tmp_path, monkeypatch):
                          gh_api=_fake_gh(merged=False), repo_clone=tmp_path)
 
 
-def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path):
+def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)
     (run_dir / "deep" / "recommendation-verdicts.json").write_text(
@@ -393,14 +402,14 @@ def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path):
     assert inputs.grounding_rate == 0.75 and inputs.format_valid is True
 
 
-def test_assemble_shallow_run_has_null_verdicts(tmp_path: Path):
+def test_assemble_shallow_run_has_null_verdicts(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": None})
     assert inputs.verifier_verdicts is None
 
 
-def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: Path):
+def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: Path) -> None:
     # Verify relocation: a declined deep run writes the deep bundle (records,
     # merged report) but skips recommendation verification, so no
     # recommendation-verdicts.json exists. Harvest must treat the absent
@@ -417,7 +426,7 @@ def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: P
     assert inputs.format_valid is True                # absence is expected, not malformed
 
 
-def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path):
+def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)
     (run_dir / "deep" / "recommendation-verdicts.json").write_text("{not json")
@@ -425,7 +434,7 @@ def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path):
     assert inputs.format_valid is False
 
 
-def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path):
+def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path) -> None:
     """AC2: a default-run row (eval-by-default populated grounding_rate) yields a
     non-absent grounding axis; a --no-eval row (grounding_rate=None) omits it.
 
@@ -451,7 +460,11 @@ def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path):
 
 
 def _seed_archived_deep_run(
-    archive_dir: Path, session_id: str, *, merged_at: str, source_path: Path | None = None
+    archive_dir: Path,
+    session_id: str,
+    *,
+    merged_at: str,
+    source_path: Path | None = None,
 ) -> Path:
     """Seed a deep-run bronze bundle and index it under ``archive_dir``.
 
@@ -557,7 +570,7 @@ def _seed_pr_runs(archive_dir: Path, bronze_parent: Path, count: int) -> None:
         )
 
 
-async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_writes_one_annotation(tmp_path: Path, archive_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
@@ -565,11 +578,16 @@ async def test_harvest_writes_one_annotation(tmp_path, archive_dir, monkeypatch)
     )
     summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
     obs = latest_label_observation(archive_dir, "s1")
+    assert obs is not None
     assert summary["annotated"] == 1
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00" and obs["composite_reward"] is not None
 
 
-async def test_harvest_stores_github_z_merge_timestamp_canonically(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_stores_github_z_merge_timestamp_canonically(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path writer convergence: GitHub reports merged_at with a 'Z' suffix;
     the stored valid_at must be the canonical '+00:00' spelling."""
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00Z")
@@ -579,11 +597,16 @@ async def test_harvest_stores_github_z_merge_timestamp_canonically(tmp_path, arc
     )
     summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
     obs = latest_label_observation(archive_dir, "s1")
+    assert obs is not None
     assert summary["annotated"] == 1
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00"
 
 
-async def test_harvest_labels_unresolved_daydream_comment_contested(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_labels_unresolved_daydream_comment_contested(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a merged PR whose daydream comment is unresolved → ``contested``.
 
     Bug 1 regression guard. daydream posts review comments as a normal
@@ -602,7 +625,11 @@ async def test_harvest_labels_unresolved_daydream_comment_contested(tmp_path, ar
     assert json.loads(row["outcome_labels"]) == ["contested"]
 
 
-async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_relinks_orphan_run_and_labels_it(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: an orphan run (PR opened after launch) is re-linked at harvest.
 
     Bug 2. The default deep loop archives before the PR exists, freezing
@@ -627,7 +654,12 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path, archive_dir, m
 
 
 @pytest.mark.parametrize("with_clone", [False, True])
-async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, monkeypatch, with_clone):
+async def test_harvest_fork_pr_404_degrades_not_drops(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    with_clone: Any,
+) -> None:
     """Real-path: a benign ``pulls/<n>`` 404 degrades to the local posterior.
 
     A fork-PR (or deleted-PR) fetch raises ``GitError`` with an HTTP 404. The
@@ -673,7 +705,7 @@ async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, mon
 
     assert summary["errors"] == 0  # benign 404 degraded; not a hard error
     obs = latest_label_observation(archive_dir, "s-fork")
-    assert obs is not None  # still annotated (not dropped)
+    assert obs is not None
     # pr_state is None on the local-branch rubric (not "merged"/"closed"):
     # observable proof the fix degraded to the local path rather than
     # fabricating a merged=False PR rubric.
@@ -684,7 +716,11 @@ async def test_harvest_fork_pr_404_degrades_not_drops(tmp_path, archive_dir, mon
     assert json.loads(row["outcome_labels"]) == []
 
 
-async def test_harvest_orphan_422_degrades_not_drops(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_orphan_422_degrades_not_drops(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a benign ``commits/<sha>/pulls`` 422 degrades to local.
 
     An orphan run whose head SHA was never pushed yields an HTTP 422 from the
@@ -716,7 +752,11 @@ def _gh_unpushed_422(repo: str, endpoint: str, **kwargs: Any) -> Any:
     return {}
 
 
-async def test_harvest_deleted_branch_ref_labels_unknown_not_rejected(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_deleted_branch_ref_labels_unknown_not_rejected(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a squash-merged run whose branch ref is gone must NOT be "rejected".
 
     This is the shape that mislabeled 286 archived runs. After a squash merge
@@ -757,8 +797,10 @@ async def test_harvest_deleted_branch_ref_labels_unknown_not_rejected(tmp_path, 
 
 
 async def test_harvest_squash_merged_branch_recovers_accepted_from_base_branch(
-    tmp_path, archive_dir, monkeypatch
-):
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a squash-merged run is recovered as "accepted", not lost to "unknown".
 
     The full production shape of the 286-row mislabel. The branch was squash-
@@ -813,8 +855,10 @@ async def test_harvest_squash_merged_branch_recovers_accepted_from_base_branch(
 
 
 async def test_harvest_live_branch_with_no_followup_commits_still_labels_rejected(
-    tmp_path, archive_dir, monkeypatch
-):
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path counterpart: a readable window with no follow-up IS "rejected".
 
     Same code path as the deleted-ref test, differing only in that the recorded
@@ -844,7 +888,11 @@ async def test_harvest_live_branch_with_no_followup_commits_still_labels_rejecte
     assert json.loads(row["outcome_labels"]) == ["rejected"]
 
 
-async def test_harvest_live_branch_with_applied_fix_labels_accepted(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_live_branch_with_applied_fix_labels_accepted(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path counterpart: a follow-up commit carrying the fix IS "accepted".
 
     Completes the three-way distinction (unknown / rejected / accepted) through
@@ -883,8 +931,10 @@ async def test_harvest_live_branch_with_applied_fix_labels_accepted(tmp_path, ar
 
 
 async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
-    tmp_path, archive_dir, monkeypatch
-):
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a merged PR where daydream tracked NO comments is unlabeled.
 
     The vacuous-accept bug. ``comment_resolution == (0, 0, 0)`` made
@@ -906,6 +956,7 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
     row = query_runs(archive_dir, "session_id = ?", ("s-vacuous",))[0]
     assert json.loads(row["outcome_labels"]) == []  # NOT ["accepted"]
     obs = latest_label_observation(archive_dir, "s-vacuous")
+    assert obs is not None
     assert obs["pr_state"] == "merged"  # merge state still recorded, just not decisive
     assert json.loads(obs["rubric_json"])["comment_resolution"]["total"] == 0
     # "unknown" maps to no penalty, so the row is excluded from the posterior population.
@@ -914,8 +965,10 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
 
 
 async def test_harvest_merged_pr_with_replied_comment_is_labeled_accepted(
-    tmp_path, archive_dir, monkeypatch
-):
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: the evidenced accept survives the fix and IS posterior evidence.
 
     The positive arm of the same distinction: one tracked daydream finding, a
@@ -935,6 +988,7 @@ async def test_harvest_merged_pr_with_replied_comment_is_labeled_accepted(
     row = query_runs(archive_dir, "session_id = ?", ("s-evidenced",))[0]
     assert json.loads(row["outcome_labels"]) == ["accepted"]
     obs = latest_label_observation(archive_dir, "s-evidenced")
+    assert obs is not None
     resolution = json.loads(obs["rubric_json"])["comment_resolution"]
     assert (resolution["total"], resolution["unresolved"]) == (1, 0)
     # A maintainer acting on a real PR IS posterior evidence.
@@ -943,8 +997,10 @@ async def test_harvest_merged_pr_with_replied_comment_is_labeled_accepted(
 
 
 async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evidence(
-    tmp_path, archive_dir, monkeypatch
-):
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a local-commit "accepted" is a weaker evidence tier.
 
     A commit on the recorded branch containing the recommended lines is not a
@@ -985,6 +1041,7 @@ async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evid
     row = query_runs(archive_dir, "session_id = ?", ("s-local-tier",))[0]
     assert json.loads(row["outcome_labels"]) == ["accepted"]  # label kept
     obs = latest_label_observation(archive_dir, "s-local-tier")
+    assert obs is not None
     assert json.loads(obs["rubric_json"])["posterior_source"] == "local_branch"
     # Weaker tier: labeled, but withheld from the posterior population.
     assert obs["has_posterior"] == 0
@@ -992,8 +1049,10 @@ async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evid
 
 
 async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_link(
-    tmp_path, archive_dir, monkeypatch
-):
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """dry_run=True: in-memory linkage preview is applied but not persisted.
 
     The contract (harvest.py lines 832-836): when an orphan run re-links to a
@@ -1034,7 +1093,11 @@ async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_l
     assert latest_label_observation(archive_dir, "s-orph-dry") is None
 
 
-async def test_harvest_leaves_true_local_run_unlinked(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_leaves_true_local_run_unlinked(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a local-only run (no PR ever opened) flows the local path.
 
     Bug 2 guard. The ``commits/{sha}/pulls`` probe returns no PR, so the row
@@ -1055,7 +1118,7 @@ async def test_harvest_leaves_true_local_run_unlinked(tmp_path, archive_dir, mon
     assert summary["errors"] == 0
 
 
-async def test_re_harvest_is_idempotent(tmp_path, archive_dir, monkeypatch):
+async def test_re_harvest_is_idempotent(tmp_path: Path, archive_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
@@ -1067,7 +1130,11 @@ async def test_re_harvest_is_idempotent(tmp_path, archive_dir, monkeypatch):
     assert second["skipped"] == 1 and second["annotated"] == 0
 
 
-async def test_re_harvest_appends_on_version_bump(tmp_path, archive_dir, monkeypatch):
+async def test_re_harvest_appends_on_version_bump(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _seed_archived_deep_run(archive_dir, "s1", merged_at="2026-02-01T00:00:00+00:00")
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
@@ -1079,13 +1146,17 @@ async def test_re_harvest_appends_on_version_bump(tmp_path, archive_dir, monkeyp
     assert len(label_observation_history(archive_dir, "s1")) == 2
 
 
-async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Two PR rows; PR 1 succeeds, PR 2 hits an exhausted rate-limit on every gh
     # call so the harvest loop must abort cleanly.
     _seed_pr_runs(archive_dir, tmp_path, 2)
     merged = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
 
-    def _gh(repo, endpoint, **kw):
+    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
         if "/pulls/2" in endpoint or "/2/" in endpoint or endpoint.endswith("/2"):
             raise git_ops.RateLimitError("exhausted")
         return merged(repo, endpoint, **kw)
@@ -1099,18 +1170,18 @@ async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_pat
     assert "s1" in done and "s2" not in done
 
 
-def test_gh_api_backoff_retries_then_succeeds(monkeypatch):
+def test_gh_api_backoff_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     slept = []
     monkeypatch.setattr(harvest, "_rate_limit_sleep", lambda s: slept.append(s))
     seq = [git_ops.RateLimitError("x"), git_ops.RateLimitError("x"), {"ok": True}]
 
-    def _inner(*a, **k):
+    def _inner(*a: Any, **k: Any) -> Any:
         v = seq.pop(0)
         if isinstance(v, Exception):
             raise v
         return v
 
-    monkeypatch.setattr(harvest.git_ops, "gh_api", _inner)
+    monkeypatch.setattr("daydream.git_ops.gh_api", _inner)
     assert harvest._gh_api("o/r", "endpoint") == {"ok": True}
     assert len(slept) == 2
 
@@ -1118,7 +1189,7 @@ def test_gh_api_backoff_retries_then_succeeds(monkeypatch):
 # _resolve_repo_for_row
 
 
-def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path):
+def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path) -> None:
     """source_path is preferred when it exists and contains .git."""
     source = tmp_path / "source_repo"
     source.mkdir()
@@ -1128,7 +1199,7 @@ def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path):
     assert result == source
 
 
-def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Falls through to clone when source_path is absent."""
     cache = tmp_path / "cache"
 
@@ -1142,7 +1213,7 @@ def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, mo
     assert result == cache / "org" / "repo"
 
 
-def test_resolve_repo_for_row_fetches_existing_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_resolve_repo_for_row_fetches_existing_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When the cache clone already exists, fetch instead of clone."""
     cache = tmp_path / "cache"
     cached_repo = cache / "org" / "repo"
@@ -1158,14 +1229,14 @@ def test_resolve_repo_for_row_fetches_existing_cache(tmp_path: Path, monkeypatch
     assert fetched == [cached_repo]
 
 
-def test_resolve_repo_for_row_returns_none_when_no_remote(tmp_path: Path):
+def test_resolve_repo_for_row_returns_none_when_no_remote(tmp_path: Path) -> None:
     """Returns None when neither source_path nor remote_url is available."""
     row = {"source_path": None, "remote_url": None, "repo_slug": None}
     result = _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
     assert result is None
 
 
-def test_resolve_repo_for_row_clone_failure_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_resolve_repo_for_row_clone_failure_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Clone failure is swallowed and None is returned (no .git left on disk)."""
     cache = tmp_path / "cache"
 
@@ -1178,7 +1249,10 @@ def test_resolve_repo_for_row_clone_failure_returns_none(tmp_path: Path, monkeyp
     assert result is None
 
 
-def test_resolve_repo_for_row_fetch_failure_returns_cached_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_resolve_repo_for_row_fetch_failure_returns_cached_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Fetch failure is swallowed and the existing cached repo path is returned."""
     cache = tmp_path / "cache"
     cached_repo = cache / "org" / "repo"
@@ -1197,7 +1271,7 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(tmp_path: Path, 
 # pr_attached_label_coverage
 
 
-def test_pr_coverage_helper_counts_decisive(tmp_path: Path):
+def test_pr_coverage_helper_counts_decisive(tmp_path: Path) -> None:
     for i, label in [(1, "accepted"), (2, "rejected"), (3, "unknown")]:
         upsert_run(tmp_path, make_manifest(session_id=f"p{i}", pr_number=i, pr_repo="o/r"))
         append_label_observation(
@@ -1214,7 +1288,11 @@ def test_pr_coverage_helper_counts_decisive(tmp_path: Path):
     assert cov["pr_attached"] == 3 and cov["decisive"] == 2  # accepted+rejected, not unknown
 
 
-async def test_harvest_propagates_transient_giterror_for_retry(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_propagates_transient_giterror_for_retry(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a transient GitError (HTTP 500) on /comments propagates, not degrades.
 
     ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a
@@ -1246,8 +1324,10 @@ async def test_harvest_propagates_transient_giterror_for_retry(tmp_path, archive
 
 
 async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
-    tmp_path, archive_dir, monkeypatch
-):
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a 404 on /comments after a confirmed merge propagates, not degrades.
 
     ``/pulls/{n}`` succeeds (merged) but the ``/comments`` fetch raises a benign
@@ -1277,7 +1357,11 @@ async def test_harvest_does_not_discard_confirmed_merge_on_benign_comment_error(
     assert "s-merge-comments-404" not in done
 
 
-async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Real-path: a GitError on the ``/reviews`` lookup must not drop a labeled row.
 
     ``/pulls/{n}`` resolves the PR outcome (merged → ``accepted``) and
@@ -1310,13 +1394,17 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(tmp_path, a
 
     assert summary["errors"] == 0  # reviewer-lookup failure degraded, row not dropped
     obs = latest_label_observation(archive_dir, "s-reviews-err")
-    assert obs is not None  # still annotated
+    assert obs is not None
     assert obs["pr_state"] == "merged"  # resolved PR outcome preserved (not degraded to local)
     row = query_runs(archive_dir, "session_id = ?", ("s-reviews-err",))[0]
     assert json.loads(row["outcome_labels"]) == ["accepted"]  # merged-PR label kept
 
 
-async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_path, archive_dir, monkeypatch):
+async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # 10 PR rows: PRs 1..8 merged ("accepted"); PRs 9..10 raise a benign GitError
     # (e.g. fork-PR 404). The fix DEGRADES 9..10 to the local-branch posterior
     # instead of dropping them: errors == 0, annotated == 10. Degraded rows route
@@ -1344,7 +1432,9 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_pat
 
     # 8 PR-path rows: decisive "accepted", merged pr_state; 2 degraded rows:
     # pr_state None (local rubric) — proof they took the local path.
-    accepted_pr_state = latest_label_observation(archive_dir, "s1")["pr_state"]
+    obs_pr = latest_label_observation(archive_dir, "s1")
+    assert obs_pr is not None
+    accepted_pr_state = obs_pr["pr_state"]
     assert accepted_pr_state == "merged"
     assert json.loads(query_runs(archive_dir, "session_id = ?", ("s1",))[0]["outcome_labels"]) == ["accepted"]
     for sid in ("s9", "s10"):

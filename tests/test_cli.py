@@ -1,10 +1,10 @@
 # tests/test_cli.py
 """Tests for CLI argument parsing."""
-
 import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,19 +13,19 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 
 
-def test_approved_head_sha_flag_populates_config(monkeypatch):
+def test_approved_head_sha_flag_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """--approved-head-sha pins config.approved_head_sha (no normalization)."""
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--approved-head-sha", "a" * 40, "/tmp/repo"])
     config = _parse_args()
     assert config.approved_head_sha == "a" * 40
 
 
-def test_approved_head_sha_defaults_none(monkeypatch):
+def test_approved_head_sha_defaults_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "/tmp/repo"])
     assert _parse_args().approved_head_sha is None
 
 
-def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
+def test_default_backend_is_none_and_resolves_to_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     # --backend default is now None so the config file can supply it; the
     # terminal fallback in _resolved_backend_name is "claude".
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
@@ -40,14 +40,14 @@ BACKEND_NAMES = ["codex", "osprey"]
 
 @pytest.mark.parametrize("flag", ["--backend", "-b"], ids=["long", "short"])
 @pytest.mark.parametrize("backend", BACKEND_NAMES, ids=lambda name: name)
-def test_backend_flag(monkeypatch, flag, backend):
+def test_backend_flag(monkeypatch: pytest.MonkeyPatch, flag: Any, backend: Any) -> None:
     """Accept each backend flag spelling and select the named backend."""
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", flag, backend])
     config = _parse_args()
     assert config.backend == backend
 
 
-def test_invalid_backend_rejected(monkeypatch):
+def test_invalid_backend_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--backend", "invalid"])
     with pytest.raises(SystemExit):
         _parse_args()
@@ -62,7 +62,7 @@ def test_invalid_backend_rejected(monkeypatch):
         pytest.param(None, {"test": {"backend": "codex"}}, "test", "codex", id="test-override"),
     ],
 )
-def test_phase_backend_override_via_config_file(global_backend, overrides, phase, expected):
+def test_phase_backend_override_via_config_file(global_backend: Any, overrides: Any, phase: Any, expected: Any) -> None:
     """Resolve phase-specific backends ahead of the global configured backend."""
     # Per-phase backend overrides moved to the config file (Task 8); resolver still honours them.
     fc = DaydreamFileConfig(backend=global_backend, phases=overrides)
@@ -70,37 +70,37 @@ def test_phase_backend_override_via_config_file(global_backend, overrides, phase
     assert _resolved_backend_name(config, phase) == expected
 
 
-def _cfg(monkeypatch, args: list[str]) -> RunConfig:
+def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
     """Parse ``daydream <args>`` into a RunConfig via the real CLI parser."""
     monkeypatch.setattr(sys, "argv", ["daydream", *args])
     return _parse_args()
 
 
-def test_run_config_flow_name_defaults_none():
+def test_run_config_flow_name_defaults_none() -> None:
     assert RunConfig(target="/tmp/p").flow_name is None
 
 
-def test_run_config_flow_name_settable():
+def test_run_config_flow_name_settable() -> None:
     assert RunConfig(target="/tmp/p", flow_name="ro-audit").flow_name == "ro-audit"
 
 
-def test_flow_flag_sets_flow_name(monkeypatch):
+def test_flow_flag_sets_flow_name(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _cfg(monkeypatch, ["--flow", "ro-audit", "/tmp/project"])
     assert cfg.flow_name == "ro-audit"
 
 
-def test_flow_default_none(monkeypatch):
+def test_flow_default_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _cfg(monkeypatch, ["/tmp/project"]).flow_name is None
 
 
 @pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"]])
-def test_flow_conflicts_rejected(monkeypatch, conflict):
+def test_flow_conflicts_rejected(monkeypatch: pytest.MonkeyPatch, conflict: Any) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--flow", "x", *conflict, "/tmp/project"])
     with pytest.raises(SystemExit):
         _parse_args()
 
 
-def test_loop_flag_rejected(monkeypatch, capsys):
+def test_loop_flag_rejected(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """``--loop`` was removed entirely (#330); the CLI rejects it as unknown."""
     monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "/tmp/project"])
     with pytest.raises(SystemExit):
@@ -108,14 +108,18 @@ def test_loop_flag_rejected(monkeypatch, capsys):
     assert "unrecognized arguments" in capsys.readouterr().err
 
 
-def test_runconfig_has_no_loop_fields():
+def test_runconfig_has_no_loop_fields() -> None:
     """RunConfig carries no loop mode after the collapse (#330)."""
     assert not hasattr(RunConfig(), "loop")
     assert not hasattr(RunConfig(), "max_iterations")
 
 
 @pytest.mark.parametrize("output_flag", ["--review", "--comment"], ids=["review", "comment"])
-def test_yes_with_review_only_output_errors(monkeypatch, capsys, output_flag):
+def test_yes_with_review_only_output_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    output_flag: Any,
+) -> None:
     """--yes has no effect in review-only output modes and must be rejected."""
     monkeypatch.setattr(sys, "argv", ["daydream", "--yes", output_flag, "/tmp/project"])
     with pytest.raises(SystemExit):
@@ -124,26 +128,26 @@ def test_yes_with_review_only_output_errors(monkeypatch, capsys, output_flag):
 
 
 @pytest.mark.parametrize("stack", ["go", "rust", "ios"])
-def test_stack_choice_routes_to_stack_field(monkeypatch, stack):
+def test_stack_choice_routes_to_stack_field(monkeypatch: pytest.MonkeyPatch, stack: Any) -> None:
     """Every CLI stack selector routes into ``RunConfig.stack``."""
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--stack", stack])
     config = _parse_args()
     assert config.stack == stack
 
 
-def test_stack_short_flag(monkeypatch):
+def test_stack_short_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "-s", "python"])
     config = _parse_args()
     assert config.stack == "python"
 
 
-def test_ignore_paths_default_empty(monkeypatch):
+def test_ignore_paths_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
     config = _parse_args()
     assert config.ignore_paths == []
 
 
-def test_ignore_paths_single(monkeypatch):
+def test_ignore_paths_single(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", [
         "daydream", "/tmp/project", "--ignore-path", ".planning",
     ])
@@ -151,7 +155,7 @@ def test_ignore_paths_single(monkeypatch):
     assert config.ignore_paths == [".planning"]
 
 
-def test_ignore_paths_repeatable(monkeypatch):
+def test_ignore_paths_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", [
         "daydream", "/tmp/project",
         "--ignore-path", ".planning",
@@ -164,7 +168,7 @@ def test_ignore_paths_repeatable(monkeypatch):
 # Consolidated CLI surface (worktree-isolation refactor)
 
 
-def test_parse_args_branch_and_base(monkeypatch):
+def test_parse_args_branch_and_base(monkeypatch: pytest.MonkeyPatch) -> None:
     """--branch and --base populate the new RunConfig fields; output_mode defaults to loop."""
     monkeypatch.setattr(sys, "argv", [
         "daydream", "--branch", "feat/x", "--base", "develop", "/tmp/repo",
@@ -175,32 +179,32 @@ def test_parse_args_branch_and_base(monkeypatch):
     assert config.output_mode == "loop"
 
 
-def test_parse_args_comment_mode_excludes_review(monkeypatch):
+def test_parse_args_comment_mode_excludes_review(monkeypatch: pytest.MonkeyPatch) -> None:
     """--comment and --review are mutually exclusive (argparse output group)."""
     monkeypatch.setattr(sys, "argv", ["daydream", "--comment", "--review", "/tmp/repo"])
     with pytest.raises(SystemExit):
         _parse_args()
 
 
-def test_parse_args_comment_mode_sets_output_mode(monkeypatch):
+def test_parse_args_comment_mode_sets_output_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--comment", "/tmp/repo"])
     config = _parse_args()
     assert config.output_mode == "comment"
 
 
-def test_parse_args_review_mode_sets_output_mode(monkeypatch):
+def test_parse_args_review_mode_sets_output_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "/tmp/repo"])
     config = _parse_args()
     assert config.output_mode == "review"
 
 
-def test_parse_args_default_is_loop(monkeypatch):
+def test_parse_args_default_is_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/repo"])
     config = _parse_args()
     assert config.output_mode == "loop"
 
 
-def test_findings_out_with_review_populates_config(monkeypatch):
+def test_findings_out_with_review_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", [
         "daydream", "--review", "--findings-out", "findings/findings.json", "/tmp/repo",
     ])
@@ -210,7 +214,11 @@ def test_findings_out_with_review_populates_config(monkeypatch):
 
 
 @pytest.mark.parametrize("extra", [["--comment"], ["--shallow"]])
-def test_findings_out_rejects_flows_without_pipeline_errors(monkeypatch, capsys, extra):
+def test_findings_out_rejects_flows_without_pipeline_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: Any,
+) -> None:
     """--findings-out is rejected for flows with no findings pipeline (--comment, --shallow)."""
     monkeypatch.setattr(sys, "argv", ["daydream", *extra, "--findings-out", "f.json", "/tmp/repo"])
     with pytest.raises(SystemExit) as exc_info:
@@ -220,7 +228,7 @@ def test_findings_out_rejects_flows_without_pipeline_errors(monkeypatch, capsys,
     assert "--findings-out" in err
 
 
-def test_findings_out_with_deep_flow_populates_config(monkeypatch):
+def test_findings_out_with_deep_flow_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """The default deep loop flow (no --review/--comment/--shallow) permits --findings-out."""
     monkeypatch.setattr(sys, "argv", [
         "daydream", "--findings-out", "findings/findings.json", "/tmp/repo",
@@ -231,43 +239,43 @@ def test_findings_out_with_deep_flow_populates_config(monkeypatch):
     assert config.shallow is False
 
 
-def test_findings_out_defaults_none(monkeypatch):
+def test_findings_out_defaults_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "/tmp/repo"])
     assert _parse_args().findings_out is None
 
 
-def test_pr_number_flag_populates_config(monkeypatch):
+def test_pr_number_flag_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """--pr-number pins config.pr_number, bypassing branch auto-detection."""
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--pr-number", "42", "/tmp/repo"])
     config = _parse_args()
     assert config.pr_number == 42
 
 
-def test_parse_args_worktree_modifier(monkeypatch):
+def test_parse_args_worktree_modifier(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--worktree", "/tmp/repo"])
     config = _parse_args()
     assert config.force_worktree is True
 
 
-def test_parse_args_shallow_modifier(monkeypatch):
+def test_parse_args_shallow_modifier(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--shallow", "/tmp/repo"])
     config = _parse_args()
     assert config.shallow is True
 
 
-def test_parse_args_non_interactive_sets_config(monkeypatch):
+def test_parse_args_non_interactive_sets_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--non-interactive", "/some/target"])
     config = _parse_args()
     assert config.non_interactive is True
 
 
-def test_parse_args_non_interactive_defaults_false(monkeypatch):
+def test_parse_args_non_interactive_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/some/target"])
     config = _parse_args()
     assert config.non_interactive is False
 
 
-def test_parse_args_copy_repeatable(monkeypatch):
+def test_parse_args_copy_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", [
         "daydream", "--copy", "a.env", "--copy", "b.env", "/tmp/repo",
     ])
@@ -275,13 +283,13 @@ def test_parse_args_copy_repeatable(monkeypatch):
     assert config.extra_copy == [Path("a.env"), Path("b.env")]
 
 
-def test_parse_args_copy_default_empty(monkeypatch):
+def test_parse_args_copy_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/repo"])
     config = _parse_args()
     assert config.extra_copy == []
 
 
-def test_feedback_subcommand_is_unknown(tmp_path):
+def test_feedback_subcommand_is_unknown(tmp_path: Path) -> None:
     """The removed feedback command is rejected without starting a review."""
     repo_root = Path(__file__).resolve().parent.parent
     (tmp_path / "a.py").write_text("x = 1\n")
@@ -298,14 +306,15 @@ def test_feedback_subcommand_is_unknown(tmp_path):
     assert "feedback" not in result.stdout
 
 
-def test_phase_subtitles_include_wonder():
+def test_phase_subtitles_include_wonder() -> None:
     from daydream.ui import PHASE_SUBTITLES
     assert "WONDER" in PHASE_SUBTITLES
     assert len(PHASE_SUBTITLES["WONDER"]) >= 2
 
 
-def test_print_issues_table_renders():
+def test_print_issues_table_renders() -> None:
     from io import StringIO
+    from typing import cast
 
     from rich.console import Console
 
@@ -319,7 +328,7 @@ def test_print_issues_table_renders():
          "recommendation": "Add tests", "files": ["src/utils.py"]},
     ]
     print_issues_table(test_console, issues)
-    output = test_console.file.getvalue()
+    output = cast("StringIO", test_console.file).getvalue()
     assert "Bad pattern" in output
     assert "Missing test" in output
 
@@ -336,14 +345,14 @@ def test_print_issues_table_renders():
         ("test", "gpt-5.5"),
     ],
 )
-def test_per_phase_model_set_via_config_file(phase, value):
+def test_per_phase_model_set_via_config_file(phase: Any, value: Any) -> None:
     # Per-phase model overrides moved to the config file; resolver still honours them.
     fc = DaydreamFileConfig(phases={phase: {"model": value}})
     config = RunConfig(target="/tmp/project", backend=None, model=None, file_config=fc)
     assert _resolved_model(config, phase) == value
 
 
-def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
+def test_no_per_phase_model_flag_leaves_field_none(tmp_path: Path) -> None:
     config = _parse_args([str(tmp_path)])
     assert config.review_model is None
     assert config.parse_model is None
@@ -368,7 +377,12 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
         ("--test-model", "test"),
     ],
 )
-def test_per_phase_flag_rejected_with_config_pointer(flag, phase, tmp_path, capsys):
+def test_per_phase_flag_rejected_with_config_pointer(
+    flag: Any,
+    phase: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     with pytest.raises(SystemExit):
         _parse_args([flag, "claude-opus-5", str(tmp_path)])
     err = capsys.readouterr().err
@@ -383,7 +397,12 @@ def test_per_phase_flag_rejected_with_config_pointer(flag, phase, tmp_path, caps
         ("--review-backend", "review"),
     ],
 )
-def test_per_phase_flag_rejected_equals_form(flag, phase, tmp_path, capsys):
+def test_per_phase_flag_rejected_equals_form(
+    flag: Any,
+    phase: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     with pytest.raises(SystemExit):
         _parse_args([f"{flag}=claude-opus-5", str(tmp_path)])
     err = capsys.readouterr().err
@@ -394,12 +413,12 @@ def test_per_phase_flag_rejected_equals_form(flag, phase, tmp_path, capsys):
 # Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
 
 
-def test_global_model_flag_populates_runconfig(tmp_path):
+def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
     config = _parse_args(["--model", "claude-opus-5", str(tmp_path)])
     assert config.model == "claude-opus-5"
 
 
-def test_runconfig_has_model_field():
+def test_runconfig_has_model_field() -> None:
     config = RunConfig(backend="claude")
     assert hasattr(config, "model"), "RunConfig.model is the global model override source"
     assert config.model is None
@@ -431,16 +450,16 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
 # corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)
 
 
-def test_harvest_and_build_corpus_dispatch(monkeypatch, tmp_path):
+def test_harvest_and_build_corpus_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from daydream import cli
-    called = {}
+    called: dict[str, Any] = {}
     monkeypatch.setattr("daydream.training.harvest.run_harvest",
                         lambda cfg: called.setdefault("harvest", cfg) or {"annotated": 0})
     assert cli._handle_harvest_command(["--archive-dir", str(tmp_path)]) == 0
     assert "harvest" in called
 
 
-def test_harvest_parser_accepts_repo_clone_root():
+def test_harvest_parser_accepts_repo_clone_root() -> None:
     """--repo-clone-root is parsed and forwarded to HarvestConfig."""
     from daydream.cli import _build_harvest_parser
 
@@ -449,7 +468,7 @@ def test_harvest_parser_accepts_repo_clone_root():
     assert args.repo_clone_root == Path("/tmp/clones")
 
 
-def test_harvest_parser_repo_clone_root_defaults_to_none():
+def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
     """--repo-clone-root defaults to None (derived from cache_dir at runtime)."""
     from daydream.cli import _build_harvest_parser
 
@@ -458,7 +477,7 @@ def test_harvest_parser_repo_clone_root_defaults_to_none():
     assert args.repo_clone_root is None
 
 
-def test_removed_verbs_no_longer_dispatch():
+def test_removed_verbs_no_longer_dispatch() -> None:
     from daydream import cli
     # export-jsonl / snapshot handlers are gone. ``label`` was reintroduced as
     # the human-override surface (daydream label <prefix> --outcome ...).
@@ -467,13 +486,13 @@ def test_removed_verbs_no_longer_dispatch():
     assert hasattr(cli, "_handle_label_command")
 
 
-def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch, tmp_path):
+def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """With no target positional, slug detection falls back to the cwd (#128)."""
     invoking_repo = tmp_path / "invoking-repo"
     invoking_repo.mkdir()
     monkeypatch.chdir(invoking_repo)
 
-    def fake_gh_repo_view(repo):
+    def fake_gh_repo_view(repo: Any) -> tuple[Any, ...]:
         assert Path(repo) == invoking_repo
         return ("existential-birds", "daydream")
 
@@ -487,7 +506,7 @@ def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch, tmp_path):
     assert config.pr_repo == "existential-birds/daydream"
 
 
-def test_cli_stack_selector_and_skill_rejected():
+def test_cli_stack_selector_and_skill_rejected() -> None:
     from daydream.cli import _build_main_parser
 
     p = _build_main_parser()
@@ -499,7 +518,7 @@ def test_cli_stack_selector_and_skill_rejected():
     assert e.value.code == 2   # argparse unknown-option exit code
 
 
-def test_runconfig_uses_stack_terminology():
+def test_runconfig_uses_stack_terminology() -> None:
     from daydream.runner import RunConfig
 
     cfg = RunConfig(target="/tmp", stack="go")
@@ -507,7 +526,7 @@ def test_runconfig_uses_stack_terminology():
     assert not hasattr(cfg, "skill")   # old name removed
 
 
-def test_real_cli_stack_entry(tmp_path):
+def test_real_cli_stack_entry(tmp_path: Path) -> None:
     """Real entrypoint: --stack python reaches dispatch; --skill is rejected."""
     import os
     import subprocess

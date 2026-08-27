@@ -531,7 +531,7 @@ def test_public_text_redactor_is_fail_closed() -> None:
 
 def test_invocation_has_no_parent_field() -> None:
     """D-08: Invocation does not carry parent; parent linkage is on TrajectoryRecorder."""
-    fields = {f.name for f in Invocation.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+    fields = {f.name for f in Invocation.__dataclass_fields__.values()}
     assert "parent" not in fields, (
         f"Invocation must not carry a parent field in Phase 2 (D-08); got {fields}"
     )
@@ -1001,7 +1001,8 @@ async def test_write_partial_is_idempotent(tmp_path: Path) -> None:
 
 
 async def test_write_partial_failure_emits_warning_does_not_raise(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Disk-write failure during partial flush degrades with warning, never raises."""
     recorder = make_recorder(tmp_path)

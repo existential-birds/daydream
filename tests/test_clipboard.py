@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from typing import Any
 
@@ -45,7 +46,7 @@ def test_copy_to_clipboard_success_and_selection(
 ) -> None:
     """Select the first available clipboard command and pass text on standard input."""
     detected = {cmd: f"/usr/bin/{cmd}" for cmd in available}
-    monkeypatch.setattr(clipboard.shutil, "which", detected.get)
+    monkeypatch.setattr(shutil, "which", detected.get)
     captured: dict[str, Any] = {}
 
     def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -54,7 +55,7 @@ def test_copy_to_clipboard_success_and_selection(
         captured["timeout"] = kwargs.get("timeout")
         return subprocess.CompletedProcess(argv, returncode=0)
 
-    monkeypatch.setattr(clipboard.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert copy_to_clipboard(text) is True
     assert captured["argv"] == expected_argv
@@ -64,7 +65,7 @@ def test_copy_to_clipboard_success_and_selection(
 
 def test_copy_to_clipboard_no_mechanism(monkeypatch: pytest.MonkeyPatch) -> None:
     """No clipboard tool on PATH → returns False without invoking run."""
-    monkeypatch.setattr(clipboard.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
 
     invoked = False
 
@@ -72,7 +73,7 @@ def test_copy_to_clipboard_no_mechanism(monkeypatch: pytest.MonkeyPatch) -> None
         nonlocal invoked
         invoked = True
 
-    monkeypatch.setattr(clipboard.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert copy_to_clipboard("hello") is False
     assert invoked is False
@@ -100,11 +101,11 @@ def test_copy_to_clipboard_subprocess_failure(
     error: BaseException,
 ) -> None:
     """Return failure when the selected clipboard command cannot complete."""
-    monkeypatch.setattr(clipboard.shutil, "which", {tool: f"/usr/bin/{tool}"}.get)
+    monkeypatch.setattr(shutil, "which", {tool: f"/usr/bin/{tool}"}.get)
 
     def fake_run(argv: list[str], **kwargs: Any) -> None:
         """Raise the parameterized failure at the subprocess boundary."""
         raise error
 
-    monkeypatch.setattr(clipboard.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
     assert copy_to_clipboard("hello") is False

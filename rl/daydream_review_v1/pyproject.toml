@@ -41,7 +41,32 @@ select = ["E", "F", "I", "W"]
 
 [tool.mypy]
 python_version = "3.12"
+explicit_package_bases = true
+namespace_packages = true
+mypy_path = "../..:tests"
+strict = true
+# daydream is a sibling first-party package (no py.typed; mypy_path + follow
+# make it fully checked). verifiers is the only untyped seam: it ships without
+# py.typed and has no stub package on the registry (checked upstream 0.2.1), so
+# its import surface and strict-subclass / strict-decorator expectations are the
+# legitimate typed-against-untyped boundary. mypy applies the subclassing and
+# untyped-decorator toggles per checked FILE, not per the base/dependent module,
+# so neither can live inside the verifiers-scoped override below; both are
+# relaxed globally here and nothing else is: every own def, annotation, return
+# and call stays strict, and a future typed verifiers release is picked up
+# automatically.
+follow_untyped_imports = true
+disallow_subclassing_any = false
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+# verifiers has no py.typed marker and no stub package on the registry; strip
+# the import to Any for verifiers modules only, never a blanket-library ignore.
+module = ["verifiers.*"]
 ignore_missing_imports = true
+follow_imports = "skip"
+# (Base classes Task/Harness/Taskset/Data/Config/State/Trace/Runtime are the Any
+# boundary the two toggles above describe; nothing else is relaxed here.)
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

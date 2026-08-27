@@ -9,7 +9,6 @@ from daydream.deep.prompts import (
     CONFIG_FLOW_TRACE_INSTRUCTION,
     CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
     DOC_REVIEW_NOTICE,
-    INLINE_DIFF_BUDGET_BYTES,
     TEST_QUALITY_RUBRIC_INSTRUCTION,
     TRUST_MODEL_INSTRUCTION,
     bound_deep_diff,
@@ -19,6 +18,7 @@ from daydream.deep.prompts import (
     build_per_stack_prompt,
     build_structural_prompt,
 )
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 
 
@@ -587,7 +587,8 @@ def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
     ``INLINE_DIFF_BUDGET_BYTES``, the helper returns ``None`` so the caller
     keeps the path pointer (the agent is told to Read diff.patch directly).
     """
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES, _diff_blocks_for_files
+    from daydream.deep.prompts import _diff_blocks_for_files
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Synthesize a diff whose single matching block exceeds the budget.
     huge_line = "x" * (INLINE_DIFF_BUDGET_BYTES + 64)
@@ -1506,7 +1507,7 @@ def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp
     assert "assigned source files" not in sentence
 
 
-def test_per_stack_prompt_uses_profile_strategy_and_no_skill():
+def test_per_stack_prompt_uses_profile_strategy_and_no_skill() -> None:
     from daydream import review_profile as rp
     from daydream.deep.prompts import build_per_stack_prompt
     strategy = rp.build_default_profile().strategies["discovery.per_stack"].content
@@ -1521,7 +1522,7 @@ def test_per_stack_prompt_uses_profile_strategy_and_no_skill():
     assert "Apply this specialist skill" not in p
 
 
-def test_structural_prompt_uses_profile_strategy_and_no_skill():
+def test_structural_prompt_uses_profile_strategy_and_no_skill() -> None:
     from daydream import review_profile as rp
     from daydream.deep.prompts import build_structural_prompt
     strategy = rp.build_default_profile().strategies["discovery.structural"].content

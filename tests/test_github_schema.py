@@ -7,7 +7,7 @@ for "requesting a nonexistent field fails CI, never in production".
 from tests.harness import github_schema as gs
 
 
-def test_unknown_query_fields_flags_invented_fields():
+def test_unknown_query_fields_flags_invented_fields() -> None:
     # A query requesting fields GitHub's schema does not define must be flagged.
     bad = """
     query X($o:String!,$n:String!,$p:Int!) {
@@ -20,7 +20,7 @@ def test_unknown_query_fields_flags_invented_fields():
     assert {"side", "startSide", "isResolvedBy", "isBot", "type"} <= gs.unknown_query_fields(bad)
 
 
-def test_unknown_query_fields_accepts_aliased_real_fields():
+def test_unknown_query_fields_accepts_aliased_real_fields() -> None:
     # The fixed projection aliases real fields to the consumer keys; the real
     # field names (diffSide/startDiffSide/__typename) are all schema-defined.
     good = """

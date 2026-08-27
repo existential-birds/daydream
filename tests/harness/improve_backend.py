@@ -24,18 +24,18 @@ Three subclasses bend one axis each and are otherwise the same fake:
 
 This is a verbatim move: behaviour is unchanged from the pre-extraction file.
 """
-
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
-from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.config import AUDIT_CATEGORIES
 
@@ -428,7 +428,7 @@ class ImproveStubBackend:
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         marker = "other"
         category = None
         if "you are the **repo-survey** specialist" in prompt.lower():
@@ -890,7 +890,7 @@ class ProductionPathBackend(ImproveStubBackend):
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         if "IMPROVE_RECON" in prompt:
             self.calls.append(
                 {
@@ -1047,7 +1047,7 @@ class IncrementalPlanBackend(ImproveStubBackend):
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         if (
             _is_plan_writer_prompt(prompt, output_schema)
             and _finding_from_prompt(prompt)["title"] == self._slow_title
@@ -1116,7 +1116,7 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         rank: int | None = None
         if _is_plan_writer_prompt(prompt, output_schema):
             selection = self._selection()

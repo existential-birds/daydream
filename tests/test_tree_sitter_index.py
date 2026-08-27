@@ -5,13 +5,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import _commit, _configure_identity, _git, _make_repo_with_main
 
 from daydream import git_ops
 from daydream.tree_sitter_index import (
     _MAX_IMPORTERS,
     detect_affected_files,
 )
+from tests.conftest import _make_repo_with_main
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import configure_identity as _configure_identity
+from tests.harness.git_helpers import git as _git
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -28,7 +31,7 @@ def _modified_diff(path: str) -> str:
     )
 
 
-def _importers(results) -> set[str]:
+def _importers(results: Any) -> set[str]:
     return {r.path for r in results if r.role == "imported_by"}
 
 
@@ -41,7 +44,7 @@ def _materialize(tmp_path: Path, files: dict[str, str]) -> Path:
     return tmp_path
 
 
-def test_detect_affected_files_rows_are_static_provenance(tmp_path: Path):
+def test_detect_affected_files_rows_are_static_provenance(tmp_path: Path) -> None:
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "widget.py").write_text("x = 1\n")
     (tmp_path / "app.py").write_text("import pkg.widget\n")
@@ -50,7 +53,7 @@ def test_detect_affected_files_rows_are_static_provenance(tmp_path: Path):
     assert all(f.provenance == "static" for f in results)
 
 
-def test_python_impact_surface(tmp_path: Path):
+def test_python_impact_surface(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     repo = _materialize(
         tmp_path,
@@ -136,8 +139,11 @@ _SHARED_FIXTURES: dict[str, str] = {
     ],
 )
 def test_python_multilevel_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_path: str | set[str]
-):
+    tmp_path: Path,
+    api_rel: str,
+    files: dict[str, str],
+    expected_import_path: str | set[str],
+) -> None:
     repo = _materialize(tmp_path, files)
     results = detect_affected_files(_modified_diff(api_rel), repo, depth=1)
     imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
@@ -181,15 +187,18 @@ def test_python_multilevel_relative_imports(
     ],
 )
 def test_python_parent_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_paths: set[str]
-):
+    tmp_path: Path,
+    api_rel: str,
+    files: dict[str, str],
+    expected_import_paths: set[str],
+) -> None:
     repo = _materialize(tmp_path, files)
     results = detect_affected_files(_modified_diff(api_rel), repo, depth=1)
     imports_paths = {r.path for r in results if r.role == "imports"}
     assert imports_paths == expected_import_paths
 
 
-def test_typescript_impact_surface(tmp_path: Path):
+def test_typescript_impact_surface(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "typescript_multifile.diff").read_text()
     repo = _materialize(
         tmp_path,
@@ -210,7 +219,7 @@ def test_typescript_impact_surface(tmp_path: Path):
     assert len(results) >= 2
 
 
-def test_go_impact_surface(tmp_path: Path):
+def test_go_impact_surface(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "go_multifile.diff").read_text()
     repo = _materialize(
         tmp_path,
@@ -261,7 +270,7 @@ def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.
     assert {r.path for r in results if r.role == "modified"} == {"cmd/alpha.go", "cmd/beta.go"}
 
 
-def test_rust_impact_surface(tmp_path: Path):
+def test_rust_impact_surface(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "rust_multifile.diff").read_text()
     repo = _materialize(
         tmp_path,
@@ -279,12 +288,12 @@ def test_rust_impact_surface(tmp_path: Path):
     assert len(results) >= 2
 
 
-def test_default_depth_is_one():
+def test_default_depth_is_one() -> None:
     sig = inspect.signature(detect_affected_files)
     assert sig.parameters["depth"].default == 1
 
 
-def test_unsupported_language_gets_modified_role(tmp_path: Path):
+def test_unsupported_language_gets_modified_role(tmp_path: Path) -> None:
     diff_text = (
         "diff --git a/lib/foo.rb b/lib/foo.rb\n"
         "index 1111111..2222222 100644\n"
@@ -302,7 +311,7 @@ def test_unsupported_language_gets_modified_role(tmp_path: Path):
     assert results[0].role == "modified"
 
 
-def test_deleted_file_does_not_raise_filenotfound(tmp_path: Path):
+def test_deleted_file_does_not_raise_filenotfound(tmp_path: Path) -> None:
     diff_text = (
         "diff --git a/gone.py b/gone.py\n"
         "deleted file mode 100644\n"
@@ -321,7 +330,7 @@ def test_deleted_file_does_not_raise_filenotfound(tmp_path: Path):
 # --- Reverse-edge (importers) behavior: real git repo -----------------------
 
 
-def test_reverse_edge_finds_code_importer(tmp_path: Path):
+def test_reverse_edge_finds_code_importer(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     (repo / "pkg").mkdir()
     (repo / "pkg" / "widget.py").write_text("x = 1\ny = 2\n")
@@ -333,7 +342,7 @@ def test_reverse_edge_finds_code_importer(tmp_path: Path):
     assert "caller.py" in _importers(results)
 
 
-def test_reverse_edge_skips_generic_stem(tmp_path: Path):
+def test_reverse_edge_skips_generic_stem(tmp_path: Path) -> None:
     # "app" is a generic stem: a bare grep would match unrelated prose/code.
     repo = _make_repo_with_main(tmp_path)
     (repo / "app.py").write_text("x = 1\ny = 2\n")
@@ -345,7 +354,7 @@ def test_reverse_edge_skips_generic_stem(tmp_path: Path):
     assert _importers(results) == set()
 
 
-def test_reverse_edge_excludes_non_code_files(tmp_path: Path):
+def test_reverse_edge_excludes_non_code_files(tmp_path: Path) -> None:
     # A markdown/doc file cannot import a code module; it must never be an importer.
     repo = _make_repo_with_main(tmp_path)
     (repo / "widget.py").write_text("x = 1\ny = 2\n")
@@ -402,7 +411,7 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 # --- Symbol index (definitions + line numbers) ------------------------------
 
 
-def test_symbol_index_python_records_file_and_line_range(tmp_path: Path):
+def test_symbol_index_python_records_file_and_line_range(tmp_path: Path) -> None:
     from daydream.tree_sitter_index import build_symbol_index
 
     (tmp_path / "widget.py").write_text(
@@ -425,7 +434,7 @@ def test_symbol_index_python_records_file_and_line_range(tmp_path: Path):
     ]
 
 
-def test_symbol_index_rust_records_file_and_line_range(tmp_path: Path):
+def test_symbol_index_rust_records_file_and_line_range(tmp_path: Path) -> None:
     from daydream.tree_sitter_index import build_symbol_index
 
     (tmp_path / "lib.rs").write_text(
@@ -440,7 +449,7 @@ def test_symbol_index_rust_records_file_and_line_range(tmp_path: Path):
     ]
 
 
-def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path):
+def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> None:
     """A generic-stem file that actually defines a symbol must not be skipped
     by the reverse-import lookup (config.py -> app.py ``imported_by`` edge)."""
     (tmp_path / "config.py").write_text("def load_config():\n    return {}\n")

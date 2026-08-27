@@ -20,7 +20,7 @@ import shutil
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Iterable
+from typing import TYPE_CHECKING, Any, Awaitable, Iterable, cast
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -131,6 +131,7 @@ from daydream.phases import (
     severity_sorted,
 )
 from daydream.quote_scrub import scrub_smart_quotes_changed_files
+from daydream.review_profile import Pipeline
 from daydream.supervision import (
     RuleBasedSupervisor,
     apply_findings_verdicts,
@@ -244,16 +245,16 @@ def _resolve_config_value[T: (int, float, bool)](config: RunConfig, attr: str, d
     """
     value = getattr(config, attr, None)
     if value is not None:
-        return value
+        return cast(T, value)  # T-typed attr read off a config object; scalar-validated by the callers
     file_config = config.file_config
     if file_config is not None:
         value = getattr(file_config, attr, None)
         if value is not None:
-            return value
+            return cast(T, value)
     return default
 
 
-def _config_pipeline(config: RunConfig):
+def _config_pipeline(config: RunConfig) -> Pipeline:
     """Return the resolved profile pipeline for a ``RunConfig`` (pre-context).
 
     ``FlowContext.pipeline()`` is the in-flow accessor; this mirrors it for the
@@ -993,8 +994,8 @@ def _read_full_diff(ctx: FlowContext) -> str:
     """
     diff_path = ctx.data.get("diff_path")
     if diff_path is None:
-        return ctx.data["diff"]
-    return diff_path.read_text(encoding="utf-8")
+        return str(ctx.data["diff"])
+    return Path(diff_path).read_text(encoding="utf-8")
 
 
 async def _step_exploration(ctx: FlowContext) -> None:
@@ -1105,7 +1106,7 @@ def _ttt_diff_text(ctx: FlowContext) -> str | None:
     with a warning (defensive only — ``diff.patch`` was written this run).
     """
     if not ctx.data.get("diff_truncated"):
-        return ctx.data["diff"]
+        return str(ctx.data["diff"])
     try:
         return _read_full_diff(ctx)
     except OSError as exc:
@@ -1120,7 +1121,7 @@ def _ttt_diff_text(ctx: FlowContext) -> str | None:
             f"Could not read the full diff for the intent/wonder phases "
             f"({exc}); falling back to the bounded in-memory diff{detail}",
         )
-    return ctx.data["diff"]
+    return str(ctx.data["diff"])
 
 
 async def _step_intent(ctx: FlowContext) -> None:
@@ -3832,7 +3833,7 @@ def _resolve_mode(config: RunConfig) -> str:
 
 def _mode_of(ctx: FlowContext) -> str:
     """The active mode, set by ``run_deep``'s dispatch preamble."""
-    return ctx.data.get("mode", "loop")
+    return str(ctx.data.get("mode", "loop"))
 
 
 def _review_only_mode(ctx: FlowContext) -> bool:

@@ -1,22 +1,24 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
-
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from daydream import review_profile as _rp
 from daydream.backends import (
     AgentEvent,
+    Backend,
     ContinuationToken,
     ResultEvent,
     TextEvent,
 )
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.trajectory import TrajectoryRecorder
+from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as git_commit
 from tests.harness.git_helpers import git, init_repo
@@ -74,7 +76,10 @@ class _HealBackend(ScriptedBackend):
         return [call["read_only"] for call in self.calls]
 
 
-def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(tmp_path, silence_console):
+def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(
+    tmp_path: Path,
+    silence_console: Callable[..., None],
+) -> None:
     """The per-healing guard protects historical migrations after a fix agent runs."""
     from daydream import git_ops
     from daydream.phases import _reject_test_healing_generated_file_edits
@@ -104,7 +109,10 @@ def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migrat
     ).read_text()
 
 
-def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(tmp_path, silence_console):
+def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
+    tmp_path: Path,
+    silence_console: Callable[..., None],
+) -> None:
     """A healing edit cannot remove a marker and thereby evade the guard."""
     from daydream import git_ops
     from daydream.phases import _reject_test_healing_generated_file_edits
@@ -127,7 +135,10 @@ def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
     assert generated.read_text() == "# @generated\nORIGINAL = True\n"
 
 
-def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(tmp_path, silence_console):
+def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(
+    tmp_path: Path,
+    silence_console: Callable[..., None],
+) -> None:
     """Without a pre-fix snapshot, recovery must not fall back to HEAD."""
     from daydream.phases import _reject_test_healing_generated_file_edits
 
@@ -148,7 +159,10 @@ def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(tmp_p
     assert migration.read_text() == "-- user edit\n"
 
 
-def test_test_healing_guard_uses_unique_recovery_patch_names(tmp_path, silence_console):
+def test_test_healing_guard_uses_unique_recovery_patch_names(
+    tmp_path: Path,
+    silence_console: Callable[..., None],
+) -> None:
     """Distinct paths with the same slug preserve both rejected edits."""
     from daydream import git_ops
     from daydream.phases import _reject_test_healing_generated_file_edits
@@ -176,8 +190,10 @@ def test_test_healing_guard_uses_unique_recovery_patch_names(tmp_path, silence_c
 
 
 def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
-    tmp_path, monkeypatch, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
     """An unknown changed-path set cannot safely drive destructive recovery."""
     from daydream import git_ops
     from daydream.git_ops import GitError
@@ -205,7 +221,11 @@ def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
     assert migration.read_text() == "-- healing edit\n"
 
 
-def test_test_healing_guard_reports_restoration_failure(tmp_path, monkeypatch, silence_console):
+def test_test_healing_guard_reports_restoration_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
     """A forbidden edit remains unsafe when Git cannot restore its baseline."""
     from daydream import git_ops
     from daydream.git_ops import GitError
@@ -233,7 +253,10 @@ def test_test_healing_guard_reports_restoration_failure(tmp_path, monkeypatch, s
     assert migration.read_text() == "-- healing edit\n"
 
 
-def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(tmp_path, silence_console):
+def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(
+    tmp_path: Path,
+    silence_console: Callable[..., None],
+) -> None:
     """A healing edit to an untracked migration is restored byte-for-byte."""
     from daydream import git_ops
     from daydream.phases import _reject_test_healing_generated_file_edits
@@ -264,7 +287,10 @@ def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(tmp_p
     assert migration.read_bytes() == original
 
 
-def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(tmp_path, silence_console):
+def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(
+    tmp_path: Path,
+    silence_console: Callable[..., None],
+) -> None:
     """An untouched untracked migration remains byte-identical."""
     from daydream import git_ops
     from daydream.phases import _reject_test_healing_generated_file_edits
@@ -433,7 +459,9 @@ class _PartialCommitBackend(StubBackend):
 
 @pytest.mark.asyncio
 async def test_do_commit_excludes_preexisting_untracked_from_tree(
-    git_repo: Path, make_work, capsys,
+    git_repo: Path,
+    make_work: Callable[..., WorkContext],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """_do_commit stages only (daydream changes + new untracked) - (pre-existing
     untracked): a pre-existing file never enters the commit tree; a fix-created
@@ -464,7 +492,9 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
 
 @pytest.mark.asyncio
 async def test_do_commit_warns_on_scope_creep_beyond_prestaged_set(
-    git_repo: Path, make_work, capsys,
+    git_repo: Path,
+    make_work: Callable[..., WorkContext],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """#562 enforcement is not prompt-only: a commit agent that re-runs
     ``git add -A`` sweeps a pre-existing untracked file into the commit, and
@@ -494,7 +524,9 @@ async def test_do_commit_warns_on_scope_creep_beyond_prestaged_set(
 
 @pytest.mark.asyncio
 async def test_do_commit_warns_on_under_commit_missing_prestaged_files(
-    git_repo: Path, make_work, capsys,
+    git_repo: Path,
+    make_work: Callable[..., WorkContext],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A commit agent that commits only part of the pre-staged index drops the
     remaining tracked fixes — the verification surfaces the under-commit
@@ -524,7 +556,9 @@ async def test_do_commit_warns_on_under_commit_missing_prestaged_files(
 
 @pytest.mark.asyncio
 async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
-    git_repo: Path, make_work, capsys,
+    git_repo: Path,
+    make_work: Callable[..., WorkContext],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Daydream's own mid-run artifacts under .daydream/ (recommended.patch,
     fix-failures.json, quality-gate verdicts) are excluded from the
@@ -558,7 +592,12 @@ async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
 
 
 @pytest.mark.asyncio
-async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch, make_work, silence_console):
+async def test_phase_test_and_heal_fix_uses_fresh_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Test that fix-and-retry starts fresh (no continuation) with enriched prompt."""
     from daydream.phases import phase_test_and_heal
 
@@ -598,8 +637,11 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """A failed generated-file restore stops healing before another test run."""
     from daydream.phases import phase_test_and_heal
 
@@ -619,8 +661,11 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Driving the heal loop to a fix attempt passes an absolute path and no turn cap.
 
     Root bug being guarded: the heal fix prompt listed repo-relative paths so the
@@ -666,8 +711,10 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
 
 @pytest.mark.asyncio
 async def test_phase_parse_feedback_empty_response_returns_empty_list(
-    tmp_path, make_work, silence_console,
-):
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """When the agent returns empty text (schema miss), treat as no issues."""
     from daydream.phases import phase_parse_feedback
 
@@ -681,7 +728,11 @@ async def test_phase_parse_feedback_empty_response_returns_empty_list(
 
 
 @pytest.mark.asyncio
-async def test_phase_parse_feedback_json_fallback(tmp_path, make_work, silence_console):
+async def test_phase_parse_feedback_json_fallback(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """When structured output fails but raw text is valid JSON, parse it."""
     from daydream.phases import phase_parse_feedback
 
@@ -707,7 +758,11 @@ async def test_phase_parse_feedback_json_fallback(tmp_path, make_work, silence_c
 
 
 @pytest.mark.asyncio
-async def test_phase_parse_feedback_default_path_drops_speculative(tmp_path, make_work, silence_console):
+async def test_phase_parse_feedback_default_path_drops_speculative(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Issue #227 (AC3): the default (shallow) parse path drops speculative
     findings before they reach the fix loop -- the grounding gate the deep
     merge path applies is enforced here too, so AC3 holds for ``--shallow``
@@ -754,8 +809,10 @@ async def test_phase_parse_feedback_default_path_drops_speculative(tmp_path, mak
 
 @pytest.mark.asyncio
 async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
-    tmp_path, make_work, silence_console,
-):
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """phase_fix must hand the agent the SCOPE and PRECEDENCE guardrails.
 
     Issue #336 turns the old "make it, but name and justify" license into a
@@ -793,8 +850,10 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
 
 @pytest.mark.asyncio
 async def test_phase_fix_prompt_enumerates_changed_files_when_provided(
-    tmp_path, make_work, silence_console,
-):
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """When ``changed_files`` is passed, the prompt carries an explicit
     "Allowed files" clause enumerating the reviewed diff's file set.
 
@@ -829,7 +888,11 @@ async def test_phase_fix_prompt_enumerates_changed_files_when_provided(
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_concise_fix_prompts_adds_directive(tmp_path, make_work, silence_console):
+async def test_phase_fix_concise_fix_prompts_adds_directive(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """phase_fix appends a CONCISE MODE directive when backend.concise_fix_prompts is True."""
     from daydream.phases import phase_fix
 
@@ -847,7 +910,11 @@ async def test_phase_fix_concise_fix_prompts_adds_directive(tmp_path, make_work,
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_default_backend_no_concise_directive(tmp_path, make_work, silence_console):
+async def test_phase_fix_default_backend_no_concise_directive(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """phase_fix omits the CONCISE MODE directive when backend.concise_fix_prompts is False."""
     from daydream.phases import phase_fix
 
@@ -863,7 +930,11 @@ async def test_phase_fix_default_backend_no_concise_directive(tmp_path, make_wor
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_no_commit_message_references(tmp_path, make_work, silence_console):
+async def test_phase_fix_no_commit_message_references(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """The fix-phase prompt no longer references commit messages (that is _do_commit's job)."""
     from daydream.phases import phase_fix
 
@@ -891,8 +962,10 @@ async def test_phase_fix_no_commit_message_references(tmp_path, make_work, silen
 
 @pytest.mark.asyncio
 async def test_fix_prompt_frames_confirmed_intent_body_as_untrusted(
-    tmp_path, make_work, silence_console,
-):
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """An instruction-like body echoed into the confirmed-intent file reaches the
     mutating fix agent only under the untrusted framing hardening (issue #579)."""
     from daydream.phases import phase_fix
@@ -919,7 +992,7 @@ async def test_fix_prompt_frames_confirmed_intent_body_as_untrusted(
     )
 
 
-def test_build_fix_prompt_concise_mode():
+def test_build_fix_prompt_concise_mode() -> None:
     """_build_fix_prompt adds concise directives when concise_mode=True."""
     from daydream.phases import _build_fix_prompt
 
@@ -936,21 +1009,21 @@ def test_build_fix_prompt_concise_mode():
     assert "CONCISE MODE" not in prompt_default
 
 
-def test_fix_guardrails_forbid_generated_file_edits():
+def test_fix_guardrails_forbid_generated_file_edits() -> None:
     from daydream.phases import _FIX_GUARDRAILS
 
     assert "generated" in _FIX_GUARDRAILS.lower()
     assert "migration" in _FIX_GUARDRAILS.lower()
 
 
-def test_fix_guardrails_preserve_ascii_quotes():
+def test_fix_guardrails_preserve_ascii_quotes() -> None:
     from daydream.phases import _FIX_GUARDRAILS
 
     assert "ascii" in _FIX_GUARDRAILS.lower()
     assert "smart quote" in _FIX_GUARDRAILS.lower()
 
 
-def test_build_fix_prompt_carries_generated_file_rule():
+def test_build_fix_prompt_carries_generated_file_rule() -> None:
     from daydream.phases import _build_fix_prompt
 
     prompt = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
@@ -961,7 +1034,11 @@ def test_build_fix_prompt_carries_generated_file_rule():
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_resolves_existing_file_to_absolute_path(tmp_path, make_work, silence_console):
+async def test_phase_fix_resolves_existing_file_to_absolute_path(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """phase_fix hands the agent an absolute path when the file exists under work.repo."""
     from daydream.phases import phase_fix
 
@@ -983,7 +1060,11 @@ async def test_phase_fix_resolves_existing_file_to_absolute_path(tmp_path, make_
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, make_work, silence_console):
+async def test_phase_fix_falls_back_to_relative_path_when_missing(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """When the file does not exist under work.repo, the relative path is preserved."""
     from daydream.phases import phase_fix
 
@@ -1000,7 +1081,12 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, make
 
 @pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
 @pytest.mark.asyncio
-async def test_phase_fix_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+async def test_phase_fix_rejects_unconfined_finding_file(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+    path_kind: Any,
+) -> None:
     """A finding file escaping the worktree raises ValueError and emits no prompt."""
     from daydream.phases import phase_fix
 
@@ -1014,7 +1100,11 @@ async def test_phase_fix_rejects_unconfined_finding_file(tmp_path, make_work, si
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+async def test_phase_fix_rejects_missing_file_reference(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """An item with no file reference is rejected, not silently delegated."""
     from daydream.phases import phase_fix
 
@@ -1028,7 +1118,11 @@ async def test_phase_fix_rejects_missing_file_reference(tmp_path, make_work, sil
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_passes_no_turn_cap(tmp_path, make_work, silence_console):
+async def test_phase_fix_passes_no_turn_cap(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """phase_fix sends no turn ceiling: a real fix is bounded by wall-clock only."""
     from daydream.phases import phase_fix
 
@@ -1043,7 +1137,11 @@ async def test_phase_fix_passes_no_turn_cap(tmp_path, make_work, silence_console
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_batched_prompt_lists_all_findings(tmp_path, make_work, silence_console):
+async def test_phase_fix_batched_prompt_lists_all_findings(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Multiple same-file findings collapse into ONE prompt listing every finding."""
     from daydream.phases import phase_fix_batched
 
@@ -1075,8 +1173,10 @@ async def test_phase_fix_batched_prompt_lists_all_findings(tmp_path, make_work, 
 
 @pytest.mark.asyncio
 async def test_phase_fix_batched_prompt_lists_related_files(
-    tmp_path, make_work, silence_console,
-):
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """A deduplicated cross-file finding names every other file it touches.
 
     The outcome of the footprint grouping is useless if the fix agent never
@@ -1117,7 +1217,11 @@ async def test_phase_fix_batched_prompt_lists_related_files(
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_batched_concise_fix_prompts_adds_directive(tmp_path, make_work, silence_console):
+async def test_phase_fix_batched_concise_fix_prompts_adds_directive(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Batched same-file fixes carry backend concise-fix-prompt guidance."""
     from daydream.phases import phase_fix_batched
 
@@ -1138,16 +1242,19 @@ async def test_phase_fix_batched_concise_fix_prompts_adds_directive(tmp_path, ma
 
 @pytest.mark.asyncio
 async def test_phase_fix_batched_single_item_delegates_to_phase_fix(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """A one-item group delegates to phase_fix instead of building a batched prompt."""
     from daydream import phases
 
     silence_console("daydream.phases")
 
-    calls: list[tuple[dict, int]] = []
+    calls: list[tuple[dict[str, Any], int]] = []
 
-    async def _fake_fix(backend, work, item, item_num, total, **kwargs):
+    async def _fake_fix(backend: Any, work: Any, item: Any, item_num: Any, total: Any, **kwargs: Any) -> None:
         calls.append((item, item_num))
 
     monkeypatch.setattr("daydream.phases.phase_fix", _fake_fix)
@@ -1163,7 +1270,11 @@ async def test_phase_fix_batched_single_item_delegates_to_phase_fix(
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_batched_includes_verifier_verdicts(tmp_path, make_work, silence_console):
+async def test_phase_fix_batched_includes_verifier_verdicts(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Per-finding verifier verdict/evidence/assumptions reach the batched prompt."""
     from daydream.phases import phase_fix_batched
 
@@ -1204,7 +1315,12 @@ async def test_phase_fix_batched_includes_verifier_verdicts(tmp_path, make_work,
 
 @pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
 @pytest.mark.asyncio
-async def test_phase_fix_batched_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+async def test_phase_fix_batched_rejects_unconfined_finding_file(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+    path_kind: Any,
+) -> None:
     """A single unconfined reference at any position rejects the whole batch.
 
     The hostile value lives only in the second item so the batched preflight
@@ -1226,7 +1342,11 @@ async def test_phase_fix_batched_rejects_unconfined_finding_file(tmp_path, make_
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_batched_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+async def test_phase_fix_batched_rejects_missing_file_reference(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """An item with no file reference rejects the whole batch, not just that item.
 
     The missing ref lives in the second item so the batched preflight loop
@@ -1247,16 +1367,20 @@ async def test_phase_fix_batched_rejects_missing_file_reference(tmp_path, make_w
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_batches_same_file_findings(tmp_path, monkeypatch, make_work):
+async def test_phase_fix_parallel_batches_same_file_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
     """phase_fix_parallel calls phase_fix_batched once per file-group, never falls back."""
     from daydream import phases
 
-    batched_calls: list[list[dict]] = []
+    batched_calls: list[list[dict[str, Any]]] = []
 
-    async def _fake_batched(backend, work, items, item_nums, total, **kwargs):
+    async def _fake_batched(backend: Any, work: Any, items: Any, item_nums: Any, total: Any, **kwargs: Any) -> None:
         batched_calls.append(items)
 
-    async def _fail_fix(*a, **kw):
+    async def _fail_fix(*a: Any, **kw: Any) -> None:
         raise AssertionError("phase_fix must not be called when batched succeeds")
 
     monkeypatch.setattr("daydream.phases.phase_fix_batched", _fake_batched)
@@ -1269,7 +1393,7 @@ async def test_phase_fix_parallel_batches_same_file_findings(tmp_path, monkeypat
         {"id": 5, "file": "b.py"},
     ]
 
-    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
+    failures = await phases.phase_fix_parallel(cast(Backend, object()), make_work(tmp_path), items)
 
     assert failures == {}
     # Two file-groups -> two batched calls (NOT five per-finding calls).
@@ -1279,17 +1403,28 @@ async def test_phase_fix_parallel_batches_same_file_findings(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(tmp_path, monkeypatch, make_work):
+async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
     """When the batched turn raises, the group retries each finding via phase_fix."""
     from daydream import phases
 
     fix_calls: list[int] = []
 
-    async def _flaky_batched(backend, work, items, item_nums, total, **kwargs):
+    async def _flaky_batched(backend: Any, work: Any, items: Any, item_nums: Any, total: Any, **kwargs: Any) -> None:
         if any(i["file"] == "boom.py" for i in items):
             raise RuntimeError("batched kaboom")
 
-    async def _fake_fix(backend, work, item, item_num, total, **kwargs):
+    async def _fake_fix(
+        backend: Any,
+        work: Any,
+        item: dict[str, Any],
+        item_num: Any,
+        total: Any,
+        **kwargs: Any,
+    ) -> None:
         fix_calls.append(item["id"])
 
     monkeypatch.setattr("daydream.phases.phase_fix_batched", _flaky_batched)
@@ -1301,7 +1436,7 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(tmp
         {"id": 4, "file": "boom.py"},
     ]
 
-    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
+    failures = await phases.phase_fix_parallel(cast(Backend, object()), make_work(tmp_path), items)
 
     # Fallback ran each finding in the failing group individually...
     assert sorted(fix_calls) == [3, 4]
@@ -1313,7 +1448,12 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(tmp
 
 @pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+async def test_phase_fix_parallel_rejects_unconfined_finding_file(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+    path_kind: Any,
+) -> None:
     """A single unconfined reference at any position aborts the whole run.
 
     The hostile value lives only in the second item so the parallel preflight
@@ -1335,7 +1475,11 @@ async def test_phase_fix_parallel_rejects_unconfined_finding_file(tmp_path, make
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+async def test_phase_fix_parallel_rejects_missing_file_reference(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """An item with no file reference aborts the whole run before any dispatch.
 
     The missing ref lives in the second item so the parallel preflight loop
@@ -1356,7 +1500,11 @@ async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_batched_adds_test_map_source_hint(tmp_path, make_work, silence_console):
+async def test_phase_fix_batched_adds_test_map_source_hint(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     import json as _json
 
     from daydream.phases import _parse_test_map, phase_fix_batched
@@ -1376,7 +1524,11 @@ async def test_phase_fix_batched_adds_test_map_source_hint(tmp_path, make_work, 
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_forwards_exploration_pointer(tmp_path, make_work, silence_console):
+async def test_phase_fix_parallel_forwards_exploration_pointer(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     from daydream.phases import phase_fix_parallel
 
     silence_console("daydream.phases")
@@ -1391,8 +1543,10 @@ async def test_phase_fix_parallel_forwards_exploration_pointer(tmp_path, make_wo
 
 @pytest.mark.asyncio
 async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_reviewer(
-    tmp_path, make_work, silence_console
-):
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Real path: a populated exploration dir is threaded phase_per_stack_reviews
     -> structural reviewer prompt (not just the builder's synthetic unit test).
 
@@ -1449,7 +1603,11 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_batched_prompt_includes_evidence(tmp_path, make_work, silence_console):
+async def test_phase_fix_batched_prompt_includes_evidence(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     from daydream.phases import phase_fix_batched
 
     silence_console("daydream.phases")
@@ -1462,7 +1620,7 @@ async def test_phase_fix_batched_prompt_includes_evidence(tmp_path, make_work, s
 class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
-    def test_short_output_included_fully(self):
+    def test_short_output_included_fully(self) -> None:
         from daydream.phases import _build_fix_prompt
 
         output = "FAILED test_foo.py::test_bar - AssertionError"
@@ -1473,7 +1631,7 @@ class TestBuildFixPrompt:
         assert output in result
         assert "Analyze the failures and fix them" in result
 
-    def test_long_output_truncated(self):
+    def test_long_output_truncated(self) -> None:
         from daydream.phases import TEST_OUTPUT_TAIL_LINES, _build_fix_prompt
 
         lines = [f"line {i}" for i in range(200)]
@@ -1487,7 +1645,7 @@ class TestBuildFixPrompt:
         assert "line 0\n" not in result
         assert f"line {200 - TEST_OUTPUT_TAIL_LINES - 1}\n" not in result
 
-    def test_feedback_items_adds_file_list(self):
+    def test_feedback_items_adds_file_list(self) -> None:
         from daydream.phases import _build_fix_prompt
 
         items = [
@@ -1504,14 +1662,14 @@ class TestBuildFixPrompt:
         # foo.py deduped to a single entry.
         assert result.count("- src/foo.py") == 1
 
-    def test_build_fix_prompt_threads_evidence_exemplar(self):
+    def test_build_fix_prompt_threads_evidence_exemplar(self) -> None:
         from daydream.phases import _build_fix_prompt
 
         items = [{"file": "src/app.py", "evidence": "tests/test_deep_orchestrator.py:526"}]
         prompt = _build_fix_prompt("tests failed", items, repo=None)
         assert "tests/test_deep_orchestrator.py:526" in prompt
 
-    def test_none_feedback_items_omits_file_section(self):
+    def test_none_feedback_items_omits_file_section(self) -> None:
         from daydream.phases import _build_fix_prompt
 
         result = _build_fix_prompt("test failed", None)
@@ -1521,7 +1679,7 @@ class TestBuildFixPrompt:
         assert "if a correct fix needs another file" not in result
         assert "Analyze the failures and fix them" in result
 
-    def test_empty_feedback_items_omits_file_section(self):
+    def test_empty_feedback_items_omits_file_section(self) -> None:
         from daydream.phases import _build_fix_prompt
 
         result = _build_fix_prompt("test failed", [])
@@ -1529,7 +1687,7 @@ class TestBuildFixPrompt:
         assert "Files modified" not in result
         assert "Focus on the files" not in result
 
-    def test_repo_maps_existing_file_to_absolute(self, tmp_path):
+    def test_repo_maps_existing_file_to_absolute(self, tmp_path: Path) -> None:
         from daydream.phases import _build_fix_prompt
 
         (tmp_path / "daydream").mkdir()
@@ -1547,7 +1705,7 @@ class TestBuildFixPrompt:
         assert "- daydream/x.py" in rel_result
         assert abs_path not in rel_result
 
-    def test_repo_leaves_missing_file_relative(self, tmp_path):
+    def test_repo_leaves_missing_file_relative(self, tmp_path: Path) -> None:
         from daydream.phases import _build_fix_prompt
 
         items = [{"id": 1, "description": "Bug", "file": "src/ghost.py", "line": 1}]
@@ -1557,15 +1715,15 @@ class TestBuildFixPrompt:
         assert str(tmp_path / "src" / "ghost.py") not in result
 
 
-def test_git_diff_returns_diff(feature_branch_repo):
+def test_git_diff_returns_diff(feature_branch_repo: Path) -> None:
     """Test _git_diff returns diff output against default branch."""
     from daydream.phases import _git_diff
 
     diff = _git_diff(feature_branch_repo)
-    assert "hello" in diff or "world" in diff
+    assert "hello" in (diff or "") or "world" in (diff or "")
 
 
-def test_git_log_returns_log(git_repo):
+def test_git_log_returns_log(git_repo: Path) -> None:
     """Test _git_log returns commit log."""
     from daydream.phases import _git_log
 
@@ -1578,7 +1736,7 @@ def test_git_log_returns_log(git_repo):
     assert "add new file" in log
 
 
-def test_git_branch_returns_branch(git_repo):
+def test_git_branch_returns_branch(git_repo: Path) -> None:
     """Test _git_branch returns current branch name."""
     from daydream.phases import _git_branch
 
@@ -1588,7 +1746,7 @@ def test_git_branch_returns_branch(git_repo):
     assert branch == "my-feature"
 
 
-def test_git_diff_empty_when_no_changes(git_repo):
+def test_git_diff_empty_when_no_changes(git_repo: Path) -> None:
     """Test _git_diff returns empty string when branch has no diff."""
     from daydream.phases import _git_diff
 
@@ -1596,7 +1754,7 @@ def test_git_diff_empty_when_no_changes(git_repo):
     assert diff == ""
 
 
-def _init_repo_with_exclude_fixture(tmp_path):
+def _init_repo_with_exclude_fixture(tmp_path: Path) -> None:
     """Create a repo with a main branch, then a feature branch touching tracked
     files and files under .planning/."""
     init_repo(tmp_path)
@@ -1611,7 +1769,7 @@ def _init_repo_with_exclude_fixture(tmp_path):
     git_commit(tmp_path, "feature work")
 
 
-def test_git_diff_exclude_filters_out_directory(tmp_path):
+def test_git_diff_exclude_filters_out_directory(tmp_path: Path) -> None:
     """_git_diff with exclude should drop matching files from the diff."""
     from daydream.phases import _git_diff
 
@@ -1623,7 +1781,7 @@ def test_git_diff_exclude_filters_out_directory(tmp_path):
     assert "world-change" in diff
 
 
-def test_git_diff_exclude_empty_list_matches_none(tmp_path):
+def test_git_diff_exclude_empty_list_matches_none(tmp_path: Path) -> None:
     """Passing an empty exclude list should behave identically to None."""
     from daydream.phases import _git_diff
 
@@ -1637,7 +1795,7 @@ def test_git_diff_exclude_empty_list_matches_none(tmp_path):
     assert "planning-only-content" in diff_no_arg
 
 
-def test_git_diff_no_exclude_still_works(tmp_path):
+def test_git_diff_no_exclude_still_works(tmp_path: Path) -> None:
     """Regression: _git_diff with no exclude arg returns full diff."""
     from daydream.phases import _git_diff
 
@@ -1649,7 +1807,7 @@ def test_git_diff_no_exclude_still_works(tmp_path):
     assert "world-change" in diff
 
 
-def test_build_intent_prompt_includes_pr_description_with_precedence_framing():
+def test_build_intent_prompt_includes_pr_description_with_precedence_framing() -> None:
     from daydream.phases import build_intent_prompt
     from daydream.prompts.authorial_intent import (
         AUTHORITATIVE_INTENT_RULE,
@@ -1710,7 +1868,7 @@ def test_build_intent_prompt_frames_instruction_like_body_as_untrusted(
     assert AUTHORITATIVE_INTENT_RULE in prompt
 
 
-def test_build_intent_prompt_omits_pr_section_when_absent():
+def test_build_intent_prompt_omits_pr_section_when_absent() -> None:
     from daydream.phases import build_intent_prompt
     from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
 
@@ -1727,7 +1885,7 @@ def test_build_intent_prompt_omits_pr_section_when_absent():
         assert PR_DESCRIPTION_UNTRUSTED_FRAMING not in prompt  # NEW #579
 
 
-def test_build_intent_prompt_truncates_body_over_8000_chars():
+def test_build_intent_prompt_truncates_body_over_8000_chars() -> None:
     """A body longer than _PR_BODY_MAX_CHARS is capped with a truncation marker;
     the first 8000 chars appear verbatim, the excess does not."""
     from daydream.phases import _PR_BODY_MAX_CHARS, build_intent_prompt
@@ -1747,7 +1905,7 @@ def test_build_intent_prompt_truncates_body_over_8000_chars():
     assert "[PR description truncated]" in prompt
 
 
-def test_build_intent_prompt_escapes_closing_delimiter_in_body():
+def test_build_intent_prompt_escapes_closing_delimiter_in_body() -> None:
     """A body containing </pr_description> must have that tag escaped so it
     cannot prematurely close the XML-like framing.
 
@@ -1778,7 +1936,7 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body():
     assert "&lt;pr_description>" in prompt
 
 
-def test_build_intent_prompt_contains_no_pr_and_no_skill_directives():
+def test_build_intent_prompt_contains_no_pr_and_no_skill_directives() -> None:
     """The intent prompt anchors the agent to the on-disk diff: no PR lookups, no skill invocations."""
     from daydream.phases import build_intent_prompt
 
@@ -1801,7 +1959,7 @@ def test_build_intent_prompt_contains_no_pr_and_no_skill_directives():
     assert "as plain text" in prompt
 
 
-def test_authoritative_intent_block_pairs_framing_with_rule():
+def test_authoritative_intent_block_pairs_framing_with_rule() -> None:
     """AUTHORITATIVE_INTENT_BLOCK carries the untrusted framing and the intent
     rule in that fixed order — the pairing-and-order invariant consumers rely on."""
     from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
@@ -1834,7 +1992,12 @@ def test_authoritative_intent_block_pairs_framing_with_rule():
 
 
 @pytest.mark.asyncio
-async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch, make_work, silence_console):
+async def test_phase_understand_intent_confirmed_first_try(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """User confirms the agent's understanding on the first attempt."""
     from daydream.phases import phase_understand_intent
 
@@ -1862,14 +2025,17 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_rejects_budget_truncated_summary(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """A partial intent response is never returned for downstream persistence."""
     from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases")
 
-    async def _truncated_run_agent(*args, **kwargs):
+    async def _truncated_run_agent(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
         return "partial intent", None, "wall_budget_exceeded"
 
     monkeypatch.setattr("daydream.phases.run_agent", _truncated_run_agent)
@@ -1892,8 +2058,11 @@ async def test_phase_understand_intent_rejects_budget_truncated_summary(
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_correction_then_confirm(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """User corrects the agent's understanding, then confirms on second attempt."""
     from daydream.phases import phase_understand_intent
 
@@ -1927,8 +2096,11 @@ async def test_phase_understand_intent_correction_then_confirm(
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_codex_read_only_inlines_diff_and_exploration(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """A Codex read-only intent turn runs in a disposable clone that omits
     gitignored ``.daydream/`` artifacts, so its prompt must inline the diff and
     the exploration summary instead of pointing at the on-disk files (issue
@@ -1942,7 +2114,7 @@ async def test_phase_understand_intent_codex_read_only_inlines_diff_and_explorat
 
     captured: dict[str, Any] = {}
 
-    async def _capture_run_agent(backend, cwd, prompt, **kwargs):
+    async def _capture_run_agent(backend: Any, cwd: Any, prompt: Any, **kwargs: dict[str, Any]) -> tuple[Any, ...]:
         captured["prompt"] = prompt
         captured["read_only"] = kwargs.get("read_only")
         return "This PR adds a login page.", None, None
@@ -1985,8 +2157,11 @@ async def test_phase_understand_intent_codex_read_only_inlines_diff_and_explorat
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_codex_correction_loop_inlines_diff_under_boundary(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """A disposable-clone backend's correction-loop rebuild inlines the diff under
     the UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY (issue #336 findings 1/3/7): the
     inlined diff is repository-controlled content, and the on-disk
@@ -1999,7 +2174,7 @@ async def test_phase_understand_intent_codex_correction_loop_inlines_diff_under_
 
     captured: list[str] = []
 
-    async def _capture_run_agent(backend, cwd, prompt, **kwargs):
+    async def _capture_run_agent(backend: Any, cwd: Any, prompt: Any, **kwargs: Any) -> tuple[Any, ...]:
         captured.append(prompt)
         return "This PR adds a login page.", None, None
 
@@ -2033,8 +2208,11 @@ async def test_phase_understand_intent_codex_correction_loop_inlines_diff_under_
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_non_codex_keeps_budget_gated_diff_pointer(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Non-cloning backends keep the budget-gated diff pointer: their execution
     cwd is the worktree, where the on-disk ``.daydream/diff.patch`` is present."""
     from daydream.phases import phase_understand_intent
@@ -2069,8 +2247,11 @@ async def test_phase_understand_intent_non_codex_keeps_budget_gated_diff_pointer
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_correction_prompt_keeps_no_pr_no_skill_directives(
-    tmp_path, monkeypatch, make_work, silence_console
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """The rebuilt prompt after a user correction still forbids PR lookups and skill invocations."""
     from daydream.phases import phase_understand_intent
 
@@ -2111,8 +2292,11 @@ async def test_phase_understand_intent_correction_prompt_keeps_no_pr_no_skill_di
 
 
 async def test_phase_understand_intent_forced_no_interactive_falls_through(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """A forced ``no`` (assume="no") in interactive mode must enter the correction flow.
 
     Regression: ``resolve_gate`` returns False for assume="no", and the gate
@@ -2133,7 +2317,7 @@ async def test_phase_understand_intent_forced_no_interactive_falls_through(
 
         prompt_calls: list[str] = []
 
-        def _record(console, message, default=""):
+        def _record(console: Any, message: Any, default: Any="") -> str:
             prompt_calls.append(message)
             return "y"
 
@@ -2164,8 +2348,11 @@ def _make_intent_backend(summary: str) -> ScriptedBackend:
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_renders_summary_panel_before_gate(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """The intent summary is printed in the Understanding panel before the confirm gate.
 
     Uses a recording console (not capsys scraping — that flakes in the no-TTY
@@ -2200,8 +2387,11 @@ async def test_phase_understand_intent_renders_summary_panel_before_gate(
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_renders_placeholder_for_empty_summary(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """An empty intent reply renders the dim placeholder, not a blank panel."""
     from rich.console import Console
 
@@ -2230,7 +2420,11 @@ async def test_phase_understand_intent_renders_placeholder_for_empty_summary(
 
 
 @pytest.mark.asyncio
-async def test_phase_alternative_review_returns_issues(tmp_path, make_work, silence_console):
+async def test_phase_alternative_review_returns_issues(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Agent returns numbered issues via structured output."""
     from daydream.phases import phase_alternative_review
 
@@ -2277,7 +2471,11 @@ async def test_phase_alternative_review_returns_issues(tmp_path, make_work, sile
 
 
 @pytest.mark.asyncio
-async def test_phase_alternative_review_no_issues(tmp_path, make_work, silence_console):
+async def test_phase_alternative_review_no_issues(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Agent finds no issues — returns empty list."""
     from daydream.phases import phase_alternative_review
 
@@ -2300,7 +2498,7 @@ async def test_phase_alternative_review_no_issues(tmp_path, make_work, silence_c
     assert issues == []
 
 
-def test_feedback_schema_requires_confidence_and_rationale():
+def test_feedback_schema_requires_confidence_and_rationale() -> None:
     from daydream.phases import FEEDBACK_SCHEMA
 
     required = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["required"]
@@ -2311,7 +2509,7 @@ def test_feedback_schema_requires_confidence_and_rationale():
     assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
-def test_finding_file_schema_slots_use_repository_file_path_schema():
+def test_finding_file_schema_slots_use_repository_file_path_schema() -> None:
     """Every model-facing finding schema constrains its file slot to the shared repository-path grammar."""
     from daydream import phases
     from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
@@ -2331,7 +2529,7 @@ def test_finding_file_schema_slots_use_repository_file_path_schema():
     assert per_stack_file["pattern"]
 
 
-def test_alternative_review_schema_requires_confidence_and_rationale():
+def test_alternative_review_schema_requires_confidence_and_rationale() -> None:
     from daydream.phases import ALTERNATIVE_REVIEW_SCHEMA
 
     required = ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["required"]
@@ -2342,7 +2540,7 @@ def test_alternative_review_schema_requires_confidence_and_rationale():
     assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
-def test_is_evidenced_gate_branches():
+def test_is_evidenced_gate_branches() -> None:
     """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
     from daydream.phases import _is_evidenced
 
@@ -2416,18 +2614,18 @@ def _per_stack_prompt(**overrides: Any) -> str:
     return build_per_stack_prompt(**args)
 
 
-def test_review_prompt_includes_dependency_impact(tmp_path):
+def test_review_prompt_includes_dependency_impact(tmp_path: Path) -> None:
     prompt = _per_stack_prompt(exploration_dir=tmp_path)
     assert "Dependency Impact" in prompt
 
 
-def test_review_prompt_distinguishes_convention_cases(tmp_path):
+def test_review_prompt_distinguishes_convention_cases(tmp_path: Path) -> None:
     prompt = _per_stack_prompt(exploration_dir=tmp_path)
     assert "DROP IT" in prompt
     assert "flag it as HIGH" in prompt
 
 
-def test_all_phase_builders_include_exploration_pointer(tmp_path):
+def test_all_phase_builders_include_exploration_pointer(tmp_path: Path) -> None:
     from daydream.phases import (
         build_alternative_review_prompt,
         build_intent_prompt,
@@ -2436,18 +2634,19 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
-    for builder in (
+    builders: list[Callable[..., str]] = [
         lambda **kw: _per_stack_prompt(**kw),
         lambda **kw: build_intent_prompt(strategy=_default_strategy("intent"), **kw),
         lambda **kw: build_alternative_review_prompt(strategy=_default_strategy("alternatives"), **kw),
-    ):
+    ]
+    for builder in builders:
         prompt = builder(exploration_dir=exploration_dir)
         assert str(exploration_dir) in prompt
         assert "summary.md" in prompt
         assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
 
 
-def test_exploration_pointer_names_affected_files_and_scopes_read_clause(tmp_path):
+def test_exploration_pointer_names_affected_files_and_scopes_read_clause(tmp_path: Path) -> None:
     from daydream.phases import _exploration_pointer
 
     exploration_dir = tmp_path / "exploration"
@@ -2458,7 +2657,7 @@ def test_exploration_pointer_names_affected_files_and_scopes_read_clause(tmp_pat
     assert _exploration_pointer(None) == ""
 
 
-def test_exploration_pointer_marks_results_untrusted(tmp_path):
+def test_exploration_pointer_marks_results_untrusted(tmp_path: Path) -> None:
     from daydream.phases import _exploration_pointer
     from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
@@ -2469,18 +2668,19 @@ def test_exploration_pointer_marks_results_untrusted(tmp_path):
     assert _exploration_pointer(None) == ""
 
 
-def test_issue_producing_builders_use_shared_instructions(tmp_path):
+def test_issue_producing_builders_use_shared_instructions(tmp_path: Path) -> None:
     from daydream.phases import build_alternative_review_prompt
 
-    for builder in (
+    builders: list[Callable[..., str]] = [
         lambda **kw: _per_stack_prompt(**kw),
         lambda **kw: build_alternative_review_prompt(strategy=_default_strategy("alternatives"), **kw),
-    ):
+    ]
+    for builder in builders:
         prompt = builder(exploration_dir=tmp_path)
         assert "Confidence and Convention Rules" in prompt
 
 
-def test_intent_builder_omits_issue_instructions(tmp_path):
+def test_intent_builder_omits_issue_instructions(tmp_path: Path) -> None:
     from daydream.phases import build_intent_prompt
 
     prompt = build_intent_prompt(strategy=_default_strategy("intent"), exploration_dir=tmp_path)
@@ -2488,21 +2688,24 @@ def test_intent_builder_omits_issue_instructions(tmp_path):
     assert "issue" not in prompt.lower()
 
 
-def test_build_review_prompt_with_prior_commits():
+def test_build_review_prompt_with_prior_commits() -> None:
     prompt = _per_stack_prompt(prior_commits="abc1234 fix: something")
     assert "settled decisions" in prompt
     assert "abc1234 fix: something" in prompt
 
 
-def test_build_review_prompt_without_prior_commits():
+def test_build_review_prompt_without_prior_commits() -> None:
     prompt = _per_stack_prompt(prior_commits=None)
     assert "settled decisions" not in prompt
 
 
 @pytest.mark.asyncio
 async def test_phase_commit_push_includes_daydream_trailers(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """commit-push must include Daydream-Run and Daydream-Version trailers."""
     from daydream.phases import phase_commit_push
 
@@ -2525,8 +2728,11 @@ async def test_phase_commit_push_includes_daydream_trailers(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_verdict_correct_uses_original_prompt(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Investigator verdict 'correct' → retry uses the original generic prompt."""
     from daydream.phases import phase_test_and_heal
 
@@ -2564,8 +2770,11 @@ async def test_phase_test_and_heal_option1_verdict_correct_uses_original_prompt(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Investigator suggests replacement + user confirms → retry pins new command."""
     from daydream.phases import phase_test_and_heal
 
@@ -2599,8 +2808,11 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Investigator suggests replacement + user declines → retry uses original prompt."""
     from daydream.phases import phase_test_and_heal
 
@@ -2632,8 +2844,11 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Investigator raising / returning garbage → warning + retry with original cmd."""
     from daydream.phases import phase_test_and_heal
 
@@ -2671,7 +2886,7 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
 # phase_test_and_heal — option 4 failure-summarizer + handoff
 
 
-def test_minimal_handoff_separates_facts_from_unknown_cause():
+def test_minimal_handoff_separates_facts_from_unknown_cause() -> None:
     """The no-agent fallback mirrors the facts/hypotheses split and invents no cause."""
     from daydream.phases import _build_minimal_handoff
 
@@ -2696,8 +2911,11 @@ def test_minimal_handoff_separates_facts_from_unknown_cause():
 
 @pytest.mark.asyncio
 async def test_summarizer_invoked_read_only_normal_calls_mutating(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """The summarizer runs read_only=True; the preceding test run does not."""
     from daydream.phases import phase_test_and_heal
 
@@ -2713,7 +2931,7 @@ async def test_summarizer_invoked_read_only_normal_calls_mutating(
     assert backend.read_only_calls == [False, True]
 
 
-def _install_recorder(monkeypatch, tmp_path, *, on_write=None):
+def _install_recorder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_write: Any=None) -> Any:
     """Plant a fake recorder with .target_dir and .session_id on get_current_recorder.
 
     Also stubs ``maybe_fork`` to a no-op async context manager so the fake
@@ -2738,7 +2956,7 @@ def _install_recorder(monkeypatch, tmp_path, *, on_write=None):
     monkeypatch.setattr("daydream.phases.get_current_recorder", lambda: fake)
 
     @asynccontextmanager
-    async def _noop_fork(recorder, descriptor):
+    async def _noop_fork(recorder: Any, descriptor: Any) -> AsyncIterator[Any]:
         yield
 
     monkeypatch.setattr("daydream.phases.maybe_fork", _noop_fork)
@@ -2747,8 +2965,11 @@ def _install_recorder(monkeypatch, tmp_path, *, on_write=None):
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Option 4 → handoff.md written to <target>/.daydream/runs/<session_id>/."""
     from daydream.phases import phase_test_and_heal
 
@@ -2777,8 +2998,11 @@ async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """When pbcopy is on PATH → user is offered; 'y' triggers copy_to_clipboard."""
     from daydream.phases import phase_test_and_heal
 
@@ -2787,10 +3011,11 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
     monkeypatch.setattr("daydream.phases.clipboard_available", lambda: True)
 
     copied: list[str] = []
-    monkeypatch.setattr(
-        "daydream.phases.copy_to_clipboard",
-        lambda text: (copied.append(text) or True),
-    )
+    def _copy_to_clipboard(text: Any) -> bool:
+        copied.append(text)
+        return True
+
+    monkeypatch.setattr("daydream.phases.copy_to_clipboard", _copy_to_clipboard)
 
     backend = _HealBackend(script=[
         _FAIL_TURN,
@@ -2810,8 +3035,11 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """No clipboard tool on PATH → graceful skip line printed, no offer."""
     from daydream.phases import phase_test_and_heal
 
@@ -2828,7 +3056,7 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
     user_prompts: list[str] = []
     answers = iter(["4"])
 
-    def fake_prompt(console_arg, message, default=""):  # noqa
+    def fake_prompt(_console_arg: Any, message: Any, default: Any="") -> Any:
         user_prompts.append(message)
         return next(answers, "n")
 
@@ -2858,8 +3086,11 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """No active recorder → handoff written under <repo>/.daydream/handoff-*.md, note included."""
     from daydream.phases import phase_test_and_heal
 
@@ -2893,8 +3124,11 @@ async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Summarizer raising → minimal handoff is written anyway."""
     from daydream.phases import phase_test_and_heal
 
@@ -2926,8 +3160,11 @@ async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Summarizer returning a structured_output without 'handoff_prompt' → minimal fallback."""
     from daydream.phases import phase_test_and_heal
 
@@ -2956,8 +3193,11 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
 
 @pytest.mark.asyncio
 async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Real path: option-4 drives the summarizer with the facts/hypotheses contract."""
     from daydream.phases import phase_test_and_heal
 
@@ -2980,8 +3220,11 @@ async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
 
 @pytest.mark.asyncio
 async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Direct regression for the incident: with no evidence, cause is parked UNKNOWN.
 
     The summarizer raises, so the on-disk handoff is the no-agent fallback. It
@@ -3014,7 +3257,7 @@ async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
 # _resolve_handoff_paths — ephemeral worktree + archive routing
 
 
-def _make_ephemeral_workcontext(source: Path, repo: Path):
+def _make_ephemeral_workcontext(source: Path, repo: Path) -> Any:
     """Build a WorkContext where ``source != repo`` (ephemeral case)."""
     from daydream.workspace import WorkContext
 
@@ -3031,8 +3274,9 @@ def _make_ephemeral_workcontext(source: Path, repo: Path):
 
 
 def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
-    tmp_path, monkeypatch,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ephemeral + archive: handoff lives inside the archive run dir.
 
     Co-locating the handoff with the other archived artifacts keeps the
@@ -3061,7 +3305,7 @@ def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
         on_write = lambda *_args, **_kw: None  # archiving enabled  # noqa: E731
 
     handoff, trajectory, traj_dir, diff, manifest, deep = _resolve_handoff_paths(
-        _Recorder(), work,
+        cast(TrajectoryRecorder, _Recorder()), work,
     )
 
     archive_run_dir = archive_root / "runs" / "sess-xyz"
@@ -3074,7 +3318,7 @@ def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
     assert deep == archive_run_dir / "deep"
 
 
-def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path):
+def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path: Path) -> None:
     """In-place: artifact references stay under recorder.target_dir."""
     from daydream.phases import _resolve_handoff_paths
     from daydream.workspace import WorkContext
@@ -3096,7 +3340,7 @@ def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path):
         on_write = None  # archive disabled — should be irrelevant in-place
 
     handoff, trajectory, traj_dir, diff, manifest, deep = _resolve_handoff_paths(
-        _Recorder(), work,
+        cast(TrajectoryRecorder, _Recorder()), work,
     )
 
     live_run_dir = tmp_path / ".daydream" / "runs" / "sess-abc"
@@ -3108,7 +3352,7 @@ def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path):
     assert deep == tmp_path / ".daydream" / "deep"
 
 
-def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path):
+def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path: Path) -> None:
     """Trajectory ref is set even though the recorder has not flushed yet.
 
     The old behavior gated artifact refs on ``is_file()`` / ``is_dir()``,
@@ -3137,7 +3381,7 @@ def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path):
         on_write = None
 
     _, trajectory, traj_dir, _, manifest, deep = _resolve_handoff_paths(
-        _Recorder(), work,
+        cast(TrajectoryRecorder, _Recorder()), work,
     )
 
     # None of these files exist on disk yet, but the resolver must still
@@ -3152,7 +3396,7 @@ def test_resolve_handoff_paths_returns_paths_even_when_files_missing(tmp_path):
 # _write_handoff — must report write failure so the caller can fall back
 
 
-def test_write_handoff_returns_true_on_success(tmp_path):
+def test_write_handoff_returns_true_on_success(tmp_path: Path) -> None:
     """Happy path: bytes hit disk and the helper reports success."""
     from daydream.phases import _write_handoff
 
@@ -3161,7 +3405,7 @@ def test_write_handoff_returns_true_on_success(tmp_path):
     assert target.read_text(encoding="utf-8") == "BODY"
 
 
-def test_write_handoff_returns_false_on_oserror(tmp_path, monkeypatch):
+def test_write_handoff_returns_false_on_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Filesystem failure must surface as False so the caller can recover.
 
     Without this signal the option-4 abort branch prints "Handoff written:
@@ -3173,7 +3417,7 @@ def test_write_handoff_returns_false_on_oserror(tmp_path, monkeypatch):
 
     target = tmp_path / "runs" / "sid" / "handoff.md"
 
-    def _boom(self, *args, **kwargs):  # noqa: ARG001 - signature must match Path.write_text
+    def _boom(self: object, *args: Any, **kwargs: Any) -> None:  # noqa: ARG001 - signature must match Path.write_text
         raise OSError("disk full")
 
     monkeypatch.setattr(_Path, "write_text", _boom)
@@ -3183,8 +3427,11 @@ def test_write_handoff_returns_false_on_oserror(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """When the handoff write fails, the full body is surfaced inline.
 
     Otherwise the user would see ``Handoff written: <path>`` for a file
@@ -3235,8 +3482,11 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Non-interactive: failing tests take choice-"4" semantics — no menu, no fix.
 
     With ``non_interactive`` set, ``phase_test_and_heal`` must NOT render the
@@ -3312,8 +3562,11 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses_split(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Non-interactive + summarizer fails → on-disk handoff carries the split, cause UNKNOWN.
 
     Mirrors the interactive fallback regression through the unattended abort
@@ -3362,8 +3615,11 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """``--yes`` (assume="yes") triggers exactly ONE auto fix attempt then aborts.
 
     Observable contract:
@@ -3424,7 +3680,7 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
 # _sanitize_suggested_command — fence-break hardening + whitespace collapse
 
 
-def test_sanitize_suggested_command_strips_backticks_and_collapses_whitespace():
+def test_sanitize_suggested_command_strips_backticks_and_collapses_whitespace() -> None:
     """Backticks would break out of the triple-backtick prompt fence.
 
     The retry prompt wraps the sanitized command in ```...```; if backticks
@@ -3447,8 +3703,11 @@ def test_sanitize_suggested_command_strips_backticks_and_collapses_whitespace():
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_strips_backticks_from_retry_prompt(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Backticks in suggested_command must NOT survive into the retry prompt.
 
     Drives the real option-1 path: investigator returns a malicious
@@ -3493,8 +3752,11 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_retry_prompt(
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_shows_suggested_command_before_confirm(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """User must see the sanitized command BEFORE the y/n prompt.
 
     Previously they only saw 'verdict — reason' and were asked to
@@ -3515,7 +3777,7 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
     prompt_called_at: list[int] = []
     prompt_called_at_choice: list[bool] = []
 
-    def _prompt(*_args, **_kw):
+    def _prompt(*_args: Any, **_kw: Any) -> str:
         prompt_called_at.append(len(infos))
         if not prompt_called_at_choice:
             prompt_called_at_choice.append(True)
@@ -3566,7 +3828,7 @@ def _init_git_repo(repo: Path) -> None:
     git_commit(repo, "seed")
 
 
-def test_changed_files_includes_untracked_new_files(tmp_path):
+def test_changed_files_includes_untracked_new_files(tmp_path: Path) -> None:
     """A fix that creates a new file is still untracked at abort time."""
     from daydream.phases import _changed_files
 
@@ -3589,7 +3851,7 @@ def test_changed_files_includes_untracked_new_files(tmp_path):
     assert len(paths) == len(set(paths))  # deduped
 
 
-def test_changed_files_returns_empty_on_non_git_dir(tmp_path):
+def test_changed_files_returns_empty_on_non_git_dir(tmp_path: Path) -> None:
     """Outside a git repo the helper still degrades gracefully to []."""
     from daydream.phases import _changed_files
 
@@ -3601,8 +3863,11 @@ def test_changed_files_returns_empty_on_non_git_dir(tmp_path):
 
 @pytest.mark.asyncio
 async def test_option4_calls_write_partial_before_summarizer(
-    tmp_path, monkeypatch, make_work, silence_console,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Abort flushes a `.partial` snapshot so the trajectory exists on disk."""
     from daydream.phases import phase_test_and_heal
 
@@ -3644,10 +3909,10 @@ def _install_hero_dim_spies(
     heroes: list[tuple[str, str]] = []
     dim_messages: list[str] = []
 
-    def _hero_spy(_console, title, description):
+    def _hero_spy(_console: Any, title: Any, description: Any) -> None:
         heroes.append((title, description))
 
-    def _dim_spy(_console, message):
+    def _dim_spy(_console: Any, message: Any) -> None:
         dim_messages.append(message)
 
     monkeypatch.setattr("daydream.phases.print_phase_hero", _hero_spy)
@@ -3732,9 +3997,16 @@ _MERGE_ITEMS = {
     ],
 )
 async def test_phase_prints_model_line_after_hero(
-    tmp_path, monkeypatch, make_work, silence_console,
-    phase_name, model, events, expected_hero, setup,
-):
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+    phase_name: Any,
+    model: Any,
+    events: Any,
+    expected_hero: Any,
+    setup: Any,
+) -> None:
     from daydream import phases
 
     silence_console("daydream.phases", keep=("print_phase_hero", "print_dim"))
@@ -3750,7 +4022,11 @@ async def test_phase_prints_model_line_after_hero(
     assert f"Model: {model}" in dim_messages
 
 
-async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, make_work, silence_console):
+async def test_merge_writes_canonical_json_and_renders_markdown(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Merge emits a schema item list; structural records are tagged in Python.
 
     Observable consequences:
@@ -3808,7 +4084,11 @@ async def test_merge_writes_canonical_json_and_renders_markdown(tmp_path, make_w
     assert (work.repo / REVIEW_OUTPUT_FILE).read_text() == report_path.read_text()
 
 
-async def test_merge_raises_on_empty_agent_output(tmp_path, make_work, silence_console):
+async def test_merge_raises_on_empty_agent_output(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Empty/invalid agent output raises ValueError -- no silent [] fallback."""
     from daydream.phases import phase_cross_stack_merge
 
@@ -3825,7 +4105,11 @@ async def test_merge_raises_on_empty_agent_output(tmp_path, make_work, silence_c
         )
 
 
-async def test_verifier_excludes_structural_lens(tmp_path, make_work, silence_console):
+async def test_verifier_excludes_structural_lens(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Verifier reads canonical items and filters structural out before the prompt.
 
     Observable consequence: a structural item present in ``merged-items.json``
@@ -3906,7 +4190,11 @@ async def test_verifier_excludes_structural_lens(tmp_path, make_work, silence_co
     assert backend.read_only_calls == [True]
 
 
-async def test_verifier_prompt_carries_gate_zero_protocol(tmp_path, make_work, silence_console):
+async def test_verifier_prompt_carries_gate_zero_protocol(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
     """Real-path: ``phase_verify_recommendations`` embeds the Gate-0 anti-confabulation
     protocol in the prompt actually handed to the backend.
 
@@ -3964,15 +4252,16 @@ async def test_verifier_prompt_carries_gate_zero_protocol(tmp_path, make_work, s
     assert "same-turn echo" in backend.last_prompt
 
 
-def test_fix_guardrails_forbid_git_mutation():
-    from daydream.phases import _FIX_GUARDRAILS, GENERATED_FILES_PROMPT_RULE
+def test_fix_guardrails_forbid_git_mutation() -> None:
+    from daydream.generated_files import GENERATED_FILES_PROMPT_RULE
+    from daydream.phases import _FIX_GUARDRAILS
 
     text = _FIX_GUARDRAILS + GENERATED_FILES_PROMPT_RULE
     for verb in ("git stash", "git checkout", "git reset", "git commit"):
         assert verb in text, f"guardrails must forbid `{verb}`"
 
 
-def test_fix_verify_schema_rejects_bad_verdict():
+def test_fix_verify_schema_rejects_bad_verdict() -> None:
     import jsonschema
 
     from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
@@ -3984,13 +4273,13 @@ def test_fix_verify_schema_rejects_bad_verdict():
         jsonschema.validate(payload, FIX_VERIFY_VERDICTS_SCHEMA)
 
 
-def test_fix_verify_schema_accepts_all_four_verdicts():
+def test_fix_verify_schema_accepts_all_four_verdicts() -> None:
     import jsonschema
 
     from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
 
     for verdict in ("resolved", "unresolved", "wrong_target", "regressed"):
-        entry = {"issue_id": 1, "verdict": verdict, "reason": "r"}
+        entry: dict[str, Any] = {"issue_id": 1, "verdict": verdict, "reason": "r"}
         # ``path`` is strict-mode required (see test_output_schema_strict.py)
         # but nullable; wrong_target/regressed carry the corrected file.
         if verdict in ("wrong_target", "regressed"):
@@ -4000,7 +4289,7 @@ def test_fix_verify_schema_accepts_all_four_verdicts():
         jsonschema.validate({"verdicts": [entry]}, FIX_VERIFY_VERDICTS_SCHEMA)
 
 
-def test_fix_verify_verdicts_are_single_source():
+def test_fix_verify_verdicts_are_single_source() -> None:
     """The fix-verify verdicts live in ONE public constant, not scattered literals.
 
     The schema enum, ``phase_fix_verify``'s allowed-value filter, and the
@@ -4015,15 +4304,18 @@ def test_fix_verify_verdicts_are_single_source():
         FIX_VERIFY_VERDICTS_SCHEMA,
     )
 
-    enum = FIX_VERIFY_VERDICTS_SCHEMA["properties"]["verdicts"]["items"]\
-        ["properties"]["verdict"]["enum"]
+    schema = cast(dict[str, Any], FIX_VERIFY_VERDICTS_SCHEMA)
+    enum = schema["properties"]["verdicts"]["items"]["properties"]["verdict"]["enum"]
     assert enum == list(FIX_VERIFY_VERDICTS)
     # Subsets are drawn from the same four-value authority.
     assert set(FIX_VERIFY_ACTIONABLE_VERDICTS) < set(FIX_VERIFY_VERDICTS)
     assert set(FIX_VERIFY_RETARGETABLE_VERDICTS) < set(FIX_VERIFY_VERDICTS)
 
 
-def test_print_fix_complete_gates_on_resolved(monkeypatch, capsys):
+def test_print_fix_complete_gates_on_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from rich.console import Console
 
     from daydream.ui.summary import print_fix_complete
@@ -4037,7 +4329,7 @@ def test_print_fix_complete_gates_on_resolved(monkeypatch, capsys):
     assert out.count("Fix applied") == 1  # only the resolved one
 
 
-def test_group_items_by_footprint_unions_overlapping_footprints():
+def test_group_items_by_footprint_unions_overlapping_footprints() -> None:
     from daydream.phases import group_items_by_footprint
 
     items = [
@@ -4052,7 +4344,7 @@ def test_group_items_by_footprint_unions_overlapping_footprints():
     assert {i["id"] for i in a_group} == {1, 2}
 
 
-def test_group_items_by_footprint_never_splits_same_file_batch():
+def test_group_items_by_footprint_never_splits_same_file_batch() -> None:
     from daydream.phases import group_items_by_footprint
 
     items = [
@@ -4065,14 +4357,25 @@ def test_group_items_by_footprint_never_splits_same_file_batch():
     assert {i["id"] for i in groups[0][1]} == {1, 2, 3}
 
 
-async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(tmp_path, monkeypatch, make_work):
+async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
     import anyio
 
     from daydream import phases
 
     active_files, batched_calls, fix_calls = set(), [], []
 
-    async def _fake_batched(backend, work, items, item_nums, total, **kwargs):
+    async def _fake_batched(
+        backend: Any,
+        work: Any,
+        items: list[Any],
+        item_nums: Any,
+        total: Any,
+        **kwargs: Any,
+    ) -> None:
         f = items[0]["file"]
         batched_calls.append(f)
         assert f not in active_files, "two concurrent fixes on the same file"
@@ -4080,7 +4383,14 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
         await anyio.sleep(0)  # force interleave window
         active_files.discard(f)
 
-    async def _fake_fix(backend, work, item, item_num, total, **kwargs):
+    async def _fake_fix(
+        backend: Any,
+        work: Any,
+        item: dict[str, Any],
+        item_num: Any,
+        total: Any,
+        **kwargs: Any,
+    ) -> None:
         f = item["file"]
         if f == "boom.py":
             raise RuntimeError("kaboom")
@@ -4098,7 +4408,7 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
         {"id": 3, "file": "b.py"},
         {"id": 4, "file": "boom.py"},
     ]
-    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
+    failures = await phases.phase_fix_parallel(cast(Backend, object()), make_work(tmp_path), items)
     # a.py has 2 findings -> one batched call. b.py and boom.py have 1 finding
     # each -> direct phase_fix (no batched prompt, no fallback retry).
     assert batched_calls == ["a.py"]
@@ -4181,8 +4491,8 @@ def test_alternatives_prompt_pointer_when_diff_is_none() -> None:
 
 def test_inlineable_diff_budget_boundaries() -> None:
     """Under and exactly-at budget inline; over budget falls back to the pointer."""
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
     from daydream.phases import _inlineable_diff
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     assert _inlineable_diff(None) is None
     assert _inlineable_diff("") == ""  # empty diff is under budget
@@ -4194,8 +4504,8 @@ def test_inlineable_diff_budget_boundaries() -> None:
 
 def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
     """A multi-byte diff just over the byte budget is not inlined."""
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
     from daydream.phases import _inlineable_diff
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # 3 bytes per char in UTF-8, so this is ~3x the budget in bytes while
     # being under it in characters.
@@ -4217,7 +4527,7 @@ async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched()
     assert "severity" in props["issues"]["items"]["properties"]  # existing field preserved
 
 
-def test_merge_validates_finding_locations_before_write(tmp_path: Path):
+def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
     """A beyond-tolerance citation is demoted-with-annotation, not snapped."""
     from daydream.hunk_index import write_hunk_index
     from daydream.phases import _write_single_stack_merged_items

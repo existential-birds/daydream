@@ -25,7 +25,7 @@ import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from daydream import config, git_ops
@@ -403,7 +403,7 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
     git_ops.push_branch(repo_dir, branch)
     existing_prs = git_ops.gh_pr_list_for_branch(repo_dir, branch)
     if existing_prs:
-        return existing_prs[0]["url"]
+        return str(existing_prs[0]["url"])
     return git_ops.gh_pr_create(repo_dir, head=branch, base=base, title=_PR_TITLE, body=_PR_BODY)
 
 
@@ -633,7 +633,7 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
     # trigger map the same way the test harness's ``_wf_triggers`` does.
     on: Any = wf.get("on")
     if on is None:
-        on = cast(dict[Any, Any], wf).get(True)
+        on = wf.get(True)
     triggers = on if isinstance(on, dict) else {}
 
     if name == "daydream-review.yml":

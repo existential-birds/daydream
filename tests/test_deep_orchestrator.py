@@ -12,21 +12,20 @@ module's call sites -- and the sibling modules that
 ``from tests.test_deep_orchestrator import _StubBackend`` -- keep working now
 that the canonical home is the harness, not this file.
 """
-
 from __future__ import annotations
 
 import json
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import pytest
 
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.eval.analyzer import _records_issues
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from tests.harness.git_helpers import bare_remote as _bare_remote
@@ -315,7 +314,10 @@ def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> "PRInfo":
 
 
 async def test_supervise_rules_drops_deny_globbed_finding(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Rule supervision rewrites the canonical items before findings-out."""
     from daydream.config_file import load_file_config
@@ -366,7 +368,10 @@ async def test_supervise_rules_drops_deny_globbed_finding(
 
 
 async def test_supervise_hold_excluded_but_rendered(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Held findings leave the actionable items but remain visible in the report."""
     from daydream.config_file import load_file_config
@@ -401,7 +406,10 @@ async def test_supervise_hold_excluded_but_rendered(
 
 
 async def test_supervise_llm_drop_records_step(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """LLM supervision drops by canonical id and records its deep stage."""
     from daydream.config_file import load_file_config
@@ -446,7 +454,10 @@ async def test_supervise_llm_drop_records_step(
 
 
 async def test_supervise_llm_edit_revises_severity(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """LLM edit verdicts revise severity in canonical items and findings-out."""
     from daydream.config_file import load_file_config
@@ -481,7 +492,10 @@ async def test_supervise_llm_edit_revises_severity(
 
 
 async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """All findings may be dropped while findings-out still writes an empty artifact."""
     from daydream.config_file import load_file_config
@@ -511,7 +525,10 @@ async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
 
 
 async def test_supervise_off_byte_identical(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """No config and explicit off produce the same canonical items bytes."""
     from daydream.config_file import load_file_config
@@ -554,7 +571,10 @@ async def test_supervise_off_byte_identical(
 
 
 async def test_supervise_dropped_finding_never_reaches_fix(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """A dropped finding is absent from the real fix prompt and remains unmodified."""
     from daydream.config_file import load_file_config
@@ -588,7 +608,10 @@ async def test_supervise_dropped_finding_never_reaches_fix(
 
 
 async def test_run_deep_renders_prescan_summary_not_json(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: the pre-scan summary renders as a readable panel, not raw JSON.
 
@@ -625,7 +648,10 @@ async def test_run_deep_renders_prescan_summary_not_json(
 
 
 async def test_parallel_fix_applies_all_disjoint_files(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC#3: every disjoint-file group is applied (each per-file sentinel lands).
 
@@ -706,7 +732,10 @@ async def test_long_fix_is_not_turn_capped(
 
 
 async def test_parallel_fix_same_file_no_race(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """3 items on ONE file + 1 on another. The 3 same-file findings collapse into
     ONE batched fix turn that addresses every marker in severity order, while the
@@ -739,7 +768,10 @@ async def test_parallel_fix_same_file_no_race(
 
 
 async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """A finding whose footprint intersects another group is dispatched to ONE
     agent owning both -- observable as ONE batched fix turn covering both files,
@@ -775,7 +807,10 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
 
 
 async def test_fix_verify_turn_is_read_only(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC: verification is strictly read-only. The stub records ``read_only``
     per call (stub_backend.py:276), so the real-path run must show every
@@ -799,7 +834,10 @@ async def test_fix_verify_turn_is_read_only(
 
 
 async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Spec: every dispatched finding has a recorded terminal outcome; all
     resolved -> BreakLoop on round 1 (one fix pass per group, no re-dispatch)."""
@@ -830,7 +868,10 @@ async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
 
 
 async def test_fix_verify_loop_redispatch_resolves_second_round(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Spec AC#2: a partial first fix verifies unresolved, re-dispatches in a
     second round, verifies resolved -> the loop ran twice and the outcome is
@@ -858,7 +899,10 @@ async def test_fix_verify_loop_redispatch_resolves_second_round(
 
 
 async def test_fix_verify_wrong_target_retargets_within_scope(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Spec: a wrong_target retarget re-dispatches to the corrected file, but
     only inside the allowed edit set (#336 net never widens)."""
@@ -884,7 +928,10 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
 
 
 async def test_unresolved_finding_reported_attempted_not_fixed(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Spec: a finding still unresolved after the last round appears as
     attempted-not-fixed, never counted/shown as fixed."""
@@ -909,7 +956,10 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
 
 
 async def test_parallel_fix_failure_isolated_returns_nonzero(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC#5: a failed fix group is isolated, surfaced, and exits nonzero.
 
@@ -1306,7 +1356,7 @@ class _SecondaryEditBackend(_StubBackend):
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         async for event in super().execute(
             cwd, prompt, output_schema, continuation, agents, max_turns, read_only
         ):
@@ -1340,7 +1390,7 @@ class _NewFileSecondaryEditBackend(_StubBackend):
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         async for event in super().execute(
             cwd, prompt, output_schema, continuation, agents, max_turns, read_only
         ):
@@ -1377,7 +1427,7 @@ class _ScopeCreepBackend(_StubBackend):
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         if prompt.startswith("The daydream changes are already staged"):
             run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
             version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
@@ -1404,7 +1454,7 @@ class _ScopeCreepBackend(_StubBackend):
 def _read_quality_gate(target: Path) -> dict[str, Any]:
     gate_p = target / ".daydream" / "deep" / "fix-quality-gate.json"
     assert gate_p.is_file(), "fix-quality-gate.json must be written"
-    return json.loads(gate_p.read_text(encoding="utf-8"))
+    return cast(dict[str, Any], json.loads(gate_p.read_text(encoding="utf-8")))
 
 
 async def _run_quality_gate_fixture(
@@ -1553,7 +1603,7 @@ async def test_fix_quality_gate_fail_open(
     and reason -- so the failure is auditable and can never read as a clean
     verdict (and it supersedes any stale verdict for the current round).
     """
-    def _boom(*_args: object, **_kwargs: object) -> dict:
+    def _boom(*_args: object, **_kwargs: object) -> dict[str, Any]:
         raise RuntimeError("analyzer down")
 
     from daydream.config_file import DaydreamFileConfig
@@ -2310,7 +2360,10 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
 
 
 async def test_parallel_fix_commit_runs_once_after_all(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC#6: commit stays serial and runs exactly once, after every parallel fix lands.
 
@@ -2520,7 +2573,10 @@ async def test_fix_tool_veto_blocks_denied_write(
 
 
 async def test_fix_tool_veto_allows_unmatched_write(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Built-in rules allow a Write whose path does not match the deny glob."""
     from daydream.config_file import load_file_config
@@ -2550,7 +2606,10 @@ async def test_fix_tool_veto_allows_unmatched_write(
 
 
 async def test_fix_tool_veto_stops_subsequent_calls(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """A vetoed first deferred Write prevents the generator's later Write."""
     from daydream.config_file import load_file_config
@@ -2582,7 +2641,10 @@ async def test_fix_tool_veto_stops_subsequent_calls(
 
 
 async def test_fix_tool_supervisor_off_writes(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """With tool supervision off, the deferred Write resumes and writes."""
     from daydream.config_file import load_file_config
@@ -2609,7 +2671,10 @@ async def test_fix_tool_supervisor_off_writes(
 
 
 async def test_confirmed_intent_reaches_fix_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """The confirmed author intent reaches every deep fix prompt so a fixer
     can't undo a deliberate decision.
@@ -2757,7 +2822,8 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
 
 async def test_deep_run_writes_hunk_index_after_diff(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The persisted hunk index is written right after diff materialization.
 
@@ -2785,7 +2851,7 @@ async def test_deep_run_writes_hunk_index_after_diff(
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
 
 
-def _intent_calls(stub: _StubBackend) -> list[dict]:
+def _intent_calls(stub: _StubBackend) -> list[dict[str, Any]]:
     """Recover the intent-phase calls by their stable instruction text."""
     return [
         c for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()
@@ -2794,7 +2860,7 @@ def _intent_calls(stub: _StubBackend) -> list[dict]:
 
 def _intent_prompt(stub: _StubBackend) -> str:
     """Recover the intent-phase prompt by its stable instruction text."""
-    return next(c["prompt"] for c in _intent_calls(stub))
+    return cast(str, next(c["prompt"] for c in _intent_calls(stub)))
 
 
 def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
@@ -2847,7 +2913,9 @@ def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool
 
 
 async def test_pr_body_reaches_intent_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """The PR description body is threaded into the initial intent prompt."""
     from daydream.runner import run
@@ -2868,7 +2936,9 @@ async def test_pr_body_reaches_intent_prompt(
 
 
 async def test_no_pr_body_degrades_cleanly(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """No PR body -> intent prompt carries no PR-description section.
 
@@ -2900,7 +2970,9 @@ async def test_no_pr_body_degrades_cleanly(
 
 
 async def test_whitespace_only_pr_body_is_not_authoritative(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Whitespace-only PR bodies must not publish intent_authoritative (#279).
 
@@ -2927,7 +2999,10 @@ async def test_whitespace_only_pr_body_is_not_authoritative(
 
 
 async def test_non_interactive_intent_prompt_carries_pr_body(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: the unattended (non-interactive) deep run auto-accepts the
     proposed intent with no human corrector -- and STILL threads the PR body
@@ -2969,7 +3044,10 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
 
 
 async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_only(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: an instruction-like PR body in a non-interactive run is framed as
     untrusted data, cannot suppress findings, and the intent turn runs read-only (#579).
@@ -3023,7 +3101,9 @@ async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_on
 
 @pytest.mark.asyncio
 async def test_non_open_pr_state_suppresses_pr_body(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """When gh_pr_view returns a non-OPEN state (CLOSED or MERGED), the
     orchestrator must NOT thread the PR body into the intent prompt — trusting
@@ -3057,7 +3137,7 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
 
     asked: list[str] = []
 
-    def _record_prompt(console, message, default=""):
+    def _record_prompt(console: Any, message: Any, default: Any="") -> str:
         asked.append(message)
         return "n"  # decline the fix gate
 
@@ -3073,7 +3153,9 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
 
 
 async def test_yes_auto_applies_fix(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Task 6 real-path: ``--yes`` (assume="yes") auto-applies fixes without prompting.
 
@@ -3091,7 +3173,7 @@ async def test_yes_auto_applies_fix(
 
     prompt_calls: list[tuple[Any, ...]] = []
 
-    def _record_prompt(console, message, default=""):
+    def _record_prompt(console: Any, message: Any, default: Any="") -> Any:
         prompt_calls.append((message, default))
         return default
 
@@ -3384,7 +3466,13 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     captured: list[dict[str, Any]] = []
 
     def _capture(
-        console, *, stages, stack_lines, agent_count, exploration_available, sweep_note=None
+        console: Any,
+        *,
+        stages: Any,
+        stack_lines: Any,
+        agent_count: Any,
+        exploration_available: Any,
+        sweep_note: Any=None,
     ) -> None:
         captured.append(
             {
@@ -3432,13 +3520,20 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
 
 
 async def test_preflight_notice_sweep_note_disabled_when_sweep_off(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No sweep additive in the pre-flight estimate when the sweep is disabled."""
     captured: list[dict[str, Any]] = []
 
     def _capture(
-        console, *, stages, stack_lines, agent_count, exploration_available, sweep_note=None
+        console: Any,
+        *,
+        stages: Any,
+        stack_lines: Any,
+        agent_count: Any,
+        exploration_available: Any,
+        sweep_note: Any=None,
     ) -> None:
         captured.append(
             {
@@ -3534,7 +3629,7 @@ async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.
     """D-44: UI prints [stage N/5: ...] at each stage boundary."""
     progress_calls: list[tuple[int, int, str]] = []
 
-    def _capture(console, current, total, name) -> None:
+    def _capture(console: Any, current: Any, total: Any, name: Any) -> None:
         progress_calls.append((current, total, name))
 
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", _capture)
@@ -3565,7 +3660,9 @@ def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
 
 
 def test_run_deep_routes_missing_skill_to_generic(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """When beagle-react is absent, React files route to the generic bucket.
 
@@ -3655,7 +3752,8 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
 
 
 async def test_merge_prompt_lists_records_in_sorted_order(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pre-merge parse iterates sorted(per_stack_outputs.items()) so the merge
     prompt's records list is stable across runs regardless of which per-stack
@@ -3690,7 +3788,7 @@ async def test_merge_prompt_lists_records_in_sorted_order(
     )
 
 
-def test_merge_prompt_emits_related_files_instruction():
+def test_merge_prompt_emits_related_files_instruction() -> None:
     from pathlib import Path
 
     from daydream.deep.prompts import build_merge_prompt
@@ -3706,7 +3804,8 @@ def test_merge_prompt_emits_related_files_instruction():
 
 
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A per-stack agent failure must:
       1) persist to per-stack-failures.json under .daydream/deep/,
@@ -3723,15 +3822,22 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     original_execute = stub.execute
 
     def _maybe_fail(
-        cwd, prompt, output_schema=None, continuation=None, agents=None,
-        max_turns=None, read_only=False,
-    ):
+        cwd: Any,
+        prompt: str,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
+    ) -> Any:
         pl = prompt.lower()
         if "you are reviewing the react stack" in pl:
-            async def _fail():
-                async def _raise() -> None:
-                    raise RuntimeError("simulated react failure")
-                yield (await _raise())
+            async def _raise() -> None:
+                raise RuntimeError("simulated react failure")
+
+            async def _fail() -> AsyncIterator[Any]:
+                await _raise()
+                yield  # pragma: no cover -- unreachable; satisfies async-gen typing
             return _fail()
         return original_execute(
             cwd, prompt, output_schema, continuation, agents,
@@ -3760,7 +3866,8 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
 
 
 async def test_resume_merge_errors_on_missing_stack_records(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """--start-at merge must fail loudly when a detected stack has no records.
 
@@ -3783,7 +3890,8 @@ async def test_resume_merge_errors_on_missing_stack_records(
 
 
 async def test_resume_merge_allows_missing_records_for_failed_stacks(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stack listed in per-stack-failures.json is allowed to be missing.
 
@@ -3812,7 +3920,8 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
 
 
 async def test_orchestrator_threads_structural_records_to_merge(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural records ride the merge prompt as a separate input and are
     excluded from the dedup pre-filter so they don't get silently collapsed
@@ -3829,22 +3938,22 @@ async def test_orchestrator_threads_structural_records_to_merge(
 
     _real_build_merge = _prompts.build_merge_prompt
 
-    captured_merge: dict = {}
-    captured_dedup_records: dict = {}
-    captured_record_dedup: dict = {}
+    captured_merge: dict[str, Any] = {}
+    captured_dedup_records: dict[str, Any] = {}
+    captured_record_dedup: dict[str, Any] = {}
 
     real_build_dedup = _dedup.build_dedup_candidates
     real_build_record_dedup = _dedup.build_record_dedup_candidates
 
-    def _capture_merge(**kwargs):
+    def _capture_merge(**kwargs: Any) -> Any:
         captured_merge.update(kwargs)
         return _real_build_merge(**kwargs)
 
-    def _capture_dedup(records, alt_issues):
+    def _capture_dedup(records: Any, alt_issues: Any) -> Any:
         captured_dedup_records["records"] = list(records)
         return real_build_dedup(records, alt_issues)
 
-    def _capture_record_dedup(records, sources):
+    def _capture_record_dedup(records: Any, sources: Any) -> Any:
         captured_record_dedup["records"] = list(records)
         captured_record_dedup["sources"] = list(sources)
         return real_build_record_dedup(records, sources=sources)
@@ -3884,7 +3993,7 @@ async def test_orchestrator_threads_structural_records_to_merge(
     ), f"structural records must be partitioned out: {per_stack_paths}"
 
     # (2) The structural sentinel record must NOT appear in either dedup input.
-    def _has_structure(records: list) -> bool:
+    def _has_structure(records: list[dict[str, Any]]) -> bool:
         return any(str(r.get("id", "")).startswith("structure") for r in records)
 
     assert not _has_structure(captured_dedup_records["records"]), (
@@ -3900,7 +4009,8 @@ async def test_orchestrator_threads_structural_records_to_merge(
 
 
 async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fresh-run path (no start_at) applies the same structural partition.
 
@@ -3913,20 +4023,20 @@ async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
 
     _real_build_merge = _prompts.build_merge_prompt
 
-    captured_merge: dict = {}
-    captured_record_dedup: dict = {}
+    captured_merge: dict[str, Any] = {}
+    captured_record_dedup: dict[str, Any] = {}
 
     real_build_dedup = _dedup.build_dedup_candidates
     real_build_record_dedup = _dedup.build_record_dedup_candidates
 
-    def _capture_merge(**kwargs):
+    def _capture_merge(**kwargs: Any) -> Any:
         captured_merge.update(kwargs)
         return _real_build_merge(**kwargs)
 
-    def _capture_dedup(records, alt_issues):
+    def _capture_dedup(records: Any, alt_issues: Any) -> Any:
         return real_build_dedup(records, alt_issues)
 
-    def _capture_record_dedup(records, sources):
+    def _capture_record_dedup(records: Any, sources: Any) -> Any:
         captured_record_dedup["records"] = list(records)
         captured_record_dedup["sources"] = list(sources)
         return real_build_record_dedup(records, sources=sources)
@@ -4015,7 +4125,9 @@ async def test_resume_fix_skips_pr_post(
 
 
 async def test_resolve_backend_called_with_each_phase_in_deep_flow(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
 ) -> None:
     """The deep orchestrator must call _resolve_backend with each spec phase,
     not just 'review'. This is a wiring test, not a model-value test.
@@ -4029,7 +4141,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     seen_phases: list[str] = []
     original = _runner._resolve_backend
 
-    def spy(config, phase, cache=None, *, cwd=None):
+    def spy(config: Any, phase: Any, cache: Any=None, *, cwd: Any=None) -> Any:
         seen_phases.append(phase)
         return original(config, phase, cache, cwd=cwd)
 
@@ -4051,7 +4163,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     # plus phase_fix, so the fix loop doesn't mutate the workspace.
     mute_side_effects()
 
-    async def _stub_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
+    async def _stub_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         return None
 
     monkeypatch.setattr("daydream.phases.phase_fix", _stub_fix)
@@ -4108,7 +4220,8 @@ def test_intent_phase_resolves_to_sonnet_default(
 
 
 async def test_intent_phase_runs_on_sonnet_through_runner_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#171 real-path: the intent phase Sonnet downgrade must be observable
     through the runner.run production entrypoint, not only at the unit seam.
@@ -4144,7 +4257,9 @@ async def test_intent_phase_runs_on_sonnet_through_runner_run(
 
 
 async def test_verifier_runs_after_merge_before_fix(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
 ) -> None:
     """Recommendation verifier runs as a sub-step of the fix gate.
 
@@ -4204,7 +4319,9 @@ async def test_verifier_runs_after_merge_before_fix(
 
 
 async def test_verifier_contradicts_propagates_to_fix_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
 ) -> None:
     """When the verifier returns `contradicts` for an issue_id matching a parsed
     feedback item, the orchestrator attaches the verdict and phase_fix inlines
@@ -4250,7 +4367,9 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
 
 
 async def test_heal_loop_receives_feedback_items_in_fix_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
 ) -> None:
     """Deep mode threads parsed feedback_items into phase_test_and_heal so the
     heal loop's fix prompt names the changed files.
@@ -4306,7 +4425,9 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
 
 
 async def test_structural_finding_reaches_fix_loop(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
 ) -> None:
     """The fix gate feeds the canonical merged-items.json (structural included),
     severity-ordered, into phase_fix -- never the LLM re-parse that dropped
@@ -4350,7 +4471,7 @@ async def test_structural_finding_reaches_fix_loop(
     # Capture at the batched dispatch point: phase_fix_parallel now hands every
     # file-group (single- or multi-item) to phase_fix_batched, so this is where
     # every item that reaches the fix loop is observable.
-    async def _capture_fix(backend, work, items, item_nums, total, **kwargs):  # noqa: ARG001
+    async def _capture_fix(backend: Any, work: Any, items: Any, item_nums: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         fixed.extend(items)
 
     monkeypatch.setattr("daydream.phases.phase_fix_batched", _capture_fix)
@@ -4367,7 +4488,9 @@ async def test_structural_finding_reaches_fix_loop(
 
 
 async def test_start_at_fix_recovers_merged_items(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
 ) -> None:
     """--start-at fix with ONLY the deep-dir merged-items.json present (canonical
     repo review-output.md ABSENT) still loads items and reaches phase_fix.
@@ -4384,7 +4507,7 @@ async def test_start_at_fix_recovers_merged_items(
 
     fixed: list[dict[str, Any]] = []
 
-    async def _capture_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
+    async def _capture_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         fixed.append(item)
 
     monkeypatch.setattr("daydream.phases.phase_fix", _capture_fix)
@@ -4483,7 +4606,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     # Spy on phase_fix to prove fixes are NOT applied when the gate declines.
     fix_calls: list[Any] = []
 
-    async def _spy_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
+    async def _spy_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         fix_calls.append(item)
         return None
 
@@ -4527,7 +4650,10 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
 
 
 async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: an EOF on stdin at the apply-fixes gate is caught and resolved
     to the safe default -- the deep run declines fixes and returns 0, no crash.
@@ -4548,7 +4674,7 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 
     fix_calls: list[Any] = []
 
-    async def _spy_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
+    async def _spy_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         fix_calls.append(item)
         return None
 
@@ -4584,7 +4710,10 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 
 
 async def test_cleanup_true_removes_review_output_shallow(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#330 R2/#6 real-path: ``--cleanup`` deletes ``.review-output.md`` after a
     successful shallow run.
@@ -4608,7 +4737,10 @@ async def test_cleanup_true_removes_review_output_shallow(
 
 
 async def test_no_cleanup_retains_review_output_shallow(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#330 R2/#6 real-path: ``--no-cleanup`` keeps ``.review-output.md``."""
     from daydream.config import REVIEW_OUTPUT_FILE
@@ -4625,7 +4757,10 @@ async def test_no_cleanup_retains_review_output_shallow(
 
 
 async def test_cleanup_true_removes_review_output_default_loop(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#330 R2/#6 real-path: the terminal cleanup also applies to the default
     (deep loop) mode, not just shallow."""
@@ -4643,7 +4778,10 @@ async def test_cleanup_true_removes_review_output_default_loop(
 
 
 async def test_cleanup_none_unattended_defaults_to_keep(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#330 R2/#6: an unspecified cleanup flag on an unattended run defaults to
     KEEPING the report (the old ``safe_default=False``), without touching stdin.
@@ -4671,7 +4809,10 @@ async def test_cleanup_none_unattended_defaults_to_keep(
 
 
 async def test_cleanup_none_interactive_prompts_before_keeping(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#330 R2/#6: with cleanup unspecified and interactive stdin, the terminal
     step prompts the user (the old shallow preamble's question); a "n" answer
@@ -4687,7 +4828,7 @@ async def test_cleanup_none_interactive_prompts_before_keeping(
 
     asked: list[str] = []
 
-    def _record_prompt(console, message, default=""):
+    def _record_prompt(console: Any, message: Any, default: Any="") -> str:
         asked.append(message)
         return "n"  # decline cleanup
 
@@ -4756,7 +4897,10 @@ async def test_cleanup_gate_declines_honors_cleanup_flag(
 
 
 async def test_cleanup_skips_on_failure_keeps_evidence(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#335 real-path: a non-zero exit skips ``--cleanup`` so evidence survives.
 
@@ -4799,7 +4943,8 @@ async def test_cleanup_skips_on_failure_keeps_evidence(
 
 
 async def test_deep_run_recovers_from_transient_git_timeout(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for #120: a transient git timeout no longer fails the run.
 
@@ -4843,7 +4988,8 @@ async def test_deep_run_recovers_from_transient_git_timeout(
 
 
 async def test_deep_run_reports_persistent_git_timeout_distinctly(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timeout that survives retries is surfaced as a distinct 'Git Timeout'.
 
@@ -4884,7 +5030,8 @@ async def test_deep_run_reports_persistent_git_timeout_distinctly(
 
 
 async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#168 real-path: drive runner.run through the production entrypoint and
     assert observable model targeting + the arbitrated finding on disk.
@@ -4920,7 +5067,8 @@ async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
 
 
 async def test_arbiter_missing_verdict_retains_high_severity_finding(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#175 real-path: a truncated/lazy arbiter that omits every verdict must NOT
     delete the high-severity finding it was selected to protect.
@@ -4961,7 +5109,8 @@ async def test_arbiter_missing_verdict_retains_high_severity_finding(
 
 
 async def test_no_arbiter_when_all_findings_low_and_uncontested(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#168 real-path: when every per-stack finding is low/uncontested, NO Opus
     arbiter backend is created — but Sonnet still runs the per-stack fan-out."""
@@ -5042,7 +5191,8 @@ _SUPPRESSION_COLLISION_STACKS: dict[str, dict[str, Any]] = {
 
 
 async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#232 Comment 2: a borderline LOW finding sharing a (file, line) with an
     arbitrated HIGH finding from the same stack must STILL be suppression-reviewed
@@ -5078,7 +5228,8 @@ async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
 
 
 async def test_precision_on_drops_unconfirmed_low_finding(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#232 Test A (precision ON, no evidence): the borderline LOW finding is
     dropped when the suppression reviewer returns keep=false; the HIGH finding
@@ -5140,7 +5291,8 @@ async def test_precision_off_keeps_low_finding(
 
 
 async def test_precision_on_keeps_low_finding_with_evidence(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#232 Test C (precision ON, evidence): a borderline LOW finding the
     suppression reviewer CONFIRMS (keep=true with a rationale) is retained."""
@@ -5180,7 +5332,14 @@ async def test_precision_on_keeps_low_finding_with_evidence(
 def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[bool]) -> None:
     """Stub the PR-posting boundary, recording the ``approve_on_clean`` kwarg."""
 
-    async def _record_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
+    async def _record_post(
+        target_dir: Any,
+        merged_items_path: Any,
+        *,
+        console: Any,
+        post: Any,
+        approve_on_clean: Any=False,
+    ) -> None:
         received.append(approve_on_clean)
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
@@ -5205,7 +5364,8 @@ async def test_deep_flow_forwards_approve_on_clean(
 
 
 async def test_deep_flow_approve_on_clean_defaults_off(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#343 real-path: without the opt-in the deep flow forwards ``False``, so
     the posted event stays ``COMMENT`` (byte-identical default)."""
@@ -5257,7 +5417,8 @@ def _prime_merge_resume_records(target: Path, *, python_severity: str | None) ->
 
 
 async def test_merge_resume_reruns_arbiter_when_marker_absent(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#175 real-path: a `--start-at merge` resume whose on-disk records carry a
     high-severity finding and NO completion marker must re-run the arbiter.
@@ -5284,7 +5445,8 @@ async def test_merge_resume_reruns_arbiter_when_marker_absent(
 
 
 async def test_merge_resume_skips_arbiter_when_marker_present(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#175 real-path: when the completion marker proves the records were already
     finalised, a `--start-at merge` resume must NOT re-run the arbiter."""
@@ -5686,7 +5848,10 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
 
 
 async def test_run_batches_same_file_findings_into_one_fix_turn(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#202 real-path: N findings on ONE file collapse to a single FIX run_agent turn.
 
@@ -6232,7 +6397,10 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
 
 
 async def test_ac5_per_stack_prompt_inlines_diff_hunks(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC5 (real-path): per-stack review prompts contain inlined diff hunks and
     NO ``Read it directly`` / diff_path instruction.
@@ -6294,7 +6462,10 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
 
 
 async def test_ac6_single_stack_merged_items_carry_structural_lens(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC6: tiny-diff single-stack writer tags structural items ``lens="structural"``.
 
@@ -6325,7 +6496,10 @@ async def test_ac6_single_stack_merged_items_carry_structural_lens(
 
 
 async def test_ac_fix_resume_on_tiny_diff(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Issue #172 risk: ``--start-at fix`` resume on a tiny diff works.
 
@@ -6362,7 +6536,10 @@ async def test_ac_fix_resume_on_tiny_diff(
 
 
 async def test_ac_merge_resume_on_tiny_diff(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Issue #172: ``--start-at merge`` resume on a tiny diff routes to the
     single-stack merge writer, not the multi-stack merge agent.
@@ -6426,7 +6603,8 @@ async def test_ac_merge_resume_on_tiny_diff(
 
 
 async def test_evidence_gate_drops_speculative_finding(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Issue #227 (AC2/AC3/AC6): the structural evidence gate keeps an evidenced
     finding but drops a speculative one before it reaches merged-items.json.
@@ -6494,7 +6672,10 @@ async def test_evidence_gate_drops_speculative_finding(
 
 
 async def test_evidence_gate_all_speculative_yields_empty(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Issue #227 (AC5, N=1): a single-stack run whose only findings are all
     speculative writes an EMPTY merged-items.json without crashing and records
@@ -6548,7 +6729,10 @@ async def test_evidence_gate_all_speculative_yields_empty(
 
 
 async def test_evidence_gate_keeps_whole_file_structural_finding(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Issue #227 (findings 3/5): a structural (host-tagged, whole-file) finding
     with ``line: 0`` and colon-free evidence SURVIVES the gate -- the structural
@@ -6605,7 +6789,10 @@ async def test_evidence_gate_keeps_whole_file_structural_finding(
 
 
 async def test_evidence_gate_clears_stale_dropped_sidecar(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Issue #227 (findings 4/6): a resume that drops 0 findings clears a stale
     ``dropped-speculative.json`` left by a prior run, so the sidecar cannot
@@ -6661,7 +6848,9 @@ async def test_evidence_gate_clears_stale_dropped_sidecar(
 
 
 async def test_deep_findings_out_emits_artifact_and_stops(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings
     artifact from the canonical merged items and STOPS -- no PR post, no fix.
@@ -6721,7 +6910,9 @@ async def test_deep_findings_out_emits_artifact_and_stops(
 
 
 async def test_cleanup_keeps_report_on_findings_out_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Real-path: ``--findings-out --cleanup`` keeps ``.review-output.md``.
 
@@ -6762,7 +6953,10 @@ async def test_cleanup_keeps_report_on_findings_out_run(
 
 
 async def test_test_verdict_artifact_written_on_passing_suite(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: a run whose suite passes leaves ``test-verdict.json`` on disk.
 
@@ -6791,7 +6985,10 @@ async def test_test_verdict_artifact_written_on_passing_suite(
 
 
 async def test_test_verdict_artifact_written_on_failing_suite(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: a permanently-red suite STILL leaves ``test-verdict.json``.
 
@@ -6902,7 +7099,10 @@ class _PushingCommittingStubBackend(_StubBackend):
 
 
 async def test_test_verdict_records_failure_when_operator_ignores_it(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: heal-menu choice "3" continues the run WITHOUT claiming a green suite.
 
@@ -6963,7 +7163,8 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
 
 
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real path: a small diff is inlined into BOTH the intent and wonder prompts."""
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
@@ -6986,7 +7187,8 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
 
 
 async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An over-budget diff falls back to today's diff.patch pointer in both prompts.
 
@@ -7002,7 +7204,8 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     (``test_deep_run_keeps_pointer_when_trailing_block_dropped``).
     """
     import daydream.deep.orchestrator as orch_mod
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.deep.prompts import bound_deep_diff
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Push the diff over the byte budget with a large committed file.
     big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
@@ -7011,9 +7214,9 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     _git(multi_stack_target, "commit", "-m", "add big file")
 
     bounded_results: list[str] = []
-    real = orch_mod.bound_deep_diff
+    real = bound_deep_diff
 
-    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES):
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
         result = real(diff, budget)
         bounded_results.append(result[0])
         return result
@@ -7058,7 +7261,8 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
 
 
 async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A multi-file over-budget diff whose trailing block is dropped keeps the
     diff.patch pointer in the intent/wonder prompts.
@@ -7069,7 +7273,7 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
     inlined below (do NOT re-Read diff.patch)" over a truncated diff whose
     dropped block is nowhere reachable — the pointer must be restored instead.
     """
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # aaa.py sorts FIRST in the byte-ordered git diff and its block is
     # retained; zzz.py's block alone exceeds the budget and arrives after a
@@ -7123,7 +7327,8 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
 
 
 async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Gather stores the BOUNDED diff in ctx.data; diff.patch on disk stays FULL.
 
@@ -7132,7 +7337,8 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     loses the truncated block). Both must be caught.
     """
     import daydream.deep.orchestrator as orch_mod
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.deep.prompts import bound_deep_diff
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
     (multi_stack_target / "big.py").write_text(big + "\n")
@@ -7141,9 +7347,9 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
 
     called_with: list[str] = []
     bounded_results: list[str] = []
-    real = orch_mod.bound_deep_diff
+    real = bound_deep_diff
 
-    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES):
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
         called_with.append(diff)
         result = real(diff, budget)
         bounded_results.append(result[0])
@@ -7195,7 +7401,8 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
 
 
 async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The sweep extracts blocks from the FULL diff.patch, not the bounded
     ctx.data['diff'], so sweep targets cannot diverge from the coverage set.
@@ -7205,7 +7412,8 @@ async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
     None) instead of being swept.
     """
     import daydream.deep.orchestrator as orch_mod
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.deep.prompts import bound_deep_diff
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
     # Push the in-memory diff over the budget with a file that sorts FIRST in
     # git's byte-ordered diff: its oversize block is kept whole by the bound,
@@ -7220,9 +7428,9 @@ async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
     _git(multi_stack_target, "commit", "-m", "add big file and an uncovered file")
 
     bounded_results: list[str] = []
-    real = orch_mod.bound_deep_diff
+    real = bound_deep_diff
 
-    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES):
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
         result = real(diff, budget)
         bounded_results.append(result[0])
         return result
@@ -7256,7 +7464,8 @@ async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
 
 
 async def test_intent_artifact_survives_wonder_failure(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """intent.md is on disk even when the wonder step dies.
 
@@ -7277,7 +7486,8 @@ async def test_intent_artifact_survives_wonder_failure(
 
 
 async def test_both_ttt_artifacts_written_on_the_happy_path(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Relocating the writer leaves contents and ctx.data pointers unchanged."""
     _silence(monkeypatch)
@@ -7336,7 +7546,8 @@ def test_extension_api_version_is_six_and_alternatives_step_is_gone() -> None:
 
 
 async def test_start_at_merge_refuses_after_the_diff_changes(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fresh run writes diff-key; changing the diff then blocks the resume."""
     _silence(monkeypatch)
@@ -7361,7 +7572,8 @@ async def test_start_at_merge_refuses_after_the_diff_changes(
 
 
 async def test_fresh_run_discards_stale_deep_artifacts_before_writing_its_diff_key(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fresh run cannot certify a new diff key alongside old deep outputs."""
     _silence(monkeypatch)
@@ -7377,7 +7589,8 @@ async def test_fresh_run_discards_stale_deep_artifacts_before_writing_its_diff_k
 
 
 async def test_start_at_merge_refuses_after_an_uncommitted_worktree_change(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Resumes reject review artifacts once the worktree is no longer clean."""
     _silence(monkeypatch)
@@ -7391,7 +7604,8 @@ async def test_start_at_merge_refuses_after_an_uncommitted_worktree_change(
 
 
 async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The freshness gate is not a blanket refusal: same diff still resumes."""
     _silence(monkeypatch)
@@ -7404,7 +7618,8 @@ async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(
 
 
 async def test_pre_upgrade_artifacts_without_a_key_refuse_resume(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An artifact dir from before diff tracking is treated as unverifiable."""
     _silence(monkeypatch)
@@ -7478,7 +7693,8 @@ def _eroded_main_repo(tmp_path: Path) -> Path:
 
 
 async def test_anti_slop_rubric_extraction_finding_flows_through_merge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#314 acceptance: an eroded ``main()`` diff emits the extraction finding
     class through the real deep pipeline, calibrated to medium.
@@ -7514,7 +7730,8 @@ async def test_anti_slop_rubric_extraction_finding_flows_through_merge(
 
 
 async def test_structural_finding_reported_medium_severity_survives_merge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#314 regression: a structural-stack anti-slop finding parsed with an
     explicitly reported ``medium`` severity lands in ``merged-items.json`` as
@@ -7587,7 +7804,10 @@ def _uncovered_sweep_target(tmp_path: Path) -> Path:
 
 
 async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC (issue #309): the sweep reviews an uncovered file, its finding is an
     ordinary merged finding, coverage stats improve, and the report surfaces
@@ -7665,7 +7885,10 @@ async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
 
 
 async def test_run_deep_uncovered_sweep_fails_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """A broken sweep (backend raise) never fails the run: exit 0, the failure
     is recorded in coverage-stats.json, and merged-items.json is still written.
@@ -7702,7 +7925,10 @@ async def test_run_deep_uncovered_sweep_fails_open(
 
 
 async def test_uncovered_sweep_disabled_by_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """A profile pipeline with ``uncovered_sweep_enabled = false`` skips the sweep entirely."""
     from daydream.runner import run
@@ -7734,7 +7960,8 @@ async def test_uncovered_sweep_disabled_by_config(
 
 
 async def test_uncovered_sweep_noop_on_merge_resume(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``--start-at merge`` resume is a sweep no-op: no sweep artifacts are
     created and the resume still succeeds.
@@ -7757,7 +7984,8 @@ async def test_uncovered_sweep_noop_on_merge_resume(
 
 
 async def test_uncovered_sweep_per_stack_resume_clears_stale_artifacts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``--start-at per-stack`` resume drops the prior run's sweep artifacts.
 
@@ -7797,7 +8025,8 @@ async def test_uncovered_sweep_per_stack_resume_clears_stale_artifacts(
 
 
 async def test_uncovered_sweep_per_stack_resume_no_findings_writes_empty_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A per-stack resume whose rerun sweep produces no findings writes ``[]``.
 
@@ -7829,7 +8058,10 @@ async def test_uncovered_sweep_per_stack_resume_no_findings_writes_empty_records
 
 
 async def test_run_deep_uncovered_sweep_missing_output_not_claimed_as_coverage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """A sweep backend that returns success WITHOUT writing its review output is
     NOT recorded as completed coverage (issue #309 finding 7).
@@ -7871,7 +8103,10 @@ async def test_run_deep_uncovered_sweep_missing_output_not_claimed_as_coverage(
 
 
 async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_covered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """A successful sweep review WITHOUT a file Read is an attempt, not coverage
     (issue #309 finding 6).
@@ -7919,7 +8154,8 @@ async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_cover
 
 
 async def test_uncovered_sweep_per_stack_resume_fails_closed_on_unremovable_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A per-stack resume whose stale sweep artifact cannot be removed STOPS
     with an actionable error instead of continuing (issue #309 finding 8).
@@ -7957,7 +8193,8 @@ async def test_uncovered_sweep_per_stack_resume_fails_closed_on_unremovable_arti
 
 
 async def test_uncovered_sweep_malformed_stats_does_not_fail_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A structurally-malformed ``coverage-stats.json`` must NOT abort the run
     (issue #309 finding 9).
@@ -8148,7 +8385,9 @@ def test_deep_shard_default_bounds_align_with_inline_budget() -> None:
 
 
 async def test_deep_sharding_produces_multiple_review_tasks_for_one_large_stack(
-    shard_many_python_target: Path, monkeypatch, install_backend,
+    shard_many_python_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
 ) -> None:
     """Issue #731: one oversized python stack becomes multiple review tasks."""
     from daydream.runner import RunConfig, run
@@ -8169,7 +8408,9 @@ async def test_deep_sharding_produces_multiple_review_tasks_for_one_large_stack(
 
 
 async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
-    multi_stack_target: Path, monkeypatch, install_backend,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
 ) -> None:
     """Issue #731: an inline-grounded, finding-referenced file is NOT swept.
 
@@ -8207,7 +8448,10 @@ async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
 
 
 async def test_deep_default_run_coverage_by_evidence_present(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Issue #740 AC2/AC3: coverage_by_evidence is non-empty on a DEFAULT (non-sharded) run.
 
@@ -8238,7 +8482,9 @@ async def test_deep_default_run_coverage_by_evidence_present(
 
 
 async def test_deep_large_diff_shards_respect_limiter_union_and_forensic(
-    shard_many_python_target: Path, monkeypatch, install_backend,
+    shard_many_python_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
 ) -> None:
     """Issue #731: enabled real-path large diff -> >1 review task per language
     stack, records produced, capacity limiter respected (shards ride the same
@@ -8265,7 +8511,9 @@ async def test_deep_large_diff_shards_respect_limiter_union_and_forensic(
 
 
 async def test_deep_forensic_mode_keeps_single_agent_per_stack(
-    shard_many_python_target: Path, monkeypatch, install_backend,
+    shard_many_python_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
 ) -> None:
     """Issue #731: forensic (default off) keeps exactly one agent per stack."""
     from daydream.runner import RunConfig, run
@@ -8280,8 +8528,10 @@ async def test_deep_forensic_mode_keeps_single_agent_per_stack(
 
 
 async def test_clean_verdict_on_unread_file_is_not_reviewed_not_pass(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig, mute_side_effects: Mute,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC4: per-stack reviewer declares clean for an assigned file it never
     Read -> that file is recorded not_reviewed, never a pass; the assigned
@@ -8341,7 +8591,8 @@ async def test_clean_verdict_on_unread_file_is_not_reviewed_not_pass(
 
 
 async def test_per_stack_prompt_points_at_hunk_index(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reviewer prompts source changed-line ranges from the hunk index, not
     a diff.patch re-read (AC#1)."""
@@ -8357,7 +8608,8 @@ async def test_per_stack_prompt_points_at_hunk_index(
 
 
 async def test_no_parse_phase_and_records_from_output_schema(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AC4: no parse-<stack> fork exists; records come from output_schema.
 
@@ -8404,8 +8656,9 @@ def test_structural_gate_resolver_reads_profile_pipeline() -> None:
     )
 
 
-def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch):
+def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.deep import orchestrator as o
+    from daydream.flows.engine import FlowContext
 
     class _Ctx:
         class _Cfg:
@@ -8416,7 +8669,7 @@ def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch):
 
         config = _Cfg()
 
-        def pipeline(self):
+        def pipeline(self) -> Any:
             return _Ctx._P()
 
-    assert o._uncovered_sweep_enabled(_Ctx()) is False
+    assert o._uncovered_sweep_enabled(cast(FlowContext, _Ctx())) is False

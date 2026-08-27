@@ -659,7 +659,7 @@ def _normalize_authored(
     """Apply the deterministic category-c repairs; None if not an object."""
     if not isinstance(authored, dict):
         return None
-    normalized = _strip_unknown(authored, PLAN_AUTHOR_SCHEMA)
+    normalized: dict[str, Any] = _strip_unknown(authored, PLAN_AUTHOR_SCHEMA)
     normalized = _redact_strings(normalized)
     for pattern, limit in _AUTHOR_PROSE_CLAMP_LIMITS:
         _clamp_node(normalized, pattern, limit)

@@ -6,13 +6,14 @@ manifest (optional fields, omitted on legacy), and the SQLite run projection
 (with an additive migration for legacy DBs).
 """
 import sqlite3
+from pathlib import Path
 
 from daydream.archive import manifest as m
 from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
 
-async def test_trajectory_build_extra_carries_profile_provenance(tmp_path):
+async def test_trajectory_build_extra_carries_profile_provenance(tmp_path: Path) -> None:
     rec = TrajectoryRecorder(
         path=tmp_path / "trajectory.json",
         run_flow=DaydreamRunFlow.NORMAL,
@@ -27,17 +28,18 @@ async def test_trajectory_build_extra_carries_profile_provenance(tmp_path):
             inv.observe(ResultEvent(structured_output=None, continuation=None))
     traj = rec.build_trajectory()  # the in-memory Trajectory; extra carries profile fields
     extra = traj.extra
+    assert extra is not None
     assert extra["profile_schema_version"] == 1
     assert extra["profile_name"] == "p"
     assert extra["profile_source_kind"] == "default"
     assert extra["profile_digest"] == "abc"
 
 
-def test_manifest_to_dict_carries_profile_provenance_and_omits_when_none():
+def test_manifest_to_dict_carries_profile_provenance_and_omits_when_none() -> None:
     # A new manifest with profile fields serializes them; a legacy-shaped manifest
     # (no profile fields) omits them entirely (optional on legacy, R12).
     man = m.Manifest(  # fields per Manifest.__init__/to_dict; executor fills the rest
-        schema_version=1,
+        schema_version="1",
         session_id="s",
         archived_at="2026-08-23T00:00:00Z",
         status="complete",
@@ -51,11 +53,11 @@ def test_manifest_to_dict_carries_profile_provenance_and_omits_when_none():
     assert d["profile_name"] == "p" and d["profile_source_kind"] == "default"
 
 
-def test_legacy_manifest_without_profile_fields_still_serializes():
+def test_legacy_manifest_without_profile_fields_still_serializes() -> None:
     # Legacy manifests are read from disk (json) and never rewritten (R12);
     # to_dict on a profile-field-None Manifest omits them.
     man = m.Manifest(  # profile_* all None (legacy shape)
-        schema_version=1,
+        schema_version="1",
         session_id="s",
         archived_at="2026-01-01T00:00:00Z",
         status="complete",
@@ -65,7 +67,7 @@ def test_legacy_manifest_without_profile_fields_still_serializes():
     assert "profile_schema_version" not in d and "profile_source_kind" not in d
 
 
-def test_sqlite_projection_has_profile_columns_and_migration():
+def test_sqlite_projection_has_profile_columns_and_migration() -> None:
     from daydream.archive import _schema
 
     ddl = _schema._CREATE_TABLE  # the runs CREATE TABLE constant

@@ -13,7 +13,7 @@ def _default_strategy(stage: str) -> str:
     return rp.build_default_profile().strategies[stage].content
 
 
-def test_golden_baseline_generic_fallback():
+def test_golden_baseline_generic_fallback() -> None:
     from daydream.deep.prompts import build_generic_fallback_prompt
     p = build_generic_fallback_prompt(
         strategy=_default_strategy("discovery.generic_fallback"),
@@ -27,7 +27,7 @@ def test_golden_baseline_generic_fallback():
     assert "beagle" not in p.lower() and "/beagle-" not in p
 
 
-def test_golden_baseline_arbiter_and_merge():
+def test_golden_baseline_arbiter_and_merge() -> None:
     from daydream.deep.prompts import build_arbiter_prompt, build_merge_prompt
     a = build_arbiter_prompt(strategy=_default_strategy("arbitration"),
                              arbiter_input_path=Path("/in"), diff_path=Path("/d"),
@@ -41,7 +41,7 @@ def test_golden_baseline_arbiter_and_merge():
     assert "/ps" in m and "/dc" in m           # envelope runtime data present
     assert "/in" in a and "/i" in m
 
-def test_authored_blocks_land_verbatim():
+def test_authored_blocks_land_verbatim() -> None:
     p = rp.build_default_profile()
     per_stack = p.strategies["discovery.per_stack"].content
     structural = p.strategies["discovery.structural"].content
@@ -56,7 +56,7 @@ def test_authored_blocks_land_verbatim():
     assert p.strategies["improve.vetting"].source == "authored: #886 NATIVE_IMPROVE_VET_STRATEGY"
 
 
-def test_copy_existing_stages_byte_identical_after_strategy_threading():
+def test_copy_existing_stages_byte_identical_after_strategy_threading() -> None:
     from daydream.deep.coverage import build_uncovered_sweep_prompt
     from daydream.deep.prompts import (
         build_supervise_prompt,

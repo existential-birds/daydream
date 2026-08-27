@@ -17,9 +17,11 @@ from typing import TYPE_CHECKING, Any
 from daydream.extensions.api import (
     BreakLoop,
     FlowStep,
-    LoopGroup,
     Stop,
     UnresolvedExtensionError,
+)
+from daydream.extensions.api import (
+    LoopGroup as LoopGroup,
 )
 
 if TYPE_CHECKING:

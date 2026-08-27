@@ -120,7 +120,11 @@ def _total_input_tokens(usage: dict[str, Any]) -> int | None:
     input_tokens = usage.get("input_tokens")
     if input_tokens is None:
         return None
-    return input_tokens + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
+    return (
+        int(input_tokens)
+        + int(usage.get("cache_read_input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+    )
 
 
 class ClaudeAgentError(Exception):

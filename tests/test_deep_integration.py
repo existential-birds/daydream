@@ -1,12 +1,15 @@
 """Deep-mode backend parity + primitive-preservation tests (D-38, D-39, D-40)."""
-
 from __future__ import annotations
 
 import inspect
 import re
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
-from daydream.backends import CostEvent, ResultEvent, TextEvent
+import pytest
+
+from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE
 
 
@@ -25,15 +28,15 @@ class _DeepMockBackend:
 
     async def execute(
         self,
-        cwd,
-        prompt,
-        output_schema=None,
-        continuation=None,
+        cwd: Any,
+        prompt: str,
+        output_schema: Any=None,
+        continuation: Any=None,
         *,
-        agents=None,
-        max_turns=None,
-        read_only=False,
-    ):
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
+    ) -> AsyncIterator[AgentEvent]:
         # Record parity evidence -- D-38: no stage may pass `agents=`.
         self.agents_kwargs_seen.append(agents)
         # Record the delivered prompt at the backend seam (no builder spies).
@@ -175,7 +178,7 @@ class _CodexShape(_DeepMockBackend):
     raise_on_agents = True   # Codex rejects agents kwarg (parity contract)
 
 
-def _silence_ui(monkeypatch) -> None:
+def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence noisy UI helpers across orchestrator, phases, and runner."""
     noop = lambda *a, **kw: None  # noqa: E731 -- terse silencer
     for module in (
@@ -197,7 +200,7 @@ def _silence_ui(monkeypatch) -> None:
             monkeypatch.setattr(f"{module}.{name}", noop, raising=False)
 
 
-def _wire_mocks(monkeypatch, backend: _DeepMockBackend) -> None:
+def _wire_mocks(monkeypatch: pytest.MonkeyPatch, backend: _DeepMockBackend) -> None:
     """Install the mock backend + silence prompts and UI.
 
     ``phase_understand_intent`` loops on ``prompt_user`` until the user confirms
@@ -233,7 +236,7 @@ def _wire_mocks(monkeypatch, backend: _DeepMockBackend) -> None:
 async def _run_deep(
     target: Path,
     backend: _DeepMockBackend,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     shallow_fanout_threshold: int | None = None,
 ) -> int:
     """Common driver: wire mocks and execute the full deep pipeline.
@@ -259,7 +262,7 @@ async def _run_deep(
     return await run(config)
 
 
-async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch) -> None:
+async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes end-to-end on a Claude-shaped backend (cost_usd populated)."""
     backend = _ClaudeShape(multi_stack_target)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
@@ -277,7 +280,7 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch) -> No
     )
 
 
-async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch) -> None:
+async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes on Codex-shape (cost_usd=None, no agents= ever passed)."""
     backend = _CodexShape(multi_stack_target)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
@@ -376,7 +379,10 @@ def test_existing_tests_still_collect() -> None:
         spec.loader.exec_module(module)
 
 
-async def test_deep_default_backend_line_is_phase_agnostic(multi_stack_target: Path, monkeypatch) -> None:
+async def test_deep_default_backend_line_is_phase_agnostic(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """#647: the 'Default backend' status line never shows a review override."""
     from daydream.exploration import ExplorationContext
     from daydream.runner import RunConfig, run
@@ -402,7 +408,8 @@ async def test_deep_default_backend_line_is_phase_agnostic(multi_stack_target: P
 
 
 async def test_structural_meta_stack_flows_end_to_end(
-    multi_stack_target: Path, monkeypatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end smoke for the structural meta-stack pipeline (Tasks 2-7 composed).
 
@@ -432,15 +439,15 @@ async def test_structural_meta_stack_flows_end_to_end(
     detected_stacks: list[StackAssignment] = []
     real_detect = _detection.detect_stacks
 
-    def _spy_detect(changed_files, **kwargs):
+    def _spy_detect(changed_files: Any, **kwargs: Any) -> Any:
         result = real_detect(changed_files, **kwargs)
         detected_stacks.extend(result)
         return result
 
-    merge_kwargs: dict = {}
+    merge_kwargs: dict[str, Any] = {}
     real_build_merge = _prompts.build_merge_prompt
 
-    def _spy_merge(**kwargs):
+    def _spy_merge(**kwargs: Any) -> Any:
         merge_kwargs.update(kwargs)
         return real_build_merge(**kwargs)
 
@@ -489,7 +496,8 @@ async def test_structural_meta_stack_flows_end_to_end(
 
 
 async def test_310_prompt_gates_reach_built_prompts_in_real_run(
-    multi_stack_target: Path, monkeypatch
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path coverage for the #310 prompt gates (PR #328, Finding 2).
 
@@ -577,7 +585,8 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
 
 
 async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
-    rust_wire_target: Path, monkeypatch
+    rust_wire_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path coverage for the #311 wire-contract instructions (R3/R4).
 

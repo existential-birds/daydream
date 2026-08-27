@@ -23,8 +23,8 @@ try:
 
     _HARBOR = True
 except ImportError:  # Harbor is an optional extra; degrade to plain bases.
-    BaseAgent = object  # type: ignore[assignment]
-    AgentContext = object  # type: ignore[assignment]
+    BaseAgent = object
+    AgentContext = object
     _HARBOR = False
 
 

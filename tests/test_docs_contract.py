@@ -81,7 +81,7 @@ def test_extensions_doc_claims_only_exposed() -> None:
     assert "migration" in doc.lower()
 
 
-def test_help_exposes_native_surface(capsys) -> None:
+def test_help_exposes_native_surface(capsys: pytest.CaptureFixture[str]) -> None:
     for flag in ("--help", "--help-all"):
         with pytest.raises(SystemExit):
             _parse_args([flag])

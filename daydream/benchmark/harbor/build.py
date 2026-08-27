@@ -133,7 +133,7 @@ _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 def bounded_pr_context(
-    pull_request: dict, *, max_bytes: int = MAX_PR_CONTEXT_BYTES
+    pull_request: dict[str, Any], *, max_bytes: int = MAX_PR_CONTEXT_BYTES
 ) -> str:
     """Build the delimited ``<historical_pr_context>`` block for one PR.
 
@@ -196,7 +196,7 @@ def bounded_pr_context(
     )
 
 
-def render_task_spec(case_doc: dict, *, instruction: str) -> bytes:
+def render_task_spec(case_doc: dict[str, Any], *, instruction: str) -> bytes:
     """Deterministic per-case Task.md render; the single source shared by [r] approval and compile (D3)."""
     pull_request = case_doc.get("pull_request") or {}
     title = str(pull_request.get("title") or "")
@@ -283,7 +283,7 @@ def render_task_spec(case_doc: dict, *, instruction: str) -> bytes:
     return "\n".join(parts).encode("utf-8")
 
 
-def task_spec_digest(case_doc: dict) -> str:
+def task_spec_digest(case_doc: dict[str, Any]) -> str:
     """Canonical sha256 hexdigest of the rendered ``Task.md`` for *case_doc*.
 
     Single source for the task-spec invariant (sha256 over the deterministic
@@ -297,7 +297,7 @@ def task_spec_digest(case_doc: dict) -> str:
     ).hexdigest()
 
 
-def _flatten_finding(finding: dict) -> dict:
+def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
     """Map a curated finding to its provenance-free gold/artifact shape.
 
     Returns the content fields ``{title, body, severity, path, start_line,
@@ -335,7 +335,7 @@ def _flatten_finding(finding: dict) -> dict:
     }
 
 
-def _gold_finding_ids(key: str, finding: dict) -> str:
+def _gold_finding_ids(key: str, finding: dict[str, Any]) -> str:
     """Derive the compiled gold id bound to the opaque task *key*.
 
     Delegates to the canonical ``schema.derive_finding_id`` digest (sha256 over
@@ -350,7 +350,7 @@ def _gold_finding_ids(key: str, finding: dict) -> str:
     return schema.derive_finding_id(finding, case_id=key)
 
 
-def build_gold_list(findings: list, *, key: str) -> list:
+def build_gold_list(findings: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]:
     """Return the provenance-free hidden gold list, ordered by ``finding_id``.
 
     ``[]`` for empty input; otherwise each entry carries a ``finding_id``
@@ -367,7 +367,7 @@ def build_gold_list(findings: list, *, key: str) -> list:
     return [{"finding_id": fid, **flattened} for flattened, fid in flat]
 
 
-def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
+def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
     """Return the §9 candidate Oracle artifact for one compiled case.
 
     ``schema_version`` 1, ``case_id`` is the opaque task key, ``base_ref`` /
@@ -398,7 +398,7 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
     # Candidate ids are derived from canonical content + an occurrence ordinal
     # (mirrors the verifier's own per-content dedup ordinal), so the compiled
     # artifact re-derives identical ids under ``validate_candidate_artifact``.
-    groups: dict[tuple, int] = {}
+    groups: dict[tuple[str, ...], int] = {}
     entries = []
     for flattened, _ in flat:
         canon = (
@@ -565,7 +565,7 @@ _ROOT_README = (
 )
 
 
-def _is_compilable(curation: dict) -> bool:
+def _is_compilable(curation: dict[str, Any]) -> bool:
     """Eligible iff ready AND snapshot-attested (findings-ready or clean-ready)."""
     if not (curation.get("state") == "ready" and curation.get("snapshot_attested")):
         return False
@@ -576,9 +576,9 @@ def _is_compilable(curation: dict) -> bool:
     return schema.derive_gold_status(schema.Curation(**curation)) is not None
 
 
-def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
+def _authoring_input_digest(case_docs: dict[str, Any], manifest: dict[str, Any]) -> str:
     """Deterministic sha256 over the authoring inputs (no timestamps)."""
-    payload: dict = {}
+    payload: dict[str, Any] = {}
     for _case in manifest.get("cases") or []:
         case_id = _case.get("case_id")
         if not case_id or case_id not in case_docs:
@@ -602,7 +602,7 @@ def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _write_task_spec(stage: Path, case_doc: dict) -> str:
+def _write_task_spec(stage: Path, case_doc: dict[str, Any]) -> str:
     """Render one case's hidden ``Task.md``, verify it, and write it to *stage*.
 
     The task spec is the byte-deterministic hidden evaluation contract (R10/
@@ -627,14 +627,14 @@ def _write_task_spec(stage: Path, case_doc: dict) -> str:
 def _compile_case(
     stage: Path,
     ws: Path,
-    case_doc: dict,
+    case_doc: dict[str, Any],
     repo_slug: str,
     *,
     runtime_lock: bytes,
     wheel: Path | None,
     reviewer_hosts: list[str],
     judge_hosts: list[str],
-) -> dict:
+) -> dict[str, Any]:
     """Compile one case tree into ``stage/<key>/`` and return its lock row.
 
     The network policy is threaded from the workspace's persisted privacy
@@ -776,15 +776,15 @@ def _compile_case(
 
 
 def _build_lock(
-    case_rows: list[dict],
+    case_rows: list[dict[str, Any]],
     authoring_digest: str,
     all_files: dict[str, str],
     *,
     wheel_info: Any | None = None,
     runtime_lock_fields: dict[str, str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Assemble the deterministic private lock (no timestamps anywhere)."""
-    lock: dict = {
+    lock: dict[str, Any] = {
         "schema_version": 1,
         "authoring_input_digest": authoring_digest,
         "template_version": TEMPLATE_VERSION,
@@ -806,7 +806,7 @@ def _build_lock(
     return lock
 
 
-def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
+def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any]:
     """Compile the whole workspace into ``root/harbor/`` atomically.
 
     Builds into ``root/cache/harbor-build-stage``, validates every indexed case,
@@ -863,7 +863,7 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
         # unsafe (or hostless) policy can never reach the task render.
         reviewer_hosts = list(manifest_model.privacy.reviewer_allowed_hosts)
         judge_hosts = list(manifest_model.privacy.judge_allowed_hosts)
-        case_docs: dict[str, dict] = {}
+        case_docs: dict[str, dict[str, Any]] = {}
         for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
             dumped = doc.model_dump(mode="json")
             case_id = dumped["case_id"]
@@ -886,7 +886,7 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
 
         try:
             all_files: dict[str, str] = {}
-            case_rows: list[dict] = []
+            case_rows: list[dict[str, Any]] = []
             control_plane: dict[str, str] = {"README.md": _ROOT_README}
             for _case in manifest.get("cases") or []:
                 case_id = _case.get("case_id")
@@ -961,4 +961,7 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
             shutil.rmtree(stage, ignore_errors=True)
             raise
 
-    return json.loads(lock_bytes.decode("utf-8"))
+    lock_data = json.loads(lock_bytes.decode("utf-8"))
+    if not isinstance(lock_data, dict):
+        raise ValueError("compiled lock is not a JSON object")
+    return lock_data

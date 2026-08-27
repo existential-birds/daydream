@@ -11,18 +11,19 @@ Assertions are on observable outcomes: exit codes, the review payloads that
 crossed the ``gh`` boundary, and the GraphQL mutations issued — never on
 in-process bookkeeping.
 """
-
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream import cli
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers
+from tests.harness.fake_gh import FakeGh
 
 
 def cli_main(argv: list[str]) -> int:
@@ -43,8 +44,15 @@ def _post_argv(artifact: Path, *, pr: int = 7) -> list[str]:
     return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", "h" * 40, "--repo", "o/r"]
 
 
-def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, title: str,
-             severity: str = "high") -> dict:
+def _finding(
+    fingerprint: str,
+    *,
+    path: str,
+    line: int | None,
+    placement: str,
+    title: str,
+    severity: str = "high",
+) -> dict[str, Any]:
     return {
         "fingerprint": fingerprint,
         "path": path,
@@ -58,7 +66,7 @@ def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, t
     }
 
 
-def _write_artifact(path: Path, findings: list[dict]) -> Path:
+def _write_artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
     """Build a valid artifact via write_findings_artifact."""
     write_findings_artifact(
         path,
@@ -97,7 +105,7 @@ def artifact_on_disk_v2(tmp_path: Path) -> Path:
     )
 
 
-def test_fresh_post_then_idempotent_repost(fake_gh, artifact_on_disk) -> None:
+def test_fresh_post_then_idempotent_repost(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
     argv = _post_argv(artifact_on_disk) + ["--bot-login", "daydream"]
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
@@ -114,7 +122,7 @@ def test_fresh_post_then_idempotent_repost(fake_gh, artifact_on_disk) -> None:
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1  # no dup review
 
 
-def test_stale_finding_resolved_new_finding_posted(fake_gh, artifact_on_disk_v2) -> None:
+def test_stale_finding_resolved_new_finding_posted(fake_gh: FakeGh, artifact_on_disk_v2: Path) -> None:
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
     )
@@ -126,20 +134,24 @@ def test_stale_finding_resolved_new_finding_posted(fake_gh, artifact_on_disk_v2)
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 
-def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh, artifact_on_disk) -> None:
+def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
     rc = cli_main(_post_argv(artifact_on_disk, pr=8))  # event says 8
     assert rc == 1
     assert fake_gh.calls("POST") == []  # nothing posted, nothing resolved
 
 
-def test_malformed_artifact_aborts(fake_gh, tmp_path) -> None:
+def test_malformed_artifact_aborts(fake_gh: FakeGh, tmp_path: Path) -> None:
     bad = tmp_path / "f.json"
     bad.write_text("{not json")
     rc = cli_main(_post_argv(bad))
     assert rc == 1 and fake_gh.calls("POST") == []
 
 
-def test_malformed_repo_config_warns_and_still_posts(fake_gh, tmp_path, monkeypatch) -> None:
+def test_malformed_repo_config_warns_and_still_posts(
+    fake_gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A malformed .daydream.toml in the checkout must not abort the unattended post.
 
     post-findings never consulted the repo config before issue #343; the new
@@ -167,7 +179,7 @@ def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
 
 
 def test_forged_marker_from_non_bot_commenter_does_not_suppress_finding(
-    fake_gh, tmp_path
+    fake_gh: FakeGh, tmp_path: Path
 ) -> None:
     # Prior thread carries the SAME fingerprint, but authored by a human -> forged.
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
@@ -180,7 +192,7 @@ def test_forged_marker_from_non_bot_commenter_does_not_suppress_finding(
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 
-def test_bot_authored_marker_with_bot_login_suppresses_repost(fake_gh, tmp_path) -> None:
+def test_bot_authored_marker_with_bot_login_suppresses_repost(fake_gh: FakeGh, tmp_path: Path) -> None:
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
@@ -191,7 +203,7 @@ def test_bot_authored_marker_with_bot_login_suppresses_repost(fake_gh, tmp_path)
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
 
-def test_bot_login_env_fallback(monkeypatch, fake_gh, tmp_path) -> None:
+def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, tmp_path: Path) -> None:
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
@@ -202,7 +214,7 @@ def test_bot_login_env_fallback(monkeypatch, fake_gh, tmp_path) -> None:
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
 
-def test_post_findings_approve_when_clean_and_flag(fake_gh, tmp_path) -> None:
+def test_post_findings_approve_when_clean_and_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
     """low-severity-only artifact + --approve-on-clean -> review event APPROVE."""
     artifact = _write_artifact(tmp_path / "f.json", [
         _finding("a" * 64, path="a.py", line=3, placement="inline",
@@ -216,7 +228,7 @@ def test_post_findings_approve_when_clean_and_flag(fake_gh, tmp_path) -> None:
     assert "no high/medium findings" in posts[0].payload["body"]
 
 
-def test_post_findings_keeps_comment_when_high_finding(fake_gh, tmp_path) -> None:
+def test_post_findings_keeps_comment_when_high_finding(fake_gh: FakeGh, tmp_path: Path) -> None:
     """high-severity finding + --approve-on-clean -> event stays COMMENT."""
     artifact = _write_artifact(tmp_path / "f.json", [
         _finding("a" * 64, path="a.py", line=3, placement="inline",
@@ -230,7 +242,7 @@ def test_post_findings_keeps_comment_when_high_finding(fake_gh, tmp_path) -> Non
     assert "no high/medium findings" not in posts[0].payload["body"]
 
 
-def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh, tmp_path) -> None:
+def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
     """F2: an all-matched clean artifact + --approve-on-clean still posts APPROVE.
 
     The post-findings spine previously returned 0 on its unconditional empty
@@ -253,7 +265,7 @@ def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh, tmp_path
     assert "no high/medium findings" in posts[0].payload["body"]
 
 
-def test_post_findings_all_matched_no_approve_without_flag(fake_gh, tmp_path) -> None:
+def test_post_findings_all_matched_no_approve_without_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
     """F2: without --approve-on-clean the same all-matched artifact posts nothing."""
     artifact = _write_artifact(tmp_path / "f.json", [
         _finding("a" * 64, path="a.py", line=3, placement="inline",
@@ -267,7 +279,7 @@ def test_post_findings_all_matched_no_approve_without_flag(fake_gh, tmp_path) ->
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 
-def test_post_findings_matched_high_blocks_approval(fake_gh, tmp_path) -> None:
+def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: Path) -> None:
     """F2b: a still-live matched high finding blocks APPROVE.
 
     The approval decision must count the severities of already-posted

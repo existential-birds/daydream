@@ -8,10 +8,10 @@ must still resolve.
 Also covers ``analyze_grounding``'s rate arithmetic, including the
 undefined (zero-findings) case, which must not report a perfect score.
 """
-
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -44,7 +44,7 @@ def _write_run(daydream_dir: Path, session_id: str, marker: str) -> Path:
     return run_dir
 
 
-def test_ambiguous_prefix_raises(tmp_path: Path):
+def test_ambiguous_prefix_raises(tmp_path: Path) -> None:
     daydream_dir = tmp_path / ".daydream"
     _write_run(daydream_dir, "abcd1234-0000-0000-0000-000000000001", "first")
     _write_run(daydream_dir, "abcd1234-0000-0000-0000-000000000002", "second")
@@ -53,7 +53,7 @@ def test_ambiguous_prefix_raises(tmp_path: Path):
         load_trajectories(daydream_dir, session_id="abcd1234")
 
 
-def test_unique_prefix_resolves(tmp_path: Path):
+def test_unique_prefix_resolves(tmp_path: Path) -> None:
     daydream_dir = tmp_path / ".daydream"
     _write_run(daydream_dir, "abcd1234-0000-0000-0000-000000000001", "first")
     _write_run(daydream_dir, "ffff0000-0000-0000-0000-000000000002", "second")
@@ -65,7 +65,7 @@ def test_unique_prefix_resolves(tmp_path: Path):
     assert result["forked"] == []
 
 
-def test_exact_match_takes_precedence(tmp_path: Path):
+def test_exact_match_takes_precedence(tmp_path: Path) -> None:
     """An exact dir name must win even if a longer dir would also prefix-match."""
     daydream_dir = tmp_path / ".daydream"
     # Exact id and a sibling whose name starts with the same string.
@@ -78,7 +78,7 @@ def test_exact_match_takes_precedence(tmp_path: Path):
     assert result["main"]["marker"] == "exact"
 
 
-def test_analyze_costs_preserves_fractional_aggregate_precision():
+def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
     trajectories = {
         "main": {
             "_source_file": "trajectory.json",
@@ -93,7 +93,7 @@ def test_analyze_costs_preserves_fractional_aggregate_precision():
     assert sum(agent["cost_usd"] for agent in result["by_agent"]) == result["total_cost_usd"]
 
 
-def test_analyze_costs_includes_cached_tokens_when_prompt_dominates():
+def test_analyze_costs_includes_cached_tokens_when_prompt_dominates() -> None:
     trajectories = {
         "main": {
             "_source_file": "trajectory.json",
@@ -111,7 +111,7 @@ def test_analyze_costs_includes_cached_tokens_when_prompt_dominates():
     assert result["cache_hit_rate"] == 0.1
 
 
-def test_analyze_costs_aggregates_legacy_fork_metrics():
+def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
     trajectories = {
         "main": {
             "_source_file": "trajectory.json",
@@ -130,7 +130,7 @@ def test_analyze_costs_aggregates_legacy_fork_metrics():
     assert result["total_cost_usd"] == 1.5
 
 
-async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path):
+async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path) -> None:
     session = "nested-forks"
     daydream_dir = tmp_path / ".daydream"
     recorder = TrajectoryRecorder(
@@ -177,7 +177,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
 # --- analyze_grounding ---
 
 
-def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict:
+def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict[str, Any]:
     """Forked-trajectory fixture whose agent Read each of ``read_paths``.
 
     Shaped for ``_extract_tool_calls``: every step needs a ``step_id`` and its
@@ -196,7 +196,7 @@ def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> di
     return {"_source_file": source_file, "steps": steps}
 
 
-def test_exploration_utilization_counts_reads_beneath_exploration_dir():
+def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
     from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
@@ -221,7 +221,7 @@ def test_exploration_utilization_counts_reads_beneath_exploration_dir():
     assert result["reviewers_utilizing_exploration"] == 4
 
 
-def test_exploration_utilization_counts_bash_mediated_reads():
+def test_exploration_utilization_counts_bash_mediated_reads() -> None:
     from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
@@ -246,7 +246,7 @@ def test_exploration_utilization_counts_bash_mediated_reads():
     assert result["reviewers_utilizing_exploration"] == 1
 
 
-def test_grounding_rate_is_undefined_with_zero_findings():
+def test_grounding_rate_is_undefined_with_zero_findings() -> None:
     """A review that produced NO findings has an undefined grounding rate.
 
     Reporting 1.0 here would hand a review that found nothing a perfect
@@ -275,7 +275,7 @@ CODEX_READ_COMMAND = (
 )
 
 
-def test_files_read_extracts_codex_shell_paths():
+def test_files_read_extracts_codex_shell_paths() -> None:
     calls = [{"function_name": "shell", "arguments": {"command": CODEX_READ_COMMAND}}]
 
     paths = _files_read(calls)
@@ -293,7 +293,7 @@ def test_files_read_extracts_codex_shell_paths():
     assert "2>/dev/null" not in paths
 
 
-def test_files_read_extracts_pi_read_and_bash_paths():
+def test_files_read_extracts_pi_read_and_bash_paths() -> None:
     calls = [
         {"function_name": "read", "arguments": {"path": "/repo/pkg/services/cleanup.go"}},
         {"function_name": "bash", "arguments": {"command": "cat README.md && nl -ba core/osprey-cli"}},
@@ -306,7 +306,7 @@ def test_files_read_extracts_pi_read_and_bash_paths():
     assert "core/osprey-cli" in paths
 
 
-def test_files_read_counts_claude_bash_shell_reads():
+def test_files_read_counts_claude_bash_shell_reads() -> None:
     calls = [{"function_name": "Bash", "arguments": {"command": "sed -n '1,60p' daydream/config.py"}}]
 
     paths = _files_read(calls)
@@ -320,14 +320,14 @@ def _shell_reads(command: str) -> set[str]:
     return _files_read([{"function_name": "shell", "arguments": {"command": command}}])
 
 
-def test_files_read_skips_separated_redirect_target():
+def test_files_read_skips_separated_redirect_target() -> None:
     paths = _shell_reads("cat source.txt > target.py")
 
     assert "source.txt" in paths
     assert "target.py" not in paths
 
 
-def test_files_read_skips_redirect_and_pattern_for_rg():
+def test_files_read_skips_redirect_and_pattern_for_rg() -> None:
     paths = _shell_reads("rg -n 'pat' a.py b.py 2>/dev/null")
 
     assert "a.py" in paths
@@ -336,12 +336,12 @@ def test_files_read_skips_redirect_and_pattern_for_rg():
     assert "pat" not in paths
 
 
-def test_files_read_preserves_quoted_paths_with_spaces():
+def test_files_read_preserves_quoted_paths_with_spaces() -> None:
     assert "my file.py" in _shell_reads("cat 'my file.py'")
     assert "my file.py" in _shell_reads('cat "my file.py"')
 
 
-def test_files_read_skips_rg_option_values():
+def test_files_read_skips_rg_option_values() -> None:
     paths = _shell_reads("rg -C 3 --glob '*.py' 'needle' src/app.py")
 
     assert paths == {"src/app.py"}
@@ -350,7 +350,7 @@ def test_files_read_skips_rg_option_values():
     assert "needle" not in paths
 
 
-def test_files_read_extracts_claude_inspection_verbs():
+def test_files_read_extracts_claude_inspection_verbs() -> None:
     calls = [{"function_name": "Bash", "arguments": {"command": (
         "grep -n 'def validate' daydream/config.py && "
         "head -n 20 tests/test_config.py; "
@@ -373,7 +373,7 @@ def test_files_read_extracts_claude_inspection_verbs():
     assert "1" not in paths               # wc -l flag not a path
 
 
-def test_files_read_bash_import_only_grep_does_not_credit():
+def test_files_read_bash_import_only_grep_does_not_credit() -> None:
     # The import-only carve-out spans the shared seam: a Bash/shell ``grep``
     # whose pattern references only module imports credits no read path,
     # matching the Grep-tool branch (issue #739).
@@ -383,7 +383,7 @@ def test_files_read_bash_import_only_grep_does_not_credit():
     assert _shell_reads("grep -n 'def validate' daydream/config.py") == {"daydream/config.py"}
 
 
-def test_files_read_claude_read_and_grep_unchanged():
+def test_files_read_claude_read_and_grep_unchanged() -> None:
     calls = [
         {"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}},
         {"function_name": "Grep", "arguments": {"path": "src/"}},
@@ -394,7 +394,7 @@ def test_files_read_claude_read_and_grep_unchanged():
     assert paths == {"/repo/api.py", "src/"}
 
 
-def test_files_read_grep_import_only_pattern_does_not_credit():
+def test_files_read_grep_import_only_pattern_does_not_credit() -> None:
     calls = [{"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "daydream/config.py"}}]
 
     paths = _files_read(calls)
@@ -402,7 +402,7 @@ def test_files_read_grep_import_only_pattern_does_not_credit():
     assert paths == set()
 
 
-def test_files_read_grep_content_pattern_credits_path():
+def test_files_read_grep_content_pattern_credits_path() -> None:
     calls = [{"function_name": "Grep", "arguments": {"pattern": "def validate", "path": "daydream/config.py"}}]
 
     paths = _files_read(calls)
@@ -410,7 +410,7 @@ def test_files_read_grep_content_pattern_credits_path():
     assert paths == {"daydream/config.py"}
 
 
-def test_files_read_grep_pattern_flag_keeps_file_operand():
+def test_files_read_grep_pattern_flag_keeps_file_operand() -> None:
     # -e/-f/--regexp/--file are pattern-supplying options: the following token
     # is the pattern, so the trailing file operand must still be credited as a
     # read path (issue #739). Before the fix these dropped the operand entirely.
@@ -420,7 +420,7 @@ def test_files_read_grep_pattern_flag_keeps_file_operand():
     assert _shell_reads("grep -f /tmp/patterns.txt daydream/config.py") == {"daydream/config.py"}
 
 
-def test_files_read_grep_context_options_do_not_eat_operand():
+def test_files_read_grep_context_options_do_not_eat_operand() -> None:
     # --before-context/--after-context/--max-count take a value; their numeric
     # value must not be misread as the pattern (issue #739).
     assert _shell_reads("grep --before-context 3 'def validate' daydream/config.py") == {"daydream/config.py"}
@@ -448,7 +448,7 @@ def test_tokenize_command_whitespace_fallback_keeps_recoverable_paths() -> None:
     assert "a.py" in paths
 
 
-def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path):
+def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path) -> None:
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
     (daydream_dir / "diff.patch").write_text(
@@ -491,7 +491,7 @@ def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path):
     assert result["uncovered_files"] == []
 
 
-def test_analyze_grounding_counts_codex_and_pi_reads():
+def test_analyze_grounding_counts_codex_and_pi_reads() -> None:
     trajectories = {
         "main": None,
         "forked": [
@@ -560,7 +560,7 @@ def _mass(cc: int, sloc: int) -> float:
     return cc * math.sqrt(sloc)
 
 
-def test_quality_erosion_computes_cc_mass_share(tmp_path: Path):
+def test_quality_erosion_computes_cc_mass_share(tmp_path: Path) -> None:
     """Pooled erosion is the high-CC mass share, hand-computed from the file."""
     ws = _quality_workspace(
         tmp_path,
@@ -579,7 +579,7 @@ def test_quality_erosion_computes_cc_mass_share(tmp_path: Path):
     assert entry["high_cc_functions"] == 1
 
 
-def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path):
+def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {"app.py": "def one(x):\n    return x + 1\n\ndef two(x, y):\n    return x + y\n"},
@@ -592,7 +592,7 @@ def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path):
     assert result["per_file"]["app.py"]["high_cc_functions"] == 0
 
 
-def test_quality_verbosity_flags_identity_comprehension(tmp_path: Path):
+def test_quality_verbosity_flags_identity_comprehension(tmp_path: Path) -> None:
     ws = _quality_workspace(tmp_path, {"app.py": "def f(items):\n    return [x for x in items]\n"})
 
     result = analyze_quality(ws / ".daydream")
@@ -602,7 +602,7 @@ def test_quality_verbosity_flags_identity_comprehension(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(1 / 2)
 
 
-def test_quality_verbosity_flags_empty_list_guard(tmp_path: Path):
+def test_quality_verbosity_flags_empty_list_guard(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {
@@ -623,7 +623,7 @@ def test_quality_verbosity_flags_empty_list_guard(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(2 / 5)
 
 
-def test_quality_verbosity_flags_single_use_variable(tmp_path: Path):
+def test_quality_verbosity_flags_single_use_variable(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {
@@ -642,7 +642,7 @@ def test_quality_verbosity_flags_single_use_variable(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(round(1 / 3, 4))
 
 
-def test_quality_verbosity_flags_trivial_wrapper(tmp_path: Path):
+def test_quality_verbosity_flags_trivial_wrapper(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {
@@ -663,7 +663,7 @@ def test_quality_verbosity_flags_trivial_wrapper(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(2 / 4)
 
 
-def test_quality_verbosity_flags_nested_ladder(tmp_path: Path):
+def test_quality_verbosity_flags_nested_ladder(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {
@@ -685,7 +685,7 @@ def test_quality_verbosity_flags_nested_ladder(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(round(2 / 6, 4))
 
 
-def test_quality_verbosity_flags_clone_block(tmp_path: Path):
+def test_quality_verbosity_flags_clone_block(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {
@@ -710,7 +710,7 @@ def test_quality_verbosity_flags_clone_block(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(6 / 8)
 
 
-def test_quality_per_file_keyed_by_relative_path(tmp_path: Path):
+def test_quality_per_file_keyed_by_relative_path(tmp_path: Path) -> None:
     ws = _quality_workspace(tmp_path, {"pkg/mod.py": "def f(x):\n    return x\n"})
 
     result = analyze_quality(ws / ".daydream")
@@ -719,7 +719,7 @@ def test_quality_per_file_keyed_by_relative_path(tmp_path: Path):
     assert result["per_file"]["pkg/mod.py"]["functions"] == 1
 
 
-def test_quality_returns_none_when_no_python_files(tmp_path: Path):
+def test_quality_returns_none_when_no_python_files(tmp_path: Path) -> None:
     ws = _quality_workspace(tmp_path, {"README.md": "# nothing here\n"})
 
     result = analyze_quality(ws / ".daydream")
@@ -735,7 +735,7 @@ def test_quality_returns_none_when_no_python_files(tmp_path: Path):
     }
 
 
-def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path):
+def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {
@@ -752,7 +752,7 @@ def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path):
     assert list(result["per_file"]) == ["app.py"]
 
 
-def test_quality_monotone_across_eroding_fix(tmp_path: Path):
+def test_quality_monotone_across_eroding_fix(tmp_path: Path) -> None:
     """An eroding fix to an already-large function raises erosion (verbosity holds)."""
     clean_ws = _quality_workspace(
         tmp_path,
@@ -772,7 +772,7 @@ def test_quality_monotone_across_eroding_fix(tmp_path: Path):
     assert eroded["verbosity"] >= clean["verbosity"]
 
 
-def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path):
+def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path) -> None:
     """Real-path: analyze_session computes quality on the live workspace tree."""
     ws = _quality_workspace(
         tmp_path,
@@ -809,7 +809,7 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path)
 # --- review round 1 fix regressions (#316) ---
 
 
-def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(tmp_path: Path):
+def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(tmp_path: Path) -> None:
     """Blank rows inside a flagged span must not count toward the ratio.
 
     A trivial wrapper's span covers the whole function, blank lines included;
@@ -835,7 +835,7 @@ def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(
     assert entry["verbosity"] == pytest.approx(1.0)
 
 
-def test_quality_erosion_counts_comprehension_filters_toward_cc(tmp_path: Path):
+def test_quality_erosion_counts_comprehension_filters_toward_cc(tmp_path: Path) -> None:
     """A comprehension's generators and filters are real branch paths.
 
     A function whose only decision points live inside a comprehension must
@@ -860,7 +860,7 @@ def test_quality_erosion_counts_comprehension_filters_toward_cc(tmp_path: Path):
     assert entry["erosion"] == 1.0
 
 
-def test_quality_erosion_ignores_wildcard_match_case(tmp_path: Path):
+def test_quality_erosion_ignores_wildcard_match_case(tmp_path: Path) -> None:
     """``case _:`` matches any value and adds no decision path."""
     ws = _quality_workspace(
         tmp_path,
@@ -880,7 +880,7 @@ def test_quality_erosion_ignores_wildcard_match_case(tmp_path: Path):
     assert result["erosion"] == 0.0
 
 
-def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path):
+def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path) -> None:
     """Each real ``case <value>:`` adds a decision path; 11 cross the threshold."""
     lines = ["def f(x):", "    match x:"]
     for i in range(1, 12):
@@ -895,7 +895,7 @@ def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path):
     assert entry["erosion"] == 1.0
 
 
-def test_quality_verbosity_filtered_comprehension_not_flagged(tmp_path: Path):
+def test_quality_verbosity_filtered_comprehension_not_flagged(tmp_path: Path) -> None:
     """``[x for x in items if x > 0]`` filters, so it is not an identity."""
     ws = _quality_workspace(
         tmp_path,
@@ -907,7 +907,7 @@ def test_quality_verbosity_filtered_comprehension_not_flagged(tmp_path: Path):
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_multi_generator_comprehension_not_flagged(tmp_path: Path):
+def test_quality_verbosity_multi_generator_comprehension_not_flagged(tmp_path: Path) -> None:
     """``[x for x in a for y in b]`` is a product, not a passthrough."""
     ws = _quality_workspace(
         tmp_path,
@@ -919,7 +919,7 @@ def test_quality_verbosity_multi_generator_comprehension_not_flagged(tmp_path: P
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_while_predicate_guard_not_flagged(tmp_path: Path):
+def test_quality_verbosity_while_predicate_guard_not_flagged(tmp_path: Path) -> None:
     """A predicate merely receiving the collection does not prove it nonempty."""
     ws = _quality_workspace(
         tmp_path,
@@ -938,7 +938,7 @@ def test_quality_verbosity_while_predicate_guard_not_flagged(tmp_path: Path):
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_while_bare_collection_guard_flagged(tmp_path: Path):
+def test_quality_verbosity_while_bare_collection_guard_flagged(tmp_path: Path) -> None:
     """``while items:`` proves nonemptiness, so the guard is redundant."""
     ws = _quality_workspace(
         tmp_path,
@@ -959,7 +959,7 @@ def test_quality_verbosity_while_bare_collection_guard_flagged(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(2 / 4)
 
 
-def test_quality_verbosity_while_len_comparison_guard_flagged(tmp_path: Path):
+def test_quality_verbosity_while_len_comparison_guard_flagged(tmp_path: Path) -> None:
     """``while len(items) > 0:`` proves nonemptiness, so the guard is redundant."""
     ws = _quality_workspace(
         tmp_path,
@@ -980,7 +980,7 @@ def test_quality_verbosity_while_len_comparison_guard_flagged(tmp_path: Path):
     assert entry["verbosity"] == pytest.approx(2 / 4)
 
 
-def test_quality_verbosity_trivial_wrapper_with_literal_not_flagged(tmp_path: Path):
+def test_quality_verbosity_trivial_wrapper_with_literal_not_flagged(tmp_path: Path) -> None:
     """``g(x, 42)`` supplies a literal, so the wrapper is not a pure passthrough."""
     ws = _quality_workspace(
         tmp_path,
@@ -992,7 +992,7 @@ def test_quality_verbosity_trivial_wrapper_with_literal_not_flagged(tmp_path: Pa
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_trivial_wrapper_with_keyword_arg_not_flagged(tmp_path: Path):
+def test_quality_verbosity_trivial_wrapper_with_keyword_arg_not_flagged(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {"app.py": "def f(x):\n    return g(x=x)\n"},
@@ -1003,7 +1003,7 @@ def test_quality_verbosity_trivial_wrapper_with_keyword_arg_not_flagged(tmp_path
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_trivial_wrapper_with_starred_args_not_flagged(tmp_path: Path):
+def test_quality_verbosity_trivial_wrapper_with_starred_args_not_flagged(tmp_path: Path) -> None:
     ws = _quality_workspace(
         tmp_path,
         {"app.py": "def f(*xs):\n    return g(*xs)\n"},
@@ -1014,7 +1014,7 @@ def test_quality_verbosity_trivial_wrapper_with_starred_args_not_flagged(tmp_pat
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_trivial_wrapper_typed_param_still_flagged(tmp_path: Path):
+def test_quality_verbosity_trivial_wrapper_typed_param_still_flagged(tmp_path: Path) -> None:
     """A type annotation adds no behavior, so ``def f(x: int): return g(x)`` is a wrapper."""
     ws = _quality_workspace(
         tmp_path,
@@ -1026,7 +1026,7 @@ def test_quality_verbosity_trivial_wrapper_typed_param_still_flagged(tmp_path: P
     assert result["per_file"]["app.py"]["verbosity"] == 1.0
 
 
-def test_quality_verbosity_trivial_wrapper_with_default_not_flagged(tmp_path: Path):
+def test_quality_verbosity_trivial_wrapper_with_default_not_flagged(tmp_path: Path) -> None:
     """A default supplies behavior, so ``def f(x=1): return g(x)`` is not a wrapper."""
     ws = _quality_workspace(
         tmp_path,
@@ -1044,7 +1044,7 @@ def test_quality_verbosity_trivial_wrapper_with_default_not_flagged(tmp_path: Pa
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
 
 
-def test_quality_verbosity_flags_clones_across_files(tmp_path: Path):
+def test_quality_verbosity_flags_clones_across_files(tmp_path: Path) -> None:
     """An exact block copied from ``a.py`` into ``b.py`` flags BOTH files.
 
     Per-file clone detection alone never sees the duplicate — each per-file
@@ -1098,14 +1098,15 @@ def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path)
 
 
 def test_quality_candidate_empty_set_returns_empty_without_enumeration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An explicitly empty candidate set reports zero files without walking the workspace."""
     from daydream.eval import analyzer as analyzer_mod
 
     ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n"})
 
-    def _boom(_workspace: Path):
+    def _boom(_workspace: Path) -> None:
         raise AssertionError("workspace must not be enumerated for an empty candidate set")
 
     monkeypatch.setattr(analyzer_mod, "_scoped_python_files", _boom)
@@ -1131,7 +1132,7 @@ def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
     assert set(result["per_file"]) == {"app.py"}
 
 
-def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path):
+def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path) -> None:
     """A block present in only one file flags neither file."""
     ws = _quality_workspace(
         tmp_path,
@@ -1147,7 +1148,7 @@ def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path):
     assert result["per_file"]["b.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: Path):
+def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: Path) -> None:
     """Within-file duplicates keep counting now that the cross-file pass exists."""
     ws = _quality_workspace(
         tmp_path,
@@ -1171,7 +1172,7 @@ def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: 
     assert result["per_file"]["app.py"]["verbosity"] == pytest.approx(6 / 8)
 
 
-def test_quality_erosion_generator_expression_filters_count_toward_cc(tmp_path: Path):
+def test_quality_erosion_generator_expression_filters_count_toward_cc(tmp_path: Path) -> None:
     """Generator-expression filters are real branch paths, like list comprehensions."""
     ws = _quality_workspace(
         tmp_path,
@@ -1203,7 +1204,7 @@ def test_quality_erosion_generator_expression_filters_count_toward_cc(tmp_path: 
 )
 def test_quality_erosion_comprehension_types_cc_parity(
     tmp_path: Path, comprehension: str, label: str
-):
+) -> None:
     """List/set/dict/generator comprehensions count generators + filters identically."""
     ws = _quality_workspace(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
 
@@ -1214,7 +1215,7 @@ def test_quality_erosion_comprehension_types_cc_parity(
     assert entry["erosion"] == 1.0
 
 
-def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path: Path):
+def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path: Path) -> None:
     """``(x for x in items)`` is an identity comprehension, exactly like a list one."""
     ws = _quality_workspace(tmp_path, {"app.py": "def f(items):\n    return (x for x in items)\n"})
 
@@ -1223,7 +1224,7 @@ def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path:
     assert result["per_file"]["app.py"]["verbosity"] > 0
 
 
-def test_quality_excludes_generated_and_vendored_files(tmp_path: Path):
+def test_quality_excludes_generated_and_vendored_files(tmp_path: Path) -> None:
     """Generated and vendored Python is out of metric scope (Finding #8).
 
     Path-based generated files (``*_generated.py``, ``*.pb.py``,
@@ -1250,7 +1251,7 @@ def test_quality_excludes_generated_and_vendored_files(tmp_path: Path):
     assert result["scoped_files"] == 1
 
 
-def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path):
+def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> None:
     """A malformed file stays in scoped_files but not per_file or the ratios."""
     ws = _quality_workspace(
         tmp_path,
@@ -1270,7 +1271,7 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path):
 # --- review round 3 fix regressions (#316) ---
 
 
-def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path):
+def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path) -> None:
     """A malformed file's lines must never flag matching blocks in valid files.
 
     ``analyze_quality`` indexes the cross-file clone pass over successfully
@@ -1320,7 +1321,7 @@ def test_quality_candidate_malformed_peer_does_not_contaminate_cross_file_clones
     assert clean["verbosity"] == dirty["verbosity"]
 
 
-def test_quality_per_file_erosion_none_without_functions(tmp_path: Path):
+def test_quality_per_file_erosion_none_without_functions(tmp_path: Path) -> None:
     """A module with no functions has no mass, so its erosion ratio is None.
 
     Zero is a meaningful value (no high-CC mass), so undefined must be None;
@@ -1342,7 +1343,7 @@ def test_quality_per_file_erosion_none_without_functions(tmp_path: Path):
     assert result["erosion"] == 0.0
 
 
-def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path):
+def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path) -> None:
     """A file with no non-blank lines has an undefined verbosity ratio.
 
     ``None`` signals the undefined denominator; the workspace aggregate keeps
@@ -1366,7 +1367,7 @@ def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path):
 )
 def test_quality_verbosity_guard_after_mutation_not_flagged(
     tmp_path: Path, mutation: str, label: str
-):
+) -> None:
     """A post-mutation empty check is a necessary termination guard.
 
     ``while items:`` proves nonemptiness only at the header; once the body
@@ -1383,7 +1384,7 @@ def test_quality_verbosity_guard_after_mutation_not_flagged(
     assert result["per_file"]["app.py"]["verbosity"] == 0.0, label
 
 
-def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: Path):
+def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: Path) -> None:
     """A non-mutating statement between header and guard keeps it redundant.
 
     ``while items: x = f(); if not items: break`` — nothing touches ``items``,
@@ -1416,8 +1417,10 @@ def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: 
     ],
 )
 def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(
-    tmp_path: Path, wrapper_body: str, label: str
-):
+    tmp_path: Path,
+    wrapper_body: str,
+    label: str,
+) -> None:
     """A leading docstring is not an executable statement for wrapper detection.
 
     ``_trivial_wrapper`` must count only the real body statement, so a
@@ -1442,7 +1445,7 @@ def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(
     assert result["per_file"]["app.py"]["verbosity"] > 0, label
 
 
-def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path):
+def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
     """A vendored dir whose basename is not vendor/third_party is still excluded.
 
     ``daydream/atif/`` is explicitly vendored from Harbor (see
@@ -1514,7 +1517,7 @@ def seed_review_output(deep: Path, *, count: int) -> None:
     (deep / "review-output.md").write_text("\n".join(lines) + "\n")
 
 
-def test_shipped_count_wins_over_per_stack_records(tmp_path: Path):
+def test_shipped_count_wins_over_per_stack_records(tmp_path: Path) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1525,7 +1528,7 @@ def test_shipped_count_wins_over_per_stack_records(tmp_path: Path):
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
 
-def test_shipped_count_includes_wonder_lens_items(tmp_path: Path):
+def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
     # Issue #741: wonder-lens merged items are shipped findings and MUST count
     # toward total_findings (they were dropped by the pre-fix renderer, inflating
     # cost_per_finding ~2x). The analyzer counts every merged-items.json item.
@@ -1552,7 +1555,7 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path):
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
 
-def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path):
+def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path) -> None:
     # ``_shipped_counts`` documents present-but-corrupt merged-items.json as a
     # data-integrity error. A well-formed file with the wrong shape must surface
     # that error too, not silently yield a bogus count behind the fallback.
@@ -1567,7 +1570,7 @@ def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path):
         analyze_findings(dd)
 
 
-def test_shipped_count_missing_items_key_propagates(tmp_path: Path):
+def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1576,7 +1579,7 @@ def test_shipped_count_missing_items_key_propagates(tmp_path: Path):
         analyze_findings(dd)
 
 
-def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path):
+def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path) -> None:
     # A *syntax*-invalid merged-items.json surfaces, not the fallback.
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
@@ -1587,7 +1590,7 @@ def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_pat
         analyze_findings(dd)
 
 
-def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path):
+def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1597,7 +1600,7 @@ def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Pa
     assert out["total"] == 8                    # from merged_finding_count regex, not per-stack
 
 
-def test_shipped_count_never_zero_without_artifacts(tmp_path: Path):
+def test_shipped_count_never_zero_without_artifacts(tmp_path: Path) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1606,7 +1609,7 @@ def test_shipped_count_never_zero_without_artifacts(tmp_path: Path):
     assert out["total"] == 4                    # pre-merge fallback, never 0
 
 
-def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Path):
+def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Path) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1618,7 +1621,7 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Pat
     assert out["per_lens"] == {"wonder": 2, "per-stack": 3, "uncovered": 1, "structure": 2}
 
 
-def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path):
+def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path) -> None:
     # A present-but-malformed alternatives.json must not take down
     # analyze_findings / analyze_session (it served wonder attribution either).
     dd = tmp_path / ".daydream"
@@ -1629,7 +1632,7 @@ def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path):
     assert out["per_lens"]["wonder"] == 0
 
 
-def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path):
+def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1651,7 +1654,7 @@ def seed_run_trajectory(dd: Path, session_id: str, *, total_cost_usd: float) -> 
     }))
 
 
-def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path):
+def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
     dd = tmp_path / ".daydream"
     seed_run_trajectory(dd, sid, total_cost_usd=18.2056)

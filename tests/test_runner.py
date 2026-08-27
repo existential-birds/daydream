@@ -21,7 +21,7 @@ import pytest
 from daydream import git_ops, runner
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import Manifest, build_manifest
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
@@ -92,30 +92,30 @@ def _handoff_turn(body: str) -> Turn:
     return (ResultEvent(structured_output={"handoff_prompt": body}, continuation=None),)
 
 
-def test_run_config_exploration_depth():
+def test_run_config_exploration_depth() -> None:
     assert RunConfig().exploration_depth == 1
     cfg = RunConfig(exploration_depth=2)
     assert cfg.exploration_depth == 2
 
 
-def test_run_config_has_no_skill_availability_field():
+def test_run_config_has_no_skill_availability_field() -> None:
     """M1: RunConfig no longer carries installed-skill availability."""
     assert not hasattr(RunConfig(), "skill_availability")
     assert not hasattr(RunConfig(), "skill_availability")
 
 
-def test_run_config_has_no_bot_field():
+def test_run_config_has_no_bot_field() -> None:
     """M2: RunConfig no longer carries the feedback-mode ``bot`` field."""
     cfg = RunConfig(target="/tmp")
     assert not hasattr(cfg, "bot")
 
 
-def test_feedback_routes_to_review_shim_not_feedback():
+def test_feedback_routes_to_review_shim_not_feedback() -> None:
     """M2: numeric targets no longer select feedback; no feedback entry point exists."""
     assert not hasattr(runner, "run_feedback")
 
 
-def test_run_config_exploration_context_defaults_to_none():
+def test_run_config_exploration_context_defaults_to_none() -> None:
     cfg = RunConfig()
     assert cfg.exploration_context is None
     explicit = ExplorationContext()
@@ -129,7 +129,7 @@ def test_run_config_exploration_context_defaults_to_none():
 @pytest.fixture
 def patch_workspace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_work: Callable[..., WorkContext]
-):
+) -> Any:
     """Stub ``open_workspace`` and the in-place fallback so dispatch tests
     don't touch git. Yields the synthetic ``WorkContext`` callers will see.
     """
@@ -184,16 +184,16 @@ _DISPATCH_TARGETS = (
     ],
 )
 async def test_run_dispatches_to_expected_flow(
-    expected_target,
-    config_kwargs,
-    expected_attr,
-    expected_value,
-    monkeypatch,
-    patch_workspace,
-    silence_runner_ui,  # noqa
-    tmp_path,
-    make_config,
-):
+    expected_target: Any,
+    config_kwargs: Any,
+    expected_attr: Any,
+    expected_value: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_workspace: Any,
+    silence_runner_ui: None,  # noqa: F841
+    tmp_path: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """``run()`` routes each flag combination to exactly one flow entrypoint.
 
     Every dispatch function is stubbed, so the recorded call list also proves
@@ -202,8 +202,8 @@ async def test_run_dispatches_to_expected_flow(
     """
     called: list[tuple[str, WorkContext, RunConfig]] = []
 
-    def _record(name: str):
-        async def stub(work, config):
+    def _record(name: str) -> Any:
+        async def stub(work: Any, config: Any) -> int:
             called.append((name, work, config))
             return 0
 
@@ -225,13 +225,17 @@ async def test_run_dispatches_to_expected_flow(
 
 @pytest.mark.asyncio
 async def test_run_rejects_head_mismatch_before_dispatch(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,  # noqa
-):
+    monkeypatch: pytest.MonkeyPatch,
+    patch_workspace: Any,
+    silence_runner_ui: None,  # noqa: F841
+    tmp_path: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Head drift: run() returns 1 and no flow is dispatched."""
     called: list[str] = []
 
-    def _record(name: str):
-        async def stub(work, config):
+    def _record(name: str) -> Any:
+        async def stub(work: Any, config: Any) -> int:
             called.append(name)
             return 0
 
@@ -248,13 +252,17 @@ async def test_run_rejects_head_mismatch_before_dispatch(
 
 @pytest.mark.asyncio
 async def test_run_allows_matching_approved_head(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,  # noqa
-):
+    monkeypatch: pytest.MonkeyPatch,
+    patch_workspace: Any,
+    silence_runner_ui: None,  # noqa: F841
+    tmp_path: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Matching approved head: run() proceeds to the expected flow."""
     called: list[str] = []
 
-    def _record(name: str):
-        async def stub(work, config):
+    def _record(name: str) -> Any:
+        async def stub(work: Any, config: Any) -> int:
             called.append(name)
             return 0
 
@@ -271,8 +279,11 @@ async def test_run_allows_matching_approved_head(
 
 @pytest.mark.asyncio
 async def test_run_rejects_head_mismatch_on_real_worktree(
-    monkeypatch, silence_runner_ui, deep_target, make_config,  # noqa
-):
+    monkeypatch: pytest.MonkeyPatch,
+    silence_runner_ui: None,  # noqa: F841
+    deep_target: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Head drift on a real checkout: run() returns 1 and no flow is dispatched.
 
     Unlike the stub-based gate tests above (``patch_workspace`` yields a
@@ -283,8 +294,8 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
     """
     called: list[str] = []
 
-    def _record(name: str):
-        async def stub(work, config):
+    def _record(name: str) -> Any:
+        async def stub(work: Any, config: Any) -> int:
             called.append(name)
             return 0
 
@@ -301,8 +312,11 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
 
 @pytest.mark.asyncio
 async def test_run_allows_matching_approved_head_on_real_worktree(
-    monkeypatch, silence_runner_ui, deep_target, make_config,  # noqa
-):
+    monkeypatch: pytest.MonkeyPatch,
+    silence_runner_ui: None,  # noqa: F841
+    deep_target: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Matching approved head on a real checkout: run() proceeds to the flow.
 
     The dispatch stub records the ``WorkContext`` the real ``open_workspace``
@@ -312,8 +326,8 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
     called: list[str] = []
     head_shas: list[str] = []
 
-    def _record(name: str):
-        async def stub(work, config):
+    def _record(name: str) -> Any:
+        async def stub(work: Any, config: Any) -> int:
             called.append(name)
             head_shas.append(work.head_sha)
             return 0
@@ -423,7 +437,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
 async def test_review_run_does_not_mint_app_identity(
     monkeypatch: pytest.MonkeyPatch,
     patch_workspace: WorkContext,
-    silence_runner_ui: None,  # noqa
+    silence_runner_ui: None,  # noqa: F841  # noqa
     tmp_path: Path,
     make_config: Callable[..., RunConfig],
 ) -> None:
@@ -481,8 +495,12 @@ def test_run_posts_to_github_matches_dispatch(config: RunConfig, expected: bool)
 
 @pytest.mark.asyncio
 async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config  # noqa
-):
+    monkeypatch: pytest.MonkeyPatch,
+    patch_workspace: Any,
+    silence_runner_ui: None,  # noqa: F841
+    tmp_path: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """``--comment --branch X`` with no open PR for X runs the deep flow.
 
     The old review flow refused up front ("No Open PR" error, exit 1); the
@@ -514,55 +532,55 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
 
 
 class TestResolveBackendPhaseModel:
-    def test_explicit_phase_flag_wins_over_table(self):
+    def test_explicit_phase_flag_wins_over_table(self) -> None:
         config = RunConfig(backend="claude", review_model="claude-haiku-4-5")
         backend = runner._resolve_backend(config, "review")
         assert backend.model == "claude-haiku-4-5"
 
-    def test_table_default_used_when_no_flag(self):
+    def test_table_default_used_when_no_flag(self) -> None:
         config = RunConfig(backend="claude")  # no review_model override
         backend = runner._resolve_backend(config, "review")
         assert backend.model == "claude-opus-5"  # claude REVIEW default
 
-    def test_table_default_for_phase_without_flag(self):
+    def test_table_default_for_phase_without_flag(self) -> None:
         # WONDER has no override flag but should still get the table default.
         config = RunConfig(backend="claude")
         backend = runner._resolve_backend(config, "wonder")
         assert backend.model == "claude-opus-5"
 
-    def test_codex_table_default(self):
+    def test_codex_table_default(self) -> None:
         config = RunConfig(backend="codex")
         backend = runner._resolve_backend(config, "parse")
         assert backend.model == "gpt-5.6-luna"  # codex PARSE default (cheap tier)
 
-    def test_backend_override_uses_overridden_backends_table(self):
+    def test_backend_override_uses_overridden_backends_table(self) -> None:
         # review_backend=codex while default is claude: resolver must use the codex table.
         config = RunConfig(backend="claude", review_backend="codex")
         backend = runner._resolve_backend(config, "review")
         assert backend.model == "gpt-5.6-sol"  # codex REVIEW default (heavy tier)
 
-    def test_cache_returns_same_instance_for_same_phase_and_backend(self):
-        cache: dict = {}
+    def test_cache_returns_same_instance_for_same_phase_and_backend(self) -> None:
+        cache: dict[tuple[str, str | None, str | None], Backend] = {}
         config = RunConfig(backend="claude")
         b1 = runner._resolve_backend(config, "review", cache)
         b2 = runner._resolve_backend(config, "review", cache)
         assert b1 is b2
 
-    def test_cache_returns_distinct_instances_for_different_phases(self):
+    def test_cache_returns_distinct_instances_for_different_phases(self) -> None:
         # Different models -> different backends, even on the same backend kind.
-        cache: dict = {}
+        cache: dict[tuple[str, str | None, str | None], Backend] = {}
         config = RunConfig(backend="claude")
         review_backend = runner._resolve_backend(config, "review", cache)
         parse_backend = runner._resolve_backend(config, "parse", cache)
         assert review_backend is not parse_backend
 
-    def test_codex_backend_receives_resolved_reasoning_effort_and_cache_splits_on_it(self):
-        cache: dict = {}
+    def test_codex_backend_receives_resolved_reasoning_effort_and_cache_splits_on_it(self) -> None:
+        cache: dict[tuple[str, str | None, str | None], Backend] = {}
         config = RunConfig(backend="codex", reasoning_effort="low")
-        low_backend = runner._resolve_backend(config, "review", cache)
+        low_backend: Any = runner._resolve_backend(config, "review", cache)
         assert low_backend.reasoning_effort == "low"
         config.reasoning_effort = "high"
-        high_backend = runner._resolve_backend(config, "review", cache)
+        high_backend: Any = runner._resolve_backend(config, "review", cache)
         assert high_backend.reasoning_effort == "high"
         assert low_backend is not high_backend  # different effort -> distinct cached instance
 
@@ -624,8 +642,11 @@ async def _stub_verify(*_a: Any, **_k: Any) -> tuple[Path, dict[str, Any]]:
 
 @pytest.mark.asyncio
 async def test_fix_cycle_awaken_hero_followed_by_model_line(
-    monkeypatch, feature_branch_repo, make_config, silence_console
-):
+    monkeypatch: pytest.MonkeyPatch,
+    feature_branch_repo: Path,
+    make_config: Callable[..., 'RunConfig'],
+    silence_console: Callable[..., None],
+) -> None:
     """The AWAKEN test-phase hero must be followed by a dim ``Model: <name>``
     line scoped to the test backend.
 
@@ -663,10 +684,10 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
     # Capture hero + dim calls in order.
     calls: list[tuple[str, str]] = []  # (kind, payload)
 
-    def _hero_spy(_console, title, _description):
+    def _hero_spy(_console: Any, title: Any, _description: Any) -> None:
         calls.append(("hero", title))
 
-    def _dim_spy(_console, message):
+    def _dim_spy(_console: Any, message: Any) -> None:
         calls.append(("dim", message))
 
     monkeypatch.setattr("daydream.phases.print_phase_hero", _hero_spy)
@@ -700,8 +721,11 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
 
 @pytest.mark.asyncio
 async def test_fix_cycle_items_severity_ordered(
-    monkeypatch, feature_branch_repo, make_config, silence_console
-):
+    monkeypatch: pytest.MonkeyPatch,
+    feature_branch_repo: Path,
+    make_config: Callable[..., 'RunConfig'],
+    silence_console: Callable[..., None],
+) -> None:
     """Merged items are severity-sorted (high before low) before ``phase_fix_parallel``.
 
     The fix gate seeds ``ctx.data["items"]`` with canonical merged items in an
@@ -723,7 +747,7 @@ async def test_fix_cycle_items_severity_ordered(
 
     order: list[list[str]] = []
 
-    async def _spy_fix_parallel(_b, _w, items, **_k):
+    async def _spy_fix_parallel(_b: Any, _w: Any, items: Any, **_k: Any) -> dict[str, Any]:
         order.append([item["severity"] for item in items])
         return {}
 
@@ -760,7 +784,7 @@ async def test_fix_cycle_items_severity_ordered(
 # --- Task 4: non_interactive threading -------------------------------------
 
 
-def test_runconfig_defaults_non_interactive_false():
+def test_runconfig_defaults_non_interactive_false() -> None:
     assert RunConfig().non_interactive is False
 
 
@@ -776,9 +800,14 @@ def test_runconfig_defaults_non_interactive_false():
     ids=["deep_loop", "shallow", "comment", "improve"],
 )
 async def test_run_threads_non_interactive_into_agent_state(
-    dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path,  # noqa
-    make_config,
-):
+    dispatch_target: Any,
+    config_kwargs: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_workspace: Any,
+    silence_runner_ui: None,  # noqa: F841
+    tmp_path: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """``config.non_interactive=True`` flips the agent singleton flag before any
     promptable phase, on every dispatch branch ``run()`` can take. Each case
     patches one dispatch fn so ``run()`` reaches the run-start setup (where
@@ -789,7 +818,7 @@ async def test_run_threads_non_interactive_into_agent_state(
     reset_state()
     try:
 
-        async def stub(work, config):
+        async def stub(work: Any, config: Any) -> int:
             return 0
 
         monkeypatch.setattr(dispatch_target, stub)
@@ -829,7 +858,7 @@ class _CommitWritingBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         pl = prompt.lower()
         if "run the project's test suite" in pl:
             yield TextEvent(text="All 1 tests passed. 0 failed.")
@@ -857,8 +886,11 @@ class _CommitWritingBackend:
 
 @pytest.mark.asyncio
 async def test_fix_cycle_yes_commits_fixes(
-    monkeypatch, feature_branch_repo, make_config, silence_console
-):
+    monkeypatch: pytest.MonkeyPatch,
+    feature_branch_repo: Path,
+    make_config: Callable[..., 'RunConfig'],
+    silence_console: Callable[..., None],
+) -> None:
     """Real-path: a --yes shallow deep run whose tests pass commits its fixes.
 
     The deep fix cycle's commit step is ``phase_commit_push`` (interactive gate);
@@ -902,8 +934,11 @@ async def test_fix_cycle_yes_commits_fixes(
 
 @pytest.mark.asyncio
 async def test_fix_cycle_non_interactive_declines_fix_and_commit(
-    monkeypatch, feature_branch_repo, make_config, silence_console
-):
+    monkeypatch: pytest.MonkeyPatch,
+    feature_branch_repo: Path,
+    make_config: Callable[..., 'RunConfig'],
+    silence_console: Callable[..., None],
+) -> None:
     """Real-path: a non-interactive shallow deep run with no ``--yes`` declines at
     the apply-fixes gate — no fix, no test, no commit (observable: HEAD unchanged).
     """
@@ -1026,8 +1061,10 @@ def _assert_single_handoff(repo: Path, body: str) -> None:
 
 @pytest.mark.asyncio
 async def test_fix_cycle_failing_tests_abort_writes_handoff(
-    monkeypatch, feature_branch_repo, make_config
-):
+    monkeypatch: pytest.MonkeyPatch,
+    feature_branch_repo: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Real-path: an interactive deep shallow run whose tests FAIL and the operator
     aborts (heal-menu "4") writes a handoff and exits 1 without committing.
 
@@ -1062,8 +1099,10 @@ async def test_fix_cycle_failing_tests_abort_writes_handoff(
 
 @pytest.mark.asyncio
 async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows_manual_copy_guidance(
-    monkeypatch, feature_branch_repo, make_config
-):
+    monkeypatch: pytest.MonkeyPatch,
+    feature_branch_repo: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Real-path: a hung clipboard utility during the confirmed failure handoff is bounded to
     5s, runs off the event loop, degrades to the manual-copy warning, and the run still exits 1.
 
@@ -1140,8 +1179,10 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
 
 @pytest.mark.asyncio
 async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
-    monkeypatch, feature_branch_repo, make_config
-):
+    monkeypatch: pytest.MonkeyPatch,
+    feature_branch_repo: Path,
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
     """Real-path: a --yes shallow deep run whose tests FAIL runs ONE fix attempt
     then aborts.
 

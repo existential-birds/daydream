@@ -12,8 +12,9 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import subprocess
 from pathlib import Path
-from typing import Literal, overload
+from typing import Any, Literal, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -187,7 +188,7 @@ def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -
     return out or None
 
 
-def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str):
+def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str) -> str | tuple[str, str]:
     """Peel ``^{tree}`` for both commits, or return ``"missing_object"``."""
     def _tree(sha: str) -> str | None:
         proc = git_ops._run_git(mirror_repo, ["rev-parse", "--verify", f"{sha}^{{tree}}"], retries=0)
@@ -389,12 +390,16 @@ def _run_git_cwd(
 ) -> str | bytes:
     """Run git and raise GitError on non-zero exit (offline-clone helper)."""
     repo = Path(repo)
-    proc = git_ops._run_git(repo, args, retries=0, capture_bytes=capture_bytes, timeout=30)
+    proc: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]
+    if capture_bytes:
+        proc = git_ops._run_git(repo, args, retries=0, capture_bytes=True, timeout=30)
+    else:
+        proc = git_ops._run_git(repo, args, retries=0, capture_bytes=False, timeout=30)
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
         raise git_ops.GitError(f"git {' '.join(args)} failed: {stderr.strip()}")
-    if capture_bytes:
-        return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+    if isinstance(proc.stdout, bytes):
+        return proc.stdout
     return proc.stdout.strip()
 
 
@@ -408,7 +413,7 @@ def freeze_one(
     policy: str,
     requested_head: str,
     origin_url: str | None = None,
-) -> tuple[dict, bytes | None]:
+) -> tuple[dict[str, Any], bytes | None]:
     """Freeze one requested head into a ``(ready|unreplayable, bundle_bytes)`` pair.
 
     Runs the full pipeline (mirror ensure -> fetch -> ancestry -> merge-base -> trees
@@ -429,7 +434,7 @@ def freeze_one(
     # merge-base resolution (None for the earlier fetch/ancestry failures).
     resolved_base: str | None = None
 
-    def unreplayable(reason: str, detail: str) -> tuple[dict, None]:
+    def unreplayable(reason: str, detail: str) -> tuple[dict[str, Any], None]:
         return ({
             "status": "unreplayable",
             "policy": policy,
@@ -493,8 +498,8 @@ def freeze_one(
     if base is None:
         return unreplayable("base_unreachable", "no merge-base could be resolved for the sourced base tip and head")
     trees = resolve_trees(m, base, head_sha)
-    if trees == "missing_object":
-        return unreplayable("missing_object", "a source tree object is absent from the mirror")
+    if not isinstance(trees, tuple):
+        return unreplayable(trees, "a source tree object is absent from the mirror")
     base_tree, head_tree = trees
 
     # 6) a clean review still requires a real code change.

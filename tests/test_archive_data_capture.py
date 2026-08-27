@@ -15,16 +15,17 @@ The deep AC1/AC3 test drives the production entrypoint (``runner.run`` →
 stub harness. The shallow AC3 test drives the shallow single-pass path. Only the
 backend seam is mocked.
 """
-
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream import git_ops
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import bare_remote, git
 
@@ -45,14 +46,14 @@ from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
 class _ArchiveCaptureBackend(StubBackend):
     async def execute(
         self,
-        cwd,
-        prompt,
-        output_schema=None,
-        continuation=None,
-        agents=None,
-        max_turns=None,
-        read_only=False,
-    ):
+        cwd: Any,
+        prompt: str,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
+    ) -> AsyncIterator[AgentEvent]:
         if prompt.startswith("The daydream changes are already staged"):
             run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
             version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
@@ -93,7 +94,7 @@ def _install_deep_capture_backend(
     monkeypatch: pytest.MonkeyPatch,
     *,
     real_internal_phases: bool = False,
-):
+) -> Any:
     """Install the shared deep-run backend and optional focused phase seams."""
     silence(monkeypatch)
     force_interactive(monkeypatch)
@@ -114,7 +115,7 @@ def _install_deep_capture_backend(
     return stub
 
 
-async def _ok_with_heal_edit(target: Path):
+async def _ok_with_heal_edit(target: Path) -> Any:
     (target / "heal_edit.py").write_text("def healed():\n    pass\n")
     return await _ok()
 
@@ -123,7 +124,9 @@ async def _ok_with_heal_edit(target: Path):
 
 
 async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
 ) -> None:
     """AC1 + AC3: a default deep run (no --no-eval) populates the manifest's eval
     metrics AND writes a recommended.patch distinct from diff.patch.
@@ -181,7 +184,9 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
 
 
 async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_files(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
 ) -> None:
     """A pre-existing untracked file (present before the run) is absent from the
     archived recommended.patch while a fix-created untracked file is present."""
@@ -206,7 +211,9 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
 
 
 async def test_deep_heal_edit_lands_in_archived_recommended_patch(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
 ) -> None:
     remote = bare_remote(archive_dir.parent / "origin.git")
     git(multi_stack_target, "remote", "add", "archive", str(remote))
@@ -236,7 +243,9 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
 
 
 async def test_deep_archive_commit_excludes_preexisting_untracked_files(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
 ) -> None:
     """A pre-existing untracked file (before the run) is absent from the daydream
     commit's tree; a fix-created untracked file is present (issue #543)."""
@@ -265,7 +274,9 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
 
 
 async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evaluation(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
 ) -> None:
     """A shell command ``shlex`` cannot tokenize must not lose the archive's
     evaluation.json (issue #327).
@@ -328,7 +339,10 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
 
 
 async def test_dump_artifacts_copies_full_bundle_to_target_dir(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """``--dump-artifacts DIR`` copies the fully-assembled run bundle into DIR so CI
     can upload it — trajectory, deep artifacts, diffs, manifest, and evaluation all
@@ -359,7 +373,10 @@ async def test_dump_artifacts_copies_full_bundle_to_target_dir(
 
 
 async def test_no_dump_artifacts_leaves_no_extra_copy(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """Without ``--dump-artifacts`` no bundle copy is made outside the archive."""
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -374,7 +391,9 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
 
 
 async def test_no_eval_leaves_manifest_eval_fields_null(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
 ) -> None:
     """AC1b: --no-eval (run_eval=False) skips the eval pass, leaving its metrics null."""
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
@@ -418,9 +437,15 @@ class _FixEditingBackend:
         self._repo = repo
 
     async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None,
-        agents=None, max_turns=None, read_only=False,
-    ):
+        self,
+        cwd: Any,
+        prompt: str,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
+    ) -> AsyncIterator[AgentEvent]:
         from daydream.backends import ResultEvent, TextEvent
 
         pl = prompt.lower()
@@ -471,7 +496,9 @@ class _FixEditingBackend:
 
 
 async def test_shallow_run_captures_recommended_patch(
-    feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
 ) -> None:
     """AC3 (shallow): the shallow single-pass fix path archives a recommended.patch
     carrying daydream's edit.

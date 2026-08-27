@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from daydream.atif import Step
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
     ResultEvent,
@@ -16,7 +17,6 @@ from daydream.backends import (
 from daydream.trajectory import (
     DaydreamPhase,
     PhaseEvent,
-    Step,
     get_current_recorder,
     phase_scope,
 )

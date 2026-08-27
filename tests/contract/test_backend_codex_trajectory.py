@@ -33,7 +33,9 @@ FIXTURE = "multi_turn_with_metrics.jsonl"
 
 
 async def _drive_codex_through_recorder(
-    tmp_path: Path, *, fixture: str = FIXTURE
+    tmp_path: Path,
+    *,
+    fixture: str = FIXTURE,
 ) -> tuple[list[Any], TrajectoryRecorder]:
     """Drive ``CodexBackend.execute`` through *fixture* while recording.
 
@@ -114,14 +116,14 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
     assert traj_path.exists(), "recorder.__aexit__ must write trajectory.json"
 
     # First validation pass on the freshly-written file.
-    validator = TrajectoryValidator()
+    validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
     first_ok = validator.validate(traj_path)
     assert first_ok, validator.get_errors() or "first validation failed"
 
     # Round-trip: re-load the written JSON, re-validate from dict form
     # (validate_images=False — no filesystem anchor for in-memory dict).
     raw = json.loads(traj_path.read_text())
-    rt_validator = TrajectoryValidator()
+    rt_validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
     rt_ok = rt_validator.validate(raw, validate_images=False)
     assert rt_ok, rt_validator.get_errors() or "round-trip validation failed"
 

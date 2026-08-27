@@ -1,6 +1,6 @@
 # tests/test_backend_claude.py
 """Tests for ClaudeBackend."""
-
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -31,9 +31,9 @@ from tests.harness.claude_sdk import (
 
 
 @pytest.fixture
-def patch_sdk(monkeypatch):
+def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Return a function that patches the SDK imports in claude.py."""
-    def _patch(client_class):
+    def _patch(client_class: Any) -> None:
         patch_claude_sdk(monkeypatch, client_class)
     return _patch
 
@@ -66,7 +66,7 @@ async def _drive_claude_backend_to_list(
 
 
 @pytest.mark.asyncio
-async def test_execute_yields_text_and_result(patch_sdk):
+async def test_execute_yields_text_and_result(patch_sdk: Any) -> None:
     events = await _drive_claude_backend_to_list(
         messages=[
             MockAssistantMessage(content=[MockTextBlock(text="Hello world")]),
@@ -90,7 +90,7 @@ async def test_execute_yields_text_and_result(patch_sdk):
 
 
 @pytest.mark.asyncio
-async def test_execute_yields_tool_events(patch_sdk):
+async def test_execute_yields_tool_events(patch_sdk: Any) -> None:
     events = await _drive_claude_backend_to_list(
         messages=[
             MockAssistantMessage(content=[MockThinkingBlock(thinking="Let me think...")]),
@@ -119,14 +119,14 @@ async def test_execute_yields_tool_events(patch_sdk):
 
 
 @pytest.mark.asyncio
-async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch_sdk):
+async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch_sdk: Any) -> None:
     lifecycle: list[str] = []
 
     class EarlyCloseClient:
         def __init__(self, options: Any = None) -> None:
             self.options = options
 
-        async def __aenter__(self):
+        async def __aenter__(self) -> Any:
             return self
 
         async def __aexit__(self, *args: Any) -> None:
@@ -138,7 +138,7 @@ async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch
         async def interrupt(self) -> None:
             lifecycle.append("interrupt")
 
-        async def receive_response(self):
+        async def receive_response(self) -> AsyncIterator[Any]:
             yield MockAssistantMessage(
                 content=[MockToolUseBlock(id="tool-1", name="Read", input={"file_path": "a.py"})]
             )
@@ -159,7 +159,7 @@ async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch
 
 
 @pytest.mark.asyncio
-async def test_execute_structured_output(patch_sdk):
+async def test_execute_structured_output(patch_sdk: Any) -> None:
     events = await _drive_claude_backend_to_list(
         messages=[
             MockAssistantMessage(content=[MockTextBlock(text="Parsed.")]),
@@ -181,7 +181,7 @@ async def test_execute_structured_output(patch_sdk):
 
 
 @pytest.mark.asyncio
-async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk):
+async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any) -> None:
     """An is_error ResultMessage must raise, never yield a normal ResultEvent.
 
     Regression guard for the sandbox acceptance failure: an invalid API key
@@ -211,7 +211,7 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk):
 
 
 @pytest.mark.asyncio
-async def test_max_turns_result_raises_typed_error(patch_sdk):
+async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     """error_max_turns must raise the typed MaxTurnsError carrying the subtype.
 
     A generic ClaudeAgentError left callers (and the trajectory) unable to
@@ -282,7 +282,7 @@ async def test_max_turns_result_raises_typed_error(patch_sdk):
     ("git diff HEAD~1 HEAD -- --output", True),  # --output after -- is a path arg; scan stops at --
     ("", False),                          # empty → fail closed
 ])
-def test_read_only_bash_guard_decision(cmd, allowed):
+def test_read_only_bash_guard_decision(cmd: Any, allowed: Any) -> None:
     """The read-only Bash allowlist predicate allows inspection, denies mutation/chains."""
     from daydream.backends.claude import _is_read_only_command
 
@@ -313,7 +313,7 @@ def test_read_only_bash_guard_decision(cmd, allowed):
     ("ls", False),
     ("rg foo src/", False),
 ])
-def test_is_dangerous_command(cmd, dangerous):
+def test_is_dangerous_command(cmd: Any, dangerous: Any) -> None:
     """The always-on dangerous-command predicate flags root-scans and catastrophic deletes."""
     from daydream.backends.claude import _is_dangerous_command
 
@@ -321,7 +321,7 @@ def test_is_dangerous_command(cmd, dangerous):
 
 
 @pytest.mark.asyncio
-async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
+async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> None:
     """read_only=True wires a fail-closed PreToolUse guard onto the SDK options.
 
     The contract is behavioral, not a matcher-string shape: under
@@ -348,7 +348,7 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     matcher = matchers[0]
     assert matcher.hooks  # callbacks registered
 
-    async def decide(payload):
+    async def decide(payload: Any) -> Any:
         # Mirror the SDK: run every registered hook; first deny wins.
         for hook in matcher.hooks:
             out = await hook(payload, None, {})
@@ -390,7 +390,7 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
 
 
 @pytest.mark.asyncio
-async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk):
+async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk: Any) -> None:
     """read_only=False (default) still wires the always-on dangerous-command guard.
 
     The guard is registered unconditionally (all phases). Drive the callback that
@@ -426,18 +426,18 @@ async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk)
 
 
 @pytest.mark.asyncio
-async def test_read_only_guard_denies_mutation_allows_inspection():
+async def test_read_only_guard_denies_mutation_allows_inspection() -> None:
     """The registered guard callback denies Write and non-read-only Bash, allows read-only Bash."""
     from daydream.backends.claude import _read_only_guard
 
-    deny_write = await _read_only_guard(
+    deny_write = cast(dict[str, Any], await _read_only_guard(
         {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
-    )
+    ))
     assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    deny_bash = await _read_only_guard(
+    deny_bash = cast(dict[str, Any], await _read_only_guard(
         {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, None, {},
-    )
+    ))
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     allow_bash = await _read_only_guard(
@@ -446,7 +446,7 @@ async def test_read_only_guard_denies_mutation_allows_inspection():
     assert "hookSpecificOutput" not in allow_bash
 
     # Malformed input → fail closed (deny)
-    deny_malformed = await _read_only_guard({"tool_name": "Bash"}, None, {})
+    deny_malformed = cast(dict[str, Any], await _read_only_guard({"tool_name": "Bash"}, None, {}))
     assert deny_malformed["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
@@ -479,7 +479,7 @@ async def test_read_only_guard_deny_reason_uses_shared_guard_wording() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_passes_agents_dict_to_options(patch_sdk):
+async def test_execute_passes_agents_dict_to_options(patch_sdk: Any) -> None:
     """Agents dict must reach ClaudeAgentOptions with original keys preserved verbatim."""
     from claude_agent_sdk.types import AgentDefinition
 
@@ -520,7 +520,7 @@ async def test_execute_passes_agents_dict_to_options(patch_sdk):
 
 
 @pytest.mark.asyncio
-async def test_execute_passes_none_when_no_agents(patch_sdk):
+async def test_execute_passes_none_when_no_agents(patch_sdk: Any) -> None:
     """When agents=None, ClaudeAgentOptions should not carry an agents dict."""
     captured: dict[str, Any] = {}
     patch_sdk(_capturing_client(captured))
@@ -536,7 +536,7 @@ async def test_execute_passes_none_when_no_agents(patch_sdk):
     assert agents_val is None
 
 
-def test_backend_protocol_agents_param_is_dict_typed():
+def test_backend_protocol_agents_param_is_dict_typed() -> None:
     """The Backend protocol's execute.agents annotation must be dict[str, AgentDefinition]."""
     from daydream.backends import Backend
 
@@ -563,7 +563,7 @@ def _result_message(*, cost: float | None = 0.0) -> MockResultMessage:
 
 
 @pytest.mark.asyncio
-async def test_structured_output_tool_result_is_suppressed(patch_sdk) -> None:
+async def test_structured_output_tool_result_is_suppressed(patch_sdk: Any) -> None:
     """StructuredOutput ToolUseBlocks are skipped, and the corresponding
     ToolResultBlock in the next UserMessage must also be skipped — otherwise
     the trajectory recorder logs it as an unmatched_tool_result."""
@@ -598,7 +598,7 @@ async def test_structured_output_tool_result_is_suppressed(patch_sdk) -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk) -> None:
+async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: Any) -> None:
     """One TurnEndEvent per AssistantMessage, after that message's events."""
     from daydream.backends import TurnEndEvent
 
@@ -625,7 +625,7 @@ async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk) ->
 # Skill guard removal
 
 
-def test_no_skill_guard_registered():
+def test_no_skill_guard_registered() -> None:
     """M14: no PreToolUse skill guard is wired; an attempted Skill call is not executable."""
     from daydream.backends import claude as c
 
@@ -667,7 +667,7 @@ def test_claude_agent_sdk_has_shielded_teardown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk):
+async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk: Any) -> None:
     """The resolved per-phase effort arrives as ClaudeAgentOptions.effort."""
     captured: dict[str, Any] = {}
 
@@ -680,7 +680,7 @@ async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk):
 
 
 @pytest.mark.asyncio
-async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk):
+async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk: Any) -> None:
     captured: dict[str, Any] = {}
 
     patch_sdk(_capturing_client(captured))
@@ -691,7 +691,7 @@ async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk):
     assert captured["options"].effort is None
 
 
-def test_unsupported_reasoning_effort_fails_at_construction():
+def test_unsupported_reasoning_effort_fails_at_construction() -> None:
     with pytest.raises(ValueError, match="does not support reasoning effort"):
         ClaudeBackend(model="opus", reasoning_effort="minimal")
 
@@ -701,17 +701,17 @@ def test_unsupported_reasoning_effort_fails_at_construction():
 # ---------------------------------------------------------------------------
 
 
-def test_claude_fanout_concurrency_defaults_to_eight(monkeypatch):
+def test_claude_fanout_concurrency_defaults_to_eight(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 8
 
 
-def test_claude_fanout_concurrency_env_overrides_the_default(monkeypatch):
+def test_claude_fanout_concurrency_env_overrides_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "3")
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 3
 
 
-def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
+def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
     assert effective_fanout_concurrency(2, ClaudeBackend(model="opus")) == 2
 
@@ -726,7 +726,12 @@ def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
         ("", 8),
     ],
 )
-def test_claude_fanout_concurrency_env_validation(monkeypatch, caplog, env_value, expected):
+def test_claude_fanout_concurrency_env_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    env_value: Any,
+    expected: int,
+) -> None:
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", env_value)
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == expected
     if expected == 8:
@@ -737,7 +742,7 @@ def test_claude_fanout_concurrency_env_validation(monkeypatch, caplog, env_value
 
 
 @pytest.mark.asyncio
-async def test_continuation_token_sets_resume(monkeypatch):
+async def test_continuation_token_sets_resume(monkeypatch: pytest.MonkeyPatch) -> None:
     """A claude-minted token becomes ``options.resume`` on the next call."""
     captured: dict[str, Any] = {}
     patch_claude_sdk(
@@ -757,7 +762,7 @@ async def test_continuation_token_sets_resume(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_result_event_mints_session_token(monkeypatch):
+async def test_result_event_mints_session_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """The terminal ResultMessage's session_id is minted into the ResultEvent."""
     patch_claude_sdk(
         monkeypatch,
@@ -778,7 +783,7 @@ async def test_result_event_mints_session_token(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_token_without_persist_session(monkeypatch):
+async def test_no_token_without_persist_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """persist_session=False disables SDK session persistence and suppresses the token."""
     captured: dict[str, Any] = {}
     patch_claude_sdk(
@@ -798,7 +803,7 @@ async def test_no_token_without_persist_session(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_foreign_backend_token_is_ignored(monkeypatch):
+async def test_foreign_backend_token_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     """A token minted by another backend starts cold instead of raising."""
     captured: dict[str, Any] = {}
     patch_claude_sdk(
@@ -818,7 +823,7 @@ async def test_foreign_backend_token_is_ignored(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_session_id_mints_no_token(monkeypatch):
+async def test_no_session_id_mints_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ResultMessage without a session id yields continuation=None."""
     patch_claude_sdk(
         monkeypatch,

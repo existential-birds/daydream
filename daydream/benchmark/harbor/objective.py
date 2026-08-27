@@ -352,7 +352,7 @@ def _suite_experiment_id(
 
 
 def aggregate_suite(
-    manifest: dict, *, env: dict[str, Any] | None = None
+    manifest: dict[str, Any], *, env: dict[str, Any] | None = None
 ) -> SuiteObjective:
     """Validate and pool a suite manifest into one compatible ``SuiteObjective``.
 
@@ -438,7 +438,7 @@ _PROFILE_SCHEMA_VERSION = 1
 _SUITE_SCHEMA_VERSION = 1
 
 
-def validate_suite_manifest(manifest: dict) -> list[SuiteEntry]:
+def validate_suite_manifest(manifest: dict[str, Any]) -> list[SuiteEntry]:
     """Validate a suite manifest and return its entries in manifest order.
 
     Rejects a manifest whose ``schema_version`` is not 1, a missing/non-list

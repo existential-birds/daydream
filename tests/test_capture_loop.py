@@ -15,12 +15,13 @@ These tests cover the two halves of that loop:
   ``gh`` subprocess seam must produce a comment on ``/pulls/{n}/comments``
   that the labeler's own signals read back, count, and resolve on reply.
 """
-
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -35,12 +36,13 @@ from daydream.training.labeler_signals import (
     index_pr_review_comments,
     per_finding_resolution_signal,
 )
+from tests.harness.fake_gh import FakeGh
 from tests.harness.phase_backend import PhaseDispatchBackend
 
 FILE_FINGERPRINT = "f" * 64
 
 
-def _never_fetch(*_args, **_kwargs):
+def _never_fetch(*_args: Any, **_kwargs: Any) -> None:
     """A gh_api that must never be called: `threads=` makes the fetch unnecessary."""
     raise AssertionError("gh_api must not be called when threads= is supplied")
 
@@ -64,7 +66,13 @@ def cli_main(argv: list[str]) -> int:
 
 
 @contextmanager
-def _review_run_env(repo: Path, monkeypatch, out: Path, backend, fake_gh):
+def _review_run_env(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    out: Path,
+    backend: Any,
+    fake_gh: FakeGh,
+) -> Iterator[Any]:
     """`--review --findings-out` real-path setup, mocking ONLY the backend seam.
 
     PR discovery runs for real through ``git_ops``' ``gh`` subprocess seam
@@ -97,8 +105,11 @@ def _review_run_env(repo: Path, monkeypatch, out: Path, backend, fake_gh):
 
 
 async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
-    feature_branch_repo, monkeypatch, tmp_path, fake_gh
-):
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_gh: FakeGh,
+) -> None:
     """A finding whose anchors match nothing still gets a trackable placement.
 
     Enters from ``runner.run`` against a real git worktree. The scripted issue
@@ -148,7 +159,7 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
 # --- Capture: the posted comment is read back by the labeler's own signals ---
 
 
-def _artifact(path: Path, findings: list[dict]) -> Path:
+def _artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
     write_findings_artifact(
         path,
         {
@@ -184,7 +195,7 @@ def file_level_artifact(tmp_path: Path) -> Path:
     )
 
 
-def _posted_comments(fake_gh) -> list[dict]:
+def _posted_comments(fake_gh: FakeGh) -> list[dict[str, Any]]:
     """Rebuild the ``/comments`` GET payload from what actually crossed the gh boundary."""
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/comments")
     return [
@@ -198,7 +209,7 @@ def _posted_comments(fake_gh) -> list[dict]:
     ]
 
 
-def test_file_level_finding_is_captured_and_resolvable(fake_gh, file_level_artifact) -> None:
+def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_level_artifact: Path) -> None:
     """The full loop: post → read back → count → resolve on reply.
 
     Drives ``daydream post-findings`` from ``cli.main`` with the real
@@ -245,7 +256,7 @@ def test_file_level_finding_is_captured_and_resolvable(fake_gh, file_level_artif
     assert [(r.fingerprint, r.resolved) for r in per_finding] == [(FILE_FINGERPRINT, True)]
 
 
-def test_file_level_post_rejected_falls_back_to_review_body(fake_gh, file_level_artifact) -> None:
+def test_file_level_post_rejected_falls_back_to_review_body(fake_gh: FakeGh, file_level_artifact: Path) -> None:
     """A finding GitHub refuses a file-level comment for is never silently dropped.
 
     ``diff-paths`` excludes ``b.py``, so the shim 422s the file-level POST the
@@ -265,7 +276,9 @@ def test_file_level_post_rejected_falls_back_to_review_body(fake_gh, file_level_
 
 
 def test_review_failure_still_reports_live_file_level_comments(
-    fake_gh, file_level_artifact, capsys
+    fake_gh: FakeGh,
+    file_level_artifact: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A failed review POST must not claim nothing was posted.
 

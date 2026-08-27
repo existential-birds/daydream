@@ -30,6 +30,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.6",
     "ruff>=0.9",
+    "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0",
     "vulture>=2.13",
 ]
@@ -57,10 +58,49 @@ include = [
 
 [tool.mypy]
 python_version = "3.12"
-ignore_missing_imports = true
+strict = true
 namespace_packages = true
 explicit_package_bases = true
-mypy_path = "."
+# The sandbox score_review.py does a bare `import verifier_core` (the twin of
+# in-repo daydream.benchmark.harbor.verifier_core, copied beside it at sandbox
+# build time; golden byte-parity gate: tests/test_benchmark_verifier_assets.py).
+# That top-level name is not on sys.path, so mypy_stubs/verifier_core.py shims it
+# by re-exporting the source twin's public API. Pointing mypy_path at harbour/
+# itself would discover the twin twice ("Source file found twice"), so the shim
+# lives on its own mypy_path root -- the sandbox still checks against the real
+# signatures, never Any.
+mypy_path = "mypy_stubs"
+
+
+[[tool.mypy.overrides]]
+# Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/atif/NOTICE);
+# mechanical-edit-only policy forbids hand-fixes. Mirrors ruff exemption above.
+module = ["daydream.atif.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Harbor ships without py.typed; no stub package exists. Narrow per-module,
+# not blanket-library, so future typed releases are picked up automatically.
+module = ["harbor.models.*", "harbor.agents.base", "harbor.environments.docker.*", "harbor.environments.base"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# No types-huggingface_hub exists on PyPI (verified); boundary stays Any-typed.
+module = ["huggingface_hub", "huggingface_hub.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Sample-repo/symbol fixture modules are literal demo data (a sample project the
+# CLI treks, symbol tables a matcher parses), not test logic. Strict annotations
+# would rewrite the sample itself, so they are exempted from the untyped-def
+# wave (disallow_untyped_defs=false). Other fixtures/training helpers stay
+# checked. Lift when these fixtures carry real signatures. Ref: issue-931 task 4.
+module = [
+    "tests.fixtures.real_cli_sample_repo.hello",
+    "tests.fixtures.symbols.config",
+    "tests.fixtures.symbols.widget",
+]
+disallow_untyped_defs = false
 
 [tool.ruff]
 target-version = "py312"
@@ -73,9 +113,6 @@ select = ["E", "F", "I", "W"]
 # Vendored from Harbor v0.17.1-9; see daydream/atif/NOTICE.
 # Mechanical-only edit policy (D-03): no reformatting allowed.
 "daydream/atif/**" = ["E", "F", "I", "W"]
-# Re-exporting package facade: every import re-exports a submodule symbol onto
-# the public `daydream.ui` surface (no `__all__`, per project convention).
-"daydream/ui/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
 # Bare `pytest` must not descend into rl/daydream_review_v1/, a standalone uv

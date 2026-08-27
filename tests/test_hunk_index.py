@@ -5,8 +5,9 @@ Pins the load-bearing claim of the hunk-index refactor: a single parser in
 contracts (pr_review head-side ranges, coverage added/removed totals,
 quote_scrub added-line numbers), so the three can never drift apart.
 """
-
 from __future__ import annotations
+
+from pathlib import Path
 
 from daydream.hunk_index import (
     added_line_numbers,
@@ -18,7 +19,7 @@ from daydream.hunk_index import (
 )
 
 
-def test_parse_hunks_matches_pr_head_side_ranges():
+def test_parse_hunks_matches_pr_head_side_ranges() -> None:
     diff = (
         "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
         "@@ -1,3 +10,5 @@\n old\n+new1\n+new2\n@@ -20 +30,2 @@\n+new3\n"
@@ -32,7 +33,7 @@ def test_parse_hunks_matches_pr_head_side_ranges():
     assert added_line_numbers(parsed) == {"x.py": {11, 12, 30}}
 
 
-def test_write_hunk_index_round_trips(tmp_path):
+def test_write_hunk_index_round_trips(tmp_path: Path) -> None:
     diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1,2 @@\n x\n+y\n"
     write_hunk_index(tmp_path, diff)
     idx = load_hunk_index(tmp_path)

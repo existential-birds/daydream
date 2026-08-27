@@ -94,7 +94,9 @@ def test_cli_main_clean_deep_run_exits_0(
 
 
 def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end provenance: the written trajectory's extra.pr_repo is the
     target checkout's slug, not the invoking cwd (#128).
@@ -157,7 +159,9 @@ def test_cli_main_wrong_branch_exits_1(
 
 
 def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A confinement rejection that reaches cli.main renders actionably.
 

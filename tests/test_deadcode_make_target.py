@@ -3,7 +3,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 
-def test_deadcode_recipe_runs_both_scans():
+def test_deadcode_recipe_runs_both_scans() -> None:
     makefile = (REPO / "Makefile").read_text()
     dead_section = makefile.split("\ndeadcode:", 1)[1].split("\n", 3)[:3]
     recipes = [line.lstrip("\t").strip() for line in dead_section]

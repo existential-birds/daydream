@@ -40,13 +40,15 @@ from daydream.benchmark.schema import (
 )
 from daydream.benchmark.storage import (
     Transaction,
-    WorkspaceCorrupt,
     WorkspaceLock,
     load_json_strict,
     load_yaml_strict,
     recover_startup,
     resolve_authoring_path,
     sha256_file,
+)
+from daydream.benchmark.storage import (
+    WorkspaceCorrupt as WorkspaceCorrupt,
 )
 
 _SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache")

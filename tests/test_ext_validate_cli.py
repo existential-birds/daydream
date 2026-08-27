@@ -6,11 +6,13 @@ plus the user-visible stdout. The extension module comes from the ``ext_dir``
 fixture (``$DAYDREAM_EXT_DIR`` seam), so the loader, version gate, and
 registry resolve-check all run for real.
 """
-
 import re
 import sys
 
+import pytest
+
 from daydream import cli
+from tests.conftest import ExtDir
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -33,7 +35,7 @@ def _run_main(argv: list[str]) -> int:
     return 0
 
 
-def test_ext_validate_ok(ext_dir, capsys) -> None:
+def test_ext_validate_ok(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
         "def supervise(name, tool_input, *, phase):\n"
@@ -47,7 +49,7 @@ def test_ext_validate_ok(ext_dir, capsys) -> None:
     assert "tool supervisor: registered" in out.lower()
 
 
-def test_ext_validate_without_supervisor_reports_none(ext_dir, capsys) -> None:
+def test_ext_validate_without_supervisor_reports_none(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:
     ext_dir.write_module("def register(r): ...\n")
     rc = _run_main(["ext", "validate"])
     assert rc == 0
@@ -56,14 +58,20 @@ def test_ext_validate_without_supervisor_reports_none(ext_dir, capsys) -> None:
     assert "supported: 6..6" in out
 
 
-def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir, capsys) -> None:
+def test_ext_validate_rejects_invalid_supervisor_registration(
+    ext_dir: ExtDir,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     ext_dir.write_module("def register(r): r.register_tool_supervisor(None)\n")
     rc = _run_main(["ext", "validate"])
     assert rc == 1
     assert "tool supervisor" in strip_ansi(capsys.readouterr().out).lower()
 
 
-def test_ext_validate_rejects_async_supervisor_registration(ext_dir, capsys) -> None:
+def test_ext_validate_rejects_async_supervisor_registration(
+    ext_dir: ExtDir,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
         "async def supervise(name, tool_input, *, phase):\n"
@@ -77,7 +85,7 @@ def test_ext_validate_rejects_async_supervisor_registration(ext_dir, capsys) -> 
     assert "synchronous" in out
 
 
-def test_ext_validate_broken_ref(ext_dir, capsys) -> None:
+def test_ext_validate_broken_ref(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:
     ext_dir.write_module(
         "def register(r):\n"
         "    r.set_flow('deep', ['ghost'])\n"
@@ -87,7 +95,7 @@ def test_ext_validate_broken_ref(ext_dir, capsys) -> None:
     assert "ghost" in strip_ansi(capsys.readouterr().out)
 
 
-def test_ext_validate_reports_renderer_count(capsys) -> None:
+def test_ext_validate_reports_renderer_count(capsys: pytest.CaptureFixture[str]) -> None:
     # builtins register "finding" + "summary"; the success line names renderers
     rc = cli._handle_ext_validate_command()
     out = strip_ansi(capsys.readouterr().out)
@@ -95,7 +103,7 @@ def test_ext_validate_reports_renderer_count(capsys) -> None:
     assert "2 renderers" in out
 
 
-def test_bare_ext_prints_help_exits_2(capsys) -> None:
+def test_bare_ext_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     rc = _run_main(["ext"])
     assert rc == 2
     assert "validate" in strip_ansi(capsys.readouterr().out)

@@ -32,7 +32,9 @@ from verifiers.v1.errors import boundary
 
 from daydream_review_v1.corpus import harvested_corpus
 from daydream_review_v1.rundir import (
-    DAYDREAM_EXCLUDE,
+    DAYDREAM_EXCLUDE as DAYDREAM_EXCLUDE,
+)
+from daydream_review_v1.rundir import (
     DEFAULT_ARCHIVE_ROOT,
     candidate_diff_cmd,
     candidate_quiet_diff_cmd,
@@ -184,7 +186,9 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
         candidate_quiet_diff_cmd(repo, head_sha, [DAYDREAM_EXCLUDE], include_head=True),
         {},
     )
-    return diff.exit_code == 1
+    # ``runtime`` is the untyped ``vf.Runtime`` boundary, so exit codes are
+    # Any; coerce to int so the fail-closed boolean stays concrete.
+    return int(diff.exit_code) == 1
 
 
 async def _protected_test_paths_unchanged(
@@ -256,7 +260,7 @@ async def _protected_test_paths_unchanged(
     oracle_pathspecs = [*protected_test_paths, *ORACLE_IGNORE_PATHSPECS]
 
     def diff_changed(result: vf.ProgramResult) -> bool:
-        return result.exit_code != 0
+        return int(result.exit_code) != 0
 
     def flags_changed(result: vf.ProgramResult) -> bool:
         return result.exit_code != 0 or any(
@@ -345,7 +349,7 @@ async def _verifier_identity_available(runtime: vf.Runtime) -> bool:
     result = await runtime.run(
         ["sh", "-c", "command -v setpriv >/dev/null 2>&1 && id verifier >/dev/null 2>&1"], {}
     )
-    return result.exit_code == 0
+    return int(result.exit_code) == 0
 
 
 async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str) -> str | None:
@@ -602,7 +606,9 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             "reward_version": ROLLOUT_REWARD_VERSION,
             "intrinsic_reward_version": breakdown.reward_version,
         }
-        return self.config.w_composite * (breakdown.composite or 0.0)
+        # ``self.config`` rides the untyped ``vf.Task`` boundary; coerce both
+        # factors so the composite reward stays a concrete float.
+        return float(self.config.w_composite) * float(breakdown.composite or 0.0)
 
     @vf.metric
     async def suite_non_regression(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:

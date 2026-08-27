@@ -8,12 +8,12 @@ from daydream.agent import (
 )
 
 
-def test_non_interactive_defaults_false():
+def test_non_interactive_defaults_false() -> None:
     reset_state()
     assert get_non_interactive() is False
 
 
-def test_set_and_get_non_interactive():
+def test_set_and_get_non_interactive() -> None:
     try:
         set_non_interactive(True)
         assert get_non_interactive() is True
@@ -21,13 +21,13 @@ def test_set_and_get_non_interactive():
         reset_state()
 
 
-def test_reset_state_clears_non_interactive():
+def test_reset_state_clears_non_interactive() -> None:
     set_non_interactive(True)
     reset_state()
     assert get_non_interactive() is False
 
 
-def test_is_environmental_failure_both_directions():
+def test_is_environmental_failure_both_directions() -> None:
     environmental = [
         "The dev Postgres container is not running",
         "could not connect to server: Connection refused",
@@ -46,7 +46,7 @@ def test_is_environmental_failure_both_directions():
         assert is_environmental_failure(output) is False, output
 
 
-def test_scrubbed_supervisor_error_scrubs_all_str_surfaces():
+def test_scrubbed_supervisor_error_scrubs_all_str_surfaces() -> None:
     """_scrubbed_supervisor_error must never re-surface a redactable value.
 
     Regression for issue #702 round 2: the args-scrub must hold for

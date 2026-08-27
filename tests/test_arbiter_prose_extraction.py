@@ -20,15 +20,17 @@ over the model's actual prose-wrapped message. Only the backend is mocked.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from daydream.agent import set_log_mode
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.json_utils import extract_json
 from daydream.phases import phase_arbiter_review
+from daydream.workspace import WorkContext
 
 SELECTED_RECORDS: list[dict[str, Any]] = [
     {
@@ -102,7 +104,7 @@ class _PiLikeBackend:
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         yield TextEvent(text=self._message)
         structured = extract_json(self._message) if output_schema else None
         yield ResultEvent(structured_output=structured, continuation=None)
@@ -111,11 +113,14 @@ class _PiLikeBackend:
         pass
 
 
-async def test_arbiter_extracts_findings_from_prose_wrapped_message(tmp_path: Path, make_work) -> None:
+async def test_arbiter_extracts_findings_from_prose_wrapped_message(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
-        _PiLikeBackend(ARBITER_MESSAGE),
+        cast(Backend, _PiLikeBackend(ARBITER_MESSAGE)),
         make_work(tmp_path),
         selected_records=SELECTED_RECORDS,
         diff_path=diff_path,
@@ -130,12 +135,15 @@ async def test_arbiter_extracts_findings_from_prose_wrapped_message(tmp_path: Pa
     assert verdicts[1]["description"].startswith("OAuth state")
 
 
-async def test_arbiter_still_raises_on_genuinely_unparseable_output(tmp_path: Path, make_work) -> None:
+async def test_arbiter_still_raises_on_genuinely_unparseable_output(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     """A message with no JSON yields no findings object; the phase raises, not papers over."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     with pytest.raises(ValueError):
         await phase_arbiter_review(
-            _PiLikeBackend(MALFORMED_MESSAGE),
+            cast(Backend, _PiLikeBackend(MALFORMED_MESSAGE)),
             make_work(tmp_path),
             selected_records=SELECTED_RECORDS,
             diff_path=diff_path,
@@ -213,7 +221,7 @@ class _SplitTextBackend:
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         yield TextEvent(text=self._text)
         yield ResultEvent(structured_output=self._structured if output_schema else None, continuation=None)
 
@@ -221,7 +229,10 @@ class _SplitTextBackend:
         pass
 
 
-async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, make_work) -> None:
+async def test_arbiter_captures_structured_output_in_log_mode(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     """In --log mode the ResultEvent's structured dict must reach the phase, not be dropped.
 
     Regression for ``Arbiter returned no findings list (got str)``: log_mode
@@ -232,7 +243,7 @@ async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, ma
     set_log_mode(True)  # reset by the autouse _reset_agent_state fixture
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
-        _SplitTextBackend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),
+        cast(Backend, _SplitTextBackend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)),
         make_work(tmp_path),
         selected_records=SELECTED_RECORDS,
         diff_path=diff_path,

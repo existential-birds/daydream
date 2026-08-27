@@ -10,13 +10,15 @@ run_agent requires the keyword-only `phase=` argument (DaydreamPhase),
 imported from daydream.trajectory. MockBackend is imported from
 tests.test_agent_recorder_integration (the single canonical definition).
 """
-
 from __future__ import annotations
 
 import copy
 import json
 from io import StringIO
+from pathlib import Path
+from typing import Any
 
+import pytest
 from rich.console import Console
 
 from daydream.agent import run_agent
@@ -61,7 +63,7 @@ def test_redact_log_value_recurses_without_mutating() -> None:
     assert out[1] == "non-string-key"             # non-string keys untouched
 
 
-async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):
+async def test_structured_output_text_is_not_rendered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
     backend = MockBackend([TextEvent(text=RAW), ResultEvent(structured_output=PAYLOAD, continuation=None)])
@@ -74,7 +76,7 @@ async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):
     assert "{" not in out
 
 
-async def test_plain_text_still_renders(monkeypatch, tmp_path):
+async def test_plain_text_still_renders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
     backend = MockBackend(
@@ -85,8 +87,10 @@ async def test_plain_text_still_renders(monkeypatch, tmp_path):
 
 
 async def test_log_mode_emission_redacts_sentinels_on_agent_path(
-    monkeypatch, tmp_path, capsys
-):
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Real-path sentinel-absence check at the agent boundary (no phases.py
     prints): every --log event type is emitted redacted — markers present, raw
     sentinel absent — while the returned structured result stays raw."""
@@ -111,7 +115,11 @@ async def test_log_mode_emission_redacts_sentinels_on_agent_path(
     assert sentinel not in out          # no raw leak through the agent's log-mode emission
 
 
-async def test_log_mode_captures_structured_output(monkeypatch, tmp_path, capsys):
+async def test_log_mode_captures_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Under --log, the structured result is still captured, NOT just printed —
     and the printed projection is redacted while the returned object stays raw."""
     sentinel = "ghp_" + "x" * 16
@@ -132,7 +140,10 @@ async def test_log_mode_captures_structured_output(monkeypatch, tmp_path, capsys
     assert "OpenAPI First" in out   # benign content still serialized
 
 
-async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch, tmp_path):
+async def test_log_mode_structured_result_wins_over_prose_stray_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Under --log, prose containing stray JSON must not be scraped over the real result.
 
     Regression for the deep cross-stack merge crash ("Cross-stack merge returned
@@ -148,7 +159,7 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch
     """
     monkeypatch.setattr("daydream.agent._state.log_mode", True)
     merge_prose = "All source artifacts are empty: `stack-python-records.json` is `[]`. Nothing to merge."
-    payload = {"items": []}
+    payload: dict[str, Any] = {"items": []}
     backend = MockBackend(
         [
             TextEvent(text=merge_prose),
@@ -163,7 +174,8 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch
 
 
 async def test_structured_fallback_validates_against_output_schema(
-    monkeypatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Must-haves #4/#5: with output_schema set and structured output failing,
     (a) valid-schema JSON is returned as structured output, and (b) invalid-
@@ -199,7 +211,8 @@ async def test_structured_fallback_validates_against_output_schema(
 
 
 async def test_structured_fallback_recon_not_gated_all_or_nothing(
-    monkeypatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """RECON's fallback skips the structured-output gate via the caller-declared
     ``validate_structured_output=False`` kwarg (not a phase carve-out): the
@@ -235,7 +248,7 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(
 
 
 async def test_structured_fallback_salvages_partial_dict(
-    monkeypatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The fallback gate is salvage-tolerant, not all-or-nothing: a dict whose
     required top-level field is present but whose nested records contain one
@@ -280,7 +293,8 @@ async def test_structured_fallback_salvages_partial_dict(
 
 
 async def test_structured_fallback_bare_array_reaches_merge_shape(
-    monkeypatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A bare JSON array can never validate against an object-typed schema
     (MERGED_ITEMS_SCHEMA is ``type: object``), but phase_cross_stack_merge

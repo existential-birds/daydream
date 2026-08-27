@@ -6,15 +6,14 @@ tool-call ceiling. On abort, the invocation's event iterator is closed, the
 recorder Invocation is marked aborted via ``inv.mark_aborted(reason)``, and the
 partial output is returned without cancelling sibling backend invocations.
 """
-
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -22,6 +21,7 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
+    Backend,
     ContinuationToken,
     ResultEvent,
     TextEvent,
@@ -101,7 +101,7 @@ def _make_recorder(tmp_path: Path) -> TrajectoryRecorder:
 
 
 def _agent_step_with_stop_reason(traj: dict[str, Any]) -> dict[str, Any]:
-    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
+    agent_steps: list[dict[str, Any]] = [s for s in traj["steps"] if s["source"] == "agent"]
     for step in agent_steps:
         if step.get("extra", {}).get("stop_reason"):
             return step
@@ -333,7 +333,7 @@ class _RecordingCancelBackend:
         self.cancelled = False
         self.entered = asyncio.Event()
 
-    async def execute(self, *args, **kwargs):
+    async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         self.entered.set()
         yield TextEvent(text="started")
         await asyncio.sleep(3600)
@@ -348,7 +348,7 @@ async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> N
 
     task = asyncio.create_task(
         run_agent(
-            backend,
+            cast(Backend, backend),
             tmp_path,
             "hi",
             phase=DaydreamPhase.REVIEW,

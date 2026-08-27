@@ -4,7 +4,7 @@ import pytest
 from daydream.phases import MERGED_ITEMS_SCHEMA, normalize_items
 
 
-def test_schema_accepts_related_files():
+def test_schema_accepts_related_files() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
             "lens": "cross-stack", "severity": "high",
@@ -12,7 +12,7 @@ def test_schema_accepts_related_files():
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
 
 
-def test_schema_rejects_non_string_related_files():
+def test_schema_rejects_non_string_related_files() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
             "lens": "per-stack", "severity": "medium",
@@ -21,7 +21,7 @@ def test_schema_rejects_non_string_related_files():
         jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
 
 
-def test_schema_requires_lens_and_severity():
+def test_schema_requires_lens_and_severity() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
             "lens": "structural", "severity": "high", "related_files": None}
@@ -31,7 +31,7 @@ def test_schema_requires_lens_and_severity():
         jsonschema.validate({"items": [bad]}, MERGED_ITEMS_SCHEMA)
 
 
-def test_normalize_assigns_unique_ids_across_lenses():
+def test_normalize_assigns_unique_ids_across_lenses() -> None:
     raw = [{"id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "description": "x",
             "confidence": "HIGH", "rationale": "r", "severity": "low"},
            {"id": 1, "lens": "structural", "file": "b.py", "line": 1, "description": "y",
@@ -40,7 +40,7 @@ def test_normalize_assigns_unique_ids_across_lenses():
     assert len({i["id"] for i in out}) == 2   # collision resolved, not preserved
 
 
-def test_verdict_join_matches_after_collision_resolution():
+def test_verdict_join_matches_after_collision_resolution() -> None:
     from daydream.deep.orchestrator import _attach_verdicts
 
     items = normalize_items([
@@ -55,7 +55,7 @@ def test_verdict_join_matches_after_collision_resolution():
     assert joined[1]["verifier_verdict"] == "contradicts"  # right item got the verdict
 
 
-def test_schema_accepts_wonder_lens():
+def test_schema_accepts_wonder_lens() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "MEDIUM", "rationale": "r", "evidence": "a.py:4",
             "lens": "wonder", "severity": "medium", "related_files": None}

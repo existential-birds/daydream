@@ -6,6 +6,8 @@ Asserts the observable outcome (exit code + parse-call count proving the
 single review→parse pass ran once and the run completed cleanly — ``--loop``
 was removed in the single-flow collapse (#330)).
 """
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,14 +19,18 @@ ISSUE = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
 
 
 @pytest.fixture
-def mock_ui_loop(monkeypatch):
+def mock_ui_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Decline interactive gates so the run runs unattended."""
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
 
 
 @pytest.mark.asyncio
-async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, mock_ui_loop, monkeypatch):  # noqa
+async def test_shared_phase_backend_drives_shallow_pass(
+    feature_branch_repo: Path,
+    mock_ui_loop: Any,  # noqa: F841
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One issue on the single pass → the shallow deep run completes and exits 0."""
     backend = PhaseDispatchBackend(parse_results=[[ISSUE]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None, **kwargs: backend)

@@ -3,13 +3,14 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from daydream import review_profile as rp
+from daydream.backends import AgentEvent, Backend
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
@@ -57,9 +58,9 @@ def _default_strategy(stage: str) -> str:
 
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
     """Load a named improve artifact as decoded JSON."""
-    return json.loads(
+    return cast(dict[str, Any], json.loads(
         improve_artifact(repo, name).read_text(encoding="utf-8")
-    )
+    ))
 
 
 _GROUP = {
@@ -281,7 +282,7 @@ def _force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.anyio
 async def test_repo_scan_seeds_specialists_from_tracked_files(tmp_git_repo: Path) -> None:
     stub = ImproveStubBackend(tmp_git_repo)
-    ctx = await repo_scan(stub, tmp_git_repo, max_files=500)
+    ctx = await repo_scan(cast(Backend, stub), tmp_git_repo, max_files=500)
     assert any(c.name == "OpenAPI First" for c in ctx.conventions)
     prompt = stub.calls[0]["prompt"]
     assert stub.calls[0]["marker"] == "repo-scan"
@@ -293,7 +294,7 @@ async def test_repo_scan_seeds_specialists_from_tracked_files(tmp_git_repo: Path
 async def test_repo_scan_prompt_carries_no_diff_framing(tmp_git_repo: Path) -> None:
     """A repo-scoped scan has no change set, so it must not be described as one."""
     stub = ImproveStubBackend(tmp_git_repo)
-    ctx = await repo_scan(stub, tmp_git_repo, max_files=500)
+    ctx = await repo_scan(cast(Backend, stub), tmp_git_repo, max_files=500)
     prompt = stub.calls[0]["prompt"]
     assert "pattern-scanner" not in prompt
     assert "git diff" not in prompt
@@ -319,7 +320,7 @@ async def test_repo_scan_sample_spans_the_tree_not_the_alphabetical_head(
     commit(tmp_git_repo, "add skills")
 
     stub = ImproveStubBackend(tmp_git_repo)
-    await repo_scan(stub, tmp_git_repo, max_files=10)
+    await repo_scan(cast(Backend, stub), tmp_git_repo, max_files=10)
     prompt = stub.calls[0]["prompt"]
     sample = prompt.split("<tracked_file_sample>")[1].split("</tracked_file_sample>")[0]
     sampled = [line[2:] for line in sample.strip().splitlines()]
@@ -2903,9 +2904,16 @@ class _AuditCommittingBackend(ImproveStubBackend):
         self.escape_attempts = 0
 
     async def execute(
-        self, cwd, prompt, output_schema=None, continuation=None,
-        agents=None, max_turns=None, read_only=False, persist_session=True,
-    ):
+        self,
+        cwd: Path,
+        prompt: Any,
+        output_schema: Any=None,
+        continuation: Any=None,
+        agents: Any=None,
+        max_turns: Any=None,
+        read_only: Any=False,
+        persist_session: Any=True,
+    ) -> AsyncIterator[AgentEvent]:
         self._commit_count += 1
         (cwd / "model-scratch.txt").write_text(
             f"model residual {self._commit_count}\n"
@@ -3934,7 +3942,7 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
     assert "GitHub publication failures: 1" in report
 
 
-def test_audit_prompt_uses_category_strategy_no_skill():
+def test_audit_prompt_uses_category_strategy_no_skill() -> None:
     from daydream import review_profile as rp
 
     p = rp.build_default_profile()
@@ -3956,7 +3964,7 @@ def test_audit_prompt_uses_category_strategy_no_skill():
     assert "Hard Rule 4" in prompt and "Hard Rule 6" in prompt
 
 
-def test_vet_prompt_uses_native_vet_strategy_no_skill():
+def test_vet_prompt_uses_native_vet_strategy_no_skill() -> None:
     from daydream import review_profile as rp
 
     strategy = rp.build_default_profile().strategies["improve.vetting"].content

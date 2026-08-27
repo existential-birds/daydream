@@ -6,6 +6,8 @@ Task 3: full compatibility-identity binding and the compile-lock cross-check.
 Task 4: count-derived metrics equal the authoritative scoring.
 """
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,14 +19,14 @@ harbor = pytest.importorskip("harbor", reason="harbor is an optional benchmark e
 _WHEEL = {"distribution": "daydream", "version": "0.1.0", "sha256": "c" * 64}
 
 
-def _seed_compiled_lock(ws, wheel=_WHEEL):
+def _seed_compiled_lock(ws: Path, wheel: Any=_WHEEL) -> None:
     """Write a compiled lock with the ``daydream`` wheel block + a case entry."""
     lock = {"schema_version": 1, "cases": {"case-a": {"key": "case-a"}}, "files": {},
             "daydream": wheel}
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
 
 
-def _ws(tmp_path):
+def _ws(tmp_path: Path) -> Any:
     ws = tmp_path / "ws"
     (ws / "runtime").mkdir(parents=True)
     (ws / "harbor").mkdir()
@@ -37,7 +39,7 @@ def _ws(tmp_path):
     return ws
 
 
-def _env(**over):
+def _env(**over: Any) -> Any:
     """A trusted control-plane env; the default already pins the candidate digest."""
     base = {
         "DAYDREAM_JUDGE_PROVIDER": "anthropic",
@@ -51,7 +53,7 @@ def _env(**over):
     return base
 
 
-def _append(ws, run_id='run-1'):
+def _append(ws: Path, run_id: Any='run-1') -> None:
     run_mod.ledger_append_running(
         ws, run_id=run_id,
         compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
@@ -59,7 +61,7 @@ def _append(ws, run_id='run-1'):
     )
 
 
-def _complete_ws(tmp_path, run_id="run-1", trials=None):
+def _complete_ws(tmp_path: Path, run_id: Any="run-1", trials: Any=None) -> Any:
     """A complete, consistent run whose ledger lock hash matches the seed lock."""
     ws = _ws(tmp_path)
     run_mod.ledger_append_running(
@@ -74,8 +76,17 @@ def _complete_ws(tmp_path, run_id="run-1", trials=None):
     return ws
 
 
-def _reward(tp=0, fp=0, fn=0, reward=0.0, clean_task=0, clean_pass=0,
-            gold_count=0, candidate_count=0, verifier_error=0):
+def _reward(
+    tp: Any=0,
+    fp: Any=0,
+    fn: Any=0,
+    reward: Any=0.0,
+    clean_task: Any=0,
+    clean_pass: Any=0,
+    gold_count: Any=0,
+    candidate_count: Any=0,
+    verifier_error: Any=0,
+) -> dict[str, Any]:
     return {"reward": reward, "tp": tp, "fp": fp, "fn": fn,
             "precision": (tp/(tp+fp)) if (tp+fp) else 1.0,
             "recall": (tp/(tp+fn)) if (tp+fn) else 1.0,
@@ -84,7 +95,7 @@ def _reward(tp=0, fp=0, fn=0, reward=0.0, clean_task=0, clean_pass=0,
             "verifier_error": verifier_error}
 
 
-def _seed_trials(ws, run_id, trials):
+def _seed_trials(ws: Path, run_id: Any, trials: Any) -> None:
     job = ws / "harbor" / "jobs" / run_id
     for i, row in enumerate(trials):
         trial = job / f"case-{i}" / "verifier"
@@ -95,12 +106,12 @@ def _seed_trials(ws, run_id, trials):
             (trial / "reward.json").write_text(json.dumps(row))
 
 
-def _rows_to_jsonl(rows, path):
+def _rows_to_jsonl(rows: Any, path: Path) -> Any:
     path.write_text("\n".join(("null" if r is None else json.dumps(r)) for r in rows) + "\n")
     return path
 
 
-def test_objective_resolves_complete_run_by_explicit_run_id(tmp_path):
+def test_objective_resolves_complete_run_by_explicit_run_id(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
@@ -110,7 +121,7 @@ def test_objective_resolves_complete_run_by_explicit_run_id(tmp_path):
     assert run.state == "complete"
 
 
-def test_objective_rejects_missing_and_nonterminal_runs(tmp_path):
+def test_objective_rejects_missing_and_nonterminal_runs(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
@@ -121,30 +132,34 @@ def test_objective_rejects_missing_and_nonterminal_runs(tmp_path):
         assert bad in str(e.value) and str(ws) in str(e.value)
 
 
-def test_objective_parses_scored_and_infra_trials(tmp_path):
+def test_objective_parses_scored_and_infra_trials(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
     run_mod.ledger_mark(ws, run_id, state="complete")
     _seed_trials(ws, run_id, [_reward(tp=2, fp=1, fn=0), None])
     run = objective.read_completed_run(ws, run_id, env={})
-    assert run.task_rows[0]["tp"] == 2 and run.task_rows[1] is None
+    first = run.task_rows[0]
+    assert first is not None and run.task_rows[1] is None
+    assert first["tp"] == 2
+    assert run.objective is not None
     assert run.objective.infra_error_task_count == 1
     assert run.objective.scored_task_count == 1
 
 
-def test_objective_clean_task_is_not_infra_failure(tmp_path):
+def test_objective_clean_task_is_not_infra_failure(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
     run_mod.ledger_mark(ws, run_id, state="complete")
     _seed_trials(ws, run_id, [_reward(clean_task=1, clean_pass=1)])
     run = objective.read_completed_run(ws, run_id, env={})
+    assert run.objective is not None
     assert run.objective.clean_task_count == 1
     assert run.objective.infra_error_task_count == 0
 
 
-def test_objective_malformed_numeric_fails_closed(tmp_path):
+def test_objective_malformed_numeric_fails_closed(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
@@ -155,9 +170,10 @@ def test_objective_malformed_numeric_fails_closed(tmp_path):
     assert "run-1" in str(e.value)
 
 
-def test_objective_binds_full_compatibility_identity(tmp_path):
+def test_objective_binds_full_compatibility_identity(tmp_path: Path) -> None:
     ws = _complete_ws(tmp_path)
     run = objective.read_completed_run(ws, "run-1", env=_env())
+    assert run.identity is not None
     ident = run.identity
     assert ident.profile_digest == "d" * 64
     assert ident.reviewer_model == "rm"          # from _env
@@ -168,7 +184,7 @@ def test_objective_binds_full_compatibility_identity(tmp_path):
     assert ident.attempts == 3
 
 
-def test_objective_rejects_identity_disagreement(tmp_path):
+def test_objective_rejects_identity_disagreement(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     # ledger says lock hash "a"*64 but the on-disk lock hashes to something else
     run_mod.ledger_append_running(
@@ -181,12 +197,12 @@ def test_objective_rejects_identity_disagreement(tmp_path):
     assert "compiled_lock" in str(e.value).lower()
 
 
-def test_objective_metrics_equal_verifier_core_and_metric_py(tmp_path):
+def test_objective_metrics_equal_verifier_core_and_metric_py(tmp_path: Path) -> None:
     import types
 
     from daydream.benchmark.harbor import build, verifier_core
 
-    def _compiled_metric():
+    def _compiled_metric() -> Any:
         mod = types.ModuleType("metric")
         exec(compile(build.render_metric().decode("utf-8"), "metric.py", "exec"), mod.__dict__)
         return mod
@@ -195,6 +211,7 @@ def test_objective_metrics_equal_verifier_core_and_metric_py(tmp_path):
                                         _reward(tp=1, fp=0, fn=1, reward=0.5), None])
     run = objective.read_completed_run(ws, "run-1", env={})
     flat = list(run.task_rows)
+    assert run.objective is not None
     expected = verifier_core.aggregate_metrics(flat)
     assert run.objective.tp == expected["total_tp"]
     assert run.objective.fp == expected["total_fp"]
@@ -209,13 +226,14 @@ def test_objective_metrics_equal_verifier_core_and_metric_py(tmp_path):
     assert run.objective._as_metric_dict() == via_metric
 
 
-def test_objective_tokens_cost_absent_when_unrecorded(tmp_path):
+def test_objective_tokens_cost_absent_when_unrecorded(tmp_path: Path) -> None:
     ws = _complete_ws(tmp_path)
     run = objective.read_completed_run(ws, "run-1", env={})
+    assert run.objective is not None
     assert run.objective.tokens is None and run.objective.cost is None
 
 
-def test_objective_json_is_opaque(tmp_path):
+def test_objective_json_is_opaque(tmp_path: Path) -> None:
     ws = _complete_ws(tmp_path)
     # seed a private repo slug + gold/judge text into the workspace artifacts
     (ws / "benchmark.yaml").write_text(json.dumps(
@@ -233,7 +251,7 @@ def test_objective_json_is_opaque(tmp_path):
     assert isinstance(doc["objective"], dict)
 
 
-def _complete_ws_at(tmp_path, name, run_id, trials, digest="d" * 64, wheel=None):
+def _complete_ws_at(tmp_path: Path, name: Any, run_id: Any, trials: Any, digest: Any="d" * 64, wheel: Any=None) -> Any:
     """A complete, consistent run under a repository workspace of the given name.
 
     The ledger stores the on-disk compiled-lock hash and the supplied ``digest``
@@ -253,7 +271,7 @@ def _complete_ws_at(tmp_path, name, run_id, trials, digest="d" * 64, wheel=None)
     return ws
 
 
-def test_aggregate_suite_pools_micro_metrics_and_never_mean(tmp_path):
+def test_aggregate_suite_pools_micro_metrics_and_never_mean(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import verifier_core
 
     a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=1, fn=0)])
@@ -271,7 +289,7 @@ def test_aggregate_suite_pools_micro_metrics_and_never_mean(tmp_path):
     assert suite.objective._as_metric_dict() == verifier_core.aggregate_metrics(flat)
 
 
-def test_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path):
+def test_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path: Path) -> None:
     a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)])
     b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)])
     m1 = {"schema_version": 1, "entries": [
@@ -288,7 +306,7 @@ def test_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path
         objective.aggregate_suite(dup, env={})
 
 
-def test_aggregate_suite_fails_closed_on_incompatible_identity(tmp_path):
+def test_aggregate_suite_fails_closed_on_incompatible_identity(tmp_path: Path) -> None:
     a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)],
                         digest="d" * 64)
     b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)],
@@ -300,7 +318,7 @@ def test_aggregate_suite_fails_closed_on_incompatible_identity(tmp_path):
     assert "profile_digest" in str(e.value)
 
 
-def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path):
+def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path: Path) -> None:
     """Task 11 gate: pooled output equals the authoritative scoring.
 
     The pooled ``SuiteObjective`` must equal ``verifier_core.aggregate_metrics``
@@ -313,7 +331,7 @@ def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path):
 
     from daydream.benchmark.harbor import build, verifier_core
 
-    def _rendered_metric():
+    def _rendered_metric() -> Any:
         # The deployed ``metric.py`` is the template with the authoritative
         # ``aggregate_metrics`` body spliced in at build time.
         mod = types.ModuleType("metric")
@@ -338,7 +356,7 @@ def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path):
     assert suite.objective._as_metric_dict() == _rendered_metric().aggregate_rewards_file(str(jsonl))
 
 
-def test_suite_manifest_validation(tmp_path):
+def test_suite_manifest_validation(tmp_path: Path) -> None:
     good = {"schema_version": 1, "entries": [
         {"workspace": str(tmp_path / "a"), "run_id": "r1"},
         {"workspace": str(tmp_path / "b"), "run_id": "r2"},
@@ -347,7 +365,7 @@ def test_suite_manifest_validation(tmp_path):
     assert [ (e.workspace.name, e.run_id) for e in entries ] == [("a", "r1"), ("b", "r2")]
 
 
-def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path):
+def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path: Path) -> None:
     dup = {"schema_version": 1, "entries": [
         {"workspace": str(tmp_path / "a"), "run_id": "r1"},
         {"workspace": str(tmp_path / "a"), "run_id": "r1"},
@@ -365,7 +383,7 @@ def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path):
         objective.validate_suite_manifest(unsupported)
 
 
-def test_identity_to_dict_is_single_source_for_all_projections(tmp_path):
+def test_identity_to_dict_is_single_source_for_all_projections(tmp_path: Path) -> None:
     """Issue #888 anti-slop: one shared identity projection everywhere.
 
     ``objective_to_json`` (per-run), ``identity_to_dict`` (pool compat),
@@ -389,7 +407,7 @@ def test_identity_to_dict_is_single_source_for_all_projections(tmp_path):
     assert objective.identity_to_dict(suite.identity) == per_run
 
 
-def test_shared_trial_walker_skips_non_dirs_and_matches_parse_job_results(tmp_path):
+def test_shared_trial_walker_skips_non_dirs_and_matches_parse_job_results(tmp_path: Path) -> None:
     """Issue #888 anti-slop: objective._parse_task_rows reuses run's trial walker.
 
     The shared ``run_mod._iter_trial_dirs`` skips non-directory siblings and

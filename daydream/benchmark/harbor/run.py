@@ -28,6 +28,7 @@ import sys
 import tomllib
 import urllib.parse
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 
@@ -468,7 +469,7 @@ def _preflight(
     return failures
 
 
-def _iter_trial_dirs(job_dir: Path):
+def _iter_trial_dirs(job_dir: Path) -> Iterator[Path]:
     """Yield the sorted trial subdirectories of a Harbor job dir.
 
     Non-directory siblings (lockfiles, READMEs) are skipped. Shared by
@@ -715,9 +716,9 @@ def run_run(
     oracle: bool = False,
     yes: bool = False,
     env: dict[str, Any] | None = None,
-    spawn=None,
-    docker_ok=None,
-    confirm=None,
+    spawn: Callable[..., dict[str, Any]] | None = None,
+    docker_ok: Callable[[], package.DockerNetworkPolicyCapability] | None = None,
+    confirm: Callable[[str], bool] | None = None,
 ) -> int:
     """Supervised Harbor run: fail-closed preflight, then one gated run.
 

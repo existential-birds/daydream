@@ -590,7 +590,7 @@ def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_agent_state():
+def _reset_agent_state() -> Iterator[Any]:
     """Reset the ``AgentState`` singleton before AND after every test.
 
     The interaction axes (``non_interactive``, ``assume``) and ``quiet_mode``
@@ -608,7 +608,7 @@ def _reset_agent_state():
 
 
 @pytest.fixture(autouse=True)
-def _reset_gh_token_env():
+def _reset_gh_token_env() -> Iterator[Any]:
     """Reset the ``gh`` token-env singleton before AND after every test.
 
     The ``gh`` subprocess environment lives on a module-level singleton in
@@ -674,7 +674,7 @@ def _hermetic_skill_availability(
 
 
 @pytest.fixture(autouse=True)
-def _reset_trajectory_recorder():
+def _reset_trajectory_recorder() -> Iterator[Any]:
     """Clear the trajectory ContextVar before AND after every test.
 
     Mirrors ``daydream.agent.reset_state()`` for ``AgentState`` (CORE-10 / D-17).

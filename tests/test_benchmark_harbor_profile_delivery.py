@@ -6,6 +6,10 @@ normal-run ``DAYDREAM_REVIEW_PROFILE`` env, the operator's file config, or any
 target-repo profile. No candidate -> packaged default.
 """
 import asyncio
+from pathlib import Path
+from typing import Any
+
+import pytest
 
 from daydream import review_profile as rp
 from daydream.config_file import DaydreamFileConfig
@@ -25,16 +29,19 @@ def _judge_env(**extra: str) -> dict[str, str]:
     }
 
 
-def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch):
+def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # Malicious target config / ambient env must NOT change the Harbor candidate.
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE", "/tmp/user-evil.toml")
-    malicious = DaydreamFileConfig(review_profile="/tmp/repo-evil.toml")
+    malicious = DaydreamFileConfig(review_profile=Path("/tmp/repo-evil.toml"))
     resolved = rp.resolve_harbor_profile(file_config=malicious)  # no candidate requested
     assert resolved.source_kind == "default"  # falls to packaged default, ignores env+repo
     assert resolved.profile.name  # the packaged default, not user/repo
 
 
-def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypatch, tmp_path):
+def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     p = tmp_path / "control-plane-candidate.toml"
     p.write_text(_resolver_fixture)
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(p))
@@ -43,7 +50,10 @@ def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypat
 
 # Task 11 (R11): controlled Harbor delivery -- entrypoint validation + no
 # artifact on failure.
-def test_entrypoint_parses_and_validates_candidate_before_runconfig(tmp_path, monkeypatch):
+def test_entrypoint_parses_and_validates_candidate_before_runconfig(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from daydream.benchmark.harbor import entrypoint
 
     good = tmp_path / "good.toml"
@@ -53,10 +63,14 @@ def test_entrypoint_parses_and_validates_candidate_before_runconfig(tmp_path, mo
         repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
         backend="pi", model="deepseek/deepseek-v4-flash-0731",
     )
+    assert cfg.review_profile is not None
     assert cfg.review_profile.name == "g"  # candidate parsed+validated into RunConfig
 
 
-def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path, monkeypatch):
+def test_entrypoint_invalid_candidate_fails_and_writes_no_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from daydream.benchmark.harbor import entrypoint
 
     bad = tmp_path / "bad.toml"
@@ -74,7 +88,10 @@ def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path, monke
     assert not artifact.exists()  # no candidate review artifact written
 
 
-def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path, monkeypatch):
+def test_malicious_target_config_cannot_change_harbor_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from daydream.benchmark.harbor import entrypoint
 
     # target repo .daydream.toml tries to point at its own profile
@@ -87,11 +104,12 @@ def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path, monkey
         repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
         backend="pi", model="deepseek/deepseek-v4-flash-0731",
     )
+    assert cfg.review_profile is not None
     assert cfg.review_profile.name == "g"  # candidate wins; target config ignored
 
 
 # Task 12 (R12): Harbor ledger/receipt provenance.
-def test_ledger_entry_records_candidate_digest(tmp_path):
+def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
     from daydream.benchmark.harbor import run
 
     ws = tmp_path / "ws"
@@ -108,7 +126,7 @@ def test_ledger_entry_records_candidate_digest(tmp_path):
     assert entry["profile_digest"] == "abc123"
 
 
-def test_receipt_invalidation_inputs_include_candidate_digest():
+def test_receipt_invalidation_inputs_include_candidate_digest() -> None:
     from daydream.benchmark.harbor import calibrate
 
     # calibrate._invalidation_inputs is the single source of truth for the
@@ -125,7 +143,7 @@ def test_receipt_invalidation_inputs_include_candidate_digest():
 # candidate-scoped receipt is producible from the single shared producer.
 # Legacy default runs (no digest) stay byte-stable. Without this the oracle
 # preflight always fails under a candidate.
-def test_calibrate_invalidation_inputs_folds_candidate_digest():
+def test_calibrate_invalidation_inputs_folds_candidate_digest() -> None:
     from daydream.benchmark.harbor import calibrate
 
     sr = calibrate._load_judge_template()
@@ -139,7 +157,7 @@ def test_calibrate_invalidation_inputs_folds_candidate_digest():
     assert "profile_digest" not in legacy
 
 
-def test_candidate_scoped_receipt_matches_preflight_inputs(tmp_path):
+def test_candidate_scoped_receipt_matches_preflight_inputs(tmp_path: Path) -> None:
     """A candidate-scoped receipt round-trips write -> read as current.
 
     Builds the receipt through _build_receipt/_write_receipt with the candidate
@@ -167,7 +185,7 @@ def test_candidate_scoped_receipt_matches_preflight_inputs(tmp_path):
 # candidate profile digest into the env dict it hands to run_run, because run.py
 # reads DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from that env dict and the
 # in-container entrypoint runs in a different process (after the ledger row).
-def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch, tmp_path):
+def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from daydream.benchmark import cli as bc
 
     # No candidate -> digest key is None (legacy default runs stay byte-stable).
@@ -189,7 +207,7 @@ def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch, tmp_p
 
     captured = {}
 
-    def fake_run_run(workspace, *, oracle=False, yes=False, env=None, **kw):
+    def fake_run_run(workspace: Any, *, oracle: Any=False, yes: Any=False, env: Any=None, **kw: Any) -> int:
         captured["env"] = env
         return 0
 
@@ -201,7 +219,7 @@ def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch, tmp_p
     assert captured["env"]["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] == digest
 
 
-def test_benchmark_run_invalid_candidate_fails_closed(monkeypatch, tmp_path):
+def test_benchmark_run_invalid_candidate_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from daydream.benchmark import cli as bc
     from daydream.review_profile import ProfileError
 

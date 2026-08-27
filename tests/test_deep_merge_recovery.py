@@ -28,13 +28,15 @@ Integration tests run the full deep pipeline through ``runner.run``.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.phases import phase_cross_stack_merge
+from daydream.workspace import WorkContext
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.test_deep_orchestrator import _merge_item, _run_deep
 
@@ -127,7 +129,9 @@ def test_load_failures_defaults_and_filters() -> None:
 
 
 async def test_merge_salvage_applies_dedup_prefilter(
-    multi_stack_target, monkeypatch, mute_side_effects
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """F2: the salvage path applies the D-27 dedup pre-filter to the partial items.
 
@@ -170,7 +174,10 @@ async def test_merge_salvage_applies_dedup_prefilter(
 
 
 async def test_merge_failure_resume_surfaces_prior_failure(
-    multi_stack_target, monkeypatch, mute_side_effects, capsys
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Callable[..., None],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """F1/R6: a --start-at fix relaunch after salvage surfaces the merge failure.
 
@@ -229,7 +236,7 @@ class _MergeTextBackend:
         max_turns: Any = None,
         read_only: bool = False,
         persist_session: bool = True,
-    ):
+    ) -> AsyncIterator[AgentEvent]:
         yield TextEvent(text=self._text)
         yield ResultEvent(
             structured_output=self._structured if output_schema else None, continuation=None
@@ -239,13 +246,13 @@ class _MergeTextBackend:
         pass
 
 
-async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work) -> None:
+async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """R1: a bare-list result is normalized + merged, not treated as a failure."""
     from daydream.deep.artifacts import deep_dir, merged_items_path
 
     args = _merge_args(tmp_path)
     await phase_cross_stack_merge(
-        _MergeTextBackend(
+        cast(Backend, _MergeTextBackend(
             "prose",
             [
                 {
@@ -258,7 +265,7 @@ async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work) -> None
                     "evidence": "api.py:1",
                 }
             ],
-        ),
+        )),
         make_work(tmp_path),
         **args,
     )
@@ -276,14 +283,18 @@ async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work) -> None
     ],
     ids=["generic", "archived"],
 )
-async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work, merge_text) -> None:
+async def test_merge_raises_structured_error_on_str(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    merge_text: Any,
+) -> None:
     """R2/AC2: a genuinely-unparseable str raises CrossStackMergeError with shape + stacks."""
     from daydream.phases import CrossStackMergeError
 
     args = _merge_args(tmp_path)
     with pytest.raises(CrossStackMergeError) as excinfo:
         await phase_cross_stack_merge(
-            _MergeTextBackend(merge_text, None),
+            cast(Backend, _MergeTextBackend(merge_text, None)),
             make_work(tmp_path),
             **args,
         )
@@ -292,7 +303,7 @@ async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work, m
     assert str(excinfo.value) == CROSS_STACK_MERGE_ERR_MSG
 
 
-async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatch) -> None:
+async def test_merge_accepts_bare_list_end_to_end(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """R7(i): a bare-list merge result is merged and the run succeeds."""
     from daydream.deep.artifacts import deep_dir, merged_items_path
 
@@ -323,7 +334,9 @@ async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatc
     ids=["generic", "archived"],
 )
 async def test_merge_str_response_is_salvaged_not_fatal(
-    multi_stack_target, monkeypatch, merge_str
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    merge_str: Any,
 ) -> None:
     """R2/R3/R4/R5/S1/S2: a str merge writes partial items + failure record, stops resumably."""
     from daydream.deep.artifacts import (
@@ -369,7 +382,11 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     ids=["generic", "archived"],
 )
 async def test_merge_failure_relaunch_picks_up_salvage(
-    multi_stack_target, monkeypatch, mute_side_effects, capsys, merge_str
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Callable[..., None],
+    capsys: pytest.CaptureFixture[str],
+    merge_str: Any,
 ) -> None:
     """R6/AC4: --start-at fix after salvage picks up partial items; no re-review, no re-merge."""
     silence(monkeypatch)
@@ -404,7 +421,9 @@ async def test_merge_failure_relaunch_picks_up_salvage(
 
 
 async def test_merge_failure_merge_resume_skips_merge_entry(
-    multi_stack_target, monkeypatch, mute_side_effects
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """R6/AC4: a --start-at merge resume does not surface __merge__ as a failed stack.
 

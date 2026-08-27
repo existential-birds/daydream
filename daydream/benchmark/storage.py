@@ -47,7 +47,7 @@ class _UniqueKeyLoader(yaml.SafeLoader):
     """
 
 
-def _construct_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict:
+def _construct_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict[str, Any]:
     mapping = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
@@ -805,7 +805,10 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
 
 
 def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    return doc.get("targets", [])
+    targets = doc.get("targets", [])
+    if not isinstance(targets, list):
+        raise WorkspaceCorrupt("op-doc targets is not a list")
+    return targets
 
 
 def _rollback_prepared(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:

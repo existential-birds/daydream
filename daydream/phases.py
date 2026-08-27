@@ -1826,7 +1826,8 @@ async def phase_parse_feedback(
             return [], []
         return []
 
-    feedback_items = result["issues"]
+    raw_items = result["issues"]
+    feedback_items: list[dict[str, Any]] = raw_items if isinstance(raw_items, list) else []
 
     # Structural evidence gate (issue #227, AC3): the default parse path
     # (shallow loop + PR-feedback ingestion, ``input_path is None``) never
@@ -3713,6 +3714,8 @@ async def phase_alternative_review(
 
     if isinstance(result, dict) and "issues" in result:
         issues = result["issues"]
+        if not isinstance(issues, list):
+            issues = []
     else:
         # Only genuinely unusable model output degrades to an empty lens; the
         # budget case above already failed the run.

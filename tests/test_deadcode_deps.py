@@ -1,5 +1,6 @@
 import tomllib
 from pathlib import Path
+from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
 _RL_PROJECT = _ROOT / "rl" / "daydream_review_v1"
@@ -10,19 +11,19 @@ def _dev_names(pyproject: Path) -> list[str]:
     return [d.split(">=")[0].split("==")[0] for d in data["dependency-groups"]["dev"]]
 
 
-def test_vulture_in_root_dev_group():
+def test_vulture_in_root_dev_group() -> None:
     assert "vulture" in _dev_names(_ROOT / "pyproject.toml")
 
 
-def test_vulture_in_rl_dev_group():
+def test_vulture_in_rl_dev_group() -> None:
     assert "vulture" in _dev_names(_RL_PROJECT / "pyproject.toml")
 
 
-def _tool_block(pyproject: Path) -> dict:
+def _tool_block(pyproject: Path) -> dict[str, Any]:
     return tomllib.loads(pyproject.read_text()).get("tool", {}).get("vulture") or {}
 
 
-def test_root_vulture_config_pins_conventions():
+def test_root_vulture_config_pins_conventions() -> None:
     cfg = _tool_block(_ROOT / "pyproject.toml")
     assert cfg["min_confidence"] == 80
     assert cfg["exclude"] == ["*/atif/*"]
@@ -32,7 +33,7 @@ def test_root_vulture_config_pins_conventions():
     assert "ignore_names" not in cfg
 
 
-def test_rl_vulture_config_is_scoped_to_own_tree():
+def test_rl_vulture_config_is_scoped_to_own_tree() -> None:
     cfg = _tool_block(_RL_PROJECT / "pyproject.toml")
     assert cfg["min_confidence"] == 80
     joined = " ".join(cfg.get("exclude", []))

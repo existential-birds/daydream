@@ -1,6 +1,7 @@
 import hashlib
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -28,7 +29,7 @@ from daydream.benchmark.schema import (
 )
 
 
-def test_pyyaml_is_a_base_runtime_dependency():
+def test_pyyaml_is_a_base_runtime_dependency() -> None:
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     deps = data["project"]["dependencies"]
     dev = data["dependency-groups"]["dev"]
@@ -36,7 +37,7 @@ def test_pyyaml_is_a_base_runtime_dependency():
     assert "types-pyyaml>=6.0" in dev  # type stubs stay dev-only
 
 
-def _valid_manifest():
+def _valid_manifest() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
@@ -73,38 +74,38 @@ def _valid_manifest():
         ("api.anthropic.com/path", "api.anthropic.com"),
     ],
 )
-def test_normalize_hostname(raw, expected):
+def test_normalize_hostname(raw: Any, expected: Any) -> None:
     assert normalize_hostname(raw) == expected
 
 
 @pytest.mark.parametrize("raw", ["", "*.anthropic.com", "not a host", "http://"])
-def test_normalize_hostname_rejects_malformed(raw):
+def test_normalize_hostname_rejects_malformed(raw: Any) -> None:
     with pytest.raises(ValueError):
         normalize_hostname(raw)
 
 
-def test_manifest_accepts_valid_v1():
+def test_manifest_accepts_valid_v1() -> None:
     m = BenchmarkManifest.model_validate(_valid_manifest())
     assert m.source.hostname == "github.com"
     assert m.source.repository_id is None
     assert m.source.visibility == "unresolved"
 
 
-def test_manifest_rejects_unknown_field():
+def test_manifest_rejects_unknown_field() -> None:
     base = _valid_manifest()
     base["bogus"] = True
     with pytest.raises(ValidationError):
         BenchmarkManifest.model_validate(base)
 
 
-def test_manifest_rejects_non_github_hostname():
+def test_manifest_rejects_non_github_hostname() -> None:
     base = _valid_manifest()
     base["source"]["hostname"] = "gitlab.com"
     with pytest.raises(ValidationError):
         BenchmarkManifest.model_validate(base)
 
 
-def test_source_repository_id_is_nonblank_opaque_string():
+def test_source_repository_id_is_nonblank_opaque_string() -> None:
     from pydantic import ValidationError
 
     from daydream.benchmark.schema import Source
@@ -122,7 +123,7 @@ def test_source_repository_id_is_nonblank_opaque_string():
                    repository="o/r", repository_id=bad)
 
 
-def test_import_repository_id_is_opaque_string():
+def test_import_repository_id_is_opaque_string() -> None:
     from daydream.benchmark.schema import _ImportRepository
 
     r = _ImportRepository(id="R_kgDOABC123", name_with_owner="o/r", visibility="private")
@@ -132,19 +133,19 @@ def test_import_repository_id_is_opaque_string():
     with pytest.raises(ValidationError):
         _ImportRepository(id="5", name_with_owner="o/r", visibility="private")
     with pytest.raises(ValidationError):
-        _ImportRepository(id=123456, name_with_owner="o/r", visibility="private")
+        _ImportRepository(id="123456", name_with_owner="o/r", visibility="private")
     assert _ImportRepository(id="", name_with_owner="o/r", visibility="private").id == ""
 
 
 
-def test_manifest_rejects_empty_host_allowlists():
+def test_manifest_rejects_empty_host_allowlists() -> None:
     base = _valid_manifest()
     base["privacy"]["reviewer_allowed_hosts"] = []
     with pytest.raises(ValidationError):
         BenchmarkManifest.model_validate(base)
 
 
-def test_privacy_classification_and_policies_are_literals():
+def test_privacy_classification_and_policies_are_literals() -> None:
     m = _valid_manifest()
     for key, bad in [("classification", "public"), ("reviewer_data", "everything"),
                      ("judge_data", "full"), ("archive", "enabled"), ("uploads", "enabled")]:
@@ -155,34 +156,34 @@ def test_privacy_classification_and_policies_are_literals():
             BenchmarkManifest.model_validate(raw)
 
 
-def test_snapshot_policy_is_literal():
+def test_snapshot_policy_is_literal() -> None:
     raw = _valid_case_dict()
     raw["snapshot"]["policy"] = "some_head"
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
 
-def test_reviewer_judge_hosts_stay_lists():
+def test_reviewer_judge_hosts_stay_lists() -> None:
     m = BenchmarkManifest.model_validate(_valid_manifest())
     assert m.privacy.reviewer_allowed_hosts == ["api.anthropic.com"]
     assert m.privacy.judge_allowed_hosts == ["api.anthropic.com"]
 
 
-def test_manifest_rejects_bad_uuid():
+def test_manifest_rejects_bad_uuid() -> None:
     base = _valid_manifest()
     base["benchmark_id"] = "not-a-uuid"
     with pytest.raises(ValidationError):
         BenchmarkManifest.model_validate(base)
 
 
-def test_manifest_rejects_non_utc_timestamp():
+def test_manifest_rejects_non_utc_timestamp() -> None:
     base = _valid_manifest()
     base["created_at"] = "2026-08-21T12:00:00"  # no Z / offset
     with pytest.raises(ValidationError):
         BenchmarkManifest.model_validate(base)
 
 
-def test_ledger_entry_valid_and_fetch_failed_error_shape():
+def test_ledger_entry_valid_and_fetch_failed_error_shape() -> None:
     ok = PullRequestEntry(number=101, import_state="pending", requested_heads=["final"], case_ids=[])
     assert ok.import_file is None and ok.import_sha256 is None and ok.error is None
 
@@ -193,10 +194,11 @@ def test_ledger_entry_valid_and_fetch_failed_error_shape():
         case_ids=[],
         error={"code": "E_AUTH", "message": "no access"},
     )
+    assert failed.error is not None
     assert failed.error["code"] == "E_AUTH"
 
 
-def _evidence(kind, db_id, **kw):
+def _evidence(kind: Any, db_id: Any, **kw: Any) -> Any:
     body = "see above"
     base = {
         "source_id": f"github:{kind}:{db_id}", "kind": kind, "database_id": db_id,
@@ -210,7 +212,7 @@ def _evidence(kind, db_id, **kw):
     return base
 
 
-def _valid_import_document():
+def _valid_import_document() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "repository": {"id": "R_kgDOABC123", "name_with_owner": "o/r", "visibility": "private"},
@@ -236,7 +238,7 @@ def _valid_import_document():
     }
 
 
-def test_import_document_validates_and_forbids_unknown():
+def test_import_document_validates_and_forbids_unknown() -> None:
     doc = _valid_import_document()
     assert ImportDocument.model_validate(doc).pull_request.number == 101
     doc["bogus"] = True
@@ -244,7 +246,7 @@ def test_import_document_validates_and_forbids_unknown():
         ImportDocument.model_validate(doc)
 
 
-def test_import_pull_request_is_strict_submodel():
+def test_import_pull_request_is_strict_submodel() -> None:
     doc = _valid_import_document()
     doc["pull_request"]["bogus"] = True
     with pytest.raises(ValidationError) as ei:
@@ -252,7 +254,7 @@ def test_import_pull_request_is_strict_submodel():
     assert ei.value.errors()[0]["loc"][0] == "pull_request"
 
 
-def test_case_pull_request_is_strict_submodel():
+def test_case_pull_request_is_strict_submodel() -> None:
     # partial (missing a required field) rejected
     raw = _valid_case_dict()
     raw["pull_request"].pop("author")
@@ -266,7 +268,7 @@ def test_case_pull_request_is_strict_submodel():
         CaseDocument.model_validate(raw2)
 
 
-def test_case_source_is_strict_submodel():
+def test_case_source_is_strict_submodel() -> None:
     raw = _valid_case_dict()
     raw["source"]["bogus"] = 1
     with pytest.raises(ValidationError) as ei:
@@ -274,13 +276,13 @@ def test_case_source_is_strict_submodel():
     assert ei.value.errors()[0]["loc"][0] == "source"
 
 
-def test_import_and_case_pull_request_share_shape():
+def test_import_and_case_pull_request_share_shape() -> None:
     doc = ImportDocument.model_validate(_valid_import_document())
     pr = doc.pull_request
     assert pr.number == 101 and pr.author.login == "alice" and pr.head.sha == "h" * 40
 
 
-def test_pull_request_meta_accepts_full_field_set():
+def test_pull_request_meta_accepts_full_field_set() -> None:
     m = PullRequestMeta.model_validate({
         "number": 101, "url": "https://github.com/o/r/pull/101",
         "html_url": "https://github.com/o/r/pull/101",
@@ -298,7 +300,7 @@ def test_pull_request_meta_accepts_full_field_set():
     assert m.head.ref == "feature/cache"
 
 
-def test_pull_request_meta_predate_reads_empty_and_validates():
+def test_pull_request_meta_predate_reads_empty_and_validates() -> None:
     # predate import: lacks the additive body/digest/html_url/merged/closed fields
     m = PullRequestMeta.model_validate({
         "number": 101, "url": "https://github.com/o/r/pull/101",
@@ -313,7 +315,7 @@ def test_pull_request_meta_predate_reads_empty_and_validates():
     assert m.head.ref is None
 
 
-def test_pull_request_meta_fails_closed_on_malformed_required():
+def test_pull_request_meta_fails_closed_on_malformed_required() -> None:
     base = {
         "number": 101, "url": "u", "title": "t", "state": "open",
         "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
@@ -328,7 +330,7 @@ def test_pull_request_meta_fails_closed_on_malformed_required():
         PullRequestMeta.model_validate(dict(base, bogus=1))            # extra forbid
 
 
-def test_pull_request_meta_digests_are_64hex_and_match_body_when_present():
+def test_pull_request_meta_digests_are_64hex_and_match_body_when_present() -> None:
     full = {"number": 1, "url": "u", "title": "t", "state": "open",
             "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
@@ -339,7 +341,7 @@ def test_pull_request_meta_digests_are_64hex_and_match_body_when_present():
         PullRequestMeta.model_validate(dict(full, body_sha256=hashlib.sha256(b"other").hexdigest()))
 
 
-def test_evidence_requires_canonical_source_id_and_body_hash():
+def test_evidence_requires_canonical_source_id_and_body_hash() -> None:
     e = _evidence("inline_comment", 7)
     e["source_id"] = "not-canonical"
     with pytest.raises(ValidationError):
@@ -350,7 +352,7 @@ def test_evidence_requires_canonical_source_id_and_body_hash():
         EvidenceRecord.model_validate(e2)
 
 
-def _valid_case_dict():
+def _valid_case_dict() -> dict[str, Any]:
     return {
         "schema_version": 2,
         "case_id": "pr-000101-0123456789ab",
@@ -414,7 +416,15 @@ def _valid_case_dict():
     }
 
 
-def _finding_id_for(case_id, title, body, severity, path, start_line, end_line):
+def _finding_id_for(
+    case_id: Any,
+    title: Any,
+    body: Any,
+    severity: Any,
+    path: Any,
+    start_line: Any,
+    end_line: Any,
+) -> Any:
     return derive_finding_id(
         {
             "title": title,
@@ -426,21 +436,21 @@ def _finding_id_for(case_id, title, body, severity, path, start_line, end_line):
     )
 
 
-def _valid_case():
+def _valid_case() -> Any:
     return CaseDocument.model_validate(_valid_case_dict())
 
 
-def test_case_id_derivation():
+def test_case_id_derivation() -> None:
     assert case_id_for(101, "0123456789abcdef0123456789abcdef01234567") == "pr-000101-0123456789ab"
 
 
-def test_ready_snapshot_valid():
+def test_ready_snapshot_valid() -> None:
     doc = _valid_case()
     assert doc.snapshot.status == "ready"
     assert doc.curation.state == "ready"
 
 
-def test_ready_snapshot_rejects_missing_bundle_fields():
+def test_ready_snapshot_rejects_missing_bundle_fields() -> None:
     # Re-validate from a raw dict so a missing required field is caught.
     raw = _valid_case_dict()
     raw["snapshot"].pop("bundle_file")
@@ -448,7 +458,7 @@ def test_ready_snapshot_rejects_missing_bundle_fields():
         CaseDocument.model_validate(raw)
 
 
-def test_ready_snapshot_requires_requested_base_sha():
+def test_ready_snapshot_requires_requested_base_sha() -> None:
     # requested_base_sha is required on a ready snapshot (no back-compat).
     raw = _valid_case_dict()
     raw["snapshot"].pop("requested_base_sha")
@@ -459,14 +469,14 @@ def test_ready_snapshot_requires_requested_base_sha():
     assert doc.snapshot.requested_base_sha == "0123456789abcdef0123456789abcdef01234567"
 
 
-def test_ready_requires_snapshot_attestation():
+def test_ready_requires_snapshot_attestation() -> None:
     raw = _valid_case_dict()
     raw["curation"].update({"state": "ready", "snapshot_attested": False})
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
 
-def test_stale_requires_snapshot_not_attested():
+def test_stale_requires_snapshot_not_attested() -> None:
     raw = _valid_case_dict()
     raw["curation"].update({"state": "stale", "snapshot_attested": True,
                             "gold_status": None, "clean_attested": False})
@@ -474,7 +484,7 @@ def test_stale_requires_snapshot_not_attested():
         CaseDocument.model_validate(raw)
 
 
-def test_unreplayable_curation_requires_unreplayable_snapshot():
+def test_unreplayable_curation_requires_unreplayable_snapshot() -> None:
     raw = _valid_case_dict()                       # snapshot.status == ready
     raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
                             "clean_attested": False, "gold_status": None, "findings": []})
@@ -493,7 +503,7 @@ def test_unreplayable_curation_requires_unreplayable_snapshot():
     assert doc.curation.state == "unreplayable"
 
 
-def test_unreplayable_snapshot_requires_error_and_null_bundle():
+def test_unreplayable_snapshot_requires_error_and_null_bundle() -> None:
     raw = _valid_case_dict()
     raw["snapshot"] = {
         "status": "unreplayable",
@@ -513,7 +523,7 @@ def test_unreplayable_snapshot_requires_error_and_null_bundle():
     assert doc.snapshot.status == "unreplayable"
 
 
-def test_unreplayable_with_ready_fields_rejected():
+def test_unreplayable_with_ready_fields_rejected() -> None:
     raw = _valid_case_dict()
     raw["snapshot"]["status"] = "unreplayable"
     raw["snapshot"]["error"] = {"reason": "equal_trees", "detail": "no change"}
@@ -521,7 +531,7 @@ def test_unreplayable_with_ready_fields_rejected():
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_finding_title_and_body_limits():
+def test_finding_title_and_body_limits() -> None:
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["title"] = "x" * 501
     with pytest.raises(ValidationError):
@@ -532,14 +542,14 @@ def test_finding_title_and_body_limits():
         CaseDocument.model_validate(raw2)
 
 
-def test_finding_rejects_nul_in_title():
+def test_finding_rejects_nul_in_title() -> None:
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["title"] = "bad\x00title"
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
 
-def test_title_bound_is_unicode_characters_not_bytes():
+def test_title_bound_is_unicode_characters_not_bytes() -> None:
     # "界" is 3 UTF-8 bytes; 500 chars = 1500 bytes. Passes under a char bound.
     title = "界" * 500
     raw = _valid_case_dict()
@@ -558,14 +568,14 @@ def test_title_bound_is_unicode_characters_not_bytes():
         CaseDocument.model_validate(raw2)
 
 
-def test_finding_severity_enum():
+def test_finding_severity_enum() -> None:
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["severity"] = "critical"
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
 
-def test_finding_location_must_be_relative_and_ordered():
+def test_finding_location_must_be_relative_and_ordered() -> None:
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["location"] = {"path": "/abs/path.py", "start_line": 2, "end_line": 2}
     with pytest.raises(ValidationError):
@@ -576,7 +586,7 @@ def test_finding_location_must_be_relative_and_ordered():
         CaseDocument.model_validate(raw2)
 
 
-def test_finding_id_sha256_and_duplicate_rejection():
+def test_finding_id_sha256_and_duplicate_rejection() -> None:
     f = _valid_case().curation.findings[0]
     expected = derive_finding_id(f, case_id="pr-000101-0123456789ab")
     assert f.finding_id == expected
@@ -587,14 +597,14 @@ def test_finding_id_sha256_and_duplicate_rejection():
         CaseDocument.model_validate(raw)
 
 
-def test_finding_id_is_case_scoped():
+def test_finding_id_is_case_scoped() -> None:
     f = _valid_case().curation.findings[0]
     id1 = derive_finding_id(f, case_id="pr-000101-0123456789ab")
     id2 = derive_finding_id(f, case_id="pr-000102-0123456789ab")
     assert id1 != id2                      # identical content, different case -> different id
 
 
-def test_v2_case_rejects_noncanonical_finding_id():
+def test_v2_case_rejects_noncanonical_finding_id() -> None:
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["finding_id"] = "0" * 64   # wrong digest
     with pytest.raises(ValidationError) as ei:
@@ -602,7 +612,7 @@ def test_v2_case_rejects_noncanonical_finding_id():
     assert "finding_id" in str(ei.value)
 
 
-def test_v1_legacy_case_loads_without_digest_check():
+def test_v1_legacy_case_loads_without_digest_check() -> None:
     raw = _valid_case_dict()
     raw["schema_version"] = 1
     raw["curation"]["findings"][0]["finding_id"] = "e" * 64   # legacy id, not case-scoped
@@ -610,7 +620,7 @@ def test_v1_legacy_case_loads_without_digest_check():
     assert doc.schema_version == 1
 
 
-def test_historical_daydream_marker_cannot_be_gold():
+def test_historical_daydream_marker_cannot_be_gold() -> None:
     from daydream.pr_review import finding_marker
 
     raw = _valid_case_dict()
@@ -629,7 +639,7 @@ def test_historical_daydream_marker_cannot_be_gold():
         CaseDocument.model_validate(raw)
 
 
-def test_legacy_ready_without_task_spec_digest_backfills_and_validates():
+def test_legacy_ready_without_task_spec_digest_backfills_and_validates() -> None:
     """A pre-approval ready case is backfilled with its spec digest by _schema_ready.
 
     A ready curation persisted before the task-spec approval field existed
@@ -649,7 +659,7 @@ def test_legacy_ready_without_task_spec_digest_backfills_and_validates():
     assert CaseDocument.model_validate(prepared).curation.task_spec_sha256 == digest
 
 
-def test_gold_status_and_mode_derived():
+def test_gold_status_and_mode_derived() -> None:
     case = _valid_case()  # ready, 1 finding, clean_attested=False
     assert derive_gold_status(case.curation) == "findings"
     assert derive_gold_mode(case.curation) == "historical"
@@ -664,7 +674,7 @@ def test_gold_status_and_mode_derived():
     (["authored", "historical"], "mixed"),
     (["authored", "edited"], "mixed"),
 ])
-def test_gold_mode_truth_table(kinds, expected):
+def test_gold_mode_truth_table(kinds: Any, expected: Any) -> None:
     findings = [
         Finding(finding_id="e" * 64, title=f"f{i}", body="b",
                 provenance=Provenance(
@@ -687,7 +697,7 @@ def test_gold_mode_truth_table(kinds, expected):
         ("fetched", "fetched"),
     ],
 )
-def test_valid_pr_transitions(frm, to):
+def test_valid_pr_transitions(frm: Any, to: Any) -> None:
     validate_pr_transition(frm, to)  # must not raise
 
 
@@ -699,7 +709,7 @@ def test_valid_pr_transitions(frm, to):
         ("pending", "draft"),
     ],
 )
-def test_invalid_pr_transition_rejected(frm, to):
+def test_invalid_pr_transition_rejected(frm: Any, to: Any) -> None:
     with pytest.raises(TransitionError):
         validate_pr_transition(frm, to)
 
@@ -719,17 +729,17 @@ def test_invalid_pr_transition_rejected(frm, to):
         ("excluded", "unreplayable"),
     ],
 )
-def test_valid_case_transitions(frm, to):
+def test_valid_case_transitions(frm: Any, to: Any) -> None:
     validate_case_transition(frm, to)
 
 
 @pytest.mark.parametrize("frm,to", [("ready", "excluded"), ("stale", "draft"), ("draft", "stale")])
-def test_invalid_case_transition_rejected(frm, to):
+def test_invalid_case_transition_rejected(frm: Any, to: Any) -> None:
     with pytest.raises(TransitionError):
         validate_case_transition(frm, to)
 
 
-def test_derived_workspace_state_empty_vs_collecting():
+def test_derived_workspace_state_empty_vs_collecting() -> None:
     assert derive_workspace_state(pull_requests=[], cases=[]) == "empty"
     assert (
         derive_workspace_state(pull_requests=[{"number": 1, "import_state": "pending"}], cases=[])
@@ -751,13 +761,13 @@ def test_derived_workspace_state_empty_vs_collecting():
     )
 
 
-def test_classify_validation_codes():
+def test_classify_validation_codes() -> None:
     assert classify_validation(ready=True, incomplete=False, corrupt=False) == 0
     assert classify_validation(ready=False, incomplete=True, corrupt=False) == 2
     assert classify_validation(ready=False, incomplete=False, corrupt=True) == 1
 
 
-def test_pull_request_entry_fetched_allows_latest_error_only():
+def test_pull_request_entry_fetched_allows_latest_error_only() -> None:
     # A fetched entry may carry latest_error (a failed refresh attempt on an
     # otherwise-intact import) but never `error` itself.
     base_entry = {

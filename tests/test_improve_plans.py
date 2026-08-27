@@ -3,7 +3,7 @@ import sys
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -3656,7 +3656,7 @@ def _injected_out_of_scope(assembled: dict[str, Any], path: str) -> dict[str, An
         if entry["path"] == path
     ]
     assert len(entries) == 1
-    return entries[0]
+    return cast(dict[str, Any], entries[0])
 
 
 def test_undeclared_stop_path_is_declared_out_of_scope_not_blocked(repo: Path) -> None:
@@ -4225,8 +4225,8 @@ def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
 def test_improve_list_reanchored_real_path_lists_reanchored_plan(
     repo: Path,
     head_sha: str,
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     expected_rel = _make_reanchored_repo(repo, head_sha)
 
@@ -4244,8 +4244,8 @@ def test_improve_list_reanchored_real_path_lists_reanchored_plan(
 
 def test_improve_list_reanchored_real_path_empty_exits_zero(
     repo: Path,
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
         sys, "argv", ["daydream", "improve", "list-reanchored", str(repo)]
@@ -4259,8 +4259,8 @@ def test_improve_list_reanchored_real_path_empty_exits_zero(
 def test_improve_list_reanchored_json_mode(
     repo: Path,
     head_sha: str,
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     expected_rel = _make_reanchored_repo(repo, head_sha)
 
@@ -4301,7 +4301,9 @@ def test_reanchored_report_section_empty(tmp_path: Path) -> None:
     assert "No re-anchored plans" in section
 
 def test_reanchored_failure_releases_worktree_lock(
-    repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch
+    repo: Path,
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Should-have #1: a graceful re-anchor write failure releases the lock."""
     from daydream import git_ops
@@ -4332,7 +4334,9 @@ def test_reanchored_failure_releases_worktree_lock(
     assert git_ops.worktree_lock_mtime(repo, worktree) is None  # released
 
 def test_failed_reanchor_frees_worktree_for_later_finding(
-    repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch
+    repo: Path,
+    head_sha: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fix #2: a re-anchor failure must remove the worktree so a later
     re-anchorable finding in the same run can re-add the path instead of
@@ -4347,9 +4351,7 @@ def test_failed_reanchor_frees_worktree_for_later_finding(
 
     calls = {"n": 0}
 
-    from daydream.improve import plans as plans_mod
-
-    real_render = plans_mod.render_plan
+    from daydream.improve.render import render_plan as real_render
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         calls["n"] += 1

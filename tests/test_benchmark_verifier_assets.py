@@ -5,12 +5,13 @@ byte-identical (SHA-256) to the in-repo source so future edits to the source
 fail loudly. ``templates/metric.py``'s inlined aggregation must equal
 ``verifier_core.aggregate_metrics`` field-for-field on the same rows.
 """
-
 import hashlib
 import json
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -56,7 +57,11 @@ def test_verifier_core_template_is_byte_identical_to_source() -> None:
     assert _sha256(copy) == _sha256(source)
 
 
-def test_metric_entry_aggregates_as_identically_to_verifier_core(sr_metric, tmp_path, monkeypatch) -> None:
+def test_metric_entry_aggregates_as_identically_to_verifier_core(
+    sr_metric: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rows: list[dict[str, object] | None] = [
         {
             "reward": 0.8,
@@ -104,7 +109,7 @@ def test_metric_entry_aggregates_as_identically_to_verifier_core(sr_metric, tmp_
     assert result["mean_task_score"] == (0.8 + 1.0) / 2
 
 
-def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> None:
+def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path: Path) -> None:
     out, result = _run_metric_subprocess(
         tmp_path,
         '{"reward":0.8,"tp":2,"fp":0,"fn":1}\n'
@@ -119,7 +124,7 @@ def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> 
     assert not list(out.parent.glob(f".{out.name}.*.tmp"))
 
 
-def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path) -> None:
+def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path: Path) -> None:
     _, m = _run_metric_subprocess(
         tmp_path,
         '{"reward":0.8,"tp":2,"fp":0,"fn":1}\n'

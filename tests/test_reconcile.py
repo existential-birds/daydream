@@ -1,6 +1,8 @@
 """Tests for prior-finding inventory, partition, and stale resolution in `daydream/reconcile.py`."""
-
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from daydream import git_ops
 from daydream.pr_review import finding_marker
@@ -97,20 +99,23 @@ def test_partition_new_matched_stale_and_respects_human_resolution() -> None:
     # body-only f4 is stale but has no thread; it must NOT appear in plan.stale
 
 
-def test_fetch_prior_findings_parses_markers_across_pages(monkeypatch, tmp_path) -> None:
+def test_fetch_prior_findings_parses_markers_across_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(git_ops, "gh_api", _fake_gh_api_two_pages)  # canned GraphQL + REST pages
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream-bot")
     assert prior["a" * 64].thread_id == "RT_1" and prior["b" * 64].thread_id is None
 
 
-def test_fetch_prior_findings_ignores_marker_from_non_bot_author(monkeypatch, tmp_path) -> None:
+def test_fetch_prior_findings_ignores_marker_from_non_bot_author(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     # A thread whose comment carries the marker but is authored by a human.
     fp = "a" * 64
     pages = [_page([
         _thread("RT_1", comment_node_id="PRRC_1", database_id=101,
                 body=finding_marker(fp), author="evil-attacker"),  # no viewerDidAuthor
     ])]
-    def _gh(repo, endpoint, **kw):
+    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
         if endpoint == "graphql":
             return pages.pop(0) if pages else _page([])
         if endpoint.endswith("/pulls/7/reviews"):
@@ -121,9 +126,12 @@ def test_fetch_prior_findings_ignores_marker_from_non_bot_author(monkeypatch, tm
     assert prior == {}   # forged marker ignored -> not trusted
 
 
-def test_fetch_prior_findings_ignores_review_marker_from_non_bot_user(monkeypatch, tmp_path) -> None:
+def test_fetch_prior_findings_ignores_review_marker_from_non_bot_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     fp = "b" * 64
-    def _gh(repo, endpoint, **kw):
+    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
         if endpoint == "graphql":
             return _page([])
         if endpoint.endswith("/pulls/7/reviews"):
@@ -135,9 +143,9 @@ def test_fetch_prior_findings_ignores_review_marker_from_non_bot_user(monkeypatc
     assert prior == {}
 
 
-def test_fetch_prior_findings_trusts_bot_login_match(monkeypatch, tmp_path) -> None:
+def test_fetch_prior_findings_trusts_bot_login_match(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fp = "c" * 64
-    def _gh(repo, endpoint, **kw):
+    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
         if endpoint == "graphql":
             return _page([_thread("RT_2", comment_node_id="PRRC_2", database_id=102,
                                   body=finding_marker(fp), author="daydream[bot]")])
@@ -149,9 +157,12 @@ def test_fetch_prior_findings_trusts_bot_login_match(monkeypatch, tmp_path) -> N
     assert fp in prior and prior[fp].thread_id == "RT_2"
 
 
-def test_fetch_prior_findings_trusts_viewerDidAuthor_without_bot_login(monkeypatch, tmp_path) -> None:
+def test_fetch_prior_findings_trusts_viewerDidAuthor_without_bot_login(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     fp = "d" * 64
-    def _gh(repo, endpoint, **kw):
+    def _gh(repo: Any, endpoint: str, **kw: Any) -> Any:
         if endpoint == "graphql":
             return _page([_thread("RT_3", comment_node_id="PRRC_3", database_id=103,
                                   body=finding_marker(fp), viewer_did_author=True)])

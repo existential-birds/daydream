@@ -16,14 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import (
-    _bare_remote,
-    _commit,
-    _configure_identity,
-    _git,
-    _init_repo,
-    _make_repo_with_main,
-)
 
 from daydream import git_ops
 from daydream.git_ops import (
@@ -32,6 +24,12 @@ from daydream.git_ops import (
     NotAWorktreeError,
     WrongBranchError,
 )
+from tests.conftest import _make_repo_with_main
+from tests.harness.git_helpers import bare_remote as _bare_remote
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import configure_identity as _configure_identity
+from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
 
 # --- assert_is_worktree / is_inside_worktree --------------------------------
 
@@ -544,7 +542,8 @@ def test_grep_fixed_matches_empty_when_no_matches(tmp_path: Path) -> None:
 
 
 def test_grep_fixed_matches_dedups_and_skips_nul_cr_lf_patterns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Duplicate patterns are written once; empty/NUL/CR/LF patterns never
     reach the patterns file handed to git."""
@@ -573,7 +572,8 @@ def test_grep_fixed_matches_dedups_and_skips_nul_cr_lf_patterns(
 
 
 def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An all-unsuitable pattern set short-circuits with no git invocation."""
     repo = _make_repo_with_main(tmp_path)
@@ -869,8 +869,12 @@ def test_mutating_wrapper_does_not_retry_on_timeout(
     ids=["malformed", "negative", "zero", "valid"],
 )
 def test_run_gh_timeout_environment_validation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path,
-    env_value: str, expected_timeout: int, expected_warning: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    env_value: str,
+    expected_timeout: int,
+    expected_warning: str | None,
 ) -> None:
     """`_run_gh` resolves the env timeout at call time, warning+falling back on bad values."""
     repo = _make_repo_with_main(tmp_path)
@@ -905,8 +909,12 @@ def test_run_gh_timeout_environment_validation(
     ids=["default", "empty-warns", "malformed-warns", "negative-warns", "zero-valid", "one-valid"],
 )
 def test_read_only_gh_retry_environment_validation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path,
-    env_value: str | None, expected_attempts: int, expected_warning: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    env_value: str | None,
+    expected_attempts: int,
+    expected_warning: str | None,
 ) -> None:
     """Read-only ``gh`` retry budget is validated at call time; retry 0 stays a valid 1 attempt."""
     repo = _make_repo_with_main(tmp_path)
@@ -935,7 +943,8 @@ def test_read_only_gh_retry_environment_validation(
 
 
 def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Read-only ``gh`` wrappers ride out transient host-load timeouts.
 
@@ -1007,7 +1016,8 @@ def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tm
 
 
 def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """`gh_issue_create` shells out via `_run_gh` with title inline, body in a
     tempfile (`--body-file`, never on argv), optional `--label` flags and a
@@ -1444,7 +1454,8 @@ def test_clone_creates_working_tree(tmp_path: Path) -> None:
 
 
 def test_clone_of_linked_worktree_materializes_head_and_staged_patch(
-    tmp_path: Path, linked_worktree: tuple[Path, Path],
+    tmp_path: Path,
+    linked_worktree: tuple[Path, Path],
 ) -> None:
     """A linked-worktree clone materializes that worktree's HEAD and a staged
     binary patch round-trips into it (issue #221 / false-assumption STOP)."""
@@ -1546,7 +1557,10 @@ def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
     ids=["blobless_passes_filter_flag", "default_no_filter_flag"],
 )
 def test_clone_filter_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blobless: bool, filter_present: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blobless: bool,
+    filter_present: bool,
 ) -> None:
     """clone(blobless=True) includes --filter=blob:none; the default omits it."""
     captured: dict[str, list[str]] = {}
@@ -1702,7 +1716,9 @@ def test_gh_api_error_message_redacts_authorization_token(tmp_path: Path, monkey
 
 
 def test_gh_api_timeout_redacts_authorization_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Timeout must redact the Bearer token in both the retry warning and the error."""
     repo = _make_repo_with_main(tmp_path)

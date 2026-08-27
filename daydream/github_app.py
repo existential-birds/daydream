@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 import jwt as pyjwt
 
@@ -274,7 +274,7 @@ def exchange_manifest_code(repo_dir: Path, code: str) -> tuple[AppCredentials, s
     return AppCredentials(app_id=app_id, private_key=private_key), slug
 
 
-def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict:
+def get_app_metadata(repo_dir: Path, app_id: int, private_key: str) -> dict[str, Any]:
     """Read the authenticated App's metadata (``permissions``, ``slug``) via ``GET /app``.
 
     Mints an App JWT, then calls ``GET /app`` with an explicit

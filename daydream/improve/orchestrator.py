@@ -909,6 +909,8 @@ def _schema_with_provenance(
 ) -> dict[str, Any]:
     """Return a structured-output schema extended with branch provenance."""
     extended = json.loads(json.dumps(schema))
+    if not isinstance(extended, dict):
+        raise RuntimeError("computed provenance schema is not an object")
     items = extended["properties"][
         "findings" if "findings" in extended["properties"] else "verdicts"
     ]["items"]

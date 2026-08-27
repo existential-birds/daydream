@@ -82,7 +82,8 @@ def test_directory_without_trajectories_returns_nonzero(
 
 
 def test_directory_with_only_unparseable_trajectories_falls_back(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """All trajectories failed to parse → renderer fallback → non-zero exit."""
     run_dir = tmp_path / "broken-run"
@@ -275,7 +276,8 @@ def test_summarize_unknown_model_no_prices_renders_dash_and_footnote(
 
 
 async def test_per_phase_cells_show_whole_invocation_tokens(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A multi-turn phase renders the SUM of its turns, not the last snapshot.
 

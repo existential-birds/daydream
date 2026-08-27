@@ -50,7 +50,9 @@ from daydream.ui import (
     print_error,
     print_thinking,
     print_warning,
-    prompt_user,
+)
+from daydream.ui import (
+    prompt_user as prompt_user,
 )
 
 _logger = logging.getLogger(__name__)

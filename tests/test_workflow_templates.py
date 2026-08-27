@@ -501,7 +501,7 @@ _INSTALL_RE = re.compile(r"uv tool install\s+git\+https://github\.com/existentia
 def _package_version() -> str:
     pyproject = _REPO_ROOT / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    return data["project"]["version"]
+    return cast(str, data["project"]["version"])
 
 
 @pytest.mark.parametrize(
@@ -581,7 +581,7 @@ _APP_TOKEN_PIN_CASES = [
 @pytest.mark.parametrize(
     "wf_path,expected", [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES], ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES]
 )
-def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list) -> None:
+def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list[Any]) -> None:
     wf = load_workflow(wf_path)
     token_action_uses = [
         (job_name, str(step.get("uses", "")))

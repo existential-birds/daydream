@@ -222,7 +222,7 @@ def change_line_count(parsed: dict[str, dict[str, Any]], file: str) -> int:
     info = parsed.get(file)
     if info is None:
         return 0
-    return info["added_total"] + info["removed_total"]
+    return int(info["added_total"]) + int(info["removed_total"])
 
 
 def hunk_index_path(daydream_dir: Path) -> Path:

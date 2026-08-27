@@ -391,7 +391,8 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
     ],
 )
 async def test_successful_session_end_requires_a_quiescent_stream(
-    events: list[dict[str, object]], message: str
+    events: list[dict[str, object]],
+    message: str,
 ) -> None:
     lines, _ = _stream(*events)
 

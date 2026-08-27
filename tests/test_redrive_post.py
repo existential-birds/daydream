@@ -58,7 +58,9 @@ def _write_canonical(target: Path) -> None:
 
 
 def test_redrive_posts_only_canonical_merged_items(
-    multi_stack_target: Path, fake_gh: Any, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    fake_gh: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _serve_pr_view(fake_gh, multi_stack_target)
     _write_canonical(multi_stack_target)
