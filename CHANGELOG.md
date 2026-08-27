@@ -21,6 +21,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **benchmark:** require `requested_base_sha` on ready/imported snapshot records; `migrate.migrate_workspace` backfills the field from `original_base_sha` on both v1 upgrade and v2 repair passes so pre-provenance-split workspaces stay loadable.
 
+
+## [0.28.0] - 2026-08-27
+
+### Added
+
+- **benchmark:** expose typed Harbor objectives and repository-suite aggregation (#908)
+- **review:** add versioned benchmark-tunable review profiles (#885) (#895)
+- **benchmark:** add safe private benchmark cleanup (#880)
+- **benchmark:** supervise Harbor runs behind Oracle validation (#878)
+- **benchmark:** add privacy-safe Daydream Harbor review agent (#873)
+- **benchmark:** package compiled tasks for Harbor 0.21 (#867)
+- **benchmark:** review and compile per-case Harbor Task Specs (#821) (#865)
+- **cli:** expose all evidence and implement edit, split, and merge curation (#864)
+- **benchmark:** compile deterministic private PR task content (Closes #778) (#823)
+- **benchmark:** add isolated external judge verifier (Closes #777) (#804)
+- **benchmark:** define review scoring and clean-case semantics (#800)
+- **cli:** add terminal workflow for benchmark gold curation (Closes #775) (#799)
+- **benchmark:** add auditable golden review curation (#797)
+- **benchmark:** freeze reproducible PR snapshot bundles (#796)
+- **benchmark:** import explicit private GitHub PR evidence (#795)
+- **deep:** persist a hunk/symbol index and validate finding locations (#745)
+- **benchmark:** define private PR benchmark workspace and schemas (#790)
+- **extensions:** add PR-comment-formatting extension seam (#737)
+
+### Changed
+
+- type(daydream)!: establish strict mypy baseline for first-party Python (#931)
+- **quality:** automate whole-project dead-code detection (#952)
+- Make the local and pre-push gates cover every CI check (#951)
+- fix snapshot.bundle_heads and compile_workspace for relative paths (#943)
+- **benchmark:** remove obsolete sharding simulator (#926)
+- refactor(benchmark)!: remove Martian benchmark stack (#925)
+- **benchmark:** document private PR Harbor benchmarks (#784) (#920)
+- **review:** remove Beagle setup and document native review profiles (#889) (#910)
+- refactor!: remove feedback mode and all skill execution infrastructure (#887) (#907)
+- **review:** replace Beagle-driven Deep and Improve reviews with native profiles (#902)
+- remove stale documentation and fix references
+- **benchmark:** add private PR Harbor implementation plan
+- **deep:** shard large stack reviews and avoid redundant uncovered-file sweeps (#736)
+- add .zenodo.json with Existential Birds affiliation (#729)
+- rewrite README in ASD-STE100 Simplified Technical English (#728)
+
+### Fixed
+
+- **verifier:** capture staged+unstaged tracked fixes in candidate diff (#939)
+- **pi:** detect stalled responses before wall budget (#938)
+- **deep:** show structural review as preflight phase (#924)
+- disable repo-configured external diff programs in supervisor Git calls (Closes #701) (#919)
+- **benchmark:** run private Harbor flow on Docker Desktop (#917)
+- **backends:** harden Claude read-only Bash guard against redirection and Git --output (#703) (#916)
+- **benchmark:** decouple Oracle from unverified calibration and honor OpenRouter policy (#915)
+- **agent:** redact extension supervisor failure diagnostics (Closes #702) (#914)
+- **benchmark:** import-prs cannot complete against a real private repository (GraphQL schema, diff-digest abbreviation, shared base_tip refspec) (#883)
+- **benchmark:** make evidence refresh snapshot-pinned and provenance-aware (Closes #813) (#860)
+- **benchmark:** validate snapshot fidelity from frozen bundles (Closes #814) (#859)
+- **benchmark:** complete reviewed-clean final attestation (Closes #815) (#858)
+- **benchmark:** make workspace validation authoritative and path-contained (#852)
+- **benchmark:** reconcile and fully paginate review-thread evidence (#851)
+- **benchmark:** make verifier failures and metrics Harbor-native (Closes #820) (#849)
+- **benchmark:** serialize curation mutations under the workspace lock (#848)
+- **benchmark:** persist normalized historical PR intent (#810)
+- **benchmark:** harden external judge endpoints and failure handling (#842)
+- **benchmark:** make private-repository GitHub preflight operational (#839)
+- **benchmark:** contain and fully recover authoring transactions (Closes #807) (#838)
+- **benchmark:** support locationless review findings end to end (Closes #818) (#837)
+- **tests:** make curation permission assertions portable (#831)
+- **benchmark:** harden authoring schemas and canonical finding identity (Closes #806) (#827)
+- **benchmark:** enforce exact task-bound verifier artifacts (Closes #817) (#825)
+- **benchmark:** escape adversarial delimiters in Harbor judge prompts (Closes #704) (#824)
+- **deep:** re-capture recommended.patch after the test phase so it ships suite-green (#743) (#769)
+- **phases:** make the fix phase a fix/verify/re-dispatch loop (Closes #744) (#768)
+- **archive:** record executable provenance and separate archival completion from run outcome (#766)
+- **eval:** findings metrics exclude every wonder/alternatives item, inflating cost-per-finding ~2x (#741) (#761)
+- **deep:** coverage receipts credit only files with findings, and shard bounds never bind (#758)
+- **deep:** per-stack reviewers lack the anti-confabulation gate and cleared a file they never read (#756)
+- **eval:** coverage read-detection blind to Claude Bash/grep reads (issue #739) (#755)
+- **deep:** exploration's deterministic index reaches 1 of 34 agents; fix agents get none of it (#754)
+- **backends:** Claude completion tokens under-counted 15-20x (#747)
 ## [0.27.0] - 2026-08-16
 
 ### Added
