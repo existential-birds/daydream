@@ -807,7 +807,7 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
 def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
     targets = doc.get("targets", [])
     if not isinstance(targets, list):
-        return []
+        raise WorkspaceCorrupt("op-doc targets is not a list")
     return targets
 
 

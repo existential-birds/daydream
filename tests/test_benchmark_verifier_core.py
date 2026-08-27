@@ -406,6 +406,22 @@ def test_reward_details_shape_and_no_source_leak() -> None:
     assert "f1" not in blob  # candidate content never leaks
 
 
+def test_gold_finding_id_rejects_non_string() -> None:
+    # fail-closed: a raw-dict gold whose finding_id is not a str raises
+    # (reachable via _finding_id on the raw-dict path)
+    gold = [{"finding_id": 123}]
+    with pytest.raises(VerifierError, match="must be a string"):
+        reward_details(gold, [], [], set())  # type: ignore[list-item]
+
+
+def test_candidate_id_rejects_non_string() -> None:
+    # fail-closed: reward_details rejects a raw candidate whose candidate_id is
+    # not a str (reachable via _candidate_id on the raw-dict path)
+    cands = [{"candidate_id": 456}]
+    with pytest.raises(VerifierError, match="must be a string"):
+        reward_details([_gold()], cands, [], set())  # type: ignore[list-item]
+
+
 def test_artifact_rejects_unknown_top_level_key() -> None:
     art = _artifact(_valid_findings(1))
     art["smuggled"] = "x"

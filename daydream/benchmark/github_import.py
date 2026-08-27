@@ -38,7 +38,7 @@ from daydream.benchmark import schema, snapshot, storage
 
 
 def _run_gh_preflight_status(root: Path) -> subprocess.CompletedProcess[str]:
-    """Run ``git auth status --hostname github.com`` (exit code is the contract)."""
+    """Run ``gh auth status --hostname github.com`` (exit code is the contract)."""
     return git_ops._run_gh(root, ["auth", "status", "--hostname", "github.com"])
 
 
