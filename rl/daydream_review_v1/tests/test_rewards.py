@@ -1644,13 +1644,13 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
 
 
 def test_candidate_diff_cmd_carries_hardening_flags() -> None:
-    from daydream_review_v1.rundir import candidate_diff_cmd
+    from daydream_review_v1.rundir import DAYDREAM_EXCLUDE, candidate_diff_cmd
 
     argv = candidate_diff_cmd("/work/repo", "deadbeef")
     assert argv == [
         "git", "-C", "/work/repo", "diff",
         "--no-ext-diff", "--no-textconv",
-        "deadbeef",
+        "deadbeef", "--", DAYDREAM_EXCLUDE,
     ]
 
 

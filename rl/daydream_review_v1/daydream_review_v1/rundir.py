@@ -61,6 +61,16 @@ DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
 #: once cannot silently leave another deriv site unhardened.
 GIT_DIFF_HARDENING_FLAGS: tuple[str, str] = ("--no-ext-diff", "--no-textconv")
 
+#: Git pathspec (passed as a bare argv element, never shell-interpolated)
+#: excluding daydream's own ``.daydream/`` artifacts from the candidate product
+#: diff. daydream may write its own tracked artifacts into the tree during a
+#: rollout, but they are never part of the candidate product; the load-bearing
+#: seal/verify diff must agree with the fix-acceptance oracle
+#: (``_fixes_applied``), which excludes ``.daydream/`` from both of its probes.
+#: Defined here, the single-sourced deriv helper, so the exclusion can only
+#: drift by intentional edit and never by one string falling out of sync.
+DAYDREAM_EXCLUDE = ":(exclude).daydream"
+
 
 def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     """Argv for re-deriving the rollout's candidate diff against the baked head.
@@ -80,11 +90,20 @@ def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     supervisor runs as root, while a repo-local ``diff.external`` / textconv
     runs under the repo's own (untrusted) identity, so neither may execute
     during the load-bearing diff.
+
+    ``DAYDREAM_EXCLUDE`` (``:(exclude).daydream``) restricts the diff to the
+    candidate product only: daydream's own tracked artifacts under
+    ``.daydream/`` are never a fix signal, and this is the same exclusion the
+    fix-acceptance oracle ``_fixes_applied`` applies to both of its probes, so
+    the oracle and the load-bearing diff fully agree about what counts as the
+    candidate diff.
     """
     return [
         "git", "-C", repo, "diff",
         *GIT_DIFF_HARDENING_FLAGS,
         head_sha,
+        "--",
+        DAYDREAM_EXCLUDE,
     ]
 
 

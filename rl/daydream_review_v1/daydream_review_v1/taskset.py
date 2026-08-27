@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import (
+    DAYDREAM_EXCLUDE,
     DEFAULT_ARCHIVE_ROOT,
     candidate_diff_cmd,
     candidate_quiet_diff_cmd,
@@ -85,12 +86,6 @@ def _manifest_row(run_dir: Path) -> dict[str, Any]:
     metrics = manifest.get("metrics") or {}
     return {**manifest, **metrics}
 
-
-#: Git pathspec (passed as a bare argv element, never shell-interpolated)
-#: excluding daydream's own ``.daydream/`` artifacts from the fix signal.
-#: Shared by both dirty-tree and moved-HEAD probes so the exclusion set only
-#: drifts by intentional edit, never by one string falling out of sync.
-DAYDREAM_EXCLUDE = ":(exclude).daydream"
 
 #: Extra pathspecs the oracle probes treat as part of the oracle itself.
 #: ``git ls-files --exclude-standard`` honors ignore rules, so a rollout that
