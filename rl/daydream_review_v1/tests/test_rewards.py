@@ -349,17 +349,17 @@ _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 def _seal_run(run_dir: Path, task: DaydreamReviewTask, repo_path: Path) -> Path:
     """Harness-side seal production over a staged committed-fix repo.
 
-    Stages the fixture repo with the fix COMMITTED (the seal binds the committed
-    diff the verifier re-derives at scoring time, never the working tree),
-    hashes the archive members the harness recorded, and writes ``seal.json``
-    into *run_dir*. Returns the staged repo path.
+    Stages the fixture repo with the fix committed, derives the candidate diff
+    through the shared :func:`~daydream_review_v1.rundir.candidate_diff_cmd`
+    helper, hashes the archive members the harness recorded, and writes
+    ``seal.json`` into *run_dir*. Returns the staged repo path.
     """
-    from daydream_review_v1.rundir import RUN_DIR_FILES
+    from daydream_review_v1.rundir import RUN_DIR_FILES, candidate_diff_cmd
     from daydream_review_v1.verifier import seal_artifacts
 
     repo = _stage_repo(repo_path, task.data.head_sha, edit=_CALC_FIXED, commit=True)
     diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
+        candidate_diff_cmd(str(repo), task.data.head_sha),
         capture_output=True,
         check=True,
     ).stdout
@@ -531,7 +531,9 @@ async def test_green_suite_records_non_regression(
     assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
+@pytest.mark.parametrize("stage_edit", [False, True], ids=["unstaged", "staged"])
 async def test_verifier_identity_branch_executes_and_fails_closed(
+    stage_edit: bool,
     tmp_path: Path,
     runtime,
     corpus_mini_dir: Path,
@@ -558,10 +560,15 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # The fix is COMMITTED: the verifier checkout's candidate diff is
-    # ``git diff <head_sha> HEAD``, i.e. the committed contents, never the
-    # working tree.
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    if stage_edit:
+        subprocess.run(["git", "-C", str(repo), "add", "calc.py"], check=True)
+    # HEAD must stay exactly at the baked snapshot in both rows.
+    assert subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip() == task.data.head_sha
+    expected_status = "M  calc.py\n" if stage_edit else " M calc.py\n"
+    assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+                          capture_output=True, text=True, check=True).stdout == expected_status
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     # Keep the real host probe (setpriv + verifier user) before it is replaced:
