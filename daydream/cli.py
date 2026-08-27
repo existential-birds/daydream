@@ -98,7 +98,7 @@ def _first_verb(argv: list[str]) -> str:
     return "review"
 
 
-def _signal_handler(signum: int, frame: object) -> None:
+def _signal_handler(signum: int, _frame: object) -> None:
     """Handle termination signals: flush partial trajectory then request shutdown.
 
     D-07: SIGINT/SIGTERM flushes a ``<path>.partial`` trajectory with
@@ -650,7 +650,7 @@ class _HelpAllAction(argparse.Action):
             help=help,
         )
 
-    def __call__(self, parser, namespace, values, option_string=None):
+    def __call__(self, parser, _namespace, values, _option_string=None):
         _build_main_parser(full_help=True).print_help()
         parser.exit()
 
