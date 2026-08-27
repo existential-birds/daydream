@@ -207,8 +207,8 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         # agent's write window has closed: the reward verifies the staged copy
         # against this seal before trusting any value, so an attempted tamper
         # with the archived artifacts zeroes the reward instead of recording
-        # honest telemetry. The candidate diff is the rollout's own committed
-        # diff against the baked head (b"" when it cannot be re-derived).
+        # honest telemetry. The candidate diff is the rollout's own current
+        # tracked diff against the baked head (b"" when it cannot be re-derived).
         sealed = await seal_archived_run(
             runtime,
             self.config.archive_root,

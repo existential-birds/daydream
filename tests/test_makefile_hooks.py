@@ -1,21 +1,43 @@
-"""Real-path test for ``make hooks`` pre-push hook installation (issue #388).
+"""Real-path contract tests for the local and pre-push make gates (issues #388, #717).
 
-Runs the real Makefile's ``hooks:`` target from a real git worktree — both a
-primary worktree (``.git`` is a directory) and a linked worktree (``.git`` is a
-gitdir-pointer file) — and asserts the hook is installed as a symlink at Git's
-resolved ``hooks/pre-push`` path pointing at the invoking worktree's
-``scripts/hooks/pre-push``. Installation only; never executes the installed hook.
+Three contracts are exercised here against the real Makefile and hook script
+from a real git worktree:
+
+- ``make hooks`` installs the pre-push hook as a worktree-aware symlink,
+  pointing at the invoking worktree's own source file (both primary and linked
+  worktrees).
+- ``make check`` composes every gate CI enforces: the root lock/lint/types/tests
+  suite, the Docker-backed actionlint pass over all workflow templates, and the
+  standalone RL project's four gates — each run from the right working
+  directory with the exact command line CI would issue.
+- the pre-push hook delegates to ``make check`` after its signature loop.
+
+The composition/delegation tests never execute the real tooling: PATH-shim
+recorders named ``uv``/``docker`` capture ``{command, cwd, args}`` as JSONL so the
+real Makefile dependency graph and the real hook are observable without a Docker
+daemon, a network pull, or a resolver touch.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.harness.git_helpers import git as _git
+from tests.test_workflow_templates import (
+    _ACTIONLINT_REF_RE,
+    REPO_WORKFLOWS_DIR,
+    TEMPLATES_DIR,
+    job_steps,
+    load_workflow,
+)
 
 
 @pytest.mark.parametrize("worktree_name", ["main", "linked"])
@@ -48,3 +70,168 @@ def test_hooks_installs_pre_push_from_worktree(
     assert dest.is_symlink()
     # The symlink resolves to THIS worktree's source file (never a sibling's).
     assert dest.resolve() == (worktree / "scripts" / "hooks" / "pre-push").resolve()
+
+
+def _install_recording_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...]
+) -> Path:
+    """Prepend a fakebin of PATH-shim recorders for ``names`` to PATH.
+
+    Each shim appends ``{"command": <basename>, "cwd": os.getcwd(),
+    "args": sys.argv[1:]}`` to the JSONL log at ``$DAYDREAM_COMMAND_LOG`` and
+    exits 0, so the real Makefile graph can be observed without any real
+    tooling. The shebang is pinned to ``sys.executable`` (never the ambient
+    python). Returns the log path.
+    """
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "command-log.jsonl"
+    monkeypatch.setenv("DAYDREAM_COMMAND_LOG", str(log))
+    shim_body = (
+        "import json, os, sys\n"
+        "log = os.environ['DAYDREAM_COMMAND_LOG']\n"
+        "with open(log, 'a', encoding='utf-8') as f:\n"
+        "    json.dump({'command': os.path.basename(sys.argv[0]),\n"
+        "               'cwd': os.getcwd(), 'args': sys.argv[1:],\n"
+        "               'env': {k: os.environ.get(k) for k in\n"
+        "                       ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',\n"
+        "                        'GIT_COMMITTER_NAME',\n"
+        "                        'GIT_COMMITTER_EMAIL')}}, f)\n"
+        "    f.write('\\n')\n"
+    )
+    for name in names:
+        shim = fakebin / name
+        shim.write_text(f"#!{sys.executable}\n{shim_body}", encoding="utf-8")
+        shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakebin}:{os.environ.get('PATH', '')}")
+    return log
+
+
+def _read_command_records(log: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            records.append(json.loads(line.encode("utf-8")))
+    return records
+
+
+def test_check_runs_root_workflow_and_standalone_rl_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "docker", "git"))
+
+    # Strip make's jobserver/MAKELEVEL chatter so the shim children don't get
+    # tangled in an inherited parallel-make env.
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
+    proc = subprocess.run(
+        ["make", "check"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        env=clean_env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    recs = _read_command_records(log)
+    rl_root = repo_root / "rl" / "daydream_review_v1"
+    cmds = [(r["command"], r["cwd"]) for r in recs]
+    assert cmds == (
+        [("uv", str(repo_root))] * 5
+        + [("docker", str(repo_root))] * 2
+        + [("uv", str(rl_root))] * 5
+    )
+
+    argvs = [r["args"] for r in recs]
+    # Root suite mirrors ci.yml's check job: uv lock --check, the uv sync
+    # --all-extras install, ruff, mypy, pytest (-n auto parallel).
+    assert argvs[0] == ["lock", "--check"]
+    assert argvs[1] == ["sync", "--all-extras"]
+    assert argvs[2] == ["run", "ruff", "check", "daydream", "tests"]
+    assert argvs[3] == ["run", "mypy", "daydream", "tests"]
+    assert argvs[4] == ["run", "pytest", "-n", "auto"]
+
+    # actionlint: the recipe first probes the Docker daemon (docker info), then
+    # runs the container when available, invocation shaped exactly like ci.yml's
+    # with the image digest read LIVE from the CI workflow (never hardcoded).
+    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
+    steps = job_steps(wf, "check")
+    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
+    (image_ref,) = _ACTIONLINT_REF_RE.findall(actionlint["run"])
+
+    assert argvs[5] == ["info"]  # availability guard probes the daemon
+    docker = argvs[6]
+    assert docker[0:2] == ["run", "--rm"]
+    mount_at = docker.index("-v")
+    assert docker[mount_at + 1] == f"{repo_root}:/repo"
+    assert [a for a in docker if a.endswith(":/repo")] == [f"{repo_root}:/repo"]
+    w_at = docker.index("-w")
+    assert docker[w_at + 1] == "/repo"
+    assert image_ref in docker
+    image_idx = docker.index(image_ref)
+    assert "-color" in docker
+    # The selectors expand (shell glob) to the full shipped-workflow set, each
+    # exactly once, positionally grouped by the three GLB globs.
+    file_args = docker[image_idx + 2 :]  # drop the image and -color
+    expected_files = {
+        *(p.relative_to(repo_root).as_posix() for p in REPO_WORKFLOWS_DIR.glob("*.yml")),
+        *(p.relative_to(repo_root).as_posix() for p in TEMPLATES_DIR.rglob("*.yml")),
+    }
+    assert set(file_args) == expected_files
+    assert len(file_args) == len(expected_files)
+
+    # Standalone RL project: carries the same neutral git identity as
+    # ci.yml's 'Configure git identity' step (the suite commits into throwaway
+    # fixtures with no per-repo identity) as rl-check-scoped PROCESS
+    # ENVIRONMENT — never as `git config --global`, which would silently
+    # overwrite the invoking user's own identity — then its lock/sync/lint/
+    # types/tests, run from its dir (mirroring ci.yml's rl-check job's
+    # explicit `uv sync`). No `git config` subprocess may appear anywhere in
+    # the walk.
+    ci_identity_env = {
+        "GIT_AUTHOR_NAME": "daydream CI",
+        "GIT_AUTHOR_EMAIL": "ci@daydream.invalid",
+        "GIT_COMMITTER_NAME": "daydream CI",
+        "GIT_COMMITTER_EMAIL": "ci@daydream.invalid",
+    }
+    assert argvs[7] == ["lock", "--check"]
+    assert argvs[8] == ["sync"]
+    assert argvs[9] == ["run", "ruff", "check", "."]
+    assert argvs[10] == ["run", "mypy", "daydream_review_v1", "tests"]
+    assert argvs[11] == ["run", "pytest"]
+    for rec in recs:
+        if rec["cwd"] == str(rl_root):
+            assert rec["env"] == ci_identity_env, (
+                f"RL command {rec['args']} must carry exactly the neutral "
+                "CI identity in its environment"
+            )
+    assert all(
+        rec["command"] != "git" or rec["args"][:2] != ["config", "--global"]
+        for rec in recs
+    ), "no command may mutate the global git configuration"
+
+
+def test_pre_push_delegates_quality_gate_to_make_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    _install_recording_commands(tmp_path, monkeypatch, ("make", "uv", "docker"))
+    log = tmp_path / "command-log.jsonl"
+
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
+    proc = subprocess.run(
+        [str(repo_root / "scripts" / "hooks" / "pre-push")],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        input="",
+        env=clean_env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "✓ All checks passed" in proc.stdout
+
+    recs = _read_command_records(log)
+    assert len(recs) == 1
+    assert recs[0]["command"] == "make"
+    assert recs[0]["cwd"] == str(repo_root)
+    assert recs[0]["args"] == ["check"]

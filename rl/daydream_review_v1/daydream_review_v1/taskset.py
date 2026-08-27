@@ -32,6 +32,7 @@ from verifiers.v1.errors import boundary
 
 from daydream_review_v1.corpus import harvested_corpus
 from daydream_review_v1.rundir import (
+    DAYDREAM_EXCLUDE,
     DEFAULT_ARCHIVE_ROOT,
     candidate_diff_cmd,
     candidate_quiet_diff_cmd,
@@ -85,12 +86,6 @@ def _manifest_row(run_dir: Path) -> dict[str, Any]:
     metrics = manifest.get("metrics") or {}
     return {**manifest, **metrics}
 
-
-#: Git pathspec (passed as a bare argv element, never shell-interpolated)
-#: excluding daydream's own ``.daydream/`` artifacts from the fix signal.
-#: Shared by both dirty-tree and moved-HEAD probes so the exclusion set only
-#: drifts by intentional edit, never by one string falling out of sync.
-DAYDREAM_EXCLUDE = ":(exclude).daydream"
 
 #: Extra pathspecs the oracle probes treat as part of the oracle itself.
 #: ``git ls-files --exclude-standard`` honors ignore rules, so a rollout that
@@ -358,7 +353,7 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
 
     The manifest ``test_command`` must never run against the agent-mutable tree.
     This clones the current tree, detaches at the baked head, applies the
-    candidate product diff (the rollout's own committed diff against
+    candidate product diff (the rollout's own current tracked diff against
     ``head_sha``), and makes the result root-owned and read-only — the reward
     re-runs the suite there under the distinct non-root verifier identity.
 
