@@ -13,6 +13,6 @@ In `a.py` around line 3, T: B rationale
 
 </details>
 
-<sub>🧙 Posted by [daydream v0.27.0](https://github.com/existential-birds/daydream)</sub>
+<sub>🧙 Posted by [daydream v0.28.0](https://github.com/existential-birds/daydream)</sub>
 
 <!-- daydream-finding: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->

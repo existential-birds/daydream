@@ -410,6 +410,12 @@ def render_job_config(*, oracle: bool) -> bytes:
             "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY}",
             "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL}",
             "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
+            # ANTHROPIC_* carries claude-backend credentials into the container
+            # (agent.build_child_env keep-set, entrypoint claude branch); the
+            # API key and auth token are alternatives, the base URL optional.
+            "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:-}",
+            "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN:-}",
+            "ANTHROPIC_BASE_URL": "${ANTHROPIC_BASE_URL:-}",
         },
     }]
     document = {

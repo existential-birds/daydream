@@ -129,12 +129,6 @@ def require_supported_backend() -> str:
     return backend
 
 
-_ANTHROPIC_PASSTHROUGH_VARS = (
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-)
-
 
 def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "pi") -> None:
     """Map only reviewer config/credential into the selected backend's env.

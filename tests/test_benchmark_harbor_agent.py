@@ -167,6 +167,12 @@ def test_render_job_config_backend_passthrough_is_not_pi_locked(fake_gh: FakeGh)
     data = yaml.safe_load(render_job_config(oracle=False).decode())
     env = data["agents"][0]["env"]
     assert env["DAYDREAM_REVIEW_BACKEND"] == "${DAYDREAM_REVIEW_BACKEND:-pi}"
+    # claude-backend credentials are declarative: ANTHROPIC_* placeholders ride
+    # the agent.build_child_env keep-set into the container entrypoint, mirroring
+    # the pi path's DAYDREAM_REVIEW_API_KEY -> PI_API_KEY chain.
+    assert env["ANTHROPIC_API_KEY"] == "${ANTHROPIC_API_KEY:-}"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "${ANTHROPIC_AUTH_TOKEN:-}"
+    assert env["ANTHROPIC_BASE_URL"] == "${ANTHROPIC_BASE_URL:-}"
 
 
 def test_render_task_toml_host_policy_and_case_env() -> None:
@@ -937,32 +943,174 @@ def test_local_harbor_task_with_fake_backend(
     assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
 
 
-def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path) -> None:
+def test_agent_run_accepts_claude_and_invokes_entrypoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claude-backend trial keeps the ANTHROPIC_* credential in the child env
+    and the real entrypoint completes a review to a candidate artifact.
+
+    The captured child env feeds back into ``entrypoint.main`` exactly like the
+    pi sibling, so the credential passthrough is executed, not faked: with the
+    default ``backend="pi"`` scrub at the call site (the regression), the
+    in-container claude branch raises EntrypointError and rc != 0.
+    """
+    import asyncio
+    import os
+
     import pytest
 
     pytest.importorskip("harbor")
     from harbor.environments.base import ExecResult
     from harbor.models.agent.context import AgentContext
 
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
-
-    agent = DaydreamReviewAgent(
-        logs_dir=tmp_path,
-        extra_env={
-            "DAYDREAM_REVIEW_BACKEND": "claude",
-            "DAYDREAM_REVIEW_API_KEY": "k",
-        },
+    from daydream.benchmark.harbor import entrypoint
+    from daydream.benchmark.harbor import verifier_core as vc
+    from daydream.benchmark.harbor.agent import (
+        _ANTHROPIC_BAN_VARS,
+        _BANNED_PREFIXES,
+        _BANNED_VARS,
+        DaydreamReviewAgent,
     )
+    from tests.harness.stub_backend import install_stub_backend
+
+    repo = _seed_defect_repo(tmp_path)
+    install_stub_backend(monkeypatch, repo)
+    case_id = "case-abc123def456"
+    task_env = {
+        "DAYDREAM_REVIEW_CASE_ID": case_id,
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "DAYDREAM_REVIEW_API_KEY": "k",
+        "ANTHROPIC_API_KEY": "sk-ant-live",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "DAYDREAM_REVIEW_REPO_DIR": str(repo),
+        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(
+            tmp_path / "logs" / "artifacts" / "review.json"
+        ),
+        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(
+            tmp_path / "logs" / "agent" / "trajectory.json"
+        ),
+    }
+    # Host secrets present in the parent env must never reach the child env --
+    # except the ANTHROPIC_* credential the claude backend is allowed to carry,
+    # which is controlled deterministically via extra_env (extra_env wins the
+    # ``{**os.environ, **extra_env}`` merge regardless of host state).
+    for banned in _BANNED_VARS:
+        if banned in _ANTHROPIC_BAN_VARS:
+            continue  # claude keep-set; pinned by extra_env above
+        monkeypatch.setenv(banned, "super-secret")
+
+    agent = DaydreamReviewAgent(logs_dir=tmp_path / "logs", extra_env=task_env)
+
+    executed = Executed()
 
     class Env:
-        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
-            self.captured = (command, cwd, env)
+        async def exec(
+            self,
+            command: Any,
+            cwd: Any=None,
+            env: Any=None,
+            timeout_sec: Any=None,
+            user: Any=None,
+        ) -> ExecResult:
+            if "entrypoint" in command:
+                # Harbor injects the per-case child env into the container;
+                # capture it so we can assert it keeps the claude credential and
+                # then really execute the entrypoint against it below.
+                executed.command = command
+                executed.cwd = cwd
+                executed.child = env or {}
+            else:
+                executed.setup = command
             return ExecResult(return_code=0, stdout="", stderr="")
 
     env = Env()
+    asyncio.run(agent.setup(env))
+    asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
+
+    # setup() executed: the in-container probe asserts this packaged release +
+    # the claude backend SDK (not the pi CLI).
+    assert agent.version() in executed.setup
+    assert "import claude_agent_sdk" in executed.setup
+    assert "shutil.which('pi')" not in executed.setup
+    # run() executed with the allowlisted child env traversing to the entrypoint only.
+    assert "daydream.benchmark.harbor.entrypoint" in executed.command
+    assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
+    assert "--findings-out" not in executed.command  # no live-PR emission path
+    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == "claude"
+    # The regression: with backend="claude" the ANTHROPIC_* credential SURVIVES
+    # the scrub into the child env (build_child_env's default backend="pi" would
+    # strip it and the in-container claude branch would fail below).
+    assert executed.child["ANTHROPIC_API_KEY"] == "sk-ant-live"
+    assert executed.child["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    for banned in _BANNED_VARS:
+        if banned not in _ANTHROPIC_BAN_VARS:
+            assert banned not in executed.child  # non-credential bans stay
+    for prefix in _BANNED_PREFIXES:
+        if prefix == "ANTHROPIC_":
+            continue  # exempted for backend="claude"
+        assert not any(k.startswith(prefix) for k in executed.child)
+
+    # Only the allowlisted child env reaches the executed entrypoint: drop the
+    # host secrets we planted so the in-process runner sees the container env,
+    # then really run the entrypoint against the captured child env.
+    for banned in _BANNED_VARS:
+        os.environ.pop(banned, None)
+    saved = {env_key: os.environ.get(env_key) for env_key in executed.child}
+    try:
+        rc = asyncio.run(entrypoint.main(monkeypatch_env=executed.child))
+    finally:
+        for env_key, value in saved.items():
+            if value is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = value
+    assert rc == 0
+
+    # The child env carried the claude credential through to a genuinely
+    # completed review; the artifact is the exact frozen-snapshot candidate.
+    artifact = json.loads(
+        (tmp_path / "logs" / "artifacts" / "review.json").read_text()
+    )
+    parsed = vc.validate_candidate_artifact(artifact)
+    assert [p.candidate_id for p in parsed] == [
+        f["candidate_id"] for f in artifact["findings"]
+    ]
+    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
+    assert artifact["case_id"] == case_id
+    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
+
+
+def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path) -> None:
+    """setup() gates on the shared ``_SUPPORTED_BACKENDS`` allowlist before any
+    probe: an unsupported backend value must never probe a wrong SDK."""
     import asyncio
 
-    asyncio.run(agent.run("instruction", env, AgentContext()))
-    cmd, cwd, child = env.captured
-    assert "daydream.benchmark.harbor.entrypoint" in cmd
-    assert child["DAYDREAM_REVIEW_BACKEND"] == "claude"
+    import pytest
+
+    pytest.importorskip("harbor")
+    from harbor.environments.base import ExecResult
+
+    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
+
+    agent = DaydreamReviewAgent(
+        logs_dir=tmp_path,
+        extra_env={"DAYDREAM_REVIEW_BACKEND": "codex"},
+    )
+    probed: list[str] = []
+
+    class Env:
+        async def exec(
+            self,
+            command: Any,
+            cwd: Any=None,
+            env: Any=None,
+            timeout_sec: Any=None,
+            user: Any=None,
+        ) -> ExecResult:
+            probed.append(command)
+            return ExecResult(return_code=0, stdout="", stderr="")
+
+    with pytest.raises(AgentError) as refused:
+        asyncio.run(agent.setup(Env()))
+    assert "pi" in str(refused.value) and "claude" in str(refused.value)
+    assert probed == []  # rejected before any probe exec runs

@@ -84,18 +84,26 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
     async def setup(self, environment: Any) -> None:
         """Network-free setup: confirm the container installs this exact Daydream
         release and the backend SDK for the selected reviewer backend (the Pi
-        CLI for ``pi``, ``claude_agent_sdk`` for ``claude``).
+        CLI for ``pi``, ``claude_agent_sdk`` for ``claude``). A backend outside
+        the shared ``_SUPPORTED_BACKENDS`` allowlist is refused here, before
+        any probe (an unsupported value must never probe a wrong SDK).
 
         A single ``environment.exec`` runs an in-container Python probe; a
         non-zero exec return (missing exact version or missing backend SDK)
         raises :class:`AgentError` -- never a silent pass.
         """
         backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
-        backend_probe = (
-            "assert shutil.which('pi') is not None;"
-            if backend == "pi"
-            else "import claude_agent_sdk;"
-        )
+        from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
+
+        if backend not in _SUPPORTED_BACKENDS:
+            supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
+            raise AgentError(
+                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
+            )
+        backend_probe = {
+            "pi": "assert shutil.which('pi') is not None;",
+            "claude": "import claude_agent_sdk;",
+        }[backend]
         probe = (
             "import importlib.metadata, shutil;"
             f"assert importlib.metadata.version('daydream') == {self.version()!r};"
@@ -134,7 +142,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
                 f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
             )
         parent = {**os.environ, **self.extra_env}
-        child_env = build_child_env(parent)
+        child_env = build_child_env(parent, backend=backend)
         result = await environment.exec(
             "python -m daydream.benchmark.harbor.entrypoint",
             cwd=child_env.get("DAYDREAM_REVIEW_REPO_DIR", "/workspace/repo"),
