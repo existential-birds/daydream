@@ -156,6 +156,19 @@ def test_artifact_write_failure_raises(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_render_job_config_backend_passthrough_is_not_pi_locked(fake_gh: FakeGh) -> None:
+    """Task 6 should-have: the rendered job config passes DAYDREAM_REVIEW_BACKEND
+    through with a pi default; the value is a pi|claude selection validated
+    downstream by the agent/entrypoint allowlist, not pi-locked here."""
+    import yaml
+
+    from daydream.benchmark.harbor.package import render_job_config
+
+    data = yaml.safe_load(render_job_config(oracle=False).decode())
+    env = data["agents"][0]["env"]
+    assert env["DAYDREAM_REVIEW_BACKEND"] == "${DAYDREAM_REVIEW_BACKEND:-pi}"
+
+
 def test_render_task_toml_host_policy_and_case_env() -> None:
     from daydream.benchmark.harbor import package as pkg
 
