@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from daydream.archive import _copy_bundle, _read_fix_quality_gate, archive_run, get_archive_dir
-from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_git_context
+from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
     append_label_observation,
     bulk_latest_label_observations,
@@ -86,17 +86,28 @@ class _MockConfig:
     findings_out: str | None = None
 
 
-@pytest.mark.parametrize(
-    ("remote_url", "expected"),
-    [
-        pytest.param("git@github.com:org/repo.git", "org/repo", id="ssh"),
-        pytest.param("https://github.com/org/repo.git", "org/repo", id="https"),
-        pytest.param("https://github.com/org/repo", "org/repo", id="https_no_dot_git"),
-        pytest.param("not-a-url", None, id="invalid"),
-    ],
-)
-def test_parse_repo_slug(remote_url: str, expected: str | None) -> None:
-    assert _parse_repo_slug(remote_url) == expected
+def _run_git_init_with_credential_origin(repo: Path, origin_url: str) -> None:
+    """git init + one commit + credential-bearing origin remote."""
+    for argv in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        ["git", "remote", "add", "origin", origin_url],
+    ):
+        subprocess.run(argv, cwd=repo, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+
+
+def test_capture_git_context_stores_credential_free_remote(tmp_path: Path) -> None:
+    # Real git repo whose origin carries credentials (M3, real-path test).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git_init_with_credential_origin(repo, "https://user:ghp_canaryfake123@github.com/o/r.git")
+    ctx = capture_git_context(repo)
+    assert ctx.repo_slug == "o/r"
+    assert ctx.remote_url == "https://github.com/o/r"
+    assert "ghp_canaryfake123" not in (ctx.remote_url or "")
+    assert "@" not in (ctx.remote_url or "")
 
 
 def test_capture_git_context_real_repo(tmp_path: Path) -> None:
