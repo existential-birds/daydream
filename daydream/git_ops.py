@@ -48,6 +48,9 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Generator, Literal, overload
+from urllib.parse import urlparse
+
+from daydream.trajectory import redact_text
 
 _logger = logging.getLogger(__name__)
 
@@ -1692,7 +1695,9 @@ def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int 
     """
     proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout, retries=0)
     if proc.returncode != 0:
-        raise GitError(f"git fetch {remote} {refspec} failed in {repo}: {proc.stderr.strip()}")
+        raise GitError(
+            f"git fetch {_safe_url_desc(remote)} {refspec} failed in {repo}: {redact_text(proc.stderr.strip())}"
+        )
 
 
 def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
@@ -1709,6 +1714,22 @@ def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
     proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
+
+
+def _safe_url_desc(url: str) -> str:
+    """Reduce a remote URL to a credential-free description (host/path).
+
+    Issue #981: error messages must never echo a URL that may carry userinfo
+    credentials. HTTP(S) URLs are reduced to ``host/path``; anything else
+    (local paths, scp-form remotes) passes through :func:`redact_text`.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return redact_text(url)
+    if parsed.scheme and parsed.hostname:
+        return f"{parsed.hostname}{parsed.path}"
+    return redact_text(url)
 
 
 def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int = 300) -> None:
@@ -1738,9 +1759,13 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int
             timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(f"git clone {remote_url} failed: {type(exc).__name__}: {exc}") from exc
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {type(exc).__name__}: {redact_text(str(exc))}"
+        ) from exc
     if proc.returncode != 0:
-        raise GitError(f"git clone {remote_url} failed: {proc.stderr.strip()}")
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {redact_text(proc.stderr.strip())}"
+        )
 
 
 def checkout_paths(repo: Path, paths: list[Path]) -> None:

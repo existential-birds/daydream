@@ -118,6 +118,7 @@ from daydream.training.labeler_signals import (
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label, derive_per_finding_labels
+from daydream.trajectory import redact_text as _redact_text
 from daydream.ui import create_console, print_warning
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
@@ -811,9 +812,10 @@ def _resolve_repo_for_row(
             cached_repo.parent.mkdir(parents=True, exist_ok=True)
             git_ops.clone(remote_url, cached_repo, blobless=True)
     except (GitError, OSError) as exc:
+        redacted = _redact_text(str(exc))
         print_warning(
             console or create_console(),
-            f"harvest: repo resolution failed for {repo_slug}: {type(exc).__name__}: {exc}",
+            f"harvest: repo resolution failed for {repo_slug}: {type(exc).__name__}: {redacted}",
         )
         if not (cached_repo / ".git").exists():
             return None

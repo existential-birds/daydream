@@ -2065,3 +2065,34 @@ def test_worktree_add_with_lock_reason_arms_lock_atomically(
     locked = git_dir / "worktrees" / wt.name / "locked"
     assert locked.is_file()
     assert "run-A" in locked.read_text(encoding="utf-8")
+
+
+def test_clone_error_message_never_contains_remote_url(tmp_path: Path) -> None:
+    """GitError from clone() must not echo a credential-bearing remote URL (issue #981)."""
+    with pytest.raises(GitError) as excinfo:
+        git_ops.clone("https://user:ghp_canaryfake123@unreachable.invalid/o/r.git", tmp_path / "t", timeout=5)
+    message = str(excinfo.value)
+    assert "ghp_canaryfake123" not in message
+    assert "user:" not in message
+    assert "unreachable.invalid" in message  # host is safe to keep
+
+
+def test_clone_error_message_redacts_stderr_url_echo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even when git's stderr echoes the URL, the raised message is redacted."""
+    real_run = git_ops.subprocess.run
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            128,
+            stderr=(
+                "fatal: unable to access 'https://user:ghp_canaryfake123@unreachable.invalid/o/r.git/': "
+                "Could not resolve host"
+            ),
+        )
+
+    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    with pytest.raises(GitError) as excinfo:
+        git_ops.clone("https://user:ghp_canaryfake123@unreachable.invalid/o/r.git", tmp_path / "t", timeout=5)
+    assert "ghp_canaryfake123" not in str(excinfo.value)
+    assert real_run is not None

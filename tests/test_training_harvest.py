@@ -1450,3 +1450,23 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(
     assert cov["pr_attached"] == 10  # every row stays PR-attached and annotated
     assert cov["decisive"] == 8  # only the 8 merged rows are decisive; "unknown" is not
     assert cov["coverage"] == 0.8
+
+
+def _raise_git_error_with_url(*args: object, **kwargs: object) -> None:
+    raise GitError("git clone https://user:ghp_canaryfake123@github.com/o/r failed: boom")
+
+
+def test_repo_resolution_warning_is_value_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The harvest repo-resolution warning must never contain the remote URL (issue #981)."""
+    row = {
+        "source_path": None,
+        "remote_url": "https://user:ghp_canaryfake123@github.com/o/r",
+        "repo_slug": "o/r",
+    }
+    monkeypatch.setattr("daydream.training.harvest.git_ops.clone", _raise_git_error_with_url)
+    _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
+    out = capsys.readouterr().out
+    assert "ghp_canaryfake123" not in out
+    assert "o/r" in out  # slug IS present
