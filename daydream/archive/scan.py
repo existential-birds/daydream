@@ -86,6 +86,10 @@ def _scan_text(text: str) -> Iterator[tuple[str, str, str]]:
     """Yield (category, matched_value, digest) for every rule hit in *text*."""
     for pattern, category in _RULES:
         for match in pattern.finditer(text):
+            # Redaction markers are already-safe output, not secrets; scanning
+            # sanitized text must not flag its own markers.
+            if "[REDACTED_" in match.group(0):
+                continue
             yield category, match.group(0), _digest(match.group(0))
 
 
