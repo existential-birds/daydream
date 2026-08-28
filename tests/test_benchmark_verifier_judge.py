@@ -1,6 +1,7 @@
 """Fake-HTTP tests for the isolated Harbor verifier entry (``templates/tests/score_review.py``).
 
-Exercises the self-contained judge clients (Anthropic + OpenAI-compatible),
+Exercises the self-contained judge clients (Anthropic, OpenAI-compatible,
+Claude Code CLI),
 the bounded prompt renderer, strict verdict parsing, shared retry/redirect
 policy, concurrency/pair-cap runner, fail-whole-task error path, provider
 selection, oracle parity, and end-to-end ``run_verifier`` — all with an
@@ -805,6 +806,23 @@ def test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1(
 
 
 
+def _fake_cli_runner(stdout_arg: str, rc: int = 0) -> Any:
+    """Fake subprocess seam for ``ClaudeCliJudgeClient``: fixed returncode + stdout."""
+
+    class FakeProc:
+        returncode = rc
+        stdout = stdout_arg  # class bodies cannot see the enclosing function scope
+
+    calls: list[list[Any]] = []
+
+    async def runner(argv: Any, env: Any) -> Any:
+        calls.append([argv, env])
+        return FakeProc()
+
+    runner.calls = calls  # type: ignore[attr-defined]
+    return runner
+
+
 @pytest.mark.asyncio
 async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: Any) -> None:
     sr = sr_module
@@ -842,6 +860,21 @@ async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: A
         with pytest.raises(sr.VerifierError):
             await provider.complete_json(user="u", system="s", max_tokens=64)
         assert len(calls) == 3
+
+    # Third producer, identical verdict: the claude-cli client through the
+    # injectable subprocess seam parses the same verdict JSON.
+    cli = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(
+        json.dumps({"is_error": False, "subtype": "success", "type": "result",
+                    "result": '{"match": true, "confidence": 0.9, "reasoning": "same"}'})))
+    c = await cli.complete_json(user="u", system="s", max_tokens=64)
+    assert c == {"match": True, "confidence": 0.9, "reasoning": "same"}
+
+    # Identical bounded retry count before the terminal VerifierError: a runner
+    # that always exits nonzero is retried _MAX_RETRIES times like a 503.
+    failing = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner("", rc=1))
+    with pytest.raises(sr.VerifierError):
+        await failing.complete_json(user="u", system="s", max_tokens=64)
+    assert len(failing.runner.calls) == 3  # type: ignore[attr-defined]
 
 
 def test_escape_neutralizes_all_four_delimiters_in_both_roles(sr_module: Any) -> None:
@@ -1368,6 +1401,28 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
         with pytest.raises(sr.VerifierError) as e:
             await client.complete_json(user="u")
         assert "allowlist" in str(e.value)
+
+
+def test_claude_cli_missing_token_writes_typed_error_artifact(
+    sr_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sr = sr_module
+    gold = tmp_path / "golden-review.json"
+    gold.write_text(json.dumps([{"case_id": "c1"}]))
+    monkeypatch.setenv("DAYDREAM_JUDGE_ARTIFACT_PATH", str(tmp_path / "review.json"))
+    monkeypatch.setenv("DAYDREAM_JUDGE_OUT_PATH", str(tmp_path / "out"))
+    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "claude-cli")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    rc = sr.main()
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["verifier_error"] == 1 and payload["reward"] == 0.0
+    # typed diagnostic, NOT "no judge client configured"
+    details = json.loads((tmp_path / "out" / "reward-details.json").read_text())
+    assert any("CLAUDE_CODE_OAUTH_TOKEN" in e for e in details["errors"])
 
 
 def test_emit_reward_emits_full_reward_dict_and_exit_code(sr_module: Any, capsys: pytest.CaptureFixture[str]) -> None:

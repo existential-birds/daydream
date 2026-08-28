@@ -1341,10 +1341,12 @@ def main() -> int:
     try:
         client = _build_client(env)
     except VerifierError as exc:
-        if env.get(_ENV_MODEL) and env.get(_ENV_API_KEY):
+        provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+        if env.get(_ENV_MODEL) and (env.get(_ENV_API_KEY) or provider == "claude-cli"):
             # Fail-closed provider/host rejection: a typed bounded diagnostic
             # artifact naming only the rejected form -- never a barren exit.
-            provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+            # claude-cli has no API key; its typed diagnostic is the OAuth
+            # token check, so the provider branch suffices for it.
             model = env.get(_ENV_MODEL) or ""
             reward = _write_error_artifact(
                 out_dir, provider, model, {"requests": 0}, [_bounded_error(str(exc))], 0
