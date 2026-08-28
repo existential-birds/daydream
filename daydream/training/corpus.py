@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive import get_archive_dir
+from daydream.archive.git_safe import classify_remote_url
 from daydream.archive.index import bulk_latest_label_observations, count_runs, normalize_as_of, query_runs
 from daydream.json_utils import atomic_write_json
 from daydream.training.exclusion import is_copyleft, load_copyleft_list, load_exclusion_list
@@ -211,6 +212,38 @@ def _annotation_reward(
     return reward, composite
 
 
+def _resolve_projection_path(manifest_row: dict[str, Any]) -> Path | None:
+    """Derivative-resolution gate for projection inputs (issue #981 M17).
+
+    When the row's ``archive_path`` sits under a ``runs/`` directory and a
+    ``sanitized/<session_id>`` derivative exists, the derivative path is
+    returned so projection reads only sanitized inputs. When no derivative
+    exists and the bundle's stored remote URL is credential-bearing, ``None``
+    is returned (the caller skips + warns — never reads raw credential
+    fields). Paths outside a ``runs/`` layout pass through unchanged.
+    """
+    archive_path = Path(manifest_row.get("archive_path", ""))
+    parts = archive_path.parts
+    if "runs" not in parts:
+        return archive_path
+    runs_idx = len(parts) - 1 - parts[::-1].index("runs")
+    archive_dir = Path(*parts[:runs_idx]) if runs_idx else archive_path.parent
+    session_id = str(manifest_row.get("session_id") or archive_path.name)
+    derivative = archive_dir / "sanitized" / session_id
+    if derivative.is_dir():
+        return derivative
+    try:
+        doc = json.loads((archive_path / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        doc = {}
+    raw_url = ""
+    if isinstance(doc, dict) and isinstance(doc.get("git"), dict):
+        raw_url = str(doc["git"].get("remote_url") or "")
+    if classify_remote_url(raw_url):
+        return None
+    return archive_path
+
+
 def _build_record(
     manifest_row: dict[str, Any],
     trajectory: dict[str, Any],
@@ -221,7 +254,7 @@ def _build_record(
     label: str | None = None,
     reward: dict[str, Any] | None = None,
     composite_reward: float | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Assemble a training record matching ``schema/v1.json``.
 
     The returned dict carries refs (``fix_diff_ref``, ``recommended_diff_ref``,
@@ -302,9 +335,14 @@ def _build_record(
             annotation, or ``None``.
 
     Returns:
-        A dict that validates against ``daydream/training/schema/v1.json``.
+        A dict that validates against ``daydream/training/schema/v1.json``, or
+        ``None`` when the derivative gate refuses to project the row
+        (credential-bearing bundle with no released derivative — M17; the
+        caller skips + warns, never raises).
     """
-    archive_path = Path(manifest_row.get("archive_path", ""))
+    archive_path = _resolve_projection_path(manifest_row)
+    if archive_path is None:
+        return None
     # fix_diff_ref points at the REVIEWED-INPUT diff (diff.patch = the PR-under-
     # review diff daydream was asked to review), NOT daydream's own fix. The
     # name is retained for schema-v1 compatibility; treat it as the input.
@@ -978,7 +1016,14 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
             continue
         after_filters += 1
 
-        archive_path = Path(row["archive_path"])
+        archive_path = _resolve_projection_path(row)
+        if archive_path is None:
+            print_warning(
+                console,
+                f"Skipping {session_id}: credential-bearing bundle has no released "
+                "sanitized derivative; refusing to project raw inputs",
+            )
+            continue
         traj_path = archive_path / "trajectory.json"
         manifest_path = archive_path / "manifest.json"
         if not traj_path.exists() or not manifest_path.exists():
@@ -999,13 +1044,13 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
             )
             continue
         reward, _ = _annotation_reward(annotation, session_id)
-        records.append(
-            _build_record(
-                row, trajectory, row.get("stack"), manifest,
-                annotation=annotation, label=label,
-                reward=reward, composite_reward=composite_reward,
-            )
+        record = _build_record(
+            row, trajectory, row.get("stack"), manifest,
+            annotation=annotation, label=label,
+            reward=reward, composite_reward=composite_reward,
         )
+        if record is not None:
+            records.append(record)
         session_versions[session_id] = (
             annotation.get("labeler_version") if annotation is not None else None,
             annotation.get("reward_version") if annotation is not None else None,

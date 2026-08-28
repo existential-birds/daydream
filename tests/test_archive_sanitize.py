@@ -2,7 +2,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from daydream.archive import sanitize
+from daydream.archive import scan as scan_module
 
 
 def _seed_bronze_bundle(archive_dir: Path, session_id: str, remote_url: str) -> Path:
@@ -52,3 +55,43 @@ def test_resume_skips_completed_items(tmp_path: Path) -> None:
     after = (archive_dir / "sanitized" / "a" / "manifest.json").stat().st_mtime_ns
     assert before == after  # M19: completed items not re-processed
     assert (archive_dir / "sanitized" / "b" / "manifest.json").exists()
+
+
+def test_derivative_stays_quarantined_until_scan_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_dir = tmp_path / "archive"
+    src = _seed_bronze_bundle(archive_dir, "s1", "https://github.com/o/r")
+    # force the release scan to fail closed during sanitization
+    monkeypatch.setattr(
+        scan_module, "scan_run_dir", lambda _: scan_module.ScanResult(clean=False)
+    )
+    result = sanitize.sanitize_bundle(src, archive_dir)
+    assert result.released is False  # M16
+    assert (archive_dir / "quarantine" / "s1").is_dir()
+    assert not (archive_dir / "sanitized" / "s1" / "manifest.json").exists()
+
+
+def test_corpus_projection_reads_only_sanitized_paths(tmp_path: Path) -> None:
+    from daydream.training.corpus import _build_record
+
+    # M17: a projection row pointed at a bronze run_dir containing a dirty URL
+    # resolves its inputs from the sanitized derivative when one exists.
+    archive_dir = tmp_path / "archive"
+    _seed_bronze_bundle(archive_dir, "s1", "https://user:ghp_canaryfake123@github.com/o/r")
+    sanitize.sanitize_bundle(archive_dir / "runs" / "s1", archive_dir)
+    row = {"archive_path": str(archive_dir / "runs" / "s1"), "session_id": "s1"}
+    projected = _build_record(row, {}, None)  # existing corpus entrypoint
+    assert projected is not None
+    assert "ghp_canaryfake123" not in json.dumps(projected)
+
+
+def test_corpus_projection_refuses_affected_bundle_without_derivative(tmp_path: Path) -> None:
+    from daydream.training.corpus import _build_record
+
+    # M17 fail-closed: affected bundle with no released derivative is skipped,
+    # never read raw.
+    archive_dir = tmp_path / "archive"
+    _seed_bronze_bundle(archive_dir, "s1", "https://user:ghp_canaryfake123@github.com/o/r")
+    row = {"archive_path": str(archive_dir / "runs" / "s1"), "session_id": "s1"}
+    assert _build_record(row, {}, None) is None

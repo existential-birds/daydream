@@ -15,8 +15,8 @@ Transformation pipeline per file:
 
 Release gate: every derivative is re-scanned with
 :func:`daydream.archive.scan.scan_run_dir`; a derivative that does not come
-back clean is quarantined (removed from ``sanitized/``, recorded with
-``status="quarantined"``) — never released (fail-closed).
+back clean is moved to ``<archive_dir>/quarantine/<session_id>/`` and recorded
+with ``status="quarantined"`` — never released (fail-closed).
 
 ``derivative_digest`` is a SHA-256 over a canonical manifest of
 ``(relative path, per-file SHA-256)`` pairs, stable across runs on identical
@@ -36,11 +36,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from daydream.archive import scan
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
-from daydream.archive.scan import scan_run_dir
 from daydream.trajectory import redact_text, redact_value
 
-__all__ = ["SanitizeResult", "sanitize_archive", "sanitize_bundle"]
+__all__ = ["ImportResult", "SanitizeResult", "import_bundle", "sanitize_archive", "sanitize_bundle"]
 
 _PROGRESS_FILENAME = "progress.jsonl"
 _AUDIT_FILENAME = "audit.jsonl"
@@ -58,6 +58,24 @@ class SanitizeResult:
     source: Path
     derivative_digest: str
     status: str  # "sanitized" | "quarantined"
+
+    @property
+    def released(self) -> bool:
+        """True only when the derivative passed the release scan (M16)."""
+        return self.status == "sanitized"
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    """Outcome of the fail-closed Hub-bundle ingest gate (M18)."""
+
+    source: Path
+    imported: bool
+    quarantined: bool
+
+
+class _DerivativeUncleanError(Exception):
+    """Internal sentinel: the release scan found the derivative unclean."""
 
 
 def _derivative_digest(derivative_dir: Path) -> str:
@@ -156,12 +174,42 @@ def _mark_done(sanitized_dir: Path, session_id: str, derivative_digest: str) -> 
     )
 
 
+def _quarantine_derivative(
+    derivative_dir: Path, sanitized_dir: Path, archive_dir: Path, run_dir: Path, session_id: str
+) -> None:
+    """Move a failed derivative to quarantine and record it (M16, fail-closed).
+
+    Nothing is deleted: the derivative (a copy, never the bronze original) is
+    moved under ``<archive_dir>/quarantine/<session_id>/`` for human review.
+    """
+    quarantine_dir = archive_dir / "quarantine" / session_id
+    quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
+    if derivative_dir.exists():
+        if quarantine_dir.exists():
+            shutil.rmtree(quarantine_dir)  # our own prior derivative copy, not a source
+        shutil.move(str(derivative_dir), str(quarantine_dir))
+    _append_jsonl(
+        sanitized_dir / _AUDIT_FILENAME,
+        {
+            "source": str(run_dir),
+            "session_id": session_id,
+            "derivative_digest": "",
+            "status": "quarantined",
+            "completed_at": _now_iso_utc(),
+        },
+    )
+
+
 def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
     """Sanitize one legacy bundle into ``archive_dir/sanitized/<session_id>/``.
 
-    The source bundle is never modified. On any failure the derivative is
-    removed, a ``status="quarantined"`` audit record is appended, and the
-    exception is re-raised so a bulk caller can continue with the next bundle.
+    The source bundle is never modified. The derivative is released only when
+    the post-transform release scan comes back clean; otherwise it is moved to
+    ``archive_dir/quarantine/<session_id>/``, a ``status="quarantined"`` audit
+    record is appended, and a quarantined (``released=False``) result is
+    returned — nothing under ``sanitized/`` (M16, fail-closed). Unexpected
+    failures clean the partial derivative, record the quarantine, and re-raise
+    so a bulk caller can continue with the next bundle.
     """
     sanitized_dir = archive_dir / "sanitized"
     manifest: dict[str, Any] = {}
@@ -189,15 +237,23 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
         _sanitize_derivative(derivative_dir)
 
         # Fail-closed release gate: only a clean scan releases the derivative.
-        scan_result = scan_run_dir(derivative_dir)
+        scan_result = scan.scan_run_dir(derivative_dir)
         if not scan_result.clean:
-            raise ValueError(f"derivative scan found {scan_result.summary()}")
+            raise _DerivativeUncleanError(f"derivative scan found {scan_result.summary()}")
 
         digest = _derivative_digest(derivative_dir)
+    except _DerivativeUncleanError:
+        _quarantine_derivative(derivative_dir, sanitized_dir, archive_dir, run_dir, session_id)
+        return SanitizeResult(
+            session_id=session_id,
+            source=run_dir,
+            derivative_digest="",
+            status="quarantined",
+        )
     except Exception:
         if derivative_dir.exists():
             shutil.rmtree(derivative_dir, ignore_errors=True)
-        _append_jsonl(
+        _append_jsonl(  # unexpected failure: record quarantine, re-raise for bulk loop
             sanitized_dir / _AUDIT_FILENAME,
             {
                 "source": str(run_dir),
@@ -253,6 +309,27 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
             if current_digest == recorded_digest:
                 continue  # M19: completed items are not re-processed
         result = sanitize_bundle(run_dir, archive_dir)
-        _mark_done(sanitized_dir, result.session_id, result.derivative_digest)
+        if result.released:
+            _mark_done(sanitized_dir, result.session_id, result.derivative_digest)
         results.append(result)
     return results
+
+
+def import_bundle(run_dir: Path, archive_dir: Path) -> ImportResult:
+    """Fail-closed ingest gate for a downloaded Hub bundle (M18).
+
+    The incoming bundle is scanned before ingestion. A clean bundle is
+    imported in place; an affected bundle is moved to
+    ``<archive_dir>/quarantine/<session_id>/`` and skipped — never imported
+    raw, even when a released derivative exists. The move is never a deletion
+    of a source bundle; when the quarantine slot is already occupied the move
+    is skipped and the bundle is still reported quarantined.
+    """
+    scan_result = scan.scan_run_dir(run_dir)
+    if scan_result.clean:
+        return ImportResult(source=run_dir, imported=True, quarantined=False)
+    quarantine_dir = archive_dir / "quarantine" / run_dir.name
+    quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
+    if not quarantine_dir.exists():
+        shutil.move(str(run_dir), str(quarantine_dir))
+    return ImportResult(source=run_dir, imported=False, quarantined=True)
