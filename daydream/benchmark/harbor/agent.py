@@ -80,16 +80,23 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
 
     async def setup(self, environment: Any) -> None:
         """Network-free setup: confirm the container installs this exact Daydream
-        release and the Pi CLI.
+        release and the backend SDK for the selected reviewer backend (the Pi
+        CLI for ``pi``, ``claude_agent_sdk`` for ``claude``).
 
         A single ``environment.exec`` runs an in-container Python probe; a
         non-zero exec return (missing exact version or missing backend SDK)
         raises :class:`AgentError` -- never a silent pass.
         """
+        backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
+        backend_probe = (
+            "assert shutil.which('pi') is not None;"
+            if backend == "pi"
+            else "import claude_agent_sdk;"
+        )
         probe = (
             "import importlib.metadata, shutil;"
             f"assert importlib.metadata.version('daydream') == {self.version()!r};"
-            "assert shutil.which('pi') is not None;"
+            + backend_probe
         )
         command = 'python -X utf8 -c "' + probe + '"'
         result = await environment.exec(command)

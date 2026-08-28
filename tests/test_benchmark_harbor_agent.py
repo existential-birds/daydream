@@ -367,6 +367,40 @@ def test_agent_setup_confirms_version_and_backend(tmp_path: Path) -> None:
     assert "shutil.which('pi')" in env.captured      # and the required Pi CLI
 
 
+def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
+    import pytest
+
+    pytest.importorskip("harbor")
+    from harbor.environments.base import ExecResult
+
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+
+    class Env:
+        def __init__(self) -> None:
+            self.captured = ""
+        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
+            self.captured = command
+            return ExecResult(return_code=0, stdout="ok", stderr="")
+
+    pi_agent = DaydreamReviewAgent(
+        logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "pi"}
+    )
+    env_pi = Env()
+    import asyncio
+    asyncio.run(pi_agent.setup(env_pi))
+    assert "shutil.which('pi')" in env_pi.captured
+    assert "claude_agent_sdk" not in env_pi.captured
+
+    claude_agent = DaydreamReviewAgent(
+        logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "claude"}
+    )
+    env_claude = Env()
+    asyncio.run(claude_agent.setup(env_claude))
+    assert "import claude_agent_sdk" in env_claude.captured
+    assert "shutil.which('pi')" not in env_claude.captured
+    assert claude_agent.version() in env_claude.captured          # version assert kept for both
+
+
 def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
     """A failed setup probe surfaces as a typed failure, never a silent pass."""
     import pytest
