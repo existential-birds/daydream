@@ -628,6 +628,20 @@ async def run_agent(
             budget_reason: str | None = None
             # Track tool names by id for log mode output
             tool_names: dict[str, str] = {}
+            callback_text_parts: list[str] = []
+
+            async def _flush_callback_text() -> None:
+                """Render one line for a consecutive run of streamed text deltas."""
+                if progress_callback is None or not callback_text_parts:
+                    return
+                text = "".join(callback_text_parts)
+                callback_text_parts.clear()
+                last_line = text.strip().split("\n")[-1]
+                if last_line:
+                    result = progress_callback(format_callback_text(last_line))
+                    if inspect.isawaitable(result):
+                        await result
+
             # Created per attempt so a failed retry's UI panels and task-label
             # mappings cannot be flushed or reused by a later successful attempt.
             tool_registry = LiveToolPanelRegistry(console, _state.quiet_mode)
@@ -664,17 +678,16 @@ async def run_agent(
 
                     with wall_scope:
                         async for event in event_iter:
+                            if use_callback and not isinstance(event, TextEvent):
+                                await _flush_callback_text()
+
                             if isinstance(event, TextEvent):
                                 output_parts.append(event.text)
 
                                 if _state.log_mode:
                                     _print_log(event.text)
                                 elif use_callback and progress_callback is not None:
-                                    last_line = event.text.strip().split("\n")[-1]
-                                    if last_line:
-                                        result = progress_callback(format_callback_text(last_line))
-                                        if inspect.isawaitable(result):
-                                            await result
+                                    callback_text_parts.append(event.text)
                                 elif output_schema is None:
                                     # Structured-output text is the JSON payload, redundant with
                                     # the returned structured result — don't echo it to the terminal.
@@ -824,6 +837,9 @@ async def run_agent(
                                 if inv is not None:
                                     inv.observe(event)
 
+                        if use_callback:
+                            await _flush_callback_text()
+
                     # Abort handling: the wall scope cancelled the loop, a quantitative
                     # tool ceiling fired, or a supervisor veto broke out. Mark the
                     # ATIF turn aborted and let the invocation's event-stream scope
@@ -857,6 +873,8 @@ async def run_agent(
             except _ToolSupervisorFailure:
                 raise
             except Exception as exc:
+                if use_callback:
+                    await _flush_callback_text()
                 exception_max_retries = min(
                     max_attempts, getattr(exc, "max_retries", max_attempts)
                 )

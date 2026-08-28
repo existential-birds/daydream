@@ -369,6 +369,38 @@ async def test_run_agent_callback_path_labels_taskoutput(tmp_path: Path) -> None
     assert "TaskOutput a066168" not in joined  # opaque bare-id dump form is gone
 
 
+async def test_run_agent_callback_coalesces_streaming_text_deltas(tmp_path: Path) -> None:
+    """Token-sized text deltas render as one parallel-fix narration line."""
+    from rich.text import Text
+
+    from daydream.agent import run_agent
+    from daydream.backends import ResultEvent, TextEvent
+    from daydream.trajectory import DaydreamPhase
+    from tests.test_agent_recorder_integration import MockBackend
+
+    backend = MockBackend(
+        [
+            TextEvent("B"),
+            TextEvent("ash"),
+            TextEvent(" is"),
+            TextEvent(" blocked."),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    lines: list[Text] = []
+
+    result, _, _ = await run_agent(
+        backend,
+        tmp_path,
+        "go",
+        phase=DaydreamPhase.FIX,
+        progress_callback=lines.append,
+    )
+
+    assert result == "Bash is blocked."
+    assert [line.plain for line in lines] == ["    Bash is blocked."]
+
+
 async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) -> None:
     """The parallel-fix callback line names the edited file, never a stray flag.
 
