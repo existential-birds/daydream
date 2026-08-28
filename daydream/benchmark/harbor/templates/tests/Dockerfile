@@ -20,15 +20,17 @@ RUN set -eux; \
         aarch64) narch=arm64; nsha=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050;; \
         *) echo "unsupported arch"; exit 1;; \
     esac; \
-    curl -fsSLO "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${narch}.tar.xz"; \
-    echo "${nsha}  node-v22.14.0-linux-${narch}.tar.xz" | sha256sum -c -; \
+    # python:3.12-slim ships no curl/xz-utils; use the Python stdlib for both
+    # the download and the xz-compressed tar extraction.
+    python -c "import urllib.request,sys; urllib.request.urlretrieve('https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-'+sys.argv[1]+'.tar.xz', '/tmp/node.tar.xz')" "$narch"; \
+    echo "${nsha}  /tmp/node.tar.xz" | sha256sum -c -; \
     mkdir -p /usr/local/lib/nodejs; \
-    tar -xJf "node-v22.14.0-linux-${narch}.tar.xz" -C /usr/local/lib/nodejs; \
+    python -c "import tarfile; tarfile.open('/tmp/node.tar.xz').extractall('/usr/local/lib/nodejs', filter='data')"; \
+    rm -f /tmp/node.tar.xz; \
     ln -s "/usr/local/lib/nodejs/node-v22.14.0-linux-${narch}/bin/node" /usr/local/bin/node; \
     ln -s "/usr/local/lib/nodejs/node-v22.14.0-linux-${narch}/bin/npm" /usr/local/bin/npm; \
     ln -s "/usr/local/lib/nodejs/node-v22.14.0-linux-${narch}/bin/npx" /usr/local/bin/npx; \
-    rm -f "node-v22.14.0-linux-${narch}.tar.xz"; \
-    npm install -g @anthropic-ai/claude-code@2.1.250; \
+    npm install -g --prefix /usr/local @anthropic-ai/claude-code@2.1.250; \
     node --version && claude --version
 
 WORKDIR /tests
