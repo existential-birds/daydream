@@ -433,6 +433,8 @@ container); when no daemon is available that target is skipped with a note and
 exits 0, so `make check` still succeeds without a daemon (CI always runs
 actionlint).
 
+See [docs/coverage.md](docs/coverage.md) for the coverage gate and ratchet procedure.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) for details.

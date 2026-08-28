@@ -32,6 +32,7 @@ dev = [
     "ruff>=0.9",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0",
+    "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
     "vulture>=2.13",
 ]
 
@@ -120,6 +121,7 @@ select = ["E", "F", "I", "W"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# No coverage flags in addopts: global --cov/--fail-under would gate every targeted subset run (`pytest tests/foo.py`) on the 87% floor even when all its tests pass (#336). The coverage flags live on the full-suite gated invocations (make test / CI check step) so a bare or targeted pytest stays plain; no --no-cov-on-fail so coverage.xml survives failed full-suite runs for the CI upload.
 addopts = "--strict-markers"
 markers = [
     "live_codex: requires the real `codex` CLI on $PATH with valid auth; skipped automatically when codex is absent. Used by the real-CLI live smoke test in tests/test_codex_real_cli_contract.py.",
@@ -136,3 +138,26 @@ exclude = ["*/atif/*"]
 # `# noqa` at their exact definition site, never tree-wide via `ignore_names`
 # (a flat name list would mask any future genuinely-dead symbol that happened
 # to share a generic name across daydream and tests).
+
+# Enforced branch-coverage gate (#932). Measured over the first-party
+# daydream package only; run `make coverage-report` and docs/coverage.md
+# for the measurement + ratchet procedure. fail_under is the measured
+# full-suite baseline, rounded down to a whole percent — raise it only
+# via the documented ratchet, never lower it.
+[tool.coverage.run]
+branch = true
+source = ["daydream"]
+omit = [
+    # Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/atif/NOTICE);
+    # mechanical-edit-only policy (D-03) forbids touching it to add tests, so
+    # including it would set the floor from code no one may edit.
+    # Mirrors the mypy and ruff exemptions above.
+    "daydream/atif/*",
+]
+
+[tool.coverage.report]
+# measured 86.94% at 411a50d on 2026-08-28; ratchet via docs/coverage.md
+fail_under = 86
+
+[tool.coverage.xml]
+output = "coverage.xml"
