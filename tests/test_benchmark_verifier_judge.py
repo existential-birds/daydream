@@ -874,7 +874,7 @@ async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: A
     failing = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner("", rc=1))
     with pytest.raises(sr.VerifierError):
         await failing.complete_json(user="u", system="s", max_tokens=64)
-    assert len(failing.runner.calls) == 3  # type: ignore[attr-defined]
+    assert len(failing.runner.calls) == 3
 
 
 def test_escape_neutralizes_all_four_delimiters_in_both_roles(sr_module: Any) -> None:
