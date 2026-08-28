@@ -1193,8 +1193,9 @@ def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path: Path, f
 
 def test_benchmark_help_lists_import_prs() -> None:
     import subprocess
+    import sys
 
-    r = subprocess.run(["daydream", "benchmark", "--help"], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-m", "daydream", "benchmark", "--help"], capture_output=True, text=True)
     assert r.returncode == 0 and "import-prs" in r.stdout
 def test_reimport_does_not_duplicate_cases_rows(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Re-importing the same PR (unchanged evidence) must not duplicate cases[] rows."""
