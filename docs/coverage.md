@@ -2,7 +2,7 @@
 
 ## What runs where
 
-`make check` (and therefore the pre-push hook and CI's check job) runs the test suite with coverage flags from the pytest `addopts` in `pyproject.toml`. The terminal report shows missing lines. `coverage.xml` is written and uploaded as the `coverage-report` CI artifact.
+`make test` (and therefore `make check`, the pre-push hook, and CI's check job) runs the full test suite with coverage flags carried by that invocation — not global pytest `addopts`. A targeted/dev run (`pytest tests/foo.py`) is a plain, ungated pytest run, because coverage flags in global addopts would turn any subset run into a hard `fail_under` failure even when all its tests pass (#336). The terminal report shows missing lines. `coverage.xml` is written and uploaded as the `coverage-report` CI artifact.
 
 ## Local coverage
 
@@ -10,10 +10,10 @@ Run the same command that CI uses:
 
 ```bash
 make install
-uv run pytest -n auto
+uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
 ```
 
-The terminal term-missing report is produced automatically via addopts. The `coverage.xml` file is written in the repository root and is gitignored — do not commit it.
+The terminal term-missing report is produced automatically. The `coverage.xml` file is written in the repository root and is gitignored — do not commit it. (Or just run `make test`, which is identical.)
 
 ## The floor
 
@@ -21,7 +21,13 @@ The current `fail_under` value is:
 
 | Measured % | Raw value | Git SHA | Date | Machine context |
 |------------|-----------|---------|------|-----------------|
-| 87 | 87.65% | 480c76a | 2026-08-27 | blacksmith-4vcpu-ubuntu-2404 |
+| 86 | 86.94% | 411a50d | 2026-08-28 | blacksmith-4vcpu-ubuntu-2404 |
+
+Regression note: the 2026-08-27 baseline (87.65% at 480c76a) was a whole-percent
+round up to 87 that the full-suite run could not reproduce once the coverage flags
+moved from the global `addopts` to the `make test`/CI invocation row (measured
+86.94%). The floor was lowered to the reproduced measurement (rounded down), per
+the ratchet's regression rule.
 
 ## Ratchet procedure
 

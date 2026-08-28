@@ -33,13 +33,16 @@ def test_coverage_config_targets_daydream_branch_and_omits_atif(pyproject: dict[
     assert "xml" in cov and cov["xml"].get("output") == "coverage.xml"
 
 
-def test_pytest_addopts_keeps_strict_markers_and_adds_cov(pyproject: dict[str, Any]) -> None:
+def test_coverage_flags_live_on_gated_invocations_not_global_addopts(
+    pyproject: dict[str, Any],
+) -> None:
     addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
     assert "--strict-markers" in addopts, "existing strictness must be preserved"
-    assert "--cov" in addopts
-    assert "--cov-branch" in addopts
-    assert "--cov-report=term-missing" in addopts
-    assert "--cov-report=xml" in addopts
+    # Issue #336: coverage flags cannot live in global addopts — a targeted
+    # subset run (`pytest tests/foo.py`) would inherit --cov and trip fail_under
+    # even when all its tests pass. They belong on the full-suite invocations.
+    for flag in ("--cov", "--cov-branch", "--cov-report=term-missing", "--cov-report=xml"):
+        assert flag not in addopts, f"coverage flag {flag!r} must not be in global addopts"
 
 
 def test_coverage_artifacts_are_gitignored() -> None:
@@ -62,9 +65,11 @@ def test_fail_under_is_enforced_in_single_config_location(pyproject: dict[str, A
 def test_make_test_target_runs_coverage_enabled_pytest() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text()
     test_recipe = makefile.split("test:\n", 1)[1].split("\n\n", 1)[0]
-    assert "uv run pytest -n auto" in test_recipe, (
-        "test target must keep xdist parallelism; coverage flags come from addopts"
-    )
+    assert "uv run pytest -n auto" in test_recipe, "test target must keep xdist parallelism"
+    # Coverage flags moved here (from global addopts) so `make test` still gates
+    # the full suite while bare/targeted pytest stays plain (#336).
+    for flag in ("--cov", "--cov-branch", "--cov-report=term-missing", "--cov-report=xml"):
+        assert flag in test_recipe, f"test target must carry coverage flag {flag!r}"
 
 
 def test_check_target_includes_test_and_coverage_report() -> None:
@@ -95,12 +100,13 @@ def test_fail_under_is_a_measured_whole_percent(pyproject: dict[str, Any]) -> No
     )
 
 
-def test_ci_test_step_unchanged_invocation_coverage_comes_from_addopts() -> None:
+def test_ci_test_step_carries_same_coverage_invocation_as_local() -> None:
     ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
-    # The check job's Run tests step stays `uv run pytest -n auto` — enforcement
-    # arrives via pyproject addopts, identical to local (KD2: local == CI).
+    # The check job's Run tests step carries the identical coverage flags as the
+    # local Makefile test target (local == CI), NOT via global addopts — so
+    # targeted runs stay plain and never trip the floor (#336).
     check_block = ci.split("Run tests", 1)[1].split("- name:", 1)[0]
-    assert "uv run pytest -n auto" in check_block
+    assert "uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml" in check_block
 
 
 def test_coverage_docs_present_with_ratchet_and_local_command() -> None:

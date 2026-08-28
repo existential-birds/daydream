@@ -19,12 +19,17 @@ deadcode:
 	uv run vulture --config pyproject.toml daydream tests
 	cd rl/daydream_review_v1 && uv run vulture --config pyproject.toml daydream_review_v1 tests
 
+# Coverage flags live here (not in global addopts) so targeted runs like
+# `uv run pytest tests/foo.py` stay plain and never trip the 87% floor (#336).
+# These mirror the CI check job's Run tests step (local == CI), and keep
+# xdist parallelism via -n auto. No --no-cov-on-fail so coverage.xml survives
+# a failed run for the coverage-report / CI artifact upload.
 test:
-	uv run pytest -n auto
+	uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
 
 # Machine-readable coverage report for humans who want the XML locally; the
 # terminal term-missing report + coverage floor enforcement already happen inside
-# `test` via pytest addopts (#932). docs/coverage.md documents the full flow.
+# `test` via its coverage flags (#932). docs/coverage.md documents the full flow.
 coverage-report:
 	@test -f coverage.xml || { echo "no coverage.xml — run make test first"; exit 1; }
 	@echo "coverage.xml present (uploaded as a CI artifact on the check job)."

@@ -152,7 +152,8 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
 
     argvs = [r["args"] for r in recs]
     # Root suite mirrors ci.yml's check job: uv lock --check, the uv sync
-    # --all-extras install, ruff, vulture, mypy, pytest (-n auto parallel).
+    # --all-extras install, ruff, vulture, mypy, pytest (-n auto parallel with
+    # the full-suite coverage flags that only `make test`/CI carry).
     # `make check` depends on `deadcode`, whose recipe runs the RL-scoped scan
     # from the RL dir, so one extra uv invocation from rl_root lands between
     # the root vulture scan and mypy.
@@ -163,7 +164,9 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     assert argvs[4] == ["run", "vulture", "--config", "pyproject.toml",
                         "daydream_review_v1", "tests"]
     assert argvs[5] == ["run", "mypy", "daydream", "tests"]
-    assert argvs[6] == ["run", "pytest", "-n", "auto"]
+    assert argvs[6] == ["run", "pytest", "-n", "auto",
+                        "--cov", "--cov-branch",
+                        "--cov-report=term-missing", "--cov-report=xml"]
 
     assert argvs[7] == ["info"]  # availability guard probes the daemon
     docker = argvs[8]

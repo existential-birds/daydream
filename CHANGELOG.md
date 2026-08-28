@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **benchmark:** require `requested_base_sha` on ready/imported snapshot records; `migrate.migrate_workspace` backfills the field from `original_base_sha` on both v1 upgrade and v2 repair passes so pre-provenance-split workspaces stay loadable.
 
+- **tests:** enforce the branch-coverage floor (`fail_under`) on full-suite runs only — coverage flags moved out of global pytest `addopts` into `make test` and the CI check job so targeted `pytest tests/foo.py` runs stay plain, and `coverage.xml` is retained on failed runs for the CI artifact upload (#932)
+
 
 ## [0.28.0] - 2026-08-27
 
