@@ -14,7 +14,21 @@ from typing import Any
 from daydream.config_file import DaydreamFileConfig, load_toml_or_empty
 
 _CONVENTIONAL_ROOTS = ("apps", "services", "packages", "crates", "cmd")
-_SERVICE_MANIFESTS = ("pyproject.toml", "package.json", "go.mod", "Cargo.toml", "mix.exs")
+# Pre-PEP-621 Python services pin deps in requirements files and configure tooling
+# via tox.ini/setup.py/setup.cfg; without these markers they are invisible to
+# discovery and no --scope spelling can select them (issue #963).
+_SERVICE_MANIFESTS = (
+    "pyproject.toml",
+    "package.json",
+    "go.mod",
+    "Cargo.toml",
+    "mix.exs",
+    "requirements.txt",
+    "requirements.in",
+    "setup.py",
+    "setup.cfg",
+    "tox.ini",
+)
 _PNPM_PACKAGES = re.compile(r"^packages:\s*$")
 _PNPM_ITEM = re.compile(r"^\s+-\s+(.+?)\s*$")
 
