@@ -2079,9 +2079,9 @@ def test_clone_error_message_never_contains_remote_url(tmp_path: Path) -> None:
 
 def test_clone_error_message_redacts_stderr_url_echo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Even when git's stderr echoes the URL, the raised message is redacted."""
-    real_run = git_ops.subprocess.run
+    real_run = subprocess.run
 
-    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args,
             128,
@@ -2091,7 +2091,7 @@ def test_clone_error_message_redacts_stderr_url_echo(tmp_path: Path, monkeypatch
             ),
         )
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
     with pytest.raises(GitError) as excinfo:
         git_ops.clone("https://user:ghp_canaryfake123@unreachable.invalid/o/r.git", tmp_path / "t", timeout=5)
     assert "ghp_canaryfake123" not in str(excinfo.value)
