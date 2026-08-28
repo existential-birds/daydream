@@ -8153,6 +8153,49 @@ async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_cover
     assert "Coverage ratio: 0.75" in report
 
 
+async def test_run_deep_uncovered_sweep_structured_output_without_review_file_is_merged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Valid structured sweep output is authoritative without a Markdown sidecar.
+
+    Structured-output backends need not write the legacy ``uncovered-*-review.md``
+    byproduct. Their finding must still reach the host-owned records artifact and
+    merge, while the absence of a verified Read keeps coverage unchanged.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.sweep_no_review_file = True
+    stub.sweep_no_read = True
+    stub.merge_echo_records = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    assert not list(deep.glob("uncovered-*-review.md"))
+    records = json.loads((deep / "stack-uncovered-records.json").read_text())
+    assert [record["file"] for record in records] == ["notes.txt"]
+    merged = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert any(item.get("file") == "notes.txt" for item in merged)
+
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    assert stats["completed_files"] == ["notes.txt"]
+    assert stats["covered_files"] == []
+    assert stats["sweep_attempt_status"] == {"notes.txt": "reviewed (hunks only)"}
+    assert stats["sweep_finding_count"] == 1
+    assert stats["sweep_failures"] == {}
+
+
 async def test_uncovered_sweep_per_stack_resume_fails_closed_on_unremovable_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

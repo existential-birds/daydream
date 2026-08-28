@@ -62,9 +62,12 @@ FALLBACK_NOTE = "*run details unavailable*"
 
 # Generic backend labels that pre-date a real SDK model id arriving on the
 # event stream. Defense-in-depth: trajectory.TrajectoryRecorder upgrades
-# these as soon as the first MetricsEvent / CostEvent surfaces a real id,
+# these as soon as a MetricsEvent, CostEvent, or ResultEvent surfaces a real
+# id,
 # so a generic label here means the run never observed a real model name.
-_GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
+_GENERIC_MODEL_LABELS: frozenset[str] = frozenset(
+    {"claude", "codex", "osprey", "unknown", ""}
+)
 
 
 def _parse_ts(ts: str) -> datetime:

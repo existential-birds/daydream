@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -42,14 +43,40 @@ class _FakeStdout:
             return b""
 
 
+class _FakeStderr:
+    def __init__(self, lines: list[str], held_open: asyncio.Event | None = None) -> None:
+        self._lines = iter(line.encode() + b"\n" for line in lines)
+        self._held_open = held_open
+
+    async def readline(self) -> bytes:
+        try:
+            return next(self._lines)
+        except StopIteration:
+            if self._held_open is not None:
+                await self._held_open.wait()
+            return b""
+
+
 class _FakeProcess:
-    def __init__(self, lines: list[dict[str, object]], returncode: int = 0) -> None:
+    def __init__(
+        self,
+        lines: list[dict[str, object]],
+        returncode: int = 0,
+        stderr_lines: list[str] | None = None,
+        stderr_held_open: bool = False,
+    ) -> None:
         self.stdout = _FakeStdout(lines)
+        self._stderr_eof = asyncio.Event() if stderr_held_open else None
+        self.stderr = _FakeStderr(stderr_lines or [], self._stderr_eof)
         self.returncode = returncode
         self.pid = 137
 
     async def wait(self) -> int:
         return self.returncode
+
+    def close_stderr(self) -> None:
+        if self._stderr_eof is not None:
+            self._stderr_eof.set()
 
 
 def _stream(
@@ -98,12 +125,20 @@ async def _collect(
     max_turns: int | None = None,
     read_only: bool = False,
     persist_session: bool = True,
+    stderr_lines: list[str] | None = None,
+    stderr_held_open: bool = False,
 ) -> tuple[list[AgentEvent], AsyncMock]:
-    process = _FakeProcess(lines, returncode=returncode)
+    process = _FakeProcess(
+        lines,
+        returncode=returncode,
+        stderr_lines=stderr_lines,
+        stderr_held_open=stderr_held_open,
+    )
     exec_mock = AsyncMock(return_value=process)
+    terminate_mock = AsyncMock(side_effect=lambda _process: process.close_stderr())
     with (
         patch("daydream.backends.osprey.asyncio.create_subprocess_exec", exec_mock),
-        patch("daydream.backends.osprey.terminate_process", new=AsyncMock()),
+        patch("daydream.backends.osprey.terminate_process", new=terminate_mock),
     ):
         events = [
             event
@@ -119,6 +154,39 @@ async def _collect(
             )
         ]
     return events, exec_mock
+
+
+@pytest.mark.asyncio
+async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
+    lines, _ = _stream()
+
+    events, exec_mock = await _collect(
+        OspreyBackend(osprey_binary="fake"),
+        lines,
+        stderr_lines=[
+            "2026-08-27T23:07:54Z INFO osprey_cli::headless: "
+            "restoring remembered model preference"
+        ],
+    )
+
+    assert [type(event) for event in events] == [ResultEvent]
+    assert exec_mock.call_args.kwargs["stderr"] is asyncio.subprocess.PIPE
+
+
+@pytest.mark.asyncio
+async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof() -> None:
+    lines, _ = _stream()
+
+    events, _ = await asyncio.wait_for(
+        _collect(
+            OspreyBackend(osprey_binary="fake"),
+            lines,
+            stderr_held_open=True,
+        ),
+        timeout=0.5,
+    )
+
+    assert [type(event) for event in events] == [ResultEvent]
 
 
 def test_factory_builds_verified_osprey_jsonl_command() -> None:
@@ -188,6 +256,127 @@ async def test_translates_text_thinking_tool_identity_metrics_and_result() -> No
     assert tool_result.output == "payload"
     assert tool_result.is_error is False
     assert not any(isinstance(event, MetricsEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"},
+        {"event": "thinking_delta", "content": " think."},
+        {"event": "text_delta", "content": "Done."},
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": False,
+        },
+    )
+
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+    assert [type(event) for event in events] == [
+        ThinkingEvent,
+        TextEvent,
+        TurnEndEvent,
+        ResultEvent,
+    ]
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == [
+        "Let me think."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ignores_blank_thinking_deltas() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": ""},
+        {"event": "thinking_delta", "content": "  \n"},
+        {"event": "text_delta", "content": "Done."},
+        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
+    )
+
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+    assert not any(isinstance(event, ThinkingEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_result_exposes_session_model_without_usage_metrics() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "text_delta", "content": "Done."},
+        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
+    )
+
+    backend = OspreyBackend(osprey_binary="fake")
+    assert backend.model == "unknown"
+    events, _ = await _collect(backend, lines)
+    result = next(event for event in events if isinstance(event, ResultEvent))
+
+    assert result.model_name == "custom-model"
+    assert backend.model == "custom-model"
+
+
+@pytest.mark.asyncio
+async def test_separates_thinking_runs_at_protocol_boundaries() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": "first attempt"},
+        {"event": "driver_retry"},
+        {"event": "thinking_delta", "content": "second attempt"},
+        {"event": "text_delta", "content": "Done."},
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": False,
+        },
+    )
+
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == [
+        "first attempt",
+        "second attempt",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_trajectory_records_coalesced_thinking_as_prose(tmp_path: Path) -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"},
+        {"event": "thinking_delta", "content": " think."},
+        {
+            "event": "message_end",
+            "messages": [{"type": "result", "data": {"content": "Done."}}],
+        },
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": False,
+        },
+    )
+    recorder = TrajectoryRecorder(
+        path=tmp_path / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="osprey",
+        session_id="daydream-session",
+    )
+
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step("prompt")
+            events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+            for event in events:
+                invocation.observe(event)
+
+    trajectory = recorder.build_trajectory().model_dump(exclude_none=True)
+    assert trajectory["steps"][1]["reasoning_content"] == "Let me think."
+    assert trajectory["agent"]["model_name"] == "custom-model"
+    assert trajectory["steps"][1]["model_name"] == "custom-model"
 
 
 @pytest.mark.asyncio
@@ -367,6 +556,19 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
     with pytest.raises(OspreyError, match="return code 1") as exc_info:
         await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1)
     assert exc_info.value.category == "PROCESS_EXIT"
+
+
+@pytest.mark.asyncio
+async def test_nonzero_process_exit_includes_stderr_diagnostics() -> None:
+    lines, _ = _stream()
+
+    with pytest.raises(OspreyError, match="provider authentication failed"):
+        await _collect(
+            OspreyBackend(osprey_binary="fake"),
+            lines,
+            returncode=1,
+            stderr_lines=["provider authentication failed"],
+        )
 
 
 @pytest.mark.asyncio

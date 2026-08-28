@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
@@ -179,6 +181,14 @@ def _bounded_diagnostics(lines: Iterable[str]) -> str:
     return "\n".join(cleaned)
 
 
+async def _drain_stderr(stderr: asyncio.StreamReader, diagnostics: list[str]) -> None:
+    """Drain Osprey diagnostics without allowing its stderr pipe to fill."""
+    while line := await stderr.readline():
+        raw = line.decode(errors="replace").strip()
+        if raw and len(diagnostics) < _MAX_DIAGNOSTIC_LINES:
+            diagnostics.append(raw)
+
+
 @dataclass(frozen=True)
 class _OspreyCommandOptions:
     """Per-invocation inputs to the verified Osprey argv surface."""
@@ -288,7 +298,10 @@ class OspreyBackend:
             raise OspreyUnsupportedOption("tool_search_mode", f"invalid mode {tool_search_mode!r}")
 
         self._model_override = model
-        self.model = model or "osprey"
+        # Osprey may resolve an omitted model from its own config and model
+        # preference store. Until session_start reports that choice, the
+        # backend name is not a valid model identity.
+        self.model = model or "unknown"
         self.reasoning_effort = reasoning_effort
         self.osprey_binary = osprey_binary or os.environ.get("OSPREY_BINARY", "osprey")
         self.cwd = cwd
@@ -515,11 +528,13 @@ class OspreyBackend:
         turn_durations_ms: list[int] = []
         total_cost: float | None = None
         saw_metric_cost = False
-        non_json_lines: list[str] = []
+        stderr_lines: list[str] = []
+        stderr_task: asyncio.Task[None] | None = None
         terminal_outcome: str | None = None
         terminal_exit_code: int | None = None
         terminal_structured_output: Any = None
         turn_text_emitted = False
+        thinking_parts: list[str] = []
         protocol_state = _OspreyProtocolState()
 
         try:
@@ -539,12 +554,15 @@ class OspreyBackend:
                 cwd=str(cwd),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
                 limit=_OSPREY_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 start_new_session=True,
             )
             self._processes.append(proc)
+            if proc.stderr is None:
+                raise OspreyError("Osprey stderr pipe is unavailable", category="PROCESS_START")
+            stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, stderr_lines))
             while True:
                 if proc.stdout is None:
                     break
@@ -559,11 +577,9 @@ class OspreyBackend:
                 try:
                     event = json.loads(raw)
                 except json.JSONDecodeError as exc:
-                    if len(non_json_lines) < _MAX_DIAGNOSTIC_LINES:
-                        non_json_lines.append(raw)
                     raise OspreyProtocolError(
                         "Osprey emitted a non-JSON line in JSONL mode: "
-                        f"{_bounded_diagnostics(non_json_lines)}"
+                        f"{_bounded_diagnostics([raw])}"
                     ) from exc
                 if not isinstance(event, dict):
                     raise OspreyProtocolError("Osprey JSONL event must be an object")
@@ -589,6 +605,10 @@ class OspreyBackend:
                     session_id = _required_string(event, "session_id")
                     _required_string(event, "started_at")
                     session_model = _required_string(event, "model")
+                    # ``self.model`` starts as a backend-only placeholder when
+                    # Osprey is allowed to resolve its own config. The session
+                    # header is the authoritative model identity for this run.
+                    self.model = session_model
                     provider = _required_string(event, "provider")
                     saw_session_start = True
                     continue
@@ -596,6 +616,12 @@ class OspreyBackend:
                     raise OspreyProtocolError("JSONL event appeared after session_end")
                 if session_id is None:
                     raise OspreyProtocolError("session_start did not provide a session_id")
+
+                if event_name != "thinking_delta" and thinking_parts:
+                    thinking_text = "".join(thinking_parts)
+                    thinking_parts.clear()
+                    if thinking_text.strip():
+                        yield ThinkingEvent(thinking_text)
 
                 if event_name == "session_end":
                     outcome = _required_string(event, "outcome")
@@ -623,7 +649,7 @@ class OspreyBackend:
                     content = event.get("content")
                     if not isinstance(content, str):
                         raise OspreyProtocolError("thinking_delta requires string content")
-                    yield ThinkingEvent(content)
+                    thinking_parts.append(content)
                 elif event_name == "tool_call":
                     call_id = _required_string(event, "tool_call_id")
                     tool_name = _required_string(event, "tool_name")
@@ -719,10 +745,15 @@ class OspreyBackend:
                     raise OspreyProtocolError(f"unknown Osprey JSONL event {event_name!r}")
 
             await proc.wait()
+            # A descendant can outlive Osprey while retaining the inherited
+            # stderr fd. Reap the process group and close its transports before
+            # awaiting EOF so the diagnostic drain cannot hang indefinitely.
+            await terminate_process(proc)
+            await stderr_task
             returncode = proc.returncode
             if returncode not in (None, 0):
                 raise OspreyError(
-                    f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(non_json_lines)}",
+                    f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(stderr_lines)}",
                     category="PROCESS_EXIT",
                 )
             if not saw_header:
@@ -762,10 +793,16 @@ class OspreyBackend:
                         "exit_code": terminal_exit_code,
                     },
                 ),
+                model_name=session_model,
             )
         finally:
-            if proc is not None:
-                await terminate_process(proc)
+            with anyio.CancelScope(shield=True):
+                if proc is not None:
+                    await terminate_process(proc)
+                if stderr_task is not None:
+                    if not stderr_task.done():
+                        stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
             self._processes = [active for active in self._processes if active is not proc]
             if schema_path is not None:
                 Path(schema_path).unlink(missing_ok=True)

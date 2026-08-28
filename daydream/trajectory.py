@@ -59,10 +59,13 @@ _console = create_console()
 _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
 
 # Generic backend labels that should be replaced as soon as a real SDK
-# model id arrives via MetricsEvent / CostEvent. Runner stamps the recorder
+# model id arrives via MetricsEvent, CostEvent, or ResultEvent. Runner stamps
+# the recorder
 # with one of these (or empty) at init since the real model id isn't known
 # until the first agent turn streams back.
-_GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
+_GENERIC_MODEL_LABELS: frozenset[str] = frozenset(
+    {"claude", "codex", "osprey", "unknown", ""}
+)
 
 
 def _reasoning_extra(reasoning_tokens: int | None) -> dict[str, Any] | None:
@@ -1219,6 +1222,19 @@ class Invocation:
             # concentration; issue #747).
             self._fold_cost_event(event)
         elif isinstance(event, ResultEvent):
+            if event.model_name:
+                if self._open_step_dict is not None:
+                    self._open_step_dict["_model_name"] = event.model_name
+                else:
+                    for index, step in enumerate(self.steps):
+                        if (
+                            step.source == "agent"
+                            and (step.model_name or "") in _GENERIC_MODEL_LABELS
+                        ):
+                            self.steps[index] = self.recorder.redactor.redact_step(
+                                step.model_copy(update={"model_name": event.model_name})
+                            )
+                self.recorder._upgrade_model_name(event.model_name)
             self._close_open_step()
         elif isinstance(event, TurnEndEvent):
             # Per-turn close: a TurnEndEvent arriving while no Step is open is
@@ -1753,15 +1769,27 @@ class TrajectoryRecorder:
     def _upgrade_model_name(self, candidate: str) -> None:
         """Promote *candidate* over a generic backend label.
 
-        Runner stamps the recorder with a generic alias (``"claude"`` /
-        ``"codex"``) or empty string at init since the real SDK model id is
-        only known after the first agent turn streams back. The first real
-        model id observed from MetricsEvent / CostEvent upgrades the
-        recorder's ``agent_model_name`` so the rendered Trajectory.agent
-        carries the real id rather than the alias.
+        Runner stamps the recorder with a generic alias (``"claude"``,
+        ``"codex"``, ``"osprey"``, ``"unknown"``) or empty string at init
+        since the real SDK model id is only known after the first agent turn
+        streams back. The first real model id observed from MetricsEvent /
+        CostEvent / ResultEvent
+        upgrades the recorder's ``agent_model_name`` so the rendered
+        Trajectory.agent carries the real id rather than the alias. Any
+        already-closed agent Steps carrying the same provisional label are
+        upgraded too; this matters when a backend emits its identity only in a
+        terminal ResultEvent after TurnEndEvent has closed the Step.
         """
         if candidate and (self.agent_model_name or "") in _GENERIC_MODEL_LABELS:
             self.agent_model_name = candidate
+            for index, step in enumerate(self.steps):
+                if (
+                    step.source == "agent"
+                    and (step.model_name or "") in _GENERIC_MODEL_LABELS
+                ):
+                    self.steps[index] = self.redactor.redact_step(
+                        step.model_copy(update={"model_name": candidate})
+                    )
 
     def _accumulate_metrics(
         self,

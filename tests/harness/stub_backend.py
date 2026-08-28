@@ -226,11 +226,16 @@ class StubBackend:
         # (instead of the default api.py), so stack-uncovered-records.json names
         # the swept file.
         self.sweep_file: str | None = None
-        # When True, the uncovered-file-sweep branch returns success WITHOUT
-        # writing the review output file -- a backend can return normally while
-        # producing nothing (issue #309 finding 7). A successful return must
-        # NOT be recorded as completed coverage.
+        # When True, the uncovered-file-sweep branch returns success without
+        # either structured output or a review file -- a backend can return
+        # normally while producing nothing (issue #309 finding 7). A successful
+        # return must NOT be recorded as completed coverage.
         self.sweep_no_output: bool = False
+        # When True, the sweep still returns valid structured output but omits
+        # the legacy Markdown review sidecar. Real structured-output backends
+        # can behave this way; the host-owned records artifact remains the
+        # authoritative finding source.
+        self.sweep_no_review_file: bool = False
         # When True, the uncovered-file-sweep branch writes its review output
         # but emits NO Read tool call -- a successful hunk-only review (issue
         # #309 finding 6). The file must be recorded as a completed ATTEMPT
@@ -453,7 +458,7 @@ class StubBackend:
                 raise RuntimeError("stub: uncovered-file sweep blew up")
             file_match = re.search(r"changed file (\S+) was NOT read", prompt)
             swept_file = file_match.group(1) if file_match else "notes.txt"
-            if not self.sweep_no_output:
+            if not self.sweep_no_output and not self.sweep_no_review_file:
                 out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
                 if out_match is not None:
                     out_path = Path(out_match.group(1).rstrip("."))
