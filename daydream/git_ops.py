@@ -37,6 +37,7 @@ The module is intentionally dependency-free: stdlib only.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -1730,6 +1731,50 @@ def _safe_url_desc(url: str) -> str:
     if parsed.scheme and parsed.hostname:
         return f"{parsed.hostname}{parsed.path}"
     return redact_text(url)
+
+
+def clone_with_token(
+    remote_url: str,
+    target: Path,
+    token: str | None = None,
+    *,
+    blobless: bool = False,
+    timeout: int = 300,
+) -> None:
+    """Clone a reconstructed identity URL with optional out-of-band auth.
+
+    Issue #981: the URL must already be credential-free (a canonical HTTPS
+    identity like ``https://github.com/owner/repo``). When *token* is set,
+    auth is injected at the argv layer via ``-c http.extraHeader`` — the URL
+    string never contains the token. Without a token, plain clone applies
+    (ambient credential helper). ``GIT_TERMINAL_PROMPT=0`` fails closed on
+    auth errors instead of prompting.
+    """
+    cmd = ["git"]
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        cmd += ["-c", f"http.extraHeader=Authorization: Basic {basic}"]
+    cmd.append("clone")
+    if blobless:
+        cmd.append("--filter=blob:none")
+    cmd += [remote_url, str(target)]
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            cmd,  # noqa: S607 - git is a trusted command
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {type(exc).__name__}: {redact_text(str(exc))}"
+        ) from exc
+    if proc.returncode != 0:
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {redact_text(proc.stderr.strip())}"
+        )
 
 
 def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int = 300) -> None:

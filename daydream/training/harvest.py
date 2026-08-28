@@ -81,6 +81,7 @@ injection seams.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, replace
@@ -92,6 +93,7 @@ import anyio
 from rich.console import Console
 
 from daydream import git_ops
+from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.index import (
     append_label_observation,
     query_runs,
@@ -759,7 +761,12 @@ def build_annotation(
     )
 
 
-# Repo resolution — three-tier priority: source_path → clone cache → None
+# Repo resolution — source_path first, then identity-based clone (issue #981):
+# the archived remote_url is only ever normalized to a credential-free HTTPS
+# identity; hosts outside the allowlist fail closed.
+
+# Hosts trusted for harvest clone resolution (overridable in tests).
+_GIT_HOST_ALLOWLIST: frozenset[str] = frozenset({"github.com"})
 
 
 def _resolve_repo_for_row(
@@ -810,7 +817,16 @@ def _resolve_repo_for_row(
                     fetched_repos.add(cached_repo)
         else:
             cached_repo.parent.mkdir(parents=True, exist_ok=True)
-            git_ops.clone(remote_url, cached_repo, blobless=True)
+            # Issue #981: never clone the archived raw URL. Normalize it to a
+            # credential-free HTTPS identity and fail closed on untrusted
+            # hosts or unparseable input. Token, if any, travels out-of-band.
+            identity, canonical = normalize_remote_url(
+                remote_url, allowed_hosts=_GIT_HOST_ALLOWLIST
+            )
+            if identity is None or canonical is None:
+                return None
+            token = os.environ.get("DAYDREAM_GIT_TOKEN")
+            git_ops.clone_with_token(canonical, cached_repo, token, blobless=True)
     except (GitError, OSError) as exc:
         redacted = _redact_text(str(exc))
         print_warning(

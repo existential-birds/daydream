@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -1203,11 +1204,11 @@ def test_resolve_repo_for_row_clones_when_source_path_missing(tmp_path: Path, mo
     """Falls through to clone when source_path is absent."""
     cache = tmp_path / "cache"
 
-    def fake_clone(url: str, target: Path, **kwargs: object) -> None:
+    def fake_clone(url: str, target: Path, token: str | None = None, **kwargs: object) -> None:
         target.mkdir(parents=True, exist_ok=True)
         (target / ".git").mkdir()
 
-    monkeypatch.setattr("daydream.training.harvest.git_ops.clone", fake_clone)
+    monkeypatch.setattr("daydream.training.harvest.git_ops.clone_with_token", fake_clone)
     row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
     result = _resolve_repo_for_row(row, clone_cache=cache)
     assert result == cache / "org" / "repo"
@@ -1222,7 +1223,10 @@ def test_resolve_repo_for_row_fetches_existing_cache(tmp_path: Path, monkeypatch
 
     fetched = []
     monkeypatch.setattr("daydream.training.harvest.git_ops.fetch", lambda repo, remote="origin": fetched.append(repo))
-    monkeypatch.setattr("daydream.training.harvest.git_ops.clone", lambda *a, **k: pytest.fail("should not clone"))
+    monkeypatch.setattr(
+        "daydream.training.harvest.git_ops.clone_with_token",
+        lambda *a, **k: pytest.fail("should not clone"),
+    )
     row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
     result = _resolve_repo_for_row(row, clone_cache=cache)
     assert result == cached_repo
@@ -1241,8 +1245,8 @@ def test_resolve_repo_for_row_clone_failure_returns_none(tmp_path: Path, monkeyp
     cache = tmp_path / "cache"
 
     monkeypatch.setattr(
-        "daydream.training.harvest.git_ops.clone",
-        lambda url, target, **kwargs: (_ for _ in ()).throw(GitError("network error")),
+        "daydream.training.harvest.git_ops.clone_with_token",
+        lambda url, target, token=None, **kwargs: (_ for _ in ()).throw(GitError("network error")),
     )
     row = {"source_path": None, "remote_url": "https://github.com/org/repo.git", "repo_slug": "org/repo"}
     result = _resolve_repo_for_row(row, clone_cache=cache)
@@ -1465,8 +1469,74 @@ def test_repo_resolution_warning_is_value_free(
         "remote_url": "https://user:ghp_canaryfake123@github.com/o/r",
         "repo_slug": "o/r",
     }
-    monkeypatch.setattr("daydream.training.harvest.git_ops.clone", _raise_git_error_with_url)
+    monkeypatch.setattr("daydream.training.harvest.git_ops.clone_with_token", _raise_git_error_with_url)
     _resolve_repo_for_row(row, clone_cache=tmp_path / "cache")
     out = capsys.readouterr().out
     assert "ghp_canaryfake123" not in out
     assert "o/r" in out  # slug IS present
+
+
+# identity-based repo resolution (issue #981): never clone the archived raw URL
+
+
+def test_resolve_repo_never_clones_raw_archived_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    def fake_clone(url: str, target: Path, token: str | None = None, **kw: object) -> None:
+        seen.append(url)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / ".git").mkdir()
+
+    monkeypatch.setattr("daydream.training.harvest.git_ops.clone_with_token", fake_clone)
+    row = {
+        "source_path": None,
+        "remote_url": "https://user:ghp_canaryfake123@github.com/o/r",
+        "repo_slug": "o/r",
+    }
+    assert _resolve_repo_for_row(row, clone_cache=tmp_path / "cache") == tmp_path / "cache" / "o" / "r"
+    assert seen == ["https://github.com/o/r"]  # reconstructed identity, never raw
+
+
+def test_resolve_repo_fails_closed_on_untrusted_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "daydream.training.harvest.git_ops.clone_with_token",
+        lambda url, t, **kw: calls.append(url),
+    )
+    row = {"source_path": None, "remote_url": "https://evil.example.com/o/r", "repo_slug": "o/r"}
+    assert _resolve_repo_for_row(row, clone_cache=tmp_path / "cache") is None  # M7: no clone attempt
+    assert calls == []
+
+
+def test_resolve_repo_fails_closed_on_file_scheme(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "daydream.training.harvest.git_ops.clone_with_token",
+        lambda url, t, **kw: calls.append(url),
+    )
+    row = {"source_path": None, "remote_url": "file:///tmp/evil", "repo_slug": "o/r"}
+    assert _resolve_repo_for_row(row, clone_cache=tmp_path / "cache") is None
+    assert calls == []
+
+
+def test_token_never_in_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DAYDREAM_GIT_TOKEN", "ghp_envtokfake123")
+    seen: list[list[str]] = []
+
+    def _recording_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", _recording_run)
+    _resolve_repo_for_row(
+        {"source_path": None, "remote_url": "https://github.com/o/r", "repo_slug": "o/r"},
+        clone_cache=tmp_path / "cache",
+    )
+    assert seen
+    assert all("ghp_envtokfake123" not in " ".join(c) for c in seen)  # M8
