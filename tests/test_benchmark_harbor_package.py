@@ -278,6 +278,10 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     assert job["metrics"] == [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}]
     assert "DAYDREAM_JUDGE_API_KEY" in job["verifier"]["env"]
     assert job["verifier"]["env"]["DAYDREAM_JUDGE_PROVIDER"] == "${DAYDREAM_JUDGE_PROVIDER}"
+    assert job["verifier"]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "${CLAUDE_CODE_OAUTH_TOKEN}"
+    assert job["verifier"]["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == (
+        "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+    )
 
     oracle = yaml.safe_load(pkg.render_job_config(oracle=True))
     assert oracle["agents"] == [{"name": "oracle"}]

@@ -429,6 +429,12 @@ def render_job_config(*, oracle: bool) -> bytes:
             "DAYDREAM_JUDGE_MODEL": "${DAYDREAM_JUDGE_MODEL}",
             "DAYDREAM_JUDGE_API_KEY": "${DAYDREAM_JUDGE_API_KEY}",
             "DAYDREAM_JUDGE_BASE_URL": "${DAYDREAM_JUDGE_BASE_URL}",
+            # CLAUDE_CODE_* feeds the keyless claude-cli judge client; the
+            # nonessential-traffic gate defaults on (fail-safe direction).
+            "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": (
+                "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+            ),
         }},
         "datasets": [{"path": "."}],
         "metrics": [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}],

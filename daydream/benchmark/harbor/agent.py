@@ -57,6 +57,7 @@ _ANTHROPIC_KEEP_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_
 _BANNED_PREFIXES = (
     "DAYDREAM_JUDGE_",
     "ANTHROPIC_",  # dropped from the scrub for backend="claude" (credentials preserved)
+    "CLAUDE_CODE_",  # judge (claude-cli) credential; never legitimate in the reviewed scope
     "OPENAI_",
     "OPENROUTER_",
     "PI_",

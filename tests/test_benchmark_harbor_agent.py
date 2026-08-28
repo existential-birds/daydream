@@ -523,6 +523,22 @@ def test_build_child_env_keeps_anthropic_for_claude_scrubs_for_pi() -> None:
     assert child_pi["DAYDREAM_REVIEW_API_KEY"] == "review-key"
 
 
+def test_build_child_env_bans_claude_code_prefix() -> None:
+    from daydream.benchmark.harbor.agent import build_child_env
+
+    parent = {
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth-tok",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DAYDREAM_REVIEW_BACKEND": "pi",
+        "PATH": "/usr/bin",
+        "HOME": "/root",
+    }
+    child = build_child_env(parent, backend="pi")
+    assert not any(k.startswith("CLAUDE_CODE_") for k in child)
+    child_claude = build_child_env(parent, backend="claude")
+    assert not any(k.startswith("CLAUDE_CODE_") for k in child_claude)
+
+
 def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: Path) -> None:
     import pytest
 
