@@ -195,7 +195,10 @@ def test_spend_summary_prints_claude_cli_judge_host(tmp_path: Path) -> None:
     text = run_mod._pre_run_summary(
         _ws(tmp_path), env=_env(DAYDREAM_JUDGE_PROVIDER="claude-cli")
     )
-    assert "api.anthropic.com" in text
+    # exact-host match avoids CodeQL py/incomplete-url-substring-sanitization
+    host_lines = [ln for ln in text.splitlines() if ln.strip().startswith("judge host:")]
+    assert len(host_lines) == 1
+    assert host_lines[0].split(":", 1)[1].strip() == "api.anthropic.com"
 
 
 def test_preflight_blocks_judge_host_outside_allowlist(tmp_path: Path) -> None:
