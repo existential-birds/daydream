@@ -42,6 +42,46 @@ def test_reviewer_env_rejects_non_openrouter_endpoint() -> None:
         })
 
 
+def test_claude_reviewer_env_keeps_anthropic_and_no_openrouter_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "stale-or")
+    monkeypatch.setenv("PI_API_KEY", "stale-pi")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "judge-model")
+
+    entrypoint.apply_reviewer_env({
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "ANTHROPIC_API_KEY": "sk-ant-live",
+        "ANTHROPIC_AUTH_TOKEN": "tok-live",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    }, backend="claude")
+
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-live"
+    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "tok-live"
+    assert os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert "OPENROUTER_API_KEY" not in os.environ
+    assert "PI_API_KEY" not in os.environ
+    assert not any(k.startswith("DAYDREAM_JUDGE_") for k in os.environ)
+
+
+def test_claude_reviewer_env_fails_without_anthropic_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(entrypoint.EntrypointError, match="ANTHROPIC"):
+        entrypoint.apply_reviewer_env({
+            "DAYDREAM_REVIEW_BACKEND": "claude",
+            "ANTHROPIC_API_KEY": "",
+        }, backend="claude")
+
+
+def test_claude_reviewer_env_accepts_non_openrouter_base_url_only_for_claude(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entrypoint.apply_reviewer_env({
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
+    }, backend="claude")   # no raise: openrouter.ai requirement is pi-only
+
+
 def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A Python diff resolves through the controlled entrypoint with no backend
     # network dependency (the runner is stubbed at the production seam): the run
