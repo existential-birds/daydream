@@ -84,4 +84,7 @@ check: lockcheck install lint deadcode typecheck test actionlint rl-check covera
 hooks:
 	ln -sf "$$(git rev-parse --show-toplevel)/scripts/hooks/pre-push" \
 	       "$$(git rev-parse --git-path hooks/pre-push)"
+	ln -sf "$$(git rev-parse --show-toplevel)/scripts/hooks/pre-commit" \
+	       "$$(git rev-parse --git-path hooks/pre-commit)"
 	@echo "Pre-push hook installed"
+	@echo "Pre-commit hook installed"

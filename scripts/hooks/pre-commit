@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: fast staged-changes gate — runs ruff on the staged Python
+# files only, scoped to the index. The full local CI gate remains
+# `make check` at push time.
+#
+# Index-scoping: each staged file is linted from its INDEX content
+# (`git show :<path>`), never the working tree, so the gate is authoritative
+# for exactly what will be committed even when a path carries unstaged edits.
+#
+# Install with: make hooks
+#
+set -euo pipefail
+
+# Anchor path collection and ruff's pyproject.toml resolution at the repo
+# root, whatever directory the commit was made from.
+cd "$(git rev-parse --show-toplevel)"
+
+# Collect Added/Copied/Modified/Renamed staged Python files. Deletions are
+# excluded (nothing to lint); renames surface under their new path. The
+# NUL-delimited form (`-z`) emits raw, unquoted paths even under
+# core.quotepath=true, so non-ASCII/space/quote filenames reach the filter
+# intact instead of as C-quoted wrappers. `tr` folds NULs to newlines so the
+# loop uses only bash-3.2-safe `read -r` constructs (`mapfile -d ''` requires
+# bash >= 4.4, absent from macOS's stock /bin/bash). The gate is scoped to
+# exactly the canonical lint surface (`make lint` = `uv run ruff check
+# daydream tests`, plus the standalone rl project's `ruff check .`), so a
+# staged file outside every lint scope (e.g. scripts/*.py, mypy_stubs/) is
+# skipped rather than hard-blocked by a rule CI never enforces.
+py_files=()
+while IFS= read -r path; do
+    case "$path" in
+        daydream/*|tests/*|rl/daydream_review_v1/*) py_files+=("$path") ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.py' | tr '\0' '\n')
+if [ "${#py_files[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+echo "→ Running ruff on staged Python files..."
+# Lint each file from its pre-commit (index) content, never the working tree:
+# `git show :<path>` emits the exact blob that will be committed, so a file with
+# both staged and unstaged edits is judged only on the staged state.
+status=0
+for path in "${py_files[@]}"; do
+    # --stdin-filename keeps ruff's per-path config resolution (pyproject.toml
+    # discovery) on the real file name while the bytes come from the index.
+    set +e
+    git show ":$path" | uv run ruff check --stdin-filename "$path" -
+    rc=$?
+    set -e
+    if [ "$rc" -gt "$status" ]; then
+        status=$rc
+    fi
+done
+if [ "$status" -ne 0 ]; then
+    echo ""
+    echo "✗ ruff found problems in staged files — fix them or run 'make lint' for the full check"
+    exit "$status"
+fi
