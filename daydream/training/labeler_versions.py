@@ -11,7 +11,7 @@ import hashlib
 import json
 from typing import Any
 
-RUBRIC_SCHEMA_VERSION = "980-rubric-r1"
+RUBRIC_SCHEMA_VERSION = "980-rubric-r2"
 LABELER_POLICY_VERSION = "980-policy-r1"
 REPLY_CLASSIFIER_VERSION = "980-classifier-r1"
 REPLY_EVIDENCE_DIGEST_FORMAT = "sha256/1"

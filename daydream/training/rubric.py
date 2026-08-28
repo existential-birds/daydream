@@ -13,6 +13,10 @@ A :class:`Rubric` knows two things:
   :func:`derive_outcome_label`. Both are pure functions — invalid
   invariants (e.g. ``unresolved > total``) are not validated here;
   upstream extractors guarantee them.
+
+Per-finding label vocabulary: ``accepted`` / ``rejected`` (decisive
+classifier dispositions), ``ambiguous`` / ``unanswered`` /
+``missing`` (non-decisive), and ``unknown`` (non-PR posterior sources).
 """
 
 from __future__ import annotations
@@ -30,7 +34,10 @@ from daydream.training.labeler_signals import (
 
 PosteriorSource = Literal["pr_review", "local_branch", "none"]
 
-PerFindingLabel = Literal["accepted", "contested", "rejected", "unknown", "missing"]
+PerFindingLabel = Literal["accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown", "contested"]
+
+_DECISIVE = ("accepted", "rejected")
+_NON_DECISIVE = ("ambiguous", "unanswered", "missing")
 
 
 @dataclass(frozen=True)
@@ -38,7 +45,8 @@ class Rubric:
     """Bundle of posterior signals + the discriminator for outcome derivation.
 
     Attributes:
-        pr_merge: Whether the originating PR was merged.
+        pr_merge: Whether the originating PR was merged (plus preserved
+            PR ``state``/``draft`` context).
         fix_applied: Layered-cascade verdict on whether the recommended
             diff landed upstream within the review window.
         comment_resolution: Proxy for "review comments addressed".
@@ -46,9 +54,9 @@ class Rubric:
             row originated from a PR.
         posterior_source: Discriminator selecting which sub-signal
             carries the authoritative outcome label.
-        per_finding_labels: One outcome label per recorded finding
-            (fingerprint-joined), or ``None`` when no per-finding join was
-            performed.
+        per_finding_resolutions: Per-finding dispositions joined by
+            fingerprint, or ``None`` when no per-finding join was
+            performed. Serialized as ``per_finding_outcomes``.
     """
 
     pr_merge: PRMergeSignal
@@ -56,7 +64,7 @@ class Rubric:
     comment_resolution: CommentResolutionSignal
     local_commit_applied: LocalCommitAppliedSignal | None
     posterior_source: PosteriorSource
-    per_finding_labels: list[str] | None = None
+    per_finding_resolutions: list[PerFindingResolution] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation with explicit key order.
@@ -69,6 +77,8 @@ class Rubric:
             "pr_merge": {
                 "merged": self.pr_merge.merged,
                 "merged_at": self.pr_merge.merged_at,
+                "state": self.pr_merge.state,
+                "draft": self.pr_merge.draft,
             },
             "fix_applied": {
                 "verdict": self.fix_applied.verdict,
@@ -84,8 +94,8 @@ class Rubric:
         }
         if self.local_commit_applied is not None:
             out["local_commit_applied"] = {"verdict": self.local_commit_applied.verdict}
-        if self.per_finding_labels is not None:
-            out["per_finding_outcomes"] = list(self.per_finding_labels)
+        if self.per_finding_resolutions is not None:
+            out["per_finding_outcomes"] = derive_per_finding_labels(self, self.per_finding_resolutions)
         return out
 
 
@@ -94,13 +104,15 @@ def derive_outcome_label(rubric: Rubric) -> str:
 
     Selection follows ``rubric.posterior_source``:
 
-    * ``"pr_review"`` — merge-state plus comment resolution decide:
-      ``"accepted"`` (merged, at least one tracked daydream comment, none
-      unresolved), ``"contested"`` (merged but unresolved > 0),
-      ``"rejected"`` (not merged), or ``"unknown"`` (merged with **zero**
-      tracked comments). A merge alone is not an accept: with ``total == 0``
-      the run has no evidence it contributed anything to the PR, and
-      ``unresolved == 0`` would otherwise be vacuously true.
+    * ``"pr_review"`` — conservatively aggregate the per-finding
+      dispositions (never bare merge state): ``"accepted"`` when every
+      disposition is ``accepted`` and at least one finding was mapped,
+      ``"rejected"`` when every disposition is ``rejected`` (also with at
+      least one mapped finding), ``"contested"`` when decisive
+      dispositions are mixed or decisive evidence coexists with
+      ambiguous/unanswered/missing findings, and ``"unknown"`` when no
+      finding was mapped or none of the dispositions is decisive. Merge
+      state is context only — it never decides the label.
     * ``"local_branch"`` — passes through the verdict on
       :attr:`Rubric.local_commit_applied`.
     * ``"none"`` — always ``"unknown"``.
@@ -110,14 +122,19 @@ def derive_outcome_label(rubric: Rubric) -> str:
         ``"unknown"``.
     """
     if rubric.posterior_source == "pr_review":
-        if rubric.pr_merge.merged:
-            if rubric.comment_resolution.total == 0:
-                # No tracked comments ⇒ unresolved == 0 is vacuous, not evidence.
-                return "unknown"
-            if rubric.comment_resolution.unresolved == 0:
-                return "accepted"
+        dispositions = [r.disposition for r in (rubric.per_finding_resolutions or [])]
+        if not dispositions:
+            return "unknown"
+        decisive = [d for d in dispositions if d in _DECISIVE]
+        if not decisive:
+            return "unknown"
+        if any(d in _NON_DECISIVE for d in dispositions):
             return "contested"
-        return "rejected"
+        if all(d == "accepted" for d in decisive):
+            return "accepted"
+        if all(d == "rejected" for d in decisive):
+            return "rejected"
+        return "contested"
     if rubric.posterior_source == "local_branch":
         # Extractor invariant: posterior_source="local_branch" implies
         # local_commit_applied is not None.
@@ -140,19 +157,15 @@ def derive_per_finding_labels(
 ) -> list[PerFindingLabel]:
     """Reduce per-finding resolutions to one outcome label per finding.
 
-    Only ``posterior_source == "pr_review"`` yields decisive per-finding
-    labels; any other source is inconclusive at finding granularity:
-
-    * ``"pr_review"`` on a **merged** PR:
-      - resolved (replied) → ``"accepted"``
-      - unresolved with a surviving comment → ``"contested"``
-      - unresolved with no comment (deleted / never posted) → ``"missing"``
-    * ``"pr_review"`` on an **unmerged** PR → all ``"rejected"``.
-    * any other posterior source → all ``"unknown"``.
+    Only ``posterior_source == "pr_review"`` yields dispositions as
+    labels, passed through verbatim in order — the classifier already
+    decided per finding, and merge state is context only (never mapped
+    onto a disposition). Any other posterior source is inconclusive at
+    finding granularity: all ``"unknown"``.
 
     Args:
-        rubric: The rubric whose posterior source and merge state decide
-            the mapping.
+        rubric: The rubric whose posterior source decides whether
+            dispositions may be trusted.
         per_finding: The per-finding resolutions to label, in order.
 
     Returns:
@@ -161,15 +174,4 @@ def derive_per_finding_labels(
     """
     if rubric.posterior_source != "pr_review":
         return ["unknown" for _ in per_finding]
-    if not rubric.pr_merge.merged:
-        return ["rejected" for _ in per_finding]
-
-    labels: list[PerFindingLabel] = []
-    for resolution in per_finding:
-        if resolution.resolved:
-            labels.append("accepted")
-        elif resolution.comment_id is not None:
-            labels.append("contested")
-        else:
-            labels.append("missing")
-    return labels
+    return [resolution.disposition for resolution in per_finding]

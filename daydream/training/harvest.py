@@ -117,7 +117,7 @@ from daydream.training.labeler_signals import (
     reviewer_logins_signal,
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
-from daydream.training.rubric import Rubric, derive_outcome_label, derive_per_finding_labels
+from daydream.training.rubric import Rubric, derive_outcome_label
 from daydream.ui import create_console, print_warning
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
@@ -475,7 +475,7 @@ def _build_rubric_pr(
             gh_api=gh_api,
             threads=comment_threads,
         )
-        rubric = replace(rubric, per_finding_labels=list(derive_per_finding_labels(rubric, per_finding)))
+        rubric = replace(rubric, per_finding_resolutions=list(per_finding))
     return rubric
 
 

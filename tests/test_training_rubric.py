@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
     LocalCommitAppliedSignal,
+    PerFindingDisposition,
     PerFindingResolution,
     PRMergeSignal,
 )
@@ -45,136 +44,83 @@ def test_rubric_serializes_with_local_source() -> None:
     assert rub.to_dict()["local_commit_applied"] == {"verdict": "applied"}
 
 
-@pytest.mark.parametrize(
-    ("rubric", "expected"),
-    [
-        pytest.param(
-            Rubric(
-                pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-                fix_applied=FixAppliedSignal("applied", 1, 1, ["c1"]),
-                comment_resolution=CommentResolutionSignal(2, 2, 0),
-                local_commit_applied=None,
-                posterior_source="pr_review",
-            ),
-            "accepted",
-            id="pr-merged-all-resolved",
-        ),
-        pytest.param(
-            Rubric(
-                pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-                comment_resolution=CommentResolutionSignal(0, 0, 0),
-                local_commit_applied=None,
-                posterior_source="pr_review",
-            ),
-            "unknown",
-            id="pr-merged-no-comments",
-        ),
-        pytest.param(
-            Rubric(
-                pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-                fix_applied=FixAppliedSignal("applied", 1, 1, ["c1"]),
-                comment_resolution=CommentResolutionSignal(3, 1, 2),
-                local_commit_applied=None,
-                posterior_source="pr_review",
-            ),
-            "contested",
-            id="pr-merged-unresolved",
-        ),
-        pytest.param(
-            Rubric(
-                pr_merge=PRMergeSignal(False, None),
-                fix_applied=FixAppliedSignal("not_applied", 0, 1, []),
-                comment_resolution=CommentResolutionSignal(1, 0, 1),
-                local_commit_applied=None,
-                posterior_source="pr_review",
-            ),
-            "rejected",
-            id="pr-closed-unmerged",
-        ),
-        pytest.param(
-            Rubric(
-                pr_merge=PRMergeSignal(False, None),
-                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-                comment_resolution=CommentResolutionSignal(0, 0, 0),
-                local_commit_applied=LocalCommitAppliedSignal("applied"),
-                posterior_source="local_branch",
-            ),
-            "accepted",
-            id="local-branch-applied",
-        ),
-        pytest.param(
-            Rubric(
-                pr_merge=PRMergeSignal(False, None),
-                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-                comment_resolution=CommentResolutionSignal(0, 0, 0),
-                local_commit_applied=LocalCommitAppliedSignal("rejected"),
-                posterior_source="local_branch",
-            ),
-            "rejected",
-            id="local-branch-rejected",
-        ),
-        pytest.param(
-            Rubric(
-                pr_merge=PRMergeSignal(False, None),
-                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-                comment_resolution=CommentResolutionSignal(0, 0, 0),
-                local_commit_applied=LocalCommitAppliedSignal("unknown"),
-                posterior_source="none",
-            ),
-            "unknown",
-            id="no-signal",
-        ),
-    ],
-)
-def test_derive_outcome_label(rubric: Rubric, expected: str) -> None:
-    """Derive accepted, rejected, unknown, and local labels from rubric evidence."""
-    assert derive_outcome_label(rubric) == expected
-
-
-def _pr_rubric(*, merged: bool, source: PosteriorSource = "pr_review") -> Rubric:
-    """A minimal rubric for per-finding label derivation."""
+def _fp_rubric(
+    pr_merge: PRMergeSignal, resolutions: list[PerFindingResolution], source: PosteriorSource = "pr_review"
+) -> Rubric:
     return Rubric(
-        pr_merge=PRMergeSignal(merged, "2026-01-01T00:00:00Z" if merged else None),
+        pr_merge=pr_merge,
         fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=None if source == "pr_review" else LocalCommitAppliedSignal("unknown"),
+        comment_resolution=CommentResolutionSignal(
+            len(resolutions),
+            sum(r.disposition == "accepted" for r in resolutions),
+            sum(r.disposition in ("unanswered", "missing") for r in resolutions),
+        ),
+        local_commit_applied=None,
         posterior_source=source,
+        per_finding_resolutions=resolutions,
     )
 
 
-def test_derive_per_finding_labels_mixed() -> None:
-    """Merged PR: a replied finding is accepted, an unreplied one contested."""
-    rub = _pr_rubric(merged=True)
-    per_finding = [
-        PerFindingResolution(fingerprint="a" * 64, resolved=True, comment_id=1),
-        PerFindingResolution(fingerprint="b" * 64, resolved=False, comment_id=2),
-    ]
-    assert derive_per_finding_labels(rub, per_finding) == ["accepted", "contested"]
+def _res(disp: PerFindingDisposition) -> PerFindingResolution:
+    return PerFindingResolution(
+        fingerprint="a" * 64,
+        comment_id=1 if disp != "missing" else None,
+        disposition=disp,
+        evidence=[],
+        evidence_digest="x",
+    )
 
 
-def test_derive_per_finding_labels_rejected() -> None:
-    """Unmerged PR: every finding is rejected regardless of reply state."""
-    rub = _pr_rubric(merged=False)
-    per_finding = [
-        PerFindingResolution(fingerprint="a" * 64, resolved=True, comment_id=1),
-        PerFindingResolution(fingerprint="b" * 64, resolved=False, comment_id=None),
-    ]
-    assert derive_per_finding_labels(rub, per_finding) == ["rejected", "rejected"]
+MERGED = PRMergeSignal(True, "2026-01-01T00:00:00Z", state="merged")
 
 
-def test_derive_per_finding_labels_missing() -> None:
-    """Merged PR: an unresolved finding whose comment vanished is missing."""
-    rub = _pr_rubric(merged=True)
-    per_finding = [PerFindingResolution(fingerprint="a" * 64, resolved=False, comment_id=None)]
-    assert derive_per_finding_labels(rub, per_finding) == ["missing"]
+def test_run_label_all_accepted_any_merge_state() -> None:
+    """All-accepted maps to accepted regardless of merge state (M22/M10)."""
+    for pr in (MERGED, PRMergeSignal(False, None, state="open"), PRMergeSignal(False, None, state="closed")):
+        assert derive_outcome_label(_fp_rubric(pr, [_res("accepted")])) == "accepted"
 
 
-def test_derive_per_finding_labels_local_branch() -> None:
-    """Non-pr_review posterior yields unknown for every finding."""
-    rub = _pr_rubric(merged=False, source="local_branch")
-    per_finding = [
-        PerFindingResolution(fingerprint="a" * 64, resolved=True, comment_id=1),
-        PerFindingResolution(fingerprint="b" * 64, resolved=False, comment_id=2),
-    ]
-    assert derive_per_finding_labels(rub, per_finding) == ["unknown", "unknown"]
+def test_run_label_all_rejected_any_merge_state() -> None:
+    for pr in (MERGED, PRMergeSignal(False, None, state="closed")):
+        assert derive_outcome_label(_fp_rubric(pr, [_res("rejected")])) == "rejected"
+
+
+def test_run_label_mixed_decisive_is_contested() -> None:
+    """Mixed decisive evidence → contested (M9); the amelia#626 shape (M10)."""
+    rub = _fp_rubric(MERGED, [_res("accepted"), _res("rejected")])
+    assert derive_outcome_label(rub) == "contested"
+
+
+def test_run_label_decisive_with_non_decisive_is_contested() -> None:
+    rub = _fp_rubric(MERGED, [_res("accepted"), _res("unanswered"), _res("missing")])
+    assert derive_outcome_label(rub) == "contested"
+
+
+def test_run_label_no_decisive_evidence_is_unknown() -> None:
+    for pr in (MERGED, PRMergeSignal(False, None, state="open")):
+        for disps in ([], [_res("ambiguous")], [_res("unanswered")], [_res("missing")]):
+            assert derive_outcome_label(_fp_rubric(pr, disps)) == "unknown"
+
+
+def test_run_label_local_branch_unchanged() -> None:
+    """The local-branch posterior semantics are byte-stable (Out of Scope)."""
+    rub = Rubric(
+        pr_merge=PRMergeSignal(False, None),
+        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+        comment_resolution=CommentResolutionSignal(0, 0, 0),
+        local_commit_applied=LocalCommitAppliedSignal("applied"),
+        posterior_source="local_branch",
+    )
+    assert derive_outcome_label(rub) == "accepted"
+
+
+def test_per_finding_labels_come_from_dispositions() -> None:
+    """Per-finding labels pass dispositions through; merge state is irrelevant (M10)."""
+    rub = _fp_rubric(PRMergeSignal(False, None, state="closed"), [])
+    per = [_res("accepted"), _res("rejected"), _res("ambiguous"), _res("unanswered"), _res("missing")]
+    assert derive_per_finding_labels(rub, per) == ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
+
+
+def test_per_finding_non_pr_source_stays_unknown() -> None:
+    rub = _fp_rubric(MERGED, [], source="local_branch")
+    assert derive_per_finding_labels(rub, [_res("accepted")]) == ["unknown"]
