@@ -589,6 +589,32 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     assert "not in the price table" not in out
 
 
+def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
+    """The backend name is a fallback, not an actual model identity."""
+    p = _write_trajectory(
+        tmp_path,
+        model="osprey",
+        steps=[
+            _user_step(),
+            _agent_step(
+                step_id=2,
+                phase="exploration",
+                model="osprey",
+                prompt=0,
+                completion=0,
+                cached=0,
+            ),
+        ],
+    )
+
+    out = render_run_info_block([p])
+
+    assert "- **Model:** unknown" in out
+    exploration_row = next(line for line in out.splitlines() if line.startswith("| Exploration |"))
+    assert [cell.strip() for cell in exploration_row.split("|")][2] == "unknown"
+    assert "| osprey |" not in out
+
+
 # Duration formatting
 @pytest.mark.parametrize(
     ("seconds", "expected"),

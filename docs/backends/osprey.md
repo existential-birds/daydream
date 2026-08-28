@@ -57,10 +57,13 @@ are also explicit bounded backend failures.
 ## Identity and tool calls
 
 The successful `ResultEvent` continuation retains Osprey’s provider, model,
-session ID, terminal outcome, and exit code. Tool calls retain the producer’s
-underlying `tool_name` and `tool_call_id`, including MCP calls resolved through
-Tool Search. Daydream’s existing trajectory recorder continues to own the
-top-level run identity.
+session ID, terminal outcome, and exit code. The event’s `model_name` carries
+that same resolved session model into Daydream’s trajectory, including when
+Osprey did not report per-turn usage. The backend’s display model is
+`unknown` until `session_start` resolves an omitted model. Tool calls retain
+the producer’s underlying `tool_name` and `tool_call_id`, including MCP calls
+resolved through Tool Search. Daydream’s existing trajectory recorder
+continues to own the top-level run identity.
 
 Use this boundary rather than implementing another Python agent loop. Protocol
 drift requires an explicit Osprey JSONL version change and a corresponding
