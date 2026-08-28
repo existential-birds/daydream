@@ -235,6 +235,28 @@ def test_entrypoint_backend_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None
     assert "pi" in str(exc.value)
 
 
+def test_entrypoint_backend_allowlist_pi_and_claude_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daydream.benchmark.harbor import entrypoint
+
+    for value in ("pi", "claude", "CLAUDE", " claude "):
+        monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", value)
+        assert entrypoint.require_supported_backend() == value.strip().lower()
+
+
+def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.benchmark.harbor import entrypoint
+
+    for value in ("codex", "opencode"):
+        monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", value)
+        with pytest.raises(entrypoint.EntrypointError) as exc:
+            entrypoint.require_supported_backend()
+        assert "'pi'" in str(exc.value) and "'claude'" in str(exc.value)
+    monkeypatch.delenv("DAYDREAM_REVIEW_BACKEND", raising=False)
+    assert entrypoint.require_supported_backend() == "pi"
+
+
 # ---------------------------------------------------------------------------
 # Task 5: entrypoint — publish candidate artifact + failure modes
 # ---------------------------------------------------------------------------

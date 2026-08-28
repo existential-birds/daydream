@@ -36,6 +36,9 @@ _CASE_ID_ENV = "DAYDREAM_REVIEW_CASE_ID"
 _BASE_REF_ENV = "DAYDREAM_REVIEW_BASE_REF"
 _HEAD_REF_ENV = "DAYDREAM_REVIEW_HEAD_REF"
 _BACKEND_ENV = "DAYDREAM_REVIEW_BACKEND"
+# Shared allowlist backing both the host-side agent gate and the in-container
+# gate; any new reviewer backend must be added here.
+_SUPPORTED_BACKENDS: tuple[str, ...] = ("pi", "claude")
 _API_KEY_ENV = "DAYDREAM_REVIEW_API_KEY"
 _BASE_URL_ENV = "DAYDREAM_REVIEW_BASE_URL"
 _REPO_DIR_ENV = "DAYDREAM_REVIEW_REPO_DIR"
@@ -110,16 +113,17 @@ def build_run_config(
 
 
 def require_supported_backend() -> str:
-    """Refuse any backend other than ``pi``, before any reviewing.
+    """Refuse any backend other than ``pi`` or ``claude``, before any reviewing.
 
     Reads ``DAYDREAM_REVIEW_BACKEND`` (default ``"pi"``). An unsupported
     backend raises :class:`EntrypointError` before tools are installed or
     network access is widened.
     """
     backend = os.environ.get(_BACKEND_ENV, "pi").strip().lower()
-    if backend != "pi":
+    if backend not in _SUPPORTED_BACKENDS:
+        supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
         raise EntrypointError(
-            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'pi' is supported"
+            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
         )
     return backend
 
