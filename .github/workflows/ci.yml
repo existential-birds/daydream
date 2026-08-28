@@ -54,7 +54,22 @@ jobs:
         run: docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml
 
       - name: Run tests
-        run: uv run pytest -n auto
+        # The coverage flags live here (not in pyproject addopts), so targeted
+        # runs like `pytest tests/foo.py` stay plain and never trip the 87%
+        # floor even when all their tests pass (#336). Keep in sync with the
+        # local Makefile test recipe (local == CI).
+        run: uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        # Machine-readable XML from pytest-cov (--cov-report=xml on the Run tests
+        # step above, #932). Uploaded on every check run so coverage results are
+        # inspectable after any run, not just green ones.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ea165f8d65b6e75b540449e92b4886f43607fa02 v4.6.2
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: error
 
   rl-check:
     runs-on: blacksmith-4vcpu-ubuntu-2404
