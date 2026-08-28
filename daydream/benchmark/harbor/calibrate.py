@@ -148,21 +148,22 @@ def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
 def _judge_host_from_env(env: dict[str, Any]) -> str:
     """Return the normalized-lowercase judge host for ``env``.
 
-    An explicit anthropic provider routes to ``api.anthropic.com``; the
-    openai-compatible provider requires an explicit base URL, resolves it via
-    the packaged ``resolve_base_url``, and returns that URL's host. Missing
-    providers fail closed rather than selecting an implicit API.
+    An explicit anthropic or claude-cli provider routes to
+    ``api.anthropic.com``; the openai-compatible provider requires an explicit
+    base URL, resolves it via the packaged ``resolve_base_url``, and returns
+    that URL's host. Missing providers fail closed rather than selecting an
+    implicit API.
     """
     sr = _load_judge_template()
     provider = env.get("DAYDREAM_JUDGE_PROVIDER") or ""
     if not provider:
         raise ValueError("missing DAYDREAM_JUDGE_PROVIDER")
-    if provider not in {"anthropic", "openai-compatible"}:
+    if provider not in {"anthropic", "openai-compatible", "claude-cli"}:
         raise ValueError(
             f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; "
-            "expected anthropic or openai-compatible"
+            "expected anthropic, openai-compatible, or claude-cli"
         )
-    if provider == "anthropic":
+    if provider in {"anthropic", "claude-cli"}:
         return "api.anthropic.com"
     if not env.get("DAYDREAM_JUDGE_BASE_URL"):
         raise ValueError("missing DAYDREAM_JUDGE_BASE_URL for openai-compatible provider")
