@@ -173,6 +173,34 @@ def test_preflight_requires_explicit_judge_endpoint(tmp_path: Path) -> None:
     assert any("missing DAYDREAM_JUDGE_BASE_URL" in error for error in errs)
 
 
+def test_preflight_claude_cli_judge_needs_no_base_url(tmp_path: Path) -> None:
+    """claude-cli resolves its judge host (api.anthropic.com) without a base URL."""
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path, judge_allowed_hosts=["api.anthropic.com"])
+    _seed_compiled_task(ws, reviewer=["review.example"], judge=["api.anthropic.com"])
+    errs = run_mod._preflight(
+        ws,
+        oracle=True,
+        env=_env(DAYDREAM_JUDGE_PROVIDER="claude-cli", DAYDREAM_JUDGE_BASE_URL=None),
+        docker_ok=_docker_ok,
+    )
+    assert not any("cannot resolve judge host" in e for e in errs)
+    assert errs == []
+
+
+def test_spend_summary_prints_claude_cli_judge_host(tmp_path: Path) -> None:
+    import daydream.benchmark.harbor.run as run_mod
+
+    text = run_mod._pre_run_summary(
+        _ws(tmp_path), env=_env(DAYDREAM_JUDGE_PROVIDER="claude-cli")
+    )
+    # exact-host match avoids CodeQL py/incomplete-url-substring-sanitization
+    host_lines = [ln for ln in text.splitlines() if ln.strip().startswith("judge host:")]
+    assert len(host_lines) == 1
+    assert host_lines[0].split(":", 1)[1].strip() == "api.anthropic.com"
+
+
 def test_preflight_blocks_judge_host_outside_allowlist(tmp_path: Path) -> None:
     import daydream.benchmark.harbor.run as run_mod
 

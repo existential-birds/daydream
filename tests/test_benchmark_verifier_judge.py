@@ -1,6 +1,7 @@
 """Fake-HTTP tests for the isolated Harbor verifier entry (``templates/tests/score_review.py``).
 
-Exercises the self-contained judge clients (Anthropic + OpenAI-compatible),
+Exercises the self-contained judge clients (Anthropic, OpenAI-compatible,
+Claude Code CLI),
 the bounded prompt renderer, strict verdict parsing, shared retry/redirect
 policy, concurrency/pair-cap runner, fail-whole-task error path, provider
 selection, oracle parity, and end-to-end ``run_verifier`` — all with an
@@ -544,6 +545,40 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_pa
     assert len(details["errors"]) >= 1                            # bounded diagnostic written
 
 
+def test_provider_selection_claude_cli_relaxes_api_key_only(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    sr = sr_module
+    base = {"DAYDREAM_JUDGE_PROVIDER": "claude-cli", "DAYDREAM_JUDGE_MODEL": "m"}
+
+    client = sr._build_client({**base, "CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+    assert isinstance(client, sr.ClaudeCliJudgeClient)          # no API key required
+
+    # Egress is still bounded for the CLI provider: api.anthropic.com (the
+    # resolved judge host) is checked against the effective allowlist at build
+    # time, same fail-closed timing as the HTTP branches -- a container
+    # allowlist omitting it fails before any trial, not mid-trial.
+    with pytest.raises(sr.VerifierError, match="not in the verifier allowlist"):
+        sr._build_client({**base, "CLAUDE_CODE_OAUTH_TOKEN": "tok",
+                          "DAYDREAM_JUDGE_ALLOWED_HOSTS": "judge.example"})
+    ok = sr._build_client({**base, "CLAUDE_CODE_OAUTH_TOKEN": "tok",
+                           "DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com"})
+    assert isinstance(ok, sr.ClaudeCliJudgeClient)
+
+    with pytest.raises(sr.VerifierError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        sr._build_client(base)                                   # missing token -> typed diagnostic
+    with pytest.raises(sr.VerifierError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        sr._build_client({**base, "CLAUDE_CODE_OAUTH_TOKEN": ""})  # empty token also rejected
+    with pytest.raises(sr.VerifierError, match="missing DAYDREAM_JUDGE_MODEL"):
+        sr._build_client({"DAYDREAM_JUDGE_PROVIDER": "claude-cli", "CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+    # other providers unchanged: API key still mandatory, same message
+    with pytest.raises(sr.VerifierError, match="missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY"):
+        sr._build_client({"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m"})
+    with pytest.raises(sr.VerifierError, match="unsupported DAYDREAM_JUDGE_PROVIDER 'bogus'; "
+                                              "expected anthropic, openai-compatible, or claude-cli"):
+        sr._build_client(
+            {"DAYDREAM_JUDGE_PROVIDER": "bogus", "DAYDREAM_JUDGE_MODEL": "m", "DAYDREAM_JUDGE_API_KEY": "k"}
+        )
+
+
 def test_provider_selection_builds_expected_client(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     sr = sr_module
 
@@ -782,6 +817,23 @@ def test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1(
 
 
 
+def _fake_cli_runner(stdout_arg: str, rc: int = 0) -> Any:
+    """Fake subprocess seam for ``ClaudeCliJudgeClient``: fixed returncode + stdout."""
+
+    class FakeProc:
+        returncode = rc
+        stdout = stdout_arg  # class bodies cannot see the enclosing function scope
+
+    calls: list[list[Any]] = []
+
+    async def runner(argv: Any, env: Any) -> Any:
+        calls.append([argv, env])
+        return FakeProc()
+
+    runner.calls = calls  # type: ignore[attr-defined]
+    return runner
+
+
 @pytest.mark.asyncio
 async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: Any) -> None:
     sr = sr_module
@@ -819,6 +871,23 @@ async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: A
         with pytest.raises(sr.VerifierError):
             await provider.complete_json(user="u", system="s", max_tokens=64)
         assert len(calls) == 3
+
+    # Third producer, identical verdict: the claude-cli client through the
+    # injectable subprocess seam parses the same verdict JSON.
+    cli = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(
+        json.dumps({"is_error": False, "subtype": "success", "type": "result",
+                    "result": '{"match": true, "confidence": 0.9, "reasoning": "same"}'})))
+    c = await cli.complete_json(user="u", system="s", max_tokens=64)
+    assert c == {"match": True, "confidence": 0.9, "reasoning": "same"}
+
+    # Consistent with the HTTP clients (a non-429 4xx is terminal, not
+    # retryable), a runner that exits nonzero is a terminal failure: the
+    # VerifierError is raised on the first attempt, never retried like a 503.
+    failing = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner("", rc=1))
+    with pytest.raises(sr.VerifierError) as e:
+        await failing.complete_json(user="u", system="s", max_tokens=64)
+    assert "exit 1" in str(e.value)
+    assert len(failing.runner.calls) == 1
 
 
 def test_escape_neutralizes_all_four_delimiters_in_both_roles(sr_module: Any) -> None:
@@ -1150,7 +1219,7 @@ def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module: An
             {"DAYDREAM_JUDGE_PROVIDER": None, "DAYDREAM_JUDGE_MODEL": "m",
              "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
         )
-    # exactly anthropic | openai-compatible accepted
+    # exactly anthropic | openai-compatible | claude-cli accepted
     cert = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "https://api.openai.com/v1"}
     assert isinstance(sr._build_client(cert), sr.OpenAIJudgeClient)
@@ -1158,7 +1227,7 @@ def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module: An
     for bad in ("martian", "garbage", "Anthropic"):
         with pytest.raises(sr.VerifierError) as e:
             sr._build_client({**cert, "DAYDREAM_JUDGE_PROVIDER": bad})
-        assert "expected anthropic or openai-compatible" in str(e.value)
+        assert "expected anthropic, openai-compatible, or claude-cli" in str(e.value)
     # a base URL host outside the allowlist fails closed at build time
     with pytest.raises(sr.VerifierError):
         sr._build_client({**cert, "DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com"})
@@ -1347,6 +1416,28 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
         assert "allowlist" in str(e.value)
 
 
+def test_claude_cli_missing_token_writes_typed_error_artifact(
+    sr_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sr = sr_module
+    gold = tmp_path / "golden-review.json"
+    gold.write_text(json.dumps([{"case_id": "c1"}]))
+    monkeypatch.setenv("DAYDREAM_JUDGE_ARTIFACT_PATH", str(tmp_path / "review.json"))
+    monkeypatch.setenv("DAYDREAM_JUDGE_OUT_PATH", str(tmp_path / "out"))
+    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "claude-cli")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    rc = sr.main()
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["verifier_error"] == 1 and payload["reward"] == 0.0
+    # typed diagnostic, NOT "no judge client configured"
+    details = json.loads((tmp_path / "out" / "reward-details.json").read_text())
+    assert any("CLAUDE_CODE_OAUTH_TOKEN" in e for e in details["errors"])
+
+
 def test_emit_reward_emits_full_reward_dict_and_exit_code(sr_module: Any, capsys: pytest.CaptureFixture[str]) -> None:
     sr = sr_module
     r = sr.verifier_core.Reward(reward=0.8, tp=2, verifier_error=0)
@@ -1436,3 +1527,284 @@ def test_run_verifier_malformed_judge_output_is_unscored(sr_module: Any, tmp_pat
     assert not (out / "reward.json").exists()
     details = json.loads((out / "reward-details.json").read_text())
     assert len(details["errors"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module: Any) -> None:
+    sr = sr_module
+    calls = []
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.args_seen = None
+        # returncode 0, stdout = one JSON line with the verdict in "result"
+        rc = 0
+        stdout = json.dumps({
+            "is_error": False, "subtype": "success", "type": "result",
+            "result": '{"match": true, "confidence": 0.9, "reasoning": "same"}',
+        })
+        stderr = ""
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        return FakeProc()
+
+    client = sr.ClaudeCliJudgeClient(model="claude-x", runner=fake_run)
+    raw = await client.complete_json(user="<prompt>", system="sys", max_tokens=512)
+    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
+    argv = calls[0][0][0]
+    assert argv[0] == "claude" and "--output-format" in argv and "json" in argv
+    assert "--model" in argv and "claude-x" in argv
+    # Tool-scope lockdown: the spawned CLI carries the OAuth credential in its
+    # env, so tools must be denied outright -- no permission prompts, no read/
+    # execute surface for a prompt influenced by untrusted candidate text.
+    assert "--permission-mode" in argv and "plan" in argv
+    assert "--allowedTools" in argv and "[]" in argv
+    # The 512-token output budget maps onto the CLI via CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    # (the CLI exposes no --max-tokens flag), matching the HTTP clients' request cap.
+    assert calls[0][0][1]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "512"
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_timeout_kills_child_every_attempt(
+    sr_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sr = sr_module
+    kills: list[int] = []
+
+    class HangingProc:
+        """A spawned child that never produces output; kill() records the call."""
+
+        def __init__(self) -> None:
+            self.stdout = self  # the read() below doubles as the StreamReader seam
+
+        async def read(self, n: int) -> bytes:
+            await asyncio.sleep(3600)  # hang until the wait_for deadline kills us
+            raise AssertionError("unreachable: the deadline kills this read first")
+
+        async def wait(self) -> None:
+            await asyncio.sleep(3600)
+
+        def kill(self) -> None:
+            kills.append(1)
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        return HangingProc()
+
+    monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    assert "timeout" in str(e.value)
+    # Every hung attempt kills the child (once inside _claude_cli_stdout and
+    # again by the caller's backstop), so a retry or the next concurrent pair
+    # never sees a leftover claude process consuming quota/egress.
+    assert len(kills) == sr._MAX_RETRIES * 2
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_oversize_stdout_is_rejected_not_truncated(sr_module: Any) -> None:
+    sr = sr_module
+    oversized = "x" * (sr._RESPONSE_CAP_BYTES + 1)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(oversized))
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    assert "exceeds" in str(e.value) and "KiB" in str(e.value)
+    assert len(client.runner.calls) == 1  # terminal -- never retried, never truncated
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_parse_verdict_rejection_propagates_raw(sr_module: Any) -> None:
+    sr = sr_module
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(
+        json.dumps({"is_error": False, "type": "result",
+                    "result": '{"match": "yes", "confidence": 0.9, "reasoning": "r"}'})))
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    # parse_verdict raises VerifierError (not ValueError), so its bounded parse
+    # message propagates raw instead of being re-wrapped as (invalid verdict).
+    assert "match" in str(e.value)
+    assert "invalid verdict" not in str(e.value)
+    assert len(client.runner.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stdout_arg,needle",
+    [
+        ("", "empty output"),                                         # empty stdout
+        ("not json at all", "malformed output"),                      # malformed JSON
+        (json.dumps({"is_error": True, "type": "error"}), "cli reported error"),
+        (json.dumps({"is_error": False, "type": "result"}), "missing result"),
+    ],
+)
+async def test_claude_cli_terminal_failures_raise_immediately(
+    sr_module: Any, stdout_arg: str, needle: str
+) -> None:
+    """Non-timeout failure classes are terminal, never retried like a timeout.
+
+    rc != 0 is covered by ``test_both_providers_produce_identical_verdicts_and_errors``;
+    here the remaining terminal classes -- empty stdout, malformed output,
+    cli-reported error, missing result -- each raise VerifierError on the first
+    attempt instead of riding the 3-attempt backoff loop reserved for the
+    transient timeout class."""
+    sr = sr_module
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(stdout_arg))
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    assert needle in str(e.value)
+    assert len(client.runner.calls) == 1  # terminal -- no retry, no backoff
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_streaming_oversize_kills_child(sr_module: Any) -> None:
+    """Streaming-path over-cap kill: mid-stream totals past _RESPONSE_CAP_BYTES.
+
+    Unlike the str-seam oversize test, this drives the real incremental
+    ``StreamReader`` loop: a chunk at a time is accumulated, and the moment the
+    running total exceeds the cap the child is killed and the output rejected --
+    never read to completion and truncated-and-accepted."""
+    sr = sr_module
+    killed: list[int] = []
+
+    class OverflowStream:
+        def __init__(self) -> None:
+            self.stdout = self  # StreamReader-shaped: read() feeds the loop
+
+        async def read(self, n: int) -> bytes:
+            size = int(sr._STDOUT_CHUNK_BYTES)
+            return b"x" * size  # never EOF; total grows past the cap
+
+        async def wait(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            killed.append(1)
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        return OverflowStream()
+
+    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    assert "exceeds" in str(e.value) and "KiB" in str(e.value)
+    # Killed exactly once, inside _claude_cli_stdout: the VerifierError is
+    # terminal so the caller's timeout backstop is never reached.
+    assert len(killed) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_post_eof_wait_settles(sr_module: Any) -> None:
+    """The post-EOF ``wait()`` settle returns the collected verdict, no kill.
+
+    stdout EOF does not imply the child exited; the streaming loop must still
+    await ``wait()`` inside the same budget so the caller's exit-code check
+    sees a settled process."""
+    sr = sr_module
+    settled: list[int] = []
+
+    class SettlingProc:
+        def __init__(self) -> None:
+            self.stdout = self
+            self.eof = False
+
+        async def read(self, n: int) -> bytes:
+            if self.eof:
+                return b""  # EOF breaks the incremental loop
+            self.eof = True
+            return json.dumps({
+                "is_error": False, "subtype": "success", "type": "result",
+                "result": '{"match": true, "confidence": 0.9, "reasoning": "same"}',
+            }).encode("utf-8")
+
+        async def wait(self) -> None:
+            settled.append(1)  # reached only after stdout EOF
+
+        def kill(self) -> None:
+            raise AssertionError("a settled child must never be killed")
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        return SettlingProc()
+
+    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    raw = await client.complete_json(user="u")
+    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
+    assert len(settled) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_post_eof_wait_timeout_kills_child(
+    sr_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-EOF ``wait()`` settle past the deadline is killed, then retried.
+
+    A child whose stdout reached EOF but that never exits (e.g. blocked writing
+    to an undrained stderr pipe) must not burn the whole deadline silently: the
+    wait() settle inherits the timeout, the child is killed, and the timeout
+    retry loop proceeds."""
+    sr = sr_module
+    killed: list[int] = []
+
+    class StdoutEofThenWaitHangs:
+        def __init__(self) -> None:
+            self.stdout = self
+            self.eof = False
+
+        async def read(self, n: int) -> bytes:
+            if self.eof:
+                return b""
+            self.eof = True
+            return json.dumps({
+                "is_error": False, "subtype": "success", "type": "result",
+                "result": '{"match": true, "confidence": 0.9, "reasoning": "same"}',
+            }).encode("utf-8")
+
+        async def wait(self) -> None:
+            await asyncio.sleep(3600)  # child never settles
+
+        def kill(self) -> None:
+            killed.append(1)
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        return StdoutEofThenWaitHangs()
+
+    monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    assert "timeout" in str(e.value)
+    # Killed in _claude_cli_stdout's wait() deadline path and again by the
+    # caller's backstop on each of the _MAX_RETRIES attempts -- mirrors the
+    # hanging-read timeout test.
+    assert len(killed) == sr._MAX_RETRIES * 2
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_communicate_only_fallback(sr_module: Any) -> None:
+    """communicate()-only seam: no stdout attribute drains via communicate().
+
+    Exercises the fallback that processes with no exposed ``stdout`` stream
+    (both real pipes closed into one ``communicate()``) take: communicate()
+    drains stdout *and* stderr together, so the stderr pipe can never block the
+    parent regardless of volume."""
+    sr = sr_module
+    seen: list[tuple[bytes, bytes]] = []
+
+    class CommunicatingProc:
+        async def communicate(self) -> tuple[bytes, bytes]:
+            out = json.dumps({
+                "is_error": False, "subtype": "success", "type": "result",
+                "result": '{"match": true, "confidence": 0.9, "reasoning": "same"}',
+            }).encode("utf-8")
+            seen.append((out, b""))
+            return out, b""
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        return CommunicatingProc()
+
+    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    raw = await client.complete_json(user="u")
+    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
+    assert len(seen) == 1
+    assert seen[0][1] == b""  # stderr is drained by communicate, never blocks
+

@@ -136,11 +136,22 @@ def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
     validation to the packaged ``score_review._build_client`` so the two
     branches cannot silently drift (the judge template is an in-repo,
     editable file); only the injectable ``http=`` seam is added here, and
-    ``None`` leaves the client's real httpx behavior intact.
+    ``None`` leaves the client's real httpx behavior intact. The seam only
+    exists for the HTTP judge clients: the ``claude-cli`` provider shells the
+    Claude Code CLI (its injectable seam is the subprocess ``runner``), so an
+    injected ``http`` is rejected fail-closed rather than silently assigned to
+    an attribute that client never reads -- a no-op attribution would quietly
+    shell the real ``claude`` binary in what the caller believed was a
+    scripted run.
     """
     sr = _load_judge_template()
     client = sr._build_client(env)
     if http is not None:
+        if env.get("DAYDREAM_JUDGE_PROVIDER") == "claude-cli":
+            raise sr.VerifierError(
+                "http seam is not supported for the claude-cli judge provider "
+                "(it shells the Claude Code CLI; inject a fake subprocess runner instead)"
+            )
         client.http = http
     return client
 
@@ -148,21 +159,22 @@ def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
 def _judge_host_from_env(env: dict[str, Any]) -> str:
     """Return the normalized-lowercase judge host for ``env``.
 
-    An explicit anthropic provider routes to ``api.anthropic.com``; the
-    openai-compatible provider requires an explicit base URL, resolves it via
-    the packaged ``resolve_base_url``, and returns that URL's host. Missing
-    providers fail closed rather than selecting an implicit API.
+    An explicit anthropic or claude-cli provider routes to
+    ``api.anthropic.com``; the openai-compatible provider requires an explicit
+    base URL, resolves it via the packaged ``resolve_base_url``, and returns
+    that URL's host. Missing providers fail closed rather than selecting an
+    implicit API.
     """
     sr = _load_judge_template()
     provider = env.get("DAYDREAM_JUDGE_PROVIDER") or ""
     if not provider:
         raise ValueError("missing DAYDREAM_JUDGE_PROVIDER")
-    if provider not in {"anthropic", "openai-compatible"}:
+    if provider not in {"anthropic", "openai-compatible", "claude-cli"}:
         raise ValueError(
             f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; "
-            "expected anthropic or openai-compatible"
+            "expected anthropic, openai-compatible, or claude-cli"
         )
-    if provider == "anthropic":
+    if provider in {"anthropic", "claude-cli"}:
         return "api.anthropic.com"
     if not env.get("DAYDREAM_JUDGE_BASE_URL"):
         raise ValueError("missing DAYDREAM_JUDGE_BASE_URL for openai-compatible provider")

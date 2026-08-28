@@ -103,9 +103,12 @@ def test_judge_host_resolved_from_env() -> None:
     assert _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
                                  "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9"}) == "127.0.0.1"
     assert _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "anthropic"}) == "api.anthropic.com"
+    assert _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "claude-cli"}) == "api.anthropic.com"
     with pytest.raises(ValueError, match="missing DAYDREAM_JUDGE_PROVIDER"):
         _judge_host_from_env({})
     with pytest.raises(ValueError, match="unsupported DAYDREAM_JUDGE_PROVIDER"):
+        _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "bogus"})
+    with pytest.raises(ValueError, match="expected anthropic, openai-compatible, or claude-cli"):
         _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "bogus"})
     with pytest.raises(ValueError, match="missing DAYDREAM_JUDGE_BASE_URL"):
         _judge_host_from_env({

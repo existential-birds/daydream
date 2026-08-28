@@ -152,6 +152,7 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "
     for prefix in (
         "DAYDREAM_JUDGE_",
         "ANTHROPIC_",
+        "CLAUDE_CODE_",
         "OPENAI_",
         "OPENROUTER_",
         "PI_",

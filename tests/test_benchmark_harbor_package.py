@@ -258,6 +258,19 @@ def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned() -> None:
     assert "httpx" in text and "httpx>=" not in text and "httpx==0.28.1" in text
 
 
+def test_verifier_dockerfile_ships_pinned_node_and_claude_cli() -> None:
+    from daydream.benchmark.harbor import package as pkg
+
+    text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
+    assert "node-v22." in text                     # version-pinned Node tarball
+    # The CLI installs via `npm ci` from the embedded package-lock.json, so
+    # every transitive is version- and integrity-pinned (no registry re-resolution).
+    assert "npm ci" in text and "package-lock.json" in text
+    assert "@anthropic-ai/claude-code" in text and "2.1.250" in text
+    assert "ENTRYPOINT" not in text and "CMD" not in text and "/verifier" not in text  # guard set still clean
+    assert "httpx==0.28.1" in text and "httpx>=" not in text
+
+
 def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     import yaml
 
@@ -278,6 +291,10 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     assert job["metrics"] == [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}]
     assert "DAYDREAM_JUDGE_API_KEY" in job["verifier"]["env"]
     assert job["verifier"]["env"]["DAYDREAM_JUDGE_PROVIDER"] == "${DAYDREAM_JUDGE_PROVIDER}"
+    assert job["verifier"]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "${CLAUDE_CODE_OAUTH_TOKEN}"
+    assert job["verifier"]["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == (
+        "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+    )
 
     oracle = yaml.safe_load(pkg.render_job_config(oracle=True))
     assert oracle["agents"] == [{"name": "oracle"}]

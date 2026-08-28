@@ -2,14 +2,15 @@
 
 Stdlib + httpx only. Never imports daydream: this file must run unchanged
 inside a compiled-grade verifier image that has no daydream wheel. It wires a
-bounded per-pair judge prompt, two isolated external judge clients (Anthropic
-Messages + OpenAI-compatible) behind one ``complete_json`` seam, strict verdict
-parsing, a shared retry/redirect/timeout policy, a concurrency-10 runner, and
-``run_verifier`` which writes ``reward.json`` / ``reward-details.json``
-atomically.
+bounded per-pair judge prompt, three isolated external judge clients (Anthropic
+Messages + OpenAI-compatible + Claude Code CLI) behind one ``complete_json``
+seam, strict verdict parsing, a shared retry/redirect/timeout policy, a
+concurrency-10 runner, and ``run_verifier`` which writes ``reward.json`` /
+``reward-details.json`` atomically.
 
-The external judge surface is fail-closed and bounded: exactly
-``anthropic | openai-compatible`` providers are accepted, the judge host must
+The external judge surface is fail-closed and bounded: the
+``anthropic | openai-compatible | claude-cli`` providers are accepted, the judge
+host must
 sit in the configured allowlist (``DAYDREAM_JUDGE_ALLOWED_HOSTS``; own-host
 fallback when absent), redirects are bounded to ``_MAX_REDIRECTS``
 credential-preserving same-origin hops whose targets are re-validated against
@@ -51,6 +52,98 @@ class _AsyncHttpClient(Protocol):
 VerifierError = verifier_core.VerifierError
 
 
+def _terminate_proc(proc: Any) -> None:
+    """Best-effort kill of a spawned CLI child; a no-op on the seam fakes.
+
+    A hung or oversized child must never outlive the verifier, so every
+    timeout/over-cap exit kills it. Kill failures are swallowed: the
+    timeout/over-cap outcome the caller is recording must not be masked.
+    """
+    kill = getattr(proc, "kill", None) or getattr(proc, "terminate", None)
+    if kill is not None:
+        try:
+            kill()
+        except Exception:
+            pass
+
+
+async def _claude_cli_stdout(proc: Any) -> str:
+    """Collect a CLI subprocess's stdout as text, byte- and time-bounded.
+
+    Real ``asyncio`` processes expose ``proc.stdout`` as an incremental
+    ``StreamReader``; the injected test seam may instead expose the captured
+    stdout directly (as text or bytes). Either way the collected output is
+    size-capped at ``_RESPONSE_CAP_BYTES`` and rejected -- never truncated-and-
+    accepted, matching the HTTP clients' ``_parse_json_response`` posture -- and
+    total collection time is bounded by ``_REQUEST_TIMEOUT`` with the child
+    killed on timeout so a hung ``claude`` cannot accumulate across the retry
+    loop and the concurrency-10 fan-out.
+    """
+    stream = getattr(proc, "stdout", None)
+    if stream is None:
+        communicate = getattr(proc, "communicate", None)
+        if communicate is None:
+            return ""
+        try:
+            stream, _stderr_b = await asyncio.wait_for(
+                communicate(), timeout=_REQUEST_TIMEOUT
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            _terminate_proc(proc)
+            raise
+    if isinstance(stream, (str, bytes)):
+        raw = stream.encode("utf-8") if isinstance(stream, str) else stream
+        if len(raw) > _RESPONSE_CAP_BYTES:
+            _terminate_proc(proc)
+            raise VerifierError(
+                f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
+            )
+        return stream if isinstance(stream, str) else raw.decode("utf-8", errors="replace")
+    read = getattr(stream, "read", None)
+    if read is None:
+        return ""
+    # Real asyncio subprocess: read incrementally so memory stays bounded by
+    # _RESPONSE_CAP_BYTES even while the child is still streaming, and keep the
+    # whole collection inside the shared _REQUEST_TIMEOUT budget.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _REQUEST_TIMEOUT
+    parts: list[bytes] = []
+    total = 0
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            _terminate_proc(proc)
+            raise asyncio.TimeoutError
+        try:
+            chunk = await asyncio.wait_for(read(_STDOUT_CHUNK_BYTES), timeout=remaining)
+        except (asyncio.TimeoutError, TimeoutError):
+            _terminate_proc(proc)
+            raise
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _RESPONSE_CAP_BYTES:
+            _terminate_proc(proc)
+            raise VerifierError(
+                f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
+            )
+        parts.append(chunk)
+    # stdout EOF does not imply the child has exited; wait so the caller's
+    # exit-code check sees a settled process, still inside the same budget.
+    wait = getattr(proc, "wait", None)
+    if wait is not None:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            _terminate_proc(proc)
+            raise asyncio.TimeoutError
+        try:
+            await asyncio.wait_for(wait(), timeout=remaining)
+        except (asyncio.TimeoutError, TimeoutError):
+            _terminate_proc(proc)
+            raise
+    return b"".join(parts).decode("utf-8", errors="replace")
+
+
 class _InputFileNotFound(verifier_core.VerifierError):
     """A required input file is absent or unreadable — an infrastructure problem, not agent output.
 
@@ -74,6 +167,9 @@ _REQUEST_TIMEOUT = 60.0
 # and accepted -- above these sizes; redirects are bounded; diagnostics are
 # bounded and redacted before they reach any artifact or log.
 _RESPONSE_CAP_BYTES = 256 * 1024
+# Incremental read chunk for _claude_cli_stdout: verifier memory stays bounded
+# by _RESPONSE_CAP_BYTES even while a still-streaming child is mid-output.
+_STDOUT_CHUNK_BYTES = 64 * 1024
 _REASONING_CAP_BYTES = 32 * 1024
 _MAX_REDIRECTS = 3
 _ERROR_TEXT_CAP_BYTES = 4096
@@ -568,6 +664,135 @@ class AnthropicJudgeClient:
             )
 
 
+class ClaudeCliJudgeClient:
+    """Judge client that shells the pinned Claude Code CLI in non-interactive print mode.
+
+    Invokes ``claude -p --output-format json --model <model> --max-turns 1
+    --permission-mode plan --allowedTools [] [--append-system-prompt <system>]
+    <user>`` and parses the single JSON result object on stdout, passing
+    ``result`` through the strict ``parse_verdict``. The subprocess is an
+    injectable seam (``runner``, mirroring the ``http=`` seam on the HTTP
+    clients) defaulting to ``asyncio.create_subprocess_exec``. The OAuth token
+    is never placed on argv; it reaches the CLI only through the inherited
+    environment, whose tools are denied outright so the prompt-influenced
+    agent cannot read/execute/exfiltrate through them. Print-mode output is
+    capped at ``max_tokens`` via ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` and its
+    collected stdout is byte-capped and rejected whole -- never truncated-and-
+    accepted. Only the timeout failure class is transient and retried with the
+    same bounded policy as the HTTP clients; every other failure class (non-zero
+    exit, empty/malformed output, cli-reported error, missing result) is
+    terminal and raises on the first attempt. A timed-out child is
+    killed before the retry so hung processes cannot accumulate; every terminal
+    failure raises ``VerifierError`` naming only the failure class — never a
+    stderr echo, stack trace, or silent fallback to a partial verdict.
+    """
+
+    def __init__(self, model: str, *, runner: Any = None) -> None:
+        self.model = model
+        self.runner = runner
+
+    def _default_runner(self, argv: list[str], env: dict[str, str]) -> Any:
+        return asyncio.create_subprocess_exec(
+            *argv,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            # stderr is never surfaced (the contract keeps it out of every
+            # artifact), so route it to DEVNULL: a PIPE that goes undrained
+            # would let a child writing more than the ~64 KiB pipe buffer block
+            # on the stderr write, starving stdout EOF and burning the whole
+            # _REQUEST_TIMEOUT on every call before being killed and retried.
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+
+    async def complete_json(
+        self, *, user: str, system: str = "", max_tokens: int = 512
+    ) -> dict[str, Any]:
+        argv = [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--model",
+            self.model,
+            "--max-turns",
+            "1",
+            # Tool-scope lockdown: the spawned CLI is a tool-capable agent
+            # running with the OAuth credential in its env, so it must not be
+            # able to read/execute/exfiltrate via tools -- especially under a
+            # prompt influenced by untrusted candidate finding text. Deny every
+            # tool explicitly and keep the session read-only.
+            "--permission-mode",
+            "plan",
+            "--allowedTools",
+            "[]",
+        ]
+        if system:
+            argv += ["--append-system-prompt", system]
+        argv.append(user)
+        env = dict(os.environ)
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        # The CLI exposes no --max-tokens flag; print-mode output is capped via
+        # CLAUDE_CODE_MAX_OUTPUT_TOKENS so the 512-token budget the HTTP clients
+        # send in the request body is honored here too (cost symmetry), and an
+        # overlong verdict is rejected downstream, never truncated-and-accepted.
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
+        last_error = "claude-cli judge failed (unknown)"
+        for attempt in range(_MAX_RETRIES):
+            proc = None
+            try:
+                proc = await asyncio.wait_for(
+                    (self.runner or self._default_runner)(argv, env),
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                stdout = await _claude_cli_stdout(proc)
+                rc = getattr(proc, "returncode", getattr(proc, "rc", 0))
+                # Terminal failure classes raise on the first attempt, mirroring
+                # the HTTP clients (a non-429 4xx and a malformed-JSON parse are
+                # never retried): a non-zero exit (expired/revoked OAuth token,
+                # refused auth), empty stdout, malformed output, a cli-reported
+                # error, and a missing result will not resolve with retries --
+                # only the timeout class below is transient.
+                if rc != 0:
+                    raise VerifierError(f"claude-cli judge failed (exit {rc})")
+                if not stdout:
+                    raise VerifierError("claude-cli judge failed (empty output)")
+                try:
+                    payload = json.loads(stdout)
+                except (ValueError, TypeError):
+                    payload = None
+                if not isinstance(payload, dict):
+                    raise VerifierError("claude-cli judge failed (malformed output)")
+                if payload.get("is_error"):
+                    raise VerifierError("claude-cli judge failed (cli reported error)")
+                result = payload.get("result")
+                if not isinstance(result, str) or not result.strip():
+                    raise VerifierError("claude-cli judge failed (missing result)")
+                parsed: dict[str, Any] = json.loads(result)
+                # Strict validation via the shared parse_verdict;
+                # return the validated dict (judge_pairs re-parses).
+                parse_verdict(parsed)
+                return parsed
+            except (asyncio.TimeoutError, TimeoutError):
+                # A hung child must not outlive this attempt: kill it (here, as
+                # the backstop, and inside _claude_cli_stdout) so the retry loop
+                # and the concurrency-10 fan-out never accumulate living claude
+                # processes consuming quota and egress. A spawn timeout leaves
+                # no proc handle to kill.
+                _terminate_proc(proc)
+                last_error = "claude-cli judge failed (timeout)"
+            except ValueError:
+                # json.loads(result) rejected the CLI result string (a
+                # JSONDecodeError, a ValueError subclass): terminal, not
+                # retryable. A well-formed CLI result whose content is not a
+                # valid verdict is rejected by parse_verdict raising
+                # VerifierError directly, which propagates raw -- both outcomes
+                # fail closed through the shared verdict contract.
+                raise VerifierError("claude-cli judge failed (invalid verdict)") from None
+            if attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep(2**attempt)
+        raise VerifierError(last_error or "claude-cli judge failed (unknown)")
+
+
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _OPENROUTER_KEY_PREFIX = "sk-or-"
 _OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -749,6 +974,7 @@ async def judge_pairs(
 _ENV_PROVIDER = "DAYDREAM_JUDGE_PROVIDER"
 _ENV_MODEL = "DAYDREAM_JUDGE_MODEL"
 _ENV_API_KEY = "DAYDREAM_JUDGE_API_KEY"
+_ENV_OAUTH_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"
 _ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
 _ENV_ALLOWED_HOSTS = "DAYDREAM_JUDGE_ALLOWED_HOSTS"
 _ENV_ARTIFACT_PATH = "DAYDREAM_JUDGE_ARTIFACT_PATH"
@@ -1131,19 +1357,42 @@ def run_verifier(
 def _build_client(env: dict[str, Any]) -> Any:
     """Build the judge client from the DAYDREAM_JUDGE_* env surface.
 
-    Provider is fail-closed: exactly ``anthropic`` | ``openai-compatible`` is
-    accepted when explicit; absent or unsupported values raise before any
-    request. The provider's base URL is resolved and the initial request URL is
-    validated against the effective judge-host allowlist at build time.
+    the ``anthropic`` | ``openai-compatible`` | ``claude-cli`` set is accepted
+    when explicit; absent or unsupported values raise before any request.
+    The ``anthropic`` and ``openai-compatible`` providers require an API key,
+    resolve a base URL, and validate the initial request URL against the
+    effective judge-host allowlist at build time; the ``claude-cli`` provider
+    instead requires a non-empty ``CLAUDE_CODE_OAUTH_TOKEN`` and validates its
+    resolved judge host (``api.anthropic.com``) against the same allowlist.
     """
     provider = env.get(_ENV_PROVIDER) or ""
     model = env.get(_ENV_MODEL)
     api_key = env.get(_ENV_API_KEY)
+    if provider == "claude-cli":
+        # OAuth-token auth via the Claude Code CLI: no API key, no base URL.
+        # Egress is still bounded: the CLI's judge host resolves to
+        # api.anthropic.com (the same host _judge_host_from_env and the run
+        # preflight allowlist-check), so it is validated against the effective
+        # allowlist at build time -- a container allowlist that omits it fails
+        # closed before any trial instead of at the first out-of-allowlist CLI
+        # call mid-trial.
+        oauth_token = env.get(_ENV_OAUTH_TOKEN)
+        if not model:
+            raise VerifierError("missing DAYDREAM_JUDGE_MODEL")
+        if not oauth_token:
+            raise VerifierError(
+                "missing CLAUDE_CODE_OAUTH_TOKEN: required when DAYDREAM_JUDGE_PROVIDER is claude-cli"
+            )
+        _validate_base_url(
+            _ANTHROPIC_MESSAGES_URL, _effective_allowlist(_ANTHROPIC_MESSAGES_URL, env)
+        )
+        return ClaudeCliJudgeClient(model)
     if not model or not api_key:
         raise VerifierError("missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY")
     if provider not in {"anthropic", "openai-compatible"}:
         raise VerifierError(
-            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; expected anthropic or openai-compatible"
+            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; "
+            "expected anthropic, openai-compatible, or claude-cli"
         )
     if provider == "anthropic":
         allowlist = _effective_allowlist(_ANTHROPIC_MESSAGES_URL, env)
@@ -1208,6 +1457,7 @@ def main() -> int:
             _ENV_PROVIDER,
             _ENV_MODEL,
             _ENV_API_KEY,
+            _ENV_OAUTH_TOKEN,
             _ENV_BASE_URL,
             _ENV_ALLOWED_HOSTS,
         )
@@ -1215,10 +1465,12 @@ def main() -> int:
     try:
         client = _build_client(env)
     except VerifierError as exc:
-        if env.get(_ENV_MODEL) and env.get(_ENV_API_KEY):
+        provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+        if env.get(_ENV_MODEL) and (env.get(_ENV_API_KEY) or provider == "claude-cli"):
             # Fail-closed provider/host rejection: a typed bounded diagnostic
             # artifact naming only the rejected form -- never a barren exit.
-            provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+            # claude-cli has no API key; its typed diagnostic is the OAuth
+            # token check, so the provider branch suffices for it.
             model = env.get(_ENV_MODEL) or ""
             reward = _write_error_artifact(
                 out_dir, provider, model, {"requests": 0}, [_bounded_error(str(exc))], 0
