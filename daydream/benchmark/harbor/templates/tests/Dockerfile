@@ -37,8 +37,9 @@ RUN set -eux; \
     ln -s "/usr/local/lib/nodejs/node-v22.14.0-linux-${narch}/bin/node" /usr/local/bin/node; \
     ln -s "/usr/local/lib/nodejs/node-v22.14.0-linux-${narch}/bin/npm" /usr/local/bin/npm; \
     ln -s "/usr/local/lib/nodejs/node-v22.14.0-linux-${narch}/bin/npx" /usr/local/bin/npx; \
-    mkdir -p /tmp/claude-cli; \
-    cat > /tmp/claude-cli/package.json <<'EOF'
+    mkdir -p /tmp/claude-cli
+
+RUN cat > /tmp/claude-cli/package.json <<'EOF'
 {
   "name": "claude-cli-verifier",
   "private": true,
@@ -48,7 +49,8 @@ RUN set -eux; \
   }
 }
 EOF
-    cat > /tmp/claude-cli/package-lock.json <<'EOF'
+
+RUN cat > /tmp/claude-cli/package-lock.json <<'EOF'
 {
   "name": "claude-cli-verifier",
   "version": "1.0.0",
@@ -192,6 +194,8 @@ EOF
   }
 }
 EOF
+
+RUN set -eux; \
     (cd /tmp/claude-cli && npm ci --no-audit --no-fund); \
     ln -s /tmp/claude-cli/node_modules/.bin/claude /usr/local/bin/claude; \
     node --version && claude --version
