@@ -13,7 +13,10 @@ This module provides two cooperating pieces:
   immutable, so no TTL is needed (see ``/tmp/research-backfill-sla.md``).
 * ``progress.jsonl`` — an append-only JSONL log of completed
   ``session_id`` rows, written by :meth:`BackfillCache.mark_session_done`
-  and read back by :meth:`BackfillCache.completed_sessions`.
+  and read back by :meth:`BackfillCache.completed_sessions`. Each row is
+  stamped with the labeler policy version in force at completion time, so
+  a policy bump wholesale-invalidates the resume markers (M15) and forces
+  a re-fetch rather than silently resuming stale labels.
 
 The cache is intentionally process-local and lock-free: each cache key
 maps to one file, and the labeler runs single-process. Cache files are
@@ -32,6 +35,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from daydream.json_utils import atomic_write_json
+from daydream.training import labeler_versions
 from daydream.ui import create_console, print_warning
 
 GHApiFn = Callable[..., Any]
@@ -120,25 +124,37 @@ class BackfillCache:
     def mark_session_done(self, session_id: str) -> None:
         """Append a completion row for ``session_id`` to ``progress.jsonl``.
 
+        The row records the labeler policy version in force at completion
+        time (M15), so a later policy bump invalidates the marker wholesale.
         Creates ``cache_dir`` if it does not already exist.
         """
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
-            {"session_id": session_id, "completed_at": _now_iso_utc()},
+            {
+                "session_id": session_id,
+                "labeler_policy_version": labeler_versions.LABELER_POLICY_VERSION,
+                "completed_at": _now_iso_utc(),
+            },
             sort_keys=True,
         )
         with self.progress_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
     def completed_sessions(self) -> set[str]:
-        """Return the set of ``session_id``s recorded in ``progress.jsonl``.
+        """Return sessions recorded in ``progress.jsonl`` for the current policy.
 
-        Returns an empty set if the log does not exist. Malformed lines
-        are skipped (the log is append-only and a partial last-line
-        write is the only realistic failure mode).
+        Only rows whose stored ``labeler_policy_version`` equals the *current*
+        :data:`~daydream.training.labeler_versions.LABELER_POLICY_VERSION`
+        (read at call time) count as done — a policy bump re-fetches every
+        previously completed session (M15 wholesale invalidation). Rows from
+        before the version field existed never match. Returns an empty set if
+        the log does not exist. Malformed lines are skipped (the log is
+        append-only and a partial last-line write is the only realistic
+        failure mode).
         """
         if not self.progress_path.exists():
             return set()
+        current_version = labeler_versions.LABELER_POLICY_VERSION
         out: set[str] = set()
         with self.progress_path.open("r", encoding="utf-8") as f:
             for raw in f:
@@ -150,6 +166,6 @@ class BackfillCache:
                 except json.JSONDecodeError:
                     continue
                 sid = row.get("session_id")
-                if isinstance(sid, str):
+                if isinstance(sid, str) and row.get("labeler_policy_version") == current_version:
                     out.add(sid)
         return out

@@ -303,6 +303,8 @@ def append_label_observation(
     reviewer_logins: list[str] | None = None,
     has_posterior: bool = False,
     source: str = "auto",
+    reply_classifier_version: str | None = None,
+    reply_evidence_digest: str | None = None,
 ) -> bool:
     """Append a row to the immutable ``label_observations`` history.
 
@@ -354,6 +356,12 @@ def append_label_observation(
             Coerced to ``int`` and written to ``label_observations.has_posterior``
             and mirrored onto ``runs.has_posterior`` so SQL consumers can split
             labeled/unlabeled populations without parsing ``reward_json``.
+        reply_classifier_version: Version of the reply classifier that produced
+            the per-finding dispositions (version axis, M13); accepted here so
+            callers can thread it ahead of the column's persistence.
+        reply_evidence_digest: Stable digest over the combined reply evidence
+            (versioned dedup input, M14); accepted here so callers can thread
+            it ahead of the column's persistence.
         source: Provenance of this observation — ``"auto"`` (automated rubric
             labeler; the default that keeps existing harvest callers
             unchanged) or ``"human"`` (operator override). Human-sourced rows

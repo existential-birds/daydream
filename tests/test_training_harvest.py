@@ -7,6 +7,7 @@ import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -22,7 +23,7 @@ from daydream.archive.index import (
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
-from daydream.training import harvest
+from daydream.training import harvest, labeler_versions, reward
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
     HarvestConfig,
@@ -55,12 +56,61 @@ def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path
     return run_dir
 
 
-# One footer-marked daydream finding plus a human reply to it —
-# ``comment_resolution == (1, 1, 0)``, so the rubric yields ``accepted`` on real
-# evidence. A merged PR with *no* tracked comments is deliberately NOT this
-# shape: ``comment_resolution`` is ``(0, 0, 0)`` and ``unresolved == 0`` is
-# vacuously true, which the rubric must read as ``unknown`` — a merge alone is
-# not evidence daydream contributed.
+# Fingerprints recorded at review time (findings.json) and embedded as markers
+# in the daydream comment bodies, so the per-finding join can resolve them.
+_FP_A = "a" * 64
+_FP_B = "b" * 64
+
+
+def _finding_comments(
+    fp: str,
+    *,
+    reply: str | None = None,
+    reply_created_at: str | None = None,
+    reply_author: str = "amelia",
+) -> list[dict[str, Any]]:
+    """A footer-marked daydream finding comment for ``fp``, optionally replied.
+
+    The reply (when supplied) is a qualifying OWNER human, so it is decisive
+    evidence the classifier can label. ``reply_created_at`` feeds the
+    decisive-evidence ``valid_at`` derivation.
+    """
+    comments: list[dict[str, Any]] = [
+        {
+            "id": 1,
+            "in_reply_to_id": None,
+            "user": {"login": "daydream-runner"},
+            "body": f"finding\n\n{finding_marker(fp)}\n\n{DAYDREAM_FOOTER}",
+        }
+    ]
+    if reply is not None:
+        entry: dict[str, Any] = {
+            "id": 2,
+            "in_reply_to_id": 1,
+            "user": {"login": reply_author},
+            "author_association": "OWNER",
+            "body": reply,
+        }
+        if reply_created_at is not None:
+            entry["created_at"] = reply_created_at
+        comments.append(entry)
+    return comments
+
+
+def _write_findings(run_dir: Path, *fps: str) -> None:
+    """Record the given fingerprints in the run's ``findings.json`` artifact."""
+    (run_dir / "findings.json").write_text(
+        json.dumps({"findings": [{"fingerprint": fp} for fp in fps]})
+    )
+
+
+# One footer-marked daydream finding plus a human reply to it — used by tests
+# that only exercise plumbing (idempotent re-harvest, resume markers) where the
+# label itself is irrelevant; it carries no fingerprint marker, so the scoped
+# per-finding join sees nothing and the run labels ``unknown``. A merged PR
+# with *no* tracked comments is deliberately NOT an accepted shape either:
+# ``comment_resolution`` is ``(0, 0, 0)`` and a merge alone is not evidence
+# daydream contributed.
 _REPLIED_FINDING: list[dict[str, Any]] = [
     {
         "id": 1,
@@ -128,16 +178,26 @@ def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
     raise AssertionError(f"gh_api should not be called for a local row (endpoint={endpoint})")
 
 
-def test_build_annotation_pr_row_carries_label_reward_and_merge_valid_at(tmp_path: Path) -> None:
+def test_build_annotation_pr_row_labels_from_decisive_reply_evidence(tmp_path: Path) -> None:
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    _write_findings(run_dir, _FP_A)
     row = {"session_id": "s1", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    ann = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                           gh_api=_fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
-                           repo_clone=tmp_path)
+    ann = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=tmp_path,
+        gh_api=_fake_gh(
+            merged_at="2026-02-05T00:00:00+00:00",
+            comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-02-01T10:00:00Z"),
+        ),
+        repo_clone=tmp_path,
+    )
     assert ann.labels == ["accepted"]
-    assert ann.valid_at == "2026-02-01T00:00:00+00:00"        # PR merge time (Q2)
+    # valid_at is the decisive evidence time (the qualifying accept reply), not
+    # the later merge timestamp (M12).
+    assert ann.valid_at == "2026-02-01T10:00:00Z"
     assert ann.composite_reward == json.loads(ann.reward_json)["composite"]
 
 
@@ -164,7 +224,7 @@ def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: s
                 "user": {"login": "daydream-runner"},
                 "body": f"finding\n\n{finding_marker(fp_unreplied)}\n\n{DAYDREAM_FOOTER}",
             },
-            {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
+            {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "applied"},
         ],
     )
 
@@ -185,7 +245,7 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) ->
                            gh_api=_fake_gh_merged_per_finding("2026-02-01T00:00:00+00:00", fp_a, fp_b),
                            repo_clone=tmp_path)
     assert ann.rubric_json is not None
-    assert json.loads(ann.rubric_json)["per_finding_outcomes"] == ["accepted", "contested"]
+    assert json.loads(ann.rubric_json)["per_finding_outcomes"] == ["accepted", "unanswered"]
 
 
 def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Path) -> None:
@@ -201,9 +261,14 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Pa
     intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
     intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
 
-    payload = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                               gh_api=_fake_gh(merged=False),
-                               repo_clone=tmp_path)
+    _write_findings(run_dir, _FP_A)
+    payload = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=tmp_path,
+        gh_api=_fake_gh(merged=False, comments=_finding_comments(_FP_A, reply="not applicable")),
+        repo_clone=tmp_path,
+    )
 
     assert payload.labels == ["rejected"]
     assert payload.has_posterior is True
@@ -221,9 +286,18 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
     row = {"session_id": "s_rej_prod", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir),
            "grounding_rate": 1.0, "changed_files": "[]"}
-    payload = build_annotation(row, run_dir=run_dir, archive_dir=archive_dir,
-                               gh_api=_fake_gh(merged=False, reviews=[{"user": {"login": "alice"}}]),
-                               repo_clone=tmp_path)
+    _write_findings(run_dir, _FP_A)
+    payload = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=archive_dir,
+        gh_api=_fake_gh(
+            merged=False,
+            reviews=[{"user": {"login": "alice"}}],
+            comments=_finding_comments(_FP_A, reply="not applicable"),
+        ),
+        repo_clone=tmp_path,
+    )
     assert payload.labels == ["rejected"]
     assert payload.has_posterior is True
     rb = json.loads(payload.reward_json)
@@ -231,7 +305,8 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
     assert rb["outcome_prior"] is None
     assert rb["outcome_prior_n"] == 0
     assert rb["posterior_cost"] == 0.5
-    assert payload.reviewer_logins == ["alice"]
+    # The qualifying reply author joins the reviewer set alongside the review author.
+    assert payload.reviewer_logins == ["alice", "amelia"]
 
 
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path: Path) -> None:
@@ -293,11 +368,16 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
         "grounding_rate": 1.0,
         "changed_files": "[]",
     }
+    _write_findings(run_dir, _FP_A)
     payload = build_annotation(
         row,
         run_dir=run_dir,
         archive_dir=archive_dir,
-        gh_api=_fake_gh(merged=False, reviews=[{"user": {"login": "alice"}}]),
+        gh_api=_fake_gh(
+            merged=False,
+            reviews=[{"user": {"login": "alice"}}],
+            comments=_finding_comments(_FP_A, reply="not applicable"),
+        ),
         repo_clone=tmp_path,
     )
     assert payload.labels == ["rejected"]
@@ -321,8 +401,10 @@ def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(
     row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
+    _write_findings(run_dir, _FP_A)
     p = build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                         gh_api=_fake_gh(merged=False), repo_clone=tmp_path)
+                         gh_api=_fake_gh(merged=False, comments=_finding_comments(_FP_A, reply="not applicable")),
+                         repo_clone=tmp_path)
     rb = json.loads(p.reward_json)
     assert rb["posterior_cost"] == pytest.approx(0.2)   # max(0, 1.0 - 0.8)
     assert rb["outcome_prior"] == 0.8 and rb["outcome_prior_n"] == 12
@@ -340,9 +422,11 @@ def test_build_annotation_below_threshold_falls_back_to_default_prior(
     row = {"session_id": "s_rej", "pr_repo": "o/r", "pr_number": 9, "head_sha": "h",
            "base_branch": "main", "archive_path": str(run_dir), "grounding_rate": 1.0,
            "changed_files": "[]"}
+    _write_findings(run_dir, _FP_A)
     rb = json.loads(
         build_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
-                         gh_api=_fake_gh(merged=False), repo_clone=tmp_path).reward_json
+                         gh_api=_fake_gh(merged=False, comments=_finding_comments(_FP_A, reply="not applicable")),
+                         repo_clone=tmp_path).reward_json
     )
     assert rb["outcome_prior"] is None and rb["outcome_prior_n"] == 4  # n recorded; prior None -> 0.5
     assert rb["posterior_cost"] == 0.5
@@ -541,7 +625,13 @@ def _seed_orphan_run(
     return run_dir
 
 
-def _seed_pr_runs(archive_dir: Path, bronze_parent: Path, count: int) -> None:
+def _seed_pr_runs(
+    archive_dir: Path,
+    bronze_parent: Path,
+    count: int,
+    *,
+    fingerprints: Sequence[str] | None = None,
+) -> None:
     """Seed ``count`` PR-attached deep runs (sessions ``s1``..``sN``, ``pr_number`` 1..N).
 
     Each run gets its own bronze dir under ``bronze_parent/<session_id>`` so the
@@ -568,6 +658,8 @@ def _seed_pr_runs(archive_dir: Path, bronze_parent: Path, count: int) -> None:
                 archive_path=str(run_dir),
             ),
         )
+        if fingerprints:
+            _write_findings(run_dir, *fingerprints)
 
 
 async def test_harvest_writes_one_annotation(tmp_path: Path, archive_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -602,27 +694,26 @@ async def test_harvest_stores_github_z_merge_timestamp_canonically(
     assert obs["valid_at"] == "2026-02-01T00:00:00+00:00"
 
 
-async def test_harvest_labels_unresolved_daydream_comment_contested(
+async def test_harvest_unresolved_daydream_comment_stays_unknown(
     tmp_path: Path,
     archive_dir: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Real-path: a merged PR whose daydream comment is unresolved → ``contested``.
+    """Real-path: a merged PR whose only finding has no qualifying reply is ``unknown``.
 
-    Bug 1 regression guard. daydream posts review comments as a normal
-    authenticated (non-``[bot]``) user, so the old ``[bot]`` author check made
-    its findings invisible → every merged PR was mislabeled ``accepted``. This
-    drives ``run_harvest`` end-to-end and asserts the persisted run label is
-    ``contested``, the rubric's correct verdict for an unresolved finding.
+    An unresolved daydream comment is *non-decisive* evidence (M9): nobody said
+    accept or reject, so the conservative rubric persists ``unknown`` (empty
+    labels) — bare reply absence and merge state never fabricate a label.
     """
-    _seed_archived_deep_run(archive_dir, "s-contest", merged_at="2026-02-01T00:00:00+00:00")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-contest", merged_at="2026-02-01T00:00:00+00:00")
+    _write_findings(run_dir, _FP_A)
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_UNRESOLVED_FINDING),
+        _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_finding_comments(_FP_A)),
     )
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
     row = query_runs(archive_dir, "session_id = ?", ("s-contest",))[0]
-    assert json.loads(row["outcome_labels"]) == ["contested"]
+    assert json.loads(row["outcome_labels"]) == []  # unknown, never "accepted"
 
 
 async def test_harvest_relinks_orphan_run_and_labels_it(
@@ -636,14 +727,24 @@ async def test_harvest_relinks_orphan_run_and_labels_it(
     ``pr_number=None``. Harvest must re-link the orphan row by its ``head_sha``
     (via ``commits/{sha}/pulls``), persist the linkage, and then label the run
     through the PR path. Drives ``run_harvest`` end-to-end and asserts both the
-    persisted linkage and the resulting ``contested`` label.
+    persisted linkage and the resulting ``contested`` label (decisive accept
+    beside an unresolved finding — mixed evidence, M9).
     """
-    _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph")
+    run_dir = _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph")
+    _write_findings(run_dir, _FP_A, _FP_B)
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
         _fake_gh(
             merged_at="2026-02-01T00:00:00+00:00",
-            comments=_UNRESOLVED_FINDING,
+            comments=[
+                *_finding_comments(_FP_A, reply="applied"),
+                {
+                    "id": 3,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
+                },
+            ],
             commit_pulls=_ORPHAN_COMMIT_PULLS,
         ),
     )
@@ -964,36 +1065,167 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(
     assert "posterior_cost" not in json.loads(obs["reward_json"])
 
 
-async def test_harvest_merged_pr_with_replied_comment_is_labeled_accepted(
+async def test_harvest_merged_pr_with_reject_reply_is_contested(
     tmp_path: Path,
     archive_dir: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Real-path: the evidenced accept survives the fix and IS posterior evidence.
+    """The amelia#626 shape: merged PR + explicit human rejection ⇒ contested, never accepted (M10/M22).
 
-    The positive arm of the same distinction: one tracked daydream finding, a
-    human reply resolving it, PR merged. This must stay ``accepted`` with
-    ``has_posterior`` set, or the fix would have erased the only genuinely
-    discriminative positives in the corpus.
+    One daydream finding is explicitly rejected by a qualifying OWNER reply
+    ("False positive…") while a second finding goes unanswered. The decisive
+    reject beside non-decisive evidence aggregates to ``contested`` — a merge
+    can never upgrade an explicit rejection to ``accepted``.
     """
-    _seed_archived_deep_run(archive_dir, "s-evidenced", merged_at="2026-02-01T00:00:00+00:00")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-reject", merged_at="2026-08-10T00:00:00Z")
+    _write_findings(run_dir, _FP_A, _FP_B)
     monkeypatch.setattr(
         "daydream.training.harvest._gh_api",
-        _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
+        _fake_gh(
+            merged_at="2026-08-10T00:00:00Z",
+            comments=[
+                *_finding_comments(_FP_A, reply="False positive — the code already handles this"),
+                {
+                    "id": 3,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
+                },
+            ],
+        ),
     )
 
     summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
 
     assert summary["errors"] == 0 and summary["annotated"] == 1
-    row = query_runs(archive_dir, "session_id = ?", ("s-evidenced",))[0]
-    assert json.loads(row["outcome_labels"]) == ["accepted"]
-    obs = latest_label_observation(archive_dir, "s-evidenced")
+    row = query_runs(archive_dir, "session_id = ?", ("s-reject",))[0]
+    assert json.loads(row["outcome_labels"]) == ["contested"]  # NEVER ["accepted"]
+    obs = latest_label_observation(archive_dir, "s-reject")
     assert obs is not None
-    resolution = json.loads(obs["rubric_json"])["comment_resolution"]
-    assert (resolution["total"], resolution["unresolved"]) == (1, 0)
-    # A maintainer acting on a real PR IS posterior evidence.
-    assert obs["has_posterior"] == 1
-    assert json.loads(obs["reward_json"])["false_positive_penalty"] == 0.0
+    assert json.loads(obs["rubric_json"])["per_finding_outcomes"] == ["rejected", "unanswered"]
+
+
+async def test_harvest_unmerged_pr_with_no_semantic_reply_is_unknown(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Open PR, bot-only reply ⇒ unknown; pr_state == 'open' preserved (M11/M22).
+
+    The only reply to the finding is from a bot, which never qualifies as human
+    judgment, so the finding is ``unanswered`` and the run stays ``unknown``.
+    The PR's open state is preserved as context, not read as a rejection.
+    """
+    run_dir = _seed_archived_deep_run(archive_dir, "s-open", merged_at="2026-08-10T00:00:00Z")
+    _write_findings(run_dir, _FP_A)
+
+    def _gh_open(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments"):
+            return [
+                *_finding_comments(_FP_A),
+                {
+                    "id": 2,
+                    "in_reply_to_id": 1,
+                    "user": {"login": "dependabot[bot]", "type": "Bot"},
+                    "body": "applied",
+                },
+            ]
+        if endpoint.endswith("/reviews"):
+            return []
+        return {"merged": False, "merged_at": None, "state": "open"}
+
+    monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_open)
+
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["errors"] == 0 and summary["annotated"] == 1
+    row = query_runs(archive_dir, "session_id = ?", ("s-open",))[0]
+    assert json.loads(row["outcome_labels"]) == []  # unknown, NOT ["rejected"]
+    obs = latest_label_observation(archive_dir, "s-open")
+    assert obs is not None
+    assert obs["pr_state"] == "open"
+
+
+def test_valid_at_is_decisive_evidence_time(tmp_path: Path) -> None:
+    """valid_at = qualifying reply timestamp, not merged_at (M12/M22)."""
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    _write_findings(run_dir, _FP_A)
+    row = {"session_id": "s-val", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    ann = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=tmp_path,
+        gh_api=_fake_gh(
+            merged_at="2026-08-10T00:00:00Z",
+            comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
+        ),
+        repo_clone=tmp_path,
+    )
+    assert ann.valid_at == "2026-08-02T10:00:00Z"
+
+
+def test_valid_at_override_respected(tmp_path: Path) -> None:
+    """An explicit override beats derived evidence time (M12)."""
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    _write_findings(run_dir, _FP_A)
+    row = {"session_id": "s-val-ovr", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    ann = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=tmp_path,
+        gh_api=_fake_gh(
+            merged_at="2026-08-10T00:00:00Z",
+            comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
+        ),
+        repo_clone=tmp_path,
+        valid_at_override="2026-09-01T00:00:00Z",
+    )
+    assert ann.valid_at == "2026-09-01T00:00:00Z"
+
+
+async def test_labeler_version_is_not_reward_version(
+    tmp_path: Path,
+    archive_dir: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """append_label_observation receives labeler_versions.LABELER_POLICY_VERSION (M13/M22)."""
+    run_dir = _seed_archived_deep_run(archive_dir, "s-lv", merged_at="2026-08-10T00:00:00Z")
+    _write_findings(run_dir, _FP_A)
+    monkeypatch.setattr(
+        "daydream.training.harvest._gh_api",
+        _fake_gh(
+            merged_at="2026-08-10T00:00:00Z",
+            comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    def _capture(_archive_dir: Path, _session_id: str, **kwargs: Any) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr("daydream.training.harvest.append_label_observation", _capture)
+    summary = await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c"))
+
+    assert summary["annotated"] == 1
+    assert captured["labeler_version"] == labeler_versions.LABELER_POLICY_VERSION
+    assert captured["labeler_version"] != reward.REWARD_VERSION
+    assert captured["reply_classifier_version"] == labeler_versions.REPLY_CLASSIFIER_VERSION
+    assert captured["reply_evidence_digest"]
+
+
+def test_resume_cache_invalidated_on_policy_bump(tmp_path: Path) -> None:
+    """A policy-version change re-fetches sessions previously marked done (M15/M22)."""
+    cache = BackfillCache(cache_dir=tmp_path, inner=lambda r, e, **kw: {})
+    cache.mark_session_done("sess-1")
+    with patch.object(labeler_versions, "LABELER_POLICY_VERSION", "980-r2"):
+        assert "sess-1" not in cache.completed_sessions()
+    # And without the bump the session is still resumable:
+    assert "sess-1" in cache.completed_sessions()
 
 
 async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evidence(
@@ -1371,22 +1603,15 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(
     only the optional prior), not dropped as a hard error through the per-row
     catch-all. Drives ``run_harvest`` end-to-end.
     """
-    _seed_archived_deep_run(archive_dir, "s-reviews-err", merged_at="2026-02-01T00:00:00+00:00")
+    run_dir = _seed_archived_deep_run(archive_dir, "s-reviews-err", merged_at="2026-02-01T00:00:00+00:00")
+    _write_findings(run_dir, _FP_A)
 
     def _gh_reviews_fail(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if endpoint.endswith("/reviews"):
             raise GitError("gh: Internal Server Error (HTTP 500)")
         if endpoint.endswith("/comments"):
             # A resolved daydream thread: the evidence that makes the merge decisive.
-            return [
-                {
-                    "id": 1,
-                    "in_reply_to_id": None,
-                    "user": {"login": "daydream-runner"},
-                    "body": f"finding\n\n{DAYDREAM_FOOTER}",
-                },
-                {"id": 2, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "fixed"},
-            ]
+            return _finding_comments(_FP_A, reply="applied")
         return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
 
     monkeypatch.setattr("daydream.training.harvest._gh_api", _gh_reviews_fail)
@@ -1410,9 +1635,12 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(
     # instead of dropping them: errors == 0, annotated == 10. Degraded rows route
     # through _build_rubric_local, so their pr_state is None (NOT a fabricated PR
     # rubric) — observable proof no merged=False rubric drove their label.
-    _seed_pr_runs(archive_dir, tmp_path, 10)
+    _seed_pr_runs(archive_dir, tmp_path, 10, fingerprints=(_FP_A,))
 
-    merged = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
+    merged = _fake_gh(
+        merged_at="2026-02-01T00:00:00+00:00",
+        comments=_finding_comments(_FP_A, reply="applied"),
+    )
 
     def _gh(repo: str, endpoint: str, **kw: Any) -> Any:
         match = re.search(r"/pulls/(\d+)", endpoint)
