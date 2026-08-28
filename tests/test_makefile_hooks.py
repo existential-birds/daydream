@@ -375,6 +375,35 @@ def test_pre_commit_exits_zero_without_staged_python(
     assert not [r for r in _read_command_records(log) if r["command"] == "uv"]
 
 
+def test_pre_commit_skips_python_files_outside_lint_scope(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _main_repo, worktree = linked_worktree
+    _copy_pre_commit_hook(worktree)
+    # The commit gate is scoped to the canonical lint surface (`make lint` /
+    # `make check`: root `daydream tests` plus the standalone rl project). A
+    # staged .py under scripts/ or mypy_stubs/ is tracked by no lint scope, so
+    # it must not be hard-blocked at commit time by a rule CI never enforces.
+    _stage_file(worktree, "daydream/in_scope.py", "x = 1\n")
+    _stage_file(worktree, "scripts/out_of_scope.py", "y = 2\n")
+    _stage_file(worktree, "mypy_stubs/out_of_scope.py", "z = 3\n")
+
+    log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"))
+    proc = subprocess.run(
+        [str(worktree / "scripts" / "hooks" / "pre-commit")],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    uv_calls = [r for r in _read_command_records(log) if r["command"] == "uv"]
+    # Only the in-scope staged file is linted; the others are skipped.
+    assert len(uv_calls) == 1
+    call = uv_calls[0]
+    assert call["args"] == ["run", "ruff", "check", "--stdin-filename", "daydream/in_scope.py", "-"]
+    assert call["stdin"] == "x = 1\n"
+
+
 def test_pre_commit_propagates_ruff_failure(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
