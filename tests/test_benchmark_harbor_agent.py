@@ -475,6 +475,35 @@ def test_build_child_env_is_exact_allowlist() -> None:
     )
 
 
+def test_build_child_env_keeps_anthropic_for_claude_scrubs_for_pi() -> None:
+    from daydream.benchmark.harbor.agent import build_child_env
+
+    parent = {
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "ANTHROPIC_AUTH_TOKEN": "tok",
+        "OPENROUTER_API_KEY": "sk-or",
+        "PI_API_KEY": "pi-key",
+        "GH_TOKEN": "gh",
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "DAYDREAM_REVIEW_API_KEY": "review-key",
+        "PATH": "/usr/bin",
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+    }
+    child = build_child_env(parent, backend="claude")
+    assert child["ANTHROPIC_API_KEY"] == "sk-ant"
+    assert child["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert child["ANTHROPIC_AUTH_TOKEN"] == "tok"
+    assert "OPENROUTER_API_KEY" not in child and "PI_API_KEY" not in child
+    assert "GH_TOKEN" not in child                              # non-credential bans stay
+
+    child_pi = build_child_env(parent, backend="pi")
+    assert not any(k.startswith("ANTHROPIC_") for k in child_pi)
+    assert "OPENROUTER_API_KEY" not in child_pi
+    assert child_pi["DAYDREAM_REVIEW_API_KEY"] == "review-key"
+
+
 def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: Path) -> None:
     import pytest
 

@@ -46,10 +46,13 @@ _BANNED_VARS = (
     "OPENROUTER_API_KEY",
     "PI_API_KEY",
 )
-# Judge vars and raw provider credentials must never leak into the child env.
+# Anthropic credential vars; preserved into the child env when backend == "claude".
+_ANTHROPIC_BAN_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+# Judge vars and raw provider credentials must never leak into the child env
+# (``ANTHROPIC_*`` is exempted from the scrub only when backend == "claude").
 _BANNED_PREFIXES = (
     "DAYDREAM_JUDGE_",
-    "ANTHROPIC_",
+    "ANTHROPIC_",  # dropped from the scrub for backend="claude" (credentials preserved)
     "OPENAI_",
     "OPENROUTER_",
     "PI_",
@@ -172,7 +175,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
                 setattr(context, attr, value)
 
 
-def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
+def build_child_env(parent_env: Mapping[str, str], *, backend: str = "pi") -> dict[str, str]:
     """Build the fail-closed allowlist child environment.
 
     Keeps only ``DAYDREAM_REVIEW_*`` reviewer config/credential plus the required
@@ -180,19 +183,34 @@ def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
     archive and raw provider vars) so any future secret-holding variable not in
     the keep-set still cannot leak by default. Never passes the parent env wholesale.
 
+    Backend-conditional credential handling: for ``backend="claude"`` the
+    ``ANTHROPIC_*`` credential vars (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``,
+    ``ANTHROPIC_AUTH_TOKEN``) survive so the Claude Agent SDK / claude CLI in the
+    container has credentials; for ``pi`` (default) and any other value, the
+    ``ANTHROPIC_*`` scrub is exactly today's fail-closed behavior.
+
     The review-profile candidate (``DAYDREAM_REVIEW_PROFILE_CANDIDATE``, issue
     #885/R11) rides the ``DAYDREAM_REVIEW_*`` allowlist to the entrypoint; the
     verifier env is isolated to ``DAYDREAM_JUDGE_*`` (render_job_config), so the
     candidate never reaches the judge.
     """
+    keep_anthropic = backend == "claude"
     child = {
         key: value
         for key, value in dict(parent_env).items()
-        if key.startswith("DAYDREAM_REVIEW_") or key in _REQUIRED_PROCESS_VARS
+        if key.startswith("DAYDREAM_REVIEW_")
+        or key in _REQUIRED_PROCESS_VARS
+        or (keep_anthropic and key.startswith("ANTHROPIC_"))
     }
-    for banned in _BANNED_VARS:
+    banned_vars = _BANNED_VARS if not keep_anthropic else (
+        tuple(v for v in _BANNED_VARS if v not in _ANTHROPIC_BAN_VARS)
+    )
+    banned_prefixes = _BANNED_PREFIXES if not keep_anthropic else (
+        tuple(p for p in _BANNED_PREFIXES if p != "ANTHROPIC_")
+    )
+    for banned in banned_vars:
         child.pop(banned, None)
-    for prefix in _BANNED_PREFIXES:
+    for prefix in banned_prefixes:
         for key in [k for k in child if k.startswith(prefix)]:
             child.pop(key, None)
     return child
