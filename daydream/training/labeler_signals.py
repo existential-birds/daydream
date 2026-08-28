@@ -23,13 +23,21 @@ HTTP calls.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, cast
 
 from daydream.pr_review import parse_finding_markers
+from daydream.training.labeler_versions import reply_evidence_digest
+from daydream.training.reply_classifier import (
+    _QUALIFYING_ASSOCIATIONS,
+    _identity_gates_pass,
+    _login,
+    classify_reply,
+)
 
 # Version-stable footer prefix: matching only this prefix (not the full
 # version-pinned DAYDREAM_FOOTER) recognises comments from any daydream release.
@@ -107,22 +115,101 @@ class CommentResolutionSignal:
     unresolved: int
 
 
+PerFindingDisposition = Literal["accepted", "rejected", "ambiguous", "unanswered", "missing"]
+
+
+def _reply_reason(
+    reply: dict[str, Any],
+    pr_author_logins: frozenset[str],
+    review_author_logins: frozenset[str],
+) -> str:
+    """Why this reply's author qualified or was excluded (evidence ``reason``)."""
+    if reply.get("is_self_reply"):
+        return "excluded:self-reply"
+    if not _identity_gates_pass(reply):
+        return "excluded:bot"
+    assoc = reply.get("author_association")
+    if isinstance(assoc, str) and assoc in _QUALIFYING_ASSOCIATIONS:
+        return f"assoc:{assoc}"
+    login = _login(reply)
+    if login in pr_author_logins:
+        return "pr_author"
+    if login in review_author_logins:
+        return "review_author"
+    return "excluded:non-qualifying"
+
+
+def _reply_evidence(
+    replies: list[dict[str, Any]],
+    pr_author_logins: frozenset[str],
+    review_author_logins: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Persist every reply as a full evidence entry — never reduced to a count (M3)."""
+    evidence: list[dict[str, Any]] = []
+    for reply in replies:
+        if not isinstance(reply, dict):
+            continue
+        evidence.append(
+            {
+                "reply_id": reply.get("id"),
+                "author": _login(reply),
+                "author_association": reply.get("author_association", ""),
+                "created_at": reply.get("created_at", ""),
+                "body_sha256": hashlib.sha256((reply.get("body") or "").encode("utf-8")).hexdigest(),
+                "reason": _reply_reason(reply, pr_author_logins, review_author_logins),
+            }
+        )
+    return evidence
+
+
+def _disposition_for_replies(
+    replies: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> PerFindingDisposition:
+    """Map replies to a disposition via the versioned classifier (M1/M4).
+
+    Deleted/inaccessible comments never reach here (``missing`` is decided
+    by the join, so a deleted comment can never map to ``rejected``).
+    """
+    if not any(isinstance(reply, dict) and _identity_gates_pass(reply) for reply in replies):
+        return "unanswered"
+    votes: set[PerFindingDisposition] = set()
+    for reply in replies:
+        if not isinstance(reply, dict) or not _identity_gates_pass(reply):
+            continue
+        label = classify_reply(reply)
+        if label in ("accepted", "rejected"):
+            votes.add(cast(PerFindingDisposition, label))
+    if len(votes) == 1:
+        return votes.pop()
+    return "ambiguous"
+
+
 @dataclass(frozen=True)
 class PerFindingResolution:
-    """Resolution state for one recorded finding, joined by fingerprint.
+    """Semantic disposition for one recorded finding, joined by fingerprint.
 
     Attributes:
         fingerprint: The 64-hex finding fingerprint recorded at review time.
-        resolved: ``True`` when the finding's posted comment received at
-            least one reply (proxy for "addressed").
         comment_id: GitHub review-comment ID carrying the finding marker,
             or ``None`` when no surviving comment carries the fingerprint
             (deleted, edited away, or never posted).
+        disposition: ``accepted``/``rejected``/``ambiguous`` from the
+            classifier over qualifying replies, ``unanswered`` when no
+            qualifying reply exists, ``missing`` when the fingerprint has
+            no surviving comment.
+        evidence: One entry per reply — ``reply_id``, ``author``,
+            ``author_association``, ``created_at``, ``body_sha256`` and a
+            ``reason`` recording why the author qualified or was excluded.
+            Full reply objects are persisted, never reduced to a count (M3).
+        evidence_digest: Stable digest over the evidence (M14 dedup input).
     """
 
     fingerprint: str
-    resolved: bool
     comment_id: int | None
+    disposition: PerFindingDisposition
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    evidence_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -554,17 +641,23 @@ def per_finding_resolution_signal(
     row: dict[str, Any],
     *,
     recorded_fingerprints: list[str],
-    gh_api: Callable[..., Any],
+    gh_api: Callable[..., Any] | None,
     threads: PRCommentThreads | None = None,
+    pr_author_logins: frozenset[str] = frozenset(),
+    review_author_logins: frozenset[str] = frozenset(),
 ) -> list[PerFindingResolution]:
-    """Resolve each recorded finding to its posted comment and reply state.
+    """Resolve each recorded finding to a semantic disposition (M1/M4).
 
     Joins the fingerprints recorded at review time (``recorded_fingerprints``)
     against the PR's live review comments by the hidden
     ``<!-- daydream-finding: <fp> -->`` marker embedded in each daydream
-    comment body. A finding is ``resolved`` when its comment received at
-    least one reply; a fingerprint with no surviving comment yields
-    ``comment_id=None`` (deleted / edited away / never posted).
+    comment body, then classifies the surviving replies through the
+    versioned reply classifier: qualifying decisive votes give their label,
+    qualifying non-directional or conflicting replies give ``ambiguous``,
+    and no qualifying reply gives ``unanswered``. A fingerprint with no
+    surviving comment yields ``missing`` with ``comment_id=None`` (deleted /
+    edited away / never posted) — a deleted comment can never map to
+    ``rejected`` (M4).
 
     Args:
         row: Manifest row carrying ``pr_repo`` and ``pr_number``.
@@ -577,12 +670,18 @@ def per_finding_resolution_signal(
             ``/comments`` fetch is skipped, letting a caller that needs
             both this and :func:`comment_resolution_signal` on one row
             fetch the endpoint once.
+        pr_author_logins: Logins whose replies count as PR-author judgment
+            (recorded in evidence reasons).
+        review_author_logins: Logins whose replies count as formal-review
+            judgment (recorded in evidence reasons).
 
     Returns:
         One :class:`PerFindingResolution` per recorded fingerprint, or an
         empty list when the row has no associated PR.
     """
     if threads is None:
+        if gh_api is None:
+            raise ValueError("per_finding_resolution_signal needs gh_api when threads is not supplied")
         threads = index_pr_review_comments(row, gh_api=gh_api)
     if threads is None:
         return []
@@ -590,9 +689,21 @@ def per_finding_resolution_signal(
     resolutions: list[PerFindingResolution] = []
     for fingerprint in recorded_fingerprints:
         comment_id = threads.comment_id_by_fingerprint.get(fingerprint)
-        resolved = comment_id is not None and comment_id in threads.replied_ids
+        if comment_id is None:
+            resolutions.append(
+                PerFindingResolution(fingerprint=fingerprint, comment_id=None, disposition="missing")
+            )
+            continue
+        replies = threads.replies_by_comment.get(comment_id, [])
+        evidence = _reply_evidence(replies, pr_author_logins, review_author_logins)
         resolutions.append(
-            PerFindingResolution(fingerprint=fingerprint, resolved=resolved, comment_id=comment_id)
+            PerFindingResolution(
+                fingerprint=fingerprint,
+                comment_id=comment_id,
+                disposition=_disposition_for_replies(replies, evidence),
+                evidence=evidence,
+                evidence_digest=reply_evidence_digest(evidence),
+            )
         )
     return resolutions
 
