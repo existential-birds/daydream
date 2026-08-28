@@ -9,8 +9,8 @@ labels:
 * :func:`fix_applied_signal` — did the recommended diff land in the
   upstream default branch within a configurable window? Implements the
   layered cascade documented in ``docs/signals/fix-applied.md``.
-* :func:`comment_resolution_signal` — did bot review comments get a
-  reply (proxy for "addressed")?
+* :func:`comment_resolution_signal` — aggregate over daydream review
+  comment threads (context only, not an outcome label).
 * :func:`local_commit_applied_signal` — for PR-less runs (see
   ``docs/signals/no-pr.md``), did a later local commit on the same
   branch carry the recommended diff content?
@@ -66,6 +66,8 @@ class PRMergeSignal:
 
     merged: bool
     merged_at: str | None
+    state: Literal["open", "closed", "merged", "unknown"] = "unknown"
+    draft: bool = False
 
 
 @dataclass(frozen=True)
@@ -284,6 +286,14 @@ def pr_merge_signal(
     return PRMergeSignal(
         merged=bool(payload.get("merged", False)),
         merged_at=payload.get("merged_at"),
+        state=(
+            "merged"
+            if payload.get("merged")
+            else payload.get("state")
+            if payload.get("state") in ("open", "closed")
+            else "unknown"
+        ),
+        draft=bool(payload.get("draft", False)),
     )
 
 
@@ -408,22 +418,31 @@ class PRCommentThreads:
 
     Attributes:
         top_level_daydream_ids: IDs of footer-marked daydream comments with
-            no parent (the "issue" comments).
+            no parent (the "issue" comments), scoped to the session's
+            fingerprints when one was supplied at index time.
         replied_ids: Subset of ``top_level_daydream_ids`` that received at
             least one reply.
         comment_id_by_fingerprint: First comment ID carrying each finding
             marker, keyed by 64-hex fingerprint.
+        replies_by_comment: Full reply comment dicts keyed by the parent
+            top-level comment ID. Replies are preserved as complete
+            objects (author, association, body, timestamps) — never
+            reduced to counts — so downstream classifiers can read the
+            reply text. Empty for other-run threads when a session
+            fingerprint scope was supplied.
     """
 
     top_level_daydream_ids: set[int]
     replied_ids: set[int]
     comment_id_by_fingerprint: dict[str, int]
+    replies_by_comment: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 def index_pr_review_comments(
     row: dict[str, Any],
     *,
     gh_api: Callable[..., Any],
+    session_fingerprints: list[str] | None = None,
 ) -> PRCommentThreads | None:
     """Fetch and index a PR's review comments for the resolution signals.
 
@@ -437,6 +456,11 @@ def index_pr_review_comments(
         row: Manifest row carrying ``pr_repo`` and ``pr_number``.
         gh_api: Callable returning the parsed comment list. Exceptions
             propagate to the caller.
+        session_fingerprints: When supplied, only top-level daydream
+            comments carrying at least one marker for one of these
+            fingerprints are indexed; other runs' threads stay out of
+            the evidence (they remain PR context, not this run's
+            outcome). ``None`` keeps the legacy all-threads behavior.
 
     Returns:
         :class:`PRCommentThreads`, or ``None`` when the row has no
@@ -449,27 +473,37 @@ def index_pr_review_comments(
 
     comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
 
+    scope = set(session_fingerprints) if session_fingerprints is not None else None
+
     # Pass 1: top-level daydream comment IDs and the fingerprints they carry.
     top_level_daydream_ids: set[int] = set()
     comment_id_by_fingerprint: dict[str, int] = {}
     for comment in comments:
         if comment.get("in_reply_to_id") is None and _is_daydream_comment(comment):
+            markers = parse_finding_markers(comment.get("body") or "")
+            if scope is not None and not any(fp in scope for fp in markers):
+                continue
             cid = comment["id"]
             top_level_daydream_ids.add(cid)
-            for fingerprint in parse_finding_markers(comment.get("body") or ""):
+            for fingerprint in markers:
                 comment_id_by_fingerprint.setdefault(fingerprint, cid)
 
-    # Pass 2: which top-level comments received a reply.
+    # Pass 2: which top-level comments received a reply, keeping the full
+    # reply objects (author, association, body, timestamps) rather than a
+    # count — the reply text is the evidence downstream classifiers need.
     replied_ids: set[int] = set()
+    replies_by_comment: dict[int, list[dict[str, Any]]] = {}
     for comment in comments:
         in_reply_to = comment.get("in_reply_to_id")
         if in_reply_to in top_level_daydream_ids:
             replied_ids.add(in_reply_to)
+            replies_by_comment.setdefault(in_reply_to, []).append(comment)
 
     return PRCommentThreads(
         top_level_daydream_ids=top_level_daydream_ids,
         replied_ids=replied_ids,
         comment_id_by_fingerprint=comment_id_by_fingerprint,
+        replies_by_comment=replies_by_comment,
     )
 
 
@@ -479,12 +513,17 @@ def comment_resolution_signal(
     gh_api: Callable[..., Any],
     threads: PRCommentThreads | None = None,
 ) -> CommentResolutionSignal:
-    """Return a proxy for "review comments addressed".
+    """Return an aggregate over daydream review-comment threads.
 
     Top-level review comments authored by daydream (identified by the
     :data:`DAYDREAM_FOOTER` badge in the comment body) are treated as
     issues; any reply (regardless of author or body) marks the issue
-    resolved.
+    resolved. This is a context-reporting aggregate only — reply presence
+    is not evidence of acceptance or rejection.
+
+    When the supplied (or fetched) threads were built with a session
+    fingerprint scope, the counts derive from that scope only: other
+    runs' threads on the same PR never inflate this run's evidence (M8).
 
     Args:
         row: Manifest row carrying ``pr_repo`` and ``pr_number``.
@@ -494,7 +533,9 @@ def comment_resolution_signal(
             :func:`index_pr_review_comments`. When supplied, the
             ``/comments`` fetch is skipped, letting a caller that needs
             both this and :func:`per_finding_resolution_signal` on one row
-            fetch the endpoint once.
+            fetch the endpoint once. The run-level signal path must pass
+            threads built with ``session_fingerprints`` so the aggregate
+            is fingerprint-scoped.
 
     Returns:
         :class:`CommentResolutionSignal` with ``(0, 0, 0)`` when the row

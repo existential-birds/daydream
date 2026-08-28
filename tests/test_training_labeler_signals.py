@@ -19,6 +19,7 @@ from daydream.training.labeler_signals import (
     PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
+    index_pr_review_comments,
     local_commit_applied_signal,
     per_finding_resolution_signal,
     pr_link_signal,
@@ -492,3 +493,85 @@ def test_per_finding_resolution_signal_no_pr() -> None:
     result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A], gh_api=_fake_gh_responder({}))
     assert result == []
 
+
+
+def _comment(cid, body, in_reply_to=None, login="alice", assoc="MEMBER", bot="User", created="2026-08-01T00:00:00Z"):
+    return {"id": cid, "in_reply_to_id": in_reply_to, "user": {"login": login, "type": bot},
+            "author_association": assoc, "body": body, "created_at": created}
+
+
+def _daydream_body(*fps):
+    return "\n".join(finding_marker(fp) for fp in fps) + "\n" + DAYDREAM_FOOTER
+
+
+def _threads_response(comments):
+    return comments
+
+
+def test_pr_merge_signal_preserves_state() -> None:
+    """Open PR keeps state='open'; closed-unmerged keeps 'closed' (M11)."""
+    gh = _fake_gh_responder({
+        ("org/repo", "repos/org/repo/pulls/1"): {"merged": False, "merged_at": None, "state": "open", "draft": False},
+        ("org/repo", "repos/org/repo/pulls/2"): {"merged": False, "merged_at": None, "state": "closed", "draft": False},
+    })
+    assert pr_merge_signal({"pr_repo": "org/repo", "pr_number": 1}, gh_api=gh).state == "open"
+    sig2 = pr_merge_signal({"pr_repo": "org/repo", "pr_number": 2}, gh_api=gh)
+    assert sig2.state == "closed" and sig2.merged is False
+
+
+def test_pr_merge_signal_legacy_payload_defaults() -> None:
+    """A payload without state/draft (cached fixtures) degrades to safe defaults, not 'closed'."""
+    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/3"): {"merged": False, "merged_at": None}})
+    sig = pr_merge_signal({"pr_repo": "org/repo", "pr_number": 3}, gh_api=gh)
+    assert sig.state == "unknown" and sig.draft is False
+
+
+def test_thread_index_keeps_full_reply_objects() -> None:
+    """Replies persist as objects with author/body/assoc/timestamps (M3), not a count."""
+    fp_a, fp_b = "a" * 64, "b" * 64
+    comments = [
+        _comment(10, _daydream_body(fp_a)),
+        _comment(11, _daydream_body(fp_b)),
+        _comment(20, "Fixed in abc123", in_reply_to=10, login="maint", assoc="OWNER", created="2026-08-02T10:00:00Z"),
+    ]
+    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/5/comments"): comments})
+    threads = index_pr_review_comments({"pr_repo": "org/repo", "pr_number": 5}, gh_api=gh)
+    replies = threads.replies_by_comment[10]
+    assert len(replies) == 1
+    r = replies[0]
+    assert r["user"]["login"] == "maint" and r["author_association"] == "OWNER"
+    assert r["body"] == "Fixed in abc123" and r["created_at"] == "2026-08-02T10:00:00Z"
+
+
+def test_thread_index_scopes_to_fingerprints() -> None:
+    """Only the session's recorded fingerprints are exposed; other runs' threads are context (M8)."""
+    fp_mine, fp_other = "c" * 64, "d" * 64
+    comments = [
+        _comment(30, _daydream_body(fp_mine)),
+        _comment(31, _daydream_body(fp_other)),  # another daydream run's finding
+        _comment(40, "already handled", in_reply_to=31),   # reply to OTHER run's thread
+        _comment(41, "fixed in abc", in_reply_to=30),
+    ]
+    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/7/comments"): comments})
+    threads = index_pr_review_comments(
+        {"pr_repo": "org/repo", "pr_number": 7}, gh_api=gh,
+        session_fingerprints=[fp_mine],
+    )
+    assert set(threads.comment_id_by_fingerprint) == {fp_mine}
+    assert 31 not in threads.top_level_daydream_ids
+    assert threads.replies_by_comment.get(31) is None  # other-run thread not in evidence
+
+
+def test_comment_resolution_signal_becomes_fingerprint_scoped_aggregate() -> None:
+    """Run-level counts derive from session fingerprints only (M8) — other runs' replies don't count."""
+    fp_mine, fp_other = "e" * 64, "f" * 64
+    comments = [
+        _comment(50, _daydream_body(fp_mine)),
+        _comment(51, _daydream_body(fp_other)),
+        _comment(60, "thanks", in_reply_to=51),
+    ]
+    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/9/comments"): comments})
+    row = {"pr_repo": "org/repo", "pr_number": 9}
+    threads = index_pr_review_comments(row, gh_api=gh, session_fingerprints=[fp_mine])
+    sig = comment_resolution_signal(row, gh_api=gh, threads=threads)
+    assert (sig.total, sig.replied, sig.unresolved) == (1, 0, 1)
