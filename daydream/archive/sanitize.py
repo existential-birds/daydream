@@ -333,3 +333,31 @@ def import_bundle(run_dir: Path, archive_dir: Path) -> ImportResult:
     if not quarantine_dir.exists():
         shutil.move(str(run_dir), str(quarantine_dir))
     return ImportResult(source=run_dir, imported=False, quarantined=True)
+
+
+def report_inventory(archive_dir: Path) -> dict[str, int]:
+    """Value-free inventory mode (M11): classify each bundle's remote URL.
+
+    For every ``runs/*`` bundle, ``manifest.json``'s ``git.remote_url`` is
+    classified via :func:`classify_remote_url`. Prints and returns counts by
+    category (session counts only — never a URL fragment or matched value).
+    A malformed manifest counts under ``"unparseable"``. Never raises.
+    """
+    counts: dict[str, int] = {}
+    runs_dir = archive_dir / "runs"
+    if runs_dir.is_dir():
+        for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+            manifest = run_dir / "manifest.json"
+            categories: list[str]
+            try:
+                data = json.loads(manifest.read_text())
+                raw = data["git"]["remote_url"]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                categories = ["unparseable"]
+            else:
+                categories = classify_remote_url(raw) if isinstance(raw, str) else ["unparseable"]
+            for category in categories or ["clean"]:
+                counts[category] = counts.get(category, 0) + 1
+    for category in sorted(counts):
+        print(f"{category}: {counts[category]}")
+    return counts

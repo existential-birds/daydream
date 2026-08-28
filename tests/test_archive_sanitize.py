@@ -95,3 +95,16 @@ def test_corpus_projection_refuses_affected_bundle_without_derivative(tmp_path: 
     _seed_bronze_bundle(archive_dir, "s1", "https://user:ghp_canaryfake123@github.com/o/r")
     row = {"archive_path": str(archive_dir / "runs" / "s1"), "session_id": "s1"}
     assert _build_record(row, {}, None) is None
+
+
+def test_inventory_counts_by_category_without_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    archive_dir = tmp_path / "archive"
+    _seed_bronze_bundle(archive_dir, "s1", "https://user:p@github.com/o/r")
+    _seed_bronze_bundle(archive_dir, "s2", "https://x-access-token@github.com/o/r")
+    _seed_bronze_bundle(archive_dir, "s3", "https://github.com/o/r")
+    sanitize.report_inventory(archive_dir)
+    out = capsys.readouterr().out
+    assert "userinfo" in out and "2" in out  # two affected bundles
+    assert "ghp" not in out and "user:p" not in out  # no values, ever
