@@ -3,8 +3,9 @@
 Invoked inside the Harbor task container (``python -m
 daydream.benchmark.harbor.entrypoint``) by :class:`DaydreamReviewAgent`'s
 ``run`` via ``environment.exec``. Owns the fail-closed review surface: it maps
-only the ``DAYDREAM_REVIEW_*`` reviewer config/credential into Pi's native
-OpenRouter env, refuses any unsupported backend *before* reviewing, runs the real
+only the ``DAYDREAM_REVIEW_*`` reviewer config/credential into the selected
+backend's native env (OpenRouter for pi, Anthropic for claude), refuses any
+unsupported backend *before* any credential mapping or reviewing, runs the real
 Daydream runner **in-process** against the frozen ``base``/``head`` snapshot
 with a fully controlled :class:`RunConfig` (review-only, non-interactive,
 archiving and eval disabled, empty file config), then publishes the canonical
@@ -36,6 +37,9 @@ _CASE_ID_ENV = "DAYDREAM_REVIEW_CASE_ID"
 _BASE_REF_ENV = "DAYDREAM_REVIEW_BASE_REF"
 _HEAD_REF_ENV = "DAYDREAM_REVIEW_HEAD_REF"
 _BACKEND_ENV = "DAYDREAM_REVIEW_BACKEND"
+# Shared allowlist backing both the host-side agent gate and the in-container
+# gate; any new reviewer backend must be added here.
+_SUPPORTED_BACKENDS: tuple[str, ...] = ("pi", "claude")
 _API_KEY_ENV = "DAYDREAM_REVIEW_API_KEY"
 _BASE_URL_ENV = "DAYDREAM_REVIEW_BASE_URL"
 _REPO_DIR_ENV = "DAYDREAM_REVIEW_REPO_DIR"
@@ -110,28 +114,39 @@ def build_run_config(
 
 
 def require_supported_backend() -> str:
-    """Refuse any backend other than ``pi``, before any reviewing.
+    """Refuse any backend other than ``pi`` or ``claude``, before any reviewing.
 
     Reads ``DAYDREAM_REVIEW_BACKEND`` (default ``"pi"``). An unsupported
     backend raises :class:`EntrypointError` before tools are installed or
     network access is widened.
     """
     backend = os.environ.get(_BACKEND_ENV, "pi").strip().lower()
-    if backend != "pi":
+    if backend not in _SUPPORTED_BACKENDS:
+        supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
         raise EntrypointError(
-            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'pi' is supported"
+            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
         )
     return backend
 
 
-def apply_reviewer_env(env: Mapping[str, str] | None = None) -> None:
-    """Map only reviewer config/credential into Pi's OpenRouter env.
 
-    The Harbor reviewer is intentionally OpenRouter-only. The control-plane
-    credential becomes Pi's generic ``PI_API_KEY`` and the Daydream Pi backend
-    maps it to ``OPENROUTER_API_KEY`` only in the child process. Any inherited
-    raw provider or judge credential is cleared first so it cannot leak into
-    the reviewed scope. A non-HTTPS or non-OpenRouter base URL fails closed.
+def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "pi") -> None:
+    """Map only reviewer config/credential into the selected backend's env.
+
+    The mapping is backend-aware. For ``pi`` (default) the reviewer is
+    intentionally OpenRouter-only: the control-plane credential becomes Pi's
+    generic ``PI_API_KEY`` and the Daydream Pi backend maps it to
+    ``OPENROUTER_API_KEY`` only in the child process. For ``claude`` the
+    ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_BASE_URL``
+    credentials are preserved into the environment and the openrouter.ai
+    base-URL requirement does not apply (any HTTPS ``ANTHROPIC_BASE_URL`` with
+    a concrete hostname is accepted). In both branches any inherited raw provider or judge credential
+    is cleared first so it cannot leak into the reviewed scope; a bad base URL
+    or a missing credential fails closed.
+
+    The caller must pass an already-validated *backend* (see
+    :func:`require_supported_backend`); credential mapping never substitutes a
+    fallback for a missing credential.
     """
     source = dict(os.environ if env is None else env)
     for prefix in (
@@ -143,6 +158,32 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None) -> None:
     ):
         for key in [k for k in os.environ if k.startswith(prefix)]:
             os.environ.pop(key, None)
+    if backend == "claude":
+        api_key = (source.get("ANTHROPIC_API_KEY") or "").strip()
+        auth_token = (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        if not api_key and not auth_token:
+            raise EntrypointError(
+                "claude backend requires ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN "
+                "in the reviewer environment"
+            )
+        base_url = (source.get("ANTHROPIC_BASE_URL") or "").strip()
+        if base_url:
+            parsed = urllib.parse.urlsplit(base_url)
+            if (
+                parsed.scheme.lower() != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise EntrypointError(
+                    "ANTHROPIC_BASE_URL must be an HTTPS endpoint"
+                )
+            os.environ["ANTHROPIC_BASE_URL"] = base_url
+        if api_key:
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+        if auth_token:
+            os.environ["ANTHROPIC_AUTH_TOKEN"] = auth_token
+        return
     api_key = (source.get(_API_KEY_ENV) or "").strip()
     base_url = (source.get(_BASE_URL_ENV) or "").strip()
     parsed = urllib.parse.urlsplit(base_url)
@@ -227,8 +268,8 @@ async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
         for key, value in monkeypatch_env.items():
             os.environ[key] = value
     try:
-        apply_reviewer_env()
         backend = require_supported_backend()
+        apply_reviewer_env(backend=backend)
         case_id = _required_env(_CASE_ID_ENV)
         repo_dir = os.environ.get(_REPO_DIR_ENV, _DEFAULT_REPO_DIR)
         artifact_path = os.environ.get(_ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)

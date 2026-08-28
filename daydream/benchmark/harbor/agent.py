@@ -46,10 +46,17 @@ _BANNED_VARS = (
     "OPENROUTER_API_KEY",
     "PI_API_KEY",
 )
-# Judge vars and raw provider credentials must never leak into the child env.
+# Anthropic credential vars; preserved into the child env when backend == "claude".
+_ANTHROPIC_BAN_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+# Control-plane ANTHROPIC_* keep-set, byte-identical to the render_job_config
+# placeholders: only these three may ride into a claude child env; any other
+# host-ambient ANTHROPIC_* var is scrubbed like any other raw credential.
+_ANTHROPIC_KEEP_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+# Judge vars and raw provider credentials must never leak into the child env
+# (``ANTHROPIC_*`` is exempted from the scrub only when backend == "claude").
 _BANNED_PREFIXES = (
     "DAYDREAM_JUDGE_",
-    "ANTHROPIC_",
+    "ANTHROPIC_",  # dropped from the scrub for backend="claude" (credentials preserved)
     "OPENAI_",
     "OPENROUTER_",
     "PI_",
@@ -80,16 +87,39 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
 
     async def setup(self, environment: Any) -> None:
         """Network-free setup: confirm the container installs this exact Daydream
-        release and the Pi CLI.
+        release and the backend SDK for the selected reviewer backend (the Pi
+        CLI for ``pi``, ``claude_agent_sdk`` for ``claude``). A backend outside
+        the shared ``_SUPPORTED_BACKENDS`` allowlist is refused here, before
+        any probe (an unsupported value must never probe a wrong SDK).
 
         A single ``environment.exec`` runs an in-container Python probe; a
         non-zero exec return (missing exact version or missing backend SDK)
         raises :class:`AgentError` -- never a silent pass.
         """
+        backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
+        from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
+
+        if backend not in _SUPPORTED_BACKENDS:
+            supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
+            raise AgentError(
+                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
+            )
+        # The allowlist can grow before a probe exists; never KeyError on an
+        # allowlisted-but-unprobed backend (and never probe a wrong SDK) --
+        # refuse with a typed error instead.
+        backend_probe = {
+            "pi": "assert shutil.which('pi') is not None;",
+            "claude": "import claude_agent_sdk;",
+        }.get(backend)
+        if backend_probe is None:
+            raise AgentError(
+                f"no setup probe is defined for DAYDREAM_REVIEW_BACKEND={backend!r}; "
+                "extend the probe map in DaydreamReviewAgent.setup()"
+            )
         probe = (
             "import importlib.metadata, shutil;"
             f"assert importlib.metadata.version('daydream') == {self.version()!r};"
-            "assert shutil.which('pi') is not None;"
+            + backend_probe
         )
         command = 'python -X utf8 -c "' + probe + '"'
         result = await environment.exec(command)
@@ -107,20 +137,24 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
     ) -> None:
         """Review the frozen snapshot in-container.
 
-        Fail-closed: refuses any backend other than ``pi`` *before* any
-        reviewing (never installs tools or widens network access), maps the
-        allowlist child environment, and invokes the controlled entrypoint. A
-        non-zero entrypoint return raises :class:`AgentError`.
+        Fail-closed: refuses any backend outside the shared
+        ``_SUPPORTED_BACKENDS`` allowlist *before* any reviewing (never
+        installs tools or widens network access), maps the allowlist child
+        environment, and invokes the controlled entrypoint. A non-zero
+        entrypoint return raises :class:`AgentError`.
         """
         if not _HARBOR:
             raise AgentError("Harbor is not installed; install 'daydream[benchmark]'")
         backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
-        if backend != "pi":
+        from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
+
+        if backend not in _SUPPORTED_BACKENDS:
+            supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
             raise AgentError(
-                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'pi' is supported"
+                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
             )
         parent = {**os.environ, **self.extra_env}
-        child_env = build_child_env(parent)
+        child_env = build_child_env(parent, backend=backend)
         result = await environment.exec(
             "python -m daydream.benchmark.harbor.entrypoint",
             cwd=child_env.get("DAYDREAM_REVIEW_REPO_DIR", "/workspace/repo"),
@@ -161,7 +195,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
                 setattr(context, attr, value)
 
 
-def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
+def build_child_env(parent_env: Mapping[str, str], *, backend: str = "pi") -> dict[str, str]:
     """Build the fail-closed allowlist child environment.
 
     Keeps only ``DAYDREAM_REVIEW_*`` reviewer config/credential plus the required
@@ -169,19 +203,36 @@ def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
     archive and raw provider vars) so any future secret-holding variable not in
     the keep-set still cannot leak by default. Never passes the parent env wholesale.
 
+    Backend-conditional credential handling: for ``backend="claude"`` exactly
+    the control-plane ``ANTHROPIC_*`` byte set declared by ``render_job_config``
+    (``ANTHROPIC_API_KEY``, ``ANTHROPIC_AUTH_TOKEN``, ``ANTHROPIC_BASE_URL``)
+    survives so the Claude Agent SDK / claude CLI in the container has
+    credentials; any other host-ambient ``ANTHROPIC_*`` var is scrubbed like
+    any other raw credential. For ``pi`` (default) and any other value, the
+    ``ANTHROPIC_*`` scrub is exactly today's fail-closed behavior.
+
     The review-profile candidate (``DAYDREAM_REVIEW_PROFILE_CANDIDATE``, issue
     #885/R11) rides the ``DAYDREAM_REVIEW_*`` allowlist to the entrypoint; the
     verifier env is isolated to ``DAYDREAM_JUDGE_*`` (render_job_config), so the
     candidate never reaches the judge.
     """
+    keep_anthropic = backend == "claude"
     child = {
         key: value
         for key, value in dict(parent_env).items()
-        if key.startswith("DAYDREAM_REVIEW_") or key in _REQUIRED_PROCESS_VARS
+        if key.startswith("DAYDREAM_REVIEW_")
+        or key in _REQUIRED_PROCESS_VARS
+        or (keep_anthropic and key in _ANTHROPIC_KEEP_VARS)
     }
-    for banned in _BANNED_VARS:
+    banned_vars = _BANNED_VARS if not keep_anthropic else (
+        tuple(v for v in _BANNED_VARS if v not in _ANTHROPIC_BAN_VARS)
+    )
+    banned_prefixes = _BANNED_PREFIXES if not keep_anthropic else (
+        tuple(p for p in _BANNED_PREFIXES if p != "ANTHROPIC_")
+    )
+    for banned in banned_vars:
         child.pop(banned, None)
-    for prefix in _BANNED_PREFIXES:
+    for prefix in banned_prefixes:
         for key in [k for k in child if k.startswith(prefix)]:
             child.pop(key, None)
     return child

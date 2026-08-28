@@ -108,12 +108,41 @@ def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | No
     return sorted(reviewer), sorted(judge)
 
 
+def _reviewer_base_url_from_env(env: dict[str, Any]) -> str:
+    """Return the reviewer base URL (raw string, ``""`` when unset).
+
+    Backend-aware (issue #966): a claude reviewer reads ``ANTHROPIC_BASE_URL``
+    -- the in-container claude branch accepts an unset base URL (the SDK
+    default applies); every other backend keeps the pi-era
+    ``DAYDREAM_REVIEW_BASE_URL``.
+    """
+    backend = (env.get("DAYDREAM_REVIEW_BACKEND") or "").strip().lower()
+    if backend == "claude":
+        return (env.get("ANTHROPIC_BASE_URL") or "").strip()
+    return (env.get("DAYDREAM_REVIEW_BASE_URL") or "").strip()
+
+
 def _reviewer_host_from_env(env: dict[str, Any]) -> str:
     """Return the reviewer base-URL host, failing closed when it is absent.
 
-    A configured ``DAYDREAM_REVIEW_BASE_URL`` resolves to its hostname
-    (lowercased, no port). Daydream no longer selects an implicit provider API.
+    Backend-aware (issue #966): a claude reviewer resolves its host from
+    ``ANTHROPIC_BASE_URL`` -- falling back to the Anthropic SDK default
+    ``api.anthropic.com`` when unset, and refusing a set-but-hostless URL
+    (mirroring the in-container claude branch's concrete-hostname
+    requirement). Every other backend keeps the pi-era rule: a configured
+    ``DAYDREAM_REVIEW_BASE_URL`` resolves to its hostname (lowercased, no
+    port), and a missing one raises. Daydream never selects an implicit
+    provider API.
     """
+    backend = (env.get("DAYDREAM_REVIEW_BACKEND") or "").strip().lower()
+    if backend == "claude":
+        base = _reviewer_base_url_from_env(env)
+        if not base:
+            return "api.anthropic.com"
+        host = str(urllib.parse.urlsplit(base).hostname or "").lower()
+        if not host:
+            raise ValueError("ANTHROPIC_BASE_URL must include a concrete hostname")
+        return host
     base = env.get("DAYDREAM_REVIEW_BASE_URL") or ""
     if not base:
         raise ValueError("missing DAYDREAM_REVIEW_BASE_URL")

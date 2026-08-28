@@ -402,12 +402,20 @@ def render_job_config(*, oracle: bool) -> bytes:
     """Render a deterministic Harbor job or Oracle configuration."""
     agents: list[dict[str, Any]] = [{"name": "oracle"}] if oracle else [{
         "import_path": "daydream.benchmark.harbor.agent:DaydreamReviewAgent",
+        # DAYDREAM_REVIEW_BACKEND is a pi|claude selection passed through verbatim;
+        # supported values are validated downstream by the agent/entrypoint allowlist.
         "env": {
             "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-pi}",
             "DAYDREAM_REVIEW_MODEL": "${DAYDREAM_REVIEW_MODEL}",
             "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY}",
             "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL}",
             "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
+            # ANTHROPIC_* carries claude-backend credentials into the container
+            # (agent.build_child_env keep-set, entrypoint claude branch); the
+            # API key and auth token are alternatives, the base URL optional.
+            "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:-}",
+            "ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN:-}",
+            "ANTHROPIC_BASE_URL": "${ANTHROPIC_BASE_URL:-}",
         },
     }]
     document = {
