@@ -119,6 +119,35 @@ def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.M
     assert "ProfileError" not in text
 
 
+def test_entrypoint_claude_backend_reaches_run_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n")
+    artifact = tmp_path / "logs" / "artifacts" / "review.json"
+    artifact.parent.mkdir(parents=True)
+    seen: dict[str, Any] = {}
+
+    async def _fake_run(config: Any) -> int:
+        seen["backend"] = config.backend
+        return 0
+
+    def _fake_publish(**kwargs: Any) -> None:
+        Path(kwargs["artifact_path"]).write_text("{}")
+
+    monkeypatch.setattr("daydream.runner.run", _fake_run)
+    monkeypatch.setattr(entrypoint, "publish_review", _fake_publish)
+
+    rc = asyncio.run(entrypoint.main(monkeypatch_env={
+        "DAYDREAM_REVIEW_CASE_ID": "case-claude",
+        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
+        "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path),
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "ANTHROPIC_API_KEY": "sk-ant",
+    }))
+    assert rc == 0
+    assert seen["backend"] == "claude"          # the wiring this issue is about
+
+
 def test_entrypoint_env_has_no_skill_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The controlled entrypoint must never inject a skill-registry env var.
     monkeypatch.delenv("DAYDREAM_SKILLS_DIR", raising=False)
