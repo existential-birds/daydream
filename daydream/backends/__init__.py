@@ -125,7 +125,7 @@ class CostEvent:
         model_name: Real SDK model id observed during this call (e.g.
             ``claude-opus-4-5-20250901``). ``None`` when unavailable; the
             recorder uses it to upgrade a generic backend label
-            (``"claude"``, ``"codex"``) to the actual model id.
+            (``"claude"``, ``"codex"``, ``"osprey"``) to the actual model id.
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """
 
@@ -178,7 +178,7 @@ class MetricsEvent:
         model_name: Real SDK model id observed for this turn (e.g.
             ``claude-opus-4-5-20250901``). ``None`` when unavailable;
             recorder uses it to upgrade a generic backend label
-            (``"claude"``, ``"codex"``) to the actual model id.
+            (``"claude"``, ``"codex"``, ``"osprey"``) to the actual model id.
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """
 
@@ -234,12 +234,19 @@ class ResultEvent:
             True), or None. Callers that pass
             ``validate_structured_output=False`` re-validate downstream.
         continuation: Optional continuation token for multi-turn flows.
+        model_name: Real SDK model id observed for this invocation. Backends
+            should populate this when the model is only available from a
+            session-level terminal event rather than per-turn usage.
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """
 
     structured_output: Any | None
     continuation: ContinuationToken | None
     timestamp: str = field(default_factory=now_iso)
+    # Keep this after timestamp so existing three-positional-argument
+    # ResultEvent callers continue to interpret their third argument as the
+    # timestamp.
+    model_name: str | None = None
 
 
 AgentEvent = (

@@ -298,7 +298,10 @@ class OspreyBackend:
             raise OspreyUnsupportedOption("tool_search_mode", f"invalid mode {tool_search_mode!r}")
 
         self._model_override = model
-        self.model = model or "osprey"
+        # Osprey may resolve an omitted model from its own config and model
+        # preference store. Until session_start reports that choice, the
+        # backend name is not a valid model identity.
+        self.model = model or "unknown"
         self.reasoning_effort = reasoning_effort
         self.osprey_binary = osprey_binary or os.environ.get("OSPREY_BINARY", "osprey")
         self.cwd = cwd
@@ -602,6 +605,10 @@ class OspreyBackend:
                     session_id = _required_string(event, "session_id")
                     _required_string(event, "started_at")
                     session_model = _required_string(event, "model")
+                    # ``self.model`` starts as a backend-only placeholder when
+                    # Osprey is allowed to resolve its own config. The session
+                    # header is the authoritative model identity for this run.
+                    self.model = session_model
                     provider = _required_string(event, "provider")
                     saw_session_start = True
                     continue
@@ -611,8 +618,10 @@ class OspreyBackend:
                     raise OspreyProtocolError("session_start did not provide a session_id")
 
                 if event_name != "thinking_delta" and thinking_parts:
-                    yield ThinkingEvent("".join(thinking_parts))
+                    thinking_text = "".join(thinking_parts)
                     thinking_parts.clear()
+                    if thinking_text.strip():
+                        yield ThinkingEvent(thinking_text)
 
                 if event_name == "session_end":
                     outcome = _required_string(event, "outcome")
@@ -784,6 +793,7 @@ class OspreyBackend:
                         "exit_code": terminal_exit_code,
                     },
                 ),
+                model_name=session_model,
             )
         finally:
             with anyio.CancelScope(shield=True):

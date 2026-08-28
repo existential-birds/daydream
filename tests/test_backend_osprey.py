@@ -287,6 +287,38 @@ async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ignores_blank_thinking_deltas() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": ""},
+        {"event": "thinking_delta", "content": "  \n"},
+        {"event": "text_delta", "content": "Done."},
+        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
+    )
+
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+    assert not any(isinstance(event, ThinkingEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_result_exposes_session_model_without_usage_metrics() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "text_delta", "content": "Done."},
+        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
+    )
+
+    backend = OspreyBackend(osprey_binary="fake")
+    assert backend.model == "unknown"
+    events, _ = await _collect(backend, lines)
+    result = next(event for event in events if isinstance(event, ResultEvent))
+
+    assert result.model_name == "custom-model"
+    assert backend.model == "custom-model"
+
+
+@pytest.mark.asyncio
 async def test_separates_thinking_runs_at_protocol_boundaries() -> None:
     lines, _ = _stream(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
@@ -343,6 +375,8 @@ async def test_trajectory_records_coalesced_thinking_as_prose(tmp_path: Path) ->
 
     trajectory = recorder.build_trajectory().model_dump(exclude_none=True)
     assert trajectory["steps"][1]["reasoning_content"] == "Let me think."
+    assert trajectory["agent"]["model_name"] == "custom-model"
+    assert trajectory["steps"][1]["model_name"] == "custom-model"
 
 
 @pytest.mark.asyncio

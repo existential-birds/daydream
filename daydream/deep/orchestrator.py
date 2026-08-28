@@ -1061,7 +1061,6 @@ async def _step_exploration(ctx: FlowContext) -> None:
         else:
             print_phase_hero(console, "EXPLORE", phase_subtitle("EXPLORE"))
             explore_backend = ctx.backend_for("exploration")
-            print_dim(console, f"Exploration model: {explore_backend.model}")
             async with phase_scope(DaydreamPhase.EXPLORATION):
                 config.exploration_context = await safe_explore(
                     pre_scan,
@@ -1077,6 +1076,11 @@ async def _step_exploration(ctx: FlowContext) -> None:
                         "exploration.repository_survey": ctx.strategy("exploration.repository_survey"),
                     },
                 )
+            # Osprey resolves an omitted model from its own config and reports
+            # the authoritative value in session_start, during safe_explore.
+            # Log after that boundary so the backend name is never presented as
+            # the model id.
+            print_dim(console, f"Exploration model: {explore_backend.model}")
             console.print(render_exploration_summary(config.exploration_context))
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(exploration_path)
