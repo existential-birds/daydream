@@ -544,6 +544,29 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_pa
     assert len(details["errors"]) >= 1                            # bounded diagnostic written
 
 
+def test_provider_selection_claude_cli_relaxes_api_key_only(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    sr = sr_module
+    base = {"DAYDREAM_JUDGE_PROVIDER": "claude-cli", "DAYDREAM_JUDGE_MODEL": "m"}
+
+    client = sr._build_client({**base, "CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+    assert isinstance(client, sr.ClaudeCliJudgeClient)          # no API key required
+
+    with pytest.raises(sr.VerifierError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        sr._build_client(base)                                   # missing token -> typed diagnostic
+    with pytest.raises(sr.VerifierError, match="CLAUDE_CODE_OAUTH_TOKEN"):
+        sr._build_client({**base, "CLAUDE_CODE_OAUTH_TOKEN": ""})  # empty token also rejected
+    with pytest.raises(sr.VerifierError, match="missing DAYDREAM_JUDGE_MODEL"):
+        sr._build_client({"DAYDREAM_JUDGE_PROVIDER": "claude-cli", "CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+    # other providers unchanged: API key still mandatory, same message
+    with pytest.raises(sr.VerifierError, match="missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY"):
+        sr._build_client({"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m"})
+    with pytest.raises(sr.VerifierError, match="unsupported DAYDREAM_JUDGE_PROVIDER 'bogus'; "
+                                              "expected anthropic, openai-compatible, or claude-cli"):
+        sr._build_client(
+            {"DAYDREAM_JUDGE_PROVIDER": "bogus", "DAYDREAM_JUDGE_MODEL": "m", "DAYDREAM_JUDGE_API_KEY": "k"}
+        )
+
+
 def test_provider_selection_builds_expected_client(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     sr = sr_module
 
@@ -1150,7 +1173,7 @@ def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module: An
             {"DAYDREAM_JUDGE_PROVIDER": None, "DAYDREAM_JUDGE_MODEL": "m",
              "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
         )
-    # exactly anthropic | openai-compatible accepted
+    # exactly anthropic | openai-compatible | claude-cli accepted
     cert = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "https://api.openai.com/v1"}
     assert isinstance(sr._build_client(cert), sr.OpenAIJudgeClient)
@@ -1158,7 +1181,7 @@ def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module: An
     for bad in ("martian", "garbage", "Anthropic"):
         with pytest.raises(sr.VerifierError) as e:
             sr._build_client({**cert, "DAYDREAM_JUDGE_PROVIDER": bad})
-        assert "expected anthropic or openai-compatible" in str(e.value)
+        assert "expected anthropic, openai-compatible, or claude-cli" in str(e.value)
     # a base URL host outside the allowlist fails closed at build time
     with pytest.raises(sr.VerifierError):
         sr._build_client({**cert, "DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com"})

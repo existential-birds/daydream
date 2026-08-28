@@ -857,6 +857,7 @@ async def judge_pairs(
 _ENV_PROVIDER = "DAYDREAM_JUDGE_PROVIDER"
 _ENV_MODEL = "DAYDREAM_JUDGE_MODEL"
 _ENV_API_KEY = "DAYDREAM_JUDGE_API_KEY"
+_ENV_OAUTH_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"
 _ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
 _ENV_ALLOWED_HOSTS = "DAYDREAM_JUDGE_ALLOWED_HOSTS"
 _ENV_ARTIFACT_PATH = "DAYDREAM_JUDGE_ARTIFACT_PATH"
@@ -1239,20 +1240,35 @@ def run_verifier(
 def _build_client(env: dict[str, Any]) -> Any:
     """Build the judge client from the DAYDREAM_JUDGE_* env surface.
 
-    Provider is fail-closed: the ``anthropic`` | ``openai-compatible`` |
-    ``claude-cli`` set is accepted when explicit; absent or unsupported values
-    raise before any request. The provider's base URL is resolved and the
-    initial request URL is validated against the effective judge-host allowlist
-    at build time (the claude-cli provider has no HTTP base URL to validate).
+    the ``anthropic`` | ``openai-compatible`` | ``claude-cli`` set is accepted
+    when explicit; absent or unsupported values raise before any request.
+    The ``anthropic`` and ``openai-compatible`` providers require an API key,
+    resolve a base URL, and validate the initial request URL against the
+    effective judge-host allowlist at build time; the ``claude-cli`` provider
+    instead requires a non-empty ``CLAUDE_CODE_OAUTH_TOKEN`` and has no HTTP
+    base URL to validate.
     """
     provider = env.get(_ENV_PROVIDER) or ""
     model = env.get(_ENV_MODEL)
     api_key = env.get(_ENV_API_KEY)
+    if provider == "claude-cli":
+        # OAuth-token auth via the Claude Code CLI: no API key, no base URL,
+        # no allowlist validation (verified egress is intentionally unavailable
+        # on this path; trusted egress is enforced by the container env set).
+        oauth_token = env.get(_ENV_OAUTH_TOKEN)
+        if not model:
+            raise VerifierError("missing DAYDREAM_JUDGE_MODEL")
+        if not oauth_token:
+            raise VerifierError(
+                "missing CLAUDE_CODE_OAUTH_TOKEN: required when DAYDREAM_JUDGE_PROVIDER is claude-cli"
+            )
+        return ClaudeCliJudgeClient(model)
     if not model or not api_key:
         raise VerifierError("missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY")
     if provider not in {"anthropic", "openai-compatible"}:
         raise VerifierError(
-            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; expected anthropic or openai-compatible"
+            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; "
+            "expected anthropic, openai-compatible, or claude-cli"
         )
     if provider == "anthropic":
         allowlist = _effective_allowlist(_ANTHROPIC_MESSAGES_URL, env)
@@ -1317,6 +1333,7 @@ def main() -> int:
             _ENV_PROVIDER,
             _ENV_MODEL,
             _ENV_API_KEY,
+            _ENV_OAUTH_TOKEN,
             _ENV_BASE_URL,
             _ENV_ALLOWED_HOSTS,
         )
