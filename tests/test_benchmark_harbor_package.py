@@ -258,6 +258,16 @@ def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned() -> None:
     assert "httpx" in text and "httpx>=" not in text and "httpx==0.28.1" in text
 
 
+def test_verifier_dockerfile_ships_pinned_node_and_claude_cli() -> None:
+    from daydream.benchmark.harbor import package as pkg
+
+    text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
+    assert "node-v22." in text                     # version-pinned Node tarball
+    assert "@anthropic-ai/claude-code@" in text    # version-pinned CLI install
+    assert "ENTRYPOINT" not in text and "CMD" not in text and "/verifier" not in text  # guard set still clean
+    assert "httpx==0.28.1" in text and "httpx>=" not in text
+
+
 def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     import yaml
 
