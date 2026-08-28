@@ -357,11 +357,11 @@ def append_label_observation(
             and mirrored onto ``runs.has_posterior`` so SQL consumers can split
             labeled/unlabeled populations without parsing ``reward_json``.
         reply_classifier_version: Version of the reply classifier that produced
-            the per-finding dispositions (version axis, M13); accepted here so
-            callers can thread it ahead of the column's persistence.
+            the per-finding dispositions (version axis, M13); persisted on the
+            row so each annotation generation is self-describing.
         reply_evidence_digest: Stable digest over the combined reply evidence
-            (versioned dedup input, M14); accepted here so callers can thread
-            it ahead of the column's persistence.
+            (versioned dedup input, M14); persisted and compared in the auto
+            dedup key so an edited reply appends a new generation.
         source: Provenance of this observation — ``"auto"`` (automated rubric
             labeler; the default that keeps existing harvest callers
             unchanged) or ``"human"`` (operator override). Human-sourced rows
@@ -372,12 +372,18 @@ def append_label_observation(
     Returns:
         ``True`` when a new observation row was inserted; ``False`` when the
         append was a deduped no-op. Dedup is **auto-only**: an automated
-        (``source="auto"``) append whose ``(evidence_sha, reward_version)``
-        matches the latest existing *auto* observation for the session is
-        skipped without inserting and without touching the cache. Human
+        (``source="auto"``) append matching the latest existing *auto*
+        observation for the session on the versioned evidence tuple
+        ``(evidence_sha, labeler_policy_version,
+        reply_evidence_digest, labels, has_posterior)`` is
+        skipped without inserting and without touching the cache. A
+        policy-version bump or an edited-reply digest change on
+        otherwise-identical evidence appends
+        a fresh generation. A ``None`` digest is not coerced to ``""`` — ``None``
+        never equals a present digest, so digest-less legacy callers dedupe on
+        the remaining tuple exactly as before (deliberate default). Human
         (``source != "auto"``) appends are never deduped and always return
-        ``True``; a reward-version bump on otherwise-identical evidence also
-        appends a fresh generation.
+        ``True``.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table,
@@ -401,9 +407,18 @@ def append_label_observation(
         # Idempotency: an automated re-score with identical evidence is a no-op.
         # Compare against the latest *auto* row specifically so a human override
         # appended in between cannot mask a genuine automated re-score.
+        #
+        # The dedup key is the versioned evidence tuple (M14):
+        # ``(evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
+        # has_posterior)``. A policy-version bump or an edited-reply digest
+        # change therefore appends a new generation rather than deduping. A
+        # ``None`` digest is deliberately NOT coerced to ``""``: ``None`` never
+        # equals a present digest, so digest-less legacy callers dedupe on the
+        # remaining tuple exactly as before.
         if source == "auto":
             latest_auto = conn.execute(
-                "SELECT evidence_sha, reward_version, labels, has_posterior FROM label_observations "
+                "SELECT evidence_sha, labeler_policy_version, reply_evidence_digest, labels, has_posterior "
+                "FROM label_observations "
                 "WHERE session_id = ? AND source = 'auto' "
                 "ORDER BY observed_at DESC LIMIT 1",
                 (session_id,),
@@ -411,7 +426,8 @@ def append_label_observation(
             if (
                 latest_auto is not None
                 and latest_auto["evidence_sha"] == evidence_sha
-                and latest_auto["reward_version"] == reward_version
+                and latest_auto["labeler_policy_version"] == labeler_version
+                and latest_auto["reply_evidence_digest"] == reply_evidence_digest
                 and latest_auto["labels"] == labels_json
                 # Population membership varies independently of the label (a
                 # local_branch outcome is labeled but not posterior evidence).
@@ -427,8 +443,9 @@ def append_label_observation(
                 conn.execute(
                     "INSERT INTO label_observations "
                     "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
-                    "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source, "
+                    "labeler_policy_version, reply_classifier_version, reply_evidence_digest, legacy) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto')",
                     (
                         session_id,
                         observed_at,
@@ -444,6 +461,9 @@ def append_label_observation(
                         reviewer_logins_json,
                         has_posterior_int,
                         source,
+                        labeler_version,
+                        reply_classifier_version,
+                        reply_evidence_digest,
                     ),
                 )
                 break

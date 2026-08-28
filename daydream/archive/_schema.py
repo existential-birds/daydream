@@ -108,6 +108,16 @@ CREATE TABLE IF NOT EXISTS runs (
 # ``'human'`` for maintainer overrides) — human-sourced rows win in the "latest
 # label" projections regardless of recency. Pre-existing rows default to ``'auto'``
 # via the additive ``_migrate_label_observations_schema`` ALTER-ADD migration.
+# ``labeler_policy_version`` mirrors ``labeler_version`` so the policy axis is an
+# explicit column; ``reply_classifier_version`` / ``reply_evidence_digest`` carry
+# the reply-classifier version and a stable digest over the combined reply
+# evidence — together with ``evidence_sha`` they form the auto-dedup key
+# ``(evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
+# has_posterior)``, replacing the older ``(evidence_sha, reward_version)`` key.
+# ``legacy`` marks provenance generation: new rows default ``'auto'``
+# (current-generation); the additive migration stamps every pre-existing row
+# (``labeler_policy_version IS NULL``) ``'legacy'`` exactly once, never touching
+# its labels/observed_at/rubric_json.
 _CREATE_LABEL_OBSERVATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS label_observations (
     session_id       TEXT NOT NULL,
@@ -124,6 +134,10 @@ CREATE TABLE IF NOT EXISTS label_observations (
     reviewer_logins  TEXT,
     has_posterior    INTEGER NOT NULL DEFAULT 0,
     source           TEXT NOT NULL DEFAULT 'auto',
+    labeler_policy_version TEXT,
+    reply_classifier_version TEXT,
+    reply_evidence_digest  TEXT,
+    legacy           TEXT NOT NULL DEFAULT 'auto',
     PRIMARY KEY (session_id, observed_at)
 )
 """
@@ -261,5 +275,15 @@ def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
         "label_observations",
         [
             ("source", "TEXT NOT NULL DEFAULT 'auto'"),
+            ("labeler_policy_version", "TEXT"),
+            ("reply_classifier_version", "TEXT"),
+            ("reply_evidence_digest", "TEXT"),
+            ("legacy", "TEXT NOT NULL DEFAULT 'auto'"),
         ],
     )
+    # Stamp history exactly once (M17): rows written before the reply-label
+    # columns existed have ``labeler_policy_version IS NULL`` — the condition is
+    # its own idempotency guard, so pre-existing rows are marked ``legacy`` on
+    # first open and never rewritten afterwards. No row's labels/observed_at/
+    # rubric_json is ever written here.
+    conn.execute("UPDATE label_observations SET legacy = 'legacy' WHERE labeler_policy_version IS NULL")

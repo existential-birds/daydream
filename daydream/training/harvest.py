@@ -60,9 +60,10 @@ Annotation builder:
 Orchestrator (:func:`run_harvest`):
 
 * **Idempotent and re-runnable:** every indexed run is considered on every
-  pass, but the write layer dedups on ``(evidence_sha, reward_version)`` — a
-  re-harvest with unchanged evidence is a no-op (counted in ``skipped``). A
-  ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
+  pass, but the write layer dedups on ``(evidence_sha, labeler_policy_version,
+  reply_evidence_digest, labels, has_posterior)`` — a re-harvest with unchanged
+  evidence is a no-op (counted in ``skipped``). A ``LABELER_POLICY_VERSION`` or
+  reply-evidence change alters the dedup key and so appends a fresh
   generation, letting older ``as_of`` pins still resolve their original
   generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 * **Per-row error isolation:** an exception on one row counts in ``errors`` and
@@ -956,11 +957,12 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     ``reviewer_logins`` and the ``has_posterior`` population discriminator).
 
     **Idempotent and re-runnable:** every indexed run is considered, but the
-    write layer dedups on ``(evidence_sha, reward_version)`` — a re-harvest with
+    write layer dedups on ``(evidence_sha, labeler_policy_version,
+    reply_evidence_digest, labels, has_posterior)`` — a re-harvest with
     unchanged evidence is a no-op counted in ``skipped``. A later
-    ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
-    generation, letting older ``as_of`` pins still resolve their original
-    generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
+    ``LABELER_POLICY_VERSION`` or reply-evidence change alters the dedup key
+    and so appends a fresh generation, letting older ``as_of`` pins still
+    resolve their original generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 
     Per-row error isolation: an exception on one row counts in ``errors`` and
     does not derail subsequent rows. Configuration errors (missing
@@ -980,7 +982,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         raise FileNotFoundError(msg)
 
     # Queue every indexed run (optionally prefix-filtered); the write layer makes
-    # re-harvest idempotent by deduping unchanged (evidence_sha, reward_version).
+    # re-harvest idempotent by deduping unchanged evidence (evidence_sha,
+    # labeler_policy_version, reply_evidence_digest, labels, has_posterior).
     if config.session_filter:
         queue = query_runs(
             config.archive_dir,

@@ -1373,7 +1373,7 @@ async def test_re_harvest_appends_on_version_bump(
         _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
     )
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1"))
-    monkeypatch.setattr("daydream.training.harvest.reward.REWARD_VERSION", "9999.99.99-bump")
+    monkeypatch.setattr("daydream.training.labeler_versions.LABELER_POLICY_VERSION", "980-policy-bump")
     await run_harvest(HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2"))
     assert len(label_observation_history(archive_dir, "s1")) == 2
 
