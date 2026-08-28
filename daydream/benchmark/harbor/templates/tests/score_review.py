@@ -2,14 +2,15 @@
 
 Stdlib + httpx only. Never imports daydream: this file must run unchanged
 inside a compiled-grade verifier image that has no daydream wheel. It wires a
-bounded per-pair judge prompt, two isolated external judge clients (Anthropic
-Messages + OpenAI-compatible) behind one ``complete_json`` seam, strict verdict
-parsing, a shared retry/redirect/timeout policy, a concurrency-10 runner, and
-``run_verifier`` which writes ``reward.json`` / ``reward-details.json``
-atomically.
+bounded per-pair judge prompt, three isolated external judge clients (Anthropic
+Messages + OpenAI-compatible + Claude Code CLI) behind one ``complete_json``
+seam, strict verdict parsing, a shared retry/redirect/timeout policy, a
+concurrency-10 runner, and ``run_verifier`` which writes ``reward.json`` /
+``reward-details.json`` atomically.
 
-The external judge surface is fail-closed and bounded: exactly
-``anthropic | openai-compatible`` providers are accepted, the judge host must
+The external judge surface is fail-closed and bounded: the
+``anthropic | openai-compatible | claude-cli`` providers are accepted, the judge
+host must
 sit in the configured allowlist (``DAYDREAM_JUDGE_ALLOWED_HOSTS``; own-host
 fallback when absent), redirects are bounded to ``_MAX_REDIRECTS``
 credential-preserving same-origin hops whose targets are re-validated against
@@ -49,6 +50,25 @@ class _AsyncHttpClient(Protocol):
 
 
 VerifierError = verifier_core.VerifierError
+
+
+async def _claude_cli_stdout(proc: Any) -> str:
+    """Collect a finished CLI subprocess's stdout as text.
+
+    Real ``asyncio`` processes expose ``communicate()``; the injected test seam
+    may instead expose the captured stdout directly (as text or bytes).
+    """
+    communicate = getattr(proc, "communicate", None)
+    if communicate is not None:
+        stdout_b, _stderr_b = await asyncio.wait_for(communicate(), timeout=_REQUEST_TIMEOUT)
+        raw = stdout_b
+    else:
+        raw = proc.stdout
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
 
 
 class _InputFileNotFound(verifier_core.VerifierError):
@@ -566,6 +586,94 @@ class AnthropicJudgeClient:
                 content=_anthropic_text,
                 allowlist=effective,
             )
+
+
+class ClaudeCliJudgeClient:
+    """Judge client that shells the pinned Claude Code CLI in non-interactive print mode.
+
+    Invokes ``claude -p --output-format json --model <model> --max-turns 1
+    --append-system-prompt <system> <user>`` and parses the single JSON result
+    object on stdout, passing ``result`` through the strict ``parse_verdict``.
+    The subprocess is an injectable seam (``runner``, mirroring the ``http=``
+    seam on the HTTP clients) defaulting to ``asyncio.create_subprocess_exec``.
+    The OAuth token is never placed on argv; it reaches the CLI only through the
+    inherited environment. Transient failures (timeout, retryable exit codes)
+    are retried with the same bounded policy as the HTTP clients; every terminal
+    failure raises ``VerifierError`` naming only the failure class — never a
+    stderr echo, stack trace, or silent fallback to a partial verdict.
+    """
+
+    def __init__(self, model: str, *, runner: Any = None) -> None:
+        self.model = model
+        self.runner = runner
+
+    def _default_runner(self, argv: list[str], env: dict[str, str]) -> Any:
+        return asyncio.create_subprocess_exec(
+            *argv,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    async def complete_json(
+        self, *, user: str, system: str = "", max_tokens: int = 512
+    ) -> dict[str, Any]:
+        argv = [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--model",
+            self.model,
+            "--max-turns",
+            "1",
+        ]
+        if system:
+            argv += ["--append-system-prompt", system]
+        argv.append(user)
+        env = dict(os.environ)
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        last_error = ""
+        for attempt in range(_MAX_RETRIES):
+            try:
+                proc = await asyncio.wait_for(
+                    (self.runner or self._default_runner)(argv, env),
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                stdout = await _claude_cli_stdout(proc)
+                rc = getattr(proc, "returncode", getattr(proc, "rc", 0))
+                if rc != 0:
+                    last_error = f"claude-cli judge failed (exit {rc})"
+                elif not stdout:
+                    last_error = "claude-cli judge failed (empty output)"
+                else:
+                    try:
+                        payload = json.loads(stdout)
+                    except (ValueError, TypeError):
+                        payload = None
+                    if not isinstance(payload, dict):
+                        last_error = "claude-cli judge failed (malformed output)"
+                    elif payload.get("is_error"):
+                        last_error = "claude-cli judge failed (cli reported error)"
+                    else:
+                        result = payload.get("result")
+                        if not isinstance(result, str) or not result.strip():
+                            last_error = "claude-cli judge failed (missing result)"
+                        else:
+                            parsed: dict[str, Any] = json.loads(result)
+                            # Strict validation via the shared parse_verdict;
+                            # return the validated dict (judge_pairs re-parses).
+                            parse_verdict(parsed)
+                            return parsed
+            except (asyncio.TimeoutError, TimeoutError):
+                last_error = "claude-cli judge failed (timeout)"
+            except ValueError:
+                # parse_verdict consumed a well-formed CLI result whose content
+                # was not a valid verdict: terminal, not retryable.
+                raise VerifierError("claude-cli judge failed (invalid verdict)") from None
+            if attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep(2**attempt)
+        raise VerifierError(last_error or "claude-cli judge failed (unknown)")
 
 
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -1131,10 +1239,11 @@ def run_verifier(
 def _build_client(env: dict[str, Any]) -> Any:
     """Build the judge client from the DAYDREAM_JUDGE_* env surface.
 
-    Provider is fail-closed: exactly ``anthropic`` | ``openai-compatible`` is
-    accepted when explicit; absent or unsupported values raise before any
-    request. The provider's base URL is resolved and the initial request URL is
-    validated against the effective judge-host allowlist at build time.
+    Provider is fail-closed: the ``anthropic`` | ``openai-compatible`` |
+    ``claude-cli`` set is accepted when explicit; absent or unsupported values
+    raise before any request. The provider's base URL is resolved and the
+    initial request URL is validated against the effective judge-host allowlist
+    at build time (the claude-cli provider has no HTTP base URL to validate).
     """
     provider = env.get(_ENV_PROVIDER) or ""
     model = env.get(_ENV_MODEL)

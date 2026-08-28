@@ -1436,3 +1436,31 @@ def test_run_verifier_malformed_judge_output_is_unscored(sr_module: Any, tmp_pat
     assert not (out / "reward.json").exists()
     details = json.loads((out / "reward-details.json").read_text())
     assert len(details["errors"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module: Any) -> None:
+    sr = sr_module
+    calls = []
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.args_seen = None
+        # returncode 0, stdout = one JSON line with the verdict in "result"
+        rc = 0
+        stdout = json.dumps({
+            "is_error": False, "subtype": "success", "type": "result",
+            "result": '{"match": true, "confidence": 0.9, "reasoning": "same"}',
+        })
+        stderr = ""
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        return FakeProc()
+
+    client = sr.ClaudeCliJudgeClient(model="claude-x", runner=fake_run)
+    raw = await client.complete_json(user="<prompt>", system="sys", max_tokens=512)
+    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
+    argv = calls[0][0][0]
+    assert argv[0] == "claude" and "--output-format" in argv and "json" in argv
+    assert "--model" in argv and "claude-x" in argv
