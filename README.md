@@ -112,7 +112,14 @@ The report names whatever a bound leaves out. The file `.daydream/improve/covera
 | `tests` | Audit only test coverage |
 | `branch` | Audit the merge-base diff. Label each finding as introduced or inherited. |
 
-Use `--scope SERVICE_OR_GLOB` to restrict the audit to matching detected services.
+Use `--scope SERVICE_OR_GLOB` to restrict the audit to matching detected services. The glob matches a
+service's root path itself, so `apps/billing` selects `apps/billing` while `apps/billing/*` matches nothing.
+
+A directory under a conventional root (`apps/`, `services/`, `packages/`, `crates/`, `cmd/`) counts as a
+service when it holds `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `mix.exs`,
+`requirements.txt`, `requirements.in`, `setup.py`, `setup.cfg`, or `tox.ini`. Set
+`[tool.daydream.improve] service_roots` to declare roots explicitly when a repository's layout does not
+match; declared roots replace discovery rather than adding to it.
 
 ### Plan subcommands
 

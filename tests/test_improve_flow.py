@@ -2005,6 +2005,43 @@ async def test_scope_slices_search_but_report_names_the_unaudited_rest(
     assert "catalog" in report and "not audited" in report.lower()
 
 
+@pytest.fixture
+def improve_requirements_service_target(improve_monorepo_target: Path) -> Path:
+    """Monorepo whose third service pins deps with ``requirements.txt`` only."""
+    root = improve_monorepo_target / "apps" / "ledger"
+    root.mkdir(parents=True)
+    (root / "requirements.txt").write_text("httpx==0.27.0\n")
+    (root / "api.py").write_text('def service_name():\n    return "ledger"\n')
+    git(improve_monorepo_target, "add", ".")
+    commit(improve_monorepo_target, "add requirements-based service")
+    return improve_monorepo_target
+
+
+@pytest.mark.anyio
+async def test_scope_selects_a_requirements_only_python_service(
+    improve_requirements_service_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    # Pre-PEP-621 services carry no pyproject.toml; before issue #963 they were
+    # never enumerated, so --scope rejected them as an unknown service.
+    stub = install_improve_stub(monkeypatch, improve_requirements_service_target)
+    code = await run(
+        make_config(
+            improve_requirements_service_target,
+            flow_name="improve",
+            improve_scope="apps/ledger",
+        )
+    )
+
+    assert code == 0
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert audit_calls
+    assert all("apps/ledger" in call["prompt"] for call in audit_calls)
+    report = improve_artifact(improve_requirements_service_target, "report.md").read_text()
+    assert "billing" in report and "not audited" in report.lower()
+
+
 @pytest.mark.anyio
 async def test_group_scope_expands_named_service_group_to_all_members(
     improve_monorepo_target: Path,

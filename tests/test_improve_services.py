@@ -31,6 +31,28 @@ def test_heuristics_detect_manifest_under_conventional_root(tmp_path_repo: Path)
     assert {s.name for s in services} == {"billing", "catalog"}
 
 
+@pytest.mark.parametrize(
+    "manifest",
+    ["requirements.txt", "requirements.in", "setup.py", "setup.cfg", "tox.ini"],
+)
+def test_pre_pep621_python_service_is_discovered(tmp_path: Path, manifest: str) -> None:
+    root = tmp_path / "apps" / "ledger"
+    root.mkdir(parents=True)
+    (root / manifest).write_text("httpx==0.27.0\n")
+
+    services = enumerate_services(tmp_path, DaydreamFileConfig())
+
+    assert [(s.name, s.root.as_posix()) for s in services] == [("ledger", "apps/ledger")]
+    assert filter_scope(services, "apps/ledger")[0].name == "ledger"
+
+
+def test_manifestless_directory_under_conventional_root_stays_undiscovered(tmp_path: Path) -> None:
+    (tmp_path / "apps" / "docs-only").mkdir(parents=True)
+    (tmp_path / "apps" / "docs-only" / "README.md").write_text("# docs\n")
+
+    assert enumerate_services(tmp_path, DaydreamFileConfig()) == []
+
+
 def test_single_package_repo_yields_no_services(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname='solo'\n")
     assert enumerate_services(tmp_path, DaydreamFileConfig()) == []
