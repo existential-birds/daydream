@@ -1611,7 +1611,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     # directly -- there is no `parse-uncovered-<n>` fork.
     parse_backend = ctx.backend_for("parse")
     limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, parse_backend))
-    review_outputs: dict[str, Path] = {}
+    completed_reviews: set[str] = set()
     sweep_failures: dict[str, str] = {}
     sweep_records_by_file: dict[str, list[dict[str, Any]]] = {}
 
@@ -1631,7 +1631,6 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             async def _sweep_one(
                 file: str = file,
                 task_prompt: str = prompt,
-                task_output: Path = output_path,
                 n: int = n,
             ) -> None:
                 async with limiter:
@@ -1654,13 +1653,11 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                             issues = structured.get("issues")
                             issues = issues if isinstance(issues, list) else []
                             sweep_records_by_file[file] = issues
-                            # A backend can return normally without writing its
-                            # output; only an actual review file counts as
-                            # coverage, so `completed_files` never sees phantom
-                            # outputs (the review.md is a byproduct of the stub;
-                            # structured records ARE the authoritative output).
-                            if task_output.is_file():
-                                review_outputs[file] = task_output
+                            # Structured records are the authoritative sweep
+                            # output. Markdown review files are optional backend
+                            # byproducts and cannot gate persistence. Coverage is
+                            # still computed independently from verified Reads.
+                            completed_reviews.add(file)
                     except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
                         sweep_failures[file] = f"{type(exc).__name__}: {exc}"
 
@@ -1685,7 +1682,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             "files_read_by_reviewers": post_coverage["files_read_by_reviewers"],
             "coverage_ratio": post_coverage["coverage_ratio"],
         }
-        stats["covered_files"] = sorted(f for f in review_outputs if f not in post_uncovered)
+        stats["covered_files"] = sorted(f for f in completed_reviews if f not in post_uncovered)
     except Exception:  # noqa: BLE001 -- fail-open: keep the pre-sweep fallback
         pass
 
@@ -1700,7 +1697,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     for file in sorted(sweep_records_by_file):
         sweep_records.extend(sweep_records_by_file[file])
     stats["sweep_failures"] = {**sweep_failures}
-    stats["completed_files"] = sorted(review_outputs)
+    stats["completed_files"] = sorted(completed_reviews)
     # Issue #309 finding 6: per-file attempt status. A completed review output
     # is a completed ATTEMPT; only files with a verified post-sweep completed
     # read are "read". Anything else is "reviewed (hunks only)" and must not
@@ -1708,9 +1705,9 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     covered_set = set(stats.get("covered_files") or [])
     stats["sweep_attempt_status"] = {
         file: ("read" if file in covered_set else "reviewed (hunks only)")
-        for file in sorted(review_outputs)
+        for file in sorted(completed_reviews)
     }
-    if review_outputs:
+    if completed_reviews:
         records_path = per_stack_records_path(dd, "uncovered")
         records_path.write_text(json.dumps(sweep_records, indent=2))
         ctx.data["records_paths"].append(records_path)
@@ -1718,8 +1715,8 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         ctx.data["record_sources"].extend("uncovered" for _ in sweep_records)
         stats["sweep_finding_count"] = len(sweep_records)
     else:
-        # No review produced output: on a re-run, write a current empty records
-        # artifact so a stale file from the resumed run cannot linger.
+        # No structured review produced output: on a re-run, write a current
+        # empty records artifact so a stale file cannot linger.
         if config.start_at == "per-stack":
             per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
     stats_p.write_text(json.dumps(stats, indent=2))
