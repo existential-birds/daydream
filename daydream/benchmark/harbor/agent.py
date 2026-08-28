@@ -107,17 +107,21 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
     ) -> None:
         """Review the frozen snapshot in-container.
 
-        Fail-closed: refuses any backend other than ``pi`` *before* any
-        reviewing (never installs tools or widens network access), maps the
-        allowlist child environment, and invokes the controlled entrypoint. A
-        non-zero entrypoint return raises :class:`AgentError`.
+        Fail-closed: refuses any backend outside the shared
+        ``_SUPPORTED_BACKENDS`` allowlist *before* any reviewing (never
+        installs tools or widens network access), maps the allowlist child
+        environment, and invokes the controlled entrypoint. A non-zero
+        entrypoint return raises :class:`AgentError`.
         """
         if not _HARBOR:
             raise AgentError("Harbor is not installed; install 'daydream[benchmark]'")
         backend = (self.extra_env.get("DAYDREAM_REVIEW_BACKEND") or "pi").strip().lower()
-        if backend != "pi":
+        from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
+
+        if backend not in _SUPPORTED_BACKENDS:
+            supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
             raise AgentError(
-                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; only 'pi' is supported"
+                f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
             )
         parent = {**os.environ, **self.extra_env}
         child_env = build_child_env(parent)

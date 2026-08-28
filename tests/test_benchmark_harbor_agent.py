@@ -859,3 +859,34 @@ def test_local_harbor_task_with_fake_backend(
     assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
     assert artifact["case_id"] == key
     assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
+
+
+def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path) -> None:
+    import pytest
+
+    pytest.importorskip("harbor")
+    from harbor.environments.base import ExecResult
+    from harbor.models.agent.context import AgentContext
+
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+
+    agent = DaydreamReviewAgent(
+        logs_dir=tmp_path,
+        extra_env={
+            "DAYDREAM_REVIEW_BACKEND": "claude",
+            "DAYDREAM_REVIEW_API_KEY": "k",
+        },
+    )
+
+    class Env:
+        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
+            self.captured = (command, cwd, env)
+            return ExecResult(return_code=0, stdout="", stderr="")
+
+    env = Env()
+    import asyncio
+
+    asyncio.run(agent.run("instruction", env, AgentContext()))
+    cmd, cwd, child = env.captured
+    assert "daydream.benchmark.harbor.entrypoint" in cmd
+    assert child["DAYDREAM_REVIEW_BACKEND"] == "claude"
