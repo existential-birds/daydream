@@ -657,6 +657,16 @@ def test_upsert_run_creates_db(tmp_path: Path) -> None:
     assert (tmp_path / "index.db").exists()
 
 
+def test_upsert_run_never_persists_credential_bearing_url(tmp_path: Path) -> None:
+    # M4: even if upstream normalization is bypassed, the row is clean.
+    m = make_manifest(remote_url="https://user:ghp_bypassfake@github.com/o/r.git")
+    upsert_run(tmp_path, m)
+    row = query_runs(tmp_path)[0]
+    assert row["remote_url"] == "https://github.com/o/r"
+    assert row["repo_slug"] == "o/r"
+    assert "ghp_bypassfake" not in (row["remote_url"] or "")
+
+
 def test_upsert_and_query_round_trip(tmp_path: Path) -> None:
     m = make_manifest()
     upsert_run(tmp_path, m)

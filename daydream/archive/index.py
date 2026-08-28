@@ -85,6 +85,7 @@ from daydream.archive._schema import (
     _migrate_schema,
     _recreate_label_observations_if_stale,
 )
+from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.manifest import Manifest
 
 # Re-export for callers (including tests) that import these names from this module.
@@ -222,6 +223,13 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
     """
     conn = _get_connection(archive_dir)
     daydream = manifest.daydream
+    # Defense-in-depth: never persist a credential-bearing remote URL, even if
+    # upstream capture bypassed the normalizer. None identity stores None.
+    if manifest.remote_url is None:
+        # No remote URL to normalize; keep the manifest's slug as-is.
+        normalized_slug, normalized_url = manifest.repo_slug, None
+    else:
+        normalized_slug, normalized_url = normalize_remote_url(manifest.remote_url)
     try:
         conn.execute(
             _UPSERT_SQL,
@@ -246,8 +254,8 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "per_stack_review_model": manifest.per_stack_review_model,
                 "review_only": int(manifest.review_only),
                 "deep": int(manifest.deep),
-                "remote_url": manifest.remote_url,
-                "repo_slug": manifest.repo_slug,
+                "remote_url": normalized_url,
+                "repo_slug": normalized_slug,
                 "source_path": manifest.source_path,
                 "branch": manifest.branch,
                 "base_branch": manifest.base_branch,
