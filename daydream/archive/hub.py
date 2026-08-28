@@ -64,7 +64,10 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     the archive callback cannot fail the run. Skips (``False`` + warning) when
     ``HF_TOKEN`` is absent. A pre-existing repo is reused with its current
     visibility (documented behavior), but a public one triggers a warning
-    before the upload proceeds. Retries the upload commit up to 3 total
+    before the upload proceeds. Before anything reaches the Hub the bundle is
+    scanned for secrets (fail-closed): a dirty bundle — or a scanner error —
+    is refused with a safe-only warning and ``False``. Retries the upload
+    commit up to 3 total
     attempts on a commit-conflict shape (concurrent commits from parallel
     processes), backing off exponentially between attempts.
 
@@ -84,6 +87,16 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
         except ImportError:
             _warn("Skip HF upload: huggingface_hub not installed (pip install huggingface-hub)")
             return False
+
+    from daydream.archive import scan
+
+    scan_result = scan.scan_run_dir(run_dir)
+    if not scan_result.clean:
+        _warn(
+            f"Refusing HF upload of {session_id}: bundle secret scan found "
+            f"problems ({scan_result.summary()})"
+        )
+        return False
 
     try:
         api = HfApi()

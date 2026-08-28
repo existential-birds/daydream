@@ -1,6 +1,7 @@
 # tests/test_hub_upload.py
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -230,3 +231,52 @@ def test_upload_run_bundle_retries_commit_conflict(
 class _BoomApi:
     def __init__(self, token: str | None = None) -> None:
         raise AssertionError("HfApi must not be instantiated without HF_TOKEN")
+
+
+def _write_manifest_with_remote(run_dir: Path, remote_url: str) -> None:
+    """Write a manifest.json whose git context carries *remote_url*."""
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"git": {"remote_url": remote_url}}), encoding="utf-8"
+    )
+
+
+def _install_fake_hfapi(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Swap hub.HfApi for a fake; return the list of upload_folder invocations."""
+    calls: list[dict[str, Any]] = []
+
+    class FakeApi(_BaseFakeApi):
+        def upload_folder(self, **kw: Any) -> None:
+            calls.append(kw)
+
+    monkeypatch.setattr(hub, "HfApi", FakeApi)
+    return calls
+
+
+def test_upload_refused_when_bundle_contains_credential(
+    hf_run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_manifest_with_remote(hf_run_dir, "https://user:ghp_canaryfake123@github.com/o/r")
+    uploads = _install_fake_hfapi(monkeypatch)
+    assert hub.upload_run_bundle(hf_run_dir, "org/ds", "s1") is False
+    assert uploads == []  # upload_folder never invoked
+
+
+def test_upload_canary_never_echoed_in_warning(
+    hf_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_manifest_with_remote(hf_run_dir, "https://user:ghp_canaryfake123@github.com/o/r")
+    _install_fake_hfapi(monkeypatch)
+    hub.upload_run_bundle(hf_run_dir, "org/ds", "s1")
+    out = capsys.readouterr().out + capsys.readouterr().err
+    assert "ghp_canaryfake123" not in out
+
+
+def test_upload_proceeds_for_clean_bundle(
+    hf_run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_manifest_with_remote(hf_run_dir, "https://github.com/o/r")
+    uploads = _install_fake_hfapi(monkeypatch)
+    assert hub.upload_run_bundle(hf_run_dir, "org/ds", "s1") is True
+    assert len(uploads) == 1
