@@ -259,6 +259,93 @@ async def test_translates_text_thinking_tool_identity_metrics_and_result() -> No
 
 
 @pytest.mark.asyncio
+async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"},
+        {"event": "thinking_delta", "content": " think."},
+        {"event": "text_delta", "content": "Done."},
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": False,
+        },
+    )
+
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+    assert [type(event) for event in events] == [
+        ThinkingEvent,
+        TextEvent,
+        TurnEndEvent,
+        ResultEvent,
+    ]
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == [
+        "Let me think."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_separates_thinking_runs_at_protocol_boundaries() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": "first attempt"},
+        {"event": "driver_retry"},
+        {"event": "thinking_delta", "content": "second attempt"},
+        {"event": "text_delta", "content": "Done."},
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": False,
+        },
+    )
+
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == [
+        "first attempt",
+        "second attempt",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_trajectory_records_coalesced_thinking_as_prose(tmp_path: Path) -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"},
+        {"event": "thinking_delta", "content": " think."},
+        {
+            "event": "message_end",
+            "messages": [{"type": "result", "data": {"content": "Done."}}],
+        },
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": False,
+        },
+    )
+    recorder = TrajectoryRecorder(
+        path=tmp_path / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="osprey",
+        session_id="daydream-session",
+    )
+
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step("prompt")
+            events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+            for event in events:
+                invocation.observe(event)
+
+    trajectory = recorder.build_trajectory().model_dump(exclude_none=True)
+    assert trajectory["steps"][1]["reasoning_content"] == "Let me think."
+
+
+@pytest.mark.asyncio
 async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
     lines, _ = _stream(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},

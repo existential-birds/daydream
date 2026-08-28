@@ -531,6 +531,7 @@ class OspreyBackend:
         terminal_exit_code: int | None = None
         terminal_structured_output: Any = None
         turn_text_emitted = False
+        thinking_parts: list[str] = []
         protocol_state = _OspreyProtocolState()
 
         try:
@@ -609,6 +610,10 @@ class OspreyBackend:
                 if session_id is None:
                     raise OspreyProtocolError("session_start did not provide a session_id")
 
+                if event_name != "thinking_delta" and thinking_parts:
+                    yield ThinkingEvent("".join(thinking_parts))
+                    thinking_parts.clear()
+
                 if event_name == "session_end":
                     outcome = _required_string(event, "outcome")
                     if "exit_code" not in event:
@@ -635,7 +640,7 @@ class OspreyBackend:
                     content = event.get("content")
                     if not isinstance(content, str):
                         raise OspreyProtocolError("thinking_delta requires string content")
-                    yield ThinkingEvent(content)
+                    thinking_parts.append(content)
                 elif event_name == "tool_call":
                     call_id = _required_string(event, "tool_call_id")
                     tool_name = _required_string(event, "tool_name")
