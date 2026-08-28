@@ -263,7 +263,10 @@ def test_verifier_dockerfile_ships_pinned_node_and_claude_cli() -> None:
 
     text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
     assert "node-v22." in text                     # version-pinned Node tarball
-    assert "@anthropic-ai/claude-code@" in text    # version-pinned CLI install
+    # The CLI installs via `npm ci` from the embedded package-lock.json, so
+    # every transitive is version- and integrity-pinned (no registry re-resolution).
+    assert "npm ci" in text and "package-lock.json" in text
+    assert "@anthropic-ai/claude-code" in text and "2.1.250" in text
     assert "ENTRYPOINT" not in text and "CMD" not in text and "/verifier" not in text  # guard set still clean
     assert "httpx==0.28.1" in text and "httpx>=" not in text
 

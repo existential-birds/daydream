@@ -136,11 +136,22 @@ def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
     validation to the packaged ``score_review._build_client`` so the two
     branches cannot silently drift (the judge template is an in-repo,
     editable file); only the injectable ``http=`` seam is added here, and
-    ``None`` leaves the client's real httpx behavior intact.
+    ``None`` leaves the client's real httpx behavior intact. The seam only
+    exists for the HTTP judge clients: the ``claude-cli`` provider shells the
+    Claude Code CLI (its injectable seam is the subprocess ``runner``), so an
+    injected ``http`` is rejected fail-closed rather than silently assigned to
+    an attribute that client never reads -- a no-op attribution would quietly
+    shell the real ``claude`` binary in what the caller believed was a
+    scripted run.
     """
     sr = _load_judge_template()
     client = sr._build_client(env)
     if http is not None:
+        if env.get("DAYDREAM_JUDGE_PROVIDER") == "claude-cli":
+            raise sr.VerifierError(
+                "http seam is not supported for the claude-cli judge provider "
+                "(it shells the Claude Code CLI; inject a fake subprocess runner instead)"
+            )
         client.http = http
     return client
 

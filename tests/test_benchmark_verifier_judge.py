@@ -1542,3 +1542,74 @@ async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module
     argv = calls[0][0][0]
     assert argv[0] == "claude" and "--output-format" in argv and "json" in argv
     assert "--model" in argv and "claude-x" in argv
+    # Tool-scope lockdown: the spawned CLI carries the OAuth credential in its
+    # env, so tools must be denied outright -- no permission prompts, no read/
+    # execute surface for a prompt influenced by untrusted candidate text.
+    assert "--permission-mode" in argv and "plan" in argv
+    assert "--allowedTools" in argv and "[]" in argv
+    # The 512-token output budget maps onto the CLI via CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    # (the CLI exposes no --max-tokens flag), matching the HTTP clients' request cap.
+    assert calls[0][0][1]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "512"
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_timeout_kills_child_every_attempt(
+    sr_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sr = sr_module
+    kills: list[int] = []
+
+    class HangingProc:
+        """A spawned child that never produces output; kill() records the call."""
+
+        def __init__(self) -> None:
+            self.stdout = self  # the read() below doubles as the StreamReader seam
+
+        async def read(self, n: int) -> bytes:
+            await asyncio.sleep(3600)  # hang until the wait_for deadline kills us
+            raise AssertionError("unreachable: the deadline kills this read first")
+
+        async def wait(self) -> None:
+            await asyncio.sleep(3600)
+
+        def kill(self) -> None:
+            kills.append(1)
+
+    async def fake_run(*args: Any, **kwargs: Any) -> Any:
+        return HangingProc()
+
+    monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    assert "timeout" in str(e.value)
+    # Every hung attempt kills the child (once inside _claude_cli_stdout and
+    # again by the caller's backstop), so a retry or the next concurrent pair
+    # never sees a leftover claude process consuming quota/egress.
+    assert len(kills) == sr._MAX_RETRIES * 2
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_oversize_stdout_is_rejected_not_truncated(sr_module: Any) -> None:
+    sr = sr_module
+    oversized = "x" * (sr._RESPONSE_CAP_BYTES + 1)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(oversized))
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    assert "exceeds" in str(e.value) and "KiB" in str(e.value)
+    assert len(client.runner.calls) == 1  # terminal -- never retried, never truncated
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_parse_verdict_rejection_propagates_raw(sr_module: Any) -> None:
+    sr = sr_module
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(
+        json.dumps({"is_error": False, "type": "result",
+                    "result": '{"match": "yes", "confidence": 0.9, "reasoning": "r"}'})))
+    with pytest.raises(sr.VerifierError) as e:
+        await client.complete_json(user="u")
+    # parse_verdict raises VerifierError (not ValueError), so its bounded parse
+    # message propagates raw instead of being re-wrapped as (invalid verdict).
+    assert "match" in str(e.value)
+    assert "invalid verdict" not in str(e.value)
+    assert len(client.runner.calls) == 1
