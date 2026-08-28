@@ -139,8 +139,8 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "
     ``OPENROUTER_API_KEY`` only in the child process. For ``claude`` the
     ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` / ``ANTHROPIC_BASE_URL``
     credentials are preserved into the environment and the openrouter.ai
-    base-URL requirement does not apply (any HTTPS ``ANTHROPIC_BASE_URL`` is
-    accepted). In both branches any inherited raw provider or judge credential
+    base-URL requirement does not apply (any HTTPS ``ANTHROPIC_BASE_URL`` with
+    a concrete hostname is accepted). In both branches any inherited raw provider or judge credential
     is cleared first so it cannot leak into the reviewed scope; a bad base URL
     or a missing credential fails closed.
 
@@ -171,6 +171,7 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "
             parsed = urllib.parse.urlsplit(base_url)
             if (
                 parsed.scheme.lower() != "https"
+                or not parsed.hostname
                 or parsed.username is not None
                 or parsed.password is not None
             ):

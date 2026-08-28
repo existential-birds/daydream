@@ -6,6 +6,7 @@ The real end-to-end Python + mixed-stack Harbor run is the #783-dependent e2e in
 resolves via the explicit-only Harbor resolver.
 """
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,144 @@ def test_claude_reviewer_env_accepts_non_openrouter_base_url_only_for_claude(
         "ANTHROPIC_API_KEY": "sk-ant",
         "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
     }, backend="claude")   # no raise: openrouter.ai requirement is pi-only
+
+
+# ---------------------------------------------------------------------------
+# host-side gate/egress: the preflight must resolve and validate the claude
+# reviewer endpoint (ANTHROPIC_BASE_URL), never the pi-era var alone.
+# ---------------------------------------------------------------------------
+
+
+def test_host_reviewer_host_resolution_is_backend_aware() -> None:
+    # A claude operator configuring only ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
+    # (no pi-era DAYDREAM_REVIEW_BASE_URL) must resolve the reviewer host from
+    # ANTHROPIC_BASE_URL; the pi default keeps its existing behavior/error.
+    from daydream.benchmark.harbor import run as run_mod
+
+    assert run_mod._reviewer_host_from_env({
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
+    }) == "claude-proxy.internal"
+    # Unset ANTHROPIC_BASE_URL falls back to the Anthropic SDK default, mirroring
+    # the in-container claude branch that accepts an unset base URL.
+    assert run_mod._reviewer_host_from_env({
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+    }) == "api.anthropic.com"
+    assert run_mod._reviewer_base_url_from_env({}) == ""
+    # Default (pi) resolution is unchanged, including the fail-closed error.
+    assert run_mod._reviewer_host_from_env({
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
+    }) == "openrouter.ai"
+    with pytest.raises(ValueError, match="missing DAYDREAM_REVIEW_BASE_URL"):
+        run_mod._reviewer_host_from_env({})
+
+
+def _seed_host_ws(tmp_path: Path, reviewer_hosts: list[str]) -> Path:
+    """A minimal compiled benchmark workspace for the host preflight."""
+    ws = tmp_path / "ws"
+    (ws / "harbor" / "case-a").mkdir(parents=True)
+    (ws / "harbor" / "case-a" / "task.toml").write_text(
+        "[agent]\n"
+        f"allowed_hosts = {json.dumps(reviewer_hosts)}\n"
+        "\n"
+        "[verifier.environment]\n"
+        'allowed_hosts = ["127.0.0.1"]\n'
+    )
+    (ws / "harbor" / "benchmark.lock.json").write_text(
+        '{"schema_version": 1, "cases": {"case-a": {"key": "case-a"}}, "files": {}}'
+    )
+    (ws / "harbor" / "harbor-job.yaml").write_text("jobs_dir: jobs\n")
+    (ws / "harbor" / "harbor-oracle.yaml").write_text("jobs_dir: jobs\n")
+    privacy = {"classification": "confidential", "reviewer_data": "source_snapshot",
+               "reviewer_allowed_hosts": reviewer_hosts,
+               "judge_data": "finding_text_and_location_only",
+               "judge_allowed_hosts": ["127.0.0.1"],
+               "archive": "disabled", "uploads": "disabled"}
+    (ws / "benchmark.yaml").write_text(json.dumps({
+        "schema_version": 1, "benchmark_id": "6c38dc0a",
+        "created_at": "2026-08-21T12:00:00Z",
+        "source": {"provider": "github", "hostname": "github.com",
+                   "repository": "OWNER/REPO", "repository_id": None,
+                   "visibility": "unresolved"},
+        "privacy": privacy, "pull_requests": [], "cases": []}))
+    return ws
+
+
+def test_host_preflight_accepts_allowlisted_claude_proxy_without_pi_var(
+    tmp_path: Path,
+) -> None:
+    # A claude reviewer whose ANTHROPIC_BASE_URL is in the compiled reviewer
+    # allowed_hosts passes preflight with no pi-era DAYDREAM_REVIEW_BASE_URL
+    # set (regression: "cannot resolve reviewer host: missing
+    # DAYDREAM_REVIEW_BASE_URL" blocked the documented claude surface).
+    from daydream.benchmark.harbor import package as pkg
+    from daydream.benchmark.harbor import run as run_mod
+
+    ws = _seed_host_ws(tmp_path, ["claude-proxy.internal"])
+
+    def _docker_ok() -> pkg.DockerNetworkPolicyCapability:
+        return pkg.DockerNetworkPolicyCapability(supported=True)
+
+    errs = run_mod._preflight(ws, oracle=True, env={
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
+        "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9",
+    }, docker_ok=_docker_ok)
+    assert not any("reviewer host" in e for e in errs)
+    assert not any("missing DAYDREAM_REVIEW_BASE_URL" in e for e in errs)
+
+
+def test_host_preflight_blocks_non_allowlisted_claude_proxy(tmp_path: Path) -> None:
+    # A proxy ANTHROPIC_BASE_URL outside the compiled reviewer allowed_hosts
+    # must be rejected host-side, before any paid review starts (previously it
+    # passed setup+preflight and failed only in-container at the SDK call).
+    from daydream.benchmark.harbor import package as pkg
+    from daydream.benchmark.harbor import run as run_mod
+
+    ws = _seed_host_ws(tmp_path, ["review.example"])
+
+    def _docker_ok() -> pkg.DockerNetworkPolicyCapability:
+        return pkg.DockerNetworkPolicyCapability(supported=True)
+
+    errs = run_mod._preflight(ws, oracle=True, env={
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
+        "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9",
+    }, docker_ok=_docker_ok)
+    reviewer_errs = [e for e in errs if "reviewer host" in e]
+    assert any("claude-proxy.internal" in e for e in reviewer_errs)
+    assert not any("missing DAYDREAM_REVIEW_BASE_URL" in e for e in errs)
+
+
+def test_host_run_gate_threads_claude_credentials_into_supervisor_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The host-side run gate env snapshot must carry the ANTHROPIC_* reviewer
+    # credentials (previously it forwarded only DAYDREAM_REVIEW_*/JUDGE_*), so
+    # run.py can resolve ANTHROPIC_BASE_URL for the claude backend.
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from daydream.benchmark.harbor import run as run_mod
+
+    monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude-proxy.internal/v1")
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_run(ws: Any, *, oracle: Any, yes: Any, env: Any) -> int:
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(run_mod, "run_run", fake_run_run)
+    code = _handle_benchmark_command(["run", str(tmp_path), "--yes"])
+    assert code == 0
+    assert captured["env"]["DAYDREAM_REVIEW_BACKEND"] == "claude"
+    assert captured["env"]["ANTHROPIC_API_KEY"] == "sk-ant"
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "tok"
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://claude-proxy.internal/v1"
 
 
 def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

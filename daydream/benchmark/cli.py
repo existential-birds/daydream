@@ -381,6 +381,13 @@ def _handle_benchmark_run(args: argparse.Namespace) -> int:
             "DAYDREAM_REVIEW_API_KEY",
             "DAYDREAM_REVIEW_BASE_URL",
             "DAYDREAM_REVIEW_EFFORT",
+            # Claude reviewer credentials (issue #966): threaded so the
+            # supervisor can resolve ANTHROPIC_BASE_URL host-side for the
+            # claude backend (the run gate env snapshot is the only channel
+            # into run.py's preflight).
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
             "DAYDREAM_JUDGE_PROVIDER",
             "DAYDREAM_JUDGE_MODEL",
             "DAYDREAM_JUDGE_API_KEY",

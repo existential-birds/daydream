@@ -48,6 +48,10 @@ _BANNED_VARS = (
 )
 # Anthropic credential vars; preserved into the child env when backend == "claude".
 _ANTHROPIC_BAN_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL")
+# Control-plane ANTHROPIC_* keep-set, byte-identical to the render_job_config
+# placeholders: only these three may ride into a claude child env; any other
+# host-ambient ANTHROPIC_* var is scrubbed like any other raw credential.
+_ANTHROPIC_KEEP_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
 # Judge vars and raw provider credentials must never leak into the child env
 # (``ANTHROPIC_*`` is exempted from the scrub only when backend == "claude").
 _BANNED_PREFIXES = (
@@ -100,10 +104,18 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
             raise AgentError(
                 f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
             )
+        # The allowlist can grow before a probe exists; never KeyError on an
+        # allowlisted-but-unprobed backend (and never probe a wrong SDK) --
+        # refuse with a typed error instead.
         backend_probe = {
             "pi": "assert shutil.which('pi') is not None;",
             "claude": "import claude_agent_sdk;",
-        }[backend]
+        }.get(backend)
+        if backend_probe is None:
+            raise AgentError(
+                f"no setup probe is defined for DAYDREAM_REVIEW_BACKEND={backend!r}; "
+                "extend the probe map in DaydreamReviewAgent.setup()"
+            )
         probe = (
             "import importlib.metadata, shutil;"
             f"assert importlib.metadata.version('daydream') == {self.version()!r};"
@@ -191,10 +203,12 @@ def build_child_env(parent_env: Mapping[str, str], *, backend: str = "pi") -> di
     archive and raw provider vars) so any future secret-holding variable not in
     the keep-set still cannot leak by default. Never passes the parent env wholesale.
 
-    Backend-conditional credential handling: for ``backend="claude"`` the
-    ``ANTHROPIC_*`` credential vars (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``,
-    ``ANTHROPIC_AUTH_TOKEN``) survive so the Claude Agent SDK / claude CLI in the
-    container has credentials; for ``pi`` (default) and any other value, the
+    Backend-conditional credential handling: for ``backend="claude"`` exactly
+    the control-plane ``ANTHROPIC_*`` byte set declared by ``render_job_config``
+    (``ANTHROPIC_API_KEY``, ``ANTHROPIC_AUTH_TOKEN``, ``ANTHROPIC_BASE_URL``)
+    survives so the Claude Agent SDK / claude CLI in the container has
+    credentials; any other host-ambient ``ANTHROPIC_*`` var is scrubbed like
+    any other raw credential. For ``pi`` (default) and any other value, the
     ``ANTHROPIC_*`` scrub is exactly today's fail-closed behavior.
 
     The review-profile candidate (``DAYDREAM_REVIEW_PROFILE_CANDIDATE``, issue
@@ -208,7 +222,7 @@ def build_child_env(parent_env: Mapping[str, str], *, backend: str = "pi") -> di
         for key, value in dict(parent_env).items()
         if key.startswith("DAYDREAM_REVIEW_")
         or key in _REQUIRED_PROCESS_VARS
-        or (keep_anthropic and key.startswith("ANTHROPIC_"))
+        or (keep_anthropic and key in _ANTHROPIC_KEEP_VARS)
     }
     banned_vars = _BANNED_VARS if not keep_anthropic else (
         tuple(v for v in _BANNED_VARS if v not in _ANTHROPIC_BAN_VARS)
