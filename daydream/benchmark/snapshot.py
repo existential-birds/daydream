@@ -240,13 +240,19 @@ def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapp
         mirror_repo,
         ["diff", "--name-status", "-z", "-M", authoring_sha, mapped_sha],
         retries=0,
+        capture_bytes=True,
     )
     if trace.returncode != 0:
+        stderr = trace.stderr.decode("utf-8", errors="replace") if isinstance(trace.stderr, bytes) else trace.stderr
         raise AnchorDerivationError(
             "history-unavailable",
-            f"git diff --name-status -M {authoring_sha} {mapped_sha} failed in {mirror_repo}: {trace.stderr.strip()}",
+            f"git diff --name-status -M {authoring_sha} {mapped_sha} failed in {mirror_repo}: {stderr.strip()}",
         )
-    fields = [f for f in trace.stdout.split("\0") if f]
+    # The -z output is byte-oriented and may carry non-UTF-8 pathnames from the
+    # traced range, so capture bytes and surrogateescape-decode each field (the
+    # canonical NUL-split pattern shared with git_ops.ls_files).
+    stdout = trace.stdout if isinstance(trace.stdout, bytes) else trace.stdout.encode()
+    fields = [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
     matches: list[str] = []
     i = 0
     while i < len(fields):

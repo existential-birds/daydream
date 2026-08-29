@@ -1144,16 +1144,32 @@ def _backfill_prior_anchors(doc: schema.ImportDocument, prior_raw: dict[str, Any
     :func:`_derive_authoring_anchors` backfills exactly those (Task 7). The
     physical comment id is unique per record on both sides; a pre-canonical
     duplicate may appear twice for one id, and the first anchor-bearing copy
-    wins -- the REST copy is the only kind that ever carries one.
+    wins -- the REST copy is the only kind that ever carries one. A record
+    whose authoring_anchor is present but invalid (or that lacks its
+    database_id) is corrupt prior state and raises
+    :class:`~daydream.benchmark.storage.WorkspaceCorrupt` -- the caller stages
+    a ledger failure instead of letting ValidationError/KeyError abort the run.
     """
     prior_by_id: dict[int, schema.AuthoringAnchor] = {}
     for e in prior_raw.get("evidence", []):
         anchor_raw = e.get("authoring_anchor")
         if not isinstance(anchor_raw, dict):
             continue
-        db_id = int(e["database_id"])
-        if db_id not in prior_by_id:
-            prior_by_id[db_id] = schema.AuthoringAnchor.model_validate(anchor_raw)
+        try:
+            db_id = int(e["database_id"])
+            if db_id not in prior_by_id:
+                prior_by_id[db_id] = schema.AuthoringAnchor.model_validate(anchor_raw)
+        except (KeyError, ValidationError) as exc:
+            # A persisted evidence record whose authoring_anchor is present but
+            # invalid (or that lacks its database_id) is corrupt prior state:
+            # fail closed via the module's WorkspaceCorrupt convention (caught
+            # by the caller's WorkspaceError arm, which stages a ledger failure)
+            # instead of letting ValidationError/KeyError escape the run
+            # unhandled and crash the whole import.
+            raise storage.WorkspaceCorrupt(
+                "prior import evidence record has an invalid authoring_anchor"
+                " or a missing database_id"
+            ) from exc
     for record in doc.evidence:
         if record.kind != "inline_comment" or record.reply_to_id is not None:
             continue

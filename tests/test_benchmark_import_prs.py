@@ -2462,6 +2462,48 @@ def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, f
     assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
 
 
+def test_refresh_corrupt_prior_anchor_stages_ledger_failure(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """A refresh whose prior import carries a present-but-invalid persisted
+    authoring_anchor fails closed: ``_backfill_prior_anchors`` raises
+    ``WorkspaceCorrupt`` (corrupt prior state), the import stages a ledger
+    failure and returns non-zero -- the pydantic ValidationError never escapes
+    the run unhandled, and the fetched PR keeps its last-good linkage."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
+             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    # Corrupt the persisted prior anchor: a present-but-invalid dict (bogus
+    # status) that schema.AuthoringAnchor.model_validate rejects.
+    import_path = ws / "imports" / "pr-000101.json"
+    imp = load_json_strict(import_path)
+    rec = next(e for e in imp["evidence"] if e["database_id"] == 1)
+    rec["authoring_anchor"] = {"version": 1, "status": "bogus"}
+    import_path.write_text(json.dumps(imp, indent=2))
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
+    assert rc != 0
+    after = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    assert after["import_state"] == "fetched"            # NOT reset to fetch_failed
+    assert after["import_file"] == before["import_file"]  # last-good linkage preserved
+    assert after["latest_error"]["code"] == "fetch"
+    assert "authoring_anchor" in after["latest_error"]["message"]
+    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
+
+
 def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A refresh whose re-freeze of a curated pinned head goes unreplayable
     (force-push/rebased branch made the head unreachable) must fail the refresh
