@@ -166,10 +166,13 @@ def _run_stage0(
     report = gate_mod.evaluate_gate(model, split, config.gate_config)
 
     _atomic_write_json(stage_dir / "model-state.json", model.state_dict())
-    _atomic_write_json(
-        stage_dir / "gate-report.json",
-        {"gate": report.to_dict(), "split": split.to_dict()},
-    )
+    # The gate report on disk is the artifact a Stage-3 run points
+    # --taskset.gate-report-path at (rl/daydream_review_v1 gate_refusal).
+    # Its schema is the bare ``GateReport.to_dict()`` payload — top-level
+    # ``passed``/``evidence_digest`` — so the boundary consumer reads it
+    # unmodified. Split evidence lives beside it as its own artifact.
+    _atomic_write_json(stage_dir / "gate-report.json", report.to_dict())
+    _atomic_write_json(stage_dir / "split.json", split.to_dict())
     entry: dict[str, Any] = {
         "status": "complete",
         "gate": report.to_dict(),

@@ -92,6 +92,34 @@ def test_filter_threshold_reads_breakdown(frozen_rft_inputs: FrozenRftInputs, tm
         assert w.breakdown.grounding is not None and w.breakdown.grounding >= 0.5
 
 
+def test_spec_axes_match_score_trajectory_breakdown_fields(
+    frozen_rft_inputs: FrozenRftInputs, tmp_path: Path
+) -> None:
+    """Stage-boundary contract: allowed spec axes are the breakdown's actual attribute names."""
+    # "correctness" is not a field of score_trajectory's RewardBreakdown — the real
+    # axis is correctness_per_finding. A spec naming a non-axis must be rejected at
+    # config time (fail closed), and the real axis name must filter.
+    with pytest.raises(TypeError, match="unknown axis"):
+        RftConfig(
+            inputs=frozen_rft_inputs.path,
+            seed=11,
+            rubric_version="v",
+            output_dir=tmp_path / "axis-bogus",
+            min_breakdown={"correctness": 0.5},
+        )
+    cfg = RftConfig(
+        inputs=frozen_rft_inputs.path,
+        seed=11,
+        rubric_version="v",
+        output_dir=tmp_path / "axis-real",
+        min_breakdown={"correctness_per_finding": 0.5},
+    )
+    winners = run_rft(cfg)
+    for w in winners.records:
+        assert w.breakdown.correctness_per_finding is not None
+        assert min(w.breakdown.correctness_per_finding) >= 0.5
+
+
 def test_scalar_threshold_is_rejected(frozen_rft_inputs: FrozenRftInputs, tmp_path: Path) -> None:
     # M12: the filter threshold names axes, never a bare scalar.
     with pytest.raises(TypeError, match="min_breakdown"):

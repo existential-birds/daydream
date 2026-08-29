@@ -68,6 +68,33 @@ def test_full_run_writes_manifest_and_adapter(
     assert manifest["run_identity"]["base_model"]  # LOCKED_FIELDS identity stamped (M18 tie-in)
 
 
+def test_stage3_consumer_reads_coordinator_gate_report(
+    records_50_fixture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stage-boundary contract: the on-disk gate evidence the coordinator produces must
+    be directly consumable by the Stage-3 refusal seam (require_stage0_gate), whose
+    schema is a top-level ``passed`` on the GateReport payload."""
+    from daydream.training.gate import evaluate_gate
+
+    seen: dict[str, object] = {}
+
+    def _spy(model: object, split: object, config: GateConfig) -> GateReport:
+        report = evaluate_gate(model, split, config)  # type: ignore[arg-type]
+        seen["digest"] = report.evidence_digest
+        return report
+
+    monkeypatch.setattr("daydream.training.coordinator.gate_mod.evaluate_gate", _spy)
+    run_pipeline(PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path), dry_run=True)
+    report = json.loads((tmp_path / "stage0" / "gate-report.json").read_text())
+    assert report["passed"] is True  # top-level, not nested under "gate"
+    assert report["evidence_digest"] == seen["digest"]
+    # split evidence survives as its own sibling artifact
+    assert (tmp_path / "stage0" / "split.json").is_file()
+    # the consumer-side acceptance of this exact file is pinned in
+    # rl/daydream_review_v1/tests/test_gate_refusal.py::
+    # test_coordinator_gate_report_is_consumed_unmodified
+
+
 def test_gate_failure_stops_pipeline_before_stage3(
     records_50_fixture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

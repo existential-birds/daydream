@@ -35,9 +35,10 @@ from daydream.training.reward import RewardBreakdown, ScoringInputs, score_traje
 
 __all__ = ["RftConfig", "RftWinner", "RftResult", "run_rft"]
 
-# Breakdown axes the winner spec may constrain. Anything else is a typo —
-# fail closed at config time rather than silently filtering on nothing.
-_SPEC_AXES = ("composite", "grounding", "correctness", "length_penalty")
+# Breakdown axes the winner spec may constrain: exactly the attribute names of
+# ``score_trajectory``'s ``RewardBreakdown`` (reward.py:316). Anything else is a
+# typo — fail closed at config time rather than silently filtering on nothing.
+_SPEC_AXES = ("composite", "grounding", "correctness_per_finding", "length_penalty")
 
 # Minimum candidates sampled per record (full finding set + seeded subsets).
 DEFAULT_CANDIDATES_PER_TASK = 4
@@ -171,10 +172,18 @@ def _score_candidate(rec: Mapping[str, Any]) -> RewardBreakdown:
 
 
 def _passes(spec: Mapping[str, float], breakdown: RewardBreakdown) -> bool:
-    """Evaluate the breakdown-shaped threshold spec against one breakdown."""
+    """Evaluate the breakdown-shaped threshold spec against one breakdown.
+
+    Scalar axes are compared directly. ``correctness_per_finding`` is a list
+    of mapped per-finding verdicts: the minimum applies to *every* verdict,
+    and an empty list fails (no correctness evidence cannot clear a floor).
+    """
     for axis, minimum in spec.items():
         value = getattr(breakdown, axis)
-        if value is None or float(value) < float(minimum):
+        if isinstance(value, list):
+            if not value or any(float(v) < float(minimum) for v in value):
+                return False
+        elif value is None or float(value) < float(minimum):
             return False
     return True
 
