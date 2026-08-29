@@ -333,6 +333,64 @@ The top-level keys are exactly `run_id`, `mode`, `schema_version`, `identity`,
 (`comparison_eligible`, `task_count`, `candidate_count`, `gold_count`), with
 optional `tokens`/`cost`.
 
+### Reported location and severity axes
+
+Each scored task's per-trial reward JSON (verifier template version 3) carries
+the content reward plus two **reported** diagnostic axes over the matched
+(tp) pairs — location and severity agreement. A per-task reward row looks
+like:
+
+```json
+{
+  "tp": 5,
+  "fp": 1,
+  "fn": 2,
+  "reward": 0.71,
+  "location_exact": 3,
+  "location_near": 1,
+  "location_file": 1,
+  "location_miss": 0,
+  "location_credit": 0.8,
+  "location_present": 1,
+  "severity_exact": 4,
+  "severity_within_1": 1,
+  "severity_mean_distance": 0.2,
+  "severity_credit": 0.9,
+  "severity_present": 1,
+  "verifier_error": 0
+}
+```
+
+**The axes are reported-only.** They are computed over matched pairs and
+reported for diagnostics; they never gate tp/fp/fn, the reward, or the
+self-match tiebreak. A pair with no location (locationless findings) or no
+severity contributes to no count, mean, or credit — it is never imputed as a
+zero (axis-presence doctrine); `location_present`/`severity_present` are 0/1
+flags reporting whether at least one pair scored that axis. Location tiers are
+`exact` (same line range), `near` (within `LOCATION_TOLERANCE` = 3 lines),
+`file` (same file, different location), and `miss` (different file); severity
+is scored as exact, within-1 severity step, and mean ordinal distance with
+credit 1.0/0.5/0.0 for distance 0/1/2+.
+
+`aggregate` pools the axes across the suite over axis-present tasks only,
+alongside the pooled TP/FP/FN micro metrics:
+
+```json
+{
+  "location_exact": 11,
+  "location_exact_rate": 0.65,
+  "location_near_rate": 0.18,
+  "location_miss_rate": 0.0,
+  "location_pairs_scored": 17,
+  "severity_pairs_scored": 17,
+  "severity_within_1": 16,
+  "severity_credit": 0.88
+}
+```
+
+Axis rates use the axis pair count as the denominator and are 0.0 when no
+pairs scored that axis — an absent axis is missing signal, not a perfect one.
+
 ### `aggregate` — pool a suite manifest
 
 ```bash
