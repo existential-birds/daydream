@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +55,11 @@ def _write(repo: Path, name: str, content: str | bytes) -> None:
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(content, bytes):
-        path.write_bytes(content)
+        # ``Path`` cannot represent a surrogate-escaped filename on macOS,
+        # while the test deliberately creates one to exercise Git's raw-byte
+        # path handling. Encode through the filesystem boundary explicitly.
+        with open(os.fsencode(path), "wb") as fh:
+            fh.write(content)
     else:
         path.write_text(content)
     _git(repo, "add", name)
@@ -329,6 +334,10 @@ def test_derive_authoring_path_rename_traced(tmp_path: Path) -> None:
     assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="macOS filesystems reject surrogate-escaped non-UTF-8 pathnames",
+)
 def test_derive_authoring_path_rename_trace_survives_non_utf8_paths(tmp_path: Path) -> None:
     """A rename trace containing a non-UTF-8 pathname byte does not raise
     UnicodeDecodeError: the ``-z`` output is captured as bytes and
