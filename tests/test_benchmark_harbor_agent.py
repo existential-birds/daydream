@@ -104,12 +104,13 @@ def test_build_candidate_findings_enforces_verifier_bounds_fail_closed() -> None
         candidate.build_candidate_findings(overlong_body, case_id=case_id)
     assert bad_body.value.kind == "invalid_finding"
 
-    # non-enum severity is a typed failure
-    bad_severity = [{"file": "src/a.py", "line": 1,
-                     "description": "x", "rationale": "", "severity": "CRITICAL"}]
-    with pytest.raises(candidate.CandidateError) as bad_sev:
-        candidate.build_candidate_findings(bad_severity, case_id=case_id)
-    assert bad_sev.value.kind == "invalid_finding"
+    # off-vocabulary severity is mapped, never propagated: the shared
+    # extraction boundary (pr_review.extract_item_fields -> severity.normalize_severity)
+    # maps 'CRITICAL' to None, and null severity is verifier-valid (R6 boundary mapping).
+    off_vocab = [{"file": "src/a.py", "line": 1,
+                  "description": "x", "rationale": "", "severity": "CRITICAL"}]
+    [mapped] = candidate.build_candidate_findings(off_vocab, case_id=case_id)
+    assert mapped["severity"] is None
 
 
 # ---------------------------------------------------------------------------
