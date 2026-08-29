@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,11 +31,17 @@ MODEL = "some-org/some-policy-model"
 
 
 def _task(corpus_mini_dir: Path, fixture_manifest_path: Path) -> DaydreamReviewTask:
+    # The load path refuses without a passed Stage-0 gate report (M4); tests
+    # here exercise launch/sealing, not the gate, so hand them a passed one.
+    fd, gate_name = tempfile.mkstemp(suffix="-stage0-gate.json")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"passed": True, "separation": 0.2, "evidence_digest": "test"}, fh)
     taskset = DaydreamReviewTaskset(
         DaydreamReviewConfig(
             id="daydream-review-v1",
             corpus_dir=corpus_mini_dir,
             manifest_path=fixture_manifest_path,
+            gate_report_path=Path(gate_name),
         )
     )
     return list(taskset.load())[0]

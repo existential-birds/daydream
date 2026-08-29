@@ -6,6 +6,7 @@ The fixture repository itself lives in the package
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 from pathlib import Path
@@ -71,6 +72,39 @@ def corpus_mini_dir() -> Path:
 def fixture_manifest_path() -> Path:
     """The committed images manifest, which carries the fixture repo entry."""
     return PROJECT_ROOT / "images" / "manifest.toml"
+
+
+@pytest.fixture
+def stage0_gate_report(tmp_path: Path) -> Path:
+    """A PASSED Stage-0 gate report, for configs the tests must be allowed to load."""
+    p = tmp_path / "stage0-gate.json"
+    p.write_text(
+        json.dumps({"passed": True, "separation": 0.2, "evidence_digest": "fixture-digest"}),
+        encoding="utf-8",
+    )
+    return p
+
+
+@pytest.fixture
+def outcome_model_path(tmp_path: Path) -> Path:
+    """A trained Stage-0 outcome model checkpoint (OutcomeModel.state_dict shape)."""
+    p = tmp_path / "outcome-model.json"
+    p.write_text(
+        json.dumps(
+            {
+                "weights": {"bug": 1.0, "race": 0.5, "regression": 0.75},
+                "bias": -0.25,
+                "split_digest": "fixture-split-digest",
+                "label_ratio_reported": 0.5,
+                "train_rows": 10,
+                "held_out_rows": 4,
+                "held_out_accuracy": 0.75,
+                "model_fingerprint": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return p
 
 
 @pytest.fixture(scope="session")

@@ -1,0 +1,6 @@
+{
+  "passed": true,
+  "separation": 0.2,
+  "evidence_digest": "fixture-gate-report",
+  "note": "Checked-in fixture gate report for the local smoke path (configs/eval-stub.toml). Real runs point at a report produced by the Stage-0 offline gate (daydream/training/gate.py)."
+}

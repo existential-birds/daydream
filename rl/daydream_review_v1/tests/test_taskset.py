@@ -147,12 +147,15 @@ def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_pa
     assert sorted(p.name for p in dest.iterdir()) == entries_before
 
 
-def test_load_builds_tasks_from_fixture_corpus(corpus_mini_dir: Path, fixture_manifest_path: Path) -> None:
+def test_load_builds_tasks_from_fixture_corpus(
+    corpus_mini_dir: Path, fixture_manifest_path: Path, stage0_gate_report: Path
+) -> None:
     taskset = DaydreamReviewTaskset(
         DaydreamReviewConfig(
             id="daydream-review-v1",
             corpus_dir=corpus_mini_dir,
             manifest_path=fixture_manifest_path,
+            gate_report_path=stage0_gate_report,
         )
     )
     tasks = list(taskset.load())
@@ -186,13 +189,16 @@ def test_load_builds_tasks_from_fixture_corpus(corpus_mini_dir: Path, fixture_ma
     assert [task.data.idx for task in tasks] == [0, 1]
 
 
-def test_use_images_false_leaves_tasks_imageless(corpus_mini_dir: Path, fixture_manifest_path: Path) -> None:
+def test_use_images_false_leaves_tasks_imageless(
+    corpus_mini_dir: Path, fixture_manifest_path: Path, stage0_gate_report: Path
+) -> None:
     """The subprocess smoke path needs imageless tasks (verifiers env.py:189-195)."""
     taskset = DaydreamReviewTaskset(
         DaydreamReviewConfig(
             id="daydream-review-v1",
             corpus_dir=corpus_mini_dir,
             manifest_path=fixture_manifest_path,
+            gate_report_path=stage0_gate_report,
             use_images=False,
         )
     )
@@ -201,13 +207,15 @@ def test_use_images_false_leaves_tasks_imageless(corpus_mini_dir: Path, fixture_
     assert all(task.data.test_command == FIXTURE_TEST_COMMAND for task in tasks)
 
 
-def test_load_rejects_excluded_repo(tmp_path: Path) -> None:
+def test_load_rejects_excluded_repo(tmp_path: Path, stage0_gate_report: Path) -> None:
     """C5 is unconditional: an excluded slug fails the load, manifest or not."""
     corpus = _write_corpus(tmp_path / "corpus", "getsentry/sentry", [_pr(7, "a" * 40, "b" * 40)])
     manifest = _write_manifest(tmp_path / "manifest.toml", [])
 
     taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest)
+        DaydreamReviewConfig(
+            id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest, gate_report_path=stage0_gate_report
+        )
     )
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
@@ -215,38 +223,44 @@ def test_load_rejects_excluded_repo(tmp_path: Path) -> None:
     assert "getsentry/sentry" in str(excinfo.value)
 
 
-def test_load_rejects_excluded_repo_case_insensitively(tmp_path: Path) -> None:
+def test_load_rejects_excluded_repo_case_insensitively(tmp_path: Path, stage0_gate_report: Path) -> None:
     """GitHub slugs are case-insensitive; `GetSentry/Sentry` is the same repo."""
     corpus = _write_corpus(tmp_path / "corpus", "GetSentry/Sentry", [_pr(7, "a" * 40, "b" * 40)])
     manifest = _write_manifest(tmp_path / "manifest.toml", ["GetSentry/Sentry"])
 
     taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest)
+        DaydreamReviewConfig(
+            id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest, gate_report_path=stage0_gate_report
+        )
     )
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
     assert "C5" in str(excinfo.value)
 
 
-def test_load_rejects_corpus_without_benchmark_data(tmp_path: Path) -> None:
+def test_load_rejects_corpus_without_benchmark_data(tmp_path: Path, stage0_gate_report: Path) -> None:
     corpus = _write_corpus(tmp_path / "corpus", "acme/widgets", [_pr(3, "a" * 40, "b" * 40)])
     (corpus / "results" / "benchmark_data.json").unlink()
     manifest = _write_manifest(tmp_path / "manifest.toml", ["acme/widgets"])
 
     taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest)
+        DaydreamReviewConfig(
+            id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest, gate_report_path=stage0_gate_report
+        )
     )
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
     assert "benchmark_data.json" in str(excinfo.value)
 
 
-def test_load_rejects_missing_manifest_entry(tmp_path: Path) -> None:
+def test_load_rejects_missing_manifest_entry(tmp_path: Path, stage0_gate_report: Path) -> None:
     corpus = _write_corpus(tmp_path / "corpus", "acme/widgets", [_pr(3, "a" * 40, "b" * 40)])
     manifest = _write_manifest(tmp_path / "manifest.toml", ["other/repo"])
 
     taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest)
+        DaydreamReviewConfig(
+            id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest, gate_report_path=stage0_gate_report
+        )
     )
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
@@ -362,7 +376,7 @@ def test_golden_comment_rejects_unknown_key() -> None:
     ]
 
 
-def test_load_rejects_record_without_base_sha(tmp_path: Path) -> None:
+def test_load_rejects_record_without_base_sha(tmp_path: Path, stage0_gate_report: Path) -> None:
     """No base SHA means no reviewable diff and no image to build — fail loudly."""
     record = _pr(4, "a" * 40, "b" * 40)
     record["base_sha"] = None
@@ -370,7 +384,9 @@ def test_load_rejects_record_without_base_sha(tmp_path: Path) -> None:
     manifest = _write_manifest(tmp_path / "manifest.toml", ["acme/widgets"])
 
     taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest)
+        DaydreamReviewConfig(
+            id="daydream-review-v1", corpus_dir=corpus, manifest_path=manifest, gate_report_path=stage0_gate_report
+        )
     )
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
@@ -392,7 +408,9 @@ def test_load_requires_manifest_path_flag(corpus_mini_dir: Path) -> None:
     assert "--taskset.manifest-path" in str(excinfo.value)
 
 
-def test_loader_contract_resolves_package(corpus_mini_dir: Path, fixture_manifest_path: Path) -> None:
+def test_loader_contract_resolves_package(
+    corpus_mini_dir: Path, fixture_manifest_path: Path, stage0_gate_report: Path
+) -> None:
     """The real path the verifiers CLI/orchestrator takes (loaders.py:110-127)."""
     from verifiers.v1.loaders import load_taskset, taskset_config_type
 
@@ -404,6 +422,7 @@ def test_loader_contract_resolves_package(corpus_mini_dir: Path, fixture_manifes
             id="daydream-review-v1",
             corpus_dir=corpus_mini_dir,
             manifest_path=fixture_manifest_path,
+            gate_report_path=stage0_gate_report,
         )
     )
     # load(), not select(): select() is a 0.2.1 convenience the verifiers
@@ -411,7 +430,9 @@ def test_loader_contract_resolves_package(corpus_mini_dir: Path, fixture_manifes
     assert len(list(taskset.load())) == 2
 
 
-def test_reference_corpus_loads_against_the_manifest(fixture_manifest_path: Path) -> None:
+def test_reference_corpus_loads_against_the_manifest(
+    fixture_manifest_path: Path, stage0_gate_report: Path
+) -> None:
     """The reference entry is real upstream history, not another synthetic repo.
 
     pallets/itsdangerous PR #406 (BSD-3-Clause, not on the C5 exclusion list) is
@@ -422,7 +443,12 @@ def test_reference_corpus_loads_against_the_manifest(fixture_manifest_path: Path
     """
     corpus = Path(__file__).parent / "fixtures" / "corpus-reference"
     taskset = DaydreamReviewTaskset(
-        DaydreamReviewConfig(id="daydream-review-v1", corpus_dir=corpus, manifest_path=fixture_manifest_path)
+        DaydreamReviewConfig(
+            id="daydream-review-v1",
+            corpus_dir=corpus,
+            manifest_path=fixture_manifest_path,
+            gate_report_path=stage0_gate_report,
+        )
     )
     (task,) = taskset.load()
     assert task.data.repo_slug == "pallets/itsdangerous"

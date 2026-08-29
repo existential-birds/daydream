@@ -27,10 +27,15 @@ import verifiers.v1 as vf
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
+from daydream.training.reward_model import OutcomeModel
+from daydream.training.reward_model import score_comment as _score_outcome_comment
+from daydream.training.rubric_v2 import RubricV2Breakdown
+from daydream.training.rubric_v2 import score_review as _score_rubric_v2
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
 from daydream_review_v1.corpus import harvested_corpus
+from daydream_review_v1.gate_refusal import Stage0GateRefused, require_stage0_gate
 from daydream_review_v1.rundir import (
     DAYDREAM_EXCLUDE as DAYDREAM_EXCLUDE,
 )
@@ -53,6 +58,83 @@ DEFAULT_REPO_PATH = "/work/repo"
 #: scorer it was evaluated against. Archives scored before this boundary was
 #: introduced carry only the intrinsic version and need no migration tag.
 ROLLOUT_REWARD_VERSION = "2026.08.15-1"
+
+
+class _OutcomeScorer:
+    """Adapter exposing the trained outcome model under rubric_v2's protocol.
+
+    ``rubric_v2.score_review`` requires ``model.score_comment(text) -> float``;
+    the frozen ``OutcomeModel`` scores through the module-level
+    :func:`daydream.training.reward_model.score_comment`, so this wraps it.
+    """
+
+    def __init__(self, model: OutcomeModel) -> None:
+        self._model = model
+
+    def score_comment(self, text: str) -> float:
+        return float(_score_outcome_comment(self._model, text))
+
+
+_outcome_model_cache: dict[Path, _OutcomeScorer] = {}
+
+
+def _load_outcome_model(path: Path) -> _OutcomeScorer:
+    """Load (and cache) the frozen Stage-0 outcome model checkpoint at *path*."""
+    cached = _outcome_model_cache.get(path)
+    if cached is not None:
+        return cached
+    state = json.loads(path.read_text(encoding="utf-8"))
+    scorer = _OutcomeScorer(OutcomeModel(**state))
+    _outcome_model_cache[path] = scorer
+    return scorer
+
+
+def stage0_composite_terms(outcome_model_path: Path, run_dir: Path) -> dict[str, Any] | None:
+    """Compose the validated Stage-0 rubric over an archived run's merged findings (M13).
+
+    Reads the same ``deep/merged-items.json`` the intrinsic scoring path reads
+    (never a second source of truth), scores the finding descriptions under
+    ``rubric_v2.score_review`` with the frozen outcome model, and returns the
+    full breakdown dict (``terms`` / ``composite`` / ``reward_version``).
+
+    Returns ``None`` when no outcome model is configured — scoring stays
+    intrinsic-only. A run with zero merged findings also composes nothing: the
+    intrinsic path already floors it at 0.0, and rubric terms over an empty
+    finding set are undefined rather than imputable.
+
+    Rollout-time limitations, stamped into the returned provenance rather than
+    hidden: there is no live false-positive judge, so ``fp_count`` is 0 (the
+    FP-penalty term is telemetry-neutral here), and ``grounded`` is derived
+    from the manifest's ``grounding_rate``.
+    """
+    if outcome_model_path == Path(""):
+        return None
+    merged = _read_json(run_dir / "deep" / "merged-items.json", default={})
+    items = merged.get("items") if isinstance(merged, dict) else None
+    checked = [item for item in (items or []) if isinstance(item, dict) and item.get("description")]
+    if not checked:
+        return None
+    findings: list[dict[str, Any]] = [
+        {
+            "text": str(item["description"]),
+            "verdict": None,
+            "tools": [],
+        }
+        for item in checked
+    ]
+    total = len(findings)
+    grounding_rate = _manifest_row(run_dir).get("grounding_rate")
+    grounded = int(round(float(grounding_rate) * total)) if grounding_rate is not None else 0
+    result = _score_rubric_v2(
+        _load_outcome_model(outcome_model_path),
+        findings=findings,
+        fp_count=0,
+        total_findings=total,
+        grounded=max(0, min(grounded, total)),
+        breakdown=True,
+    )
+    assert isinstance(result, RubricV2Breakdown)
+    return result.to_dict()
 
 
 def _archive_root(trace: vf.Trace) -> str:
@@ -444,6 +526,9 @@ class DaydreamReviewTaskConfig(vf.TaskConfig):
 
     w_composite: float = 1.0
 
+    outcome_model_path: Path = Path("")
+    """Stage-0 outcome model checkpoint (M13); stamped from the taskset config at load."""
+
 
 class DaydreamReviewState(vf.State):
     """Mutable per-rollout scoring state, living on the trace.
@@ -509,10 +594,14 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     scores on grounding and format alone. That is the designed behaviour, and
     ``trace.info["reward_breakdown"]["axes_present"]`` records it per rollout.
 
-    The #91 Stage-0 preference rubric is deliberately NOT a reward here. Its seam
-    is ``TaskConfig.judges`` (or an additional ``@vf.reward``); until it passes
-    #91's offline ranking gate, golden-comment agreement is exposed only as the
-    non-summed ``golden_overlap`` metric.
+    The Stage-0 preference rubric (``daydream/training/rubric_v2``) composes into
+    the reward only through the validated path: when the taskset config carries
+    ``outcome_model_path``, the load path has already re-checked the Stage-0
+    gate report (M4), and ``intrinsic_composite`` returns the rubric composite
+    (which carries the intrinsic composite as one weighted term). Without an
+    outcome model, scoring stays intrinsic-only. Either way, golden-comment
+    agreement is exposed only as the non-summed ``golden_overlap`` metric —
+    golden overlap is telemetry, never a composite substitute (M6).
 
     A rollout that reports ZERO findings scores ``intrinsic_composite`` 0.0, not
     1.0. ``analyze_grounding`` returns ``grounding_rate = None`` over an empty
@@ -596,7 +685,12 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             return 0.0
         breakdown = score_trajectory(assemble_scoring_inputs(run_dir, _manifest_row(run_dir)))
 
-        trace.info["reward_breakdown"] = {
+        # M13: when a validated Stage-0 outcome model is configured, the reward
+        # becomes the rubric_v2 composite (which itself carries the intrinsic
+        # composite as a term — no double counting); otherwise intrinsic-only.
+        stage0 = stage0_composite_terms(self.config.outcome_model_path, run_dir)
+
+        reward_breakdown: dict[str, Any] = {
             "correctness_per_finding": breakdown.correctness_per_finding,
             "grounding": breakdown.grounding,
             "format_valid": breakdown.format_valid,
@@ -606,9 +700,17 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             "reward_version": ROLLOUT_REWARD_VERSION,
             "intrinsic_reward_version": breakdown.reward_version,
         }
+        if stage0 is not None:
+            reward_breakdown["stage0"] = stage0
+        trace.info["reward_breakdown"] = reward_breakdown
         # ``self.config`` rides the untyped ``vf.Task`` boundary; coerce both
         # factors so the composite reward stays a concrete float.
-        return float(self.config.w_composite) * float(breakdown.composite or 0.0)
+        reward_composite = (
+            float(stage0["composite"])
+            if stage0 is not None and stage0.get("composite") is not None
+            else float(breakdown.composite or 0.0)
+        )
+        return float(self.config.w_composite) * reward_composite
 
     @vf.metric
     async def suite_non_regression(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
@@ -735,6 +837,25 @@ class DaydreamReviewConfig(vf.TasksetConfig):
     manifest_path: Path = Path("")
     task: DaydreamReviewTaskConfig = DaydreamReviewTaskConfig()
 
+    gate_report_path: Path = Path("")
+    """Path to the Stage-0 gate report (``GateReport.to_dict()`` payload).
+
+    M4: the load path re-validates this report unconditionally, before any
+    rollout can be scheduled — a missing, corrupt, or failed report refuses
+    the load with :class:`Stage0GateRefused`. Leaving it empty is itself a
+    refusal: there is no configuration under which a taskset loads without
+    gate evidence.
+    """
+
+    outcome_model_path: Path = Path("")
+    """Path to the Stage-0 trained outcome model checkpoint (``OutcomeModel.state_dict()``).
+
+    M13: when set, the ``intrinsic_composite`` reward composes the validated
+    Stage-0 rubric (``daydream/training/rubric_v2``) over the archived run's
+    merged findings, and the reward becomes the rubric composite. When unset,
+    scoring stays intrinsic-only (the offline-parity shape).
+    """
+
     use_images: bool = True
     """Stamp the manifest image onto each task.
 
@@ -855,6 +976,18 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
                 len(prs),
             )
 
+        # Stage-0 gate first and unconditionally (M4): no rollout may be
+        # scheduled until the offline gate has passed on the trained outcome
+        # model. An unconfigured path is itself a refusal — there is no
+        # default-to-allowed branch. Empty corpus/manifest flags above fail
+        # first only because they are argument errors, not gate decisions.
+        if config.gate_report_path == Path(""):
+            raise Stage0GateRefused(
+                "no Stage-0 gate report configured: pass --taskset.gate-report-path <gate.json>. "
+                "A Stage-3 run may not schedule rollouts until the offline gate has passed (M4)."
+            )
+        require_stage0_gate(config.gate_report_path)
+
         # C5 first and unconditionally: an excluded repo must fail the load before
         # any manifest or per-record check can mask it. Slugs are compared
         # case-insensitively — GitHub treats `GetSentry/Sentry` and
@@ -909,5 +1042,12 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
                 protected_test_paths=entry.protected_test_paths,
                 golden_comments=golden.get(pr.golden_url, []),
             )
-            tasks.append(DaydreamReviewTask(data, config.task))
+            tasks.append(
+                DaydreamReviewTask(
+                    data,
+                    # The Stage-0 outcome model is taskset-level; stamp it onto
+                    # the per-task config the reward functions actually read.
+                    config.task.model_copy(update={"outcome_model_path": config.outcome_model_path}),
+                )
+            )
         return tasks

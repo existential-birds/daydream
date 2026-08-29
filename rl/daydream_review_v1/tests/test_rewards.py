@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -56,12 +57,23 @@ def mean(values: list[int]) -> float:
 '''
 
 
-def _task(corpus_mini_dir: Path, fixture_manifest_path: Path, *, pr_number: int = 1) -> DaydreamReviewTask:
+def _task(
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+    *,
+    pr_number: int = 1,
+) -> DaydreamReviewTask:
+    # The load path refuses without a passed Stage-0 gate report (M4); tests
+    # here exercise scoring, not the gate, so hand them a minimal passed one.
+    fd, gate_name = tempfile.mkstemp(suffix="-stage0-gate.json")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"passed": True, "separation": 0.2, "evidence_digest": "test"}, fh)
     taskset = DaydreamReviewTaskset(
         DaydreamReviewConfig(
             id="daydream-review-v1",
             corpus_dir=corpus_mini_dir,
             manifest_path=fixture_manifest_path,
+            gate_report_path=Path(gate_name),
             use_images=False,
         )
     )
