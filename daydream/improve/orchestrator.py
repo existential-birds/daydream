@@ -68,6 +68,7 @@ from daydream.improve.plans import (
     record_rejections,
 )
 from daydream.improve.prioritize import (
+    _map_axis_severity,
     aggregate_cross_service,
     leverage_score,
     order_by_leverage,
@@ -1206,16 +1207,14 @@ def _apply_vet_verdicts(
             if verdict.get(field) is not None:
                 corrected[field] = verdict[field]
         # The vet contract uses human-readable severity names while the
-        # prioritizer's axes use the audit vocabulary. Normalize at the host
-        # boundary so aggregation cannot silently promote every vetted item to
-        # its conservative fallback.
+        # prioritizer's axes use the audit vocabulary. Map at the host boundary
+        # via the shared P-BOUNDARY mapper (issue #972 R3.1/R6.2): unknown or
+        # absent values do not pass through raw — the axis is omitted and the
+        # prioritizer drops it instead of promoting to a conservative fallback.
         severity = corrected.get("severity")
-        if isinstance(severity, str):
-            corrected["severity"] = {
-                "high": "HIGH",
-                "medium": "MED",
-                "low": "LOW",
-            }.get(severity.lower(), severity)
+        mapped_severity = _map_axis_severity(severity)
+        if mapped_severity is not None:
+            corrected["severity"] = mapped_severity
         # Unlike the other corrected fields, ``None`` is a meaningful vet
         # correction here: it explicitly retracts an audit-time reuse target.
         if "reuse_target" in verdict:

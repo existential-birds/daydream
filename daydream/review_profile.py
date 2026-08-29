@@ -423,14 +423,20 @@ def build_default_profile() -> ReviewProfile:
                 "- \"Good Patterns\" or \"Strengths\"\n"
                 "- \"Summary\" sections\n"
                 "- Any positive observations\n"
-                "{severity_hint}{verdicts_hint}\n"
+                "{verdicts_hint}\n"
                 "For each issue found, return a JSON object with this structure:\n"
                 "{{\"issues\": [\n"
-                "  {{\"id\": 1, \"description\": \"Brief description of the issue\", \"file\": \"path/to/file.py\", \"line\": 42{severity_field}}}\n"  # noqa: E501 (verbatim copy of the phase_parse_feedback literal)
+                "  {{\"id\": 1, \"description\": \"Brief description of the issue\", \"file\": \"path/to/file.py\", \"line\": 42}}\n"  # noqa: E501 (mirrors the phase_parse_feedback example shape)
                 "]{verdicts_example}}}\n\n"
                 "If there are no actionable issues, return: {{\"issues\": []{verdicts_empty}}}\n"
             ),
-            source="copied: daydream.phases.phase_parse_feedback",
+            # The parse stage itself is removed (issue #745); this copy is kept
+            # only as schema documentation. It no longer mirrors a live literal
+            # byte-for-byte: the host-appended severity rubric
+            # (daydream.severity.SEVERITY_RUBRIC) now carries all severity
+            # instruction, and the former {severity_hint} fallback fragment is gone
+            # (issue #972 R3/A2).
+            source="mirrors: daydream.phases.phase_parse_feedback (parse stage removed, issue #745)",
         ),
         "uncovered_review": Strategy(
             content=(

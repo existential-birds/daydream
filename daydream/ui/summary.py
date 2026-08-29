@@ -16,6 +16,7 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
+from daydream.severity import normalize_severity
 from daydream.ui.messages import print_dim
 from daydream.ui.theme import (
     NEON_COLORS,
@@ -143,6 +144,16 @@ def print_summary(console: Console, data: SummaryData) -> None:
     console.print(table)
 
 
+def _display_severity(issue: dict[str, Any]) -> str | None:
+    """Normalize an issue's severity for display (issue #972 R3.1).
+
+    Unified fallback policy: a missing or unknown severity renders as absent
+    (``None``) — never the fabricated literal ``"medium"``. Known values are
+    normalized to the canonical lowercase vocabulary.
+    """
+    return normalize_severity(issue.get("severity"))
+
+
 def print_issues_table(console: Console, issues: list[dict[str, Any]]) -> None:
     """Display issues as a numbered Rich table.
 
@@ -164,10 +175,10 @@ def print_issues_table(console: Console, issues: list[dict[str, Any]]) -> None:
     severity_style = {"high": STYLE_RED, "medium": STYLE_YELLOW, "low": STYLE_GREEN}
 
     for issue in issues:
-        sev = issue.get("severity", "medium")
+        sev = _display_severity(issue)
         table.add_row(
             str(issue.get("id", "?")),
-            Text(sev, style=severity_style.get(sev, STYLE_FG)),
+            Text(sev or "--", style=severity_style.get(sev or "", STYLE_FG)),
             issue.get("title", issue.get("description", "No title")),
         )
 

@@ -8,6 +8,7 @@ from collections import Counter
 from typing import Any
 
 from daydream.deep.dedup import bigrams, jaccard, normalize_title
+from daydream.severity import normalize_severity
 
 _IMPACT = {"HIGH": 3.0, "MED": 2.0, "LOW": 1.0}
 _EFFORT = {"S": 1.0, "M": 2.0, "L": 3.0}
@@ -328,8 +329,17 @@ def _merge_work_package(findings: list[dict[str, Any]]) -> dict[str, Any]:
         "LOW",
         highest=False,
     )
-    if any("severity" in member for member in members):
-        merged["severity"] = _conservative_axis(members, "severity", _SEVERITY_ORDER, "HIGH")
+    # Unified fallback policy (issue #972 R3.1): when no member carries a
+    # known severity the axis is omitted entirely — no conservative "HIGH"
+    # default is fabricated for severity (the one permitted "high" default is
+    # the structural-lens setdefault in phases.py).
+    severity_values = [
+        axis
+        for member in members
+        if "severity" in member and (axis := _map_axis_severity(member["severity"])) is not None
+    ]
+    if severity_values:
+        merged["severity"] = max(severity_values, key=_SEVERITY_ORDER.__getitem__)
     merged["leverage"] = round(leverage_score(merged), 2)
 
     if len(members) > 1:
@@ -436,6 +446,23 @@ def _combined_change_shape(findings: list[dict[str, Any]]) -> str:
     if "neutral" in shapes:
         return "neutral"
     return "consolidate"
+
+
+def _map_axis_severity(value: object) -> str | None:
+    """Map a finding's severity to the audit-axis vocabulary, or ``None``.
+
+    Canonical lowercase levels (``daydream.severity``) map to their uppercase
+    axis names; values already in the axis vocabulary pass through as known
+    vocabulary (not an unknown passthrough). Anything else — unknown, absent,
+    ``None`` — maps to ``None`` so the caller can omit the axis instead of
+    promoting it to a conservative fallback (P-BOUNDARY, issue #972 R3.1/R6.2).
+    """
+    normalized = normalize_severity(value)
+    if normalized is not None:
+        return {"low": "LOW", "medium": "MED", "high": "HIGH"}[normalized]
+    if isinstance(value, str) and value in _SEVERITY_ORDER:
+        return value
+    return None
 
 
 def _conservative_axis(

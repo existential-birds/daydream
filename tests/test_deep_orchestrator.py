@@ -137,6 +137,17 @@ async def _run_deep(
     return await run(config)
 
 
+_SEVERITY_SORT_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def _severity_sort_key(s: str) -> int:
+    """Sort rank for canonical severities; errors naming unknown/absent values."""
+    try:
+        return _SEVERITY_SORT_RANK[s]
+    except KeyError:
+        raise ValueError(f"unexpected severity in fixture: {s!r}") from None
+
+
 def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = None) -> dict[str, Any]:
     """Build a validated merged item (shape copied from the stub default)."""
     return {
@@ -4484,7 +4495,16 @@ async def test_structural_finding_reaches_fix_loop(
         f"fix loop; items fixed: {[(i.get('lens'), i.get('severity')) for i in fixed]!r}"
     )
     sev = [str(i["severity"]) for i in fixed]
-    assert sev == sorted(sev, key=lambda s: {"high": 0, "medium": 1, "low": 2}[s])
+    assert sev == sorted(sev, key=_severity_sort_key)
+
+
+def test_severity_sort_key_names_unknown_value() -> None:
+    """Should-Have (R3): an unknown/absent severity in a fixture errors with a
+    message that names the value, instead of a bare ``KeyError``."""
+    with pytest.raises(ValueError, match="bogus"):
+        _severity_sort_key("bogus")
+    with pytest.raises(ValueError, match="unexpected severity in fixture"):
+        _severity_sort_key("")
 
 
 async def test_start_at_fix_recovers_merged_items(

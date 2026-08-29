@@ -33,7 +33,13 @@ from daydream.severity import CANONICAL_LEVELS, SEVERITY_RANK
 
 
 def _severity(record: dict[str, Any]) -> str:
-    """Normalize a record's severity to a lowercase string ("" when absent)."""
+    """Normalize a record's severity to a lowercase string ("" when absent).
+
+    Unified fallback policy for the arbiter's own view (issue #972 R3.1): an
+    empty string means "absent severity ⇒ not selectable by severity"; the
+    contested path still applies to such records. No severity value is
+    fabricated here.
+    """
     value = record.get("severity")
     return value.lower() if isinstance(value, str) else ""
 

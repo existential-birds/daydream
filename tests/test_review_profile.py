@@ -206,3 +206,10 @@ def test_clone_override_revalidates_and_rejects_forbidden() -> None:
 
 def test_suppression_severity_classes_default_narrowed() -> None:
     assert rp.Suppression.severity_classes == ("low",)
+
+
+def test_parse_review_strategy_has_no_default_to_high_hint() -> None:
+    """R3/A2: the mirrored parse-hint copy is dead — the profile's ``parse``
+    strategy must no longer carry the "Default to high" severity instruction
+    (parse stage removed, issue #745)."""
+    assert "Default to high" not in rp.build_default_profile().strategies["parse"].content
