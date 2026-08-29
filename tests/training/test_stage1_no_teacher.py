@@ -5,11 +5,11 @@ import tomllib
 from pathlib import Path
 
 
-def _all_rl_configs():
+def _all_rl_configs() -> list[Path]:
     return [p for p in (Path(__file__).parents[2] / "rl" / "train").glob("*.toml")]
 
 
-def test_no_rl_config_declares_live_teacher_algo():
+def test_no_rl_config_declares_live_teacher_algo() -> None:
     for cfg in _all_rl_configs():
         c = tomllib.loads(cfg.read_text())
         algo = c.get("orchestrator", {}).get("algo")
@@ -18,7 +18,7 @@ def test_no_rl_config_declares_live_teacher_algo():
         )
 
 
-def test_sft_config_names_a_local_dataset_not_an_endpoint():
+def test_sft_config_names_a_local_dataset_not_an_endpoint() -> None:
     c = tomllib.loads((Path(__file__).parents[2] / "rl" / "train" / "sft.toml").read_text())
     # prime-rl schema: the local dataset path lives in [data].name; [dataset]
     # is the daydream-side gating contract table (no path by design).
