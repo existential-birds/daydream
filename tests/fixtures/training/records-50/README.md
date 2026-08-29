@@ -12,15 +12,22 @@ of `rl/daydream_review_v1/tests/fixtures/corpus-mini/`.
   (`session_id`, `evidence_tier`, `base_sha`, `head_sha`, `diff_identity`,
   `daydream_version`, `profile_digest`, `detected_stack`, `label_source`,
   `label_version`, `reward_version`, `split`) plus the Stage-0 gold outcome
-  fields (`comment_id`, `text`, `label`).
+  fields (`comment_id`, `text`, `label`) with the current reply-classifier
+  policy version (`labeler_policy_version`) so the gold-admission guard admits
+  them (M23), and a frozen `diff` body for the Stage-2 RFT replay identity
+  (`id`/`base_sha`/`head_sha`/`diff`).
 - `manifest.json` — fixture metadata (counts, ratio, harness config).
 
 ## Label mix
 
 The fixture mirrors the archive's accepted/rejected ratio at roughly
 **70% accepted / 30% rejected** (35 accepted / 15 rejected). Accepted rows
-carry grounded, actionable review text; rejected rows carry noise chatter, so
-the Stage-0 outcome model can separate the classes and the gate passes.
+are distinct grounded, actionable findings naming a concrete defect and its
+consequence; rejected rows are distinct hedged, non-actionable chatter. No two
+rows share a literal template, so the Stage-0 outcome model must separate the
+classes on distributional word/char-trigram signal (mechanism-and-consequence
+vocabulary versus hedge vocabulary) rather than a memorized phrase — which
+is what the CI stage-0 gate measures.
 
 ## Constraints honored
 

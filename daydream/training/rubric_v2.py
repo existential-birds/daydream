@@ -276,7 +276,7 @@ def score_review(
 
     terms: dict[str, float | None] = {
         "learned_outcome": learned,
-        "fp_penalty": -weights.w_false_positive * false_positive_penalty,
+        "fp_penalty": -false_positive_penalty,
         "localization": localization,
         "tool_grounded": tool_grounded,
         "intrinsic_composite": intrinsic_composite,

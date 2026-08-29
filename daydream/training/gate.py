@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -208,7 +209,10 @@ def freeze_split(
         "held_out_ids": sorted(held_out_ids),
         "train_ids": sorted(str(r["comment_id"]) for r in train_rows),
     }
-    (labels_path.parent / digest_path).write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+    sidecar_path = labels_path.parent / digest_path
+    tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
+    tmp.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+    os.replace(tmp, sidecar_path)
 
     return FrozenSplit(
         digest=digest,

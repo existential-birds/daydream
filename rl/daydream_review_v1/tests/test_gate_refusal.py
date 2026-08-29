@@ -14,15 +14,19 @@ from daydream_review_v1.gate_refusal import Stage0GateRefused, require_stage0_ga
 
 
 def test_start_refused_without_gate_evidence(tmp_path: Path) -> None:
-    with pytest.raises(Stage0GateRefused, match="gate"):
-        require_stage0_gate(gate_report_path=tmp_path / "missing.json")  # M4: refuse when evidence missing
+    gate_report_path = tmp_path / "missing.json"
+    with pytest.raises(Stage0GateRefused, match="missing") as exc_info:
+        require_stage0_gate(gate_report_path=gate_report_path)  # M4: refuse when evidence missing
+    assert str(gate_report_path) in str(exc_info.value)  # contract: the message names the reason and the path
 
 
 def test_start_refused_on_unparseable_gate_report(tmp_path: Path) -> None:
     """A corrupt gate report raises, never defaults to allowed."""
-    (tmp_path / "gate.json").write_text("{not json")
-    with pytest.raises(Stage0GateRefused, match="gate"):
-        require_stage0_gate(gate_report_path=tmp_path / "gate.json")
+    gate_report_path = tmp_path / "gate.json"
+    gate_report_path.write_text("{not json")
+    with pytest.raises(Stage0GateRefused, match="unreadable") as exc_info:
+        require_stage0_gate(gate_report_path=gate_report_path)
+    assert str(gate_report_path) in str(exc_info.value)  # contract: the message names the reason and the path
 
 
 def test_start_refused_on_failed_gate(tmp_path: Path) -> None:
@@ -44,12 +48,12 @@ def test_coordinator_gate_report_is_consumed_unmodified(tmp_path: Path) -> None:
     from daydream.training.coordinator import PipelineConfig, run_pipeline
 
     fixture = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "training" / "records-50" / "records.jsonl"
-    manifest = run_pipeline(
+    run_pipeline(
         PipelineConfig(corpus=fixture, out_dir=tmp_path, stages=("stage0",)), dry_run=True
     )
     report_path = tmp_path / "stage0" / "gate-report.json"
-    assert manifest["stages"]["stage0"]["gate"]["evidence_digest"] == (
-        __import__("json").loads(report_path.read_text())["evidence_digest"]
-    )
+    # The behavioral contract: the on-disk gate-report.json (manifest "gate" and the
+    # file both derive from the same report.to_dict(), so a manifest-vs-file digest
+    # comparison is tautological) must satisfy the Stage-3 boundary consumer verbatim.
     report = require_stage0_gate(gate_report_path=report_path)  # no raise
     assert report["passed"] is True

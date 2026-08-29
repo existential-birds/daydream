@@ -1387,7 +1387,7 @@ def _handle_train_command(argv: list[str]) -> int:
     )
     try:
         run_pipeline(config, dry_run=args.dry_run)
-    except (RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print_error(create_console(), "Training run refused", str(exc))
         return 1
     print_success(create_console(), f"Training run complete: {args.out / 'manifest.json'}")

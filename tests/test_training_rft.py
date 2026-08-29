@@ -37,11 +37,11 @@ def _record(rid: str, **overrides: object) -> dict[str, object]:
         "head_sha": "b" * 40,
         "diff": f"diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ for {rid}\n",
         "findings": [
-            {"id": f"{rid}-f1", "text": "Fix the off-by-one in the loop bound."},
-            {"id": f"{rid}-f2", "text": "Add a guard for empty input."},
+            {"id": f"{rid}-f1", "text": "Fix the off-by-one in the loop bound.",
+             "grounded": True, "verdict": "consistent"},
+            {"id": f"{rid}-f2", "text": "Add a guard for empty input.",
+             "grounded": True, "verdict": "consistent"},
         ],
-        "verifier_verdicts": [{"verdict": "consistent"}, {"verdict": "consistent"}],
-        "grounding_rate": 0.9,
         "format_valid": True,
         "length": 400,
     }
@@ -158,11 +158,33 @@ def test_winners_header_stamps_provenance(frozen_rft_inputs: FrozenRftInputs, tm
     assert ids == sorted(ids)
 
 
-def test_rft_toml_carries_sampling_and_default_renderer() -> None:
+def test_rft_toml_carries_sampling() -> None:
     import tomllib
 
     cfg = tomllib.loads((Path(__file__).parents[1] / "rl" / "train" / "rft.toml").read_text())
-    # Deterministic replay: temperature pinned to 0, explicit seeds, default renderer.
+    # Deterministic replay: temperature pinned to 0, explicit seeds.
     assert cfg["sampling"]["temperature"] == 0.0
     assert "seed" in cfg["sampling"]
-    assert cfg["renderer"]["name"] == "default"
+
+
+def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
+    """Issue 6: scoring inputs derive from the sampled findings subset, so candidates
+    that differ only in their findings score differently (breakdown filter can prefer
+    one sampled completion). Determinism on identical inputs is preserved."""
+    rec: dict[str, object] = _record(
+        "r-vary",
+        findings=[
+            {"id": "r-vary-f1", "text": "grounded fix A", "grounded": True, "verdict": "consistent"},
+            {"id": "r-vary-f2", "text": "ungrounded guess B", "grounded": False, "verdict": "contradicts"},
+        ],
+    )
+    path = _write_corpus(tmp_path, [rec])
+    out_a = run_rft(RftConfig(inputs=path, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "a"))
+    out_b = run_rft(RftConfig(inputs=path, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b"))
+    # Byte-identical on rerun (M11) while the per-candidate breakdowns vary.
+    assert out_a.winners_path.read_bytes() == out_b.winners_path.read_bytes()
+    breakpoints = {(w.candidate_index, w.breakdown.grounding, tuple(w.breakdown.correctness_per_finding or []))
+                   for w in out_a.records}
+    # With mixed finding signals, sampled subsets yield distinct breakdowns, not
+    # byte-identical duplicates differing only in candidate_index.
+    assert len(breakpoints) > 1

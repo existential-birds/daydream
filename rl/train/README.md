@@ -1,6 +1,6 @@
 # Training the review policy with prime-rl
 
-Two configs live here:
+Three configs live here:
 
 - `rl.toml` — the Stage-2/3 GRPO recipe for the `daydream-review-v1` environment.
 - `sft.toml` — the Stage-1 dataset-SFT recipe over the labeled corpus (separate
@@ -8,7 +8,7 @@ Two configs live here:
 - `rft.toml` — the deterministic RFT replay parameters (daydream-private,
   consumed by `daydream.training.rft.run_rft()`, not prime-rl).
 
-Both are
+All are
 config only — no package, no lockfile — because **prime-rl cannot be consumed as a
 dependency**. At v0.7.0 prime-rl resolves verifiers from an editable path source
 pointing at its own submodule (`[tool.uv.sources] verifiers = { path = "deps/verifiers" }`),
@@ -57,7 +57,11 @@ uv run sft @ /abs/path/to/daydream/rl/train/sft.toml \
     --data.name /abs/path/to/sft-corpus
 ```
 
-`--output-dir` must be a **fresh, unique-per-experiment** directory: prime-rl
+The corpus-side dataset is written by the training coordinator's Stage-1
+materialization (`daydream train`): gold-positive (`accepted`) completions as
+prompt/completion JSONL — the loader's accepted shape (`messages` column, or
+`prompt` + `completion` columns) — with gold/silver tier counts reported in the
+stage manifest.
 
 Stage-2 deterministic RFT is offline GPU-free replay (see `rft.toml`), run with
 the training CLI, not prime-rl:

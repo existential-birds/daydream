@@ -16,7 +16,10 @@ Determinism contract: given the same inputs file, model id, seed, and rubric
 version, reruns produce **byte-identical** winners files. All iteration is
 sorted (records by stable id), serialization uses ``sort_keys=True`` with
 fixed float formatting, and the header stamps the model id, seed, rubric
-version, and a sha256 digest of the inputs file.
+version, and a sha256 digest of the inputs file. Candidate scoring derives
+its breakdown inputs (verdicts + grounding rate) from the *sampled* findings
+subset, so a sampled completion is scored on what varies, never on a
+byte-identical copy of the record.
 
 A record missing base/head/diff identity raises :class:`ValueError` naming
 the record id — never skipped silently.
@@ -158,11 +161,29 @@ def _sample_candidates(rec: Mapping[str, Any], rid: str, cfg: RftConfig) -> list
 
 
 def _score_candidate(rec: Mapping[str, Any]) -> RewardBreakdown:
-    """Score one candidate through the canonical ``score_trajectory`` hook."""
+    """Score one candidate through the canonical ``score_trajectory`` hook.
+
+    The sampled ``findings`` subset is the candidate-varying input: verdicts
+    and grounding rate are derived from it (mirroring ``rubric_v2.score_review``),
+    so candidates that differ only in their findings subset score differently
+    and the winner filter can prefer one sampled completion over another.
+    Record-level signals are used only when the record carries no findings.
+    The derivation is a pure function of the candidate, so byte-identical
+    determinism on rerun is preserved (M11).
+    """
+    findings = [f for f in rec.get("findings", []) if isinstance(f, Mapping)]
+    if findings:
+        grounded = sum(1 for f in findings if f.get("grounded"))
+        grounding_rate: float | None = grounded / len(findings)
+        verdicts_derived = [{"verdict": str(f["verdict"])} for f in findings if f.get("verdict")]
+        verifier_verdicts: Any = verdicts_derived or rec.get("verifier_verdicts")
+    else:
+        grounding_rate = rec.get("grounding_rate")
+        verifier_verdicts = rec.get("verifier_verdicts")
     breakdown = score_trajectory(
         ScoringInputs(
-            verifier_verdicts=rec.get("verifier_verdicts"),
-            grounding_rate=rec.get("grounding_rate"),
+            verifier_verdicts=verifier_verdicts,
+            grounding_rate=grounding_rate,
             format_valid=bool(rec.get("format_valid", False)),
             length=rec.get("length"),
         )

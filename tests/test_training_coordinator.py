@@ -31,6 +31,10 @@ def _write_corpus(path: Path, n: int = 50) -> Path:
                 "comment_id": f"c{i:04d}",
                 "text": f"grounded actionable finding {i}" if accepted else f"noise chatter {i}",
                 "label": "accepted" if accepted else "rejected",
+                "labeler_policy_version": "980-policy-r1",
+                "base_sha": f"a{i:064x}",
+                "head_sha": f"b{i:064x}",
+                "diff": f"diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ for sess-{i:04d}\n",
             }
         )
     path.write_text("\n".join(json.dumps(r) for r in rows))
@@ -161,3 +165,98 @@ def cli_runner() -> Any:
 def test_cli_verb_wired(cli_runner: Any) -> None:
     r = cli_runner.invoke(["train", "--help"])
     assert r.exit_code == 0
+
+
+def _production_corpus(path: Path, n: int = 20) -> Path:
+    """Production run_build_corpus export shape: outcome_label/review_output/session_id."""
+    rows = []
+    for i in range(n):
+        accepted = i % 2 == 0
+        rows.append(
+            {
+                "schema_version": "1",
+                "session_id": f"sess-{i:04d}",
+                "repo_slug": f"acme/tooling-{i % 7}",
+                "review_output": (
+                    f"grounded actionable finding {i}" if accepted else f"noise chatter {i}"
+                ),
+                "outcome_label": "accepted" if accepted else "rejected",
+                "labeler_policy_version": "980-policy-r1",
+                "code_context": {"base_sha": f"a{i:064x}", "head_sha": f"b{i:064x}"},
+                "diff": f"diff --git a/f.py b/f.py\n@@ for sess-{i:04d}\n",
+            }
+        )
+    path.write_text("\n".join(json.dumps(r) for r in rows))
+    return path
+
+
+def test_production_shaped_corpus_runs_stage0(tmp_path: Path) -> None:
+    """Issue 1/2: a production run_build_corpus export (outcome_label/review_output)
+    feeds Stage 0 instead of refusing with 'corpus carries no gold outcome rows'."""
+    corpus = _production_corpus(tmp_path / "corpus.jsonl")
+    run_pipeline(PipelineConfig(corpus=corpus, out_dir=tmp_path / "out", stages=("stage0",)), dry_run=True)
+    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert manifest["stages"]["stage0"]["status"] == "complete"
+    assert manifest["stages"]["stage0"]["gate"]["passed"] is True
+
+
+def test_stage2_writes_runnable_rft_inputs(records_50_fixture: Path, tmp_path: Path) -> None:
+    """Issue 3: Stage-2 rft-inputs carry the frozen task identity run_rft requires
+    (id/base_sha/head_sha/diff), so the recorded-complete stage is actually runnable."""
+    run_pipeline(
+        PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path, stages=("stage2",)), dry_run=False
+    )
+    inputs = [
+        json.loads(line)
+        for line in (tmp_path / "stage2" / "rft-inputs.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert inputs
+    assert all(r["id"] and r["base_sha"] and r["head_sha"] and r["diff"] for r in inputs)
+
+
+def test_stage2_refuses_records_without_diff_identity(tmp_path: Path) -> None:
+    """Issue 3: Stage 2 refuses records missing base/head/diff identity instead of
+    recording the stage complete over unrunnable inputs."""
+    corpus = tmp_path / "noid.jsonl"
+    corpus.write_text(
+        json.dumps({"comment_id": "c0", "text": "x", "label": "accepted",
+                     "labeler_policy_version": "980-policy-r1"})
+    )
+    with pytest.raises(RuntimeError, match="diff"):
+        run_pipeline(
+            PipelineConfig(corpus=corpus, out_dir=tmp_path / "out", stages=("stage2",)), dry_run=False
+        )
+
+
+def test_resume_guard_aborts_on_drifted_rerun(records_50_fixture: Path, tmp_path: Path) -> None:
+    """Issue 8/9: the M18/AC4 resume guard is wired into run_pipeline — a re-run whose
+    locked identity drifts from the prior manifest aborts loudly instead of overwriting."""
+    from daydream.training.lineage import ResumeAborted
+
+    cfg = PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path)
+    run_pipeline(cfg, dry_run=True)
+    run_pipeline(cfg, dry_run=True)  # identical re-run passes
+    drifted = PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path, learning_rate=2e-5)
+    with pytest.raises(ResumeAborted, match="learning_rate"):
+        run_pipeline(drifted, dry_run=True)
+
+
+def test_model_split_digest_matches_manifest(records_50_fixture: Path, tmp_path: Path) -> None:
+    """Issue 14: the model checkpoint split_digest reconciles with the manifest's
+    run_identity.split_digest (AC4/M18 split-digest detection is enforceable)."""
+    run_pipeline(PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path), dry_run=True)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    model_state = json.loads((tmp_path / "stage0" / "model-state.json").read_text())
+    assert model_state["split_digest"] == manifest["run_identity"]["split_digest"]
+
+
+def test_identity_defaults_match_shipped_recipes(records_50_fixture: Path, tmp_path: Path) -> None:
+    """Issue 11/15: locked-identity defaults match the shipped GPU recipes
+    (seq_len 32768, lr 1e-5) instead of contradicting them."""
+    run_pipeline(PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path), dry_run=True)
+    identity = json.loads((tmp_path / "manifest.json").read_text())["run_identity"]
+    assert identity["max_seq_len"] == 32768
+    assert identity["learning_rate"] == 1e-5
+    adapter = json.loads((tmp_path / "stage3" / "adapter" / "adapter_config.json").read_text())
+    assert adapter["learning_rate"] == 1e-5

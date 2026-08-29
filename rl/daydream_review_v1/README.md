@@ -210,11 +210,6 @@ eval-docker; the explicit `--client.base-url` is in `configs/eval-stub.toml`
 ## Vendored-verifiers skew (AC10)
 
 **The skew:** this env pins `verifiers==0.2.1`, but prime-rl `v0.7.0` vendors
-**verifiers 0.2.0** (submodule `deps/verifiers`). Task 0s spike validated that
-
-## Vendored-verifiers skew (AC10)
-
-**The skew:** this env pins `verifiers==0.2.1`, but prime-rl `v0.7.0` vendors
 **verifiers 0.2.0** (submodule `deps/verifiers`). Task 0's spike validated that
 the API surface this env uses is compatible across 0.2.0/0.2.1 in both
 directions (env suite: 172 passed against the vendored copy; `rl` dry run green

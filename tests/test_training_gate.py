@@ -10,8 +10,10 @@ from daydream.training.reward_model import OutcomeModel, train_outcome_model
 def _pairs(tmp_path: Path, n: int = 25) -> Path:
     rows = []
     for i in range(n):
-        rows.append({"comment_id": f"a{i}", "text": f"solid grounding {i}", "label": "accepted"})
-        rows.append({"comment_id": f"r{i}", "text": f"noise noise {i}", "label": "rejected"})
+        rows.append({"comment_id": f"a{i}", "text": f"solid grounding {i}", "label": "accepted",
+                     "labeler_policy_version": "980-policy-r1"})
+        rows.append({"comment_id": f"r{i}", "text": f"noise noise {i}", "label": "rejected",
+                     "labeler_policy_version": "980-policy-r1"})
     p = tmp_path / "labels.jsonl"
     p.write_text("\n".join(json.dumps(r) for r in rows))
     return p
@@ -86,8 +88,10 @@ def test_gate_config_rejects_out_of_range_thresholds() -> None:
 
 def test_gate_refuses_single_class_held_out(tmp_path: Path) -> None:
     # A held-out split with only one class cannot measure separation: refuse closed.
-    rows = [{"comment_id": f"a{i}", "text": f"solid grounding {i}", "label": "accepted"} for i in range(4)]
-    rows += [{"comment_id": f"r{i}", "text": f"noise noise {i}", "label": "rejected"} for i in range(46)]
+    rows = [{"comment_id": f"a{i}", "text": f"solid grounding {i}", "label": "accepted",
+             "labeler_policy_version": "980-policy-r1"} for i in range(4)]
+    rows += [{"comment_id": f"r{i}", "text": f"noise noise {i}", "label": "rejected",
+              "labeler_policy_version": "980-policy-r1"} for i in range(46)]
     labels = tmp_path / "skew.jsonl"
     labels.write_text("\n".join(json.dumps(r) for r in rows))
     frozen = freeze_split(labels, held_out_fraction=0.5, seed=14)

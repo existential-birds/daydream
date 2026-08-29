@@ -9,6 +9,7 @@ validates a copy with that table stripped.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import subprocess
 import tomllib
@@ -59,29 +60,53 @@ def test_no_live_teacher_algo_block() -> None:
 
 
 def test_gold_positive_only_dataset_gate() -> None:
-    c = _cfg()
-    assert c["dataset"]["gold_positive_only"] is True  # M8
-    assert c["dataset"]["tier_counts_reported"] is True  # M9: gold vs silver reported separately
-    # M23/M9: silver process traces are admitted only in the separately tagged
-    # section, never mixed into the gold-positive training data.
-    assert "silver" in c["dataset"]
-    assert "rubric" in c["dataset"]["silver"]
+    # M8/M9: the gold-positive-only guarantee lives in the coordinator's Stage-1
+    # materialization, NOT a prime-rl-unreadable [dataset] table. sft.toml is
+    # plain prime-rl schema so `uv run sft @ sft.toml --dry-run` validates
+    # directly with no stripping (issues 7/16).
+    assert "dataset" not in _cfg()
+
+
+def test_coordinator_stage1_materializes_gold_positive_prompt_completion(
+    tmp_path: pathlib.Path,
+) -> None:
+    """M8/M9: the Stage-1 dataset is gold-positive only with tier counts.
+
+    The coordinator writes only accepted-class gold completions as
+    prompt/completion JSONL (the prime-rl `sft` loader's accepted shape) and
+    reports gold vs silver counts separately in the stage manifest.
+    """
+    from daydream.training.coordinator import PipelineConfig, run_pipeline
+
+    fixture = Path(__file__).parents[2] / "tests" / "fixtures" / "training" / "records-50"
+    run_pipeline(
+        PipelineConfig(corpus=fixture / "records.jsonl", out_dir=tmp_path, stages=("stage0", "stage1")),
+        dry_run=False,
+    )
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "stage1" / "sft-dataset.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows  # gold-positive rows were materialized
+    # prompt/completion shape — the SFT-loader column contract (issue 5)
+    assert all(set(row) == {"prompt", "completion"} for row in rows)
+    # M8: no rejected row leaks into the SFT dataset; the fixture's 15 rejected
+    # rows (noise chatter) are excluded.
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    tier_counts = manifest["stages"]["stage1"]["tier_counts"]
+    assert tier_counts["gold"] == len(rows) == 35
+    assert tier_counts["silver"] == 0
 
 
 def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: pathlib.Path) -> None:
     """PATTERN dry-path test: `sft @ <cfg> --dry-run` from inside the prime-rl
     workspace validates every pydantic schema without touching a GPU."""
-    # Strip the daydream-private [dataset] table (prime-rl forbids extra keys);
-    # it is placed last in the file exactly so this copy stays trivial.
-    text = _cfg_text()
-    marker = "\n[dataset]"
-    idx = text.find(marker)
-    assert idx != -1, "sft.toml must keep the [dataset] section last for the dry-run copy"
-    sanitized = tmp_path / "sft-dryrun.toml"
-    sanitized.write_text(text[:idx] + "\n")
+    # sft.toml is plain prime-rl schema (no daydream-private [dataset] table),
+    # so the documented command validates the shipped file directly.
     out_dir = tmp_path / "outputs"
     r = subprocess.run(
-        ["uv", "run", "sft", "@", str(sanitized), "--dry-run", "--output-dir", str(out_dir)],
+        ["uv", "run", "sft", "@", str(SFT), "--dry-run", "--output-dir", str(out_dir)],
         cwd=prime_rl_workspace,
         capture_output=True,
         text=True,
@@ -97,5 +122,5 @@ def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: 
 
 
 def test_dry_run_copy_is_valid_toml(tmp_path: pathlib.Path) -> None:
-    """The sanitizer the dry-run test relies on must see a valid document."""
+    """The recipe must parse cleanly as TOML with no extra-key sections."""
     tomllib.loads(_cfg_text())

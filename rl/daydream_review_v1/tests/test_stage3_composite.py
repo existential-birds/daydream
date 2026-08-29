@@ -10,19 +10,25 @@ not just the loader.
 from __future__ import annotations
 
 import json
+import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
+import verifiers.v1 as vf
+from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
 from daydream_review_v1.taskset import (
     DaydreamReviewConfig,
+    DaydreamReviewState,
     DaydreamReviewTaskset,
     stage0_composite_terms,
 )
 
 RL_TRAIN_DIR = Path(__file__).resolve().parents[2] / "train"
+
+SESSION_ID = "9b36227a-9f80-41e5-a419-5cfed5a34b5b"
 
 
 @pytest.fixture
@@ -84,20 +90,56 @@ def _stage_run_dir(tmp_path: Path) -> Path:
     return run_dir
 
 
-def test_env_scores_with_stage0_composite(
-    mini_taskset: DaydreamReviewTaskset, tmp_path: Path, outcome_model_path: Path
+async def test_env_scores_with_stage0_composite(
+    mini_taskset: DaydreamReviewTaskset,
+    tmp_path: Path,
+    runtime: SubprocessRuntime,
+    rundir_golden: Path,
+    outcome_model_path: Path,
 ) -> None:
-    """The scoring path composes rubric_v2 terms, not intrinsic-only (M13)."""
-    tasks = list(mini_taskset.load())
+    """The scoring path composes rubric_v2 terms, not intrinsic-only (M13).
+
+    Drives the reward through the production entrypoint (``await task.score``),
+    where ``intrinsic_composite`` composes the Stage-0 rubric only because the
+    per-task config carried ``outcome_model_path``. A caller regression that
+    drops that path before the reward reads it fails here — the asserted
+    ``stage0`` breakdown would be absent and the reward would be intrinsic-only.
+    """
+    tasks = mini_taskset.load()
     assert tasks, "gate passed but no tasks loaded"
-    terms = stage0_composite_terms(outcome_model_path, _stage_run_dir(tmp_path))
-    assert terms is not None
+    task = tasks[0]
+    # The taskset stamps outcome_model_path onto each per-task config; the
+    # reward composes rubric_v2 only when it actually reads the path (M13).
+    assert task.config.outcome_model_path == outcome_model_path
+
+    archive_root = tmp_path / "archive"
+    dest = archive_root / "runs" / SESSION_ID
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(rundir_golden, dest)
+    trace = vf.Trace(
+        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        state=DaydreamReviewState(),
+    )
+    trace.info["daydream_archive_root"] = str(archive_root)
+    trace.info["daydream_repo_path"] = str(tmp_path / "repo")
+
+    await task.score(trace, runtime)
+
+    breakdown = trace.info["reward_breakdown"]
+    stage0 = breakdown.get("stage0")
+    assert stage0 is not None, (
+        "outcome_model_path was dropped before the reward: no rubric composite composed (M13)"
+    )
     # The scored breakdown carries the rubric_v2 terms, not intrinsic-only.
-    assert "learned_outcome" in terms["terms"]
-    assert "fp_penalty" in terms["terms"]
-    assert "localization" in terms["terms"]
-    assert terms["composite"] is not None
-    assert terms["reward_version"]  # rubric version stamped for provenance
+    assert "learned_outcome" in stage0["terms"]
+    assert "fp_penalty" in stage0["terms"]
+    assert "localization" in stage0["terms"]
+    assert stage0["composite"] is not None
+    assert stage0["reward_version"]  # rubric version stamped for provenance
+    # M13: the reward IS the rubric composite (which carries the intrinsic
+    # composite as one weighted term), not the intrinsic-only value.
+    assert stage0["terms"]["intrinsic_composite"] is not None
+    assert trace.rewards["intrinsic_composite"] == stage0["composite"]
 
 
 def test_stage0_composition_absent_without_model(tmp_path: Path) -> None:

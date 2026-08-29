@@ -66,8 +66,10 @@ class OutcomeModel:
     Attributes:
         weights: Token → weight mapping learned on the train split.
         bias: Scalar bias term.
-        split_digest: SHA-256 digest of the frozen split (seed + fractions +
-            sorted admitted row ids), so a score's provenance is checkable.
+        split_digest: SHA-256 digest of the frozen split (seed + sorted
+            held-out row ids) — the same payload the Stage-0 gate hashes, so
+            a score's provenance reconciles with the manifest's
+            ``run_identity.split_digest``.
         label_ratio_reported: The **actual** accepted fraction among admitted
             training rows, computed at training time (S2).
         train_rows / held_out_rows: Admitted row counts per split.
@@ -147,17 +149,21 @@ def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
 
     Admission reuses ``_is_admitted_outcome_gold`` semantics: an
     accepted/rejected gold label backed by posterior evidence, a known
-    reply-classifier policy version, and a decisive-only rubric. Rows may
-    carry these as fields (``has_posterior``, ``labeler_policy_version``,
-    ``decisive_mix``, ``decisive_only``); a well-formed gold row that omits
-    them is treated as satisfying them (the presence of a gold outcome label
-    in an exported labels file already implies the corpus gate passed), but
-    any *explicit* failing value is honored and refuses the row.
+    reply-classifier policy version, and a decisive-only rubric. Rows carry
+    these as fields (``has_posterior``, ``labeler_policy_version``,
+    ``decisive_mix``, ``decisive_only``). Labels may be written as
+    ``label``/``text``/``comment_id`` (the coordinator's Stage-0 labels
+    emission) or ``outcome_label``/``review_output``/``session_id`` (the
+    production ``run_build_corpus`` export shape). An absent
+    ``labeler_policy_version`` refuses the row — a legacy row is refused,
+    never silently given a fallback version; the guard is working, never a
+    silent admission. Any *explicit* failing value is honored and refuses.
 
     Raises:
         ValueError: On a row that is not a JSON object, missing
-            ``comment_id``/``text``/``label``, an unknown label, or a row
-            refused by the gold-outcome gate. The row id is always named.
+            ``comment_id``/``session_id``, ``text``/``review_output``, or
+            ``label``/``outcome_label``, an unknown label, or a row refused
+            by the gold-outcome gate. The row id is always named.
     """
     rows: list[dict[str, Any]] = []
     with Path(labels_path).open("r", encoding="utf-8") as fh:
@@ -171,20 +177,26 @@ def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
                 raise ValueError(f"row {lineno} in {labels_path} is not valid JSON: {exc}") from exc
             if not isinstance(row, dict):
                 raise ValueError(f"row {lineno} in {labels_path} is not a JSON object")
-            row_id = row.get("comment_id")
+            row_id = row.get("comment_id") or row.get("session_id")
             if not isinstance(row_id, str) or not row_id:
-                raise ValueError(f"row {lineno} in {labels_path} is missing a string 'comment_id'")
+                raise ValueError(
+                    f"row {lineno} in {labels_path} is missing a string 'comment_id'/'session_id'"
+                )
             text = row.get("text")
             if not isinstance(text, str):
-                raise ValueError(f"row {row_id} in {labels_path} is missing a string 'text'")
-            label = row.get("label")
+                text = row.get("review_output")
+                if not isinstance(text, str):
+                    raise ValueError(
+                        f"row {row_id} in {labels_path} is missing a string 'text'/'review_output'"
+                    )
+            label = row.get("label") or row.get("outcome_label")
             if label not in _GOLD_LABELS:
                 raise ValueError(
                     f"row {row_id} in {labels_path} has non-gold label {label!r}; "
                     f"expected one of {sorted(_GOLD_LABELS)}"
                 )
             has_posterior = bool(row.get("has_posterior", True))
-            policy_version = row.get("labeler_policy_version", "exported")
+            policy_version = row.get("labeler_policy_version")
             decisive_mix = bool(row.get("decisive_mix", False))
             decisive_only = bool(row.get("decisive_only", True))
             if label == "accepted":
@@ -200,6 +212,13 @@ def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
                     f"labeler_policy_version={policy_version!r}, decisive_mix={decisive_mix}, "
                     f"decisive_only={decisive_only}); refusing rather than silently admitting"
                 )
+            # Normalize a production-shape row (outcome_label/review_output/
+            # session_id) onto the canonical label/text/comment_id keys the
+            # training and split code reads, without mutating the caller's copy
+            # of the record.
+            row["comment_id"] = str(row_id)
+            row["text"] = text
+            row["label"] = label
             rows.append(row)
     return rows
 
@@ -230,17 +249,14 @@ def _freeze_split(
             f"split leaves no held-out rows ({len(shuffled)} admitted rows with "
             f"held_out={held_frac}); add rows or lower the held_out fraction"
         )
-    digest_payload = json.dumps(
-        {
-            "seed": seed,
-            "train": train_frac,
-            "held_out": held_frac,
-            "row_ids": [str(r.get("comment_id")) for r in ordered],
-            "train_ids": sorted(str(r.get("comment_id")) for r in train_rows),
-        },
-        sort_keys=True,
-    )
-    split_digest = hashlib.sha256(digest_payload.encode()).hexdigest()[:16]
+    # The split digest is the content address of the frozen partition: sorted
+    # held-out row ids plus the seed. This is deliberately the SAME payload the
+    # Stage-0 gate hashes (gate.freeze_split) and the manifest stamps as
+    # run_identity.split_digest, so the checkpoint/adapter split_digest
+    # reconciles with the manifest provenance (M18 split-digest detection).
+    held_out_ids = sorted(str(r.get("comment_id")) for r in held_out_rows)
+    digest_payload = json.dumps({"held_out_ids": held_out_ids, "seed": seed}, sort_keys=True)
+    split_digest = hashlib.sha256(digest_payload.encode()).hexdigest()
     return train_rows, held_out_rows, split_digest
 
 

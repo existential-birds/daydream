@@ -36,22 +36,25 @@ class StageRunEvents:
 def _accumulate(events: Iterable[AgentEvent]) -> dict[str, float]:
     """Sum USD and tokens over one stage's events.
 
-    Tokens come from ``CostEvent`` (input + output) when present; per-turn
-    ``MetricsEvent`` usage is added only when no ``CostEvent`` reported
-    tokens for the stage, so the same usage is never counted twice.
+    Tokens and USD come from ``CostEvent`` when present; per-turn
+    ``MetricsEvent`` usage and USD are added only when no ``CostEvent``
+    reported them for the stage, so the same usage/cost is never counted
+    twice.
     """
     usd = 0.0
     tokens = 0
     cost_tokens_seen = False
+    cost_usd_seen = False
     for event in events:
         if isinstance(event, CostEvent):
             if event.cost_usd is not None:
                 usd += event.cost_usd
+                cost_usd_seen = True
             if event.input_tokens is not None or event.output_tokens is not None:
                 cost_tokens_seen = True
                 tokens += (event.input_tokens or 0) + (event.output_tokens or 0)
         elif isinstance(event, MetricsEvent):
-            if event.cost_usd is not None:
+            if event.cost_usd is not None and not cost_usd_seen:
                 usd += event.cost_usd
             if not cost_tokens_seen:
                 tokens += event.prompt_tokens + event.completion_tokens

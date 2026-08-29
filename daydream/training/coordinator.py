@@ -45,7 +45,7 @@ from typing import Any
 from daydream.training import gate as gate_mod
 from daydream.training import stacks
 from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_split
-from daydream.training.lineage import RunIdentity, stage_digests
+from daydream.training.lineage import RunIdentity, stage_digests, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 
@@ -87,11 +87,11 @@ class PipelineConfig:
     stages: tuple[str, ...] = STAGES
     base_model: str = "Qwen/Qwen3-8B"
     tokenizer_renderer: str = "default"
-    max_seq_len: int = 8192
+    max_seq_len: int = 32768
     lora_rank: int = 64
     lora_targets: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj")
     optimizer: str = "adamw"
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-5
     seed: int = 0
     held_out_fraction: float = 0.2
     gate_config: GateConfig = field(default_factory=GateConfig)
@@ -125,16 +125,147 @@ def _file_digest(path: Path) -> str:
 
 
 def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract gold outcome rows (``comment_id``/``text``/``label``) for Stage 0."""
-    return [
-        {
-            "comment_id": rec["comment_id"],
-            "text": rec["text"],
-            "label": rec["label"],
+    """Extract gold outcome rows for the Stage-0 labels file from either shape.
+
+    Accepts both the committed fixture shape (``comment_id``/``text``/``label``)
+    and production ``run_build_corpus`` exports (``session_id``/
+    ``review_output``/``outcome_label``). Gold-gate evidence fields
+    (``has_posterior``, ``labeler_policy_version``, ``decisive_mix``,
+    ``decisive_only``) are carried through when the record provides them; an
+    absent ``labeler_policy_version`` is left absent so the admission guard in
+    :mod:`daydream.training.reward_model` refuses the legacy row rather than
+    silently admitting it.
+    """
+    rows: list[dict[str, Any]] = []
+    for rec in records:
+        comment_id = rec.get("comment_id") or rec.get("session_id")
+        text = rec.get("text") or rec.get("review_output")
+        label = rec.get("label") or rec.get("outcome_label")
+        # Only the two gold outcome classes feed the Stage-0 model; contested/
+        # null-label rows are not gold outcome rows and are excluded here.
+        if label not in ("accepted", "rejected"):
+            continue
+        if not (comment_id and text):
+            continue
+        row: dict[str, Any] = {
+            "comment_id": comment_id,
+            "text": text,
+            "label": label,
         }
-        for rec in records
-        if "comment_id" in rec and "text" in rec and "label" in rec
-    ]
+        for key in ("has_posterior", "labeler_policy_version", "decisive_mix", "decisive_only"):
+            if key in rec:
+                row[key] = rec[key]
+        rows.append(row)
+    return rows
+
+
+def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Materialize the Stage-1 dataset-SFT JSONL and tier counts (M8/M9).
+
+    The Stage-1 dataset is **gold-positive only** (M8): only accepted-class
+    gold completions are written, so the shipped ``sft@`` recipe never trains
+    on rejected or silver traces. Rows are prompt/completion JSONL — the shape
+    the prime-rl ``sft`` loader accepts (``messages`` column or both
+    ``prompt``/``completion``). Gold vs silver counts are reported separately
+    (M9), matching the recipe's tier accounting.
+
+    Returns:
+        ``(rows, tier_counts)`` where ``tier_counts`` has ``gold`` and
+        ``silver`` counts (silver = explicitly ``tier == "silver"`` rows,
+        never mixed into the gold-positive data).
+    """
+    gold: list[dict[str, Any]] = []
+    silver = 0
+    for rec in records:
+        label = rec.get("label") or rec.get("outcome_label")
+        completion = rec.get("completion") or rec.get("text") or rec.get("review_output")
+        if not isinstance(completion, str) or not completion:
+            continue
+        if label == "accepted":
+            gold.append(
+                {
+                    "prompt": rec.get("prompt") or _sft_prompt(rec),
+                    "completion": completion,
+                }
+            )
+        elif rec.get("tier") == "silver":
+            silver += 1
+    return gold, {"gold": len(gold), "silver": silver}
+
+
+def _sft_prompt(rec: dict[str, Any]) -> str:
+    """Deterministic SFT prompt built from a record's frozen review context."""
+    code_ctx: dict[str, Any] = {}
+    raw_ctx = rec.get("code_context")
+    if isinstance(raw_ctx, dict):
+        code_ctx = raw_ctx
+    parts = [f"repo: {rec.get('repo_slug', 'unknown')}"]
+    stack = rec.get("stack") or rec.get("detected_stack")
+    if stack:
+        parts.append(f"stack: {stack}")
+    for key in ("base_sha", "head_sha"):
+        value = rec.get(key) or code_ctx.get(key)
+        if value:
+            parts.append(f"{key}: {value}")
+    changed = code_ctx.get("changed_files") or []
+    if changed:
+        parts.append("changed_files: " + ", ".join(str(p) for p in changed))
+    return "; ".join(parts)
+
+
+def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Materialize Stage-2 RFT replay inputs from corpus records (M16).
+
+    Each input carries the frozen task identity :func:`daydream.training.rft.run_rft`
+    rebuilds tasks from (``id``/``base_sha``/``head_sha``/``diff``) plus the
+    intrinsic signals ``reward.score_trajectory`` consumes. Identity is
+    validated fail-closed, matching ``run_rft``: a record missing
+    base/head/diff raises naming it, so Stage 2 is never recorded complete
+    over unrunnable inputs.
+
+    Raises:
+        RuntimeError: When any record lacks ``base_sha``/``head_sha``/``diff``
+            identity (never written, never skipped silently).
+    """
+    rows: list[dict[str, Any]] = []
+    for rec in records:
+        code_ctx: dict[str, Any] = {}
+        raw_ctx = rec.get("code_context")
+        if isinstance(raw_ctx, dict):
+            code_ctx = raw_ctx
+        rid = str(rec.get("comment_id") or rec.get("session_id") or "")
+        base_sha = rec.get("base_sha") or code_ctx.get("base_sha")
+        head_sha = rec.get("head_sha") or code_ctx.get("head_sha")
+        diff = rec.get("diff")
+        missing = [
+            name
+            for name, value in (("base_sha", base_sha), ("head_sha", head_sha), ("diff", diff))
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(
+                f"stage2 refused: record {rid!r} lacks frozen task identity field(s) {missing}; "
+                "RFT rebuilds every task from base/head/diff identity (M16) and never skips a "
+                "record silently"
+            )
+        length = rec.get("length")
+        if length is None:
+            length = len(str(rec.get("text") or rec.get("review_output") or ""))
+        rows.append(
+            {
+                "id": rid,
+                "repo_slug": rec.get("repo_slug"),
+                "base_sha": base_sha,
+                "head_sha": head_sha,
+                "diff": diff,
+                "findings": rec.get("findings", []),
+                "verifier_verdicts": rec.get("verifier_verdicts"),
+                "grounding_rate": rec.get("grounding_rate", rec.get("grounding_score")),
+                "format_valid": bool(rec.get("format_valid", False)),
+                "length": length,
+            }
+        )
+    return rows
 
 
 def _run_stage0(
@@ -149,7 +280,7 @@ def _run_stage0(
     if not rows:
         raise RuntimeError(
             "stage0 gate evidence missing: corpus carries no gold outcome rows "
-            "(comment_id/text/label); the gate refuses closed"
+            "(no accepted/rejected comment or review-outcome labels); the gate refuses closed"
         )
     stage_dir.mkdir(parents=True, exist_ok=True)
     labels_path = stage_dir / "labels.jsonl"
@@ -195,15 +326,17 @@ def _run_gpu_stage_shim(
     """
     stage_dir.mkdir(parents=True, exist_ok=True)
     if stage == "stage1":
+        rows, tier_counts = _sft_rows(records)
         (stage_dir / "sft-dataset.jsonl").write_text(
-            "\n".join(json.dumps(r, sort_keys=True) for r in records)
+            "\n".join(json.dumps(r, sort_keys=True) for r in rows) + ("\n" if rows else "")
         )
-        return {"status": "complete", "records": len(records)}
+        return {"status": "complete", "records": len(rows), "tier_counts": tier_counts}
     if stage == "stage2":
+        rows = _rft_rows(records)
         (stage_dir / "rft-inputs.jsonl").write_text(
-            "\n".join(json.dumps(r, sort_keys=True) for r in records)
+            "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n"
         )
-        return {"status": "complete", "records": len(records)}
+        return {"status": "complete", "records": len(rows)}
     # stage3: adapter checkpoint handoff. The gate enforcement above guarantees
     # Stage 0 ran, so its model-state checkpoint is the merged adapter state.
     adapter_dir = stage_dir / "adapter"
@@ -262,7 +395,8 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         ``<out_dir>/manifest.json``).
 
     Raises:
-        ValueError: On a fail-closed corpus load (C5/C8) or an unknown stage.
+        ValueError: On a fail-closed corpus load (C5/C8), an unknown stage,
+            or a resumed run whose locked run-identity drifted (ResumeAborted).
         RuntimeError: When Stage 3 is requested without a passed Stage-0 gate,
             or the corpus carries no gold outcome rows for Stage 0.
     """
@@ -340,5 +474,13 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         "adapter_path": adapter_path,
         "corpus": str(corpus_path),
     }
-    _atomic_write_json(out_dir / "manifest.json", manifest)
+    manifest_path = out_dir / "manifest.json"
+    if manifest_path.exists():
+        prior = json.loads(manifest_path.read_text(encoding="utf-8")).get("run_identity")
+        if prior is not None:
+            # M18/AC4 resume guard: a resumed run aborts loudly, never
+            # overwrites, when any locked run-identity field (including the
+            # split digest) drifted from the prior run's manifest.
+            validate_resume(RunIdentity.from_dict(prior), identity)
+    _atomic_write_json(manifest_path, manifest)
     return manifest

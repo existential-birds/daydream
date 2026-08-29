@@ -74,24 +74,12 @@ tool = false
 [optim]
 lr = 1e-5
 
-# ------------------------------------------------ dataset gating (daydream) ----
+# ------------------------------------------------ dataset gating ---------
 #
-# The [dataset] table below is NOT prime-rl schema — prime-rl forbids extra
-# keys, and its SFT config has no notion of our label tiers. It is the contract
-# the daydream corpus loader (daydream/training/stacks.py) and coordinator read
-# before materializing the JSONL this config points at. It is kept last in this
-# file so the GPU-free dry run can strip it mechanically.
-#
-# gold_positive_only: outcome-bearing completions are gold-positive only (M8).
-# tier_counts_reported: gold vs silver counts reported separately (M9).
-
-[dataset]
-gold_positive_only = true
-tier_counts_reported = true
-
-[dataset.silver]
-# Process traces are admitted only here — a separately tagged section with a
-# documented rubric pointer — never silently mixed into the gold-positive data
-# (M9, M23 legacy-tagging rides the same `tier` field).
-rubric = "stage0 rubric_v2 composite (daydream/training/rubric_v2.py); REWARD_VERSION pinned in reward.py"
-allowed_tiers = ["silver"]
+# Gold-positive-only SFT (M8) and gold/silver tier accounting (M9) are
+# enforced by the daydream coordinator (daydream/training/coordinator.py) when
+# it materializes the Stage-1 dataset this recipe points at: only accepted-
+# class gold completions are written as prompt/completion JSONL, and tier
+# counts are reported in the stage manifest. This recipe is plain prime-rl
+# schema, so `uv run sft @ sft.toml --dry-run` validates it directly with no
+# stripping.

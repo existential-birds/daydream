@@ -15,7 +15,7 @@ identity digests, as recorded in the stage manifest of the validation run:
 
 | Field | Value |
 |---|---|
-| `run_identity.corpus_digest` | `ce2dbd5c9f4fbe589821222deccf54f1b8c0a2df95af78caa3829488dcee9375` |
+| `run_identity.corpus_digest` | `3f31e1ee266d3457fcd8f3a271fc57e3fb7fe48f29019a7f43a298bf11a03d50` |
 | `run_identity.split_digest` | `fe0a7a9559493b0cb4ef3795e5a66b4fcf8eeb718e12b44c790b4420a28a5bde` |
 | `run_identity.reward_version` | `2026.05.28-2` |
 
@@ -25,8 +25,11 @@ record is returned.
 
 The planned real-archive runs use the same loader over `run_build_corpus`
 exports of the private PR archive (`--include-all-labels`, both label classes
-exported); the fixture corpus is the CI-scale stand-in with an identical record
-shape and M16 lineage field set.
+exported). The committed fixture is a CI-scale stand-in — not byte-identical to
+an export: it carries the Stage-0 gold outcome fields
+(`comment_id`/`text`/`label`) plus the M16 lineage field set, and the
+coordinator normalizes both the fixture shape and the exporter's
+(`session_id`/`review_output`/`outcome_label`) shape before Stage 0.
 
 ### Splits
 
@@ -56,14 +59,15 @@ in the corpus or this pipeline.
 | Base model | `Qwen/Qwen3-8B` | `PipelineConfig` default, recorded in the stage manifest's `run_identity.base_model` |
 | Fine-tune | bf16 LoRA, rank 64 | `run_identity.lora_rank` |
 | Target modules | `q_proj`, `k_proj`, `v_proj`, `o_proj` | `run_identity.lora_targets` |
-| Optimizer / LR | adamw, 1e-4 | `run_identity.optimizer`, `.learning_rate` |
-| Max sequence length | 8192 | `run_identity.max_seq_len` |
+| Optimizer / LR | adamw, 1e-5 | `run_identity.optimizer`, `.learning_rate` |
+| Max sequence length | 32768 | `run_identity.max_seq_len` |
 | Renderer | `default` (never stock `qwen3`) | `run_identity.tokenizer_renderer` |
 
 C1 sizing rationale (localization-first): review quality in this corpus is
 dominated by localization — grounded, diff-anchored findings — not by long-form
-generation. A rank-64 bf16 LoRA over Qwen3-8B with 8192-token sequences fits
-comfortably on a single 80 GB accelerator, which keeps the whole SFT→RFT→GRPO
+generation. A rank-64 bf16 LoRA over Qwen3-8B with 32768-token sequences fits
+comfortably on a single 80 GB accelerator (matching the shipped `sft.toml` /
+`rl.toml` recipes at `seq_len = 32768`), which keeps the whole SFT→RFT→GRPO
 loop on one GPU and makes per-finding economics favorable, while preserving the
 grounding-weighted reward signal (`w_grounding` 0.4, `w_fp` 0.3,
 `w_correctness` 0.6 in `run_identity.reward_weights`). Larger bases would
@@ -79,8 +83,8 @@ imports no pynvml and never initializes CUDA (asserted by
 
 GPU stages (Stage-1 dataset SFT, Stage-2 deterministic RFT replay, Stage-3
 online GRPO) are planned for a single-GPU 80 GB node (H100 or A100 80 GB);
-rank-64 bf16 LoRA on Qwen3-8B at 8192 tokens fits that budget with optimizer
-states offloaded. This is the documented plan for the GPU run, not a
+rank-64 bf16 LoRA on Qwen3-8B at 32768 tokens fits that budget with optimizer
+states offloaded (the shipped recipes train at `seq_len = 32768`). This is the documented plan for the GPU run, not a
 measurement from this machine.
 
 ## Wall time
@@ -117,12 +121,12 @@ From the stage manifest's `stages.stage0.gate`:
 
 | Field | Value |
 |---|---|
-| Separation | 0.9871448895260561 (threshold `min_separation` 0.1) |
-| Calibration | 0.9951585841213858 (threshold `min_calibration` 0.5) |
+| Separation | 0.7499203696024055 (threshold `min_separation` 0.1) |
+| Calibration | 0.928531093214983 (threshold `min_calibration` 0.5) |
 | Held-out rows | 10 |
 | Label ratio (reported / actual) | 0.7 / 0.9 |
-| Model fingerprint | `f8dfac15` |
-| Evidence digest | `a9a5feb72d909de9b7783d53aa60b31e422e715e6298b2d04076d464a5e7a084` |
+| Model fingerprint | `38e7a8cd` |
+| Evidence digest | `33ff119b16a98b3acd2be5b5c49e7b83d5e231138ab410874dd16b60d4e32ed4` |
 | Verdict | **passed** |
 
 The 0.1 / 0.5 thresholds are documented config values (`GateConfig`); their

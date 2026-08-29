@@ -18,6 +18,7 @@ from daydream_review_v1.fixture import (
     FIXTURE_TEST_COMMAND,
     build_fixture_repo,
 )
+from daydream_review_v1.gate_refusal import Stage0GateRefused
 from daydream_review_v1.taskset import (
     DaydreamReviewConfig,
     DaydreamReviewTaskset,
@@ -392,6 +393,53 @@ def test_load_rejects_record_without_base_sha(tmp_path: Path, stage0_gate_report
         list(taskset.load())
     assert "base_sha" in str(excinfo.value)
     assert "acme/widgets#4" in str(excinfo.value)
+
+
+def test_load_refuses_without_gate_report_path(corpus_mini_dir: Path, fixture_manifest_path: Path) -> None:
+    """M4: an unconfigured gate path is itself a refusal, never a default-to-allow."""
+    taskset = DaydreamReviewTaskset(
+        DaydreamReviewConfig(
+            id="daydream-review-v1",
+            corpus_dir=corpus_mini_dir,
+            manifest_path=fixture_manifest_path,
+            gate_report_path=Path(""),
+        )
+    )
+    with pytest.raises(Stage0GateRefused) as excinfo:
+        list(taskset.load())
+    assert "--taskset.gate-report-path" in str(excinfo.value)
+
+
+def test_load_refuses_missing_gate_report(corpus_mini_dir: Path, fixture_manifest_path: Path, tmp_path: Path) -> None:
+    """A missing gate report refuses the load, not just the require_stage0_gate leaf."""
+    taskset = DaydreamReviewTaskset(
+        DaydreamReviewConfig(
+            id="daydream-review-v1",
+            corpus_dir=corpus_mini_dir,
+            manifest_path=fixture_manifest_path,
+            gate_report_path=tmp_path / "missing-gate.json",
+        )
+    )
+    with pytest.raises(Stage0GateRefused) as excinfo:
+        list(taskset.load())
+    assert "gate report missing" in str(excinfo.value)
+
+
+def test_load_refuses_failed_gate_report(corpus_mini_dir: Path, fixture_manifest_path: Path, tmp_path: Path) -> None:
+    """A report that did not pass refuses the load, not just the require_stage0_gate leaf."""
+    gate = tmp_path / "failed-gate.json"
+    gate.write_text(json.dumps({"passed": False, "separation": 0.01}), encoding="utf-8")
+    taskset = DaydreamReviewTaskset(
+        DaydreamReviewConfig(
+            id="daydream-review-v1",
+            corpus_dir=corpus_mini_dir,
+            manifest_path=fixture_manifest_path,
+            gate_report_path=gate,
+        )
+    )
+    with pytest.raises(Stage0GateRefused) as excinfo:
+        list(taskset.load())
+    assert "failed" in str(excinfo.value)
 
 
 def test_load_requires_corpus_dir_flag(tmp_path: Path) -> None:
