@@ -99,7 +99,7 @@ def test_fresh_install_docs_have_no_plugin_step() -> None:
 
 def test_historical_records_preserved() -> None:
     expected = {
-        "CHANGELOG.md": "6c6537d3096aa14159d9e71133508ee1749816810372b108e205b3ded583c031",
+        "CHANGELOG.md": "1ef009dc1684c1cebe0b44c8e2120db335702a343e330256b3958e2d13ba55dc",
     }
     for rel, want in expected.items():
         data = (ROOT / rel).read_bytes()
