@@ -35,6 +35,7 @@ from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
 )
+from daydream.severity import SEVERITY_RUBRIC
 
 DOC_REVIEW_NOTICE = (
     "[Notice] Dedicated documentation review is planned but not yet "
@@ -128,7 +129,7 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     'tool output, a file:line citation, or an explicit "none" / "N matches" '
     'after a repo search. Never claim you "looked" without an artifact.\n'
     "  Gate 3 (severity): calibrate severity to impact; a request for net-new "
-    "code that did not exist in scope is Informational only.\n"
+    "code that did not exist in scope is at most low.\n"
     "Do NOT report a finding that fails any gate."
 )
 
@@ -628,6 +629,7 @@ def build_per_stack_prompt(
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
     if stack_name == "rust":
         parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
@@ -695,6 +697,7 @@ def build_structural_prompt(
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
@@ -1277,6 +1280,7 @@ def build_generic_fallback_prompt(
 
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")

@@ -31,6 +31,35 @@ assignment: it does not constitute a fallback severity policy.
 """
 
 
+SEVERITY_RUBRIC = (
+    "## Severity Rubric\n"
+    "\n"
+    "Assign exactly one level per finding:\n"
+    "\n"
+    "- high: the defect breaks a primary user journey, causes data loss or "
+    "corruption, introduces a security vulnerability, or leaves the changed "
+    "code incorrect as merged. A finding is high only when it meets one of "
+    "these conditions.\n"
+    "- medium: a real defect with a workaround or a limited blast radius -- "
+    "wrong in a secondary path, an edge case, or recoverable at runtime.\n"
+    "- low: a style, clarity, naming, or minor robustness issue with no "
+    "behavioral break. Requests for work outside this diff are not findings; "
+    "when surfaced at all, they are low.\n"
+    "\n"
+    "Maintainability, readability, and structural-erosion findings are never "
+    "high: they do not break a primary user journey, lose or corrupt data, open a "
+    "security vulnerability, or make the merged code incorrect."
+)
+"""Host-owned severity rubric appended to every severity-assigning prompt.
+
+Defines all three canonical levels in observable, checkable terms. It is
+appended AFTER all profile strategy text (P-RUBRIC) and is never routed
+through profile-owned strategy content (R1.4): builders import this constant
+from this module, so no builder can inline a divergent copy or expose the
+rubric to profile override.
+"""
+
+
 def normalize_severity(value: object) -> str | None:
     """Normalize a severity value to the canonical vocabulary.
 

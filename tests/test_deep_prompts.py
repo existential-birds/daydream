@@ -1534,3 +1534,69 @@ def test_structural_prompt_uses_profile_strategy_and_no_skill() -> None:
     assert "Review the repository-wide interactions" in p
     assert "a.py, b.ts" in p and "/d" in p and "/c" in p
     assert "/beagle-" not in p and "Apply this specialist skill" not in p
+
+
+# =============================================================================
+# Issue #972 R1 — host-owned severity rubric reaches every assigning prompt
+# =============================================================================
+
+
+def _rubric_assigning_prompts(tmp_path: Path) -> list[str]:
+    from daydream.phases import build_alternative_review_prompt
+
+    p = _paths(tmp_path)
+    per_stack = build_per_stack_prompt(
+        strategy=_default_strategy("discovery.per_stack"),
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    structural = build_structural_prompt(
+        strategy=_default_strategy("discovery.structural"),
+        files=["api.py"],
+        **p,
+    )
+    generic = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["api.py"],
+        **p,
+    )
+    alternative = build_alternative_review_prompt(
+        strategy=_default_strategy("alternatives"),
+        intent_summary="intent",
+        diff_path=str(p["diff_path"]),
+    )
+    return [per_stack, structural, generic, alternative]
+
+
+def test_every_assigning_prompt_carries_severity_rubric(tmp_path: Path) -> None:
+    """R1.1: every prompt that assigns a severity embeds the host rubric."""
+    from daydream import severity
+
+    for prompt in _rubric_assigning_prompts(tmp_path):
+        assert severity.SEVERITY_RUBRIC in prompt
+
+
+def test_rubric_is_high_definition_not_a_prohibition() -> None:
+    """R1.2: the rubric defines all three levels in checkable terms, high first."""
+    from daydream import severity
+
+    rubric = severity.SEVERITY_RUBRIC
+    assert "high" in rubric and "medium" in rubric and "low" in rubric
+    assert rubric.index("high") < rubric.index("medium") < rubric.index("low")
+    assert "Informational" not in rubric
+
+
+def test_rubric_after_strategy_text(tmp_path: Path) -> None:
+    """R1.4: the host rubric lands after the profile strategy text."""
+    from daydream import severity
+
+    for prompt, strategy_stage in (
+        (0, "discovery.per_stack"),
+        (1, "discovery.structural"),
+        (2, "discovery.generic_fallback"),
+    ):
+        prompts = _rubric_assigning_prompts(tmp_path)
+        assert prompts[prompt].index(severity.SEVERITY_RUBRIC) > prompts[prompt].index(
+            _default_strategy(strategy_stage)
+        )

@@ -58,6 +58,7 @@ from daydream.repository_paths import (
 from daydream.repository_paths import (
     path_is_confined,
 )
+from daydream.severity import SEVERITY_RUBRIC
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -1530,6 +1531,7 @@ def build_alternative_review_prompt(
     else:
         body = strategy_filled
     parts.append(body + "\n")
+    parts.append(SEVERITY_RUBRIC)
     return "\n".join(parts)
 
 
