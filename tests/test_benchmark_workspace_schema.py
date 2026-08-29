@@ -818,6 +818,44 @@ def test_classify_validation_codes() -> None:
     assert classify_validation(ready=False, incomplete=False, corrupt=True) == 1
 
 
+def test_case_document_accepts_additive_prioritization_key() -> None:
+    """Spike pin (task 0, plan #879): the new additive ``prioritization`` key
+    loads under the strict CaseDocument schema (schema_version stays 2) and
+    round-trips. If this ever fails in a way an optional-field default cannot
+    fix, the additive-under-v2 Key Decision is unsound and must be re-routed to
+    the spec before any prioritization task runs."""
+    raw = _valid_case_dict()
+    assert "prioritization" not in raw
+    doc = CaseDocument.model_validate(raw)
+    assert doc.prioritization is None  # absence tolerated (old case docs load)
+
+    facts = {
+        "extraction_version": 1,
+        "head_sha": "a" * 40,
+        "candidates": {
+            "github:review_comment:1": {
+                "commit_relation": "at_head",
+                "anchor_delta": "unchanged",
+            }
+        },
+        "non_candidates": {},
+    }
+    raw2 = _valid_case_dict()
+    raw2["prioritization"] = facts
+    doc2 = CaseDocument.model_validate(raw2)
+    assert doc2.prioritization is not None
+    assert doc2.prioritization.extraction_version == 1
+    assert doc2.prioritization.head_sha == "a" * 40
+    cand = doc2.prioritization.candidates["github:review_comment:1"]
+    assert cand.commit_relation == "at_head" and cand.anchor_delta == "unchanged"
+    assert doc2.prioritization.non_candidates == {}
+    # extra="forbid" still holds inside the new subtree
+    raw3 = _valid_case_dict()
+    raw3["prioritization"] = dict(facts, bogus=1)
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw3)
+
+
 def test_pull_request_entry_fetched_allows_latest_error_only() -> None:
     # A fetched entry may carry latest_error (a failed refresh attempt on an
     # otherwise-intact import) but never `error` itself.

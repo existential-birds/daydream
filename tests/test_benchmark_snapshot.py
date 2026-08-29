@@ -888,3 +888,86 @@ def _clone_offline(bundle: Path, workdir: Path) -> Path:
     clone = tempfile.mkdtemp(prefix="e2e-", dir=str(workdir))
     _git(bundle.parent, "clone", "--no-local", "--no-checkout", str(bundle), clone)
     return Path(clone)
+
+
+# ---------------------------------------------------------------------------
+# Task 0 spike (plan #879): mirror reads for commit-relation + anchor-delta facts
+# ---------------------------------------------------------------------------
+
+
+def _seed_facts_origin(tmp_path: Path) -> tuple[str, str, str, str]:
+    """Bare origin seeded for the prioritization fact probes.
+
+    main: base1 -> base2 -> base3; refs/pull/1/head off base2 with one commit
+    that (a) renames ``old.py`` to ``new.py`` with no content change, (b) edits
+    ``feature.py`` in place, and (c) adds a binary file. Returns
+    ``(bare, base2_sha, base3_sha, head_sha)`` where base2 is the PR's base tip
+    and base3 is an unrelated (non-ancestor-of-head) commit.
+    """
+    repo = tmp_path / "facts_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "readme.txt", "base1\n")
+    _commit(repo, "base1")
+    _write(repo, "base.py", "BASE = 2\n")
+    base2_sha = _commit(repo, "base2")
+    _write(repo, "beyond.py", "BEYOND = 3\n")
+    base3_sha = _commit(repo, "base3")
+    _git(repo, "checkout", "--detach", base2_sha)
+    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
+    _write(repo, "feature.py", "FEATURE = 1\n")
+    authoring_sha = _commit(repo, "author old.py + feature.py")
+    _git(repo, "mv", "old.py", "new.py")
+    repo.joinpath("feature.py").write_text("FEATURE = 2\n")
+    _git(repo, "add", "feature.py")
+    (repo / "blob.bin").write_bytes(b"\x00\x01\x02\x03binary")
+    _git(repo, "add", "blob.bin")
+    head_sha = _commit(repo, "rename + edit + binary")
+
+    bare = tmp_path / "facts_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    return str(bare), authoring_sha, base3_sha, head_sha
+
+
+def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path) -> None:
+    """Spike pin (task 0, plan #879): a plain bare mirror answers both fact
+    queries the prioritization extraction needs — ``merge-base --is-ancestor``
+    for the commit relation and ``diff --name-status -M`` / ``--numstat`` for
+    the anchor delta (with parseable path columns and binary detection). If any
+    probe's output shape deviates on a plain bare mirror, the extraction helper
+    design must be revised before Task 1."""
+    from daydream.benchmark import snapshot as sn
+
+    origin, authoring_sha, unrelated_sha, head_sha = _seed_facts_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = sn.mirror(tmp_path)
+
+    # (a) commit relation: ancestor exits 0; unrelated commit exits non-zero.
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", head_sha, head_sha],
+        cwd=m, capture_output=True, text=True,
+    )
+    assert ancestor.returncode == 0, ancestor.stderr
+    unrelated = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", unrelated_sha, head_sha],
+        cwd=m, capture_output=True, text=True,
+    )
+    assert unrelated.returncode != 0
+
+    # (b) anchor delta inputs: rename + intersecting edit with parseable columns.
+    statuses = _git(m, "diff", "--name-status", authoring_sha, head_sha, "-M")
+    rows = [line.split("\t") for line in statuses.splitlines() if line]
+    rename = next(r for r in rows if r[0].startswith("R"))
+    assert rename == ["R100", "old.py", "new.py"], statuses
+    edited = next(r for r in rows if r[0] == "M")
+    assert edited == ["M", "feature.py"], statuses
+    assert all(r[0] == "A" or len(r) >= 2 for r in rows), statuses
+
+    # (c) binary detection: numstat emits '-' for both added/deleted counts.
+    numstat = _git(m, "diff", "--numstat", authoring_sha, head_sha)
+    assert "-\t-\tblob.bin" in numstat.splitlines(), numstat
