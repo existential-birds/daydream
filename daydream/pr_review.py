@@ -47,6 +47,7 @@ from daydream.extensions import (
 )
 from daydream.git_ops import GitError
 from daydream.pr_comment_renderer import render_run_info_block
+from daydream.severity import normalize_severity
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from daydream.ui import print_error, print_info, print_success, print_warning
 
@@ -254,6 +255,19 @@ def parse_finding_markers(text: str) -> list[str]:
     return FINDING_MARKER_RE.findall(text)
 
 
+def _normalize_severity(raw: dict[str, Any]) -> str | None:
+    """Normalize a raw item's severity against the canonical vocabulary.
+
+    Total: never raises. Present-but-null severities (the wire schema emits
+    ``severity: null``) and omitted keys both map to ``None``, as do unknown
+    or non-string values — never the string ``"none"``. Unknown string
+    severities (e.g. ``"critical"``) also map to ``None`` here; the approval
+    gate independently fails closed on raw strings in paths that skip this
+    helper.
+    """
+    return normalize_severity(raw.get("severity"))
+
+
 def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
     """Convert `phase_alternative_review` dicts into ParsedIssue objects.
 
@@ -274,7 +288,7 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
         title = str(raw.get("title", "")).strip()
         description = str(raw.get("description", "")).strip()
         recommendation = str(raw.get("recommendation", "")).strip()
-        severity = str(raw.get("severity", "")).strip().lower() or None
+        severity = _normalize_severity(raw)
         confidence = str(raw.get("confidence", "")).strip().upper() or None
         body_parts = []
         if severity:
@@ -316,7 +330,7 @@ def extract_item_fields(
     line_int = int(line) if isinstance(line, int) and not isinstance(line, bool) else None
     description = str(raw.get("description", "")).strip()
     rationale = str(raw.get("rationale", "")).strip()
-    severity = str(raw.get("severity", "")).strip().lower() or None
+    severity = _normalize_severity(raw)
     confidence = str(raw.get("confidence", "")).strip().upper() or None
     is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
     location_distrust = bool(raw.get("location_distrust"))

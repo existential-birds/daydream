@@ -1173,3 +1173,28 @@ def test_parsed_issues_carry_location_distrust_and_report_note() -> None:
     assert len(issues) == 1
     assert issues[0].location_distrust is True
     assert "**Location:** unverified citation (severity demoted from high)" in issues[0].body
+
+
+@pytest.mark.parametrize("raw", [{"severity": None}, {}])  # present-but-null ≡ omitted (R4.1)
+def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> None:
+    fields = pr_review.extract_item_fields({"file": "a.py", "line": 1, **raw})
+    assert fields is not None
+    assert fields.severity is None  # not the string "none"
+
+
+def test_null_severity_does_not_block_approval(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None))
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "APPROVE"
+    assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
