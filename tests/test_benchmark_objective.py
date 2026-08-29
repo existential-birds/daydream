@@ -423,3 +423,18 @@ def test_shared_trial_walker_skips_non_dirs_and_matches_parse_job_results(tmp_pa
     assert trials == sorted(
         p.name for p in job_dir.iterdir() if p.is_dir()
     )
+
+
+def test_objective_metric_dict_includes_axis_keys() -> None:
+    # Shape parity (P-NUMERIC-ROW): the objective projection must carry the
+    # exact key set the authoritative aggregate_metrics returns.
+    from daydream.benchmark.harbor import verifier_core
+
+    assert set(objective.Objective(
+        tp=0, fp=0, fn=0, precision=1.0, recall=1.0, f1=1.0,
+        clean_task_count=0, clean_pass_count=0, clean_accuracy=1.0,
+        task_count=0, scored_task_count=0, candidate_count=0, gold_count=0,
+        infra_error_task_count=0, verifier_error_task_count=0,
+        malformed_task_count=0, failed_task_count=0,
+        comparison_eligible=True, mean_task_score=1.0,
+    )._as_metric_dict()) == set(verifier_core.aggregate_metrics([]))

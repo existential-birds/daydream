@@ -699,3 +699,67 @@ def test_reward_dict_early_returns_have_absent_axes() -> None:
     assert set(d) == EXPECTED_22_KEYS
     assert d["location_present"] == 0 and d["severity_present"] == 0
     assert d["location_exact"] == 0 and d["severity_mean_distance"] == 0.0
+
+
+def test_aggregate_metrics_pools_axis_keys() -> None:
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_exact": 1, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 1.0, "location_present": 1,
+         "severity_exact": 1, "severity_within_1": 1, "severity_mean_distance": 0.0,
+         "severity_credit": 1.0, "severity_present": 1},
+        {"verifier_error": 0, "reward": 0.0, "tp": 1, "fp": 1, "fn": 0,
+         "clean_task": 1, "location_file": 1, "location_credit": 0.0, "location_present": 1,
+         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
+         "severity_mean_distance": 0.0, "severity_credit": 0.0,
+         "location_exact": 0, "location_near": 0, "location_miss": 0},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["location_exact_rate"] == 0.5 and m["location_pairs_scored"] == 2
+    assert m["severity_pairs_scored"] == 1 and m["severity_credit"] == 1.0
+    assert m["severity_mean_distance"] == 0.0
+
+
+def test_aggregate_metrics_axis_rates_zero_when_no_pairs() -> None:
+    m = vc.aggregate_metrics([])
+    for tier in ("exact", "near", "file", "miss"):
+        assert m[f"location_{tier}_rate"] == 0.0
+    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
+    assert m["severity_exact_rate"] == 0.0
+    assert m["severity_within_1_rate"] == 0.0
+    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 0.0
+    assert m["total_location_exact"] == 0 and m["total_severity_exact"] == 0
+
+
+def test_aggregate_metrics_pools_severity_counts_and_credit() -> None:
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 1, "severity_within_1": 1,
+         "severity_mean_distance": 0.0, "severity_credit": 1.0,
+         "severity_present": 1},
+        {"verifier_error": 0, "reward": 0.5, "tp": 1, "fp": 0, "fn": 1,
+         "clean_task": 0, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 0, "severity_within_1": 1,
+         "severity_mean_distance": 1.0, "severity_credit": 0.5,
+         "severity_present": 1},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["severity_pairs_scored"] == 2
+    assert m["total_severity_exact"] == 1 and m["total_severity_within_1"] == 2
+    assert m["severity_exact_rate"] == 0.5 and m["severity_within_1_rate"] == 1.0
+    assert m["severity_mean_distance"] == 0.5 and m["severity_credit"] == 0.75
+
+
+def test_aggregate_metrics_pre_axis_rows_default_to_zero_pairs() -> None:
+    # An older row without any axis keys is a genuinely zero-pair row: it
+    # contributes nothing to the pooled axes and never raises.
+    m = vc.aggregate_metrics([
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0, "clean_task": 1},
+    ])
+    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
+    assert m["location_exact_rate"] == 0.0 and m["severity_credit"] == 0.0

@@ -833,16 +833,33 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
     TP/FP/FN are pooled across tasks (never averaged per task). A ``None`` row
     or a row with ``verifier_error == 1`` is an unscored infrastructure
     failure: it increments ``infra_error_task_count`` and contributes nothing
-    (no reward, no tp/fp/fn, no clean counts). Scored rows (``verifier_error
-    == 0``) pool into ``scored_task_count``/``total_tp/fp/fn`` and the mean,
-    which is over scored rows only (zero scored rows -> 1.0). Zero
-    denominators evaluate to 1.0 throughout.
+    (no reward, no tp/fp/fn, no clean counts, no axis contributions). Scored
+    rows (``verifier_error == 0``) pool into ``scored_task_count``/
+    ``total_tp/fp/fn`` and the mean, which is over scored rows only (zero
+    scored rows -> 1.0). Zero denominators evaluate to 1.0 throughout for the
+    headline rates.
+
+    The reported location/severity axes pool over scored pairs only (axis-
+    presence doctrine): per-row pair counts come from ``location_present``/
+    ``severity_present`` with tier/count fields read via ``row.get(k, 0)`` so
+    pre-axis rows (older reward schemas) are genuine zero-pair rows and never
+    raise. Tier rates and the severity rates/means use the axis pair counts as
+    denominators and evaluate to 0.0 when no pairs were scored — deliberately
+    not the 1.0 clean-slate convention, because an absent axis is missing
+    signal, not a perfect one.
     """
     infra_errors = 0
     clean_correct = 0
     clean_total = 0
     scored_rewards: list[float] = []
     total_tp = total_fp = total_fn = 0
+    loc_tiers = {"exact": 0, "near": 0, "file": 0, "miss": 0}
+    loc_credit_sum = 0.0
+    location_pairs = 0
+    sev_exact = sev_within_1 = 0
+    sev_distance_sum = 0.0
+    sev_credit_sum = 0.0
+    severity_pairs = 0
 
     for row in rows:
         if row is None or row.get("verifier_error") == 1:
@@ -852,6 +869,17 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
         total_fp += _as_int(row["fp"])
         total_fn += _as_int(row["fn"])
         scored_rewards.append(_as_float(row["reward"]))
+        if row.get("location_present") == 1:
+            location_pairs += 1
+            for tier in loc_tiers:
+                loc_tiers[tier] += int(_as_float(row.get(f"location_{tier}", 0)))
+            loc_credit_sum += _as_float(row.get("location_credit", 0.0))
+        if row.get("severity_present") == 1:
+            severity_pairs += 1
+            sev_exact += int(_as_float(row.get("severity_exact", 0)))
+            sev_within_1 += int(_as_float(row.get("severity_within_1", 0)))
+            sev_distance_sum += _as_float(row.get("severity_mean_distance", 0.0))
+            sev_credit_sum += _as_float(row.get("severity_credit", 0.0))
         if row.get("clean_task") == 1:
             clean_total += 1
             if _as_int(row["fp"]) == 0:
@@ -883,6 +911,59 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
         "total_tp": total_tp,
         "total_fp": total_fp,
         "total_fn": total_fn,
+        **_axis_aggregates(
+            loc_tiers, loc_credit_sum, location_pairs,
+            sev_exact, sev_within_1, sev_distance_sum, sev_credit_sum,
+            severity_pairs,
+        ),
+    }
+
+
+def _axis_aggregates(
+    loc_tiers: dict[str, int],
+    loc_credit_sum: float,
+    location_pairs: int,
+    sev_exact: int,
+    sev_within_1: int,
+    sev_distance_sum: float,
+    sev_credit_sum: float,
+    severity_pairs: int,
+) -> dict[str, float | int]:
+    """Pool the reported location/severity axes over scored pairs.
+
+    Rates are counts over the axis pair denominator (0.0 with zero pairs).
+    ``severity_mean_distance``/``severity_credit`` pool as the mean of each
+    task's reported per-pair mean over the tasks where the axis is present
+    (row-level summaries do not carry per-pair sums, so per-task means are the
+    finest granularity available; equal-pair tasks pool to the exact per-pair
+    mean).
+    """
+    n_loc = location_pairs
+    n_sev = severity_pairs
+    return {
+        "location_exact": loc_tiers["exact"],
+        "location_near": loc_tiers["near"],
+        "location_file": loc_tiers["file"],
+        "location_miss": loc_tiers["miss"],
+        "location_exact_rate": loc_tiers["exact"] / n_loc if n_loc else 0.0,
+        "location_near_rate": loc_tiers["near"] / n_loc if n_loc else 0.0,
+        "location_file_rate": loc_tiers["file"] / n_loc if n_loc else 0.0,
+        "location_miss_rate": loc_tiers["miss"] / n_loc if n_loc else 0.0,
+        "location_credit": loc_credit_sum / n_loc if n_loc else 0.0,
+        "location_pairs_scored": n_loc,
+        "total_location_exact": loc_tiers["exact"],
+        "total_location_near": loc_tiers["near"],
+        "total_location_file": loc_tiers["file"],
+        "total_location_miss": loc_tiers["miss"],
+        "severity_exact": sev_exact,
+        "severity_within_1": sev_within_1,
+        "severity_exact_rate": sev_exact / n_sev if n_sev else 0.0,
+        "severity_within_1_rate": sev_within_1 / n_sev if n_sev else 0.0,
+        "severity_mean_distance": sev_distance_sum / n_sev if n_sev else 0.0,
+        "severity_credit": sev_credit_sum / n_sev if n_sev else 0.0,
+        "severity_pairs_scored": n_sev,
+        "total_severity_exact": sev_exact,
+        "total_severity_within_1": sev_within_1,
     }
 
 
