@@ -41,6 +41,7 @@ __all__ = [
     "SnapshotReady",
     "SnapshotUnreplayable",
     "SnapshotImported",
+    "AuthoringAnchor",
     "EvidenceRecord",
     "Candidate",
     "ImportDocument",
@@ -443,6 +444,19 @@ Snapshot = Annotated[
 # ---------------------------------------------------------------------------
 
 
+def _relative_path(v: str, *, what: str = "location") -> str:
+    """A POSIX-relative source path (shared by Location and AuthoringAnchor)."""
+    if not v:
+        raise ValueError(f"{what} path must not be blank")
+    if v.startswith("/") or (":" in v and not v.startswith("http")):
+        raise ValueError(f"{what} path must be relative, got {v!r}")
+    if v == ".." or v.startswith("../") or "/../" in v or v.endswith("/.."):
+        raise ValueError(f"{what} path must not contain '..' segments: {v!r}")
+    if "\x00" in v:
+        raise ValueError(f"{what} path must not contain NUL")
+    return v
+
+
 class Location(BaseModel):
     """A POSIX-relative source location with a positive ordered line span."""
 
@@ -454,16 +468,8 @@ class Location(BaseModel):
 
     @field_validator("path")
     @classmethod
-    def _relative_path(cls, v: str) -> str:
-        if not v:
-            raise ValueError("location path must not be blank")
-        if v.startswith("/") or (":" in v and not v.startswith("http")):
-            raise ValueError(f"location path must be relative, got {v!r}")
-        if v == ".." or v.startswith("../") or "/../" in v or v.endswith("/.."):
-            raise ValueError(f"location path must not contain '..' segments: {v!r}")
-        if "\x00" in v:
-            raise ValueError("location path must not contain NUL")
-        return v
+    def _relative(cls, v: str) -> str:
+        return _relative_path(v)
 
     @model_validator(mode="after")
     def _ordered(self) -> "Location":
@@ -481,6 +487,64 @@ class _EvidenceAuthor(BaseModel):
 
     login: str
     type: str
+
+
+class AuthoringAnchor(BaseModel):
+    """The strict, versioned authoring-time anchor of one inline evidence record.
+
+    Derived once during case materialization from the authenticated mirror (the
+    authoring commit/path/line span as it existed when the comment was written),
+    never from GitHub's re-anchored fields. ``status == "derived"`` carries the
+    full data payload; every non-derived status is fail-closed with all four data
+    fields unset. Version 1 is the current shape.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1]
+    status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"]
+    commit_id: str | None
+    path: str | None
+    start_line: int | None
+    end_line: int | None
+
+    @field_validator("commit_id")
+    @classmethod
+    def _sha40_nullable(cls, v: str | None) -> str | None:
+        if v is not None and not _HEX40.fullmatch(v):
+            raise ValueError(f"commit SHA must be lowercase 40-hex, got {v!r}")
+        return v
+
+    @field_validator("path")
+    @classmethod
+    def _relative(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _relative_path(v, what="anchor")
+
+    @field_validator("start_line", "end_line")
+    @classmethod
+    def _positive_line(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("line anchor must be positive when set")
+        return v
+
+    @model_validator(mode="after")
+    def _derived_iff_populated(self) -> "AuthoringAnchor":
+        populated = (
+            self.commit_id is not None
+            and self.path is not None
+            and self.start_line is not None
+            and self.end_line is not None
+        )
+        if self.status == "derived":
+            if not populated:
+                raise ValueError("derived anchor requires commit_id, path, start_line, and end_line")
+            if self.start_line > self.end_line:  # type: ignore[operator]
+                raise ValueError("start_line must be <= end_line")
+        elif populated:
+            raise ValueError(f"anchor status {self.status!r} must leave commit/path/lines None")
+        return self
 
 
 class EvidenceRecord(BaseModel):
@@ -505,6 +569,8 @@ class EvidenceRecord(BaseModel):
     line: int | None = None
     start_line: int | None = None
     original_line: int | None = None
+    original_start_line: int | None = None
+    authoring_anchor: AuthoringAnchor | None = None
     review_id: str | None = None
     thread_id: str | None = None
     reply_to_id: str | None = None
@@ -544,7 +610,7 @@ class EvidenceRecord(BaseModel):
             raise ValueError(f"commit SHA must be lowercase 40-hex, got {v!r}")
         return v
 
-    @field_validator("line", "start_line", "original_line")
+    @field_validator("line", "start_line", "original_line", "original_start_line")
     @classmethod
     def _positive_line(cls, v: int | None) -> int | None:
         if v is not None and v < 1:
