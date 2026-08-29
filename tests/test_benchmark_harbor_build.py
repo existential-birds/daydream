@@ -132,6 +132,7 @@ def _seed_candidate(fake_gh: FakeGh, *, number: int = 101, head_sha: str) -> Non
         "original_commit_id": head_sha,
         "path": "feature.py",
         "line": 2,
+        "original_line": 2,
         "subject_type": "line",
         "side": "RIGHT",
         "in_reply_to_id": None,

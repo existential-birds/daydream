@@ -844,21 +844,44 @@ def _title_ok(title: str) -> bool:
 def _anchor_location(
     evidence: schema.EvidenceRecord,
 ) -> tuple[schema.Location | None, str | None]:
-    """Project a RIGHT-side inline anchor to a ``Location``, or the block reason.
+    """Project a RIGHT-side inline anchor exclusively from its authoring anchor.
 
-    Returns ``(location, None)`` on a usable anchor, or ``(None, reason)`` when
-    the anchor is unusable or the comment is not a right-side line anchor.
+    The strict versioned ``authoring_anchor`` (derived at case materialization
+    from the authenticated mirror) is the single source of the projected
+    ``Location``; the re-anchored observed fields (``path``/``start_line``/
+    ``line``/``original_path``) never feed it. Returns ``(location, None)`` on
+    a usable derived anchor, or ``(None, reason)`` from the fixed closed set
+    — ``side`` (LEFT/mixed-side), ``history-unavailable`` (no anchor ever
+    derived: import-only snapshot or a pre-anchor import), ``path-unavailable``
+    / ``range-unavailable`` (derivation failed closed on exactly that) — and
+    ``(None, None)`` for a locationless file-level comment.
     """
     if evidence.subject_type == "file":
         return None, None
     if evidence.side == "LEFT" or evidence.start_side == "LEFT":
         return None, "side"
-    path = evidence.original_path or evidence.path
-    start = evidence.start_line or evidence.line
-    end = evidence.line or evidence.start_line
-    if not path or start is None or end is None or start < 1 or end < start:
-        return None, "anchor"
-    return schema.Location(path=path, start_line=start, end_line=end), None
+    anchor = evidence.authoring_anchor
+    if anchor is None:
+        # No strict anchor: never trust GitHub's re-anchored fields. A missing
+        # anchor means the authoring history was never derived (no mirror) or
+        # does not exist in this import — fail closed to edit-required.
+        return None, "history-unavailable"
+    if anchor.status != "derived":
+        # 1:1 mapping of the fail-closed derivation status to the fixed reason.
+        return None, anchor.status
+    if (
+        anchor.start_line is None
+        or anchor.end_line is None
+        or anchor.start_line < 1
+        or anchor.end_line < anchor.start_line
+    ):
+        return None, "range-unavailable"
+    if anchor.path is None:
+        return None, "path-unavailable"
+    return (
+        schema.Location(path=anchor.path, start_line=anchor.start_line, end_line=anchor.end_line),
+        None,
+    )
 
 
 def _project_one(evidence: schema.EvidenceRecord, head_sha: str) -> schema.Candidate:
@@ -875,14 +898,26 @@ def _project_one(evidence: schema.EvidenceRecord, head_sha: str) -> schema.Candi
         if anchor_reason is not None:
             exact = False
             reason = anchor_reason
-    # review bodies are file-agnostic: no location, no side constraint
+        elif (
+            evidence.authoring_anchor is not None
+            and evidence.authoring_anchor.status == "derived"
+            and evidence.authoring_anchor.commit_id != head_sha
+        ):
+            # A derived anchor on any other commit means GitHub re-anchored
+            # the comment (its re-anchored ``commit_id`` may even equal the
+            # head). Exact acceptance is judged solely from the anchor.
+            exact = False
+            reason = "re-anchored"
+    elif evidence.commit_id != head_sha:
+        # review bodies are file-agnostic: no location, no side constraint,
+        # and their single submission commit_id (reviews expose no inline
+        # re-anchoring fields) still gates exact acceptance.
+        exact = False
+        reason = "commit"
 
     if not title_ok:
         exact = False
         reason = "title"
-    if evidence.commit_id != head_sha:
-        exact = False
-        reason = "commit"
     if evidence.outdated:
         exact = False
         reason = "outdated"
@@ -909,9 +944,15 @@ def project_candidates(
     Root inline comments with a non-empty body and ``COMMENTED`` /
     ``CHANGES_REQUESTED`` review bodies become candidates; pure approvals,
     replies, and conversation comments are retained as evidence only.
-    Projection never raises — an underivable title, a LEFT-side anchor, an
-    unusable anchor, an off-head commit, an outdated, or a dismissed record all
-    set ``exact_acceptable`` low with a ``not_exact_reason``.
+    Projection never raises — an underivable title, a LEFT-side anchor, a
+    missing or fail-closed authoring anchor, a re-anchored inline record,
+    an off-head review submission, an outdated, or a dismissed record all
+    set ``exact_acceptable`` low with a ``not_exact_reason`` from the fixed
+    closed set (``re-anchored``, ``history-unavailable``, ``path-unavailable``,
+    ``range-unavailable``, ``side``, ``title``, ``commit``, ``outdated``,
+    ``dismissed``). Inline exact acceptance derives solely from the authoring
+    anchor's commit matching *head_sha*; review bodies key off their
+    submission ``commit_id``.
     """
     cands: list[schema.Candidate] = []
     for evidence in doc.evidence:
@@ -947,17 +988,33 @@ def _evidence_projection_hash(rec: dict[str, Any]) -> str:
 
     One digest per physical evidence record over exactly the fields that feed
     candidate projection and the curated review surface: body sha, author
-    (login/type), commit anchors, path/line anchors, side, subject type,
+    (login/type), commit anchors, re-anchored path/line anchors, the strict
+    authoring anchor (version/status/commit/path/range), sides, subject type,
     reply status (replies are evidence, never candidates), resolution
     state, dismissal, and review state. Values use ``.get()``
     defaults (``False`` for booleans, ``None`` for optional fields, ``""`` for
     strings) so an absent pre-canonicalization key equals the canonical
     default. ``kind``/``source_id``/``database_id``/``url``/timestamps are
     excluded: they are format-drift/metadata-sensitive and must not flip the
-    signature.
+    signature. A pre-canonicalization record with no anchor key hashes like
+    the canonical ``authoring_anchor``-less default, so a pure format/metadata
+    change stays stable while a genuine anchor change flips the digest.
     """
     author_raw = rec.get("author")
     author = author_raw if isinstance(author_raw, dict) else {}
+    anchor_raw = rec.get("authoring_anchor")
+    anchor: dict[str, Any] | None
+    if isinstance(anchor_raw, dict):
+        anchor = {
+            "version": anchor_raw.get("version"),
+            "status": anchor_raw.get("status"),
+            "commit_id": anchor_raw.get("commit_id"),
+            "path": anchor_raw.get("path"),
+            "start_line": anchor_raw.get("start_line"),
+            "end_line": anchor_raw.get("end_line"),
+        }
+    else:
+        anchor = None
     values: dict[str, Any] = {
         "body_sha256": str(rec.get("body_sha256") or ""),
         "author.login": str(author.get("login") or ""),
@@ -969,6 +1026,8 @@ def _evidence_projection_hash(rec: dict[str, Any]) -> str:
         "line": rec.get("line"),
         "start_line": rec.get("start_line"),
         "original_line": rec.get("original_line"),
+        "original_start_line": rec.get("original_start_line"),
+        "authoring_anchor": anchor,
         "side": rec.get("side"),
         "start_side": rec.get("start_side"),
         "subject_type": rec.get("subject_type"),

@@ -13,8 +13,9 @@ import hashlib
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -440,6 +441,177 @@ def test_graphql_thread_maps_original_start_line(tmp_path: Path, fake_gh: FakeGh
     assert rec.original_start_line == 4
 
 
+head_sha = "a" * 40  # matches _PR_HEADER's head sha; the projection head in these tests
+
+_TS = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def _set_anchor(
+    rec: Any,
+    *,
+    status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"] = "derived",
+    commit_id: str = "a" * 40,
+    path: str = "a.py",
+    start_line: int = 4,
+    end_line: int = 5,
+) -> Any:
+    """Attach an authoring anchor (derived or fail-closed) to a normalized record.
+
+    Mirrors what ``_case_materialize`` derives from the mirror: a strict
+    versioned anchor is the single projection input, so projection tests feed
+    it directly instead of re-deriving through git.
+    """
+    from daydream.benchmark import schema
+
+    if status == "derived":
+        rec.authoring_anchor = schema.AuthoringAnchor(
+            version=1, status="derived", commit_id=commit_id, path=path,
+            start_line=start_line, end_line=end_line,
+        )
+    else:
+        rec.authoring_anchor = schema.AuthoringAnchor(
+            version=1, status=status, commit_id=None, path=None,
+            start_line=None, end_line=None,
+        )
+    return rec
+
+
+def _rec_dict(**over: Any) -> dict[str, Any]:
+    """One canonical inline evidence dict (model_dump shape) for the projection hash."""
+    from daydream.benchmark import schema
+
+    rec = schema.EvidenceRecord(
+        source_id="github:inline_comment:1",
+        kind="inline_comment",
+        database_id=1,
+        node_id="DIFF_1",
+        author=schema._EvidenceAuthor(login="alice", type="User"),
+        body="fix this",
+        body_sha256=hashlib.sha256(b"fix this").hexdigest(),
+        created_at=_TS,
+        updated_at=_TS,
+        commit_id=head_sha,
+        original_commit_id=head_sha,
+        path="a.py",
+        original_path="a.py",
+        line=4,
+        start_line=4,
+        original_line=4,
+        original_start_line=4,
+        subject_type="line",
+        side="RIGHT",
+        is_bot=False,
+        url="https://github.com/o/r/pull/101#discussion_r1",
+    )
+    d = rec.model_dump(mode="json")
+    d.update(over)
+    return d
+
+
+def _project_from_anchor(
+    *,
+    anchor_commit: str | None = None,
+    status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"] | None = None,
+    rest_commit_id: str | None = None,
+    original_commit_id: str | None = None,
+    anchor: Any = None,
+) -> Any:
+    """Project one right-side inline comment with the authoring anchor per kwargs.
+
+    The observed (re-anchored) fields are deliberately set to ``new.py:9`` so
+    any test reaching ``Location(old.py, 4, 5)`` proves the anchor — not the
+    observed fields — drove projection.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import schema
+
+    if anchor is None:
+        if status is not None:
+            anchor = schema.AuthoringAnchor(
+                version=1, status=status, commit_id=None, path=None,
+                start_line=None, end_line=None,
+            )
+        elif anchor_commit is not None:
+            anchor = schema.AuthoringAnchor(
+                version=1, status="derived", commit_id=anchor_commit,
+                path="old.py", start_line=4, end_line=5,
+            )
+    rec = schema.EvidenceRecord(
+        source_id="github:inline_comment:1",
+        kind="inline_comment",
+        database_id=1,
+        node_id="DIFF_1",
+        author=schema._EvidenceAuthor(login="alice", type="User"),
+        body="fix this",
+        body_sha256=hashlib.sha256(b"fix this").hexdigest(),
+        created_at=_TS,
+        updated_at=_TS,
+        commit_id=rest_commit_id if rest_commit_id is not None else head_sha,
+        original_commit_id=original_commit_id if original_commit_id is not None else head_sha,
+        path="new.py",
+        original_path="new.py",
+        line=9,
+        start_line=9,
+        original_line=8,
+        original_start_line=8,
+        subject_type="line",
+        side="RIGHT",
+        authoring_anchor=anchor,
+        is_bot=False,
+        url="https://github.com/o/r/pull/101#discussion_r1",
+    )
+    return gi._project_one(rec, head_sha=head_sha)
+
+
+def test_exact_acceptance_from_authoring_anchor_matches_head(fake_gh: FakeGh) -> None:
+    """A comment GitHub re-anchored onto the head (``commit_id == head`` but
+    originally authored elsewhere) is denied exact acceptance: the anchor's
+    commit — not the re-anchored ``commit_id`` — gates the judgment.
+    """
+    cand = _project_from_anchor(
+        anchor_commit="b" * 40, rest_commit_id=head_sha, original_commit_id="b" * 40,
+    )
+    assert cand.exact_acceptable is False
+    assert cand.not_exact_reason == "re-anchored"
+
+
+def test_exact_acceptance_under_explicit_historical_snapshot(fake_gh: FakeGh) -> None:
+    """A comment written against an explicitly selected historical head is exactly
+    acceptable even though GitHub's ``commit_id`` has since moved on: the anchor
+    matches the head, and the location comes from the authoring path/range.
+    """
+    from daydream.benchmark.schema import Location
+
+    cand = _project_from_anchor(
+        anchor_commit=head_sha, rest_commit_id="c" * 40, original_commit_id=head_sha,
+    )
+    assert cand.exact_acceptable is True
+    assert cand.not_exact_reason is None
+    assert cand.location == Location(path="old.py", start_line=4, end_line=5)
+
+
+def test_range_and_missing_anchor_fail_closed(fake_gh: FakeGh) -> None:
+    """A fail-closed anchor reason maps 1:1 to its fixed reason; a missing anchor
+    (import-only snapshot / pre-anchor import) fails closed to history-unavailable
+    and is never granted exact acceptance.
+    """
+    assert _project_from_anchor(status="range-unavailable").not_exact_reason == "range-unavailable"
+    assert _project_from_anchor(anchor=None).not_exact_reason == "history-unavailable"
+
+
+def test_anchor_fields_flip_projection_signature() -> None:
+    """The projection signature whitelist spans the authoring anchor: changing only
+    anchor metadata must flip the per-record digest so refresh staleness sees it.
+    """
+    from daydream.benchmark import github_import as gi
+
+    h1 = gi._evidence_projection_hash(_rec_dict())
+    d = _rec_dict()
+    d["authoring_anchor"] = {"version": 1, "status": "path-unavailable",
+        "commit_id": None, "path": None, "start_line": None, "end_line": None}
+    assert gi._evidence_projection_hash(d) != h1
+
+
 def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.schema import Location
@@ -465,6 +637,7 @@ def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: Fake
         [
             {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
              "body": "## note\nfix this", "path": "a.py", "line": 5, "start_line": 4,
+             "original_commit_id": "a" * 40, "original_line": 5, "original_start_line": 4,
              "subject_type": "line", "side": "RIGHT", "start_side": None,
              "commit_id": "a" * 40, "created_at": "2026-01-01T00:00:00Z",
              "updated_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
@@ -482,6 +655,13 @@ def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: Fake
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([])
     doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
+    # comment 1 carries a derived authoring anchor (what _case_materialize
+    # would derive from the mirror given original_commit_id head); direct
+    # fetch-and-project tests bypass materialization, so attach it here.
+    _set_anchor(
+        {e.database_id: e for e in doc_gi.evidence}[1],
+        commit_id="a" * 40, path="a.py", start_line=4, end_line=5,
+    )
     cands = gi.project_candidates(doc_gi, head_sha="a" * 40)
     by_src = {c.source_id: c for c in cands}
     right = by_src["github:inline_comment:1"]
@@ -1605,7 +1785,8 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fa
     # REST copy of comment 40 is OUTDATED via the joined GraphQL thread state
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
         {"id": 40, "node_id": "DIFF_40", "user": {"login": "dave", "type": "User"},
-         "body": "outdated root", "commit_id": "a" * 40, "path": "a.py", "line": 5,
+         "body": "outdated root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+         "path": "a.py", "line": 5, "original_line": 5, "original_start_line": 4,
          "subject_type": "line", "side": "RIGHT",
          "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
          "html_url": "https://github.com/o/r/pull/101#discussion_r40"}])
@@ -1621,6 +1802,13 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fa
              "url": "https://github.com/o/r/pull/101#discussion_r40"}]}}],
         number=101)
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    # the record's authoring anchor is derived (commit == head): the thread's
+    # outdated flag must be the reason it is denied exact acceptance, not a
+    # missing anchor.
+    _set_anchor(
+        {e.database_id: e for e in doc.evidence}[40],
+        commit_id="a" * 40, path="a.py", start_line=4, end_line=5,
+    )
     cands = {c.source_id: c for c in gi.project_candidates(doc, head_sha="a" * 40)}
     cand = cands["github:inline_comment:40"]
     assert cand.exact_acceptable is False
