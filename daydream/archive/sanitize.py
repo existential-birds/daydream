@@ -111,8 +111,16 @@ def _sanitize_json_value(value: Any) -> Any:
 
 
 def _sanitize_text(text: str) -> str:
-    """Redact one text file body, then re-check with the scanner's extra rules."""
-    return redact_text(text)
+    """Redact one text file body, then re-check with the scanner's extra rules.
+
+    The scanner's two local gaps (token-only userinfo, credential query params)
+    are applied from scan.py's own patterns, so a rule added there applies here
+    too and the derivative passes the release scan (M16).
+    """
+    text = redact_text(text)
+    text = scan._TOKEN_ONLY_USERINFO_PATTERN.sub(r"\1[REDACTED_USER]@", text)
+    text = scan._QUERY_CREDENTIAL_PATTERN.sub(r"\1\2=[REDACTED_CREDENTIAL]", text)
+    return text
 
 
 def _sanitize_derivative(derivative_dir: Path) -> None:
@@ -308,7 +316,12 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
                 current_digest = None
             if current_digest == recorded_digest:
                 continue  # M19: completed items are not re-processed
-        result = sanitize_bundle(run_dir, archive_dir)
+        try:
+            result = sanitize_bundle(run_dir, archive_dir)
+        except Exception:
+            # sanitize_bundle already recorded the quarantine audit line and
+            # cleaned the partial derivative; one bad bundle never stops the pass.
+            continue
         if result.released:
             _mark_done(sanitized_dir, result.session_id, result.derivative_digest)
         results.append(result)

@@ -57,6 +57,50 @@ def test_resume_skips_completed_items(tmp_path: Path) -> None:
     assert (archive_dir / "sanitized" / "b" / "manifest.json").exists()
 
 
+def test_text_file_token_only_userinfo_and_query_credentials_are_sanitized(
+    tmp_path: Path,
+) -> None:
+    """M16: extended text rules (token-only userinfo, query credentials) are
+    applied so the derivative passes the release scan instead of quarantining."""
+    archive_dir = tmp_path / "archive"
+    run_dir = archive_dir / "runs" / "s1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"session_id": "s1", "git": {"remote_url": "https://github.com/o/r"}})
+    )
+    (run_dir / "review-output.md").write_text(
+        "clone https://x-access-token@github.com/o/r.git\n"
+        "fetch https://example.com/repo?token=abc123\n"
+        "auth https://example.com/api?client=1&access_token=abcdef\n"
+    )
+    result = sanitize.sanitize_bundle(run_dir, archive_dir)
+    assert result.released  # extended rules applied; release scan clean
+    text = (archive_dir / "sanitized" / "s1" / "review-output.md").read_text()
+    assert "x-access-token" not in text
+    assert "token=abc123" not in text
+    assert "access_token=abcdef" not in text
+
+
+def test_archive_pass_continues_past_unreadable_bundle(tmp_path: Path) -> None:
+    """One bad bundle never stops the pass (M19): a bundle whose binary file
+    fails UTF-8 decode is quarantined and later bundles are still sanitized."""
+    archive_dir = tmp_path / "archive"
+    bad = archive_dir / "runs" / "bad"
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_text(json.dumps({"session_id": "bad"}))
+    (bad / "binary.bin").write_bytes(b"\x00\xff\xfe")
+    _seed_bronze_bundle(archive_dir, "good", "https://github.com/o/r")
+    results = sanitize.sanitize_archive(archive_dir)
+    assert [r.session_id for r in results] == ["good"]
+    assert results[0].released
+    audit = [
+        json.loads(line)
+        for line in (archive_dir / "sanitized" / "audit.jsonl").read_text().splitlines()
+    ]
+    statuses = {line["session_id"]: line["status"] for line in audit}
+    assert statuses == {"bad": "quarantined", "good": "sanitized"}
+
+
 def test_derivative_stays_quarantined_until_scan_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

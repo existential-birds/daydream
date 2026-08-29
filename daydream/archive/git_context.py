@@ -54,11 +54,13 @@ def capture_git_context(target_dir: Path) -> GitContext:
     raw_remote = git_ops.remote_url(target_dir)
     if raw_remote:
         repo_slug, canonical_url = normalize_remote_url(raw_remote)
-        # Fail closed: an untrusted or unparseable raw URL is never stored,
-        # not even credential-stripped.
-        if repo_slug is not None:
-            ctx.repo_slug = repo_slug
+        # Fail closed: an unparseable raw URL is never stored, not even
+        # credential-stripped. Identity alone is None for hosts outside the
+        # allowlist, but the credential-stripped canonical URL is still kept.
+        if canonical_url is not None:
             ctx.remote_url = canonical_url
+            if repo_slug is not None:
+                ctx.repo_slug = repo_slug
 
     try:
         ctx.branch = git_ops.current_branch(target_dir)

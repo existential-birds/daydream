@@ -1733,6 +1733,33 @@ def _safe_url_desc(url: str) -> str:
     return redact_text(url)
 
 
+def _run_clone(
+    remote_url: str, cmd: list[str], timeout: int, env: dict[str, str] | None = None
+) -> None:
+    """Run a prepared ``git clone`` argv and map failures to :class:`GitError`.
+
+    Shared by :func:`clone` and :func:`clone_with_token`, which differ only in
+    argv prefix and environment. ``env=None`` inherits the parent environment,
+    matching :func:`clone`'s current behavior.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            cmd,  # noqa: S607 - git is a trusted command
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {type(exc).__name__}: {redact_text(str(exc))}"
+        ) from exc
+    if proc.returncode != 0:
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {redact_text(proc.stderr.strip())}"
+        )
+
+
 def clone_with_token(
     remote_url: str,
     target: Path,
@@ -1758,23 +1785,7 @@ def clone_with_token(
     if blobless:
         cmd.append("--filter=blob:none")
     cmd += [remote_url, str(target)]
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            cmd,  # noqa: S607 - git is a trusted command
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(
-            f"git clone {_safe_url_desc(remote_url)} failed: {type(exc).__name__}: {redact_text(str(exc))}"
-        ) from exc
-    if proc.returncode != 0:
-        raise GitError(
-            f"git clone {_safe_url_desc(remote_url)} failed: {redact_text(proc.stderr.strip())}"
-        )
+    _run_clone(remote_url, cmd, timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 
 def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int = 300) -> None:
@@ -1796,21 +1807,7 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int
     if blobless:
         cmd.append("--filter=blob:none")
     cmd += [remote_url, str(target)]
-    try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            cmd,  # noqa: S607 - git is a trusted command
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(
-            f"git clone {_safe_url_desc(remote_url)} failed: {type(exc).__name__}: {redact_text(str(exc))}"
-        ) from exc
-    if proc.returncode != 0:
-        raise GitError(
-            f"git clone {_safe_url_desc(remote_url)} failed: {redact_text(proc.stderr.strip())}"
-        )
+    _run_clone(remote_url, cmd, timeout)
 
 
 def checkout_paths(repo: Path, paths: list[Path]) -> None:

@@ -96,8 +96,9 @@ def classify_remote_url(raw: str) -> list[str]:
         user = unquote(parsed.username) if parsed.username else ""
         password = unquote(parsed.password) if parsed.password else ""
         # Percent-encoded userinfo (e.g. user%40corp:p%40ss) counts too;
-        # token-only user@ is credential-bearing (x-access-token form).
-        if user or password:
+        # token-only user@ is credential-bearing only on http(s) (the
+        # x-access-token form); a lone SSH login user (ssh://git@...) is not.
+        if password or (user and parsed.scheme.lower() in {"http", "https"}):
             categories.append("userinfo")
         if parsed.query:
             keys = {k.lower() for k, _ in parse_qsl(parsed.query, keep_blank_values=True)}
@@ -105,6 +106,8 @@ def classify_remote_url(raw: str) -> list[str]:
                 categories.append("query")
     else:
         scp = _parse_scp(raw)
-        if scp is not None and scp[0]:
+        # A plain SCP username (git@host:path) is a login, not a credential;
+        # only an embedded user:pass slot (colon in the user group) carries one.
+        if scp is not None and ":" in scp[0]:
             categories.append("userinfo")
     return categories

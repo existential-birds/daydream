@@ -28,9 +28,10 @@ report_inventory(Path('/path/to/archive_dir'))
 `report_inventory()` classifies each bundle's `git.remote_url` via the
 normalizer and prints **counts by category only** — session counts, never a
 URL fragment or a matched credential value. Categories mirror
-`daydream.archive.git_safe.classify_remote_url` (e.g. credential-bearing
-userinfo forms, `x-access-token` token-only forms, clean HTTPS/SCP forms) plus
-`unparseable` for manifests it could not read.
+`daydream.archive.git_safe.classify_remote_url`: `userinfo` (covers both
+`user:token`/PAT-shaped userinfo and `x-access-token` token-only `user@`
+forms), `query` (credential-like query parameters), and `clean` (benign URLs),
+plus `unparseable` for manifests it could not read.
 
 Record the output. It tells you how many manifests/bundles are affected per
 category, which determines how wide the revocation net in step 3 must be.
@@ -61,9 +62,12 @@ Map affected sessions to the repos they touched:
 1. For each affected `session_id`, read `manifest.json` in the source run
    directory and note the repo identity (owner/repo) — the *identity*, not the
    raw URL.
-2. Correlate with the inventory categories: `x-access-token` forms are GitHub
-   App installation tokens; `user:token` or PAT-shaped userinfo are personal
-   access tokens.
+2. The inventory's single `userinfo` category covers both `x-access-token`
+   token-only `user@` forms (GitHub App installation tokens) and `user:token`
+   or PAT-shaped userinfo (personal access tokens), so it cannot tell the two
+   apart at category granularity. Distinguish them from the source
+   `manifest.json` `git.remote_url` records instead, not the inventory
+   category counts.
 3. The result is a table of (credential type, repo(s), session ids, date
    range) — safe to share, contains no secret values.
 
@@ -140,3 +144,29 @@ Post-remediation, confirm the incident is closed:
    sanitizer release gate) blocks any bundle that is not provably clean from
    every egress path. Future incidents should be caught at that gate, before
    upload.
+
+## 7. How the harvest clone step authenticates
+
+`corpus harvest` clones repos from manifests that have no local checkout into
+its clone cache. It never clones the archived raw URL: the URL is rewritten via
+`normalize_remote_url` (see `daydream.archive.git_safe`) into a credential-free
+HTTPS identity like `https://github.com/owner/repo`, and only allowlisted git
+hosts are accepted. All credential material is therefore absent from the URL
+by construction.
+
+Authentication for private repos is out-of-band and operator-supplied:
+
+- Set the `DAYDREAM_GIT_TOKEN` environment variable (e.g. a GitHub PAT with
+  read access to the target repos) when running `corpus harvest`. It is
+  injected into the git command via `-c http.extraHeader` at the argv layer;
+  the URL string never contains the token.
+- Without the variable, the clone falls back to the ambient git credential
+  helper. `GIT_TERMINAL_PROMPT=0` fails closed on auth errors instead of
+  prompting.
+- A clone or fetch failure is warning-only at harvest time (the affected run
+  is skipped, never aborted) and never survives into the archive.
+
+Treat `DAYDREAM_GIT_TOKEN` as a credential in its own right: if it is
+suspected leaked, add it to the step-3 revocation net. It is an input to the
+clone step, not archived data, so it never appears in uploaded bundles or in
+`report_inventory()` output.

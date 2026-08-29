@@ -93,7 +93,7 @@ import anyio
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.archive.git_safe import normalize_remote_url
+from daydream.archive.git_safe import _DEFAULT_HOSTS, normalize_remote_url
 from daydream.archive.index import (
     append_label_observation,
     query_runs,
@@ -765,9 +765,6 @@ def build_annotation(
 # the archived remote_url is only ever normalized to a credential-free HTTPS
 # identity; hosts outside the allowlist fail closed.
 
-# Hosts trusted for harvest clone resolution (overridable in tests).
-_GIT_HOST_ALLOWLIST: frozenset[str] = frozenset({"github.com"})
-
 
 def _resolve_repo_for_row(
     row: dict[str, Any],
@@ -821,7 +818,7 @@ def _resolve_repo_for_row(
             # credential-free HTTPS identity and fail closed on untrusted
             # hosts or unparseable input. Token, if any, travels out-of-band.
             identity, canonical = normalize_remote_url(
-                remote_url, allowed_hosts=_GIT_HOST_ALLOWLIST
+                remote_url, allowed_hosts=_DEFAULT_HOSTS
             )
             if identity is None or canonical is None:
                 return None

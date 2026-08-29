@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from daydream.archive.git_safe import _CREDENTIAL_QUERY_KEYS
 from daydream.trajectory import (
     _API_KEY_PATTERN,
     _ENV_VAR_PATTERN,
@@ -34,8 +35,11 @@ __all__ = ["Finding", "ScanResult", "scan_run_dir"]
 # the single-token gap (matches the pinned inventory's x-access-token rows).
 _TOKEN_ONLY_USERINFO_PATTERN = re.compile(r"(https?://)[^@/\s]+@", re.IGNORECASE)
 # Credential-like query params: ``?token=...`` / ``&access_token=...`` etc.
+# The key set comes from git_safe._CREDENTIAL_QUERY_KEYS (single source: a key
+# added there widens this scan gate automatically).
 _QUERY_CREDENTIAL_PATTERN = re.compile(
-    r"[?&](token|access_token|key|secret|password|credential)=[^&\s]+", re.IGNORECASE
+    r"([?&])(" + "|".join(sorted(_CREDENTIAL_QUERY_KEYS)) + r")=[^&\s]+",
+    re.IGNORECASE,
 )
 
 # (pattern, category) pairs applied in order to every scanned text. The

@@ -29,6 +29,19 @@ def test_token_only_userinfo_flagged(tmp_path: Path) -> None:
     assert not scan.scan_run_dir(run_dir).clean
 
 
+def test_query_credential_keys_single_source(tmp_path: Path) -> None:
+    """git_safe._CREDENTIAL_QUERY_KEYS is the one key set for the scan's
+    query-credential rule — a key added there widens this gate automatically."""
+    from daydream.archive.git_safe import _CREDENTIAL_QUERY_KEYS
+
+    for key in _CREDENTIAL_QUERY_KEYS:
+        run_dir = tmp_path / f"run-{key}"
+        _write_manifest(run_dir, f"https://example.com/repo?{key}=abc123")
+        assert any(
+            f.category == "query_credential" for f in scan.scan_run_dir(run_dir).findings
+        )
+
+
 def test_clean_bundle_passes(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _write_manifest(run_dir, "https://github.com/o/r")
