@@ -985,3 +985,24 @@ def test_strip_dot_slash_shared_by_both_record_loaders(tmp_path: Path) -> None:
     assert "api.py" not in uncovered
     assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
 
+
+
+def test_uncovered_sweep_prompt_carries_severity_rubric(tmp_path: Path) -> None:
+    """Issue #972 R1.1: the sweep reviewer assigns severities, so it gets the
+    host severity rubric, appended after the profile strategy text."""
+    from daydream import severity
+
+    intent = tmp_path / ".daydream" / "deep" / "intent.md"
+    output = tmp_path / ".daydream" / "deep" / "uncovered-0-review.md"
+    hunks = diff_block_for_file(_DIFF, "notes.txt") or ""
+    strategy = rp.build_default_profile().strategies["uncovered_review"].content
+    prompt = build_uncovered_sweep_prompt(
+        strategy=strategy,
+        file="notes.txt",
+        hunks=hunks,
+        intent_path=intent,
+        cwd=tmp_path,
+        output_path=output,
+    )
+    assert severity.SEVERITY_RUBRIC in prompt
+    assert prompt.index(severity.SEVERITY_RUBRIC) > prompt.index(strategy.format(file="notes.txt"))

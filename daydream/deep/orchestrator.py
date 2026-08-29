@@ -201,7 +201,8 @@ def total_agent_count(stack_count: int) -> int:
 
     Formula: 2 (TTT intent + alternative-review) + N per-stack reviews
     + N per-stack parse passes + 1 cross-stack merge + 1 conditional
-    arbiter (Opus pass over high-severity / contested findings). The
+    arbiter (Opus pass over findings at or above the profile's
+    ``Arbitration.min_severity`` — default high — plus contested findings). The
     arbiter fires when qualifying findings exist; the pre-flight estimate
     always includes it so users aren't surprised by the extra Opus call.
     The fix-gate agents are user-gated and excluded from the estimate.
@@ -1749,7 +1750,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         ctx.pipeline().arbitration.enabled
         and (config.start_at != "merge" or not adjudication_marker.is_file())
     ):
-        arbiter_targets = select_arbiter_targets(all_records, record_sources)
+        arbiter_targets = select_arbiter_targets(
+            all_records, record_sources,
+            min_severity=ctx.pipeline().arbitration.min_severity,
+            contested_location=ctx.pipeline().arbitration.contested_location,
+        )
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
         # are indices into this pre-apply list; once records are dropped the
@@ -1795,7 +1800,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # off (product default) this block never runs, `select_suppression_targets`
         # is never called, and arbiter output is byte-identical. When on, it gives
         # the borderline (LOW-confidence / low-severity uncontested) findings the
-        # arbiter never sees a skeptical second opinion, dropping any it cannot
+        # arbiter never sees a skeptical second opinion (for the profile's
+        # ``Suppression.severity_classes`` severity classes), dropping any it cannot
         # confirm (fail-CLOSED, the inverse of the arbiter). The arbiter target set
         # is the exclusion set so nothing high-severity / contested is re-judged
         # here. One batched agent call, resolved via the cheaper `suppression`
@@ -1805,7 +1811,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 i for i, r in enumerate(all_records) if id(r) in arbitrated_ids
             ]
             suppression_targets = select_suppression_targets(
-                all_records, record_sources, suppression_exclude
+                all_records,
+                record_sources,
+                suppression_exclude,
+                severity_classes=ctx.pipeline().suppression.severity_classes,
+                confidence_classes=ctx.pipeline().suppression.confidence_classes,
             )
             if suppression_targets:
                 async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):

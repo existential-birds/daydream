@@ -43,6 +43,7 @@ from daydream.phases import (
     _dependency_impact_instructions,
     _exploration_pointer,
 )
+from daydream.severity import SEVERITY_RUBRIC
 
 
 def _path_component_matches(absolute: str, relative: str) -> bool:
@@ -585,5 +586,6 @@ def build_uncovered_sweep_prompt(
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
     parts.append(f"Work in {cwd}. Write your full review to {output_path}.")
     return "\n\n".join(parts)

@@ -47,6 +47,7 @@ from daydream.extensions import (
 )
 from daydream.git_ops import GitError
 from daydream.pr_comment_renderer import render_run_info_block
+from daydream.severity import normalize_severity
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from daydream.ui import print_error, print_info, print_success, print_warning
 
@@ -91,6 +92,19 @@ class ParsedIssue:
         fingerprint: Deterministic SHA256 identity for cross-run dedup. Set on
             canonical merged findings and alt-review issues; None on other
             construction paths.
+        location_distrust: True when location validation demoted this finding
+            (its citation was beyond tolerance), issue #972 R2. Renders a
+            demotion note; blocks approval only when the finding was demoted
+            from a blocking original severity (see ``severity_before_demotion``).
+        severity_before_demotion: The original severity before location-
+            validation demotion, if any; the approval gate compares it against
+            the blocking set so an initially-low or never-asserted severity
+            stays non-blocking despite the demotion mark.
+        severity_off_vocabulary: True when this issue carried a present severity
+            string outside the canonical vocabulary (e.g. ``"critical"``). The
+            boundary folds such labels into ``None`` for ``severity`` (so the
+            canonical render path stays clean), but the gate must still fail
+            closed on them rather than read them as an omitted severity.
     """
 
     path: str
@@ -101,6 +115,9 @@ class ParsedIssue:
     confidence: str | None = None
     severity: str | None = None
     fingerprint: str | None = None
+    location_distrust: bool = False
+    severity_before_demotion: str | None = None
+    severity_off_vocabulary: bool = False
 
 
 @dataclass
@@ -131,6 +148,9 @@ class ItemFields:
     severity: str | None
     confidence: str | None
     is_cross_stack: bool
+    location_distrust: bool = False
+    severity_before_demotion: str | None = None
+    severity_off_vocabulary: bool = False
 
 
 @dataclass
@@ -248,6 +268,39 @@ def parse_finding_markers(text: str) -> list[str]:
     return FINDING_MARKER_RE.findall(text)
 
 
+def _normalize_severity(raw: dict[str, Any]) -> str | None:
+    """Normalize a raw item's severity against the canonical vocabulary.
+
+    Total: never raises. Present-but-null severities (the wire schema emits
+    ``severity: null``) and omitted keys both map to ``None``, as do unknown
+    or non-string values — never the string ``"none"``. Unknown string
+    severities (e.g. ``"critical"``) also map to ``None`` here so the
+    canonical render path stays clean; callers must pair this with
+    :func:`_severity_off_vocabulary` so a present-but-off-vocabulary label
+    still fails closed at the approval gate instead of looking like a model
+    that omitted severity.
+    """
+    return normalize_severity(raw.get("severity"))
+
+
+def _severity_off_vocabulary(raw: dict[str, Any]) -> bool:
+    """True when ``raw`` carries a present, non-empty severity string outside
+    the canonical vocabulary (e.g. ``"critical"``).
+
+    ``_normalize_severity`` folds such labels into ``None``, but a raw
+    off-vocabulary label is a severity the model asserted — it must not be
+    indistinguishable from an omitted severity at the approval gate. The gate
+    blocks on this flag, restoring the documented fail-closed invariant for
+    off-vocabulary labels (issue #972).
+    """
+    value = raw.get("severity")
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and normalize_severity(value) is None
+    )
+
+
 def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
     """Convert `phase_alternative_review` dicts into ParsedIssue objects.
 
@@ -268,7 +321,7 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
         title = str(raw.get("title", "")).strip()
         description = str(raw.get("description", "")).strip()
         recommendation = str(raw.get("recommendation", "")).strip()
-        severity = str(raw.get("severity", "")).strip().lower() or None
+        severity = _normalize_severity(raw)
         confidence = str(raw.get("confidence", "")).strip().upper() or None
         body_parts = []
         if severity:
@@ -289,6 +342,7 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
                     body=body,
                     confidence=confidence,
                     severity=severity,
+                    severity_off_vocabulary=_severity_off_vocabulary(raw),
                     fingerprint=compute_fingerprint(str(path), title, description),
                 )
             )
@@ -310,9 +364,12 @@ def extract_item_fields(
     line_int = int(line) if isinstance(line, int) and not isinstance(line, bool) else None
     description = str(raw.get("description", "")).strip()
     rationale = str(raw.get("rationale", "")).strip()
-    severity = str(raw.get("severity", "")).strip().lower() or None
+    severity = _normalize_severity(raw)
     confidence = str(raw.get("confidence", "")).strip().upper() or None
     is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
+    location_distrust = bool(raw.get("location_distrust"))
+    before = raw.get("severity_before_demotion")
+    severity_before_demotion = str(before).strip().lower() or None if before else None
     return ItemFields(
         path=path,
         line_int=line_int,
@@ -321,6 +378,9 @@ def extract_item_fields(
         severity=severity,
         confidence=confidence,
         is_cross_stack=is_cross_stack,
+        location_distrust=location_distrust,
+        severity_before_demotion=severity_before_demotion,
+        severity_off_vocabulary=_severity_off_vocabulary(raw),
     )
 
 
@@ -348,6 +408,16 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
             body_parts.append(f"**Severity:** {fields.severity}")
         if fields.confidence:
             body_parts.append(f"**Confidence:** {fields.confidence}")
+        if fields.location_distrust:
+            # First production reader of the location-distrust signal (issue
+            # #972 R2): the demotion is visible on the report, never silent.
+            if fields.severity_before_demotion:
+                body_parts.append(
+                    "**Location:** unverified citation "
+                    f"(severity demoted from {fields.severity_before_demotion})"
+                )
+            else:
+                body_parts.append("**Location:** unverified citation (severity demoted)")
         if fields.rationale and fields.rationale != fields.description:
             body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
@@ -363,6 +433,9 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                 fingerprint=compute_fingerprint(
                     fields.path, fields.description, fields.rationale
                 ),
+                location_distrust=fields.location_distrust,
+                severity_before_demotion=fields.severity_before_demotion,
+                severity_off_vocabulary=fields.severity_off_vocabulary,
             )
         )
     return out
@@ -1097,6 +1170,35 @@ def _severity_blocks_approval(severity: str | None) -> bool:
     return severity is not None and severity.lower() not in _NON_BLOCKING_SEVERITIES
 
 
+def _finding_blocks_approval(
+    severity: str | None,
+    location_distrust: bool,
+    severity_off_vocabulary: bool = False,
+    severity_before_demotion: str | None = None,
+) -> bool:
+    """Whether one finding blocks an approval, demotion-aware (issue #972 R2).
+
+    A finding marked ``location_distrust=True`` was judged at a higher severity
+    and demoted by location validation (its citation was beyond tolerance);
+    the demoted severity must not silently make it non-blocking. The demotion
+    mark is written for any beyond-tolerance record regardless of its original
+    severity, so the gate only re-blocks when the pre-demotion severity carried
+    via ``severity_before_demotion`` was itself blocking; an originally-low or
+    never-asserted severity stays non-blocking. This check is deliberately
+    separate from ``_severity_blocks_approval`` (and NOT folded into
+    ``_NON_BLOCKING_SEVERITIES``) so off-vocabulary severity strings keep
+    failing closed for their own reason. ``severity_off_vocabulary`` carries
+    that signal: a present-but-off-canonical label (e.g. ``"critical"``) is
+    folded into ``None`` at the boundary but was still a severity the model
+    asserted, so it blocks rather than reading as an omitted severity.
+    """
+    if location_distrust and _severity_blocks_approval(severity_before_demotion):
+        return True
+    if severity_off_vocabulary:
+        return True
+    return _severity_blocks_approval(severity)
+
+
 def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> bool:
     """Whether an opted-in review may post as an approval (issue #343).
 
@@ -1110,7 +1212,13 @@ def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> b
     if not approve_on_clean:
         return False
     return not any(
-        _severity_blocks_approval(issue.severity) for issue in classified.all_issues()
+        _finding_blocks_approval(
+            issue.severity,
+            issue.location_distrust,
+            issue.severity_off_vocabulary,
+            issue.severity_before_demotion,
+        )
+        for issue in classified.all_issues()
     )
 
 
@@ -1490,7 +1598,13 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and not any(
-        _severity_blocks_approval(finding.severity) for finding in artifact.findings
+        _finding_blocks_approval(
+            finding.severity,
+            finding.location_distrust,
+            finding.severity_off_vocabulary,
+            finding.severity_before_demotion,
+        )
+        for finding in artifact.findings
     )
 
     if classified.is_empty() and not can_approve:
@@ -1551,4 +1665,7 @@ def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
         confidence=finding.confidence,
         severity=finding.severity,
         fingerprint=finding.fingerprint,
+        location_distrust=finding.location_distrust,
+        severity_before_demotion=finding.severity_before_demotion,
+        severity_off_vocabulary=finding.severity_off_vocabulary,
     )

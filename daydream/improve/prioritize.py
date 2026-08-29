@@ -8,6 +8,7 @@ from collections import Counter
 from typing import Any
 
 from daydream.deep.dedup import bigrams, jaccard, normalize_title
+from daydream.severity import normalize_severity
 
 _IMPACT = {"HIGH": 3.0, "MED": 2.0, "LOW": 1.0}
 _EFFORT = {"S": 1.0, "M": 2.0, "L": 3.0}
@@ -21,7 +22,7 @@ _IMPACT_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
 _EFFORT_UNITS = {"S": 1, "M": 2, "L": 3}
 _RISK_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
 _CONFIDENCE_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
-_SEVERITY_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2, "CRITICAL": 3}
+_SEVERITY_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
 _CHANGE_SHAPES = {
     "delete",
     "reuse",
@@ -328,8 +329,17 @@ def _merge_work_package(findings: list[dict[str, Any]]) -> dict[str, Any]:
         "LOW",
         highest=False,
     )
-    if any("severity" in member for member in members):
-        merged["severity"] = _conservative_axis(members, "severity", _SEVERITY_ORDER, "HIGH")
+    # Unified fallback policy (issue #972 R3.1): when no member carries a
+    # known severity the axis is omitted entirely — no conservative "HIGH"
+    # default is fabricated for severity (the one permitted "high" default is
+    # the structural-lens setdefault in phases.py).
+    severity_values = [
+        axis
+        for member in members
+        if "severity" in member and (axis := _map_axis_severity(member["severity"])) is not None
+    ]
+    if severity_values:
+        merged["severity"] = max(severity_values, key=_SEVERITY_ORDER.__getitem__)
     merged["leverage"] = round(leverage_score(merged), 2)
 
     if len(members) > 1:
@@ -436,6 +446,21 @@ def _combined_change_shape(findings: list[dict[str, Any]]) -> str:
     if "neutral" in shapes:
         return "neutral"
     return "consolidate"
+
+
+def _map_axis_severity(value: object) -> str | None:
+    """Map a finding's severity to the audit-axis vocabulary, or ``None``.
+
+    Canonical lowercase levels (``daydream.severity``) map to their uppercase
+    axis names. Anything else — unknown, absent, ``None``, or off-canonical
+    (e.g. ``"CRITICAL"``) — maps to ``None`` so the caller can omit the axis
+    instead of promoting it to a conservative fallback (P-BOUNDARY, issue
+    #972 R3.1/R6.2).
+    """
+    normalized = normalize_severity(value)
+    if normalized is not None:
+        return {"low": "LOW", "medium": "MED", "high": "HIGH"}[normalized]
+    return None
 
 
 def _conservative_axis(

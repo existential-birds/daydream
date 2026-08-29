@@ -4558,3 +4558,37 @@ def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
     assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped
     assert "location_note" in items[0]  # demoted-with-annotation
 
+
+def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path: Path) -> None:
+    """R2.1/R2.4: a beyond-tolerance demotion keeps the original severity recoverable
+    and carries a machine-readable ``location_distrust`` mark through the merge."""
+    from daydream.hunk_index import write_hunk_index
+    from daydream.phases import _write_single_stack_merged_items
+
+    dd = tmp_path / ".daydream" / "deep"
+    dd.mkdir(parents=True)
+    write_hunk_index(
+        tmp_path / ".daydream",
+        "diff --git a/orchestrator.py b/orchestrator.py\n--- a/orchestrator.py\n+++ b/orchestrator.py\n"
+        "@@ -2270,3 +2284,5 @@\n x\n+x1\n+x2\n",
+    )
+    records = [
+        {
+            "id": 1,
+            "description": "off-citation",
+            "file": "orchestrator.py",
+            "line": 2272,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "r",
+            "evidence": "e",
+        }
+    ]
+    _write_single_stack_merged_items(tmp_path, dd, records, None)
+    from daydream.deep.artifacts import merged_items_path
+
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    assert items[0]["severity"] == "low"  # demoted value (report-facing)
+    assert items[0]["severity_before_demotion"] == "high"  # original preserved (R2.1)
+    assert items[0]["location_distrust"] is True  # machine-readable demotion mark
+

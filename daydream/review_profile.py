@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from daydream import severity
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
 
 
@@ -80,11 +81,12 @@ STAGE_KEYS: frozenset[str] = frozenset(
 )
 
 
-# Host-owned severity/confidence vocabularies (R5; mirror the repo's allowed
-# sets: severity is the lowercase low|medium|high scale -- benchmark/mapping.py,
-# benchmark/cli.py:284-287; confidence is the uppercase HIGH|MEDIUM|LOW schema
-# enum -- phases.py:4048,4250, deep/prompts.py arbiter/suppression/merge).
-_SEVERITY_LEVELS: frozenset[str] = frozenset(("low", "medium", "high"))
+# Host-owned severity/confidence vocabularies (R5): severity derives from the
+# canonical vocabulary in daydream/severity.py (CANONICAL_LEVELS -- the only
+# declaration of the lowercase low|medium|high scale); confidence is the
+# uppercase HIGH|MEDIUM|LOW schema enum -- phases.py:4048,4250,
+# deep/prompts.py arbiter/suppression/merge).
+_SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
 _CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
 
 
@@ -167,7 +169,7 @@ class Suppression:
     """
 
     enabled: bool = False
-    severity_classes: tuple[str, ...] = ("low", "medium")
+    severity_classes: tuple[str, ...] = ("low",)
     confidence_classes: tuple[str, ...] = ("LOW",)
 
 
@@ -423,14 +425,20 @@ def build_default_profile() -> ReviewProfile:
                 "- \"Good Patterns\" or \"Strengths\"\n"
                 "- \"Summary\" sections\n"
                 "- Any positive observations\n"
-                "{severity_hint}{verdicts_hint}\n"
+                "{verdicts_hint}\n"
                 "For each issue found, return a JSON object with this structure:\n"
                 "{{\"issues\": [\n"
-                "  {{\"id\": 1, \"description\": \"Brief description of the issue\", \"file\": \"path/to/file.py\", \"line\": 42{severity_field}}}\n"  # noqa: E501 (verbatim copy of the phase_parse_feedback literal)
+                "  {{\"id\": 1, \"description\": \"Brief description of the issue\", \"file\": \"path/to/file.py\", \"line\": 42}}\n"  # noqa: E501 (mirrors the phase_parse_feedback example shape)
                 "]{verdicts_example}}}\n\n"
                 "If there are no actionable issues, return: {{\"issues\": []{verdicts_empty}}}\n"
             ),
-            source="copied: daydream.phases.phase_parse_feedback",
+            # The parse stage itself is removed (issue #745); this copy is kept
+            # only as schema documentation. It no longer mirrors a live literal
+            # byte-for-byte: the host-appended severity rubric
+            # (daydream.severity.SEVERITY_RUBRIC) now carries all severity
+            # instruction, and the former {severity_hint} fallback fragment is gone
+            # (issue #972 R3/A2).
+            source="mirrors: daydream.phases.phase_parse_feedback (parse stage removed, issue #745)",
         ),
         "uncovered_review": Strategy(
             content=(

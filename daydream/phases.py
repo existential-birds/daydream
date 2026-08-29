@@ -58,6 +58,7 @@ from daydream.repository_paths import (
 from daydream.repository_paths import (
     path_is_confined,
 )
+from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -1118,15 +1119,9 @@ def _evidence_gate_then_validate(
     return validate_records(index, evidenced)
 
 
-# Canonical severity ordering shared by the deep fix loop and the shallow fix
-# loop. Defined here (next to normalize_items / MERGED_ITEMS_SCHEMA) so both
-# callers can import a single helper rather than duplicate the map.
-_SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
-
-
 def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stable-sort canonical items by severity (high < medium < low)."""
-    return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
+    return sorted(items, key=lambda it: SEVERITY_RANK.get(it.get("severity") or "", 1))
 
 
 def group_items_by_footprint(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -1530,6 +1525,7 @@ def build_alternative_review_prompt(
     else:
         body = strategy_filled
     parts.append(body + "\n")
+    parts.append(SEVERITY_RUBRIC)
     return "\n".join(parts)
 
 
@@ -1537,9 +1533,7 @@ def build_parse_prompt(
     *,
     strategy: str,
     review_output_path: Path,
-    severity_hint: str,
     verdicts_hint: str,
-    severity_field: str,
     verdicts_example: str,
     verdicts_empty: str,
 ) -> str:
@@ -1547,26 +1541,23 @@ def build_parse_prompt(
 
     The profile-owned ``parse`` strategy carries the extraction/dedup judgment
     prose as a template (``copied: daydream.phases.phase_parse_feedback``); the
-    host fills the runtime ``review_output_path`` and the schema/severity/verdict
-    envelope placeholders so the rendered prompt stays byte-identical to the
-    pre-extraction literal.
+    host fills the runtime ``review_output_path`` and the verdict
+    envelope placeholders so the rendered prompt matches the profile-owned
+    extraction strategy (the host-owned severity rubric in
+    ``daydream.severity`` now carries all severity instruction; the former
+    in-prompt severity hint died with the parse stage (issue #972 R3).
 
     Args:
         strategy: The profile-owned ``parse`` strategy content.
         review_output_path: Absolute path to the review markdown to parse.
-        severity_hint: Severity-extraction instruction (empty when the schema
-            does not request a ``severity`` field).
         verdicts_hint: Per-file verdict-surface instruction (empty when
             ``include_verdicts`` is False).
-        severity_field: The schema's severity enum fragment (empty when absent).
         verdicts_example: The schema's verdicts example fragment.
         verdicts_empty: The schema's empty-verdicts fragment.
     """
     return strategy.format(
         review_output_path=review_output_path,
-        severity_hint=severity_hint,
         verdicts_hint=verdicts_hint,
-        severity_field=severity_field,
         verdicts_example=verdicts_example,
         verdicts_empty=verdicts_empty,
     )
@@ -1739,21 +1730,6 @@ async def phase_parse_feedback(
     print_dim(console, f"Model: {backend.model}")
 
     schema = output_schema if output_schema is not None else FEEDBACK_SCHEMA
-    wants_severity = "severity" in (
-        schema.get("properties", {})
-        .get("issues", {})
-        .get("items", {})
-        .get("properties", {})
-    )
-    severity_field = ', "severity": "high|medium|low"' if wants_severity else ""
-    severity_hint = (
-        "\nAlso set a `severity` of high | medium | low for each issue, taken from the "
-        "review's own severity/priority label. Default to high when the review gives "
-        "no explicit severity.\n"
-        if wants_severity
-        else ""
-    )
-
     # Per-file verdict surface (issue #742). Deep-mode's per-stack parse emits
     # the schema-required ``verdicts`` array, so the prompt must teach the
     # verdict-line shape and its sub-fields; otherwise the strict-mode model
@@ -1789,9 +1765,7 @@ async def phase_parse_feedback(
     prompt = build_parse_prompt(
         strategy=strategy,
         review_output_path=review_output_path,
-        severity_hint=severity_hint,
         verdicts_hint=verdicts_hint,
-        severity_field=severity_field,
         verdicts_example=verdicts_example,
         verdicts_empty=verdicts_empty,
     )
@@ -4406,6 +4380,10 @@ def _append_structural_and_write_merged(
                 continue
             item = {**rec, "lens": "structural"}
             item.setdefault("confidence", "HIGH")
+            # The one documented exception to severity.DEFAULT_SEVERITY_POLICY
+            # (R3.3 structural high-conviction invariant): a structural finding
+            # that survived the evidence gate is high-conviction by
+            # construction, so it defaults to ``high``.
             item.setdefault("severity", "high")
             structural_items.append(item)
 
@@ -4416,9 +4394,11 @@ def _append_structural_and_write_merged(
     # makes that order structurally unreachable (issue #745). The validator
     # snaps in-tolerance citations to the nearest hunk boundary (aligning the
     # evidence citation) and demotes-with-annotation beyond-tolerance ones
-    # (severity/confidence lowered, ``location_note`` carried through
-    # normalize_items), so no unverified citation reaches the report at full
-    # severity. Fail-open: a missing index validates nothing (pre-change
+    # (severity/confidence lowered, ``location_note``, plus the non-destructive
+    # demotion fields ``severity_before_demotion``/``location_distrust``, all
+    # carried through normalize_items unchanged), so no unverified citation
+    # reaches the report at full severity while the original judgment stays
+    # recoverable. Fail-open: a missing index validates nothing (pre-change
     # behavior); the validator never raises and never rejects.
     evidenced = _evidence_gate_then_validate(
         base_items + structural_items, items_path

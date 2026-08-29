@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from daydream import git_ops, pr_review
+from daydream.findings import ArtifactFinding
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
     ParsedIssue,
@@ -1138,3 +1139,149 @@ def test_file_hunks_gh_fallback_handles_subprocess_error(
         git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42
     )
     assert hunks == []
+
+
+def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
+    """R2.2: a judged-high finding demoted to low by location validation must
+    still block APPROVE — demotion is visible, never approval-silencing."""
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline_issues=[
+            ParsedIssue(path="a.py", line=10, title="t", body="b",
+                        severity="low", location_distrust=True,
+                        severity_before_demotion="high")
+        ],
+    )
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "COMMENT"
+
+
+def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
+    """#336: a demoted finding whose ORIGINAL severity was already low (or never
+    asserted) must not block APPROVE — the location_distrust mark is written for
+    every beyond-tolerance record, but only a demotion from a blocking severity
+    keeps the gate closed."""
+    for before in ("low", None):
+        classified = pr_review._ClassifiedIssues(
+            inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+            inline_issues=[
+                ParsedIssue(path="a.py", line=10, title="t", body="b",
+                            severity="low", location_distrust=True,
+                            severity_before_demotion=before)
+            ],
+        )
+        payload = build_payload(pr, classified, approve_on_clean=True)
+        assert payload["event"] == "APPROVE"
+
+
+def test_demoted_low_finding_approval_gate_does_not_block() -> None:
+    """#336: the approval-gate unit check itself — location_distrust alone no
+    longer blocks once the original severity was low or never asserted."""
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, "low"
+    ) is False
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, None
+    ) is False
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, "high"
+    ) is True
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, "medium"
+    ) is True
+
+
+def test_parsed_issues_carry_location_distrust_and_report_note() -> None:
+    """R2 visibility: the demotion reaches the human-read issue body and the
+    machine-readable flag rides on the ParsedIssue."""
+    items = [
+        {
+            "file": "a.py",
+            "line": 10,
+            "description": "off-citation",
+            "rationale": "r",
+            "severity": "low",
+            "confidence": "LOW",
+            "severity_before_demotion": "high",
+            "location_distrust": True,
+        }
+    ]
+    issues = parsed_issues_from_items(items)
+    assert len(issues) == 1
+    assert issues[0].location_distrust is True
+    assert "**Location:** unverified citation (severity demoted from high)" in issues[0].body
+
+
+@pytest.mark.parametrize("raw", [{"severity": None}, {}])  # present-but-null ≡ omitted (R4.1)
+def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> None:
+    fields = pr_review.extract_item_fields({"file": "a.py", "line": 1, **raw})
+    assert fields is not None
+    assert fields.severity is None  # not the string "none"
+
+
+def test_null_severity_does_not_block_approval(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None))
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "APPROVE"
+    assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
+
+
+def test_artifact_off_vocabulary_severity_blocks_approval() -> None:
+    """R1/F1: an off-vocabulary label ('critical') folded to None at the Phase A
+    boundary must still block the artifact-backed approve gate.
+
+    The raw off-vocabulary signal rides through the artifact as
+    ``severity_off_vocabulary`` so the poster's gate fails closed even though
+    ``severity`` reads ``None``.
+    """
+    finding = ArtifactFinding(
+        fingerprint="f" * 64,
+        path="a.py",
+        line=10,
+        placement="inline",
+        title="t",
+        body="b",
+        severity=None,  # "critical" was folded to None by Phase A normalization
+        confidence="HIGH",
+        is_cross_stack=False,
+        severity_off_vocabulary=True,
+    )
+    issue = pr_review._issue_from_artifact_finding(finding)
+    assert issue.severity is None
+    assert issue.severity_off_vocabulary is True
+    # The approval gate blocks on the off-vocabulary signal even with severity None.
+    assert pr_review._finding_blocks_approval(
+        issue.severity, issue.location_distrust, issue.severity_off_vocabulary
+    ) is True
+
+
+def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
+    """Present-but-null severity (wire ``severity: null``) is not an asserted
+    off-vocabulary label: it models an omitted severity and does not block."""
+    finding = ArtifactFinding(
+        fingerprint="f" * 64,
+        path="a.py",
+        line=10,
+        placement="inline",
+        title="t",
+        body="b",
+        severity=None,
+        confidence="HIGH",
+        is_cross_stack=False,
+        severity_off_vocabulary=False,
+    )
+    issue = pr_review._issue_from_artifact_finding(finding)
+    assert pr_review._finding_blocks_approval(
+        issue.severity, issue.location_distrust, issue.severity_off_vocabulary
+    ) is False

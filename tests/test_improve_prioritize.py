@@ -406,3 +406,17 @@ def test_member_aliases_survive_wording_and_expose_membership_drift() -> None:
     assert before["package_fingerprint"] == after["package_fingerprint"]
     assert set(after["member_aliases"]) < set(expanded["member_aliases"])
     assert expanded["package_fingerprint"] != after["package_fingerprint"]
+
+
+def test_prioritize_unknown_severity_maps_explicitly() -> None:
+    """P-BOUNDARY (R6.2): unknown severity does not silently pass through as
+    ``"CRITICAL"``/raw — the axis mapper returns ``None`` and the caller omits
+    the axis instead of promoting to a conservative fallback."""
+    from daydream.improve import prioritize
+
+    assert prioritize._map_axis_severity(None) is None
+    assert prioritize._map_axis_severity("high") == "HIGH"
+    assert prioritize._map_axis_severity("weird") is None
+    # The axis vocabulary is 3-level; the off-canonical "CRITICAL" must not
+    # pass through as raw, exactly as the docstring asserts.
+    assert prioritize._map_axis_severity("CRITICAL") is None

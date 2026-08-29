@@ -112,14 +112,19 @@ def validate_records(
         the nearest hunk boundary (the record's ``nearest_hunk`` start or end)
         and align the ``file:line`` citation in ``record["evidence"]`` to the
         snapped line, so the evidence and snapped line never diverge.
-      - ``distance > tolerance``: demote the record in place -- lower
+      - ``distance > tolerance``: demote the record non-destructively --
+        preserve the original severity in ``record["severity_before_demotion"]``,
+        set ``record["location_distrust"] = True`` (machine-readable demotion
+        mark, read by the approval gate and the report renderer), then lower
         ``record["severity"]`` to ``"low"``, ``record["confidence"]`` to
         ``"LOW"`` and set ``record["location_note"]`` to a demotion annotation
         naming the file, cited line, nearest hunk and distance -- so the
-        unverified citation no longer reaches the report at full severity.
+        unverified citation no longer reaches the report at full severity while
+        the originally adjudicated severity remains recoverable (issue #972 R2).
 
     The mutation surface is the snap (line + evidence) and the demote
-    (severity/confidence/location_note); an in-hunk record is untouched.
+    (severity_before_demotion/location_distrust/severity/confidence/location_note);
+    an in-hunk record is untouched.
     Records without a file/line (or with a non-int line) pass through unchanged.
     Never raises. Returns the (possibly mutated) record list.
     """
@@ -148,12 +153,18 @@ def validate_records(
             _align_evidence(record, file, line, snapped)
         else:
             start, end = check.nearest_hunk
+            # Non-destructive demotion (issue #972 R2): keep the originally
+            # adjudicated severity recoverable and mark the record so the
+            # approval gate and the report renderer can surface the demotion
+            # instead of silently reading the lowered value as the verdict.
+            record["severity_before_demotion"] = record.get("severity")
+            record["location_distrust"] = True
             record["severity"] = "low"
             record["confidence"] = "LOW"
             record["location_note"] = (
                 f"cited line {line} in {file} is {check.distance} lines from the "
                 f"nearest hunk {start}..{end} (tolerance {tolerance}); demoted to "
-                f"informational (unverified citation)."
+                f"low (unverified citation)."
             )
     return records
 

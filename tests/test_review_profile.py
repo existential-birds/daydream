@@ -202,3 +202,27 @@ def test_clone_override_revalidates_and_rejects_forbidden() -> None:
     base = rp.build_default_profile()
     with pytest.raises(rp.ProfileError):
         rp.clone_with_overrides(base, {"intent": {"backend": "claude"}})  # host-owned
+
+
+def test_suppression_severity_classes_default_narrowed() -> None:
+    assert rp.Suppression.severity_classes == ("low",)
+
+
+def test_parse_review_strategy_has_no_default_to_high_hint() -> None:
+    """R3/A2: the mirrored parse-hint copy is dead — the profile's ``parse``
+    strategy must no longer carry the "Default to high" severity instruction
+    (parse stage removed, issue #745)."""
+    assert "Default to high" not in rp.build_default_profile().strategies["parse"].content
+
+
+def test_review_profile_severity_levels_derive_from_severity_module() -> None:
+    from daydream import severity
+
+    assert rp._SEVERITY_LEVELS == frozenset(severity.CANONICAL_LEVELS)
+
+
+def test_review_profile_no_stale_mapping_citation() -> None:
+    # benchmark/mapping.py does not exist — the comment citing it must be gone/corrected.
+    import inspect
+
+    assert "benchmark/mapping.py" not in inspect.getsource(rp)

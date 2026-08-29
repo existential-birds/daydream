@@ -1357,3 +1357,13 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     digest_b = lock_b["files"][next(iter(lock_b["cases"])) + "/task.toml"]
     assert digest_a != digest_b
     assert lock_a != lock_b          # lock bytes differ -> compiled_lock_sha256 differs
+
+
+def test_harbor_build_null_gold_severity_labeled_not_silent() -> None:
+    # build.py emits "unknown" for null gold severity — must remain an EXPLICIT
+    # labeled value, documented at the emission site (label, not canonical
+    # passthrough).
+    from daydream.benchmark.harbor import build
+
+    assert build._gold_severity_label(None) == "unknown"
+    assert build._gold_severity_label("HIGH") == "high"

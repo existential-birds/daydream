@@ -35,6 +35,7 @@ from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
 )
+from daydream.severity import SEVERITY_RUBRIC
 
 DOC_REVIEW_NOTICE = (
     "[Notice] Dedicated documentation review is planned but not yet "
@@ -128,7 +129,7 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     'tool output, a file:line citation, or an explicit "none" / "N matches" '
     'after a repo search. Never claim you "looked" without an artifact.\n'
     "  Gate 3 (severity): calibrate severity to impact; a request for net-new "
-    "code that did not exist in scope is Informational only.\n"
+    "code that did not exist in scope is at most low.\n"
     "Do NOT report a finding that fails any gate."
 )
 
@@ -628,6 +629,7 @@ def build_per_stack_prompt(
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
     if stack_name == "rust":
         parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
@@ -695,6 +697,7 @@ def build_structural_prompt(
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
@@ -754,11 +757,12 @@ def build_arbiter_prompt(
         "its `arb_id` unchanged. For each:\n"
         "  - keep: true if the finding is real and actionable; false to reject a "
         "false positive or a non-issue (rejected findings are dropped entirely).\n"
-        "  - severity: your adjudicated high | medium | low (you may change it).\n"
+        "  - severity: your adjudicated severity per the rubric below (you may "
+        "change it).\n"
         "  - confidence: your adjudicated HIGH | MEDIUM | LOW.\n"
         "  - description: a sharpened one-line summary (keep it about the same "
         "finding; do not repurpose the slot for a different issue).\n"
-        "  - rationale: why it matters, grounded in what you actually read."
+        "  - rationale: why it matters, grounded in what you actually read.\n\n" + SEVERITY_RUBRIC
     )
     return "\n\n".join(parts)
 
@@ -799,7 +803,7 @@ def build_supervise_prompt(
         "id and choose exactly one action: allow, drop, edit, or hold. Explain "
         "the decision in reason. For edit, revise only severity, confidence, "
         "description, rationale, or evidence; never file, line, or id. Missing "
-        "verdicts are treated as allow by the host."
+        "verdicts are treated as allow by the host.\n\n" + SEVERITY_RUBRIC
     )
     return "\n\n".join(parts)
 
@@ -859,12 +863,12 @@ def build_suppression_prompt(
         "its `sup_id` unchanged. For each:\n"
         "  - keep: true ONLY if you cite confirming evidence that the finding is "
         "real and actionable; false to drop an unconfirmed / immaterial finding.\n"
-        "  - severity: your adjudicated high | medium | low.\n"
+        "  - severity: your adjudicated severity per the rubric below.\n"
         "  - confidence: your adjudicated HIGH | MEDIUM | LOW.\n"
         "  - description: a sharpened one-line summary of the SAME finding.\n"
         "  - rationale: for a keep, the concrete evidence you found; for a drop, "
         "why it is not confirmable.\n"
-        "  - evidence: the grounded `file:line` citation backing a kept finding."
+        "  - evidence: the grounded `file:line` citation backing a kept finding.\n\n" + SEVERITY_RUBRIC
     )
     return "\n\n".join(parts)
 
@@ -980,7 +984,7 @@ def build_merge_prompt(
         "concern spanning multiple stacks, and \"wonder\" for an "
         "alternatives.json-sourced finding. (Structural findings are appended by "
         "the host -- do NOT emit them yourself.)\n"
-        "  - severity: \"high\" | \"medium\" | \"low\".\n"
+        "  - severity: one level per the rubric below.\n"
         "  - confidence: \"HIGH\" | \"MEDIUM\" | \"LOW\".\n"
         "  - file: the FULL repo-relative path exactly as it appears in the per-stack "
         "records (e.g. `services/my-svc/handler.py`, not just `handler.py`). "
@@ -1006,7 +1010,7 @@ def build_merge_prompt(
         "findings (same concern across files), emit ONE item with the primary file "
         "and list every other affected file in the `related_files` array (NOT buried "
         "in the rationale).\n"
-        "  - Do not invent findings not supported by the source records."
+        "  - Do not invent findings not supported by the source records.\n\n" + SEVERITY_RUBRIC
     )
     if resumed_from_arbiter:
         # Resuming the arbiter's session replays ITS context, which holds the
@@ -1277,6 +1281,7 @@ def build_generic_fallback_prompt(
 
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")

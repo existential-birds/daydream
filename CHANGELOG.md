@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **benchmark:** require `requested_base_sha` on ready/imported snapshot records; `migrate.migrate_workspace` backfills the field from `original_base_sha` on both v1 upgrade and v2 repair passes so pre-provenance-split workspaces stay loadable.
 
 - **tests:** enforce the branch-coverage floor (`fail_under`) on full-suite runs only — coverage flags moved out of global pytest `addopts` into `make test` and the CI check job so targeted `pytest tests/foo.py` runs stay plain, and `coverage.xml` is retained on failed runs for the CI artifact upload (#932)
+- **review:** unify finding-severity policy under a single canonical `low|medium|high` vocabulary (`daydream/severity.py`) with a host-owned severity rubric appended to every severity-assigning prompt; missing or off-vocabulary severities no longer render with a fabricated `medium` default (issue #972)
+- **review:** make the approval gate demotion-aware — findings demoted for an unverified citation (beyond-tolerance location) and asserted off-vocabulary severity strings block approval even when their folded severity is non-blocking; location demotion is now non-destructive (the original severity is preserved and surfaced on the report) (issue #972)
+- **review:** expose `Arbitration.min_severity` and `Suppression.severity_classes` review-profile knobs for the arbiter and suppression passes; arbitration defaults to high-severity (plus contested) findings and suppression defaults to low-severity findings only
 
 
 ## [0.28.0] - 2026-08-27
@@ -480,7 +483,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **review:** Precision-mode arbiter suppression for evidenced-but-minor findings ([#248](https://github.com/existential-birds/daydream/pull/248))
 
-  The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via `--precision` or automatically when the diff exceeds 500 lines.
+  The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via the `--precision` flag (or the corresponding file-config setting); there is no automatic diff-size trigger.
 
 - **training:** Stable per-finding join key for accept/reject labels ([#246](https://github.com/existential-birds/daydream/pull/246))
 
