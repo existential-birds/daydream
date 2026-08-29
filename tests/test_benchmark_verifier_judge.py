@@ -390,6 +390,18 @@ _REWARD_KEYS = {
     "clean_task",
     "clean_pass",
     "verifier_error",
+    "location_exact",
+    "location_near",
+    "location_file",
+    "location_miss",
+    "location_credit",
+    "location_present",
+    "severity_exact",
+    "severity_within_1",
+    "severity_mean_distance",
+    "severity_credit",
+    "severity_pairs",
+    "severity_present",
 }
 
 
@@ -512,6 +524,9 @@ def test_run_verifier_writes_reward_and_details_atomically(
     assert details["provider"] == "anthropic" and details["model"] == "m"
     assert "request_counts" in details and "errors" in details
     assert "src/" not in json.dumps(details)  # never source/diffs
+    assert reward.location_present == 1 and reward.location_exact == 2  # gold == candidate locations
+    assert reward.severity_present == 1 and reward.severity_exact == 2
+    assert reward.severity_credit == 1.0
 
 
 def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_path: Path) -> None:

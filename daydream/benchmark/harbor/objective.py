@@ -65,6 +65,29 @@ class Objective:
     failed_task_count: int
     comparison_eligible: bool
     mean_task_score: float
+    location_pairs_scored: int = 0
+    severity_pairs_scored: int = 0
+    location_exact: int = 0
+    location_near: int = 0
+    location_file: int = 0
+    location_miss: int = 0
+    total_location_exact: int = 0
+    total_location_near: int = 0
+    total_location_file: int = 0
+    total_location_miss: int = 0
+    severity_exact: int = 0
+    severity_within_1: int = 0
+    total_severity_exact: int = 0
+    total_severity_within_1: int = 0
+    location_exact_rate: float = 0.0
+    location_near_rate: float = 0.0
+    location_file_rate: float = 0.0
+    location_miss_rate: float = 0.0
+    severity_exact_rate: float = 0.0
+    severity_within_1_rate: float = 0.0
+    severity_mean_distance: float = 0.0
+    severity_credit: float = 0.0
+    location_credit: float = 0.0
     tokens: float | None = None
     cost: float | None = None
 
@@ -89,6 +112,29 @@ class Objective:
             "total_tp": self.tp,
             "total_fp": self.fp,
             "total_fn": self.fn,
+            "location_pairs_scored": self.location_pairs_scored,
+            "severity_pairs_scored": self.severity_pairs_scored,
+            "location_exact_rate": self.location_exact_rate,
+            "location_near_rate": self.location_near_rate,
+            "location_file_rate": self.location_file_rate,
+            "location_miss_rate": self.location_miss_rate,
+            "location_credit": self.location_credit,
+            "location_exact": self.location_exact,
+            "location_near": self.location_near,
+            "location_file": self.location_file,
+            "location_miss": self.location_miss,
+            "total_location_exact": self.total_location_exact,
+            "total_location_near": self.total_location_near,
+            "total_location_file": self.total_location_file,
+            "total_location_miss": self.total_location_miss,
+            "severity_exact": self.severity_exact,
+            "severity_within_1": self.severity_within_1,
+            "total_severity_exact": self.total_severity_exact,
+            "total_severity_within_1": self.total_severity_within_1,
+            "severity_exact_rate": self.severity_exact_rate,
+            "severity_within_1_rate": self.severity_within_1_rate,
+            "severity_mean_distance": self.severity_mean_distance,
+            "severity_credit": self.severity_credit,
         }
 
 
@@ -272,7 +318,8 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
 
     Produces only the opaque ``run_id``, ``mode``, ``schema_version``, the
     ``identity`` dict, and the ``objective`` dict (counts + ``comparison_eligible``
-    + optional ``tokens``/``cost``). No repository slug, PR number, source path,
+    + the reported location/severity axes + optional ``tokens``/``cost``). No
+    repository slug, PR number, source path,
     gold/candidate text, judge reasoning, or source code is ever emitted; only
     opaque benchmark/run ids and counts pass through (spec privacy must-have).
 
@@ -307,6 +354,29 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
             "failed_task_count": obj.failed_task_count,
             "comparison_eligible": obj.comparison_eligible,
             "mean_task_score": obj.mean_task_score,
+            "location_pairs_scored": obj.location_pairs_scored,
+            "severity_pairs_scored": obj.severity_pairs_scored,
+            "location_exact_rate": obj.location_exact_rate,
+            "location_near_rate": obj.location_near_rate,
+            "location_file_rate": obj.location_file_rate,
+            "location_miss_rate": obj.location_miss_rate,
+            "location_credit": obj.location_credit,
+            "location_exact": obj.location_exact,
+            "location_near": obj.location_near,
+            "location_file": obj.location_file,
+            "location_miss": obj.location_miss,
+            "total_location_exact": obj.total_location_exact,
+            "total_location_near": obj.total_location_near,
+            "total_location_file": obj.total_location_file,
+            "total_location_miss": obj.total_location_miss,
+            "severity_exact": obj.severity_exact,
+            "severity_within_1": obj.severity_within_1,
+            "total_severity_exact": obj.total_severity_exact,
+            "total_severity_within_1": obj.total_severity_within_1,
+            "severity_exact_rate": obj.severity_exact_rate,
+            "severity_within_1_rate": obj.severity_within_1_rate,
+            "severity_mean_distance": obj.severity_mean_distance,
+            "severity_credit": obj.severity_credit,
         }
         if obj.tokens is not None:
             objective_dict["tokens"] = obj.tokens
@@ -737,4 +807,27 @@ def _build_objective(
             infra_errors + verifier_errors + malformed + failed
         ),
         mean_task_score=float(agg["mean_task_score"]),
+        location_pairs_scored=int(agg["location_pairs_scored"]),
+        severity_pairs_scored=int(agg["severity_pairs_scored"]),
+        location_exact_rate=float(agg["location_exact_rate"]),
+        location_near_rate=float(agg["location_near_rate"]),
+        location_file_rate=float(agg["location_file_rate"]),
+        location_miss_rate=float(agg["location_miss_rate"]),
+        location_credit=float(agg["location_credit"]),
+        location_exact=int(agg["location_exact"]),
+        location_near=int(agg["location_near"]),
+        location_file=int(agg["location_file"]),
+        location_miss=int(agg["location_miss"]),
+        total_location_exact=int(agg["total_location_exact"]),
+        total_location_near=int(agg["total_location_near"]),
+        total_location_file=int(agg["total_location_file"]),
+        total_location_miss=int(agg["total_location_miss"]),
+        severity_exact=int(agg["severity_exact"]),
+        severity_within_1=int(agg["severity_within_1"]),
+        total_severity_exact=int(agg["total_severity_exact"]),
+        total_severity_within_1=int(agg["total_severity_within_1"]),
+        severity_exact_rate=float(agg["severity_exact_rate"]),
+        severity_within_1_rate=float(agg["severity_within_1_rate"]),
+        severity_mean_distance=float(agg["severity_mean_distance"]),
+        severity_credit=float(agg["severity_credit"]),
     )

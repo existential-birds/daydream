@@ -76,6 +76,17 @@ def test_metric_entry_aggregates_as_identically_to_verifier_core(
             "clean_task": 0,
             "clean_pass": 0,
             "verifier_error": 0,
+            "location_exact": 0,
+            "location_near": 0,
+            "location_file": 1,
+            "location_miss": 0,
+            "location_credit": 0.0,
+            "location_present": 1,
+            "severity_exact": 1,
+            "severity_within_1": 1,
+            "severity_mean_distance": 0.0,
+            "severity_credit": 1.0,
+            "severity_present": 1,
         },
         None,  # failed task (null row)
         {
@@ -91,6 +102,17 @@ def test_metric_entry_aggregates_as_identically_to_verifier_core(
             "clean_task": 1,
             "clean_pass": 1,
             "verifier_error": 0,
+            "location_exact": 0,
+            "location_near": 0,
+            "location_file": 0,
+            "location_miss": 0,
+            "location_credit": 0.0,
+            "location_present": 0,
+            "severity_exact": 0,
+            "severity_within_1": 0,
+            "severity_mean_distance": 0.0,
+            "severity_credit": 0.0,
+            "severity_present": 0,
         },
     ]
     lp = tmp_path / "rewards.jsonl"
@@ -139,21 +161,47 @@ def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path: Path) -
     assert m["micro_precision"] == 1.0 and m["micro_recall"] == 2.0 / 3.0
 
 
+def test_range_distance_cannot_drift_from_hunk_index() -> None:
+    """The verifier's private range_distance copy must stay semantically
+    byte-locked to daydream.hunk_index.range_distance (issue #971 R8)."""
+    import inspect
+
+    from daydream import hunk_index
+    from daydream.benchmark.harbor import verifier_core as vc
+    host = inspect.getsource(hunk_index.range_distance)
+    # the copy is private and stdlib-only; assert the arithmetic body matches
+    for line in (
+        "if start <= line <= end:",
+        "return 0",
+        "if line < start:",
+        "return start - line",
+        "return line - end",
+    ):
+        assert line in host and line in inspect.getsource(vc._range_distance)
+    assert "import daydream" not in inspect.getsource(vc)
+
+
+def test_location_tolerance_meets_floor() -> None:
+    from daydream.benchmark.harbor import verifier_core as vc
+    assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
+
+
 def test_metric_helper_functions_cannot_drift_from_verifier_core() -> None:
     """The metric.py template's helper functions must stay byte-identical to verifier_core.
 
     ``render_metric()`` splices only ``aggregate_metrics`` into the compiled
-    metric; the ``_as_int/_as_float/_f1`` helpers it resolves at runtime are the
-    template-local copies. They must not drift from the in-repo verifier_core
-    copies (which the corpus pool uses), or the compiled metric and the pool
-    would disagree on row coercion / f1. This gate makes any drift fail loudly
-    instead of silently diverging.
+    metric; the ``_as_int/_as_float/_f1/_axis_aggregates`` helpers it
+    resolves at runtime are the template-local copies. They must not drift
+    from the in-repo verifier_core copies (which the corpus pool uses), or
+    the compiled metric and the pool would disagree on row coercion / f1 /
+    axis pooling. This gate makes any drift fail loudly instead of silently
+    diverging.
     """
     import inspect
 
     from daydream.benchmark.harbor import verifier_core as vc
 
     tmpl = (REPO / "daydream" / "benchmark" / "harbor" / "templates" / "metric.py").read_text(encoding="utf-8")
-    for name in ("_as_int", "_as_float", "_f1"):
+    for name in ("_as_int", "_as_float", "_f1", "_axis_aggregates"):
         src = inspect.getsource(getattr(vc, name))
         assert src in tmpl, f"metric.py template's {name} drifted from verifier_core.py"

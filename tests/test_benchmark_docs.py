@@ -233,6 +233,34 @@ def test_claude_has_no_active_legacy_benchmark_reference() -> None:
         assert token not in text, f"legacy token {token!r} must not appear in CLAUDE.md"
 
 
+# --- Reported location/severity axes (issue #971) ---
+
+def test_reward_example_documents_reported_axes() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    # Per-task reward keys (24-key schema, TEMPLATE_VERSION 4)
+    for key in (
+        "location_exact", "location_near", "location_file", "location_miss",
+        "location_credit", "location_present", "severity_exact",
+        "severity_within_1", "severity_mean_distance", "severity_credit",
+        "severity_pairs", "severity_present",
+    ):
+        assert key in text, f"reward-key example missing {key!r}"
+    # Pooled aggregate axis keys
+    for key in (
+        "location_exact_rate", "location_near_rate", "location_miss_rate",
+        "location_pairs_scored", "severity_pairs_scored",
+    ):
+        assert key in text, f"aggregate example missing {key!r}"
+
+
+def test_reported_axes_contract_documented() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8").lower()
+    assert re.search(r"reported.{0,120}(never|do not|don't).{0,60}(gate|change)", text, re.S), (
+        "runbook must state that the reported axes never gate tp or reward"
+    )
+    assert "axis" in text
+
+
 # --- Change-scope guards (out-of-scope) ---
 
 def test_removed_docs_not_recreated() -> None:

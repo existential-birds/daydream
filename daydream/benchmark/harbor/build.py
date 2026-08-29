@@ -27,7 +27,7 @@ from daydream import severity
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 
-TEMPLATE_VERSION = "2"
+TEMPLATE_VERSION = "4"
 
 
 _METRIC_AGG_BEGIN = "# __AGGREGATION_BODY_BEGIN__"
@@ -226,8 +226,10 @@ def render_task_spec(case_doc: dict[str, Any], *, instruction: str) -> bytes:
         scoring = (
             f"The gold set contains {len(findings)} verified findings "
             f"({severity_summary}). A candidate finding scores when its content "
-            "semantically matches a gold finding; severity, location, and content "
-            "are graded, never the raw review-thread text."
+            "semantically matches a gold finding; severity agreement and location "
+            "tier are computed and reported per matched pair, but they never "
+            "change the match verdict, the tp/fp/fn counts, or the reward; "
+            "scoring never grades the raw review-thread text."
         )
         stable_summary = "\n".join(
             f"- {_gold_severity_label(f.get('severity'))}: {f.get('title') or ''}"

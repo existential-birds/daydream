@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from daydream.benchmark.harbor import verifier_core as vc
 from daydream.benchmark.harbor.verifier_core import (
     CandidateFinding,
     GoldFinding,
@@ -374,8 +375,7 @@ def test_empty_side_resolves_with_zero_verdicts() -> None:
 
 def test_reward_dict_is_numeric_only_with_all_keys() -> None:
     d = score_review([_gold()], _artifact(_valid_findings(1)), []).to_dict()
-    assert set(d) == {"reward", "tp", "fp", "fn", "precision", "recall", "f1",
-                      "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error"}
+    assert set(d) == EXPECTED_24_KEYS
     for k, v in d.items():
         assert isinstance(v, (int, float)) and not isinstance(v, bool)
 
@@ -543,3 +543,295 @@ def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
     r = score_review(gold, art, vs)
     assert (r.tp, r.fp, r.fn) == (2, 0, 0)
     assert r.reward == 1.0 and r.verifier_error == 0
+
+
+# ---------------------------------------------------------------------------
+# location-tier + severity-distance helpers (issue #971, task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_location_tier_classification() -> None:
+    # exact: same path, distance 0 inside the range
+    assert vc.location_tier("a.py", 10, 12, "a.py", 10, 12, 3) == "exact"
+    # near: same path, within tolerance
+    assert vc.location_tier("a.py", 10, 12, "a.py", 15, 15, 3) == "near"
+    # file: same path, beyond tolerance
+    assert vc.location_tier("a.py", 10, 12, "a.py", 100, 100, 3) == "file"
+    # miss: different path
+    assert vc.location_tier("a.py", 10, 12, "b.py", 10, 12, 3) == "miss"
+
+
+def test_location_tier_spans_overlap_counts_exact() -> None:
+    # multi-line candidate range overlapping the gold range at all -> exact
+    assert vc.location_tier("a.py", 10, 20, "a.py", 18, 25, 3) == "exact"
+    # non-overlapping span uses the nearer boundary distance
+    assert vc.location_tier("a.py", 10, 20, "a.py", 22, 24, 3) == "near"
+    assert vc.location_tier("a.py", 10, 20, "a.py", 30, 32, 3) == "file"
+
+
+def test_severity_distance_and_credit() -> None:
+    assert vc.severity_distance("high", "high") == 0
+    assert vc.severity_distance("high", "low") == 2
+    assert vc.severity_distance("low", "medium") == 1
+    assert vc.severity_credit(0) == 1.0
+    assert vc.severity_credit(1) == 0.5
+    assert vc.severity_credit(2) == 0.0
+
+
+def test_severity_distance_none_is_absent() -> None:
+    assert vc.severity_distance(None, "high") is None
+    assert vc.severity_distance("high", None) is None
+    assert vc.severity_distance(None, None) is None
+
+
+def test_severity_distance_unknown_raises() -> None:
+    with pytest.raises(VerifierError):
+        vc.severity_distance("critical", "high")
+    with pytest.raises(VerifierError):
+        vc.severity_distance("high", "info")
+
+
+# ---------------------------------------------------------------------------
+# Task 3: reported location/severity axes over matched pairs (issue #971)
+# ---------------------------------------------------------------------------
+
+EXPECTED_24_KEYS = {
+    "reward", "tp", "fp", "fn", "precision", "recall", "f1",
+    "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error",
+    "location_exact", "location_near", "location_file", "location_miss",
+    "location_credit", "location_present",
+    "severity_exact", "severity_within_1", "severity_mean_distance",
+    "severity_credit", "severity_pairs", "severity_present",
+}
+
+
+def _axis_gold(**overrides: Any) -> Any:
+    return _gold(path="src/a.py", start_line=10, end_line=12, **overrides)
+
+
+def _axis_cand_id(**overrides: Any) -> Any:
+    base = _cand()
+    base.update(overrides)
+    base["candidate_id"] = derive_candidate_id("case-x", base, 0)
+    return base
+
+
+def _axis_pair(gold_raw: Any, cand_raw: Any) -> tuple[list[Any], Any, list[Verdict]]:
+    gold = [parse_gold_finding(gold_raw)]
+    art = _artifact([cand_raw])
+    vs = [Verdict(gold_raw["finding_id"], cand_raw["candidate_id"], True, 0.9, "same bug")]
+    return gold, art, vs
+
+
+def test_score_review_axes_reported_not_gating() -> None:
+    # 1 gold finding at src/a.py:10-12, high severity; candidate matches content
+    # but reports src/a.py:50 (beyond tolerance) with low severity.
+    gold_raw = _axis_gold()
+    cand_raw = _axis_cand_id(path="src/a.py", start_line=50, end_line=50, severity="low")
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    assert reward.reward > 0.0 and reward.tp == 1          # content match still gates tp (R4)
+    assert reward.location_file == 1 and reward.location_present == 1
+    assert reward.severity_exact == 0 and reward.severity_within_1 == 0
+    assert reward.severity_present == 1 and reward.severity_credit == 0.0
+    assert reward.location_exact == 0 and reward.location_near == 0 and reward.location_miss == 0
+    assert reward.location_credit == 0.0 and reward.severity_mean_distance == 2.0
+
+
+def test_score_review_axis_absent_never_imputes() -> None:
+    # gold finding is locationless (path/start_line/end_line all None) and
+    # severityless -> both axes absent for the pair
+    gold_raw = _gold(path=None, start_line=None, end_line=None, severity=None)
+    cand_raw = _cand()
+    cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    assert reward.tp == 1 and reward.location_present == 0
+    assert reward.location_exact == 0 and reward.location_near == 0   # no counts, not imputed
+    assert reward.location_credit == 0.0
+    assert reward.severity_present == 0 and reward.severity_mean_distance == 0.0
+
+
+def test_score_review_locationless_candidate_side_absent() -> None:
+    # candidate locationless, gold located -> location axis absent; severity
+    # axis still scored independently (both sides have severity)
+    gold_raw = _axis_gold()
+    cand_raw = _cand(path=None, start_line=None, end_line=None)
+    cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    assert reward.tp == 1 and reward.location_present == 0 and reward.location_exact == 0
+    assert reward.location_credit == 0.0
+    assert reward.severity_present == 1 and reward.severity_exact == 1
+
+
+def test_score_review_location_tiers_and_severity_exact() -> None:
+    gold_raw = _axis_gold()
+    # near: within tolerance (distance 2); same severity -> exact
+    near_cand = _axis_cand_id(path="src/a.py", start_line=14, end_line=14, severity="high")
+    r_near = score_review(*_axis_pair(gold_raw, near_cand))
+    assert r_near.location_near == 1 and r_near.location_present == 1
+    assert r_near.location_credit == 1.0
+    assert r_near.severity_exact == 1 and r_near.severity_within_1 == 1
+    assert r_near.severity_mean_distance == 0.0 and r_near.severity_credit == 1.0
+
+    # exact tier
+    exact_cand = _axis_cand_id(path="src/a.py", start_line=11, end_line=11)
+    r_exact = score_review(*_axis_pair(gold_raw, exact_cand))
+    assert r_exact.location_exact == 1 and r_exact.location_credit == 1.0
+
+    # miss: different path -> counted as miss, location still present
+    miss_cand = _axis_cand_id(path="src/b.py", start_line=10, end_line=12)
+    r_miss = score_review(*_axis_pair(gold_raw, miss_cand))
+    assert r_miss.location_miss == 1 and r_miss.location_present == 1
+    assert r_miss.location_exact == 0 and r_miss.location_credit == 0.0
+
+
+def test_reward_to_dict_stays_numeric_only() -> None:
+    gold_raw = _axis_gold()
+    cand_raw = _axis_cand_id()
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    d = reward.to_dict()
+    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in d.values())
+    assert set(d) == EXPECTED_24_KEYS
+
+
+def test_reward_dict_early_returns_have_absent_axes() -> None:
+    # clean pass: no tp pairs -> all axis fields at zero/absent defaults (A4)
+    d = score_review([], _artifact([]), []).to_dict()
+    assert set(d) == EXPECTED_24_KEYS
+    assert d["location_present"] == 0 and d["severity_present"] == 0
+    assert d["location_exact"] == 0 and d["severity_mean_distance"] == 0.0
+
+
+def test_aggregate_metrics_pools_axis_keys() -> None:
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_exact": 1, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 1.0, "location_present": 1,
+         "severity_exact": 1, "severity_within_1": 1, "severity_mean_distance": 0.0,
+         "severity_credit": 1.0, "severity_pairs": 1, "severity_present": 1},
+        {"verifier_error": 0, "reward": 0.0, "tp": 1, "fp": 1, "fn": 0,
+         "clean_task": 1, "location_file": 1, "location_credit": 0.0, "location_present": 1,
+         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
+         "severity_mean_distance": 0.0, "severity_credit": 0.0,
+         "location_exact": 0, "location_near": 0, "location_miss": 0},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["location_exact_rate"] == 0.5 and m["location_pairs_scored"] == 2
+    assert m["severity_pairs_scored"] == 1 and m["severity_credit"] == 1.0
+    assert m["severity_mean_distance"] == 0.0
+
+
+def test_aggregate_metrics_axis_rates_zero_when_no_pairs() -> None:
+    m = vc.aggregate_metrics([])
+    for tier in ("exact", "near", "file", "miss"):
+        assert m[f"location_{tier}_rate"] == 0.0
+    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
+    assert m["severity_exact_rate"] == 0.0
+    assert m["severity_within_1_rate"] == 0.0
+    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 0.0
+    assert m["total_location_exact"] == 0 and m["total_severity_exact"] == 0
+
+
+def test_aggregate_metrics_pools_severity_counts_and_credit() -> None:
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 1, "severity_within_1": 1,
+         "severity_mean_distance": 0.0, "severity_credit": 1.0,
+         "severity_pairs": 1, "severity_present": 1},
+        {"verifier_error": 0, "reward": 0.5, "tp": 1, "fp": 0, "fn": 1,
+         "clean_task": 0, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 0, "severity_within_1": 1,
+         "severity_mean_distance": 1.0, "severity_credit": 0.5,
+         "severity_pairs": 1, "severity_present": 1},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["severity_pairs_scored"] == 2
+    assert m["total_severity_exact"] == 1 and m["total_severity_within_1"] == 2
+    assert m["severity_exact_rate"] == 0.5 and m["severity_within_1_rate"] == 1.0
+    assert m["severity_mean_distance"] == 0.5 and m["severity_credit"] == 0.75
+
+
+def test_aggregate_metrics_multi_pair_severity_rates_bounded() -> None:
+    # A single task with two severity-scored pairs: the per-pair numerators
+    # must divide by the pooled pair count, never the per-task row count, so
+    # the rates stay <= 1.0 (issue: pooled axis rates could exceed 1.0).
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 2, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 2, "severity_within_1": 2,
+         "severity_mean_distance": 0.0, "severity_credit": 1.0,
+         "severity_pairs": 2, "severity_present": 1},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["severity_pairs_scored"] == 2
+    assert m["severity_exact_rate"] == 1.0
+    assert m["severity_within_1_rate"] == 1.0
+    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 1.0
+
+
+def test_aggregate_metrics_severity_means_weight_by_pair_count() -> None:
+    # Unequal per-task pair counts (1 vs 2) must pool to the per-pair mean,
+    # weighting each task's reported mean by its pair count.
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 1, "severity_within_1": 1,
+         "severity_mean_distance": 0.0, "severity_credit": 1.0,
+         "severity_pairs": 1, "severity_present": 1},
+        {"verifier_error": 0, "reward": 0.5, "tp": 2, "fp": 0, "fn": 0,
+         "clean_task": 0, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 0, "severity_within_1": 2,
+         "severity_mean_distance": 1.0, "severity_credit": 0.5,
+         "severity_pairs": 2, "severity_present": 1},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["severity_pairs_scored"] == 3
+    assert m["severity_mean_distance"] == pytest.approx(2.0 / 3)
+    assert m["severity_credit"] == pytest.approx(2.0 / 3)
+
+
+def test_aggregate_metrics_location_credit_weights_by_pair_count() -> None:
+    # Unequal per-task pair counts (1 vs 2) must pool to the per-pair mean,
+    # weighting each task's reported credit by its pair count (the sum of its
+    # tier counts) so location_credit agrees with the per-pair tier rates.
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_exact": 1, "location_near": 0,
+         "location_file": 0, "location_miss": 0, "location_credit": 1.0,
+         "location_present": 1,
+         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
+         "severity_mean_distance": 0.0, "severity_credit": 0.0,
+         "severity_pairs": 0},
+        {"verifier_error": 0, "reward": 0.5, "tp": 2, "fp": 0, "fn": 0,
+         "clean_task": 0, "location_exact": 0, "location_near": 1,
+         "location_file": 1, "location_miss": 0, "location_credit": 0.5,
+         "location_present": 1,
+         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
+         "severity_mean_distance": 0.0, "severity_credit": 0.0,
+         "severity_pairs": 0},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["location_pairs_scored"] == 3
+    # unweighted mean of the per-task means would be 0.75; per-pair pooling
+    # (1 pair at 1.0, 2 pairs at 0.5) is 2/3, matching the pair-level rates.
+    assert m["location_credit"] == pytest.approx(2.0 / 3)
+
+
+def test_aggregate_metrics_pre_axis_rows_default_to_zero_pairs() -> None:
+    # An older row without any axis keys is a genuinely zero-pair row: it
+    # contributes nothing to the pooled axes and never raises.
+    m = vc.aggregate_metrics([
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0, "clean_task": 1},
+    ])
+    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
+    assert m["location_exact_rate"] == 0.0 and m["severity_credit"] == 0.0
