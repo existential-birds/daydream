@@ -1135,6 +1135,116 @@ def test_compiled_findings_oracle_scores_reward_1(sr_module: Any, tmp_path: Path
     assert reward.reward == 1.0 and reward.verifier_error == 0
 
 
+def _restamp_gold(case: Path, gold_bytes: bytes) -> None:
+    """Rewrite the compiled hidden gold and re-stamp its sentinel digest.
+
+    Test-only scenario construction: the compiled gold is replaced and the
+    ``gold_sha256`` sentinel in ``verifier-metadata.json`` is recomputed over
+    the new bytes with the same digest the compiler uses, so ``run_verifier``
+    still accepts the rewritten gold as the task's hidden ground truth.
+    """
+    import json as _json
+    gold_path = case / "tests" / "golden-review.json"
+    gold_path.write_bytes(gold_bytes)
+    meta_path = case / "tests" / "verifier-metadata.json"
+    meta = _json.loads(meta_path.read_bytes())
+    meta["gold_sha256"] = hashlib.sha256(gold_bytes).hexdigest()
+    meta_path.write_bytes(_json.dumps(meta, sort_keys=True).encode("utf-8"))
+
+
+def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(
+    sr_module: Any, tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """Compiled-path oracle: reward 1.0 with both reported axes perfect.
+
+    Extends the base fixture's gold with a non-null severity (re-derived with
+    the canonical gold id digest) and re-renders the oracle artifact with the
+    same severity and exact location, so every matched pair is exact on both
+    axes (R13: oracle still 1.0 with axes perfect).
+    """
+    import json
+
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    key = build.derive_task_key(case_id)
+    build.compile_workspace(ws)
+    case = ws / "harbor" / key
+
+    gold = json.loads((case / "tests" / "golden-review.json").read_bytes())
+    finding = {
+        "finding_id": "a" * 64, "title": gold[0]["title"], "body": gold[0]["body"],
+        "severity": "high",
+        "location": {"path": gold[0]["path"], "start_line": gold[0]["start_line"],
+                     "end_line": gold[0]["end_line"]},
+        "provenance": {"kind": "authored", "source_ids": []},
+    }
+    gold_bytes = json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8")
+    _restamp_gold(case, gold_bytes)
+
+    oracle_path = case / "solution" / "golden-review.json"
+    oracle_path.write_bytes(json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8"))
+
+    class MatchClient:
+        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
+            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
+
+    out = tmp_path / "out"
+    reward = sr_module.run_verifier(
+        case / "tests" / "golden-review.json", oracle_path, out,
+        client=MatchClient(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+    )
+    assert reward.reward == 1.0 and reward.verifier_error == 0
+    rj = json.loads((out / "reward.json").read_bytes())
+    assert rj["location_present"] == 1 and rj["location_exact"] == rj["tp"]
+    assert rj["severity_present"] == 1
+    assert rj["severity_exact"] == rj["tp"] and rj["severity_credit"] == 1.0
+
+
+def test_compiled_findings_oracle_locationless_null_severity_axes_absent(
+    sr_module: Any, tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """Locationless / null-severity gold: axes absent, reward still 1.0.
+
+    Satisfied-or-absent (R13): a locationless, null-severity matched pair
+    contributes to no axis count and never counts as a miss.
+    """
+    import json
+
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    key = build.derive_task_key(case_id)
+    build.compile_workspace(ws)
+    case = ws / "harbor" / key
+
+    finding = {
+        "finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
+        "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
+    }
+    gold_bytes = json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8")
+    _restamp_gold(case, gold_bytes)
+
+    oracle_path = case / "solution" / "golden-review.json"
+    oracle_path.write_bytes(json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8"))
+
+    class MatchClient:
+        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
+            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
+
+    out = tmp_path / "out"
+    reward = sr_module.run_verifier(
+        case / "tests" / "golden-review.json", oracle_path, out,
+        client=MatchClient(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+    )
+    assert reward.reward == 1.0 and reward.verifier_error == 0
+    rj = json.loads((out / "reward.json").read_bytes())
+    assert rj["location_present"] == 0 and rj["severity_present"] == 0
+    assert rj["location_miss"] == 0  # absent, never imputed to a miss
+
+
 def test_compile_uses_shared_model_gated_loader(
     tmp_path: Path,
     fake_gh: FakeGh,
