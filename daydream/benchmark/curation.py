@@ -347,6 +347,12 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
     ``evidence`` list of every import evidence record (all kinds), each
     augmented with a ``candidate_index``. A missing/unreadable import
     file for a case that references it propagates the storage error.
+
+    Additionally the case gains an in-memory (never persisted)
+    ``prioritized_evidence`` projection — the ranked actionability view
+    derived from the persisted ``prioritization`` facts plus current curation
+    state (:func:`prioritized_evidence`); the canonical ``evidence`` order is
+    untouched.
     """
     raw = _load_case(root, case_id)
     projection = _evidence_projection(root, raw)
@@ -356,6 +362,7 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
             if src in projection:
                 cand["evidence"] = projection[src]
     raw["evidence"] = _evidence_list(root, raw)
+    raw["prioritized_evidence"] = prioritized_evidence(raw)
     return raw
 
 
@@ -401,6 +408,232 @@ def _evidence_projection(
             "outdated": ev.get("outdated", False),
         }
     return projection
+
+
+# ---------------------------------------------------------------------------
+# prioritized evidence projection (issue #879)
+# ---------------------------------------------------------------------------
+
+# The seven bands in fixed display order (lowest rank first).
+BAND_RANK: dict[str, int] = {
+    "review_first": 0,
+    "needs_judgment": 1,
+    "possibly_actioned": 2,
+    "likely_actioned": 3,
+    "withdrawn": 4,
+    "context": 5,
+    "decided": 6,
+}
+
+# The closed reason-code set, in fixed display order (signal codes, then
+# availability causes, then classification causes).
+REASON_CODES: tuple[str, ...] = (
+    "resolved",
+    "outdated",
+    "anchor-delta-changed",
+    "anchor-delta-deleted",
+    "anchor-delta-renamed",
+    "anchor-delta-binary",
+    "pr-author-reply",
+    "commit-non-ancestor",
+    "commit-unavailable",
+    "anchor-unavailable",
+    "facts-missing",
+    "dismissed",
+    "decided-by-finding",
+    "decided-by-exclusion",
+    "decided-by-conflict",
+    "non-candidate",
+)
+
+_DELTA_SIGNAL_CODES = {
+    "changed": "anchor-delta-changed",
+    "deleted": "anchor-delta-deleted",
+    "renamed": "anchor-delta-renamed",
+    "binary": "anchor-delta-binary",
+}
+
+
+def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> frozenset[str]:
+    """The advisory actionability signals one evidence record carries.
+
+    Returns at most the four distinct signal types: ``resolved`` / ``outdated``
+    from the record itself, an anchor-delta signal code from the persisted
+    prioritization facts, and ``pr-author-reply`` when some same-thread later
+    reply was authored by the PR author (strictly later ``created_at``; reply
+    text is never read). Two occurrences of one type still count once — the
+    result is a set.
+
+    *view_context* carries ``pr_author_login`` (str | None), ``records`` (the
+    full evidence list, for reply-chain scanning) and ``facts`` (the persisted
+    ``prioritization`` block or None).
+    """
+    signals: set[str] = set()
+    if record.get("resolved"):
+        signals.add("resolved")
+    if record.get("outdated"):
+        signals.add("outdated")
+    source_id = record.get("source_id")
+    facts = view_context.get("facts") or {}
+    for group in ("candidates", "non_candidates"):
+        entry = (facts.get(group) or {}).get(source_id)
+        if entry:
+            code = _DELTA_SIGNAL_CODES.get(entry.get("anchor_delta"))
+            if code:
+                signals.add(code)
+    pr_login = view_context.get("pr_author_login")
+    created = record.get("created_at")
+    thread_id = record.get("thread_id")
+    if pr_login and created:
+        for other in view_context.get("records") or []:
+            if other is record or not other.get("reply_to_id"):
+                continue
+            if (other.get("thread_id") or None) != (thread_id or None):
+                continue
+            if ((other.get("author") or {}).get("login")) != pr_login:
+                continue
+            other_created = other.get("created_at")
+            if not other_created or other_created <= created:
+                continue
+            signals.add("pr-author-reply")
+            break
+    return frozenset(signals)
+
+
+def classify_evidence(
+    *,
+    refs: set[str],
+    is_candidate: bool,
+    dismissed: bool,
+    signals: frozenset[str] | set[str],
+    facts_present: bool,
+    commit_relation: str,
+    anchor_delta: str,
+) -> tuple[str, str, list[str]]:
+    """Pure first-match-wins band/disposition/reasons classifier.
+
+    Precedence: decided (curation refs) → context (non-candidate) → withdrawn
+    (dismissed) → two-or-more signals (likely_actioned) → one signal
+    (possibly_actioned) → needs_judgment (non-ancestor commit, unavailable
+    commit, unavailable anchor delta, or missing facts) → review_first.
+    Exact-acceptance blockers never alter the band. Reasons carry the codes
+    that justified the band, emitted in :data:`REASON_CODES` order.
+    """
+
+    def ordered(codes: list[str]) -> list[str]:
+        rank = {code: i for i, code in enumerate(REASON_CODES)}
+        return sorted(codes, key=lambda c: rank[c])
+
+    if "finding" in refs and "exclusion" in refs:
+        return "decided", "conflict", ordered(["decided-by-conflict"])
+    if "finding" in refs:
+        return "decided", "finding", ordered(["decided-by-finding"])
+    if "exclusion" in refs:
+        return "decided", "exclusion", ordered(["decided-by-exclusion"])
+    if not is_candidate:
+        return "context", "n/a", ordered(["non-candidate"])
+    if dismissed:
+        return "withdrawn", "undecided", ordered(["dismissed"])
+    if len(signals) >= 2:
+        return "likely_actioned", "undecided", ordered(list(signals))
+    if len(signals) == 1:
+        return "possibly_actioned", "undecided", ordered(list(signals))
+    if commit_relation == "non_ancestor":
+        return "needs_judgment", "undecided", ordered(["commit-non-ancestor"])
+    if commit_relation == "unavailable":
+        return "needs_judgment", "undecided", ordered(["commit-unavailable"])
+    if anchor_delta == "unavailable":
+        return "needs_judgment", "undecided", ordered(["anchor-unavailable"])
+    if not facts_present:
+        return "needs_judgment", "undecided", ordered(["facts-missing"])
+    return "review_first", "undecided", []
+
+
+def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
+    """Derive the read-only ``prioritized_evidence`` view of one case doc.
+
+    Consumes the raw case dict *after* its in-memory ``evidence`` list has
+    been attached (the already-loaded import records) plus the persisted
+    ``prioritization`` facts and current curation state. Mirror-scoped: no
+    git, no network. Returns ``{"entries": [...], "by_source": {...}}`` where
+    each entry carries ``source_id``, ``position`` (canonical index),
+    ``band``, ``reasons``, ``not_exact_reason`` (verbatim or None),
+    ``disposition``, ``thread_id`` and ``same_thread_ids`` (other evidence
+    sharing the same non-None thread). Final order: band rank, canonical
+    position, then ``source_id``. Absent/None facts fail open — every
+    candidate classifies via the facts-missing path (``needs_judgment``)
+    while non-candidates stay ``context`` and decided sources stay
+    ``decided``. Never persisted.
+    """
+    records = raw.get("evidence") or []
+    facts = raw.get("prioritization") or None
+    curation = raw.get("curation") or {}
+    candidate_ids = {
+        c.get("source_id") for c in (raw.get("candidates") or []) if c.get("source_id")
+    }
+    not_exact = {
+        c.get("source_id"): c.get("not_exact_reason")
+        for c in (raw.get("candidates") or [])
+        if c.get("source_id")
+    }
+    finding_refs = {
+        sid
+        for f in (curation.get("findings") or [])
+        for sid in ((f.get("provenance") or {}).get("source_ids") or [])
+    }
+    exclusion_refs = {
+        e.get("source_id") for e in (curation.get("exclusions") or []) if e.get("source_id")
+    }
+    pr_login = ((raw.get("pull_request") or {}).get("author") or {}).get("login")
+    view_context = {"pr_author_login": pr_login, "records": records, "facts": facts}
+    thread_members: dict[str, list[str]] = {}
+    for rec in records:
+        tid = rec.get("thread_id")
+        if tid is not None and rec.get("source_id"):
+            thread_members.setdefault(tid, []).append(rec["source_id"])
+    entries: list[dict[str, Any]] = []
+    by_source: dict[str, dict[str, Any]] = {}
+    for position, rec in enumerate(records):
+        sid = rec.get("source_id")
+        group = "candidates" if sid in candidate_ids else "non_candidates"
+        fentry = ((facts or {}).get(group) or {}).get(sid)
+        facts_present = fentry is not None
+        refs: set[str] = set()
+        if sid in finding_refs:
+            refs.add("finding")
+        if sid in exclusion_refs:
+            refs.add("exclusion")
+        signals = collect_signals(rec, view_context)
+        band, disposition, reasons = classify_evidence(
+            refs=refs,
+            is_candidate=sid in candidate_ids,
+            dismissed=sid in exclusion_refs,
+            signals=signals,
+            facts_present=facts_present,
+            commit_relation=(fentry or {}).get("commit_relation") or "at_head",
+            anchor_delta=(fentry or {}).get("anchor_delta") or "unchanged",
+        )
+        tid = rec.get("thread_id")
+        entry = {
+            "source_id": sid,
+            "position": position,
+            "band": band,
+            "reasons": reasons,
+            "not_exact_reason": not_exact.get(sid),
+            "disposition": disposition,
+            "thread_id": tid,
+            "same_thread_ids": sorted(
+                s for s in thread_members.get(tid, []) if s != sid
+            )
+            if tid is not None
+            else [],
+        }
+        entries.append(entry)
+        by_source[sid] = entry
+    entries.sort(
+        key=lambda e: (BAND_RANK[e["band"]], e["position"], e["source_id"])
+    )
+    return {"entries": entries, "by_source": by_source}
 
 
 # ---------------------------------------------------------------------------

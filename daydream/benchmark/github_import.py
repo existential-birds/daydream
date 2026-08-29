@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from daydream import git_ops
 from daydream.benchmark import curation as cu
 from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark.schema import EXTRACTION_VERSION
 
 
 def _run_gh_preflight_status(root: Path) -> subprocess.CompletedProcess[str]:
@@ -1371,9 +1372,6 @@ def _derive_one_anchor(
         # rather than aborting the import run: an anchor failure never kills
         # the import.
         return _anchor_fail_closed("path-unavailable")
-
-
-EXTRACTION_VERSION = 1
 
 
 def _extract_prioritization_facts(

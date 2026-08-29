@@ -15,6 +15,8 @@ import pytest
 import yaml
 
 from daydream import git_ops
+from daydream.benchmark import curation as cu
+from daydream.benchmark import storage
 from daydream.benchmark.schema import derive_finding_id
 from daydream.benchmark.storage import (
     atomic_write_json,
@@ -1232,3 +1234,94 @@ def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path: Path
     cu.mark_ready(ws2, case_id2, head_sha=head2, task_spec_sha256="c" * 64)
     cur2 = load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["curation"]
     assert cur2["state"] == "ready" and cur2["task_spec_sha256"] == "c" * 64
+
+
+# ---------------------------------------------------------------------------
+# prioritized_evidence projection (issue #879)
+# ---------------------------------------------------------------------------
+
+BANDS = ["review_first", "needs_judgment", "possibly_actioned", "likely_actioned",
+         "withdrawn", "context", "decided"]
+
+
+def test_band_rank_is_fixed_order() -> None:
+    from daydream.benchmark.curation import BAND_RANK
+    assert [b for b, _ in sorted(BAND_RANK.items(), key=lambda kv: kv[1])] == BANDS
+
+
+def test_classify_table_covers_precedence_and_dispositions() -> None:
+    from daydream.benchmark.curation import classify_evidence
+    # (curation refs, is_candidate, dismissed, signals, facts_present, commit_relation,
+    #  anchor_delta, expected_band, expected_disposition)
+    cases = [
+        ({"finding", "exclusion"}, True, False, set(), True, "at_head", "unchanged", "decided", "conflict"),
+        ({"finding"}, True, False, set(), True, "at_head", "unchanged", "decided", "finding"),
+        (set(), False, False, set(), True, "at_head", "unchanged", "context", "n/a"),
+        (set(), True, True, set(), True, "at_head", "unchanged", "withdrawn", "undecided"),
+        (set(), True, False, {"resolved", "outdated"}, True, "at_head", "unchanged", "likely_actioned", "undecided"),
+        (set(), True, False, {"resolved"}, True, "at_head", "unchanged", "possibly_actioned", "undecided"),
+        (set(), True, False, set(), True, "non_ancestor", "unchanged", "needs_judgment", "undecided"),
+        (set(), True, False, set(), True, "at_head", "unavailable", "needs_judgment", "undecided"),
+        (set(), True, False, set(), False, "at_head", "unchanged", "needs_judgment", "undecided"),  # facts-missing
+        (set(), True, False, set(), True, "at_head", "unchanged", "review_first", "undecided"),
+        # a repeated identical signal still counts once:
+        (set(), True, False, {"resolved"}, True, "at_head", "changed", "possibly_actioned", "undecided"),
+    ]
+    for refs, is_cand, dismissed, signals, has_facts, rel, delta, band, disp in cases:
+        got_band, got_disp, reasons = classify_evidence(
+            refs=refs, is_candidate=is_cand, dismissed=dismissed, signals=signals,
+            facts_present=has_facts, commit_relation=rel, anchor_delta=delta)
+        assert got_band == band and got_disp == disp, (refs, signals, rel, delta, got_band)
+
+
+def test_reason_codes_are_the_closed_set_in_fixed_order() -> None:
+    from daydream.benchmark.curation import REASON_CODES
+    assert list(REASON_CODES) == [
+        "resolved", "outdated", "anchor-delta-changed", "anchor-delta-deleted",
+        "anchor-delta-renamed", "anchor-delta-binary", "pr-author-reply",
+        "commit-non-ancestor", "commit-unavailable", "anchor-unavailable",
+        "facts-missing", "dismissed", "decided-by-finding", "decided-by-exclusion",
+        "decided-by-conflict", "non-candidate"]
+
+
+def test_get_case_attaches_prioritized_evidence_canonical_order_unchanged(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    from daydream.benchmark.curation import BAND_RANK
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    view = cu.get_case(ws, case_id)
+    canon = [e["source_id"] for e in view["evidence"]]
+    pe = view["prioritized_evidence"]
+    assert [e["source_id"] for e in pe["entries"]] == sorted(
+        (e["source_id"] for e in pe["entries"]),
+        key=lambda sid: (BAND_RANK[pe["by_source"][sid]["band"]], canon.index(sid), sid),
+    )
+    # canonical evidence list untouched:
+    assert [e["source_id"] for e in view["evidence"]] == canon
+
+
+def test_prioritized_view_fails_open_without_facts(tmp_path: Path, fake_gh: FakeGh) -> None:
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(case_path)
+    raw.pop("prioritization", None)
+    storage.atomic_write_yaml(case_path, raw)
+    view = cu.get_case(ws, case_id)
+    cand_sid = view["candidates"][0]["source_id"]
+    cand = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
+    assert cand["band"] == "needs_judgment" and "facts-missing" in cand["reasons"]
+    # and no case file was rewritten by the read:
+    assert load_yaml_strict(case_path) == raw
+
+
+def test_decided_and_withdrawn_classify_from_curation_state(tmp_path: Path, fake_gh: FakeGh) -> None:
+    # accept one candidate (a real curator action) -> that source becomes decided/finding;
+    # a dismissed evidence record -> withdrawn.
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    view = cu.get_case(ws, case_id)
+    cand_sid = view["candidates"][0]["source_id"]
+    cu.accept_candidate(ws, case_id, cand_sid)
+    view = cu.get_case(ws, case_id)
+    entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
+    assert entry["band"] == "decided" and entry["disposition"] == "finding"
+    assert "decided-by-finding" in entry["reasons"]

@@ -898,6 +898,12 @@ class CaseExclusion(_NoteForOther):
     note: str | None = None
 
 
+# Single source of truth for the snapshot-comparison fact extraction version.
+# Defined here (next to :class:`PrioritizationFacts`) so both github_import (the
+# writer) and curation (the reader) can import it without a circular import.
+EXTRACTION_VERSION = 1
+
+
 class PrioritizationCandidate(BaseModel):
     """Per-evidence comparison facts against the pinned snapshot head."""
 
