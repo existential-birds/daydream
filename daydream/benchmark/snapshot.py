@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, NamedTuple, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -169,6 +169,217 @@ def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
     return "ok" if anc.returncode == 0 else "head_not_on_pr"
 
 
+def commit_relation(mirror_repo: Path, head: str, commit: str) -> str:
+    """Classify how *commit* relates to the PR head in the pinned mirror.
+
+    Returns ``"at_head"`` iff *commit* equals *head*; ``"ancestor"`` when
+    ``git merge-base --is-ancestor commit head`` exits zero; ``"non_ancestor"``
+    on a non-zero exit with the object present; and ``"unavailable"`` when the
+    object is missing from the mirror or the probe itself fails. Errors are
+    returned as the value, never raised.
+    """
+    if commit == head:
+        return "at_head"
+    try:
+        verify = git_ops._run_git(
+            mirror_repo, ["rev-parse", "--verify", f"{commit}^{{commit}}"], retries=0,
+        )
+        if verify.returncode != 0:
+            return "unavailable"
+        anc = git_ops._run_git(
+            mirror_repo, ["merge-base", "--is-ancestor", commit, head], retries=0,
+        )
+    except git_ops.GitError:
+        return "unavailable"
+    return "ancestor" if anc.returncode == 0 else "non_ancestor"
+
+
+class AnchorDiff(NamedTuple):
+    """Whole-tree ``base_tip..head`` diff classification, shared across anchors.
+
+    A pure function of ``(base_tip, head)`` and the mirror's content-addressed
+    objects, so one classification serves every anchor against the same pair:
+    :func:`anchor_delta` skips the two whole-tree diffs
+    (``--name-status -z -M`` / ``--numstat -z``) for subsequent records,
+    leaving only the per-path ``-U0`` probe. A path appears in at most one
+    bucket, mirroring the probe's check order.
+    """
+
+    renames: frozenset[str]
+    binary: frozenset[str]
+    modified: frozenset[str]
+    deleted: frozenset[str]
+
+
+def _nul_fields(stdout: str | bytes) -> list[str]:
+    """NUL-split ``git -z`` output into surrogateescape-decoded fields.
+
+    The canonical split shared by :func:`anchor_delta` and
+    :func:`resolve_authoring_path` (and ``git_ops.ls_files``): ``-z`` emits
+    raw pathnames (no C-style quoting to unparse), so records must be split on
+    NUL and each field surrogateescape-decoded.
+    """
+    stdout = stdout if isinstance(stdout, bytes) else stdout.encode()
+    return [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
+
+
+def _classify_diff(name_status: str | bytes, numstat: str | bytes) -> AnchorDiff:
+    """Classify a whole-tree ``base..head`` diff into per-path buckets.
+
+    Never probes git — the caller supplies the already-captured
+    ``--name-status -z -M`` and ``--numstat -z`` byte streams (both pure
+    functions of ``(base_tip, head)``). Rename/copy rows contribute the old
+    AND new name; ``D`` rows the deleted set; every other two-field row the
+    modified set; numstat ``-\t-`` records the binary set.
+    """
+    fields = _nul_fields(name_status)
+    # numstat -z records are NUL-terminated with tab-separated fields:
+    # add, del, path (add/del are "-" for binary content).
+    nfields = _nul_fields(numstat)
+    binary: set[str] = set()
+    for record in nfields:
+        parts = record.split("\t", 2)
+        if len(parts) == 3 and parts[0] == "-" and parts[1] == "-":
+            binary.add(parts[2])
+    renames: set[str] = set()
+    modified: set[str] = set()
+    deleted: set[str] = set()
+    j = 0
+    while j < len(fields):
+        status = fields[j]
+        if status.startswith(("R", "C")):
+            if j + 2 >= len(fields):
+                break
+            renames.add(fields[j + 1])
+            renames.add(fields[j + 2])
+            j += 3
+        else:
+            if j + 1 >= len(fields):
+                break
+            path = fields[j + 1]
+            if status == "D":
+                deleted.add(path)
+            else:
+                modified.add(path)
+            j += 2
+    return AnchorDiff(
+        renames=frozenset(renames),
+        binary=frozenset(binary),
+        modified=frozenset(modified),
+        deleted=frozenset(deleted),
+    )
+
+
+def anchor_delta(
+    mirror_repo: Path,
+    base_tip: str,
+    head: str,
+    anchor: Any,
+    diff_cache: dict[tuple[str, str], AnchorDiff] | None = None,
+) -> str:
+    """Classify how the base..head change interacts with one authoring anchor.
+
+    *anchor* is an :class:`~daydream.benchmark.schema.AuthoringAnchor`-shaped
+    dict whose ``[start_line, end_line]`` span lives in the diff base (the
+    ``base_tip`` argument) commit's file coordinate space — for real fact
+    extraction the caller feeds the record's authoring commit as ``base_tip``,
+    the space GitHub's authoring ``original_line`` fields are expressed in.
+    Returns ``"locationless"`` when the anchor is not ``status == "derived"``
+    or carries no path/range; otherwise the base..head diff is classified:
+    anchored path renamed -> ``"renamed"``; anchored path deleted ->
+    ``"deleted"``; binary content at the anchored path -> ``"binary"``; a
+    modification whose ``-U0`` base-side hunk ranges intersect the anchored
+    ``[start_line, end_line]`` span -> ``"changed"``; a same-file
+    modification outside the span -> ``"unchanged"``. Equal base/head (an
+    at-head anchor) is ``"unchanged"`` with no mirror probes. Any git failure
+    returns ``"unavailable"`` (fail-closed: never raised, never guessed). All
+    reads are local mirror reads only.
+
+    The two whole-tree diffs are pure functions of ``(base_tip, head)``, so
+    when *diff_cache* is supplied the classification is computed once per
+    distinct pair and shared by every anchor on it: a comment-heavy
+    materialization whose records sit on the same authoring commit pays the
+    ``--name-status``/``--numstat`` fan-out once, not once per record. The
+    per-path ``-U0`` probe still runs per modified record (it depends on the
+    anchored path, and the hunk intersection on the anchor's span).
+    """
+    if not isinstance(anchor, dict) or anchor.get("status") != "derived":
+        return "locationless"
+    path = anchor.get("path")
+    start = anchor.get("start_line")
+    end = anchor.get("end_line")
+    if not path or start is None or end is None:
+        return "locationless"
+    if base_tip == head:
+        # An at-head anchor is by definition unmodified by the (empty)
+        # base..head change — and the most common extraction case, so it must
+        # never spawn git probes.
+        return "unchanged"
+    try:
+        diff = diff_cache.get((base_tip, head)) if diff_cache is not None else None
+        if diff is None:
+            st = git_ops._run_git(
+                mirror_repo,
+                ["diff", "--name-status", "-z", "-M", base_tip, head],
+                retries=0,
+                capture_bytes=True,
+            )
+            if st.returncode != 0:
+                return "unavailable"
+            numstat = git_ops._run_git(
+                mirror_repo,
+                ["diff", "--numstat", "-z", base_tip, head],
+                retries=0,
+                capture_bytes=True,
+            )
+            if numstat.returncode != 0:
+                return "unavailable"
+            # Both streams are pure functions of (base_tip, head): compute the
+            # classification once per distinct pair and share it across every
+            # anchor on that pair (the -U0 probe below still runs per record).
+            diff = _classify_diff(st.stdout, numstat.stdout)
+            if diff_cache is not None:
+                diff_cache[(base_tip, head)] = diff
+        if path in diff.deleted:
+            return "deleted"
+        if path in diff.renames:
+            return "renamed"
+        if path in diff.binary:
+            return "binary"
+        if path not in diff.modified:
+            return "unchanged"
+        # The anchored path was modified: the anchor's [start_line, end_line]
+        # span lives in the diff-base (authoring) coordinate space, so
+        # intersect it with the -U0 hunk *base-side* ranges (``-l,s``) — the
+        # new-side ``+c,d`` positions diverge from the authoring coordinates
+        # whenever lines shift above the anchor, misclassifying the span.
+        hunks = git_ops._run_git(
+            mirror_repo, ["diff", "-U0", base_tip, head, "--", path], retries=0,
+        )
+        if hunks.returncode != 0:
+            return "unavailable"
+        for line in hunks.stdout.splitlines():
+            if not line.startswith("@@"):
+                continue
+            minus = line.split("+", 1)[0].strip()
+            old = minus.rpartition(" ")[2]
+            if not old.startswith("-"):
+                continue
+            c, _, d = old[1:].partition(",")
+            cstart = int(c)
+            clen = int(d) if d else 1
+            if clen == 0:
+                # A zero-length base-side range (a pure insertion) cannot
+                # touch any existing authoring line, so the span is unaffected.
+                continue
+            cend = cstart + max(clen - 1, 0)
+            if start <= cend and end >= cstart:
+                return "changed"
+        return "unchanged"
+    except git_ops.GitError:
+        return "unavailable"
+
+
 def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -> str | None:
     """The merge-base of the base tip and head, or None when none exists.
 
@@ -250,9 +461,9 @@ def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapp
         )
     # The -z output is byte-oriented and may carry non-UTF-8 pathnames from the
     # traced range, so capture bytes and surrogateescape-decode each field (the
-    # canonical NUL-split pattern shared with git_ops.ls_files).
-    stdout = trace.stdout if isinstance(trace.stdout, bytes) else trace.stdout.encode()
-    fields = [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
+    # canonical NUL-split pattern shared with git_ops.ls_files; see
+    # snapshot._nul_fields).
+    fields = _nul_fields(trace.stdout)
     matches: list[str] = []
     i = 0
     while i < len(fields):

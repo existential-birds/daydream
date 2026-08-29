@@ -44,6 +44,8 @@ __all__ = [
     "AuthoringAnchor",
     "EvidenceRecord",
     "Candidate",
+    "PrioritizationFacts",
+    "PrioritizationCandidate",
     "ImportDocument",
     "PullRequestMeta",
     "CaseSource",
@@ -896,6 +898,45 @@ class CaseExclusion(_NoteForOther):
     note: str | None = None
 
 
+# Single source of truth for the snapshot-comparison fact extraction version.
+# Defined here (next to :class:`PrioritizationFacts`) so both github_import (the
+# writer) and curation (the reader) can import it without a circular import.
+EXTRACTION_VERSION = 1
+
+
+class PrioritizationCandidate(BaseModel):
+    """Per-evidence comparison facts against the pinned snapshot head."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commit_relation: Literal["at_head", "ancestor", "non_ancestor", "unavailable"]
+    anchor_delta: Literal[
+        "unchanged", "changed", "renamed", "deleted", "binary", "locationless", "unavailable"
+    ]
+
+
+class PrioritizationFacts(BaseModel):
+    """Additive per-case prioritization facts (schema_version stays 2).
+
+    Written once at case materialization/refresh; all new data stays out of
+    every hash surface.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    extraction_version: int
+    head_sha: str
+    candidates: dict[str, PrioritizationCandidate] = {}
+    non_candidates: dict[str, PrioritizationCandidate] = {}
+
+    @field_validator("head_sha")
+    @classmethod
+    def _hex40(cls, v: str) -> str:
+        if not _HEX40.fullmatch(v):
+            raise ValueError(f"head_sha must be 40-hex, got {v!r}")
+        return v
+
+
 class Curation(BaseModel):
     """Curated gold state for one case."""
 
@@ -970,6 +1011,7 @@ class CaseDocument(BaseModel):
     source: CaseSource
     curation: Curation
     candidates: list[Candidate] = []
+    prioritization: PrioritizationFacts | None = None
 
     @model_validator(mode="after")
     def _unique_candidates(self) -> "CaseDocument":

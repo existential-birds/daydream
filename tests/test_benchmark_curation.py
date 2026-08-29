@@ -15,6 +15,8 @@ import pytest
 import yaml
 
 from daydream import git_ops
+from daydream.benchmark import curation as cu
+from daydream.benchmark import storage
 from daydream.benchmark.schema import derive_finding_id
 from daydream.benchmark.storage import (
     atomic_write_json,
@@ -1232,3 +1234,192 @@ def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path: Path
     cu.mark_ready(ws2, case_id2, head_sha=head2, task_spec_sha256="c" * 64)
     cur2 = load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["curation"]
     assert cur2["state"] == "ready" and cur2["task_spec_sha256"] == "c" * 64
+
+
+# ---------------------------------------------------------------------------
+# prioritized_evidence projection (issue #879)
+# ---------------------------------------------------------------------------
+
+BANDS = ["review_first", "needs_judgment", "possibly_actioned", "likely_actioned",
+         "withdrawn", "context", "decided"]
+
+
+def test_band_rank_is_fixed_order() -> None:
+    from daydream.benchmark.curation import BAND_RANK
+    assert [b for b, _ in sorted(BAND_RANK.items(), key=lambda kv: kv[1])] == BANDS
+
+
+def test_classify_table_covers_precedence_and_dispositions() -> None:
+    from daydream.benchmark.curation import classify_evidence
+    # (curation refs, is_candidate, dismissed, signals, facts_present, commit_relation,
+    #  anchor_delta, expected_band, expected_disposition)
+    cases = [
+        ({"finding", "exclusion"}, True, False, set(), True, "at_head", "unchanged", "decided", "conflict"),
+        ({"finding"}, True, False, set(), True, "at_head", "unchanged", "decided", "finding"),
+        (set(), False, False, set(), True, "at_head", "unchanged", "context", "n/a"),
+        (set(), True, True, set(), True, "at_head", "unchanged", "withdrawn", "undecided"),
+        (set(), True, False, {"resolved", "outdated"}, True, "at_head", "unchanged", "likely_actioned", "undecided"),
+        (set(), True, False, {"resolved"}, True, "at_head", "unchanged", "possibly_actioned", "undecided"),
+        (set(), True, False, set(), True, "non_ancestor", "unchanged", "needs_judgment", "undecided"),
+        (set(), True, False, set(), True, "at_head", "unavailable", "needs_judgment", "undecided"),
+        (set(), True, False, set(), False, "at_head", "unchanged", "needs_judgment", "undecided"),  # facts-missing
+        (set(), True, False, set(), True, "at_head", "unchanged", "review_first", "undecided"),
+        # a repeated identical signal still counts once:
+        (set(), True, False, {"resolved"}, True, "at_head", "changed", "possibly_actioned", "undecided"),
+    ]
+    for refs, is_cand, dismissed, signals, has_facts, rel, delta, band, disp in cases:
+        got_band, got_disp, reasons = classify_evidence(
+            refs=refs, is_candidate=is_cand, dismissed=dismissed, signals=signals,
+            facts_present=has_facts, commit_relation=rel, anchor_delta=delta)
+        assert got_band == band and got_disp == disp, (refs, signals, rel, delta, got_band)
+
+
+def test_reason_codes_are_the_closed_set_in_fixed_order() -> None:
+    from daydream.benchmark.curation import REASON_CODES
+    assert list(REASON_CODES) == [
+        "resolved", "outdated", "anchor-delta-changed", "anchor-delta-deleted",
+        "anchor-delta-renamed", "anchor-delta-binary", "pr-author-reply",
+        "commit-non-ancestor", "commit-unavailable", "anchor-unavailable",
+        "facts-missing", "dismissed", "decided-by-finding", "decided-by-exclusion",
+        "decided-by-conflict", "non-candidate"]
+
+
+def test_get_case_attaches_prioritized_evidence_canonical_order_unchanged(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    from daydream.benchmark.curation import BAND_RANK
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    view = cu.get_case(ws, case_id)
+    canon = [e["source_id"] for e in view["evidence"]]
+    pe = view["prioritized_evidence"]
+    assert [e["source_id"] for e in pe["entries"]] == sorted(
+        (e["source_id"] for e in pe["entries"]),
+        key=lambda sid: (BAND_RANK[pe["by_source"][sid]["band"]], canon.index(sid), sid),
+    )
+    # canonical evidence list untouched:
+    assert [e["source_id"] for e in view["evidence"]] == canon
+
+
+def test_prioritized_view_fails_open_without_facts(tmp_path: Path, fake_gh: FakeGh) -> None:
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(case_path)
+    raw.pop("prioritization", None)
+    storage.atomic_write_yaml(case_path, raw)
+    view = cu.get_case(ws, case_id)
+    cand_sid = view["candidates"][0]["source_id"]
+    cand = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
+    assert cand["band"] == "needs_judgment" and "facts-missing" in cand["reasons"]
+    # and no case file was rewritten by the read:
+    assert load_yaml_strict(case_path) == raw
+
+
+def test_decided_and_withdrawn_classify_from_curation_state(tmp_path: Path, fake_gh: FakeGh) -> None:
+    # a record-level GitHub dismissal (the import marks inline comments whose
+    # review was DISMISSED) reaches the withdrawn band through the real
+    # projection; the same candidate accepted afterwards becomes decided/finding
+    # (curation refs outrank a dismissal).
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    view = cu.get_case(ws, case_id)
+    cand_sid = view["candidates"][0]["source_id"]
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    import_path = ws / raw["source"]["import_file"]
+    imp = load_json_strict(import_path)
+    for rec in imp["evidence"]:
+        if rec["source_id"] == cand_sid:
+            rec["dismissed"] = True
+    atomic_write_json(import_path, imp)
+
+    view = cu.get_case(ws, case_id)
+    entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
+    assert entry["band"] == "withdrawn" and entry["disposition"] == "undecided"
+    assert entry["reasons"] == ["dismissed"]
+
+    # accept one candidate (a real curator action) -> that source becomes decided/finding.
+    cu.accept_candidate(ws, case_id, cand_sid)
+    view = cu.get_case(ws, case_id)
+    entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
+    assert entry["band"] == "decided" and entry["disposition"] == "finding"
+    assert "decided-by-finding" in entry["reasons"]
+
+
+def test_pr_author_reply_signal_respects_real_thread_identity() -> None:
+    """Thread-less records are never conflated into one shared reply bucket.
+
+    Regression (issue #336): a PR-author reply without a GraphQL thread id
+    (REST-only inline reply absent from the thread overlay) used to land in
+    ``latest_pr_author_reply[None]`` and spuriously flag every earlier
+    thread-less record (reviews, issue comments, other reply chains). Thread
+    identity for a thread-less record is its REST reply chain top; records
+    outside any chain are unreachable from any reply.
+    """
+    from daydream.benchmark import curation as cu
+
+    def rec(source_id: str, kind: str, db_id: int, node_id: str, created: str,
+            login: str, *, thread_id: str | None = None,
+            reply_to_id: str | None = None) -> dict[str, object]:
+        return {
+            "source_id": source_id, "kind": kind, "database_id": db_id,
+            "node_id": node_id, "created_at": created, "updated_at": created,
+            "author": {"login": login, "type": "User"},
+            "thread_id": thread_id, "reply_to_id": reply_to_id,
+        }
+
+    # pr author login: alice
+    records = [
+        rec("github:review:100", "review", 100, "PRR_100",
+            "2026-01-01T00:01:00Z", "carol"),
+        rec("github:issue_comment:200", "issue_comment", 200, "IC_200",
+            "2026-01-01T00:02:00Z", "dave"),
+        # a thread-less, reply-less REST root in its own unrelated chain,
+        # predating the later thread-less PR-author reply (the pre-fix
+        # None-bucket scenario); a candidate, so a signal would render:
+        rec("github:inline_comment:40", "inline_comment", 40, "DIFF_40",
+            "2026-01-01T00:02:30Z", "bob"),
+        # REST-only chain root + PR-author reply, both without thread ids:
+        rec("github:inline_comment:10", "inline_comment", 10, "DIFF_10",
+            "2026-01-01T00:03:00Z", "bob"),
+        rec("github:inline_comment:11", "inline_comment", 11, "DIFF_11",
+            "2026-01-01T00:04:00Z", "alice", reply_to_id="10"),
+        # threaded chain (root + PR-author reply in one thread):
+        rec("github:inline_comment:20", "inline_comment", 20, "DIFF_20",
+            "2026-01-01T00:05:00Z", "bob", thread_id="T1"),
+        rec("github:inline_comment:21", "inline_comment", 21, "DIFF_21",
+            "2026-01-01T00:06:00Z", "alice", thread_id="T1",
+            reply_to_id="DIFF_20"),
+        # a different threaded thread with no PR-author reply:
+        rec("github:inline_comment:30", "inline_comment", 30, "DIFF_30",
+            "2026-01-01T00:07:00Z", "carol", thread_id="T2"),
+    ]
+    candidate_sids = [
+        "github:inline_comment:40", "github:inline_comment:10",
+        "github:inline_comment:20", "github:inline_comment:30",
+    ]
+    view = cu.prioritized_evidence({
+        "evidence": records,
+        "pull_request": {"author": {"login": "alice", "type": "User"}},
+        "candidates": [{"source_id": sid} for sid in candidate_sids],
+        "curation": {},
+    })
+    reasons = {sid: e["reasons"] for sid, e in view["by_source"].items()}
+    # thread-less non-chain records keep no pr-author-reply reason:
+    assert "pr-author-reply" not in reasons["github:review:100"]
+    assert "pr-author-reply" not in reasons["github:issue_comment:200"]
+    # the unrelated thread-less candidate root keeps no reason either, even
+    # though a later thread-less PR-author reply exists in another chain:
+    assert "pr-author-reply" not in reasons["github:inline_comment:40"]
+    # genuinely replied-to candidates still surface the signal and rank:
+    assert "pr-author-reply" in reasons["github:inline_comment:10"]
+    assert view["by_source"]["github:inline_comment:10"]["band"] == "possibly_actioned"
+    assert "pr-author-reply" in reasons["github:inline_comment:20"]
+    # unrelated threads/chains never do:
+    assert "pr-author-reply" not in reasons["github:inline_comment:30"]
+
+    # the direct-caller fallback scan (no precomputed map) agrees:
+    ctx = {"pr_author_login": "alice", "records": records}
+    assert "pr-author-reply" not in cu.collect_signals(records[0], ctx)
+    assert "pr-author-reply" not in cu.collect_signals(records[1], ctx)
+    assert "pr-author-reply" not in cu.collect_signals(records[2], ctx)
+    assert "pr-author-reply" in cu.collect_signals(records[3], ctx)
+    assert "pr-author-reply" in cu.collect_signals(records[5], ctx)
+    assert "pr-author-reply" not in cu.collect_signals(records[7], ctx)

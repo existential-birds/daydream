@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
+from daydream.git_ops import GitError
 
 # ---------------------------------------------------------------------------
 # real-git seed helpers (deterministic commit SHAs)
@@ -888,3 +889,270 @@ def _clone_offline(bundle: Path, workdir: Path) -> Path:
     clone = tempfile.mkdtemp(prefix="e2e-", dir=str(workdir))
     _git(bundle.parent, "clone", "--no-local", "--no-checkout", str(bundle), clone)
     return Path(clone)
+
+
+# ---------------------------------------------------------------------------
+# Task 0 spike (plan #879): mirror reads for commit-relation + anchor-delta facts
+# ---------------------------------------------------------------------------
+
+
+def _seed_facts_origin(tmp_path: Path) -> tuple[str, str, str, str]:
+    """Bare origin seeded for the prioritization fact probes.
+
+    main: base1 -> base2 -> base3; refs/pull/1/head off base2 with one commit
+    that (a) renames ``old.py`` to ``new.py`` with no content change, (b) edits
+    ``feature.py`` in place, and (c) adds a binary file. Returns
+    ``(bare, base2_sha, base3_sha, head_sha)`` where base2 is the PR's base tip
+    and base3 is an unrelated (non-ancestor-of-head) commit.
+    """
+    repo = tmp_path / "facts_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "readme.txt", "base1\n")
+    _commit(repo, "base1")
+    _write(repo, "base.py", "BASE = 2\n")
+    base2_sha = _commit(repo, "base2")
+    _write(repo, "beyond.py", "BEYOND = 3\n")
+    base3_sha = _commit(repo, "base3")
+    _git(repo, "checkout", "--detach", base2_sha)
+    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
+    _write(repo, "feature.py", "FEATURE = 1\n")
+    authoring_sha = _commit(repo, "author old.py + feature.py")
+    _git(repo, "mv", "old.py", "new.py")
+    repo.joinpath("feature.py").write_text("FEATURE = 2\n")
+    _git(repo, "add", "feature.py")
+    (repo / "blob.bin").write_bytes(b"\x00\x01\x02\x03binary")
+    _git(repo, "add", "blob.bin")
+    head_sha = _commit(repo, "rename + edit + binary")
+
+    bare = tmp_path / "facts_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    return str(bare), authoring_sha, base3_sha, head_sha
+
+
+def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path) -> None:
+    """Spike pin (task 0, plan #879): a plain bare mirror answers both fact
+    queries the prioritization extraction needs — ``merge-base --is-ancestor``
+    for the commit relation and ``diff --name-status -M`` / ``--numstat`` for
+    the anchor delta (with parseable path columns and binary detection). If any
+    probe's output shape deviates on a plain bare mirror, the extraction helper
+    design must be revised before Task 1."""
+    from daydream.benchmark import snapshot as sn
+
+    origin, authoring_sha, unrelated_sha, head_sha = _seed_facts_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = sn.mirror(tmp_path)
+
+    # (a) commit relation: ancestor exits 0; unrelated commit exits non-zero.
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", head_sha, head_sha],
+        cwd=m, capture_output=True, text=True,
+    )
+    assert ancestor.returncode == 0, ancestor.stderr
+    unrelated = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", unrelated_sha, head_sha],
+        cwd=m, capture_output=True, text=True,
+    )
+    assert unrelated.returncode != 0
+
+    # (b) anchor delta inputs: rename + intersecting edit with parseable columns.
+    statuses = _git(m, "diff", "--name-status", authoring_sha, head_sha, "-M")
+    rows = [line.split("\t") for line in statuses.splitlines() if line]
+    rename = next(r for r in rows if r[0].startswith("R"))
+    assert rename == ["R100", "old.py", "new.py"], statuses
+    edited = next(r for r in rows if r[0] == "M")
+    assert edited == ["M", "feature.py"], statuses
+    assert all(r[0] == "A" or len(r) >= 2 for r in rows), statuses
+
+    # (c) binary detection: numstat emits '-' for both added/deleted counts.
+    numstat = _git(m, "diff", "--numstat", authoring_sha, head_sha)
+    assert "-\t-\tblob.bin" in numstat.splitlines(), numstat
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (plan #879): commit_relation + anchor_delta helpers
+# ---------------------------------------------------------------------------
+
+
+def _seed_delta_origin(tmp_path: Path) -> tuple[str, str, str, dict[str, str]]:
+    """Bare origin seeded for the fact-helper tests (task 2, plan #879).
+
+    main: base1 (readme) -> base2 (base.py + a 10-line ``wide.py`` +
+    ``renamed.txt`` + ``deleted.txt``). Four heads branch off base2: ``edit``
+    (modifies wide.py line 10 in place), ``rename`` (``git mv renamed.txt`` ->
+    ``renamed2.txt``), ``delete`` (removes deleted.txt), and ``binary`` (adds a
+    binary ``bin.dat``). An ``orphan`` commit sits off base1 on a different
+    ancestry. Returns ``(bare, base2_sha, orphan_sha, heads)`` where ``heads``
+    maps scenario name -> head SHA.
+    """
+    repo = tmp_path / "delta_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "readme.txt", "base1\n")
+    _commit(repo, "base1")
+    _write(repo, "base.py", "BASE = 2\n")
+    _write(repo, "wide.py", "".join(f"line{i}\n" for i in range(1, 11)))
+    _write(repo, "renamed.txt", "r\n")
+    _write(repo, "deleted.txt", "d\n")
+    base2_sha = _commit(repo, "base2")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    content = (repo / "wide.py").read_text().replace("line10\n", "line10 edited\n")
+    repo.joinpath("wide.py").write_text(content)
+    _git(repo, "add", "wide.py")
+    edit_head = _commit(repo, "edit wide.py line 10")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    _git(repo, "mv", "renamed.txt", "renamed2.txt")
+    rename_head = _commit(repo, "rename renamed.txt")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    _git(repo, "rm", "deleted.txt")
+    delete_head = _commit(repo, "delete deleted.txt")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    (repo / "bin.dat").write_bytes(b"\x00\x01\x02binary")
+    _git(repo, "add", "bin.dat")
+    binary_head = _commit(repo, "add bin.dat")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    repo.joinpath("orphan.txt").write_text("o\n")
+    _git(repo, "add", "orphan.txt")
+    orphan_sha = _commit(repo, "orphan")
+
+    bare = tmp_path / "delta_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    for name, sha in (("edit", edit_head), ("rename", rename_head),
+                      ("delete", delete_head), ("binary", binary_head),
+                      ("orphan", orphan_sha)):
+        _git(repo, "push", "origin", f"{sha}:refs/heads/{name}")
+    heads = {"edit": edit_head, "rename": rename_head,
+             "delete": delete_head, "binary": binary_head}
+    return str(bare), base2_sha, orphan_sha, heads
+
+
+def _anchor(path: str | None, start: int | None, end: int | None,
+            commit: str, status: str = "derived") -> dict[str, Any]:
+    return {"version": 1, "status": status, "commit_id": commit,
+            "path": path, "start_line": start, "end_line": end}
+
+
+def _delta_mirror(tmp_path: Path) -> tuple[Path, str, str, dict[str, str]]:
+    from daydream.benchmark import snapshot as sn
+
+    origin, base, orphan, heads = _seed_delta_origin(tmp_path)
+    m = sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn._git_fetch(m, origin, [
+        f"{sha}:refs/heads/fact-{i}"
+        for i, sha in enumerate((base, orphan, *heads.values()))
+    ])
+    return sn.mirror(tmp_path), base, orphan, heads
+
+
+def test_commit_relation_classifies_ancestor_head_and_non_ancestor(tmp_path: Path) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    assert sn.commit_relation(m, heads["edit"], heads["edit"]) == "at_head"
+    assert sn.commit_relation(m, heads["edit"], base) == "ancestor"
+    assert sn.commit_relation(m, heads["edit"], orphan) == "non_ancestor"
+
+
+def test_commit_relation_unavailable_on_missing_object(tmp_path: Path) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    assert sn.commit_relation(m, heads["edit"], "f" * 40) == "unavailable"
+
+
+def test_anchor_delta_intersecting_vs_elsewhere_rename_delete_binary_locationless(
+    tmp_path: Path,
+) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    # intersecting edit to the anchored range -> changed
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 10, 10, base)) == "changed"
+    # edit elsewhere in the same file -> unchanged
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 1, 5, base)) == "unchanged"
+    # anchored path renamed -> renamed
+    assert sn.anchor_delta(m, base, heads["rename"],
+                           _anchor("renamed.txt", 1, 1, base)) == "renamed"
+    # anchored file deleted -> deleted
+    assert sn.anchor_delta(m, base, heads["delete"],
+                           _anchor("deleted.txt", 1, 1, base)) == "deleted"
+    # binary content at the anchor -> binary
+    assert sn.anchor_delta(m, base, heads["binary"],
+                           _anchor("bin.dat", 1, 1, base)) == "binary"
+    # anchor with path=None or a non-derived status -> locationless
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor(None, None, None, base)) == "locationless"
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 1, 1, base, status="path-unavailable")) == "locationless"
+
+
+def test_anchor_delta_unavailable_on_git_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise GitError("forced failure")
+
+    monkeypatch.setattr(git_ops, "_run_git", _boom)
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 10, 10, base)) == "unavailable"
+
+
+def test_anchor_delta_shared_classification_runs_whole_tree_diffs_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two anchors on the same (base_tip, head) share the whole-tree
+    name-status/numstat classification via diff_cache: only the per-path -U0
+    probe remains per-record, and the cached classification classifies each
+    record exactly as an uncached probe would."""
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    probes: list[list[str]] = []
+    real = git_ops._run_git
+
+    def counting(repo: Any, args: list[str], **kw: Any) -> Any:
+        if any(flag in args for flag in ("--name-status", "--numstat", "-U0")):
+            probes.append(args)
+        return real(repo, args, **kw)
+
+    monkeypatch.setattr(git_ops, "_run_git", counting)
+    cache: dict[tuple[str, str], sn.AnchorDiff] = {}
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 10, 10, base), diff_cache=cache
+    ) == "changed"
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 1, 5, base), diff_cache=cache
+    ) == "unchanged"
+    assert len([a for a in probes if "--name-status" in a]) == 1
+    assert len([a for a in probes if "--numstat" in a]) == 1
+    # one per-path -U0 probe per modified record stays
+    assert len([a for a in probes if "-U0" in a]) == 2
+    # without the shared cache each record pays the whole-tree fan-out anew
+    probes.clear()
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 10, 10, base)
+    ) == "changed"
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 1, 5, base)
+    ) == "unchanged"
+    assert len([a for a in probes if "--name-status" in a]) == 2
+    assert len([a for a in probes if "--numstat" in a]) == 2

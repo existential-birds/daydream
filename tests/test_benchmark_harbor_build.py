@@ -886,6 +886,38 @@ def test_harbor_bytes_identical_under_anchor_metadata_change(tmp_path: Path, fak
     assert lock_a == lock_b and tree_a == tree_b
 
 
+def test_harbor_bytes_identical_under_prioritization_fact_change(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """Prioritization facts and the derived ranked view never reach the compiled
+    Harbor tree or lock digest: mutating only the case doc's prioritization key
+    (and even deleting it) yields byte-identical tree and lock."""
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    lock_a = build.compile_workspace(ws)
+    tree_a = _harbor_tree_bytes(ws)
+
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(case_path)
+    raw["prioritization"]["candidates"] = {}                   # arbitrary fact mutation
+    raw["prioritization"]["extraction_version"] = 999
+    storage.atomic_write_yaml(case_path, raw)
+    lock_b = build.compile_workspace(ws)
+    tree_b = _harbor_tree_bytes(ws)
+    assert lock_a == lock_b and tree_a == tree_b
+    # and no triage sentinel in any compiled file:
+    for rel, data in tree_b.items():
+        assert b"prioritization" not in data, rel
+
+    # deleting the key entirely is also inert
+    raw = storage.load_yaml_strict(case_path)
+    del raw["prioritization"]
+    storage.atomic_write_yaml(case_path, raw)
+    lock_c = build.compile_workspace(ws)
+    tree_c = _harbor_tree_bytes(ws)
+    assert lock_a == lock_c and tree_a == tree_c
+
+
 def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build

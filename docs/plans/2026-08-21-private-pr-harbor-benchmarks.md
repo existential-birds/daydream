@@ -459,6 +459,14 @@ curation:
       reason: fixed_before_snapshot
       note: The final head includes the requested bounds check.
   case_exclusion: null
+prioritization:
+  extraction_version: 1
+  head_sha: <40-hex>
+  candidates:
+    github:review_comment:987654:
+      commit_relation: at_head
+      anchor_delta: unchanged
+  non_candidates: {}
 ```
 
 Case rules:
@@ -513,6 +521,14 @@ Case rules:
   `{reason, note}` where reason is `unreplayable`, `not_suitable`,
   `duplicate_case`, or `other`, and `other` requires a note. An unreplayable
   case may be excluded without snapshot/gold attestation.
+- `prioritization` is an additive, optional advisory record (schema_version
+  stays `2`): comparison facts computed once at case materialization/refresh —
+  the commit relation of each evidence anchor's commit to the pinned head and
+  the anchor delta. It is advisory display state, never curation state.
+  Prioritization facts never enter any hash surface: not the import payload,
+  not evidence signatures, not projection hashes, not staleness signatures,
+  and not the Harbor lock. Changing facts alone never stales a case or
+  invalidates a compiled Harbor tree.
 
 ### State transitions
 
@@ -618,7 +634,15 @@ benchmark.
 SHA, changed files/lines, evidence counts, curation state, derived gold mode,
 and gold count. Selecting a case shows the snapshot header and numbered
 evidence with kind, human/bot author, source commit, path/line, resolved,
-outdated, and a body preview.
+outdated, and a body preview. Evidence renders in a prioritized view: fixed
+labeled bands (undecided/unchanged float, likely-already-actioned items sink)
+with an advisory reason-code legend per entry (`resolved`, `outdated`,
+`anchor-delta-*`, `pr-author-reply`, availability and classification causes).
+Number-based actions bind to the exact displayed entry via its captured
+`source_id`; a stale view is detected instead of re-resolving indices. These
+signals are advisory only and do not establish semantic correctness —
+only explicit curator actions create gold or exclusions. All evidence is
+retained; priority is scoped to the pinned snapshot head.
 
 Actions are fixed:
 
