@@ -318,7 +318,8 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
 
     Produces only the opaque ``run_id``, ``mode``, ``schema_version``, the
     ``identity`` dict, and the ``objective`` dict (counts + ``comparison_eligible``
-    + optional ``tokens``/``cost``). No repository slug, PR number, source path,
+    + the reported location/severity axes + optional ``tokens``/``cost``). No
+    repository slug, PR number, source path,
     gold/candidate text, judge reasoning, or source code is ever emitted; only
     opaque benchmark/run ids and counts pass through (spec privacy must-have).
 
@@ -353,6 +354,29 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
             "failed_task_count": obj.failed_task_count,
             "comparison_eligible": obj.comparison_eligible,
             "mean_task_score": obj.mean_task_score,
+            "location_pairs_scored": obj.location_pairs_scored,
+            "severity_pairs_scored": obj.severity_pairs_scored,
+            "location_exact_rate": obj.location_exact_rate,
+            "location_near_rate": obj.location_near_rate,
+            "location_file_rate": obj.location_file_rate,
+            "location_miss_rate": obj.location_miss_rate,
+            "location_credit": obj.location_credit,
+            "location_exact": obj.location_exact,
+            "location_near": obj.location_near,
+            "location_file": obj.location_file,
+            "location_miss": obj.location_miss,
+            "total_location_exact": obj.total_location_exact,
+            "total_location_near": obj.total_location_near,
+            "total_location_file": obj.total_location_file,
+            "total_location_miss": obj.total_location_miss,
+            "severity_exact": obj.severity_exact,
+            "severity_within_1": obj.severity_within_1,
+            "total_severity_exact": obj.total_severity_exact,
+            "total_severity_within_1": obj.total_severity_within_1,
+            "severity_exact_rate": obj.severity_exact_rate,
+            "severity_within_1_rate": obj.severity_within_1_rate,
+            "severity_mean_distance": obj.severity_mean_distance,
+            "severity_credit": obj.severity_credit,
         }
         if obj.tokens is not None:
             objective_dict["tokens"] = obj.tokens

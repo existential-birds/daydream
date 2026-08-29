@@ -800,6 +800,33 @@ def test_aggregate_metrics_severity_means_weight_by_pair_count() -> None:
     assert m["severity_credit"] == pytest.approx(2.0 / 3)
 
 
+def test_aggregate_metrics_location_credit_weights_by_pair_count() -> None:
+    # Unequal per-task pair counts (1 vs 2) must pool to the per-pair mean,
+    # weighting each task's reported credit by its pair count (the sum of its
+    # tier counts) so location_credit agrees with the per-pair tier rates.
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_exact": 1, "location_near": 0,
+         "location_file": 0, "location_miss": 0, "location_credit": 1.0,
+         "location_present": 1,
+         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
+         "severity_mean_distance": 0.0, "severity_credit": 0.0,
+         "severity_pairs": 0},
+        {"verifier_error": 0, "reward": 0.5, "tp": 2, "fp": 0, "fn": 0,
+         "clean_task": 0, "location_exact": 0, "location_near": 1,
+         "location_file": 1, "location_miss": 0, "location_credit": 0.5,
+         "location_present": 1,
+         "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
+         "severity_mean_distance": 0.0, "severity_credit": 0.0,
+         "severity_pairs": 0},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["location_pairs_scored"] == 3
+    # unweighted mean of the per-task means would be 0.75; per-pair pooling
+    # (1 pair at 1.0, 2 pairs at 0.5) is 2/3, matching the pair-level rates.
+    assert m["location_credit"] == pytest.approx(2.0 / 3)
+
+
 def test_aggregate_metrics_pre_axis_rows_default_to_zero_pairs() -> None:
     # An older row without any axis keys is a genuinely zero-pair row: it
     # contributes nothing to the pooled axes and never raises.

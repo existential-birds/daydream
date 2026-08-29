@@ -330,8 +330,8 @@ judge reasoning, or source code is ever emitted.
 The top-level keys are exactly `run_id`, `mode`, `schema_version`, `identity`,
 `objective`. `schema_version` is `1`; `mode` is `oracle` or `benchmark`. The
 `objective` dict carries the count-derived micro-metrics plus counts
-(`comparison_eligible`, `task_count`, `candidate_count`, `gold_count`), with
-optional `tokens`/`cost`.
+(`comparison_eligible`, `task_count`, `candidate_count`, `gold_count`), the
+reported location/severity axes (below), with optional `tokens`/`cost`.
 
 ### Reported location and severity axes
 
@@ -345,7 +345,7 @@ like:
   "tp": 5,
   "fp": 1,
   "fn": 2,
-  "reward": 0.71,
+  "reward": 0.77,
   "location_exact": 3,
   "location_near": 1,
   "location_file": 1,
@@ -368,7 +368,9 @@ self-match tiebreak. A pair with no location (locationless findings) or no
 severity contributes to no count, mean, or credit — it is never imputed as a
 zero (axis-presence doctrine); `location_present`/`severity_present` are 0/1
 flags reporting whether at least one pair scored that axis. Location tiers are
-`exact` (same line range), `near` (within `LOCATION_TOLERANCE` = 3 lines),
+`exact` (same file, distance 0 — either candidate endpoint lies inside or on
+the gold's inclusive range, so an overlapping range that is not identical
+still scores exact), `near` (within `LOCATION_TOLERANCE` = 3 lines),
 `file` (same file, different location), and `miss` (different file); severity
 is scored as exact, within-1 severity step, and mean ordinal distance with
 credit 1.0/0.5/0.0 for distance 0/1/2+.

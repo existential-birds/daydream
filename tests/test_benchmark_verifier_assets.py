@@ -170,7 +170,13 @@ def test_range_distance_cannot_drift_from_hunk_index() -> None:
     from daydream.benchmark.harbor import verifier_core as vc
     host = inspect.getsource(hunk_index.range_distance)
     # the copy is private and stdlib-only; assert the arithmetic body matches
-    for line in ("if start <= line <= end:", "if line < start:", "return start - line"):
+    for line in (
+        "if start <= line <= end:",
+        "return 0",
+        "if line < start:",
+        "return start - line",
+        "return line - end",
+    ):
         assert line in host and line in inspect.getsource(vc._range_distance)
     assert "import daydream" not in inspect.getsource(vc)
 

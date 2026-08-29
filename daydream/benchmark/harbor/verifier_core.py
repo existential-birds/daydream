@@ -839,10 +839,12 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
     presence doctrine): per-row pairs come from the ``location_*`` tier fields
     and the ``severity_pairs`` count, read via ``row.get(k, 0)`` so pre-axis
     rows (older reward schemas) are genuine zero-pair rows and never raise.
-    Tier rates and the severity rates/means use the axis pair counts as
-    denominators and evaluate to 0.0 when no pairs were scored — deliberately
-    not the 1.0 clean-slate convention, because an absent axis is missing
-    signal, not a perfect one.
+    Tier rates and the location/severity rates/means use the pooled pair
+    counts as denominators, with each task's reported axis mean weighted by
+    its pair count so unequal tasks pool to the exact per-pair mean. They
+    evaluate to 0.0 when no pairs were scored — deliberately not the 1.0
+    clean-slate convention, because an absent axis is missing signal, not a
+    perfect one.
     """
     infra_errors = 0
     clean_correct = 0
@@ -852,7 +854,6 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
     loc_tiers = {"exact": 0, "near": 0, "file": 0, "miss": 0}
     loc_credit_sum = 0.0
     location_pairs = 0
-    location_tasks = 0
     sev_exact = sev_within_1 = 0
     sev_distance_sum = 0.0
     sev_credit_sum = 0.0
@@ -867,12 +868,13 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
         total_fn += _as_int(row["fn"])
         scored_rewards.append(_as_float(row["reward"]))
         if row.get("location_present") == 1:
-            location_tasks += 1
+            row_loc_pairs = 0
             for tier in loc_tiers:
                 count = int(_as_float(row.get(f"location_{tier}", 0)))
                 loc_tiers[tier] += count
-                location_pairs += count
-            loc_credit_sum += _as_float(row.get("location_credit", 0.0))
+                row_loc_pairs += count
+            location_pairs += row_loc_pairs
+            loc_credit_sum += _as_float(row.get("location_credit", 0.0)) * row_loc_pairs
         if row.get("severity_present") == 1:
             count = int(_as_float(row.get("severity_pairs", 0)))
             severity_pairs += count
@@ -912,7 +914,7 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
         "total_fp": total_fp,
         "total_fn": total_fn,
         **_axis_aggregates(
-            loc_tiers, loc_credit_sum, location_pairs, location_tasks,
+            loc_tiers, loc_credit_sum, location_pairs,
             sev_exact, sev_within_1, sev_distance_sum, sev_credit_sum,
             severity_pairs,
         ),
@@ -923,7 +925,6 @@ def _axis_aggregates(
     loc_tiers: dict[str, int],
     loc_credit_sum: float,
     location_pairs: int,
-    location_tasks: int,
     sev_exact: int,
     sev_within_1: int,
     sev_distance_sum: float,
@@ -934,16 +935,14 @@ def _axis_aggregates(
 
     Location tier counts pool per pair and the tier rates use the pooled pair
     count as the denominator (0.0 with zero pairs). ``location_credit`` pools
-    as the mean of each task's reported per-pair mean over the tasks where
-    the axis is present (row-level summaries do not carry per-pair sums, so
-    per-task means are the finest granularity available; equal-pair tasks
-    pool to the exact per-pair mean). Severity pools per pair: the totals and
-    rates divide by the pooled ``severity_pairs`` count, and the distance/
-    credit means weight each task's per-pair mean by its pair count, pooling
-    to the exact per-pair mean.
+    per pair: each task's reported per-pair mean is weighted by its location
+    pair count (the sum of its tier counts) before dividing by the pooled
+    pair count, pooling to the exact per-pair mean. Severity pools per pair:
+    the totals and rates divide by the pooled ``severity_pairs`` count, and
+    the distance/credit means weight each task's per-pair mean by its pair
+    count, pooling to the exact per-pair mean.
     """
     n_loc = location_pairs
-    n_loc_tasks = location_tasks
     n_sev = severity_pairs
     return {
         "location_exact": loc_tiers["exact"],
@@ -954,7 +953,7 @@ def _axis_aggregates(
         "location_near_rate": loc_tiers["near"] / n_loc if n_loc else 0.0,
         "location_file_rate": loc_tiers["file"] / n_loc if n_loc else 0.0,
         "location_miss_rate": loc_tiers["miss"] / n_loc if n_loc else 0.0,
-        "location_credit": loc_credit_sum / n_loc_tasks if n_loc_tasks else 0.0,
+        "location_credit": loc_credit_sum / n_loc if n_loc else 0.0,
         "location_pairs_scored": n_loc,
         "total_location_exact": loc_tiers["exact"],
         "total_location_near": loc_tiers["near"],

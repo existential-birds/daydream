@@ -86,13 +86,34 @@ def _reward(
     gold_count: Any=0,
     candidate_count: Any=0,
     verifier_error: Any=0,
+    location_present: Any=0,
+    location_exact: Any=0,
+    location_near: Any=0,
+    location_file: Any=0,
+    location_miss: Any=0,
+    location_credit: Any=0.0,
+    severity_present: Any=0,
+    severity_pairs: Any=0,
+    severity_exact: Any=0,
+    severity_within_1: Any=0,
+    severity_mean_distance: Any=0.0,
+    severity_credit: Any=0.0,
 ) -> dict[str, Any]:
     return {"reward": reward, "tp": tp, "fp": fp, "fn": fn,
             "precision": (tp/(tp+fp)) if (tp+fp) else 1.0,
             "recall": (tp/(tp+fn)) if (tp+fn) else 1.0,
             "f1": 0.0, "gold_count": gold_count, "candidate_count": candidate_count,
             "clean_task": clean_task, "clean_pass": clean_pass,
-            "verifier_error": verifier_error}
+            "verifier_error": verifier_error,
+            "location_present": location_present,
+            "location_exact": location_exact, "location_near": location_near,
+            "location_file": location_file, "location_miss": location_miss,
+            "location_credit": location_credit,
+            "severity_present": severity_present, "severity_pairs": severity_pairs,
+            "severity_exact": severity_exact,
+            "severity_within_1": severity_within_1,
+            "severity_mean_distance": severity_mean_distance,
+            "severity_credit": severity_credit}
 
 
 def _seed_trials(ws: Path, run_id: Any, trials: Any) -> None:
@@ -438,3 +459,46 @@ def test_objective_metric_dict_includes_axis_keys() -> None:
         malformed_task_count=0, failed_task_count=0,
         comparison_eligible=True, mean_task_score=1.0,
     )._as_metric_dict()) == set(verifier_core.aggregate_metrics([]))
+
+
+def test_objective_json_carries_reported_axes(tmp_path: Path) -> None:
+    """Per-run objective JSON must carry the reported location/severity axes.
+
+    ``objective_to_json`` and ``_as_metric_dict`` are two projections of the
+    same ``Objective``; the per-run JSON must never silently drop the axis
+    keys, or the runbook's ``objective --json`` output would desynchronize
+    from the pooled projection the suite aggregate emits (anti-slop).
+    """
+    ws = _complete_ws(
+        tmp_path,
+        trials=[_reward(
+            tp=2, fp=1, fn=0, reward=0.8,
+            location_present=1, location_exact=2, location_near=1,
+            location_file=1, location_miss=0, location_credit=0.75,
+            severity_present=1, severity_pairs=4, severity_exact=3,
+            severity_within_1=1, severity_mean_distance=0.25,
+            severity_credit=0.875,
+        )],
+    )
+    run = objective.read_completed_run(ws, "run-1", env={})
+    assert run.objective is not None
+    blob = objective.objective_to_json(run)["objective"]
+    assert isinstance(blob, dict)
+    metric = run.objective._as_metric_dict()
+    axis_keys = [
+        "location_pairs_scored", "severity_pairs_scored",
+        "location_exact", "location_near", "location_file", "location_miss",
+        "total_location_exact", "total_location_near",
+        "total_location_file", "total_location_miss",
+        "severity_exact", "severity_within_1",
+        "total_severity_exact", "total_severity_within_1",
+        "location_exact_rate", "location_near_rate",
+        "location_file_rate", "location_miss_rate",
+        "severity_exact_rate", "severity_within_1_rate",
+        "severity_mean_distance", "severity_credit", "location_credit",
+    ]
+    for key in axis_keys:
+        assert key in blob, f"objective JSON drops {key!r}"
+        assert blob[key] == metric[key]
+        assert blob[key] == getattr(run.objective, key)
+    assert len(axis_keys) == 23
