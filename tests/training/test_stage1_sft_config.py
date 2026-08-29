@@ -8,12 +8,12 @@ validates a copy with that table stripped.
 """
 
 from __future__ import annotations
-import pathlib
 
+import pathlib
 import subprocess
 import tomllib
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 SFT = Path(__file__).parents[2] / "rl" / "train" / "sft.toml"
 

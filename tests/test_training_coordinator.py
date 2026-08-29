@@ -11,9 +11,9 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from typing import Any
 
 from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.gate import GateConfig, GateReport
