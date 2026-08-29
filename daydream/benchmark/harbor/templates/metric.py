@@ -49,6 +49,7 @@ def _axis_aggregates(
     loc_tiers: dict[str, int],
     loc_credit_sum: float,
     location_pairs: int,
+    location_tasks: int,
     sev_exact: int,
     sev_within_1: int,
     sev_distance_sum: float,
@@ -57,14 +58,18 @@ def _axis_aggregates(
 ) -> dict[str, float | int]:
     """Pool the reported location/severity axes over scored pairs.
 
-    Rates are counts over the axis pair denominator (0.0 with zero pairs).
-    ``severity_mean_distance``/``severity_credit`` pool as the mean of each
-    task's reported per-pair mean over the tasks where the axis is present
-    (row-level summaries do not carry per-pair sums, so per-task means are the
-    finest granularity available; equal-pair tasks pool to the exact per-pair
-    mean).
+    Location tier counts pool per pair and the tier rates use the pooled pair
+    count as the denominator (0.0 with zero pairs). ``location_credit`` pools
+    as the mean of each task's reported per-pair mean over the tasks where
+    the axis is present (row-level summaries do not carry per-pair sums, so
+    per-task means are the finest granularity available; equal-pair tasks
+    pool to the exact per-pair mean). Severity pools per pair: the totals and
+    rates divide by the pooled ``severity_pairs`` count, and the distance/
+    credit means weight each task's per-pair mean by its pair count, pooling
+    to the exact per-pair mean.
     """
     n_loc = location_pairs
+    n_loc_tasks = location_tasks
     n_sev = severity_pairs
     return {
         "location_exact": loc_tiers["exact"],
@@ -75,7 +80,7 @@ def _axis_aggregates(
         "location_near_rate": loc_tiers["near"] / n_loc if n_loc else 0.0,
         "location_file_rate": loc_tiers["file"] / n_loc if n_loc else 0.0,
         "location_miss_rate": loc_tiers["miss"] / n_loc if n_loc else 0.0,
-        "location_credit": loc_credit_sum / n_loc if n_loc else 0.0,
+        "location_credit": loc_credit_sum / n_loc_tasks if n_loc_tasks else 0.0,
         "location_pairs_scored": n_loc,
         "total_location_exact": loc_tiers["exact"],
         "total_location_near": loc_tiers["near"],

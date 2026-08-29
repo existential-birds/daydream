@@ -375,7 +375,7 @@ def test_empty_side_resolves_with_zero_verdicts() -> None:
 
 def test_reward_dict_is_numeric_only_with_all_keys() -> None:
     d = score_review([_gold()], _artifact(_valid_findings(1)), []).to_dict()
-    assert set(d) == EXPECTED_22_KEYS
+    assert set(d) == EXPECTED_24_KEYS
     for k, v in d.items():
         assert isinstance(v, (int, float)) and not isinstance(v, bool)
 
@@ -595,13 +595,13 @@ def test_severity_distance_unknown_raises() -> None:
 # Task 3: reported location/severity axes over matched pairs (issue #971)
 # ---------------------------------------------------------------------------
 
-EXPECTED_22_KEYS = {
+EXPECTED_24_KEYS = {
     "reward", "tp", "fp", "fn", "precision", "recall", "f1",
     "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error",
     "location_exact", "location_near", "location_file", "location_miss",
     "location_credit", "location_present",
     "severity_exact", "severity_within_1", "severity_mean_distance",
-    "severity_credit", "severity_present",
+    "severity_credit", "severity_pairs", "severity_present",
 }
 
 
@@ -690,13 +690,13 @@ def test_reward_to_dict_stays_numeric_only() -> None:
     reward = score_review(*_axis_pair(gold_raw, cand_raw))
     d = reward.to_dict()
     assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in d.values())
-    assert set(d) == EXPECTED_22_KEYS
+    assert set(d) == EXPECTED_24_KEYS
 
 
 def test_reward_dict_early_returns_have_absent_axes() -> None:
     # clean pass: no tp pairs -> all axis fields at zero/absent defaults (A4)
     d = score_review([], _artifact([]), []).to_dict()
-    assert set(d) == EXPECTED_22_KEYS
+    assert set(d) == EXPECTED_24_KEYS
     assert d["location_present"] == 0 and d["severity_present"] == 0
     assert d["location_exact"] == 0 and d["severity_mean_distance"] == 0.0
 
@@ -707,7 +707,7 @@ def test_aggregate_metrics_pools_axis_keys() -> None:
          "clean_task": 1, "location_exact": 1, "location_near": 0, "location_file": 0,
          "location_miss": 0, "location_credit": 1.0, "location_present": 1,
          "severity_exact": 1, "severity_within_1": 1, "severity_mean_distance": 0.0,
-         "severity_credit": 1.0, "severity_present": 1},
+         "severity_credit": 1.0, "severity_pairs": 1, "severity_present": 1},
         {"verifier_error": 0, "reward": 0.0, "tp": 1, "fp": 1, "fn": 0,
          "clean_task": 1, "location_file": 1, "location_credit": 0.0, "location_present": 1,
          "severity_present": 0, "severity_exact": 0, "severity_within_1": 0,
@@ -739,20 +739,65 @@ def test_aggregate_metrics_pools_severity_counts_and_credit() -> None:
          "location_miss": 0, "location_credit": 0.0,
          "severity_exact": 1, "severity_within_1": 1,
          "severity_mean_distance": 0.0, "severity_credit": 1.0,
-         "severity_present": 1},
+         "severity_pairs": 1, "severity_present": 1},
         {"verifier_error": 0, "reward": 0.5, "tp": 1, "fp": 0, "fn": 1,
          "clean_task": 0, "location_present": 0,
          "location_exact": 0, "location_near": 0, "location_file": 0,
          "location_miss": 0, "location_credit": 0.0,
          "severity_exact": 0, "severity_within_1": 1,
          "severity_mean_distance": 1.0, "severity_credit": 0.5,
-         "severity_present": 1},
+         "severity_pairs": 1, "severity_present": 1},
     ]
     m = vc.aggregate_metrics(rows)
     assert m["severity_pairs_scored"] == 2
     assert m["total_severity_exact"] == 1 and m["total_severity_within_1"] == 2
     assert m["severity_exact_rate"] == 0.5 and m["severity_within_1_rate"] == 1.0
     assert m["severity_mean_distance"] == 0.5 and m["severity_credit"] == 0.75
+
+
+def test_aggregate_metrics_multi_pair_severity_rates_bounded() -> None:
+    # A single task with two severity-scored pairs: the per-pair numerators
+    # must divide by the pooled pair count, never the per-task row count, so
+    # the rates stay <= 1.0 (issue: pooled axis rates could exceed 1.0).
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 2, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 2, "severity_within_1": 2,
+         "severity_mean_distance": 0.0, "severity_credit": 1.0,
+         "severity_pairs": 2, "severity_present": 1},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["severity_pairs_scored"] == 2
+    assert m["severity_exact_rate"] == 1.0
+    assert m["severity_within_1_rate"] == 1.0
+    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 1.0
+
+
+def test_aggregate_metrics_severity_means_weight_by_pair_count() -> None:
+    # Unequal per-task pair counts (1 vs 2) must pool to the per-pair mean,
+    # weighting each task's reported mean by its pair count.
+    rows: list[dict[str, object] | None] = [
+        {"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+         "clean_task": 1, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 1, "severity_within_1": 1,
+         "severity_mean_distance": 0.0, "severity_credit": 1.0,
+         "severity_pairs": 1, "severity_present": 1},
+        {"verifier_error": 0, "reward": 0.5, "tp": 2, "fp": 0, "fn": 0,
+         "clean_task": 0, "location_present": 0,
+         "location_exact": 0, "location_near": 0, "location_file": 0,
+         "location_miss": 0, "location_credit": 0.0,
+         "severity_exact": 0, "severity_within_1": 2,
+         "severity_mean_distance": 1.0, "severity_credit": 0.5,
+         "severity_pairs": 2, "severity_present": 1},
+    ]
+    m = vc.aggregate_metrics(rows)
+    assert m["severity_pairs_scored"] == 3
+    assert m["severity_mean_distance"] == pytest.approx(2.0 / 3)
+    assert m["severity_credit"] == pytest.approx(2.0 / 3)
 
 
 def test_aggregate_metrics_pre_axis_rows_default_to_zero_pairs() -> None:

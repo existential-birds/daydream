@@ -2,7 +2,7 @@
 # daydream_version: 0.28.0
 # source_uv_lock_sha256: 44fbfedbf0e07ded4402c5d4f07a6c17213fc3512ef18a9484cdb707c77f4e10
 # generation_command: uv export --frozen --no-dev --no-emit-project --format requirements-txt
-# template_version: 3
+# template_version: 4
 
 annotated-types==0.7.0 \
     --hash=sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53 \

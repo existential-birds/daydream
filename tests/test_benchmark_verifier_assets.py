@@ -184,17 +184,18 @@ def test_metric_helper_functions_cannot_drift_from_verifier_core() -> None:
     """The metric.py template's helper functions must stay byte-identical to verifier_core.
 
     ``render_metric()`` splices only ``aggregate_metrics`` into the compiled
-    metric; the ``_as_int/_as_float/_f1`` helpers it resolves at runtime are the
-    template-local copies. They must not drift from the in-repo verifier_core
-    copies (which the corpus pool uses), or the compiled metric and the pool
-    would disagree on row coercion / f1. This gate makes any drift fail loudly
-    instead of silently diverging.
+    metric; the ``_as_int/_as_float/_f1/_axis_aggregates`` helpers it
+    resolves at runtime are the template-local copies. They must not drift
+    from the in-repo verifier_core copies (which the corpus pool uses), or
+    the compiled metric and the pool would disagree on row coercion / f1 /
+    axis pooling. This gate makes any drift fail loudly instead of silently
+    diverging.
     """
     import inspect
 
     from daydream.benchmark.harbor import verifier_core as vc
 
     tmpl = (REPO / "daydream" / "benchmark" / "harbor" / "templates" / "metric.py").read_text(encoding="utf-8")
-    for name in ("_as_int", "_as_float", "_f1"):
+    for name in ("_as_int", "_as_float", "_f1", "_axis_aggregates"):
         src = inspect.getsource(getattr(vc, name))
         assert src in tmpl, f"metric.py template's {name} drifted from verifier_core.py"

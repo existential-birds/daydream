@@ -335,7 +335,7 @@ optional `tokens`/`cost`.
 
 ### Reported location and severity axes
 
-Each scored task's per-trial reward JSON (verifier template version 3) carries
+Each scored task's per-trial reward JSON (verifier template version 4) carries
 the content reward plus two **reported** diagnostic axes over the matched
 (tp) pairs — location and severity agreement. A per-task reward row looks
 like:
@@ -356,6 +356,7 @@ like:
   "severity_within_1": 1,
   "severity_mean_distance": 0.2,
   "severity_credit": 0.9,
+  "severity_pairs": 5,
   "severity_present": 1,
   "verifier_error": 0
 }

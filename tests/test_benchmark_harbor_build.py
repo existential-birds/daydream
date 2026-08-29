@@ -1313,7 +1313,7 @@ def test_task_md_prose_describes_reported_axes_contract(tmp_path: Path, fake_gh:
 def test_template_version_is_bumped() -> None:
     from daydream.benchmark.harbor import build
 
-    assert build.TEMPLATE_VERSION == "3"  # one schema step (R12)
+    assert build.TEMPLATE_VERSION == "4"  # two schema steps (R12 + per-row severity pairs)
 
 
 def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_gh: FakeGh) -> None:

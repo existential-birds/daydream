@@ -237,12 +237,12 @@ def test_claude_has_no_active_legacy_benchmark_reference() -> None:
 
 def test_reward_example_documents_reported_axes() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
-    # Per-task reward keys (22-key schema, TEMPLATE_VERSION 3)
+    # Per-task reward keys (24-key schema, TEMPLATE_VERSION 4)
     for key in (
         "location_exact", "location_near", "location_file", "location_miss",
         "location_credit", "location_present", "severity_exact",
         "severity_within_1", "severity_mean_distance", "severity_credit",
-        "severity_present",
+        "severity_pairs", "severity_present",
     ):
         assert key in text, f"reward-key example missing {key!r}"
     # Pooled aggregate axis keys

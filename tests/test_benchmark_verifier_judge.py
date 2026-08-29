@@ -400,6 +400,7 @@ _REWARD_KEYS = {
     "severity_within_1",
     "severity_mean_distance",
     "severity_credit",
+    "severity_pairs",
     "severity_present",
 }
 

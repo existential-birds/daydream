@@ -27,7 +27,7 @@ from daydream import severity
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 
-TEMPLATE_VERSION = "3"
+TEMPLATE_VERSION = "4"
 
 
 _METRIC_AGG_BEGIN = "# __AGGREGATION_BODY_BEGIN__"
