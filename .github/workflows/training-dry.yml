@@ -1,0 +1,73 @@
+name: Training dry path
+
+# GPU-free validation of the training pipeline (M20, M24): the coordinator's
+# dry run over the committed 50-record fixture, plus the standalone RL checks
+# and the root suite. No pynvml, no CUDA — every step is CPU-only.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  training-dry:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify uv.lock is in sync
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Training coordinator dry run over the 50-record fixture
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          import tempfile
+
+          from daydream.training.coordinator import PipelineConfig, run_pipeline
+
+          fixture = Path("tests/fixtures/training/records-50/records.jsonl")
+          with tempfile.TemporaryDirectory() as out:
+              manifest = run_pipeline(
+                  PipelineConfig(corpus=fixture, out_dir=Path(out)), dry_run=True
+              )
+              assert manifest["stages"]["stage0"]["status"] == "complete"
+              assert manifest["stages"]["stage0"]["gate"]["passed"] is True
+              for stage in ("stage1", "stage2"):
+                  assert manifest["stages"][stage]["status"] == "skipped_dry"
+              adapter = Path(manifest["adapter_path"])
+              assert (adapter / "adapter_config.json").is_file()
+              assert (adapter / "adapter_state.json").is_file()
+              assert json.loads((Path(out) / "manifest.json").read_text())["dry_run"] is True
+          print("training dry path OK")
+          PY
+
+      - name: Run RL checks
+        run: make rl-check
+
+      - name: Run root test suite
+        # Coverage flags live here in CI (see .github/workflows/ci.yml); plain
+        # pytest so the targeted training tests never trip the coverage floor.
+        run: uv run pytest -n auto -q

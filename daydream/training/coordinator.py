@@ -17,8 +17,10 @@ Contract points:
   run leaves no partial-success artifact.
 - **Dry path (CI)**: ``dry_run=True`` executes everything that needs no GPU —
   corpus load (fail-closed via :mod:`daydream.training.stacks`), Stage-0 gate
-  evaluation on cached model state, validation, manifest — and marks the GPU
-  stages ``skipped_dry``. No GPU stage directory is created on the dry path.
+  evaluation on cached model state, validation, manifest — and marks the wall-
+  clock GPU stages ``skipped_dry``. The Stage-3 adapter *handoff* (pure file
+  assembly from Stage-0 state, no GPU) is still produced on the dry path so
+  the declared adapter path is loadable-shape-validated in CI.
 - **Atomicity**: the manifest is written temp-then-rename, mirroring the
   corpus exporter's atomic-write discipline in
   :func:`daydream.training.corpus.run_build_corpus`.
@@ -292,6 +294,12 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
                 )
 
         if dry_run and stage in GPU_STAGES:
+            if stage == "stage3":
+                # The adapter handoff is pure file assembly from Stage-0 state
+                # (no GPU), so the dry path still produces a declared, loadable-
+                # shape adapter checkpoint even while the wall-clock training
+                # itself is skipped.
+                _run_gpu_stage_shim(config, records, stage, stage_dir)
             stage_entries[stage] = {"status": "skipped_dry"}
             continue
 
@@ -316,7 +324,9 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
     )
 
     adapter_path: str | None = None
-    if "stage3" in stage_entries and stage_entries["stage3"].get("status") == "complete":
+    if "stage3" in stage_entries and (
+        stage_entries["stage3"].get("status") in ("complete", "skipped_dry")
+    ):
         adapter_path = str(out_dir / "stage3" / "adapter")
 
     manifest: dict[str, Any] = {
