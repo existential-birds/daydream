@@ -1341,3 +1341,85 @@ def test_decided_and_withdrawn_classify_from_curation_state(tmp_path: Path, fake
     entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
     assert entry["band"] == "decided" and entry["disposition"] == "finding"
     assert "decided-by-finding" in entry["reasons"]
+
+
+def test_pr_author_reply_signal_respects_real_thread_identity() -> None:
+    """Thread-less records are never conflated into one shared reply bucket.
+
+    Regression (issue #336): a PR-author reply without a GraphQL thread id
+    (REST-only inline reply absent from the thread overlay) used to land in
+    ``latest_pr_author_reply[None]`` and spuriously flag every earlier
+    thread-less record (reviews, issue comments, other reply chains). Thread
+    identity for a thread-less record is its REST reply chain top; records
+    outside any chain are unreachable from any reply.
+    """
+    from daydream.benchmark import curation as cu
+
+    def rec(source_id: str, kind: str, db_id: int, node_id: str, created: str,
+            login: str, *, thread_id: str | None = None,
+            reply_to_id: str | None = None) -> dict[str, object]:
+        return {
+            "source_id": source_id, "kind": kind, "database_id": db_id,
+            "node_id": node_id, "created_at": created, "updated_at": created,
+            "author": {"login": login, "type": "User"},
+            "thread_id": thread_id, "reply_to_id": reply_to_id,
+        }
+
+    # pr author login: alice
+    records = [
+        rec("github:review:100", "review", 100, "PRR_100",
+            "2026-01-01T00:01:00Z", "carol"),
+        rec("github:issue_comment:200", "issue_comment", 200, "IC_200",
+            "2026-01-01T00:02:00Z", "dave"),
+        # a thread-less, reply-less REST root in its own unrelated chain,
+        # predating the later thread-less PR-author reply (the pre-fix
+        # None-bucket scenario); a candidate, so a signal would render:
+        rec("github:inline_comment:40", "inline_comment", 40, "DIFF_40",
+            "2026-01-01T00:02:30Z", "bob"),
+        # REST-only chain root + PR-author reply, both without thread ids:
+        rec("github:inline_comment:10", "inline_comment", 10, "DIFF_10",
+            "2026-01-01T00:03:00Z", "bob"),
+        rec("github:inline_comment:11", "inline_comment", 11, "DIFF_11",
+            "2026-01-01T00:04:00Z", "alice", reply_to_id="10"),
+        # threaded chain (root + PR-author reply in one thread):
+        rec("github:inline_comment:20", "inline_comment", 20, "DIFF_20",
+            "2026-01-01T00:05:00Z", "bob", thread_id="T1"),
+        rec("github:inline_comment:21", "inline_comment", 21, "DIFF_21",
+            "2026-01-01T00:06:00Z", "alice", thread_id="T1",
+            reply_to_id="DIFF_20"),
+        # a different threaded thread with no PR-author reply:
+        rec("github:inline_comment:30", "inline_comment", 30, "DIFF_30",
+            "2026-01-01T00:07:00Z", "carol", thread_id="T2"),
+    ]
+    candidate_sids = [
+        "github:inline_comment:40", "github:inline_comment:10",
+        "github:inline_comment:20", "github:inline_comment:30",
+    ]
+    view = cu.prioritized_evidence({
+        "evidence": records,
+        "pull_request": {"author": {"login": "alice", "type": "User"}},
+        "candidates": [{"source_id": sid} for sid in candidate_sids],
+        "curation": {},
+    })
+    reasons = {sid: e["reasons"] for sid, e in view["by_source"].items()}
+    # thread-less non-chain records keep no pr-author-reply reason:
+    assert "pr-author-reply" not in reasons["github:review:100"]
+    assert "pr-author-reply" not in reasons["github:issue_comment:200"]
+    # the unrelated thread-less candidate root keeps no reason either, even
+    # though a later thread-less PR-author reply exists in another chain:
+    assert "pr-author-reply" not in reasons["github:inline_comment:40"]
+    # genuinely replied-to candidates still surface the signal and rank:
+    assert "pr-author-reply" in reasons["github:inline_comment:10"]
+    assert view["by_source"]["github:inline_comment:10"]["band"] == "possibly_actioned"
+    assert "pr-author-reply" in reasons["github:inline_comment:20"]
+    # unrelated threads/chains never do:
+    assert "pr-author-reply" not in reasons["github:inline_comment:30"]
+
+    # the direct-caller fallback scan (no precomputed map) agrees:
+    ctx = {"pr_author_login": "alice", "records": records}
+    assert "pr-author-reply" not in cu.collect_signals(records[0], ctx)
+    assert "pr-author-reply" not in cu.collect_signals(records[1], ctx)
+    assert "pr-author-reply" not in cu.collect_signals(records[2], ctx)
+    assert "pr-author-reply" in cu.collect_signals(records[3], ctx)
+    assert "pr-author-reply" in cu.collect_signals(records[5], ctx)
+    assert "pr-author-reply" not in cu.collect_signals(records[7], ctx)

@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, NamedTuple, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -194,7 +194,89 @@ def commit_relation(mirror_repo: Path, head: str, commit: str) -> str:
     return "ancestor" if anc.returncode == 0 else "non_ancestor"
 
 
-def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> str:
+class AnchorDiff(NamedTuple):
+    """Whole-tree ``base_tip..head`` diff classification, shared across anchors.
+
+    A pure function of ``(base_tip, head)`` and the mirror's content-addressed
+    objects, so one classification serves every anchor against the same pair:
+    :func:`anchor_delta` skips the two whole-tree diffs
+    (``--name-status -z -M`` / ``--numstat -z``) for subsequent records,
+    leaving only the per-path ``-U0`` probe. A path appears in at most one
+    bucket, mirroring the probe's check order.
+    """
+
+    renames: frozenset[str]
+    binary: frozenset[str]
+    modified: frozenset[str]
+    deleted: frozenset[str]
+
+
+def _nul_fields(stdout: str | bytes) -> list[str]:
+    """NUL-split ``git -z`` output into surrogateescape-decoded fields.
+
+    The canonical split shared by :func:`anchor_delta` and
+    :func:`resolve_authoring_path` (and ``git_ops.ls_files``): ``-z`` emits
+    raw pathnames (no C-style quoting to unparse), so records must be split on
+    NUL and each field surrogateescape-decoded.
+    """
+    stdout = stdout if isinstance(stdout, bytes) else stdout.encode()
+    return [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
+
+
+def _classify_diff(name_status: str | bytes, numstat: str | bytes) -> AnchorDiff:
+    """Classify a whole-tree ``base..head`` diff into per-path buckets.
+
+    Never probes git — the caller supplies the already-captured
+    ``--name-status -z -M`` and ``--numstat -z`` byte streams (both pure
+    functions of ``(base_tip, head)``). Rename/copy rows contribute the old
+    AND new name; ``D`` rows the deleted set; every other two-field row the
+    modified set; numstat ``-\t-`` records the binary set.
+    """
+    fields = _nul_fields(name_status)
+    # numstat -z records are NUL-terminated with tab-separated fields:
+    # add, del, path (add/del are "-" for binary content).
+    nfields = _nul_fields(numstat)
+    binary: set[str] = set()
+    for record in nfields:
+        parts = record.split("\t", 2)
+        if len(parts) == 3 and parts[0] == "-" and parts[1] == "-":
+            binary.add(parts[2])
+    renames: set[str] = set()
+    modified: set[str] = set()
+    deleted: set[str] = set()
+    j = 0
+    while j < len(fields):
+        status = fields[j]
+        if status.startswith(("R", "C")):
+            if j + 2 >= len(fields):
+                break
+            renames.add(fields[j + 1])
+            renames.add(fields[j + 2])
+            j += 3
+        else:
+            if j + 1 >= len(fields):
+                break
+            path = fields[j + 1]
+            if status == "D":
+                deleted.add(path)
+            else:
+                modified.add(path)
+            j += 2
+    return AnchorDiff(
+        renames=frozenset(renames),
+        binary=frozenset(binary),
+        modified=frozenset(modified),
+        deleted=frozenset(deleted),
+    )
+
+
+def anchor_delta(
+    mirror_repo: Path,
+    base_tip: str,
+    head: str,
+    anchor: Any,
+    diff_cache: dict[tuple[str, str], AnchorDiff] | None = None,
+) -> str:
     """Classify how the base..head change interacts with one authoring anchor.
 
     *anchor* is an :class:`~daydream.benchmark.schema.AuthoringAnchor`-shaped
@@ -212,6 +294,14 @@ def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> st
     at-head anchor) is ``"unchanged"`` with no mirror probes. Any git failure
     returns ``"unavailable"`` (fail-closed: never raised, never guessed). All
     reads are local mirror reads only.
+
+    The two whole-tree diffs are pure functions of ``(base_tip, head)``, so
+    when *diff_cache* is supplied the classification is computed once per
+    distinct pair and shared by every anchor on it: a comment-heavy
+    materialization whose records sit on the same authoring commit pays the
+    ``--name-status``/``--numstat`` fan-out once, not once per record. The
+    per-path ``-U0`` probe still runs per modified record (it depends on the
+    anchored path, and the hunk intersection on the anchor's span).
     """
     if not isinstance(anchor, dict) or anchor.get("status") != "derived":
         return "locationless"
@@ -226,58 +316,37 @@ def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> st
         # never spawn git probes.
         return "unchanged"
     try:
-        st = git_ops._run_git(
-            mirror_repo,
-            ["diff", "--name-status", "-z", "-M", base_tip, head],
-            retries=0,
-            capture_bytes=True,
-        )
-        if st.returncode != 0:
-            return "unavailable"
-        numstat = git_ops._run_git(
-            mirror_repo,
-            ["diff", "--numstat", "-z", base_tip, head],
-            retries=0,
-            capture_bytes=True,
-        )
-        if numstat.returncode != 0:
-            return "unavailable"
-        stdout = st.stdout if isinstance(st.stdout, bytes) else st.stdout.encode()
-        fields = [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
-        # numstat -z records are NUL-terminated with tab-separated fields:
-        # add, del, path (add/del are "-" for binary content).
-        nstdout = numstat.stdout if isinstance(numstat.stdout, bytes) else numstat.stdout.encode()
-        nfields = [f.decode("utf-8", errors="surrogateescape") for f in nstdout.split(b"\0") if f]
-        binary_paths: set[str] = set()
-        for record in nfields:
-            parts = record.split("\t", 2)
-            if len(parts) == 3 and parts[0] == "-" and parts[1] == "-":
-                binary_paths.add(parts[2])
-        renames: set[str] = set()
-        modified: set[str] = set()
-        j = 0
-        while j < len(fields):
-            status = fields[j]
-            if status.startswith(("R", "C")):
-                if j + 2 >= len(fields):
-                    break
-                old, new = fields[j + 1], fields[j + 2]
-                if path in (old, new):
-                    renames.add(path)
-                j += 3
-            else:
-                if j + 1 >= len(fields):
-                    break
-                if fields[j + 1] == path:
-                    if status == "D":
-                        return "deleted"
-                    modified.add(path)
-                j += 2
-        if path in renames:
+        diff = diff_cache.get((base_tip, head)) if diff_cache is not None else None
+        if diff is None:
+            st = git_ops._run_git(
+                mirror_repo,
+                ["diff", "--name-status", "-z", "-M", base_tip, head],
+                retries=0,
+                capture_bytes=True,
+            )
+            if st.returncode != 0:
+                return "unavailable"
+            numstat = git_ops._run_git(
+                mirror_repo,
+                ["diff", "--numstat", "-z", base_tip, head],
+                retries=0,
+                capture_bytes=True,
+            )
+            if numstat.returncode != 0:
+                return "unavailable"
+            # Both streams are pure functions of (base_tip, head): compute the
+            # classification once per distinct pair and share it across every
+            # anchor on that pair (the -U0 probe below still runs per record).
+            diff = _classify_diff(st.stdout, numstat.stdout)
+            if diff_cache is not None:
+                diff_cache[(base_tip, head)] = diff
+        if path in diff.deleted:
+            return "deleted"
+        if path in diff.renames:
             return "renamed"
-        if path in binary_paths:
+        if path in diff.binary:
             return "binary"
-        if path not in modified:
+        if path not in diff.modified:
             return "unchanged"
         # The anchored path was modified: the anchor's [start_line, end_line]
         # span lives in the diff-base (authoring) coordinate space, so
@@ -392,9 +461,9 @@ def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapp
         )
     # The -z output is byte-oriented and may carry non-UTF-8 pathnames from the
     # traced range, so capture bytes and surrogateescape-decode each field (the
-    # canonical NUL-split pattern shared with git_ops.ls_files).
-    stdout = trace.stdout if isinstance(trace.stdout, bytes) else trace.stdout.encode()
-    fields = [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
+    # canonical NUL-split pattern shared with git_ops.ls_files; see
+    # snapshot._nul_fields).
+    fields = _nul_fields(trace.stdout)
     matches: list[str] = []
     i = 0
     while i < len(fields):

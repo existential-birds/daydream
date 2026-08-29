@@ -1396,9 +1396,20 @@ def _extract_prioritization_facts(
     Both helpers fail closed to ``unavailable``; a defensive per-record catch
     maps an unexpected git failure to ``unavailable`` on both axes without
     failing the import.
+
+    The two whole-tree diffs :func:`~daydream.benchmark.snapshot.anchor_delta`
+    runs are pure functions of the (authoring commit, head) pair, so a per-
+    call cache classifies each distinct pair once and shares it across every
+    record anchored to the same authoring commit — the per-path ``-U0`` probe
+    still runs per modified record.
     """
     candidates: dict[str, schema.PrioritizationCandidate] = {}
     non_candidates: dict[str, schema.PrioritizationCandidate] = {}
+    # The whole-tree name-status/numstat diffs are pure functions of the
+    # (authoring commit, head) pair: classify each distinct pair once and
+    # share it across the records anchored to that commit instead of paying
+    # the fan-out per record.
+    diff_cache: dict[tuple[str, str], snapshot.AnchorDiff] = {}
     for record in doc.evidence:
         anchor = (
             record.authoring_anchor.model_dump(mode="json")
@@ -1416,7 +1427,8 @@ def _extract_prioritization_facts(
                     mirror_repo, head_sha, anchor["commit_id"]
                 )
                 delta = snapshot.anchor_delta(
-                    mirror_repo, anchor["commit_id"], head_sha, anchor
+                    mirror_repo, anchor["commit_id"], head_sha, anchor,
+                    diff_cache=diff_cache,
                 )
             except git_ops.GitError:
                 pass
@@ -1439,6 +1451,8 @@ def _reuse_prior_facts(
     prior: dict[str, Any] | None,
     head_sha: str,
     changed_ids: set[int] | None,
+    candidate_ids: set[str],
+    evidence_ids: set[str],
 ) -> schema.PrioritizationFacts | None:
     """Return the persisted prioritization block when it is still exact.
 
@@ -1446,14 +1460,19 @@ def _reuse_prior_facts(
     anchor, the mirror content at the pinned head, and the candidate split.
     On refresh the anchors come back from the prior import document
     byte-identical (backfilled before projection), so when the extraction
-    version, the head, and the evidence projection signature are all unchanged
-    the block written by the prior materialization is still exact — reusing it
-    skips the per-record mirror-probe fan-out (up to 5 subprocesses per
-    evidence record) on every no-op refresh/import. Any anomaly falls back to
-    :func:`_extract_prioritization_facts`: an absent block, a version or head
-    drift, a changed/added/removed record (its anchor re-derives and can flip
-    relation/delta), or a block that no longer validates (a hand-corrupt
-    block is recomputed and repaired, never carried forward).
+    version, the head, the evidence projection signature, and the candidate
+    split are all unchanged the block written by the prior materialization is
+    still exact — reusing it skips the per-record mirror-probe fan-out (up to
+    5 subprocesses per evidence record) on every no-op refresh/import. The
+    split is verified against the freshly recomputed projection (the caller
+    passes *candidate_ids*/*evidence_ids*): a projection-code change can
+    re-bucket membership without touching raw evidence, so it never reaches
+    *changed_ids*, yet it invalidates the persisted bucketing. Any anomaly
+    falls back to :func:`_extract_prioritization_facts`: an absent block, a
+    version or head drift, a changed/added/removed record (its anchor
+    re-derives and can flip relation/delta), a re-bucketed candidate split,
+    or a block that no longer validates (a hand-corrupt block is recomputed
+    and repaired, never carried forward).
     """
     if prior is None:
         return None
@@ -1466,6 +1485,14 @@ def _reuse_prior_facts(
     if not isinstance(prior.get("candidates"), dict) or not isinstance(
         prior.get("non_candidates"), dict
     ):
+        return None
+    # The candidate split is a documented purity input and is NOT implied by
+    # the raw evidence: a projection-code change can re-bucket membership
+    # without any raw field (and thus any changed_ids) moving. Reuse only when
+    # the persisted buckets exactly match the freshly recomputed split.
+    if set(prior["candidates"]) != candidate_ids:
+        return None
+    if set(prior["non_candidates"]) != evidence_ids - candidate_ids:
         return None
     try:
         return schema.PrioritizationFacts.model_validate(prior)
@@ -1561,7 +1588,8 @@ def _case_materialize(
     document under the additive ``prioritization`` key (schema_version stays
     2). Imported-status and unreplayable snapshots persist no key. A refresh
     whose persisted facts are still exact (same extraction version, same
-    head, unchanged evidence — see :func:`_reuse_prior_facts`) reuses the
+    head, unchanged evidence, and an identical candidate split — see
+    :func:`_reuse_prior_facts`) reuses the
     block instead of re-running the per-record mirror probes; any drift or a
     first materialization recomputes. Facts
     never feed the staleness gate, so a facts extraction-version bump alone
@@ -1659,14 +1687,21 @@ def _case_materialize(
         facts: schema.PrioritizationFacts | None = None
         if root is not None and origin_url is not None and snapshot_doc["status"] == "ready":
             # Reuse the persisted block when it is still exact (same extraction
-            # version, same head, unchanged evidence): the per-record mirror
-            # probes are pure functions of the authoring anchors, the mirror
-            # content at the pinned head, and the candidate split — unchanged
-            # on a no-op refresh — so re-running them would be pure
-            # subprocess fan-out (up to 5 per record). Any drift (or an
-            # absent/non-validating block) falls back to extraction.
+            # version, same head, unchanged evidence, and an identical candidate
+            # split — verified against the freshly recomputed projection, since
+            # a projection-code change can re-bucket membership without
+            # touching raw evidence): the per-record mirror probes are pure
+            # functions of the authoring anchors, the mirror content at the
+            # pinned head, and the candidate split — unchanged on a no-op
+            # refresh — so re-running them would be pure subprocess fan-out
+            # (up to 5 per record). Any drift (or an absent/non-validating
+            # block) falls back to extraction.
             facts = _reuse_prior_facts(
-                (prior_facts or {}).get(case_id), head_sha, changed_ids
+                (prior_facts or {}).get(case_id),
+                head_sha,
+                changed_ids,
+                {c.source_id for c in candidates},
+                {r.source_id for r in doc.evidence},
             )
             if facts is None:
                 facts = _extract_prioritization_facts(

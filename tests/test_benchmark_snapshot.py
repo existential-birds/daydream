@@ -1114,3 +1114,45 @@ def test_anchor_delta_unavailable_on_git_failure(
     monkeypatch.setattr(git_ops, "_run_git", _boom)
     assert sn.anchor_delta(m, base, heads["edit"],
                            _anchor("wide.py", 10, 10, base)) == "unavailable"
+
+
+def test_anchor_delta_shared_classification_runs_whole_tree_diffs_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two anchors on the same (base_tip, head) share the whole-tree
+    name-status/numstat classification via diff_cache: only the per-path -U0
+    probe remains per-record, and the cached classification classifies each
+    record exactly as an uncached probe would."""
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    probes: list[list[str]] = []
+    real = git_ops._run_git
+
+    def counting(repo: Any, args: list[str], **kw: Any) -> Any:
+        if any(flag in args for flag in ("--name-status", "--numstat", "-U0")):
+            probes.append(args)
+        return real(repo, args, **kw)
+
+    monkeypatch.setattr(git_ops, "_run_git", counting)
+    cache: dict[tuple[str, str], sn.AnchorDiff] = {}
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 10, 10, base), diff_cache=cache
+    ) == "changed"
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 1, 5, base), diff_cache=cache
+    ) == "unchanged"
+    assert len([a for a in probes if "--name-status" in a]) == 1
+    assert len([a for a in probes if "--numstat" in a]) == 1
+    # one per-path -U0 probe per modified record stays
+    assert len([a for a in probes if "-U0" in a]) == 2
+    # without the shared cache each record pays the whole-tree fan-out anew
+    probes.clear()
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 10, 10, base)
+    ) == "changed"
+    assert sn.anchor_delta(
+        m, base, heads["edit"], _anchor("wide.py", 1, 5, base)
+    ) == "unchanged"
+    assert len([a for a in probes if "--name-status" in a]) == 2
+    assert len([a for a in probes if "--numstat" in a]) == 2

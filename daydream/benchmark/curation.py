@@ -454,6 +454,55 @@ _DELTA_SIGNAL_CODES = {
 }
 
 
+def _reply_parent_index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Index inline review comments by every id a ``reply_to_id`` can cite.
+
+    REST reply links are stringified parent database ids; GraphQL ``replyTo``
+    links are parent node ids. Only inline comments are indexed — reviews and
+    issue comments are never reply targets and never carry a thread id, so
+    they stay unreachable from any reply (they must not share the reply map's
+    thread-less bucket).
+    """
+    index: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        if rec.get("kind") != "inline_comment":
+            continue
+        db_id = rec.get("database_id")
+        if db_id is not None:
+            index.setdefault(str(db_id), rec)
+            index.setdefault(db_id, rec)
+        node_id = rec.get("node_id")
+        if node_id:
+            index.setdefault(node_id, rec)
+    return index
+
+
+def _thread_key(record: dict[str, Any], parents: dict[str, dict[str, Any]]) -> str | None:
+    """The canonical identity of the thread one evidence record belongs to.
+
+    Threaded records key by their GraphQL thread id. Thread-less records have
+    no thread id, so their identity is the top of the REST reply chain they
+    hang off (a threaded comment up the chain donates its thread id, mirroring
+    the grouping the overlay would have provided); a thread-less record that
+    is no reply chain member keys by itself and is unreachable from any reply
+    — never a shared ``None`` bucket.
+    """
+    seen: set[Any] = set()
+    cur = record
+    while not cur.get("thread_id"):
+        source_id = cur.get("source_id")
+        if source_id is not None and source_id in seen:
+            break
+        if source_id is not None:
+            seen.add(source_id)
+        reply_to_id = cur.get("reply_to_id")
+        parent = parents.get(reply_to_id) if reply_to_id else None
+        if parent is None:
+            break
+        cur = parent
+    return cur.get("thread_id") or cur.get("source_id")
+
+
 def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> frozenset[str]:
     """The advisory actionability signals one evidence record carries.
 
@@ -490,14 +539,16 @@ def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> fro
     created = record.get("created_at")
     if pr_login and created:
         latest = view_context.get("latest_pr_author_reply")
-        if latest is None:
+        parents = view_context.get("reply_parents")
+        if latest is None or parents is None:
             # Fallback for direct callers that did not precompute the
             # per-thread map: scan the full evidence list as before.
-            thread_id = record.get("thread_id")
+            parents = _reply_parent_index(view_context.get("records") or [])
+            thread_key = _thread_key(record, parents)
             for other in view_context.get("records") or []:
                 if other is record or not other.get("reply_to_id"):
                     continue
-                if (other.get("thread_id") or None) != (thread_id or None):
+                if _thread_key(other, parents) != thread_key:
                     continue
                 if ((other.get("author") or {}).get("login")) != pr_login:
                     continue
@@ -507,7 +558,7 @@ def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> fro
                 signals.add("pr-author-reply")
                 break
         else:
-            later = latest.get(record.get("thread_id") or None)
+            later = latest.get(_thread_key(record, parents))
             if later is not None and later > created:
                 signals.add("pr-author-reply")
     return frozenset(signals)
@@ -600,18 +651,21 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
     }
     pr_login = ((raw.get("pull_request") or {}).get("author") or {}).get("login")
     latest_pr_author_reply: dict[Any, str] = {}
+    reply_parents = _reply_parent_index(records)
     if pr_login and records:
         # One O(N) pass: the latest same-thread reply authored by the PR
         # author per thread, so each collect_signals call answers the
         # strictly-later question in O(1) instead of re-scanning the full
         # evidence list per record (an O(N^2) cost on every get_case, several
-        # per TUI keystroke).
+        # per TUI keystroke). Thread identity is the GraphQL thread id when
+        # present, else the REST reply chain top (:func:`_thread_key`) — never
+        # one shared bucket for every thread-less record.
         for other in records:
             if not other.get("reply_to_id"):
                 continue
             if ((other.get("author") or {}).get("login")) != pr_login:
                 continue
-            tid = other.get("thread_id") or None
+            tid = _thread_key(other, reply_parents)
             t = other.get("created_at")
             if not t:
                 continue
@@ -622,6 +676,7 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
         "records": records,
         "facts": facts,
         "latest_pr_author_reply": latest_pr_author_reply,
+        "reply_parents": reply_parents,
     }
     thread_members: dict[str, list[str]] = {}
     for rec in records:

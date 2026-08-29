@@ -2867,6 +2867,44 @@ def test_refresh_reuses_persisted_facts_and_preserves_curation(
     assert after_case["prioritization"]["head_sha"] == after_case["snapshot"]["original_head_sha"]
 
 
+def test_reuse_gate_verifies_candidate_split(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A projection-code change that re-buckets the candidate split without
+    touching raw evidence (changed_ids stays empty) must NOT reuse the persisted
+    facts: the reuse gate compares the persisted buckets against the freshly
+    recomputed split, so the block is recomputed and re-bucketed."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from tests.test_benchmark_curation import _seed_ready_case
+
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    before = load_yaml_strict(case_path)
+    sid = before["candidates"][0]["source_id"]
+    assert set(before["prioritization"]["candidates"]) == {sid}
+
+    # Premise: the frame a projection-code change leaves behind — the raw
+    # evidence is byte-identical (no changed_ids) yet the recomputed projection
+    # re-buckets the record out of candidacy.
+    monkeypatch.setattr(gi, "project_candidates", lambda doc, head: [])
+
+    calls: list[int] = []
+    real = gi._extract_prioritization_facts
+
+    def recorded(*a: Any, **kw: Any) -> Any:
+        calls.append(1)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(gi, "_extract_prioritization_facts", recorded)
+    origin_url = str(tmp_path / "origin_local.git")
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
+    ) == 0
+    assert calls  # the gate rejected the stale split and recomputed
+    after = load_yaml_strict(case_path)
+    assert after["prioritization"]["candidates"] == {}
+    assert set(after["prioritization"]["non_candidates"]) == {sid}
+
+
 def test_facts_version_bump_alone_never_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A prioritization facts extraction-version bump alone never stales curated
     gold; the next refresh recomputes facts at the current version."""

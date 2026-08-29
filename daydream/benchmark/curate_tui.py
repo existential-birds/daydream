@@ -199,7 +199,7 @@ def _refresh_stale_view(root: Path, case_id: str) -> _ViewBinding:
         binding = _view_binding(view)
         if not _binding_stale(root, case_id, binding):
             return binding
-    print("view keeps changing \u2014 display refreshed; retry the action")
+    print("view keeps changing \u2014 display refreshed; proceeding with the freshest binding")
     return binding
 
 
@@ -802,7 +802,9 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
     after render (stale binding), the loop prints a rerender prompt and
     re-renders (bounded to ``_MAX_STALE_RERENDERS`` consecutive attempts via
     :func:`_refresh_stale_view`) instead of re-interpreting the number against
-    fresh content.
+    content the user never saw; the number action then proceeds against the
+    freshest displayed binding, so a continuously-mutating case can never
+    re-arm the rerender bound and spin forever.
     """
     view = cu.get_case(root, case_id)
     print(render_case(view))
@@ -814,7 +816,6 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
                 if action.isdigit():
                     if not _check_fresh(root, case_id, binding):
                         binding = _refresh_stale_view(root, case_id)
-                        continue
                     sid = _resolve_number(int(action), binding)
                     if sid is None:
                         print(f"no evidence number {action}")

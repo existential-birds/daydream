@@ -722,7 +722,10 @@ def test_number_action_resolves_through_captured_binding_not_fresh_order(
 
 
 def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
-    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from daydream.benchmark import curate_tui as tui
     from daydream.benchmark import curation as cu
@@ -740,17 +743,30 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
     assert len(load_yaml_strict(path)["curation"]["findings"]) == 1
     ws2, case_id2, _h2 = _seed_ready_case_mixed(tmp_path, fake_gh)
     path2 = ws2 / "cases" / f"{case_id2}.yaml"
+    paged: list[str] = []
+    monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager", paged.append)
+    late = [0]
 
     def mutate_then_answer(_prompt: str) -> str:
-        _add_late_finding(cu, ws2, case_id2)
+        # every number keystroke adds a *distinct* case mutation, so no
+        # duplicate finding_id can abort the session and mask the rerender bound
+        if late[0] >= 2:
+            return "q"
+        late[0] += 1
+        cu.add_finding(ws2, case_id2, title=f"late concern {late[0]}",
+                       body=f"added after render #{late[0]}", severity="low",
+                       location=None, source_ids=[])
         return "1"
 
-    run_curate_tui(ws2, case_id2, read_line=mutate_then_answer)
-    run_curate_tui(ws2, case_id2, read_line=_scripted("q"))
+    rc = run_curate_tui(ws2, case_id2, read_line=mutate_then_answer)
     out = capsys.readouterr().out
+    assert rc == 0
     assert "view changed" in out
+    # the number action executes against the freshest displayed binding even
+    # while the case keeps mutating — no unbounded re-prompt spin
+    assert len(paged) == 2
     cur = load_yaml_strict(path2)["curation"]
-    assert len(cur["findings"]) == 1 and not cur.get("exclusions")
+    assert len(cur["findings"]) == 2 and not cur.get("exclusions")
 
 
 def test_accept_non_candidate_and_context_is_rejected_without_write(
