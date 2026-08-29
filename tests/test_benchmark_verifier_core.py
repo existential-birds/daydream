@@ -375,8 +375,7 @@ def test_empty_side_resolves_with_zero_verdicts() -> None:
 
 def test_reward_dict_is_numeric_only_with_all_keys() -> None:
     d = score_review([_gold()], _artifact(_valid_findings(1)), []).to_dict()
-    assert set(d) == {"reward", "tp", "fp", "fn", "precision", "recall", "f1",
-                      "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error"}
+    assert set(d) == EXPECTED_22_KEYS
     for k, v in d.items():
         assert isinstance(v, (int, float)) and not isinstance(v, bool)
 
@@ -590,3 +589,113 @@ def test_severity_distance_unknown_raises() -> None:
         vc.severity_distance("critical", "high")
     with pytest.raises(VerifierError):
         vc.severity_distance("high", "info")
+
+
+# ---------------------------------------------------------------------------
+# Task 3: reported location/severity axes over matched pairs (issue #971)
+# ---------------------------------------------------------------------------
+
+EXPECTED_22_KEYS = {
+    "reward", "tp", "fp", "fn", "precision", "recall", "f1",
+    "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error",
+    "location_exact", "location_near", "location_file", "location_miss",
+    "location_credit", "location_present",
+    "severity_exact", "severity_within_1", "severity_mean_distance",
+    "severity_credit", "severity_present",
+}
+
+
+def _axis_gold(**overrides: Any) -> Any:
+    return _gold(path="src/a.py", start_line=10, end_line=12, **overrides)
+
+
+def _axis_cand_id(**overrides: Any) -> Any:
+    base = _cand()
+    base.update(overrides)
+    base["candidate_id"] = derive_candidate_id("case-x", base, 0)
+    return base
+
+
+def _axis_pair(gold_raw: Any, cand_raw: Any) -> tuple[list[Any], Any, list[Verdict]]:
+    gold = [parse_gold_finding(gold_raw)]
+    art = _artifact([cand_raw])
+    vs = [Verdict(gold_raw["finding_id"], cand_raw["candidate_id"], True, 0.9, "same bug")]
+    return gold, art, vs
+
+
+def test_score_review_axes_reported_not_gating() -> None:
+    # 1 gold finding at src/a.py:10-12, high severity; candidate matches content
+    # but reports src/a.py:50 (beyond tolerance) with low severity.
+    gold_raw = _axis_gold()
+    cand_raw = _axis_cand_id(path="src/a.py", start_line=50, end_line=50, severity="low")
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    assert reward.reward > 0.0 and reward.tp == 1          # content match still gates tp (R4)
+    assert reward.location_file == 1 and reward.location_present == 1
+    assert reward.severity_exact == 0 and reward.severity_within_1 == 0
+    assert reward.severity_present == 1 and reward.severity_credit == 0.0
+    assert reward.location_exact == 0 and reward.location_near == 0 and reward.location_miss == 0
+    assert reward.location_credit == 0.0 and reward.severity_mean_distance == 2.0
+
+
+def test_score_review_axis_absent_never_imputes() -> None:
+    # gold finding is locationless (path/start_line/end_line all None) and
+    # severityless -> both axes absent for the pair
+    gold_raw = _gold(path=None, start_line=None, end_line=None, severity=None)
+    cand_raw = _cand()
+    cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    assert reward.tp == 1 and reward.location_present == 0
+    assert reward.location_exact == 0 and reward.location_near == 0   # no counts, not imputed
+    assert reward.location_credit == 0.0
+    assert reward.severity_present == 0 and reward.severity_mean_distance == 0.0
+
+
+def test_score_review_locationless_candidate_side_absent() -> None:
+    # candidate locationless, gold located -> location axis absent; severity
+    # axis still scored independently (both sides have severity)
+    gold_raw = _axis_gold()
+    cand_raw = _cand(path=None, start_line=None, end_line=None)
+    cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    assert reward.tp == 1 and reward.location_present == 0 and reward.location_exact == 0
+    assert reward.location_credit == 0.0
+    assert reward.severity_present == 1 and reward.severity_exact == 1
+
+
+def test_score_review_location_tiers_and_severity_exact() -> None:
+    gold_raw = _axis_gold()
+    # near: within tolerance (distance 2); same severity -> exact
+    near_cand = _axis_cand_id(path="src/a.py", start_line=14, end_line=14, severity="high")
+    r_near = score_review(*_axis_pair(gold_raw, near_cand))
+    assert r_near.location_near == 1 and r_near.location_present == 1
+    assert r_near.location_credit == 1.0
+    assert r_near.severity_exact == 1 and r_near.severity_within_1 == 1
+    assert r_near.severity_mean_distance == 0.0 and r_near.severity_credit == 1.0
+
+    # exact tier
+    exact_cand = _axis_cand_id(path="src/a.py", start_line=11, end_line=11)
+    r_exact = score_review(*_axis_pair(gold_raw, exact_cand))
+    assert r_exact.location_exact == 1 and r_exact.location_credit == 1.0
+
+    # miss: different path -> counted as miss, location still present
+    miss_cand = _axis_cand_id(path="src/b.py", start_line=10, end_line=12)
+    r_miss = score_review(*_axis_pair(gold_raw, miss_cand))
+    assert r_miss.location_miss == 1 and r_miss.location_present == 1
+    assert r_miss.location_exact == 0 and r_miss.location_credit == 0.0
+
+
+def test_reward_to_dict_stays_numeric_only() -> None:
+    gold_raw = _axis_gold()
+    cand_raw = _axis_cand_id()
+    reward = score_review(*_axis_pair(gold_raw, cand_raw))
+    d = reward.to_dict()
+    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in d.values())
+    assert set(d) == EXPECTED_22_KEYS
+
+
+def test_reward_dict_early_returns_have_absent_axes() -> None:
+    # clean pass: no tp pairs -> all axis fields at zero/absent defaults (A4)
+    d = score_review([], _artifact([]), []).to_dict()
+    assert set(d) == EXPECTED_22_KEYS
+    assert d["location_present"] == 0 and d["severity_present"] == 0
+    assert d["location_exact"] == 0 and d["severity_mean_distance"] == 0.0

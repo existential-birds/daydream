@@ -12,7 +12,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_CANDIDATE_FINDINGS = 100
@@ -437,7 +437,13 @@ def maximum_matching(
 
 @dataclass(frozen=True)
 class Reward:
-    """The 12-field §10 per-task reward output."""
+    """The 22-field §10 per-task reward output.
+
+    The 12 headline fields are unchanged; the 10 location/severity axis
+    fields (issue #971) are reported-only, computed over matched tp pairs.
+    Axis fields default to zero/absent (0/1 presence flags, no imputed
+    values) when the task has no pairs scoring that axis.
+    """
 
     reward: float = 0.0
     tp: int = 0
@@ -451,9 +457,20 @@ class Reward:
     clean_task: int = 0
     clean_pass: int = 0
     verifier_error: int = 0
+    location_exact: int = 0
+    location_near: int = 0
+    location_file: int = 0
+    location_miss: int = 0
+    location_credit: float = 0.0
+    location_present: int = 0
+    severity_exact: int = 0
+    severity_within_1: int = 0
+    severity_mean_distance: float = 0.0
+    severity_credit: float = 0.0
+    severity_present: int = 0
 
     def to_dict(self) -> dict[str, float | int]:
-        """Numeric-only dict with exactly the 12 §10 keys."""
+        """Numeric-only dict with exactly the 22 §10 keys."""
         return {
             "reward": self.reward,
             "tp": self.tp,
@@ -467,6 +484,17 @@ class Reward:
             "clean_task": self.clean_task,
             "clean_pass": self.clean_pass,
             "verifier_error": self.verifier_error,
+            "location_exact": self.location_exact,
+            "location_near": self.location_near,
+            "location_file": self.location_file,
+            "location_miss": self.location_miss,
+            "location_credit": self.location_credit,
+            "location_present": self.location_present,
+            "severity_exact": self.severity_exact,
+            "severity_within_1": self.severity_within_1,
+            "severity_mean_distance": self.severity_mean_distance,
+            "severity_credit": self.severity_credit,
+            "severity_present": self.severity_present,
         }
 
 
@@ -588,6 +616,85 @@ def _empty_side_error(gold_count: int) -> Reward:
     return Reward(reward=0.0, gold_count=gold_count, verifier_error=0)
 
 
+def _located(finding: object) -> bool:
+    """True when the finding's location is fully populated (all-or-nothing)."""
+    return (
+        _finding_component(finding, "path") is not None
+        and _finding_component(finding, "start_line") is not None
+        and _finding_component(finding, "end_line") is not None
+    )
+
+
+def _score_axes(
+    gold: list[GoldFinding],
+    candidates: list[CandidateFinding],
+    matches: set[tuple[str, str]],
+) -> Reward:
+    """Compute reported location/severity axes over matched tp pairs.
+
+    A pair contributes to an axis only when both sides carry that signal
+    (axis-absent doctrine: never imputed, never raised on absence). Unknown
+    severity values raise :class:`VerifierError` via the shared helpers.
+    """
+    gold_by_id = {_finding_id(g): g for g in gold}
+    cand_by_id = {c.candidate_id: c for c in candidates}
+
+    loc_tiers = {"exact": 0, "near": 0, "file": 0, "miss": 0}
+    loc_credits: list[float] = []
+    sev_exact = sev_within_1 = 0
+    sev_distances: list[int] = []
+    sev_credits: list[float] = []
+
+    for gold_id, cand_id in matches:
+        g = gold_by_id.get(gold_id)
+        c = cand_by_id.get(cand_id)
+        if g is None or c is None:
+            raise VerifierError(f"matched pair missing finding: {gold_id!r}/{cand_id!r}")
+        g_path = _finding_component(g, "path")
+        g_start = _finding_component(g, "start_line")
+        g_end = _finding_component(g, "end_line")
+        c_path = _finding_component(c, "path")
+        c_start = _finding_component(c, "start_line")
+        c_end = _finding_component(c, "end_line")
+        if g_path is not None and c_path is not None \
+                and g_start is not None and c_start is not None \
+                and g_end is not None and c_end is not None:
+            tier = location_tier(
+                cast("str", g_path), cast("int", g_start), cast("int", g_end),
+                cast("str", c_path), cast("int", c_start), cast("int", c_end),
+                LOCATION_TOLERANCE,
+            )
+            loc_tiers[tier] += 1
+            loc_credits.append(1.0 if tier in ("exact", "near") else 0.0)
+        distance = severity_distance(
+            cast("str | None", _finding_component(g, "severity")),
+            cast("str | None", _finding_component(c, "severity")),
+        )
+        if distance is not None:
+            if distance == 0:
+                sev_exact += 1
+            if distance <= 1:
+                sev_within_1 += 1
+            sev_distances.append(distance)
+            sev_credits.append(severity_credit(distance))
+
+    n_loc = len(loc_credits)
+    n_sev = len(sev_distances)
+    return Reward(
+        location_exact=loc_tiers["exact"],
+        location_near=loc_tiers["near"],
+        location_file=loc_tiers["file"],
+        location_miss=loc_tiers["miss"],
+        location_credit=sum(loc_credits) / n_loc if n_loc else 0.0,
+        location_present=1 if n_loc else 0,
+        severity_exact=sev_exact,
+        severity_within_1=sev_within_1,
+        severity_mean_distance=(sum(sev_distances) / n_sev) if n_sev else 0.0,
+        severity_credit=(sum(sev_credits) / n_sev) if n_sev else 0.0,
+        severity_present=1 if n_sev else 0,
+    )
+
+
 def score_review(
     gold: list[GoldFinding],
     candidate_artifact: dict[str, object],
@@ -626,6 +733,7 @@ def score_review(
     precision = tp / (tp + fp) if (tp + fp) else 1.0
     recall = tp / (tp + fn) if (tp + fn) else 1.0
     f1 = 0.0 if tp == 0 else _f1(precision, recall)
+    axes = _score_axes(gold, candidates, matches)
     return Reward(
         reward=f1,
         tp=tp,
@@ -636,6 +744,17 @@ def score_review(
         f1=f1,
         gold_count=gold_count,
         candidate_count=candidate_count,
+        location_exact=axes.location_exact,
+        location_near=axes.location_near,
+        location_file=axes.location_file,
+        location_miss=axes.location_miss,
+        location_credit=axes.location_credit,
+        location_present=axes.location_present,
+        severity_exact=axes.severity_exact,
+        severity_within_1=axes.severity_within_1,
+        severity_mean_distance=axes.severity_mean_distance,
+        severity_credit=axes.severity_credit,
+        severity_present=axes.severity_present,
     )
 
 
