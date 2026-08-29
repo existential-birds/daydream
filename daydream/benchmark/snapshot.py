@@ -169,6 +169,130 @@ def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
     return "ok" if anc.returncode == 0 else "head_not_on_pr"
 
 
+def commit_relation(mirror_repo: Path, base_tip: str, head: str, commit: str) -> str:
+    """Classify how *commit* relates to the PR head in the pinned mirror.
+
+    Returns ``"at_head"`` iff *commit* equals *head*; ``"ancestor"`` when
+    ``git merge-base --is-ancestor commit head`` exits zero; ``"non_ancestor"``
+    on a non-zero exit with the object present; and ``"unavailable"`` when the
+    object is missing from the mirror or the probe itself fails. Errors are
+    returned as the value, never raised.
+    """
+    if commit == head:
+        return "at_head"
+    try:
+        verify = git_ops._run_git(
+            mirror_repo, ["rev-parse", "--verify", f"{commit}^{{commit}}"], retries=0,
+        )
+        if verify.returncode != 0:
+            return "unavailable"
+        anc = git_ops._run_git(
+            mirror_repo, ["merge-base", "--is-ancestor", commit, head], retries=0,
+        )
+    except git_ops.GitError:
+        return "unavailable"
+    return "ancestor" if anc.returncode == 0 else "non_ancestor"
+
+
+def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> str:
+    """Classify how the base..head change interacts with one authoring anchor.
+
+    *anchor* is an :class:`~daydream.benchmark.schema.AuthoringAnchor`-shaped
+    dict. Returns ``"locationless"`` when the anchor is not ``status ==
+    "derived"`` or carries no path/range; otherwise the base_tip..head diff is
+    classified: anchored path renamed -> ``"renamed"``; anchored path deleted
+    -> ``"deleted"``; binary content at the anchored path -> ``"binary"``; a
+    modification whose ``-U0`` hunks intersect the anchored ``[start_line,
+    end_line]`` range -> ``"changed"``; a same-file modification outside the
+    range -> ``"unchanged"``. Any git failure returns ``"unavailable"``
+    (fail-closed: never raised, never guessed). All reads are local mirror
+    reads only.
+    """
+    if not isinstance(anchor, dict) or anchor.get("status") != "derived":
+        return "locationless"
+    path = anchor.get("path")
+    start = anchor.get("start_line")
+    end = anchor.get("end_line")
+    if not path or start is None or end is None:
+        return "locationless"
+    try:
+        st = git_ops._run_git(
+            mirror_repo,
+            ["diff", "--name-status", "-z", "-M", base_tip, head],
+            retries=0,
+            capture_bytes=True,
+        )
+        if st.returncode != 0:
+            return "unavailable"
+        numstat = git_ops._run_git(
+            mirror_repo,
+            ["diff", "--numstat", "-z", base_tip, head],
+            retries=0,
+            capture_bytes=True,
+        )
+        if numstat.returncode != 0:
+            return "unavailable"
+        stdout = st.stdout if isinstance(st.stdout, bytes) else st.stdout.encode()
+        fields = [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
+        # numstat -z records are NUL-terminated with tab-separated fields:
+        # add, del, path (add/del are "-" for binary content).
+        nstdout = numstat.stdout if isinstance(numstat.stdout, bytes) else numstat.stdout.encode()
+        nfields = [f.decode("utf-8", errors="surrogateescape") for f in nstdout.split(b"\0") if f]
+        binary_paths: set[str] = set()
+        for record in nfields:
+            parts = record.split("\t", 2)
+            if len(parts) == 3 and parts[0] == "-" and parts[1] == "-":
+                binary_paths.add(parts[2])
+        renames: set[str] = set()
+        modified: set[str] = set()
+        j = 0
+        while j < len(fields):
+            status = fields[j]
+            if status.startswith(("R", "C")):
+                if j + 2 >= len(fields):
+                    break
+                old, new = fields[j + 1], fields[j + 2]
+                if path in (old, new):
+                    renames.add(path)
+                j += 3
+            else:
+                if j + 1 >= len(fields):
+                    break
+                if fields[j + 1] == path:
+                    if status == "D":
+                        return "deleted"
+                    modified.add(path)
+                j += 2
+        if path in renames:
+            return "renamed"
+        if path in binary_paths:
+            return "binary"
+        if path not in modified:
+            return "unchanged"
+        # The anchored path was modified: intersect the -U0 hunk new-side line
+        # ranges with the anchored [start_line, end_line] span.
+        hunks = git_ops._run_git(
+            mirror_repo, ["diff", "-U0", base_tip, head, "--", path], retries=0,
+        )
+        if hunks.returncode != 0:
+            return "unavailable"
+        for line in hunks.stdout.splitlines():
+            if not line.startswith("@@"):
+                continue
+            plus = line.split("+")[1].split(" ")[0] if "+" in line else ""
+            if not plus:
+                continue
+            c, _, d = plus.partition(",")
+            cstart = int(c)
+            clen = int(d) if d else 1
+            cend = cstart + max(clen - 1, 0)
+            if start <= cend and end >= cstart:
+                return "changed"
+        return "unchanged"
+    except git_ops.GitError:
+        return "unavailable"
+
+
 def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -> str | None:
     """The merge-base of the base tip and head, or None when none exists.
 

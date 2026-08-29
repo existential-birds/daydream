@@ -971,3 +971,145 @@ def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path)
     # (c) binary detection: numstat emits '-' for both added/deleted counts.
     numstat = _git(m, "diff", "--numstat", authoring_sha, head_sha)
     assert "-\t-\tblob.bin" in numstat.splitlines(), numstat
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (plan #879): commit_relation + anchor_delta helpers
+# ---------------------------------------------------------------------------
+
+
+def _seed_delta_origin(tmp_path: Path) -> tuple[str, str, str, dict[str, str]]:
+    """Bare origin seeded for the fact-helper tests (task 2, plan #879).
+
+    main: base1 (readme) -> base2 (base.py + a 10-line ``wide.py`` +
+    ``renamed.txt`` + ``deleted.txt``). Four heads branch off base2: ``edit``
+    (modifies wide.py line 10 in place), ``rename`` (``git mv renamed.txt`` ->
+    ``renamed2.txt``), ``delete`` (removes deleted.txt), and ``binary`` (adds a
+    binary ``bin.dat``). An ``orphan`` commit sits off base1 on a different
+    ancestry. Returns ``(bare, base2_sha, orphan_sha, heads)`` where ``heads``
+    maps scenario name -> head SHA.
+    """
+    repo = tmp_path / "delta_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "readme.txt", "base1\n")
+    _commit(repo, "base1")
+    _write(repo, "base.py", "BASE = 2\n")
+    _write(repo, "wide.py", "".join(f"line{i}\n" for i in range(1, 11)))
+    _write(repo, "renamed.txt", "r\n")
+    _write(repo, "deleted.txt", "d\n")
+    base2_sha = _commit(repo, "base2")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    content = (repo / "wide.py").read_text().replace("line10\n", "line10 edited\n")
+    repo.joinpath("wide.py").write_text(content)
+    _git(repo, "add", "wide.py")
+    edit_head = _commit(repo, "edit wide.py line 10")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    _git(repo, "mv", "renamed.txt", "renamed2.txt")
+    rename_head = _commit(repo, "rename renamed.txt")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    _git(repo, "rm", "deleted.txt")
+    delete_head = _commit(repo, "delete deleted.txt")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    (repo / "bin.dat").write_bytes(b"\x00\x01\x02binary")
+    _git(repo, "add", "bin.dat")
+    binary_head = _commit(repo, "add bin.dat")
+
+    _git(repo, "checkout", "--detach", base2_sha)
+    repo.joinpath("orphan.txt").write_text("o\n")
+    _git(repo, "add", "orphan.txt")
+    orphan_sha = _commit(repo, "orphan")
+
+    bare = tmp_path / "delta_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    for name, sha in (("edit", edit_head), ("rename", rename_head),
+                      ("delete", delete_head), ("binary", binary_head),
+                      ("orphan", orphan_sha)):
+        _git(repo, "push", "origin", f"{sha}:refs/heads/{name}")
+    heads = {"edit": edit_head, "rename": rename_head,
+             "delete": delete_head, "binary": binary_head}
+    return str(bare), base2_sha, orphan_sha, heads
+
+
+def _anchor(path: str | None, start: int | None, end: int | None,
+            commit: str, status: str = "derived") -> dict[str, Any]:
+    return {"version": 1, "status": status, "commit_id": commit,
+            "path": path, "start_line": start, "end_line": end}
+
+
+def _delta_mirror(tmp_path: Path) -> tuple[Path, str, str, dict[str, str]]:
+    from daydream.benchmark import snapshot as sn
+
+    origin, base, orphan, heads = _seed_delta_origin(tmp_path)
+    m = sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn._git_fetch(m, origin, [
+        f"{sha}:refs/heads/fact-{i}"
+        for i, sha in enumerate((base, orphan, *heads.values()))
+    ])
+    return sn.mirror(tmp_path), base, orphan, heads
+
+
+def test_commit_relation_classifies_ancestor_head_and_non_ancestor(tmp_path: Path) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    assert sn.commit_relation(m, base, heads["edit"], heads["edit"]) == "at_head"
+    assert sn.commit_relation(m, base, heads["edit"], base) == "ancestor"
+    assert sn.commit_relation(m, base, heads["edit"], orphan) == "non_ancestor"
+
+
+def test_commit_relation_unavailable_on_missing_object(tmp_path: Path) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    assert sn.commit_relation(m, base, heads["edit"], "f" * 40) == "unavailable"
+
+
+def test_anchor_delta_intersecting_vs_elsewhere_rename_delete_binary_locationless(
+    tmp_path: Path,
+) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+    # intersecting edit to the anchored range -> changed
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 10, 10, base)) == "changed"
+    # edit elsewhere in the same file -> unchanged
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 1, 5, base)) == "unchanged"
+    # anchored path renamed -> renamed
+    assert sn.anchor_delta(m, base, heads["rename"],
+                           _anchor("renamed.txt", 1, 1, base)) == "renamed"
+    # anchored file deleted -> deleted
+    assert sn.anchor_delta(m, base, heads["delete"],
+                           _anchor("deleted.txt", 1, 1, base)) == "deleted"
+    # binary content at the anchor -> binary
+    assert sn.anchor_delta(m, base, heads["binary"],
+                           _anchor("bin.dat", 1, 1, base)) == "binary"
+    # anchor with path=None or a non-derived status -> locationless
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor(None, None, None, base)) == "locationless"
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 1, 1, base, status="path-unavailable")) == "locationless"
+
+
+def test_anchor_delta_unavailable_on_git_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    m, base, orphan, heads = _delta_mirror(tmp_path)
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise git_ops.GitError("forced failure")
+
+    monkeypatch.setattr(sn.git_ops, "_run_git", _boom)
+    assert sn.anchor_delta(m, base, heads["edit"],
+                           _anchor("wide.py", 10, 10, base)) == "unavailable"
