@@ -1508,7 +1508,10 @@ def _case_materialize(
     :mod:`daydream.benchmark.snapshot`) are computed once here — where the
     authenticated mirror is already populated — and persisted on the case
     document under the additive ``prioritization`` key (schema_version stays
-    2). Imported-status and unreplayable snapshots persist no key. Facts are
+    2). Imported-status and unreplayable snapshots persist no key. Facts
+    recompute on every materialization (import and refresh alike) and never
+    feed the staleness gate, so a facts extraction-version bump alone cannot
+    stale curated gold. Facts are
     read-projection input only and live on the case doc alone, so every hash
     surface (import payload, evidence signatures, projection hashes,
     staleness signatures) is untouched.

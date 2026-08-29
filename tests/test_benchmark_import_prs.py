@@ -2816,3 +2816,64 @@ def test_facts_absent_from_every_hash_surface(tmp_path: Path, fake_gh: FakeGh) -
     assert gi._payload_sha256(load_json_strict(import_path)) == digest_before
     code_after, _ = validate_workspace(ws)
     assert code_after == code_before
+
+
+def test_refresh_recomputes_facts_and_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """A refresh recomputes prioritization facts against the pinned head while
+    carrying the curator's curation and the pinned snapshot forward unchanged."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from tests.test_benchmark_curation import _seed_ready_case
+
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    sid = load_yaml_strict(case_path)["candidates"][0]["source_id"]
+    cu.accept_candidate(ws, case_id, sid)     # curator action
+    before_case = load_yaml_strict(case_path)
+    origin_url = str(tmp_path / "origin_local.git")
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
+    ) == 0
+    after_case = load_yaml_strict(case_path)
+    assert after_case["curation"] == before_case["curation"]  # carried forward unchanged
+    assert after_case["snapshot"] == before_case["snapshot"]  # pinned head/bundle intact
+    assert after_case["prioritization"]["head_sha"] == after_case["snapshot"]["original_head_sha"]
+
+
+def test_facts_version_bump_alone_never_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """A prioritization facts extraction-version bump alone never stales curated
+    gold; the next refresh recomputes facts at the current version."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import storage
+    from daydream.benchmark.storage import load_yaml_strict
+    from tests.test_benchmark_curation import _seed_ready_case
+
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(case_path)
+    raw["prioritization"]["extraction_version"] = 0            # simulate an older facts version
+    raw["curation"]["state"] = "ready"
+    storage.atomic_write_yaml(case_path, raw)
+    origin_url = str(tmp_path / "origin_local.git")
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
+    ) == 0
+    refreshed = load_yaml_strict(case_path)
+    assert refreshed["curation"]["state"] == "ready"           # version bump alone does not stale
+    assert refreshed["prioritization"]["extraction_version"] == gi.EXTRACTION_VERSION
+
+
+def test_equivalent_imports_produce_identical_facts_and_rank(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """Two independently seeded equivalent workspaces produce byte-identical
+    prioritization facts and identical prioritized_evidence projections."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    from tests.test_benchmark_curation import _seed_ready_case_mixed
+
+    ws1, case_id1, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    ws2, case_id2, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    v1, v2 = cu.get_case(ws1, case_id1), cu.get_case(ws2, case_id2)
+    assert v1["prioritized_evidence"] == v2["prioritized_evidence"]
+    assert load_yaml_strict(ws1 / "cases" / f"{case_id1}.yaml")["prioritization"] == \
+        load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["prioritization"]
