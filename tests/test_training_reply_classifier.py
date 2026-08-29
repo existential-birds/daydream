@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 from daydream.training.reply_classifier import (
@@ -8,7 +10,7 @@ from daydream.training.reply_classifier import (
 )
 
 
-def _reply(body: str, login: str = "maintainer", assoc: str = "MEMBER", bot: str = "User") -> dict:
+def _reply(body: str, login: str = "maintainer", assoc: str = "MEMBER", bot: str = "User") -> dict[str, Any]:
     return {"user": {"login": login, "type": bot}, "author_association": assoc, "body": body}
 
 
@@ -44,7 +46,7 @@ def test_classify_directional_rules(body: str, expected: str) -> None:
         (_reply("Fixed in abc123", login="daydream-agent"), "ambiguous"),  # daydream self-reply excluded
     ],
 )
-def test_qualifying_author_gates_decisive_labels(reply: dict, expected: str) -> None:
+def test_qualifying_author_gates_decisive_labels(reply: dict[str, Any], expected: str) -> None:
     assert classify_reply(reply) == expected
 
 

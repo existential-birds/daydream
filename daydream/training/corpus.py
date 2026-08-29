@@ -844,7 +844,8 @@ def _is_admitted(
 
     - ``include_all_labels=True`` ⇒ always admit.
     - Otherwise admit when the pinned ``label`` is in ``filters.labels``
-      **and the row carries posterior evidence** (C9 accepted-only), **OR**
+      **and** it passes the gold-admission guard **and the row carries
+      posterior evidence** (C9 accepted-only), **OR**
       when ``filters.min_reward`` is set and the intrinsic
       ``composite_reward`` is present and ``>= min_reward``.
 
@@ -856,10 +857,12 @@ def _is_admitted(
     tiers. Rows whose label is not backed by a posterior are admissible only via
     the explicit intrinsic ``min_reward`` path or ``include_all_labels``.
 
-    The label path additionally requires the gold-admission guard
-    (``_is_admitted_outcome_gold``): rows are admitted only when their rubric
-    evidence is current-policy and decisive-only, so legacy reply-count/merge
-    rows and contested mixes never enter the corpus as gold.
+    The ``label in filters.labels`` conjunct keeps ``filters.labels``
+    authoritative for what counts as an admissible label (e.g. ``labels=()``
+    admits nothing on the label path); the gold-admission guard
+    (``_is_admitted_outcome_gold``) then constrains those rows to current-policy,
+    decisive-only rubric evidence, so legacy reply-count/merge rows and
+    contested mixes never enter the corpus as gold.
 
     The ``min_reward`` comparison is intrinsic-only **by construction** (C5),
     not by stripping a posterior term. Post-C5 the stored ``composite_reward``
@@ -873,7 +876,9 @@ def _is_admitted(
     """
     if filters.include_all_labels:
         return True
-    if _is_admitted_outcome_gold(label, has_posterior, labeler_policy_version, decisive_mix, decisive_only):
+    if label is not None and label in filters.labels and _is_admitted_outcome_gold(
+        label, has_posterior, labeler_policy_version, decisive_mix, decisive_only
+    ):
         return True
     if filters.min_reward is not None and composite_reward is not None and composite_reward >= filters.min_reward:
         return True

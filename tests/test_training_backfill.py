@@ -133,7 +133,7 @@ def snapshot_rows(archive: Path) -> list[dict[str, Any]]:
     return _observations(archive)
 
 
-def test_backfill_appends_new_generation(tmp_path, monkeypatch):
+def test_backfill_appends_new_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
     summary = run_backfill(archive, dry_run=False)
     assert summary["sessions_reprocessed"] == 1
@@ -142,7 +142,7 @@ def test_backfill_appends_new_generation(tmp_path, monkeypatch):
     assert rows[-1]["labels"] == '["accepted"]'
 
 
-def test_backfill_rerun_is_noop(tmp_path, monkeypatch):
+def test_backfill_rerun_is_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unchanged GitHub evidence + unchanged versions ⇒ second run appends nothing (M18)."""
     archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
     run_backfill(archive, dry_run=False)
@@ -152,7 +152,7 @@ def test_backfill_rerun_is_noop(tmp_path, monkeypatch):
     assert summary["appended"] == 0 and summary["skipped"] >= 1
 
 
-def test_backfill_fails_closed_on_deleted_comments(tmp_path, monkeypatch):
+def test_backfill_fails_closed_on_deleted_comments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Deleted/inaccessible comments ⇒ unknown, never decisive (M19/M22)."""
     archive = _archive_with_session(tmp_path, monkeypatch, replies=None, gh_error=404)
     run_backfill(archive, dry_run=False)
@@ -160,7 +160,7 @@ def test_backfill_fails_closed_on_deleted_comments(tmp_path, monkeypatch):
     assert rows[-1]["labels"] == '["unknown"]'
 
 
-def test_backfill_report_is_machine_readable(tmp_path, monkeypatch):
+def test_backfill_report_is_machine_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("False positive", assoc="OWNER")])
     summary = run_backfill(archive, dry_run=False, report_path=tmp_path / "report.json")
     report = json.loads((tmp_path / "report.json").read_text())
@@ -170,7 +170,7 @@ def test_backfill_report_is_machine_readable(tmp_path, monkeypatch):
     assert summary is not None
 
 
-def test_backfill_historical_rows_untouched(tmp_path, monkeypatch):
+def test_backfill_historical_rows_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Backfill never mutates or deletes existing label_observations (M17)."""
     archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
     legacy = snapshot_rows(archive)

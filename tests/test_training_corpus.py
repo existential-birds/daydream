@@ -654,6 +654,18 @@ def test_gold_admission_accepts_current_clean_evidence() -> None:
     assert _is_admitted_outcome_gold(**GOOD) is True
 
 
+def test_is_admitted_label_path_respects_filters_labels() -> None:
+    """The label path requires both filters.labels membership and the gold guard.
+
+    A ``labels=()`` filter admits nothing on the label path even when the row
+    is current-policy gold — and a clean gold row still admits under the
+    default ``("accepted",)`` filter, so the guard never narrows the default.
+    """
+    assert _is_admitted("accepted", None, CorpusFilters(labels=()), **
+                        {k: v for k, v in GOOD.items() if k != "label"}) is False
+    assert _is_admitted(**GOOD, composite_reward=None, filters=CorpusFilters()) is True
+
+
 def test_min_reward_path_unaffected() -> None:
     """The intrinsic min_reward path keeps its existing contract (no creep)."""
     assert _is_admitted("rejected", 1.0, CorpusFilters(min_reward=0.5)) is True

@@ -243,8 +243,9 @@ def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_lev
     reply = {
         "id": 9999,
         "in_reply_to_id": comments[0]["id"],
-        "user": {"login": "kevin"},
-        "body": "fixed",
+        "user": {"login": "kevin", "type": "User"},
+        "author_association": "MEMBER",
+        "body": "Fixed in abc123",
     }
     replied = [*comments, reply]
     threads = index_pr_review_comments(row, gh_api=lambda *a, **k: replied)
@@ -253,7 +254,7 @@ def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_lev
     per_finding = per_finding_resolution_signal(
         row, recorded_fingerprints=[FILE_FINGERPRINT], gh_api=_never_fetch, threads=threads
     )
-    assert [(r.fingerprint, r.resolved) for r in per_finding] == [(FILE_FINGERPRINT, True)]
+    assert [(r.fingerprint, r.disposition) for r in per_finding] == [(FILE_FINGERPRINT, "accepted")]
 
 
 def test_file_level_post_rejected_falls_back_to_review_body(fake_gh: FakeGh, file_level_artifact: Path) -> None:
