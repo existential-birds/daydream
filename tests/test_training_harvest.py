@@ -60,6 +60,7 @@ def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path
 # in the daydream comment bodies, so the per-finding join can resolve them.
 _FP_A = "a" * 64
 _FP_B = "b" * 64
+_FP_C = "c" * 64
 
 
 def _finding_comments(
@@ -246,6 +247,76 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) ->
                            repo_clone=tmp_path)
     assert ann.rubric_json is not None
     assert json.loads(ann.rubric_json)["per_finding_outcomes"] == ["accepted", "unanswered"]
+
+
+def test_harvest_626_shape_yields_both_polarities(tmp_path: Path) -> None:
+    """Three findings on a merged PR: one OWNER 'Fixed in <sha>', one OWNER 'False positive',
+    one qualifying question. Run label contested; per-finding exact (M22 final case)."""
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    _write_findings(run_dir, _FP_A, _FP_B, _FP_C)
+    row = {"session_id": "s_626", "pr_repo": "o/r", "pr_number": 7, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    ann = build_annotation(
+        row,
+        run_dir=run_dir,
+        archive_dir=tmp_path,
+        gh_api=_fake_gh(
+            merged_at="2026-02-05T00:00:00+00:00",
+            comments=[
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
+                },
+                {
+                    "id": 2,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{finding_marker(_FP_B)}\n\n{DAYDREAM_FOOTER}",
+                },
+                {
+                    "id": 3,
+                    "in_reply_to_id": None,
+                    "user": {"login": "daydream-runner"},
+                    "body": f"finding\n\n{finding_marker(_FP_C)}\n\n{DAYDREAM_FOOTER}",
+                },
+                {
+                    "id": 4,
+                    "in_reply_to_id": 1,
+                    "user": {"login": "amelia"},
+                    "author_association": "OWNER",
+                    "body": "Fixed in abc123",
+                    "created_at": "2026-02-01T10:00:00Z",
+                },
+                {
+                    "id": 5,
+                    "in_reply_to_id": 2,
+                    "user": {"login": "amelia"},
+                    "author_association": "OWNER",
+                    "body": "False positive",
+                    "created_at": "2026-02-01T11:00:00Z",
+                },
+                {
+                    "id": 6,
+                    "in_reply_to_id": 3,
+                    "user": {"login": "bob"},
+                    "author_association": "MEMBER",
+                    "body": "Which branch is this against?",
+                    "created_at": "2026-02-01T09:00:00Z",
+                },
+            ],
+        ),
+        repo_clone=tmp_path,
+    )
+    assert ann.labels == ["contested"]
+    assert ann.rubric_json is not None
+    rubric = json.loads(ann.rubric_json)
+    assert rubric["per_finding_outcomes"] == ["accepted", "rejected", "ambiguous"]
+    # valid_at is the earliest decisive evidence across the joined findings; the
+    # ambiguous MEMBER question is not decisive (M22).
+    assert ann.valid_at == "2026-02-01T10:00:00Z"
 
 
 def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Path) -> None:
