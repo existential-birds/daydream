@@ -1,8 +1,8 @@
 """AC6: Stage 1 uses dataset SFT and never routes through live-teacher
 [orchestrator.algo] type = "sft" — failure mode is silent (a teacher endpoint
 that does not exist), so this is asserted structurally, not at runtime."""
-from pathlib import Path
 import tomllib
+from pathlib import Path
 
 
 def _all_rl_configs():

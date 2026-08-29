@@ -13,8 +13,6 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-import pytest
-
 SFT = Path(__file__).parents[2] / "rl" / "train" / "sft.toml"
 
 
