@@ -298,7 +298,7 @@ def test_action_edit_authors_edited_finding_from_non_candidate_evidence(
     editor.chmod(0o755)
     monkeypatch.setenv("VISUAL", str(editor))
     monkeypatch.delenv("EDITOR", raising=False)
-    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "3", "q"))
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["title"] == "From approval" and f["provenance"]["kind"] == "edited"
     assert f["provenance"]["source_ids"] == ["github:review:100"]
@@ -328,7 +328,7 @@ def test_edit_author_prefills_selected_evidence_source_ids(
     monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.setenv("LOG", str(log))
 
-    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "3", "q"))
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["title"] == "From selected" and f["provenance"]["kind"] == "edited"
     # verdict: the prefill in the editor buffer carried the selected source_id
@@ -377,7 +377,7 @@ def test_action_edit_merges_range_into_one_finding(
     editor.chmod(0o755)
     monkeypatch.setenv("VISUAL", str(editor))
     monkeypatch.delenv("EDITOR", raising=False)
-    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1,3", "q"))
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1,4", "q"))
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["provenance"]["source_ids"] == ["github:inline_comment:1", "github:review:100"]
 
@@ -414,7 +414,7 @@ def test_action_exclude_range_excludes_all_selected(tmp_path: Path, fake_gh: Fak
     from daydream.benchmark.curate_tui import run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    run_curate_tui(ws, case_id, read_line=_scripted("x", "1,3", "duplicate", "q"))
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "1,4", "duplicate", "q"))
     ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"]
     assert {e["source_id"] for e in ex} == {"github:inline_comment:1", "github:review:100"}
     assert all(e["reason"] == "duplicate" for e in ex)
@@ -652,3 +652,130 @@ def test_ready_declined_leaves_draft_and_no_digest(
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
     assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
+
+
+# ---------------------------------------------------------------------------
+# prioritized sectioned render + captured view binding (issue #879)
+# ---------------------------------------------------------------------------
+
+def _add_late_finding(cu_mod: Any, ws: Path, case_id: str) -> None:
+    """A real post-render curator action: one authored finding, no sources."""
+    cu_mod.add_finding(ws, case_id, title="late concern", body="added after render",
+                       severity="low", location=None, source_ids=[])
+
+
+def test_render_case_shows_prioritized_sections_and_legend(tmp_path: Path, fake_gh: FakeGh) -> None:
+    from daydream.benchmark import curate_tui as tui
+    from daydream.benchmark import curation as cu
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    view = cu.get_case(ws, case_id)
+    out = tui.render_case(view)
+    # band sections in fixed order, only non-empty ones rendered
+    assert "-- review_first --" in out
+    assert "-- context --" in out
+    assert "-- decided --" not in out
+    assert "-- withdrawn --" not in out
+    assert "-- likely_actioned --" not in out
+    # section order follows BAND_RANK: review_first before context
+    assert out.index("-- review_first --") < out.index("-- context --")
+    # reason codes appear beside entries and a legend decodes them
+    assert "resolved" in out or "reasons:" in out
+    assert "legend:" in out.lower()
+    # numbering is contiguous across sections through the captured binding
+    binding = tui._view_binding(view)
+    for n, sid in enumerate(binding, start=1):
+        assert f"  {n}. " in out and sid in out
+
+
+def test_number_action_resolves_through_captured_binding_not_fresh_order(
+    tmp_path: Path, fake_gh: FakeGh,
+) -> None:
+    from daydream.benchmark import curate_tui as tui
+    from daydream.benchmark import curation as cu
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    view = cu.get_case(ws, case_id)
+    tui.render_case(view)
+    binding = tui._view_binding(view)                     # captured entry->source_id map
+    first_displayed_sid = binding[0]
+    # real curator action after render: a fresh read now sees a mutated case doc
+    _add_late_finding(cu, ws, case_id)
+    # a number-based action on entry 1 must resolve to the *rendered* source_id,
+    # never re-derived from a fresh get_case
+    assert tui._resolve_number(1, binding) == first_displayed_sid
+    assert tui._resolve_number(99, binding) is None
+
+
+def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from daydream.benchmark import curate_tui as tui
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    path = ws / "cases" / f"{case_id}.yaml"
+    view = cu.get_case(ws, case_id)
+    binding = tui._view_binding(view)
+    # mutate the case after render -> the captured binding must read as stale,
+    # while a freshly derived binding reads fresh
+    _add_late_finding(cu, ws, case_id)
+    assert tui._binding_stale(ws, case_id, binding) is True
+    assert tui._binding_stale(ws, case_id, tui._view_binding(cu.get_case(ws, case_id))) is False
+    assert len(load_yaml_strict(path)["curation"]["findings"]) == 1
+    ws2, case_id2, _h2 = _seed_ready_case_mixed(tmp_path, fake_gh)
+    path2 = ws2 / "cases" / f"{case_id2}.yaml"
+
+    def mutate_then_answer(_prompt: str) -> str:
+        _add_late_finding(cu, ws2, case_id2)
+        return "1"
+
+    run_curate_tui(ws2, case_id2, read_line=mutate_then_answer)
+    run_curate_tui(ws2, case_id2, read_line=_scripted("q"))
+    out = capsys.readouterr().out
+    assert "view changed" in out
+    cur = load_yaml_strict(path2)["curation"]
+    assert len(cur["findings"]) == 1 and not cur.get("exclusions")
+
+
+def test_accept_non_candidate_and_context_is_rejected_without_write(
+    tmp_path: Path, fake_gh: FakeGh,
+) -> None:
+    from daydream.benchmark import curation as cu
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+    view = cu.get_case(ws, case_id)
+    ctx_sid = next(e["source_id"] for e in view["prioritized_evidence"]["entries"]
+                   if e["band"] == "context")
+    with pytest.raises(cu.CurationError):
+        cu.accept_candidate(ws, case_id, ctx_sid)
+    assert path.read_bytes() == before
+
+
+def test_low_priority_exact_candidate_still_acceptable(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """Prioritization is advisory: a candidate whose facts/signals sink it to
+    possibly_actioned is still acceptable through the unchanged service path."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import (
+        atomic_write_json,
+        load_json_strict,
+        load_yaml_strict,
+    )
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    cand_sid = raw["candidates"][0]["source_id"]
+    import_path = ws / raw["source"]["import_file"]
+    imp = load_json_strict(import_path)
+    for rec in imp["evidence"]:
+        if rec["source_id"] == cand_sid:
+            rec["resolved"] = True
+    atomic_write_json(import_path, imp)
+
+    view = cu.get_case(ws, case_id)
+    assert view["prioritized_evidence"]["by_source"][cand_sid]["band"] == "possibly_actioned"
+    assert view["prioritized_evidence"]["by_source"][cand_sid]["reasons"] == ["resolved"]
+
+    cu.accept_candidate(ws, case_id, cand_sid)   # must not raise
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["findings"][0]["provenance"]["kind"] == "historical"
+    assert cur["findings"][0]["provenance"]["source_ids"] == [cand_sid]
