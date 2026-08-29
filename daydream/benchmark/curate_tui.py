@@ -179,6 +179,30 @@ def _check_fresh(root: Path, case_id: str, binding: list[str]) -> bool:
     return False
 
 
+_MAX_STALE_RERENDERS = 3
+
+
+def _refresh_stale_view(root: Path, case_id: str) -> _ViewBinding:
+    """Re-render *case_id* and return a binding verified current, bounded.
+
+    A stale binding means the case changed after render; the refresh re-reads,
+    re-renders, and captures a fresh binding, then verifies that captured
+    binding is current — bounded to ``_MAX_STALE_RERENDERS`` consecutive
+    re-renders so a continuously-mutating case can never loop the rerender
+    forever. When the view keeps changing, the freshest displayed binding is
+    returned (the numbering always matches the display) with a message naming
+    the instability.
+    """
+    for _ in range(_MAX_STALE_RERENDERS):
+        view = cu.get_case(root, case_id)
+        print(render_case(view))
+        binding = _view_binding(view)
+        if not _binding_stale(root, case_id, binding):
+            return binding
+    print("view keeps changing \u2014 display refreshed; retry the action")
+    return binding
+
+
 def _entry_block(
     ev: dict[str, Any],
     candidates: list[dict[str, Any]],
@@ -264,8 +288,9 @@ def render_case(case: dict[str, Any]) -> str:
     entry keeping its detail line plus advisory reason/disposition markers,
     closed by a legend line decoding the reason codes. Numbering comes from the
     captured view binding (:func:`_view_binding`) — the same order every
-    number-based action resolves through. When every candidate lacks facts,
-    the canonical order renders with a ``needs_judgment`` note instead; a
+    number-based action resolves through. When the case carries no
+    prioritization facts, the canonical order renders with an explanatory
+    note instead (only signal-free candidates rank as ``needs_judgment``); a
     minimal dict without an ``evidence`` key falls back to ``candidates``.
 
     Every evidence entry shows its number, kind, author login (+ ``[bot]`` for a
@@ -305,7 +330,7 @@ def render_case(case: dict[str, Any]) -> str:
         return "\n".join(lines)
     entries = _evidence_entries(case)
     if prioritized and candidates and facts is None:
-        lines.append("note: needs_judgment — no prioritization facts for any candidate")
+        lines.append("note: no prioritization facts — candidates without record signals rank as needs_judgment")
     for i, ev in enumerate(entries, start=1):
         lines.append(_entry_block(ev, candidates, i, None))
     return "\n".join(lines)
@@ -775,7 +800,9 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
     Renders once and captures the view binding the render numbered; every
     number-based action resolves through that binding. When the case changed
     after render (stale binding), the loop prints a rerender prompt and
-    re-renders instead of re-interpreting the number against fresh content.
+    re-renders (bounded to ``_MAX_STALE_RERENDERS`` consecutive attempts via
+    :func:`_refresh_stale_view`) instead of re-interpreting the number against
+    fresh content.
     """
     view = cu.get_case(root, case_id)
     print(render_case(view))
@@ -786,9 +813,7 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
             if action not in _ACTIONS:
                 if action.isdigit():
                     if not _check_fresh(root, case_id, binding):
-                        view = cu.get_case(root, case_id)
-                        print(render_case(view))
-                        binding = _view_binding(view)
+                        binding = _refresh_stale_view(root, case_id)
                         continue
                     sid = _resolve_number(int(action), binding)
                     if sid is None:

@@ -688,21 +688,37 @@ def test_render_case_shows_prioritized_sections_and_legend(tmp_path: Path, fake_
 
 
 def test_number_action_resolves_through_captured_binding_not_fresh_order(
-    tmp_path: Path, fake_gh: FakeGh,
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from daydream.benchmark import curate_tui as tui
     from daydream.benchmark import curation as cu
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
-    tui.render_case(view)
     binding = tui._view_binding(view)                     # captured entry->source_id map
-    first_displayed_sid = binding[0]
-    # real curator action after render: a fresh read now sees a mutated case doc
-    _add_late_finding(cu, ws, case_id)
-    # a number-based action on entry 1 must resolve to the *rendered* source_id,
-    # never re-derived from a fresh get_case
-    assert tui._resolve_number(1, binding) == first_displayed_sid
-    assert tui._resolve_number(99, binding) is None
+    raw_order = [ev["source_id"] for ev in view["evidence"]]
+    by_sid = {ev["source_id"]: ev for ev in view["evidence"]}
+    # the captured binding reorders the raw evidence (band ranking), so a number
+    # action re-derived from fresh order would page a different record; pick the
+    # first number where the two orders diverge
+    diverging = next(
+        (n for n, sid in enumerate(binding, start=1) if raw_order[n - 1] != sid),
+        None,
+    )
+    assert diverging is not None
+    bound_sid = binding[diverging - 1]
+    paged: dict[str, str] = {}
+    monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager",
+                        lambda body: paged.update(body=body))
+    # production number action: entry N pages the record the render numbered N
+    # through the captured binding, never a fresh re-derivation of raw order
+    tui.run_curate_tui(ws, case_id,
+                       read_line=_scripted(str(diverging), "99", "q"))
+    assert paged["body"] == by_sid[bound_sid]["body"]
+    assert paged["body"] != by_sid[raw_order[diverging - 1]]["body"]
+    assert "no evidence number 99" in capsys.readouterr().out
 
 
 def test_stale_binding_prompts_rerender_instead_of_reinterpreting(

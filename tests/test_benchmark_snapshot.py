@@ -1061,16 +1061,16 @@ def test_commit_relation_classifies_ancestor_head_and_non_ancestor(tmp_path: Pat
     from daydream.benchmark import snapshot as sn
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
-    assert sn.commit_relation(m, base, heads["edit"], heads["edit"]) == "at_head"
-    assert sn.commit_relation(m, base, heads["edit"], base) == "ancestor"
-    assert sn.commit_relation(m, base, heads["edit"], orphan) == "non_ancestor"
+    assert sn.commit_relation(m, heads["edit"], heads["edit"]) == "at_head"
+    assert sn.commit_relation(m, heads["edit"], base) == "ancestor"
+    assert sn.commit_relation(m, heads["edit"], orphan) == "non_ancestor"
 
 
 def test_commit_relation_unavailable_on_missing_object(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
-    assert sn.commit_relation(m, base, heads["edit"], "f" * 40) == "unavailable"
+    assert sn.commit_relation(m, heads["edit"], "f" * 40) == "unavailable"
 
 
 def test_anchor_delta_intersecting_vs_elsewhere_rename_delete_binary_locationless(

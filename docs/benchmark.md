@@ -171,8 +171,9 @@ reason-code legend line explaining its placement:
 
 - Signal reasons: `resolved` (record marked resolved), `outdated` (record
   marked outdated), `anchor-delta-*` (the authoring anchor's content changed or
-  moved between the authoring commit and the pinned snapshot head — an
-  intersecting change at the anchor location vs the same file elsewhere), and
+  moved between the authoring commit and the pinned snapshot head — only a
+  change intersecting the anchor range surfaces a code; a change elsewhere in
+  the same file leaves the delta `unchanged` and surfaces none), and
   `pr-author-reply` (the PR author replied later in the thread).
 - Availability causes: `commit-non-ancestor`, `commit-unavailable`,
   `anchor-unavailable`, `facts-missing`.
@@ -221,9 +222,11 @@ fields.
   `commit_id` gate.
 - An anchor delta between the authoring commit and the pinned snapshot head
   feeds the advisory prioritized view only: a change intersecting the anchor
-  range and a change elsewhere in the same file are surfaced as distinct
-  reason codes. Neither signal establishes semantic correctness — only
-  explicit curator actions create gold or exclusions.
+  range surfaces as an `anchor-delta-changed` reason code (with deleted,
+  renamed, and binary variants); a change elsewhere in the same file leaves
+  the delta `unchanged` and surfaces no reason code. Neither signal
+  establishes semantic correctness — only explicit curator actions create gold
+  or exclusions.
 - `curate` shows the authoring commit prefix (`auth:`) beside the observed
   re-anchored `commit_id` (`commit:`) and the fixed not-exact reason whenever
   exact acceptance is unavailable, so you can see at a glance whether a record

@@ -2263,11 +2263,13 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path: Path) -> None:
         _,
         prior_pinned,
         prior_policy,
+        prior_facts,
         prior_heads,
     ) = gi._prior_import_state(ws, raw, 202)
     assert prior_sig is None and prior_task_sig is None and curations == {}
     assert prior_candidates == {}
     assert prior_pinned == {} and prior_policy == {} and prior_heads == []
+    assert prior_facts == {}
 
 
 def test_refresh_stale_clears_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -2754,17 +2756,27 @@ def test_fact_extraction_failure_records_unavailable_and_import_still_succeeds(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A git failure during fact extraction fail-closes to 'unavailable' without
-    failing the import or disturbing carried-forward curation."""
+    failing the import or disturbing carried-forward curation.
+
+    The prior facts are staled to an older extraction version first so the
+    refresh actually re-extracts: an exact persisted block is reused verbatim
+    (see test_refresh_reuses_persisted_facts_without_probes) and never probes.
+    """
     import shutil
 
     from daydream import git_ops
     from daydream.benchmark import github_import as gi
+    from daydream.benchmark import storage
     from daydream.benchmark.storage import load_json_strict, load_yaml_strict
     from tests.test_benchmark_curation import _seed_ready_case
 
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
     import_path = ws / load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["source"]["import_file"]
     before = load_json_strict(import_path)
+    # stale the persisted facts so the refresh recomputes (and fails closed)
+    raw_case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    raw_case["prioritization"]["extraction_version"] = 0
+    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw_case)
 
     # break the mirror; the refresh freeze re-populates it from the local bare origin
     shutil.rmtree(ws / "cache" / "repository.git")
@@ -2818,11 +2830,15 @@ def test_facts_absent_from_every_hash_surface(tmp_path: Path, fake_gh: FakeGh) -
     assert code_after == code_before
 
 
-def test_refresh_recomputes_facts_and_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """A refresh recomputes prioritization facts against the pinned head while
+def test_refresh_reuses_persisted_facts_and_preserves_curation(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A no-op refresh reuses the persisted prioritization block verbatim (the
+    mirror probes never re-run — zero subprocess fan-out per record) while
     carrying the curator's curation and the pinned snapshot forward unchanged."""
     from daydream.benchmark import curation as cu
     from daydream.benchmark import github_import as gi
+    from daydream.benchmark import snapshot as snapshot_mod
     from daydream.benchmark.storage import load_yaml_strict
     from tests.test_benchmark_curation import _seed_ready_case
 
@@ -2832,12 +2848,22 @@ def test_refresh_recomputes_facts_and_preserves_curation(tmp_path: Path, fake_gh
     cu.accept_candidate(ws, case_id, sid)     # curator action
     before_case = load_yaml_strict(case_path)
     origin_url = str(tmp_path / "origin_local.git")
+
+    # The extraction probes must not run at all on the no-op refresh: any call
+    # proves a recompute raced past the reuse gate.
+    def boom(*a: Any, **kw: Any) -> str:
+        raise AssertionError("mirror probe re-ran on a no-op refresh")
+
+    monkeypatch.setattr(snapshot_mod, "commit_relation", boom)
+    monkeypatch.setattr(snapshot_mod, "anchor_delta", boom)
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
     ) == 0
     after_case = load_yaml_strict(case_path)
     assert after_case["curation"] == before_case["curation"]  # carried forward unchanged
     assert after_case["snapshot"] == before_case["snapshot"]  # pinned head/bundle intact
+    # the persisted facts are reused byte-identical
+    assert after_case["prioritization"] == before_case["prioritization"]
     assert after_case["prioritization"]["head_sha"] == after_case["snapshot"]["original_head_sha"]
 
 

@@ -169,7 +169,7 @@ def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
     return "ok" if anc.returncode == 0 else "head_not_on_pr"
 
 
-def commit_relation(mirror_repo: Path, base_tip: str, head: str, commit: str) -> str:
+def commit_relation(mirror_repo: Path, head: str, commit: str) -> str:
     """Classify how *commit* relates to the PR head in the pinned mirror.
 
     Returns ``"at_head"`` iff *commit* equals *head*; ``"ancestor"`` when
@@ -198,15 +198,20 @@ def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> st
     """Classify how the base..head change interacts with one authoring anchor.
 
     *anchor* is an :class:`~daydream.benchmark.schema.AuthoringAnchor`-shaped
-    dict. Returns ``"locationless"`` when the anchor is not ``status ==
-    "derived"`` or carries no path/range; otherwise the base_tip..head diff is
-    classified: anchored path renamed -> ``"renamed"``; anchored path deleted
-    -> ``"deleted"``; binary content at the anchored path -> ``"binary"``; a
-    modification whose ``-U0`` hunks intersect the anchored ``[start_line,
-    end_line]`` range -> ``"changed"``; a same-file modification outside the
-    range -> ``"unchanged"``. Any git failure returns ``"unavailable"``
-    (fail-closed: never raised, never guessed). All reads are local mirror
-    reads only.
+    dict whose ``[start_line, end_line]`` span lives in the diff base (the
+    ``base_tip`` argument) commit's file coordinate space — for real fact
+    extraction the caller feeds the record's authoring commit as ``base_tip``,
+    the space GitHub's authoring ``original_line`` fields are expressed in.
+    Returns ``"locationless"`` when the anchor is not ``status == "derived"``
+    or carries no path/range; otherwise the base..head diff is classified:
+    anchored path renamed -> ``"renamed"``; anchored path deleted ->
+    ``"deleted"``; binary content at the anchored path -> ``"binary"``; a
+    modification whose ``-U0`` base-side hunk ranges intersect the anchored
+    ``[start_line, end_line]`` span -> ``"changed"``; a same-file
+    modification outside the span -> ``"unchanged"``. Equal base/head (an
+    at-head anchor) is ``"unchanged"`` with no mirror probes. Any git failure
+    returns ``"unavailable"`` (fail-closed: never raised, never guessed). All
+    reads are local mirror reads only.
     """
     if not isinstance(anchor, dict) or anchor.get("status") != "derived":
         return "locationless"
@@ -215,6 +220,11 @@ def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> st
     end = anchor.get("end_line")
     if not path or start is None or end is None:
         return "locationless"
+    if base_tip == head:
+        # An at-head anchor is by definition unmodified by the (empty)
+        # base..head change — and the most common extraction case, so it must
+        # never spawn git probes.
+        return "unchanged"
     try:
         st = git_ops._run_git(
             mirror_repo,
@@ -269,8 +279,11 @@ def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> st
             return "binary"
         if path not in modified:
             return "unchanged"
-        # The anchored path was modified: intersect the -U0 hunk new-side line
-        # ranges with the anchored [start_line, end_line] span.
+        # The anchored path was modified: the anchor's [start_line, end_line]
+        # span lives in the diff-base (authoring) coordinate space, so
+        # intersect it with the -U0 hunk *base-side* ranges (``-l,s``) — the
+        # new-side ``+c,d`` positions diverge from the authoring coordinates
+        # whenever lines shift above the anchor, misclassifying the span.
         hunks = git_ops._run_git(
             mirror_repo, ["diff", "-U0", base_tip, head, "--", path], retries=0,
         )
@@ -279,12 +292,17 @@ def anchor_delta(mirror_repo: Path, base_tip: str, head: str, anchor: Any) -> st
         for line in hunks.stdout.splitlines():
             if not line.startswith("@@"):
                 continue
-            plus = line.split("+")[1].split(" ")[0] if "+" in line else ""
-            if not plus:
+            minus = line.split("+", 1)[0].strip()
+            old = minus.rpartition(" ")[2]
+            if not old.startswith("-"):
                 continue
-            c, _, d = plus.partition(",")
+            c, _, d = old[1:].partition(",")
             cstart = int(c)
             clen = int(d) if d else 1
+            if clen == 0:
+                # A zero-length base-side range (a pure insertion) cannot
+                # touch any existing authoring line, so the span is unaffected.
+                continue
             cend = cstart + max(clen - 1, 0)
             if start <= cend and end >= cstart:
                 return "changed"

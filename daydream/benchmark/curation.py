@@ -465,8 +465,13 @@ def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> fro
     result is a set.
 
     *view_context* carries ``pr_author_login`` (str | None), ``records`` (the
-    full evidence list, for reply-chain scanning) and ``facts`` (the persisted
-    ``prioritization`` block or None).
+    full evidence list, for reply-chain scanning), ``facts`` (the persisted
+    ``prioritization`` block or None) and ``latest_pr_author_reply`` (a
+    precomputed thread -> latest same-thread PR-author reply ``created_at``
+    map, built once by :func:`prioritized_evidence` so each record answers the
+    strictly-later question in O(1) instead of a per-record full-list scan;
+    when the key is absent the scan runs inline as a fallback for direct
+    callers).
     """
     signals: set[str] = set()
     if record.get("resolved"):
@@ -483,20 +488,28 @@ def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> fro
                 signals.add(code)
     pr_login = view_context.get("pr_author_login")
     created = record.get("created_at")
-    thread_id = record.get("thread_id")
     if pr_login and created:
-        for other in view_context.get("records") or []:
-            if other is record or not other.get("reply_to_id"):
-                continue
-            if (other.get("thread_id") or None) != (thread_id or None):
-                continue
-            if ((other.get("author") or {}).get("login")) != pr_login:
-                continue
-            other_created = other.get("created_at")
-            if not other_created or other_created <= created:
-                continue
-            signals.add("pr-author-reply")
-            break
+        latest = view_context.get("latest_pr_author_reply")
+        if latest is None:
+            # Fallback for direct callers that did not precompute the
+            # per-thread map: scan the full evidence list as before.
+            thread_id = record.get("thread_id")
+            for other in view_context.get("records") or []:
+                if other is record or not other.get("reply_to_id"):
+                    continue
+                if (other.get("thread_id") or None) != (thread_id or None):
+                    continue
+                if ((other.get("author") or {}).get("login")) != pr_login:
+                    continue
+                other_created = other.get("created_at")
+                if not other_created or other_created <= created:
+                    continue
+                signals.add("pr-author-reply")
+                break
+        else:
+            later = latest.get(record.get("thread_id") or None)
+            if later is not None and later > created:
+                signals.add("pr-author-reply")
     return frozenset(signals)
 
 
@@ -560,9 +573,10 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
     ``band``, ``reasons``, ``not_exact_reason`` (verbatim or None),
     ``disposition``, ``thread_id`` and ``same_thread_ids`` (other evidence
     sharing the same non-None thread). Final order: band rank, canonical
-    position, then ``source_id``. Absent/None facts fail open — every
-    candidate classifies via the facts-missing path (``needs_judgment``)
-    while non-candidates stay ``context`` and decided sources stay
+    position, then ``source_id``. Absent/None facts fail open — a candidate
+    without record-level signals classifies via the facts-missing path
+    (``needs_judgment``) while signalled candidates still rank by signal
+    count, non-candidates stay ``context`` and decided sources stay
     ``decided``. Never persisted.
     """
     records = raw.get("evidence") or []
@@ -585,7 +599,30 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
         e.get("source_id") for e in (curation.get("exclusions") or []) if e.get("source_id")
     }
     pr_login = ((raw.get("pull_request") or {}).get("author") or {}).get("login")
-    view_context = {"pr_author_login": pr_login, "records": records, "facts": facts}
+    latest_pr_author_reply: dict[Any, str] = {}
+    if pr_login and records:
+        # One O(N) pass: the latest same-thread reply authored by the PR
+        # author per thread, so each collect_signals call answers the
+        # strictly-later question in O(1) instead of re-scanning the full
+        # evidence list per record (an O(N^2) cost on every get_case, several
+        # per TUI keystroke).
+        for other in records:
+            if not other.get("reply_to_id"):
+                continue
+            if ((other.get("author") or {}).get("login")) != pr_login:
+                continue
+            tid = other.get("thread_id") or None
+            t = other.get("created_at")
+            if not t:
+                continue
+            if latest_pr_author_reply.get(tid) is None or t > latest_pr_author_reply[tid]:
+                latest_pr_author_reply[tid] = t
+    view_context = {
+        "pr_author_login": pr_login,
+        "records": records,
+        "facts": facts,
+        "latest_pr_author_reply": latest_pr_author_reply,
+    }
     thread_members: dict[str, list[str]] = {}
     for rec in records:
         tid = rec.get("thread_id")
@@ -607,7 +644,7 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
         band, disposition, reasons = classify_evidence(
             refs=refs,
             is_candidate=sid in candidate_ids,
-            dismissed=sid in exclusion_refs,
+            dismissed=bool(rec.get("dismissed")),
             signals=signals,
             facts_present=facts_present,
             commit_relation=(fentry or {}).get("commit_relation") or "at_head",

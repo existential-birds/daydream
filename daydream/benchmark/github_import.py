@@ -1377,37 +1377,49 @@ def _derive_one_anchor(
 def _extract_prioritization_facts(
     doc: schema.ImportDocument,
     mirror_repo: Path,
-    base_tip: str,
     head_sha: str,
     candidate_ids: set[str],
 ) -> schema.PrioritizationFacts:
     """Per-evidence snapshot-comparison facts against the pinned head.
 
     Consumes exactly each record's ``authoring_anchor`` (the #826 contract —
-    never GitHub's re-anchored fields). The commit relation classifies the
-    record's authoring commit against the pinned head; the anchor delta
-    measures the base_tip..head-classified interaction from that same
-    authoring commit to the head, so an at-head comment's anchored region is
-    by definition unchanged by the PR's own diff. Both helpers fail closed
-    to ``unavailable``; a defensive per-record catch maps an unexpected git
-    failure to ``unavailable`` on both axes without failing the import.
+    never GitHub's re-anchored fields: their ``commit_id`` may even equal the
+    head, which would make the relation vacuously ``at_head`` and the delta
+    vacuously ``unchanged``). The commit relation classifies the record's
+    authoring commit against the pinned head; the anchor delta classifies the
+    authoring-commit..head change against the anchored span — the anchor's
+    ``start_line``/``end_line`` live in the authoring commit's file coordinate
+    space, the diff's base side — so an at-head comment's anchored region is
+    by definition unchanged by later PR commits. A record with no anchor or a
+    fail-closed anchor carries no authoring commit: its facts are the fixed
+    ``unavailable``/``locationless`` pair and no mirror probes run for it.
+    Both helpers fail closed to ``unavailable``; a defensive per-record catch
+    maps an unexpected git failure to ``unavailable`` on both axes without
+    failing the import.
     """
     candidates: dict[str, schema.PrioritizationCandidate] = {}
     non_candidates: dict[str, schema.PrioritizationCandidate] = {}
     for record in doc.evidence:
-        commit = record.commit_id or record.original_commit_id or head_sha
+        anchor = (
+            record.authoring_anchor.model_dump(mode="json")
+            if record.authoring_anchor
+            else None
+        )
         relation: str = "unavailable"
-        delta: str = "unavailable"
-        try:
-            relation = snapshot.commit_relation(mirror_repo, base_tip, head_sha, commit)
-            anchor = (
-                record.authoring_anchor.model_dump(mode="json")
-                if record.authoring_anchor
-                else None
-            )
-            delta = snapshot.anchor_delta(mirror_repo, commit, head_sha, anchor)
-        except git_ops.GitError:
-            pass
+        delta: str = "locationless"
+        if anchor is not None and anchor.get("status") == "derived":
+            # A derived anchor carries the authoring commit (schema-enforced);
+            # both probes run against that commit, never a re-anchored field.
+            delta = "unavailable"
+            try:
+                relation = snapshot.commit_relation(
+                    mirror_repo, head_sha, anchor["commit_id"]
+                )
+                delta = snapshot.anchor_delta(
+                    mirror_repo, anchor["commit_id"], head_sha, anchor
+                )
+            except git_ops.GitError:
+                pass
         entry = schema.PrioritizationCandidate(
             commit_relation=relation,  # type: ignore[arg-type]
             anchor_delta=delta,  # type: ignore[arg-type]
@@ -1421,6 +1433,44 @@ def _extract_prioritization_facts(
         candidates=candidates,
         non_candidates=non_candidates,
     )
+
+
+def _reuse_prior_facts(
+    prior: dict[str, Any] | None,
+    head_sha: str,
+    changed_ids: set[int] | None,
+) -> schema.PrioritizationFacts | None:
+    """Return the persisted prioritization block when it is still exact.
+
+    The per-evidence facts are a pure function of each record's authoring
+    anchor, the mirror content at the pinned head, and the candidate split.
+    On refresh the anchors come back from the prior import document
+    byte-identical (backfilled before projection), so when the extraction
+    version, the head, and the evidence projection signature are all unchanged
+    the block written by the prior materialization is still exact — reusing it
+    skips the per-record mirror-probe fan-out (up to 5 subprocesses per
+    evidence record) on every no-op refresh/import. Any anomaly falls back to
+    :func:`_extract_prioritization_facts`: an absent block, a version or head
+    drift, a changed/added/removed record (its anchor re-derives and can flip
+    relation/delta), or a block that no longer validates (a hand-corrupt
+    block is recomputed and repaired, never carried forward).
+    """
+    if prior is None:
+        return None
+    if prior.get("extraction_version") != EXTRACTION_VERSION:
+        return None
+    if prior.get("head_sha") != head_sha:
+        return None
+    if changed_ids:
+        return None
+    if not isinstance(prior.get("candidates"), dict) or not isinstance(
+        prior.get("non_candidates"), dict
+    ):
+        return None
+    try:
+        return schema.PrioritizationFacts.model_validate(prior)
+    except ValidationError:
+        return None
 
 
 def _derive_authoring_anchors(
@@ -1471,6 +1521,7 @@ def _case_materialize(
     prior_candidates: dict[str, dict[str, dict[str, Any]]] | None = None,
     prior_pinned: dict[str, str] | None = None,
     prior_policy: dict[str, str] | None = None,
+    prior_facts: dict[str, dict[str, Any]] | None = None,
     changed_ids: set[int] | None = None,
     task_input_changed: bool = False,
 ) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, bytes]]]:
@@ -1508,10 +1559,13 @@ def _case_materialize(
     :mod:`daydream.benchmark.snapshot`) are computed once here — where the
     authenticated mirror is already populated — and persisted on the case
     document under the additive ``prioritization`` key (schema_version stays
-    2). Imported-status and unreplayable snapshots persist no key. Facts
-    recompute on every materialization (import and refresh alike) and never
-    feed the staleness gate, so a facts extraction-version bump alone cannot
-    stale curated gold. Facts are
+    2). Imported-status and unreplayable snapshots persist no key. A refresh
+    whose persisted facts are still exact (same extraction version, same
+    head, unchanged evidence — see :func:`_reuse_prior_facts`) reuses the
+    block instead of re-running the per-record mirror probes; any drift or a
+    first materialization recomputes. Facts
+    never feed the staleness gate, so a facts extraction-version bump alone
+    cannot stale curated gold. Facts are
     read-projection input only and live on the case doc alone, so every hash
     surface (import payload, evidence signatures, projection hashes,
     staleness signatures) is untouched.
@@ -1604,13 +1658,23 @@ def _case_materialize(
         candidates = project_candidates(doc, head_sha)
         facts: schema.PrioritizationFacts | None = None
         if root is not None and origin_url is not None and snapshot_doc["status"] == "ready":
-            facts = _extract_prioritization_facts(
-                doc,
-                snapshot.mirror(root),
-                base_sha,
-                head_sha,
-                {c.source_id for c in candidates},
+            # Reuse the persisted block when it is still exact (same extraction
+            # version, same head, unchanged evidence): the per-record mirror
+            # probes are pure functions of the authoring anchors, the mirror
+            # content at the pinned head, and the candidate split — unchanged
+            # on a no-op refresh — so re-running them would be pure
+            # subprocess fan-out (up to 5 per record). Any drift (or an
+            # absent/non-validating block) falls back to extraction.
+            facts = _reuse_prior_facts(
+                (prior_facts or {}).get(case_id), head_sha, changed_ids
             )
+            if facts is None:
+                facts = _extract_prioritization_facts(
+                    doc,
+                    snapshot.mirror(root),
+                    head_sha,
+                    {c.source_id for c in candidates},
+                )
         if prior_curations and case_id in prior_curations:
             prior = prior_curations[case_id]
             # The stale gate runs after projection so its third arm can see
@@ -1788,6 +1852,7 @@ def _prior_import_state(
     str,
     dict[str, str],
     dict[str, str],
+    dict[str, dict[str, Any]],
     list[str],
 ]:
     """Prior import signatures, curations, candidates, path, pins, policies, heads.
@@ -1797,8 +1862,10 @@ def _prior_import_state(
     case_id -> source_id -> candidate dict — the candidate basis the prior
     curation's findings/exclusions were validated against), the import path,
     each prior case's pinned ``snapshot.original_head_sha`` (``prior_pinned``),
-    each prior case's ``snapshot.policy`` (``prior_policy``), and the prior
-    ledger entry's ``requested_heads``. A missing prior state (no ``fetched``
+    each prior case's ``snapshot.policy`` (``prior_policy``), each prior
+    case's persisted ``prioritization`` facts (``prior_facts`` — the reuse
+    gate for snapshot-comparison facts), and the prior ledger entry's
+    ``requested_heads``. A missing prior state (no ``fetched``
     ledger entry, or no persisted import/case to read) yields ``None`` for
     both signatures, empty curations/candidates/pins/policies/heads, and the
     default import path — the normal first-run path. A *present-but-corrupt*
@@ -1816,6 +1883,7 @@ def _prior_import_state(
     prior_candidates: dict[str, dict[str, dict[str, Any]]] = {}
     prior_pinned: dict[str, str] = {}
     prior_policy: dict[str, str] = {}
+    prior_facts: dict[str, dict[str, Any]] = {}
     prior_requested_heads: list[str] = list(existing.get("requested_heads", [])) if existing else []
     if existing is not None and existing.get("import_state") == "fetched":
         prior_import_file = existing.get("import_file")
@@ -1867,6 +1935,9 @@ def _prior_import_state(
             policy = snapshot.get("policy")
             if policy:
                 prior_policy[case_id] = policy
+            facts = case_raw.get("prioritization")
+            if isinstance(facts, dict):
+                prior_facts[case_id] = facts
     return (
         prior_sig,
         prior_task_sig,
@@ -1875,6 +1946,7 @@ def _prior_import_state(
         import_file,
         prior_pinned,
         prior_policy,
+        prior_facts,
         prior_requested_heads,
     )
 
@@ -1924,7 +1996,7 @@ def _import_one_pr(
     basis the findings no longer byte-match.
     """
     prior_sig, prior_task_sig, prior_curations, prior_candidates, import_file, prior_pinned, \
-        prior_policy, prior_requested_heads = _prior_import_state(root, raw, number)
+        prior_policy, prior_facts, prior_requested_heads = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
         # Head-immutable task input: an existing final_pr_head case pins the
@@ -2033,6 +2105,7 @@ def _import_one_pr(
             root=root, repo_slug=repo, origin_url=origin_url,
             prior_curations=prior_curations, prior_candidates=prior_candidates,
             prior_pinned=prior_pinned, prior_policy=prior_policy,
+            prior_facts=prior_facts,
             changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
         # Re-serialize the mutated doc (authoring anchors derived on the typed

@@ -1315,11 +1315,27 @@ def test_prioritized_view_fails_open_without_facts(tmp_path: Path, fake_gh: Fake
 
 
 def test_decided_and_withdrawn_classify_from_curation_state(tmp_path: Path, fake_gh: FakeGh) -> None:
-    # accept one candidate (a real curator action) -> that source becomes decided/finding;
-    # a dismissed evidence record -> withdrawn.
+    # a record-level GitHub dismissal (the import marks inline comments whose
+    # review was DISMISSED) reaches the withdrawn band through the real
+    # projection; the same candidate accepted afterwards becomes decided/finding
+    # (curation refs outrank a dismissal).
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
     cand_sid = view["candidates"][0]["source_id"]
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    import_path = ws / raw["source"]["import_file"]
+    imp = load_json_strict(import_path)
+    for rec in imp["evidence"]:
+        if rec["source_id"] == cand_sid:
+            rec["dismissed"] = True
+    atomic_write_json(import_path, imp)
+
+    view = cu.get_case(ws, case_id)
+    entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)
+    assert entry["band"] == "withdrawn" and entry["disposition"] == "undecided"
+    assert entry["reasons"] == ["dismissed"]
+
+    # accept one candidate (a real curator action) -> that source becomes decided/finding.
     cu.accept_candidate(ws, case_id, cand_sid)
     view = cu.get_case(ws, case_id)
     entry = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)

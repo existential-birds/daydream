@@ -460,9 +460,13 @@ curation:
       note: The final head includes the requested bounds check.
   case_exclusion: null
 prioritization:
-  commit_relation: descendant
-  anchors:
-    github:review_comment:987654: changed_intersecting
+  extraction_version: 1
+  head_sha: <40-hex>
+  candidates:
+    github:review_comment:987654:
+      commit_relation: at_head
+      anchor_delta: unchanged
+  non_candidates: {}
 ```
 
 Case rules:
