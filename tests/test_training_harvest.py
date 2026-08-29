@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -1539,7 +1540,13 @@ def test_token_never_in_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         clone_cache=tmp_path / "cache",
     )
     assert seen
-    assert all("ghp_envtokfake123" not in " ".join(c) for c in seen)  # M8
+    # The base64 Authorization header is trivially recoverable, so the token's
+    # absence on argv must hold for both the raw token and its encoded form.
+    basic = base64.b64encode(b"x-access-token:ghp_envtokfake123").decode()
+    for c in seen:
+        joined = " ".join(c)
+        assert "ghp_envtokfake123" not in joined  # raw token never on argv
+        assert basic not in joined  # recoverable base64 never on argv either (M8)
 
 
 def test_hub_import_rejects_unsanitized_affected_bundle(tmp_path: Path) -> None:

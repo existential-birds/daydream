@@ -56,6 +56,17 @@ def test_canary_in_patch_file_flagged(tmp_path: Path) -> None:
     assert not scan.scan_run_dir(run_dir).clean
 
 
+def test_already_redacted_markers_skip(tmp_path: Path) -> None:
+    """Marker-skip branch: a credential-shaped value whose match carries a
+    [REDACTED_*] marker is already-safe sanitizer output, so it must not be
+    flagged (scan.py skips such matches instead of re-reporting them)."""
+    run_dir = tmp_path / "run"
+    _write_manifest(
+        run_dir, "https://user:[REDACTED_PASSWORD]@github.com/o/r.git"
+    )
+    assert scan.scan_run_dir(run_dir).clean
+
+
 def test_scan_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = tmp_path / "run"
     _write_manifest(run_dir, "https://github.com/o/r")

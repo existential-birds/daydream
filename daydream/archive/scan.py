@@ -8,8 +8,8 @@ value or its surrounding content. Any scanner error is absorbed into a
 ``scan_error`` finding so a broken scan can never return clean (fail-closed).
 
 Redaction rule shapes are imported from :mod:`daydream.trajectory` (reuse, not
-copy); the two pattern gaps unique to serialized bundles (token-only userinfo,
-credential-bearing query params) are local additions.
+copy); the pattern gaps unique to serialized bundles (token-only userinfo,
+scheme-less SCP userinfo, credential-bearing query params) are local additions.
 """
 
 import hashlib
@@ -34,6 +34,14 @@ __all__ = ["Finding", "ScanResult", "scan_run_dir"]
 # trajectory URL-credential rule only matches ``user:pass@``, so this closes
 # the single-token gap (matches the pinned inventory's x-access-token rows).
 _TOKEN_ONLY_USERINFO_PATTERN = re.compile(r"(https?://)[^@/\s]+@", re.IGNORECASE)
+# Scheme-less SCP userinfo: ``user:pass@host:path``. The trajectory URL rule
+# and the token-only rule above both anchor on ``https?://``, so this closes
+# the SCP gap that git_safe.classify_remote_url labels a credential (':' in
+# the pre-@ user group). A lone login user (git@host:path) is not a credential
+# and is intentionally not matched, matching git_safe's classification.
+_SCP_USERINFO_PATTERN = re.compile(
+    r"([^\s@/:]+:[^\s@/:]+@)([^/\s@:]+:)(?=[^\s])", re.IGNORECASE,
+)
 # Credential-like query params: ``?token=...`` / ``&access_token=...`` etc.
 # The key set comes from git_safe._CREDENTIAL_QUERY_KEYS (single source: a key
 # added there widens this scan gate automatically).
@@ -48,6 +56,7 @@ _QUERY_CREDENTIAL_PATTERN = re.compile(
 _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (_URL_CREDENTIAL_PATTERN, "url_credential"),
     (_TOKEN_ONLY_USERINFO_PATTERN, "url_credential"),
+    (_SCP_USERINFO_PATTERN, "url_credential"),
     (_QUERY_CREDENTIAL_PATTERN, "query_credential"),
     (_PEM_KEY_PATTERN, "pem_key"),
     (_ENV_VAR_PATTERN, "env_var"),

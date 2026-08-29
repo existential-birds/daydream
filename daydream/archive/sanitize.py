@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,10 @@ __all__ = ["ImportResult", "SanitizeResult", "import_bundle", "sanitize_archive"
 
 _PROGRESS_FILENAME = "progress.jsonl"
 _AUDIT_FILENAME = "audit.jsonl"
+# Marker written inside a quarantined *derivative* so a later replacement can
+# tell our own copy from an imported source bundle parked in the same
+# ``quarantine/<name>`` namespace by :func:`import_bundle` (M14).
+_DERIVATIVE_MARKER = ".daydream_derivative_marker"
 
 
 def _now_iso_utc() -> str:
@@ -119,6 +124,7 @@ def _sanitize_text(text: str) -> str:
     """
     text = redact_text(text)
     text = scan._TOKEN_ONLY_USERINFO_PATTERN.sub(r"\1[REDACTED_USER]@", text)
+    text = scan._SCP_USERINFO_PATTERN.sub(r"[REDACTED_USER]@\2", text)
     text = scan._QUERY_CREDENTIAL_PATTERN.sub(r"\1\2=[REDACTED_CREDENTIAL]", text)
     return text
 
@@ -148,6 +154,26 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _resolve_session_id(run_dir: Path) -> str:
+    """Return the session id that keys this bundle's derivative and resume marker.
+
+    Mirrors the manifest-driven identity used by :func:`sanitize_bundle`
+    (manifest ``session_id``, falling back to the directory name) so a bulk
+    pass skips a completed bundle even when a legacy manifest's ``session_id``
+    differs from its run-dir name (M19).
+    """
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except ValueError:
+            loaded = {}
+        session_id = loaded.get("session_id") if isinstance(loaded, dict) else None
+        if session_id:
+            return str(session_id)
+    return run_dir.name
 
 
 def _read_progress(sanitized_dir: Path) -> dict[str, str]:
@@ -187,15 +213,23 @@ def _quarantine_derivative(
 ) -> None:
     """Move a failed derivative to quarantine and record it (M16, fail-closed).
 
-    Nothing is deleted: the derivative (a copy, never the bronze original) is
-    moved under ``<archive_dir>/quarantine/<session_id>/`` for human review.
+    Nothing deleted is ever a source: a prior derivative copy in the slot is
+    replaced only when the marker proves it is ours; an imported source bundle
+    parked at the same ``quarantine/<name>`` namespace by :func:`import_bundle`
+    is never touched (the failed derivative is parked in a sibling slot).
     """
     quarantine_dir = archive_dir / "quarantine" / session_id
     quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
     if derivative_dir.exists():
-        if quarantine_dir.exists():
+        if (quarantine_dir / _DERIVATIVE_MARKER).exists():
             shutil.rmtree(quarantine_dir)  # our own prior derivative copy, not a source
+        if quarantine_dir.exists():
+            # The slot is not provably our derivative (e.g. an imported source
+            # parked by import_bundle at quarantine/<name>). Never delete it;
+            # park this failed derivative in a unique sibling slot instead.
+            quarantine_dir = quarantine_dir.with_name(f"{session_id}.{int(time.time())}")
         shutil.move(str(derivative_dir), str(quarantine_dir))
+        (quarantine_dir / _DERIVATIVE_MARKER).write_text(_now_iso_utc(), encoding="utf-8")
     _append_jsonl(
         sanitized_dir / _AUDIT_FILENAME,
         {
@@ -307,7 +341,7 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
     if not runs_dir.is_dir():
         return results
     for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-        session_id = run_dir.name
+        session_id = _resolve_session_id(run_dir)
         recorded_digest = completed.get(session_id)
         if recorded_digest is not None and (sanitized_dir / session_id).is_dir():
             try:

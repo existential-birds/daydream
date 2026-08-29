@@ -1233,7 +1233,8 @@ def test_dump_artifacts_refuses_credential_bearing_bundle(
     assert not (dest / "trajectory.json").exists()
 
     # The warning is value-free (M11): the credential never echoes.
-    out = capsys.readouterr().out + capsys.readouterr().err
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
     assert "ghp_canaryfake123" not in out
 
 

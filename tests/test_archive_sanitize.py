@@ -8,8 +8,10 @@ from daydream.archive import sanitize
 from daydream.archive import scan as scan_module
 
 
-def _seed_bronze_bundle(archive_dir: Path, session_id: str, remote_url: str) -> Path:
-    run_dir = archive_dir / "runs" / session_id
+def _seed_bronze_bundle(
+    archive_dir: Path, session_id: str, remote_url: str, *, dir_name: str | None = None
+) -> Path:
+    run_dir = archive_dir / "runs" / (dir_name or session_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "manifest.json").write_text(
         json.dumps({"session_id": session_id, "git": {"remote_url": remote_url, "repo_slug": "o/r"}})
@@ -44,17 +46,21 @@ def test_digest_is_stable_and_audit_record_links(tmp_path: Path) -> None:
 
 def test_resume_skips_completed_items(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
-    for sid in ("a", "b"):
-        _seed_bronze_bundle(archive_dir, sid, "https://github.com/o/r")
+    # Seed bundles whose manifest session_id differs from the run-dir name so
+    # the M19 resume key (dir name vs manifest session_id) is not masked.
+    _seed_bronze_bundle(archive_dir, "a-session", "https://github.com/o/r", dir_name="a")
+    _seed_bronze_bundle(archive_dir, "b-session", "https://github.com/o/r", dir_name="b")
     sanitize.sanitize_archive(archive_dir)  # first pass completes both
-    # delete derivative b and re-run: only b is re-processed (a untouched mtime)
-    before = (archive_dir / "sanitized" / "a" / "manifest.json").stat().st_mtime_ns
+    audit_path = archive_dir / "sanitized" / "audit.jsonl"
+    assert len(audit_path.read_text().splitlines()) == 2
     # simulate partial state (b's derivative dir exists but manifest missing)
-    (archive_dir / "sanitized" / "b" / "manifest.json").unlink()
+    (archive_dir / "sanitized" / "b-session" / "manifest.json").unlink()
     sanitize.sanitize_archive(archive_dir)
-    after = (archive_dir / "sanitized" / "a" / "manifest.json").stat().st_mtime_ns
-    assert before == after  # M19: completed items not re-processed
-    assert (archive_dir / "sanitized" / "b" / "manifest.json").exists()
+    # M19: completed items not re-processed — a's derivative is left in place
+    # (no extra audit line), while b's is rebuilt (a new audit line).
+    assert (archive_dir / "sanitized" / "a-session" / "manifest.json").exists()
+    assert (archive_dir / "sanitized" / "b-session" / "manifest.json").exists()
+    assert len(audit_path.read_text().splitlines()) == 3  # only b re-processed
 
 
 def test_text_file_token_only_userinfo_and_query_credentials_are_sanitized(
@@ -122,9 +128,17 @@ def test_corpus_projection_reads_only_sanitized_paths(tmp_path: Path) -> None:
     # M17: a projection row pointed at a bronze run_dir containing a dirty URL
     # resolves its inputs from the sanitized derivative when one exists.
     archive_dir = tmp_path / "archive"
-    _seed_bronze_bundle(archive_dir, "s1", "https://user:ghp_canaryfake123@github.com/o/r")
-    sanitize.sanitize_bundle(archive_dir / "runs" / "s1", archive_dir)
-    row = {"archive_path": str(archive_dir / "runs" / "s1"), "session_id": "s1"}
+    run_dir = _seed_bronze_bundle(
+        archive_dir, "s1", "https://user:ghp_canaryfake123@github.com/o/r"
+    )
+    # The canary must flow into the projected record were the raw bundle read
+    # (review-output.md is read for content at projection), so the security half
+    # is observable: only the sanitized derivative keeps it out.
+    (run_dir / "review-output.md").write_text(
+        "clone https://x-access-token=ghp_canaryfake123@github.com/o/r.git\n"
+    )
+    sanitize.sanitize_bundle(run_dir, archive_dir)
+    row = {"archive_path": str(run_dir), "session_id": "s1"}
     projected = _build_record(row, {}, None)  # existing corpus entrypoint
     assert projected is not None
     assert "ghp_canaryfake123" not in json.dumps(projected)

@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 import tempfile
 import warnings
@@ -340,16 +341,30 @@ def _build_record(
         (credential-bearing bundle with no released derivative — M17; the
         caller skips + warns, never raises).
     """
+    row_archive_path = Path(manifest_row.get("archive_path", ""))
     archive_path = _resolve_projection_path(manifest_row)
     if archive_path is None:
         return None
+
+    # Refs resolve against the row's stored ``archive_path`` (the bronze
+    # ``runs/<sid>``) by a downstream materializer. When ``_resolve_projection_path``
+    # redirected this bundle to the sanitized derivative (M17), emit the ref
+    # relative to that row path so resolution lands on ``sanitized/<sid>/…``
+    # (the credential-free copy) — never the raw credential-bearing bronze file.
+    # The ``../sanitized/<slide>`` prefix in the resolved value is the record's
+    # only derivative-origin marker: the v1 schema is ``additionalProperties:
+    # false``, so origin cannot be a new sibling field.
+    def _ref_relative_path(filename: str) -> str:
+        # relative from the row's bronze path to the file actually projected.
+        return os.path.relpath(str(archive_path / filename), start=str(row_archive_path))
+
     # fix_diff_ref points at the REVIEWED-INPUT diff (diff.patch = the PR-under-
     # review diff daydream was asked to review), NOT daydream's own fix. The
     # name is retained for schema-v1 compatibility; treat it as the input.
     diff_path = archive_path / "diff.patch"
     fix_diff_ref = {
         "available": diff_path.is_file(),
-        "archive_relative_path": "diff.patch",
+        "archive_relative_path": _ref_relative_path("diff.patch"),
     }
     # recommended_diff_ref points at the OUTCOME diff (recommended.patch =
     # daydream's proposed base->worktree edit, captured best-effort after the
@@ -359,7 +374,7 @@ def _build_record(
     recommended_path = archive_path / "recommended.patch"
     recommended_diff_ref = {
         "available": recommended_path.is_file(),
-        "archive_relative_path": "recommended.patch",
+        "archive_relative_path": _ref_relative_path("recommended.patch"),
     }
 
     manifest_dict = manifest or {}
@@ -402,7 +417,7 @@ def _build_record(
         "outcome_label": label,
         "grounding_score": manifest_row.get("grounding_rate"),
         "spans": _build_spans(trajectory),
-        "trajectory_ref": {"archive_relative_path": "trajectory.json"},
+        "trajectory_ref": {"archive_relative_path": _ref_relative_path("trajectory.json")},
     }
 
     # Optional reward fields. composite_reward is nullable (written always);
