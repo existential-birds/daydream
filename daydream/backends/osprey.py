@@ -45,6 +45,9 @@ from daydream.trajectory import redact_text
 logger = logging.getLogger(__name__)
 
 _OSPREY_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
+_OSPREY_OBSERVATION_UPDATE_BYTES = 64 * 1024
+_OSPREY_OBSERVATION_INLINE_BYTES = 256 * 1024
+_OSPREY_OBSERVATION_ADMISSION_BYTES = 2 * 1024 * 1024
 _JSONL_PROTOCOL_VERSION = 2
 _MAX_DIAGNOSTIC_LINES = 10
 _MAX_DIAGNOSTIC_LINE_CHARS = 500
@@ -175,18 +178,34 @@ def _bounded_diagnostics(lines: Iterable[str]) -> str:
     for line in lines:
         if len(cleaned) >= _MAX_DIAGNOSTIC_LINES:
             break
-        cleaned.append(redact_text(line)[:_MAX_DIAGNOSTIC_LINE_CHARS])
+        cleaned.append(_bounded_diagnostic_line(line))
     if not cleaned:
         return "no diagnostic output captured"
     return "\n".join(cleaned)
 
 
+def _bounded_diagnostic_line(line: str) -> str:
+    return redact_text(line)[:_MAX_DIAGNOSTIC_LINE_CHARS]
+
+
 async def _drain_stderr(stderr: asyncio.StreamReader, diagnostics: list[str]) -> None:
     """Drain Osprey diagnostics without allowing its stderr pipe to fill."""
-    while line := await stderr.readline():
+    while True:
+        try:
+            line = await stderr.readline()
+        except ValueError:
+            # ``StreamReader.readline`` clears an over-limit unterminated line
+            # before raising. Stderr is diagnostic-only, so discard that line
+            # and keep draining instead of failing an otherwise valid JSONL
+            # session during teardown.
+            if len(diagnostics) < _MAX_DIAGNOSTIC_LINES:
+                diagnostics.append("stderr diagnostic line exceeded stream limit and was discarded")
+            continue
+        if not line:
+            break
         raw = line.decode(errors="replace").strip()
         if raw and len(diagnostics) < _MAX_DIAGNOSTIC_LINES:
-            diagnostics.append(raw)
+            diagnostics.append(_bounded_diagnostic_line(raw))
 
 
 @dataclass(frozen=True)
@@ -392,7 +411,17 @@ class OspreyBackend:
         if continuation is not None and continuation.backend not in {"osprey", ""}:
             continuation = None
 
-        args = [self.osprey_binary, "agent", "--events-jsonl"]
+        args = [
+            self.osprey_binary,
+            "agent",
+            "--events-jsonl",
+            "--observation-budget-update-bytes",
+            str(_OSPREY_OBSERVATION_UPDATE_BYTES),
+            "--observation-budget-inline-bytes",
+            str(_OSPREY_OBSERVATION_INLINE_BYTES),
+            "--observation-budget-admission-bytes",
+            str(_OSPREY_OBSERVATION_ADMISSION_BYTES),
+        ]
         if self.persona:
             args.extend(["--persona", self.persona])
         if self.toolset:
@@ -566,9 +595,15 @@ class OspreyBackend:
             while True:
                 if proc.stdout is None:
                     break
-                line = await readline_with_idle_timeout(
-                    proc.stdout, cli="osprey", timeout_s=stream_idle_timeout_s()
-                )
+                try:
+                    line = await readline_with_idle_timeout(
+                        proc.stdout, cli="osprey", timeout_s=stream_idle_timeout_s()
+                    )
+                except ValueError as exc:
+                    raise OspreyProtocolError(
+                        "Osprey stdout JSONL line exceeded the "
+                        f"{_OSPREY_STDOUT_LIMIT_BYTES}-byte limit"
+                    ) from exc
                 if not line:
                     break
                 raw = line.decode(errors="replace").strip()
