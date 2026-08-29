@@ -1,0 +1,25 @@
+# Stage-2 deterministic RFT replay. Daydream-private parameters, consumed by
+# daydream.training.rft.run_rft() — NOT a prime-rl config: RFT is an offline,
+# GPU-free deterministic replay of the frozen corpus, not an online RL run
+# (the online RL shape lives in rl.toml; the dataset-SFT shape in sft.toml).
+#
+# The winners filter is always a breakdown-shaped spec supplied to RftConfig
+# (per-axis minimums, e.g. {"composite": 0.6, "grounding": 0.5}) — never a
+# bare scalar (M12).
+
+# Deterministic replay: temperature 0 and an explicit seed. Byte-identical
+# reruns are the acceptance contract (M11) — do not raise temperature here.
+[sampling]
+temperature = 0.0
+seed = 11
+candidates_per_task = 4
+
+# Same renderer discipline as Stage 1/3: never "auto" (hard-errors on our
+# fine-tunes) and never stock "qwen3" (injects an empty <think></think> block).
+[renderer]
+name = "default"
+
+[model]
+# Provenance stamp written into the winners header; the real model id is
+# passed at launch (--model-id) per SPEC C1.
+id = "Qwen/Qwen3-0.6B"

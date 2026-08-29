@@ -5,6 +5,8 @@ Two configs live here:
 - `rl.toml` — the Stage-2/3 GRPO recipe for the `daydream-review-v1` environment.
 - `sft.toml` — the Stage-1 dataset-SFT recipe over the labeled corpus (separate
   `sft` entrypoint, not `rl @`).
+- `rft.toml` — the deterministic RFT replay parameters (daydream-private,
+  consumed by `daydream.training.rft.run_rft()`, not prime-rl).
 
 Both are
 config only — no package, no lockfile — because **prime-rl cannot be consumed as a
@@ -54,6 +56,20 @@ uv run sft @ /abs/path/to/daydream/rl/train/sft.toml \
     --output-dir /data/daydream-rl/outputs-sft-<run> \
     --data.name /abs/path/to/sft-corpus
 ```
+
+`--output-dir` must be a **fresh, unique-per-experiment** directory: prime-rl
+
+Stage-2 deterministic RFT is offline GPU-free replay (see `rft.toml`), run with
+the training CLI, not prime-rl:
+
+```bash
+uv run python -c "from daydream.training.rft import RftConfig, run_rft; run_rft(RftConfig( \
+    inputs='/abs/path/to/rft-inputs.jsonl', seed=11, rubric_version='2026.08.29-1', \
+    output_dir='/abs/path/to/rft-out', model_id='<model>'))"
+```
+
+The winners filter is a breakdown-shaped spec (`min_breakdown={"composite": 0.6, ...}`),
+never a bare scalar (M12). Same-input reruns are byte-identical (M11).
 
 `--output-dir` must be a **fresh, unique-per-experiment** directory: prime-rl
 raises `FileExistsError` if it already contains checkpoints and
