@@ -26,6 +26,7 @@ from daydream.training.corpus import (
     _build_query,
     _build_record,
     _is_admitted,
+    _is_admitted_outcome_gold,
     run_build_corpus,
 )
 from daydream.training.reward import PosteriorBreakdown, RewardBreakdown
@@ -44,6 +45,7 @@ def _seed_run_with_annotation(
     reward_version: str = "r1",
     rubric_json: str | None = None,
     has_posterior: bool | None = None,
+    labeler_policy_version: str | None = "980-policy",
     observed_at: str,
     valid_at: str,
     pipeline_status: str = "unknown",
@@ -122,6 +124,20 @@ def _seed_run_with_annotation(
         # every caller means. A local_branch row passes has_posterior=False.
         has_posterior=(label is not None) if has_posterior is None else has_posterior,
     )
+    # Stamp the policy axis: current-policy seeds (default "980-policy") are
+    # admitted as outcome gold; None models a legacy row stamped before the
+    # reply-classifier policy axis existed.
+    import sqlite3
+
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        conn.execute(
+            "UPDATE label_observations SET labeler_policy_version = ? WHERE session_id = ?",
+            (labeler_policy_version, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     # append_label_observation stamps observed_at with wall clock; overwrite it
     # so as_of pins in tests are deterministic.
     import sqlite3
@@ -614,3 +630,30 @@ def test_cli_build_corpus_default_excludes_failed_pipelines(tmp_path: Path, arch
     lines2 = [line for line in out2.read_text().splitlines() if line.strip()]
     assert len(lines2) == 1
     assert json.loads(lines2[0])["session_id"] == "bad-run"
+
+
+LEGACY: dict[str, Any] = {"label": "accepted", "has_posterior": True, "labeler_policy_version": None,
+                          "decisive_mix": False, "decisive_only": True}
+MIXED: dict[str, Any]  = {**LEGACY, "labeler_policy_version": "980-policy", "decisive_mix": True}
+AMBIG: dict[str, Any]  = {
+    **LEGACY, "labeler_policy_version": "980-policy", "decisive_mix": False, "decisive_only": False}
+GOOD: dict[str, Any]   = {**LEGACY, "labeler_policy_version": "980-policy"}
+
+
+def test_gold_admission_rejects_legacy_observations() -> None:
+    """Legacy reply-count/merge-presence rows are excluded from outcome-bearing gold (M16/M22)."""
+    assert _is_admitted_outcome_gold(**LEGACY) is False
+
+
+def test_gold_admission_rejects_mixed_and_ambiguous() -> None:
+    assert _is_admitted_outcome_gold(**MIXED) is False
+    assert _is_admitted_outcome_gold(**AMBIG) is False
+
+
+def test_gold_admission_accepts_current_clean_evidence() -> None:
+    assert _is_admitted_outcome_gold(**GOOD) is True
+
+
+def test_min_reward_path_unaffected() -> None:
+    """The intrinsic min_reward path keeps its existing contract (no creep)."""
+    assert _is_admitted("rejected", 1.0, CorpusFilters(min_reward=0.5)) is True
