@@ -856,6 +856,38 @@ def test_case_document_accepts_additive_prioritization_key() -> None:
         CaseDocument.model_validate(raw3)
 
 
+def test_case_prioritization_facts_shape() -> None:
+    from daydream.benchmark.schema import CaseDocument, PrioritizationFacts
+
+    facts = PrioritizationFacts.model_validate(
+        {
+            "extraction_version": 1,
+            "head_sha": "a" * 40,
+            "candidates": {"gh:101:c1": {"commit_relation": "at_head", "anchor_delta": "changed"}},
+            "non_candidates": {},
+        }
+    )
+    assert facts.extraction_version == 1
+    assert facts.candidates["gh:101:c1"].commit_relation == "at_head"
+    # additive under v2: an absent key still loads as None
+    doc = CaseDocument.model_validate(_valid_case_dict())
+    assert doc.prioritization is None
+
+
+def test_case_document_tolerates_absent_and_rejects_bad_prioritization() -> None:
+    raw = _valid_case_dict()
+    doc = CaseDocument.model_validate(raw)
+    assert doc.prioritization is None  # absent key -> None, old docs load
+
+    raw["prioritization"] = {
+        "extraction_version": 1,
+        "head_sha": "a" * 40,
+        "candidates": {"x": {"commit_relation": "wat", "anchor_delta": "unchanged"}},
+    }
+    with pytest.raises(ValidationError):  # unknown enum value is a schema violation
+        CaseDocument.model_validate(raw)
+
+
 def test_pull_request_entry_fetched_allows_latest_error_only() -> None:
     # A fetched entry may carry latest_error (a failed refresh attempt on an
     # otherwise-intact import) but never `error` itself.

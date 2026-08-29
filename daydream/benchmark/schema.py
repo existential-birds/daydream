@@ -903,8 +903,10 @@ class PrioritizationCandidate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    commit_relation: str
-    anchor_delta: str
+    commit_relation: Literal["at_head", "ancestor", "non_ancestor", "unavailable"]
+    anchor_delta: Literal[
+        "unchanged", "changed", "renamed", "deleted", "binary", "locationless", "unavailable"
+    ]
 
 
 class PrioritizationFacts(BaseModel):
