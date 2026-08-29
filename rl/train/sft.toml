@@ -1,0 +1,85 @@
+# Stage-1 dataset-SFT over the labeled corpus. prime-rl v0.7.0.
+#
+# Run from inside a prime-rl workspace checkout (see README.md — a `prime-rl @
+# git+...` dependency does not resolve, because prime-rl takes verifiers from an
+# editable path source pointing at its own submodule):
+#
+#   uv run sft @ <abs path>/rl/train/sft.toml --dry-run
+#   uv run sft @ <abs path>/rl/train/sft.toml --output-dir <fresh dir> --data.name <dataset>
+#
+# IMPORTANT: the entrypoint is the separate `sft` verb, NOT `rl @`. There is
+# deliberately no [orchestrator] and no [algo] block in this file — dataset SFT
+# never routes through the live-teacher variant ([orchestrator.algo]
+# type = "sft" is an orchestrator-side algorithm inside an RL run, a different
+# thing entirely). M10: the dataset path trains on gold completions, not on a
+# live teacher's rollouts.
+
+output_dir = "outputs-sft"
+# --output-dir must be unique per experiment and fresh on a re-run: prime-rl
+# raises FileExistsError if the directory already contains checkpoints and
+# --clean-output-dir is not set. Prefer passing a fresh directory on the CLI.
+
+[model]
+# PLACEHOLDER. The real base model is chosen by criteria, not pinned in a config
+# (SPEC C1), and is passed at launch: --model.name <id>. prime-rl requires the
+# key to exist, so this value is present only to satisfy the schema — do not
+# read it as the training recipe's model.
+name = "Qwen/Qwen3-0.6B"
+# Matches the Stage-3 sequence length so the SFT'd positions transfer to the RL
+# rollouts without a context jump.
+seq_len = 32768
+
+# bf16 throughout. The default is float32 and must be overridden explicitly:
+# rollout precision (Stage 2/3) and training precision have to match.
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
+
+[model.lora]
+# SPEC's SFT band is rank 64-128 at 2:1 alpha:rank — larger than the Stage-2/3
+# RL band (16-32) because SFT carries the whole behavior prior on its own.
+# `target_modules` is deliberately absent: the recipe requires prime-rl's
+# default list (the seven q/k/v/o/gate/up/down projections on a dense model);
+# unknown module names are silently ignored, so restating the list can only
+# hurt.
+rank = 64
+alpha = 128.0
+
+[ckpt.weights]
+# LoRA: save the adapter on its own so a checkpoint is an adapter, not a
+# full-model copy.
+save_adapter_separately = true
+
+[renderer]
+# Not "auto" (hard-errors on any model it has no mapping for — every fine-tune
+# of ours) and never the stock qwen3 renderer, which injects an empty
+# <think></think> block that corrupts cross-entropy on completions.
+name = "default"
+
+[data]
+# PLACEHOLDER. Point at the corpus-side SFT dataset produced by the coordinator
+# (prompt/completion JSONL; the loader accepts a whole-chat `messages` column
+# or both `prompt` and `completion`), or override on the CLI:
+# --data.name /abs/path/sft-corpus
+type = "sft"
+name = "/data/daydream-rl/sft-corpus"
+
+[data.loss_mask]
+# Only assistant completions contribute to the loss; system/user/tool messages
+# are masked (prime-rl defaults, restated for legibility).
+system = false
+user = false
+assistant = true
+tool = false
+
+[optim]
+lr = 1e-5
+
+# ------------------------------------------------ dataset gating ---------
+#
+# Gold-positive-only SFT (M8) and gold/silver tier accounting (M9) are
+# enforced by the daydream coordinator (daydream/training/coordinator.py) when
+# it materializes the Stage-1 dataset this recipe points at: only accepted-
+# class gold completions are written as prompt/completion JSONL, and tier
+# counts are reported in the stage manifest. This recipe is plain prime-rl
+# schema, so `uv run sft @ sft.toml --dry-run` validates it directly with no
+# stripping.

@@ -1,6 +1,15 @@
 # Training the review policy with prime-rl
 
-`rl.toml` here is the GRPO recipe for the `daydream-review-v1` environment. It is
+Three configs live here:
+
+- `rl.toml` — the Stage-2/3 GRPO recipe for the `daydream-review-v1` environment.
+- `sft.toml` — the Stage-1 dataset-SFT recipe over the labeled corpus (separate
+  `sft` entrypoint, not `rl @`).
+- `rft.toml` — the deterministic RFT replay reference parameters
+  (daydream-private, passed at launch via `RftConfig` to
+  `daydream.training.rft.run_rft()`; the file is reference-only, not prime-rl).
+
+All are
 config only — no package, no lockfile — because **prime-rl cannot be consumed as a
 dependency**. At v0.7.0 prime-rl resolves verifiers from an editable path source
 pointing at its own submodule (`[tool.uv.sources] verifiers = { path = "deps/verifiers" }`),
@@ -40,9 +49,43 @@ workspace glob), but an editable install is less surprising.
 uv run rl @ /abs/path/to/daydream/rl/train/rl.toml --dry-run
 ```
 
+Stage-1 dataset SFT uses the separate `sft` verb (see `sft.toml`):
+
+```bash
+uv run sft @ /abs/path/to/daydream/rl/train/sft.toml --dry-run
+uv run sft @ /abs/path/to/daydream/rl/train/sft.toml \
+    --output-dir /data/daydream-rl/outputs-sft-<run> \
+    --data.name /abs/path/to/sft-corpus
+```
+
+The corpus-side dataset is written by the training coordinator's Stage-1
+materialization (`daydream train`): gold-positive (`accepted`) completions as
+prompt/completion JSONL — the loader's accepted shape (`messages` column, or
+`prompt` + `completion` columns) — with gold/silver tier counts reported in the
+stage manifest.
+
+Stage-2 deterministic RFT is offline GPU-free replay (see `rft.toml` for the
+reference parameters), run with
+the training CLI, not prime-rl:
+
+```bash
+uv run python -c "from daydream.training.rft import RftConfig, run_rft; run_rft(RftConfig( \
+    inputs='/abs/path/to/rft-inputs.jsonl', seed=11, rubric_version='2026.08.29-1', \
+    output_dir='/abs/path/to/rft-out', model_id='<model>'))"
+```
+
+The winners filter is a breakdown-shaped spec (`min_breakdown={"composite": 0.6, ...}`),
+never a bare scalar (M12). Same-input reruns are byte-identical (M11).
+
+`--output-dir` must be a **fresh, unique-per-experiment** directory: prime-rl
+raises `FileExistsError` if it already contains checkpoints and
+`--clean-output-dir` is not set. The SFT run uses the `default` renderer — do
+not switch to `qwen3`, whose empty `<think></think>` block corrupts the
+loss.
+
 `--dry-run` runs every pydantic validator — renderer resolution, the
 LoRA/weight-broadcast interlock, the batch-size/group-size divisibility check —
-and returns before it ever touches `pynvml`, so it needs no GPU. Resolved
+and is GPU-free (it needs no GPU query/driver). Resolved
 configs land in `<output_dir>/configs/`; check that `inference.toml` came back
 with `enable_lora = true` and `max_lora_rank = 16`, which prime-rl derives from
 the trainer's LoRA block rather than taking from the file.
@@ -102,13 +145,15 @@ which would let a silently-degraded rollout train.
 
 - **The base model.** `[model] name` is a placeholder that exists only because
   prime-rl requires the key. The real model is chosen by criteria and passed at
-  launch: `--model.name <id>` (SPEC C1).
-- **`target_modules`.** SPEC C2 requires prime-rl's default list, so the recipe
-  omits the key rather than restating it.
-- **The algorithm.** GRPO is prime-rl's default at this tag, so there is no
-  `[orchestrator.algo]` block. Valid types are `grpo|echo|max_rl|opd|opsd|sft`;
-  there is no `custom` algorithm — a custom *loss* is `[trainer.loss]
-  type = "custom"`.
+  launch: `--model.name <id>` (SPEC C1). Same for `sft.toml`.
+- **`target_modules`.** SPEC C2 requires prime-rl's default list, so both
+  recipes omit the key rather than restating it.
+- **The algorithm.** GRPO is prime-rl's default at this tag, so `rl.toml` has
+  no `[orchestrator.algo]` block. Valid types are `grpo|echo|max_rl|opd|opsd|
+  sft`; there is no `custom` algorithm — a custom *loss* is `[trainer.loss]
+  type = "custom"`. `sft.toml` has no orchestrator at all: dataset SFT is a
+  separate entrypoint and must never be routed through the live-teacher
+  `[orchestrator.algo] type = "sft"` variant.
 
 ## Corpora
 

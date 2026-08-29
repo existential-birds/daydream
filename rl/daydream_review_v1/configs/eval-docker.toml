@@ -22,6 +22,10 @@ push = false
 id = "daydream-review-v1"
 corpus_dir = "tests/fixtures/corpus-mini"
 manifest_path = "images/manifest.toml"
+# M4: the taskset refuses to load without a passed Stage-0 gate report. The
+# local eval path uses the checked-in fixture report; a real run points at its
+# own gate artifact.
+gate_report_path = "tests/fixtures/stage0-gate.json"
 
 [harness]
 id = "daydream-review-v1"

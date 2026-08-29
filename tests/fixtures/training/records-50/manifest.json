@@ -1,0 +1,15 @@
+{
+  "description": "50-record corpus fixture for the training coordinator's GPU-free CI dry path (M20, M24)",
+  "record_count": 50,
+  "accepted_count": 35,
+  "rejected_count": 15,
+  "accepted_ratio": 0.7,
+  "backend": "pi",
+  "constraints": {
+    "C5_exclusion": "all repo_slug values synthetic and absent from the exclusion list",
+    "C8_copyleft": "all repo_slug values absent from the copyleft list",
+    "M16_lineage_fields": true,
+    "M24_backend_pi": true,
+    "gpu_free": true
+  }
+}

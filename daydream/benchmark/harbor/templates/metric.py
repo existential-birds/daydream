@@ -45,6 +45,56 @@ def _f1(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def _axis_aggregates(
+    loc_tiers: dict[str, int],
+    loc_credit_sum: float,
+    location_pairs: int,
+    sev_exact: int,
+    sev_within_1: int,
+    sev_distance_sum: float,
+    sev_credit_sum: float,
+    severity_pairs: int,
+) -> dict[str, float | int]:
+    """Pool the reported location/severity axes over scored pairs.
+
+    Location tier counts pool per pair and the tier rates use the pooled pair
+    count as the denominator (0.0 with zero pairs). ``location_credit`` pools
+    per pair: each task's reported per-pair mean is weighted by its location
+    pair count (the sum of its tier counts) before dividing by the pooled
+    pair count, pooling to the exact per-pair mean. Severity pools per pair:
+    the totals and rates divide by the pooled ``severity_pairs`` count, and
+    the distance/credit means weight each task's per-pair mean by its pair
+    count, pooling to the exact per-pair mean.
+    """
+    n_loc = location_pairs
+    n_sev = severity_pairs
+    return {
+        "location_exact": loc_tiers["exact"],
+        "location_near": loc_tiers["near"],
+        "location_file": loc_tiers["file"],
+        "location_miss": loc_tiers["miss"],
+        "location_exact_rate": loc_tiers["exact"] / n_loc if n_loc else 0.0,
+        "location_near_rate": loc_tiers["near"] / n_loc if n_loc else 0.0,
+        "location_file_rate": loc_tiers["file"] / n_loc if n_loc else 0.0,
+        "location_miss_rate": loc_tiers["miss"] / n_loc if n_loc else 0.0,
+        "location_credit": loc_credit_sum / n_loc if n_loc else 0.0,
+        "location_pairs_scored": n_loc,
+        "total_location_exact": loc_tiers["exact"],
+        "total_location_near": loc_tiers["near"],
+        "total_location_file": loc_tiers["file"],
+        "total_location_miss": loc_tiers["miss"],
+        "severity_exact": sev_exact,
+        "severity_within_1": sev_within_1,
+        "severity_exact_rate": sev_exact / n_sev if n_sev else 0.0,
+        "severity_within_1_rate": sev_within_1 / n_sev if n_sev else 0.0,
+        "severity_mean_distance": sev_distance_sum / n_sev if n_sev else 0.0,
+        "severity_credit": sev_credit_sum / n_sev if n_sev else 0.0,
+        "severity_pairs_scored": n_sev,
+        "total_severity_exact": sev_exact,
+        "total_severity_within_1": sev_within_1,
+    }
+
+
 # __AGGREGATION_BODY_BEGIN__
 def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float | int]:
     """Placeholder — replaced at build time by ``verifier_core.aggregate_metrics``.

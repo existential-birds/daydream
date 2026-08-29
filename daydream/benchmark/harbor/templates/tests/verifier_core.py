@@ -12,6 +12,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Final, cast
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_CANDIDATE_FINDINGS = 100
@@ -436,7 +437,13 @@ def maximum_matching(
 
 @dataclass(frozen=True)
 class Reward:
-    """The 12-field §10 per-task reward output."""
+    """The 24-field §10 per-task reward output.
+
+    The 12 headline fields are unchanged; the 12 location/severity axis
+    fields (issue #971) are reported-only, computed over matched tp pairs.
+    Axis fields default to zero/absent (0/1 presence flags, no imputed
+    values) when the task has no pairs scoring that axis.
+    """
 
     reward: float = 0.0
     tp: int = 0
@@ -450,9 +457,21 @@ class Reward:
     clean_task: int = 0
     clean_pass: int = 0
     verifier_error: int = 0
+    location_exact: int = 0
+    location_near: int = 0
+    location_file: int = 0
+    location_miss: int = 0
+    location_credit: float = 0.0
+    location_present: int = 0
+    severity_exact: int = 0
+    severity_within_1: int = 0
+    severity_mean_distance: float = 0.0
+    severity_credit: float = 0.0
+    severity_pairs: int = 0
+    severity_present: int = 0
 
     def to_dict(self) -> dict[str, float | int]:
-        """Numeric-only dict with exactly the 12 §10 keys."""
+        """Numeric-only dict with exactly the 24 §10 keys."""
         return {
             "reward": self.reward,
             "tp": self.tp,
@@ -466,7 +485,115 @@ class Reward:
             "clean_task": self.clean_task,
             "clean_pass": self.clean_pass,
             "verifier_error": self.verifier_error,
+            "location_exact": self.location_exact,
+            "location_near": self.location_near,
+            "location_file": self.location_file,
+            "location_miss": self.location_miss,
+            "location_credit": self.location_credit,
+            "location_present": self.location_present,
+            "severity_exact": self.severity_exact,
+            "severity_within_1": self.severity_within_1,
+            "severity_mean_distance": self.severity_mean_distance,
+            "severity_credit": self.severity_credit,
+            "severity_pairs": self.severity_pairs,
+            "severity_present": self.severity_present,
         }
+
+
+LOCATION_TOLERANCE: Final = 3
+# Minimum boundary tolerance for location-tier classification (issue #971 R2):
+# below 3 lines the "near" tier would measure the posting snapper's behavior,
+# not the reviewer's actual localization accuracy.
+
+_RANGE_DISTANCE_DOC = """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
+
+``0`` when ``line`` lies inside the range, else the distance to the nearer
+boundary (``start`` when ``line`` is below it, ``end`` when above).
+
+Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
+(the source of truth); policed against drift by
+``tests/test_benchmark_verifier_assets.py`` (issue #971 R8).
+"""
+
+
+def _range_distance(line: int, start: int, end: int) -> int:
+    if start <= line <= end:
+        return 0
+    if line < start:
+        return start - line
+    return line - end
+
+
+_range_distance.__doc__ = _RANGE_DISTANCE_DOC
+
+
+_SEVERITY_RANK: Final = {"high": 3, "medium": 2, "low": 1}
+"""Severity vocabulary rank (issue #971 R3); validated upstream by
+``_validate_severity``, so an unknown value here is a programming error."""
+
+_SEVERITY_CREDIT: Final = {0: 1.0, 1: 0.5, 2: 0.0}
+"""Severity-agreement credit per rank distance; distance 2 is the maximum
+reachable from the validated high/medium/low vocabulary."""
+
+
+def location_tier(
+    g_path: str,
+    g_start: int,
+    g_end: int,
+    c_path: str,
+    c_start: int,
+    c_end: int,
+    tolerance: int,
+) -> str:
+    """Classify one matched pair's location agreement into exactly one tier.
+
+    Tiers: ``"exact"`` (same path, distance 0), ``"near"`` (same path,
+    distance ``<= tolerance``), ``"file"`` (same path, distance beyond
+    tolerance), ``"miss"`` (different path). Distance is the candidate
+    range's distance to the inclusive gold range ``[g_start, g_end]``: each
+    endpoint is checked as a point in the gold range and the nearer of the
+    two wins — 0 when either endpoint lies inside the gold range, else the
+    closer endpoint's distance to the nearer boundary. A candidate range
+    fully containing the gold range has both endpoints outside it, so it
+    scores a non-zero distance despite complete overlap (multi-line ranges
+    are rare; candidate.py normally sets ``start_line == end_line``).
+    """
+    if g_path != c_path:
+        return "miss"
+    d_start = _range_distance(c_start, g_start, g_end)
+    d_end = _range_distance(c_end, g_start, g_end)
+    distance = min(d_start, d_end)
+    if distance == 0:
+        return "exact"
+    if distance <= tolerance:
+        return "near"
+    return "file"
+
+
+def severity_distance(g_sev: str | None, c_sev: str | None) -> int | None:
+    """Return ``abs(rank(gold) - rank(candidate))`` for the severity axis.
+
+    ``None`` when either side is ``None`` (axis absent -- never imputed,
+    mirroring the missing-signal doctrine in ``daydream/training/reward.py``).
+    Unknown severity strings cannot occur (validated by ``_validate_severity``
+    upstream); an unexpected value raises :class:`VerifierError` rather than
+    being coerced.
+    """
+    if g_sev is None or c_sev is None:
+        return None
+    g_rank = _SEVERITY_RANK.get(g_sev)
+    c_rank = _SEVERITY_RANK.get(c_sev)
+    if g_rank is None or c_rank is None:
+        raise VerifierError(f"unknown severity, got {g_sev!r}/{c_sev!r}")
+    return abs(g_rank - c_rank)
+
+
+def severity_credit(distance: int) -> float:
+    """Map a severity rank distance to partial credit: 0->1.0, 1->0.5, 2->0.0."""
+    try:
+        return _SEVERITY_CREDIT[distance]
+    except KeyError:
+        raise VerifierError(f"severity distance out of range, got {distance!r}") from None
 
 
 def _f1(precision: float, recall: float) -> float:
@@ -491,6 +618,77 @@ def _finding_id(finding: object) -> str:
 
 def _empty_side_error(gold_count: int) -> Reward:
     return Reward(reward=0.0, gold_count=gold_count, verifier_error=0)
+
+
+def _score_axes(
+    gold: list[GoldFinding],
+    candidates: list[CandidateFinding],
+    matches: set[tuple[str, str]],
+) -> Reward:
+    """Compute reported location/severity axes over matched tp pairs.
+
+    A pair contributes to an axis only when both sides carry that signal
+    (axis-absent doctrine: never imputed, never raised on absence). Unknown
+    severity values raise :class:`VerifierError` via the shared helpers.
+    """
+    gold_by_id = {_finding_id(g): g for g in gold}
+    cand_by_id = {c.candidate_id: c for c in candidates}
+
+    loc_tiers = {"exact": 0, "near": 0, "file": 0, "miss": 0}
+    loc_credits: list[float] = []
+    sev_exact = sev_within_1 = 0
+    sev_distances: list[int] = []
+    sev_credits: list[float] = []
+
+    for gold_id, cand_id in matches:
+        g = gold_by_id.get(gold_id)
+        c = cand_by_id.get(cand_id)
+        if g is None or c is None:
+            raise VerifierError(f"matched pair missing finding: {gold_id!r}/{cand_id!r}")
+        g_path = _finding_component(g, "path")
+        g_start = _finding_component(g, "start_line")
+        g_end = _finding_component(g, "end_line")
+        c_path = _finding_component(c, "path")
+        c_start = _finding_component(c, "start_line")
+        c_end = _finding_component(c, "end_line")
+        if g_path is not None and c_path is not None \
+                and g_start is not None and c_start is not None \
+                and g_end is not None and c_end is not None:
+            tier = location_tier(
+                cast("str", g_path), cast("int", g_start), cast("int", g_end),
+                cast("str", c_path), cast("int", c_start), cast("int", c_end),
+                LOCATION_TOLERANCE,
+            )
+            loc_tiers[tier] += 1
+            loc_credits.append(1.0 if tier in ("exact", "near") else 0.0)
+        distance = severity_distance(
+            cast("str | None", _finding_component(g, "severity")),
+            cast("str | None", _finding_component(c, "severity")),
+        )
+        if distance is not None:
+            if distance == 0:
+                sev_exact += 1
+            if distance <= 1:
+                sev_within_1 += 1
+            sev_distances.append(distance)
+            sev_credits.append(severity_credit(distance))
+
+    n_loc = len(loc_credits)
+    n_sev = len(sev_distances)
+    return Reward(
+        location_exact=loc_tiers["exact"],
+        location_near=loc_tiers["near"],
+        location_file=loc_tiers["file"],
+        location_miss=loc_tiers["miss"],
+        location_credit=sum(loc_credits) / n_loc if n_loc else 0.0,
+        location_present=1 if n_loc else 0,
+        severity_exact=sev_exact,
+        severity_within_1=sev_within_1,
+        severity_mean_distance=(sum(sev_distances) / n_sev) if n_sev else 0.0,
+        severity_credit=(sum(sev_credits) / n_sev) if n_sev else 0.0,
+        severity_pairs=n_sev,
+        severity_present=1 if n_sev else 0,
+    )
 
 
 def score_review(
@@ -531,6 +729,7 @@ def score_review(
     precision = tp / (tp + fp) if (tp + fp) else 1.0
     recall = tp / (tp + fn) if (tp + fn) else 1.0
     f1 = 0.0 if tp == 0 else _f1(precision, recall)
+    axes = _score_axes(gold, candidates, matches)
     return Reward(
         reward=f1,
         tp=tp,
@@ -541,6 +740,17 @@ def score_review(
         f1=f1,
         gold_count=gold_count,
         candidate_count=candidate_count,
+        location_exact=axes.location_exact,
+        location_near=axes.location_near,
+        location_file=axes.location_file,
+        location_miss=axes.location_miss,
+        location_credit=axes.location_credit,
+        location_present=axes.location_present,
+        severity_exact=axes.severity_exact,
+        severity_within_1=axes.severity_within_1,
+        severity_mean_distance=axes.severity_mean_distance,
+        severity_credit=axes.severity_credit,
+        severity_present=axes.severity_present,
     )
 
 
@@ -619,16 +829,35 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
     TP/FP/FN are pooled across tasks (never averaged per task). A ``None`` row
     or a row with ``verifier_error == 1`` is an unscored infrastructure
     failure: it increments ``infra_error_task_count`` and contributes nothing
-    (no reward, no tp/fp/fn, no clean counts). Scored rows (``verifier_error
-    == 0``) pool into ``scored_task_count``/``total_tp/fp/fn`` and the mean,
-    which is over scored rows only (zero scored rows -> 1.0). Zero
-    denominators evaluate to 1.0 throughout.
+    (no reward, no tp/fp/fn, no clean counts, no axis contributions). Scored
+    rows (``verifier_error == 0``) pool into ``scored_task_count``/
+    ``total_tp/fp/fn`` and the mean, which is over scored rows only (zero
+    scored rows -> 1.0). Zero denominators evaluate to 1.0 throughout for the
+    headline rates.
+
+    The reported location/severity axes pool over scored pairs only (axis-
+    presence doctrine): per-row pairs come from the ``location_*`` tier fields
+    and the ``severity_pairs`` count, read via ``row.get(k, 0)`` so pre-axis
+    rows (older reward schemas) are genuine zero-pair rows and never raise.
+    Tier rates and the location/severity rates/means use the pooled pair
+    counts as denominators, with each task's reported axis mean weighted by
+    its pair count so unequal tasks pool to the exact per-pair mean. They
+    evaluate to 0.0 when no pairs were scored — deliberately not the 1.0
+    clean-slate convention, because an absent axis is missing signal, not a
+    perfect one.
     """
     infra_errors = 0
     clean_correct = 0
     clean_total = 0
     scored_rewards: list[float] = []
     total_tp = total_fp = total_fn = 0
+    loc_tiers = {"exact": 0, "near": 0, "file": 0, "miss": 0}
+    loc_credit_sum = 0.0
+    location_pairs = 0
+    sev_exact = sev_within_1 = 0
+    sev_distance_sum = 0.0
+    sev_credit_sum = 0.0
+    severity_pairs = 0
 
     for row in rows:
         if row is None or row.get("verifier_error") == 1:
@@ -638,6 +867,21 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
         total_fp += _as_int(row["fp"])
         total_fn += _as_int(row["fn"])
         scored_rewards.append(_as_float(row["reward"]))
+        if row.get("location_present") == 1:
+            row_loc_pairs = 0
+            for tier in loc_tiers:
+                count = int(_as_float(row.get(f"location_{tier}", 0)))
+                loc_tiers[tier] += count
+                row_loc_pairs += count
+            location_pairs += row_loc_pairs
+            loc_credit_sum += _as_float(row.get("location_credit", 0.0)) * row_loc_pairs
+        if row.get("severity_present") == 1:
+            count = int(_as_float(row.get("severity_pairs", 0)))
+            severity_pairs += count
+            sev_exact += int(_as_float(row.get("severity_exact", 0)))
+            sev_within_1 += int(_as_float(row.get("severity_within_1", 0)))
+            sev_distance_sum += _as_float(row.get("severity_mean_distance", 0.0)) * count
+            sev_credit_sum += _as_float(row.get("severity_credit", 0.0)) * count
         if row.get("clean_task") == 1:
             clean_total += 1
             if _as_int(row["fp"]) == 0:
@@ -669,6 +913,61 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
         "total_tp": total_tp,
         "total_fp": total_fp,
         "total_fn": total_fn,
+        **_axis_aggregates(
+            loc_tiers, loc_credit_sum, location_pairs,
+            sev_exact, sev_within_1, sev_distance_sum, sev_credit_sum,
+            severity_pairs,
+        ),
+    }
+
+
+def _axis_aggregates(
+    loc_tiers: dict[str, int],
+    loc_credit_sum: float,
+    location_pairs: int,
+    sev_exact: int,
+    sev_within_1: int,
+    sev_distance_sum: float,
+    sev_credit_sum: float,
+    severity_pairs: int,
+) -> dict[str, float | int]:
+    """Pool the reported location/severity axes over scored pairs.
+
+    Location tier counts pool per pair and the tier rates use the pooled pair
+    count as the denominator (0.0 with zero pairs). ``location_credit`` pools
+    per pair: each task's reported per-pair mean is weighted by its location
+    pair count (the sum of its tier counts) before dividing by the pooled
+    pair count, pooling to the exact per-pair mean. Severity pools per pair:
+    the totals and rates divide by the pooled ``severity_pairs`` count, and
+    the distance/credit means weight each task's per-pair mean by its pair
+    count, pooling to the exact per-pair mean.
+    """
+    n_loc = location_pairs
+    n_sev = severity_pairs
+    return {
+        "location_exact": loc_tiers["exact"],
+        "location_near": loc_tiers["near"],
+        "location_file": loc_tiers["file"],
+        "location_miss": loc_tiers["miss"],
+        "location_exact_rate": loc_tiers["exact"] / n_loc if n_loc else 0.0,
+        "location_near_rate": loc_tiers["near"] / n_loc if n_loc else 0.0,
+        "location_file_rate": loc_tiers["file"] / n_loc if n_loc else 0.0,
+        "location_miss_rate": loc_tiers["miss"] / n_loc if n_loc else 0.0,
+        "location_credit": loc_credit_sum / n_loc if n_loc else 0.0,
+        "location_pairs_scored": n_loc,
+        "total_location_exact": loc_tiers["exact"],
+        "total_location_near": loc_tiers["near"],
+        "total_location_file": loc_tiers["file"],
+        "total_location_miss": loc_tiers["miss"],
+        "severity_exact": sev_exact,
+        "severity_within_1": sev_within_1,
+        "severity_exact_rate": sev_exact / n_sev if n_sev else 0.0,
+        "severity_within_1_rate": sev_within_1 / n_sev if n_sev else 0.0,
+        "severity_mean_distance": sev_distance_sum / n_sev if n_sev else 0.0,
+        "severity_credit": sev_credit_sum / n_sev if n_sev else 0.0,
+        "severity_pairs_scored": n_sev,
+        "total_severity_exact": sev_exact,
+        "total_severity_within_1": sev_within_1,
     }
 
 
