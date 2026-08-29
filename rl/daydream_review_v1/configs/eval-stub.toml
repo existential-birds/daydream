@@ -30,6 +30,10 @@ api_key_var = "DAYDREAM_RL_STUB_KEY"
 id = "daydream-review-v1"
 corpus_dir = "tests/fixtures/corpus-mini"
 manifest_path = "images/manifest.toml"
+# M4: the taskset refuses to load without a passed Stage-0 gate report. The
+# smoke path uses the checked-in fixture report so the plumbing test can run;
+# a real train/eval run points at its own gate artifact.
+gate_report_path = "tests/fixtures/stage0-gate.json"
 # Subprocess runtime only: a task carrying an image may not run there at all.
 use_images = false
 

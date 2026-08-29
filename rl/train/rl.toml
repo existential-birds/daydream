@@ -78,7 +78,7 @@ name = "daydream-review-train"
 # numbered task on issue #164.
 # Generic taskset/harness configs are narrowed to our own subclasses by id before
 # validation, so the plugin keys below validate.
-taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-train", manifest_path = "/data/daydream-rl/manifest.toml" }
+taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-train", manifest_path = "/data/daydream-rl/manifest.toml", gate_report_path = "/data/daydream-rl/stage0-gate.json", outcome_model_path = "/data/daydream-rl/outcome-model.json" }
 # `backend` is NOT free to change here. At training time verifiers renders
 # messages to token ids client-side with an HF chat template and calls vLLM's
 # /inference/v1/generate — that is how token_ids and logprobs reach the trace —
@@ -106,7 +106,7 @@ name = "daydream-review-eval"
 # A SEPARATE corpus directory, never a split of the training one, and never the
 # five held-out benchmark repositories — the taskset refuses those outright
 # (SPEC C5). Train and eval differ by corpus, not by flag.
-taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-eval", manifest_path = "/data/daydream-rl/manifest.toml" }
+taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-eval", manifest_path = "/data/daydream-rl/manifest.toml", gate_report_path = "/data/daydream-rl/stage0-gate.json", outcome_model_path = "/data/daydream-rl/outcome-model.json" }
 harness = { id = "daydream-review-v1", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
 timeout = { setup = 900, rollout = 5400, finalize = 600, scoring = 1800 }
 pool = { type = "elastic", max_workers = 8 }

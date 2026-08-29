@@ -22,6 +22,10 @@ top-level ``TARGET`` positional):
       into a JSONL training corpus plus a lineage manifest
     - ``corpus label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
       — record an authoritative human outcome label that overrides automated ones
+- ``daydream train --corpus <path> --out <dir>`` — run the four-stage
+  training pipeline (stage0 offline gate → stage1 SFT → stage2 RFT →
+  stage3 adapter) and write a stage manifest (``--dry-run`` is the GPU-free
+  CI path)
 - ``daydream ext validate`` — load the ``daydream_ext`` extension and
   resolve-check the registry (flows, phases, prompts)
 """
@@ -68,6 +72,7 @@ KNOWN_VERBS = {
     "improve",
     "summarize",
     "corpus",
+    "train",
     "post-findings",
     "setup",
     "benchmark",
@@ -1299,6 +1304,96 @@ def _handle_label_command(argv: list[str]) -> int:
     return 0
 
 
+def _build_train_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream train --corpus <path> --out <dir> [...]``.
+
+    Dispatched manually from ``main()`` (verb-first) so its flags don't
+    collide with the top-level ``TARGET`` positional.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream train",
+        description=(
+            "Run the four-stage training pipeline (stage0 gate → stage1 SFT → "
+            "stage2 RFT → stage3 adapter) and write a stage manifest."
+        ),
+    )
+    parser.add_argument(
+        "--corpus",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Input JSONL training corpus (one record per line; C5/C8 fail-closed)",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Output directory for stageN/ artifacts and manifest.json",
+    )
+    parser.add_argument(
+        "--stage",
+        action="append",
+        dest="stages",
+        choices=["stage0", "stage1", "stage2", "stage3"],
+        default=None,
+        help="Repeatable; run only these stages in the order given (default: all four)",
+    )
+    parser.add_argument(
+        "--base-model",
+        type=str,
+        default="Qwen/Qwen3-8B",
+        dest="base_model",
+        help="HuggingFace base model id the LoRA adapter trains against",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Master seed (split freeze + training determinism; default: 0)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Execute everything that needs no GPU (corpus load, stage0 gate, "
+             "manifest) and mark the GPU stages skipped_dry — the CI path",
+    )
+    return parser
+
+
+def _handle_train_command(argv: list[str]) -> int:
+    """Handle ``daydream train [...]``.
+
+    Drives :func:`daydream.training.coordinator.run_pipeline` synchronously
+    (pure filesystem + SQLite-free work; no agent backend, no GPU on the dry
+    path). Returns an exit code rather than calling ``sys.exit``; ``main()``
+    translates the code into the process exit.
+
+    Returns:
+        ``0`` on success; ``1`` on a gate refusal or validation error.
+    """
+    from daydream.training.coordinator import PipelineConfig, run_pipeline
+
+    parser = _build_train_parser()
+    args = parser.parse_args(argv)
+
+    config = PipelineConfig(
+        corpus=args.corpus,
+        out_dir=args.out,
+        stages=tuple(args.stages) if args.stages else ("stage0", "stage1", "stage2", "stage3"),
+        base_model=args.base_model,
+        seed=args.seed,
+    )
+    try:
+        run_pipeline(config, dry_run=args.dry_run)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print_error(create_console(), "Training run refused", str(exc))
+        return 1
+    print_success(create_console(), f"Training run complete: {args.out / 'manifest.json'}")
+    return 0
+
+
 # Sub-verbs of the ``corpus`` namespace mapped to their handler callables.
 # ``build`` is the public name for the build-corpus projection.
 _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
@@ -1749,6 +1844,7 @@ def main() -> None:
         - ``review`` (default) — the review/fix loop (bare ``daydream <target>``)
         - ``summarize`` — print run-info markdown for a trajectory
         - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
+        - ``train`` — four-stage training pipeline (``--dry-run`` for GPU-free CI)
         - ``post-findings`` — validate a findings artifact and post new
           findings to the PR (privileged Phase B poster; unattended)
         - ``setup`` — register the review-bot GitHub App, deposit credentials,
@@ -1791,6 +1887,11 @@ def main() -> None:
         # filesystem, no agent work), so short-circuit before anyio.run.
         if verb == "corpus":
             sys.exit(_handle_corpus_command(argv[1:]))
+
+        # ``train`` is sync (filesystem-only coordination, no agent work and
+        # no GPU on the dry path), so short-circuit before anyio.run.
+        if verb == "train":
+            sys.exit(_handle_train_command(argv[1:]))
 
         if verb == "benchmark":
             sys.exit(_handle_benchmark_command(argv[1:]))

@@ -206,3 +206,28 @@ eval-docker; the explicit `--client.base-url` is in `configs/eval-stub.toml`
   identity against a root-owned read-only checkout.
 - **Rollout cost is real.** A deep run is minutes and dollars. The task caps the
   harness at 5400s; daydream bounds each phase at 1800s of its own.
+
+## Vendored-verifiers skew (AC10)
+
+**The skew:** this env pins `verifiers==0.2.1`, but prime-rl `v0.7.0` vendors
+**verifiers 0.2.0** (submodule `deps/verifiers`). Task 0's spike validated that
+the API surface this env uses is compatible across 0.2.0/0.2.1 in both
+directions (env suite: 172 passed against the vendored copy; `rl` dry run green
+against 0.2.1), so the resolution is **pin discipline** — no fork, no version
+relaxation.
+
+**Resolution:** keep `verifiers==0.2.1` pinned exactly in
+`rl/daydream_review_v1/pyproject.toml` and `uv.lock`. The gate test
+`tests/test_vendored_verifiers_suite.py` re-runs the env suite with the vendored
+0.2.0 copy shadowing the pin via `PYTHONPATH` precedence (no venv mutation).
+
+**Running the gate:**
+
+```bash
+export PRIME_RL_VENDORED_VERIFIERS=<prime-rl>/deps/verifiers
+cd rl/daydream_review_v1 && uv run pytest tests/test_vendored_verifiers_suite.py -q
+```
+
+Expected: PASS. When `PRIME_RL_VENDORED_VERIFIERS` is unset the gate skips
+LOUDLY with instructions — never silently. A training claim is only valid when
+this gate has run green.
