@@ -73,6 +73,65 @@ def test_full_run_writes_manifest_and_adapter(
     assert manifest["run_identity"]["base_model"]  # LOCKED_FIELDS identity stamped (M18 tie-in)
 
 
+def test_stage1_sft_prefers_native_profile_and_falls_back_to_legacy(
+    tmp_path: Path,
+) -> None:
+    """M23: Stage-1 SFT selection reads the ``legacy_policy`` tag stamped by
+    ``stacks.load_dataset`` — native-profile accepted rows are selected first,
+    and legacy rows (no ``labeler_policy_version``) fill the dataset only when
+    the native-profile pool is empty."""
+
+    def _write_corpus(path: Path, native: int, legacy: int) -> None:
+        rows: list[dict[str, object]] = []
+        for i in range(native):
+            rows.append(
+                {
+                    "session_id": f"native-{i:04d}",
+                    "repo_slug": "acme/tooling-0",
+                    "comment_id": f"c{i:04d}",
+                    "text": f"grounded actionable finding {i}",
+                    "label": "accepted",
+                    "labeler_policy_version": "980-policy-r1",
+                }
+            )
+        for i in range(legacy):
+            rows.append(
+                {
+                    "session_id": f"legacy-{i:04d}",
+                    "repo_slug": "acme/tooling-1",
+                    "comment_id": f"c{native + i:04d}",
+                    "text": f"legacy accepted finding {i}",
+                    "label": "accepted",
+                    # no labeler_policy_version: load_dataset stamps legacy_policy=True
+                }
+            )
+        path.write_text("\n".join(json.dumps(r) for r in rows))
+
+    mixed = tmp_path / "mixed.jsonl"
+    _write_corpus(mixed, native=3, legacy=2)
+    # The mixed corpus selects only native-profile rows: gold = 3, not 5.
+    mixed_manifest = run_pipeline(
+        PipelineConfig(corpus=mixed, out_dir=tmp_path / "out-mixed", stages=("stage1",)),
+        dry_run=False,
+    )
+    assert mixed_manifest["stages"]["stage1"]["tier_counts"]["gold"] == 3
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "out-mixed" / "stage1" / "sft-dataset.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert all("grounded actionable finding" in str(row["completion"]) for row in rows)
+
+    # A legacy-only corpus still trains: the fallback fills the stage.
+    legacy_only = tmp_path / "legacy-only.jsonl"
+    _write_corpus(legacy_only, native=0, legacy=2)
+    legacy_manifest = run_pipeline(
+        PipelineConfig(corpus=legacy_only, out_dir=tmp_path / "out-legacy", stages=("stage1",)),
+        dry_run=False,
+    )
+    assert legacy_manifest["stages"]["stage1"]["tier_counts"]["gold"] == 2
+
+
 def test_stage3_consumer_reads_coordinator_gate_report(
     records_50_fixture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -126,6 +185,11 @@ def test_dry_run_marks_gpu_stages_skipped(records_50_fixture: Path, tmp_path: Pa
     assert manifest["stages"]["stage0"]["status"] == "complete"
     for stage in ("stage1", "stage2", "stage3"):
         assert manifest["stages"][stage]["status"] == "skipped_dry"
+    # M16 per-stage digests are emitted on the primary dry-run CI artifact:
+    # every stage (stage0 + skipped_dry GPU stages) carries non-empty
+    # split/lineage digests, not an empty ``stage_digests`` map.
+    assert set(manifest["stage_digests"]) == {"stage0", "stage1", "stage2", "stage3"}
+    assert all(d["split_digest"] and d["lineage_digest"] for d in manifest["stage_digests"].values())
 
 
 def test_non_dry_run_writes_stage_outputs_and_adapter(
@@ -215,6 +279,60 @@ def test_stage2_writes_runnable_rft_inputs(records_50_fixture: Path, tmp_path: P
     assert all(r["id"] and r["base_sha"] and r["head_sha"] and r["diff"] for r in inputs)
 
 
+def _production_archive(tmp_path: Path, n: int) -> Path:
+    """Write archived ``diff.patch`` files the exporter's fix_diff_ref points at."""
+    archive_root = tmp_path / "archive"
+    for i in range(n):
+        sid = f"sess-{i:04d}"
+        run_dir = archive_root / "runs" / sid
+        run_dir.mkdir(parents=True)
+        (run_dir / "diff.patch").write_text(f"diff --git a/f.py b/f.py\n@@ sess-{i:04d}\n")
+    return archive_root
+
+
+def test_stage2_materializes_diff_from_fix_diff_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 1: production run_build_corpus exports carry only fix_diff_ref (schema
+    v1 is additionalProperties:false, no raw ``diff`` body), so Stage-2 materializes
+    the RFT diff from the archived diff.patch instead of refusing on the first record."""
+    archive_root = _production_archive(tmp_path, 2)
+    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(archive_root))
+    rows = []
+    for i in range(2):
+        accepted = i % 2 == 0
+        rows.append(
+            {
+                "schema_version": "1",
+                "session_id": f"sess-{i:04d}",
+                "repo_slug": f"acme/tooling-{i % 7}",
+                "review_output": (
+                    f"grounded actionable finding {i}" if accepted else f"noise chatter {i}"
+                ),
+                "outcome_label": "accepted" if accepted else "rejected",
+                "labeler_policy_version": "980-policy-r1",
+                "code_context": {"base_sha": f"a{i:064x}", "head_sha": f"b{i:064x}"},
+                "fix_diff_ref": {"available": True, "archive_relative_path": "diff.patch"},
+            }
+        )
+    corpus = tmp_path / "corpus.jsonl"
+    corpus.write_text("\n".join(json.dumps(r) for r in rows))
+    run_pipeline(
+        PipelineConfig(corpus=corpus, out_dir=tmp_path / "out", stages=("stage2",)), dry_run=False
+    )
+    inputs = [
+        json.loads(line)
+        for line in (tmp_path / "out" / "stage2" / "rft-inputs.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(inputs) == 2
+    # the frozen task identity run_rft rebuilds from is fully present, with the
+    # diff body materialized from the archive pointer, not refused
+    assert all(r["id"] and r["base_sha"] and r["head_sha"] and r["diff"] for r in inputs)
+    assert inputs[0]["diff"] == "diff --git a/f.py b/f.py\n@@ sess-0000\n"
+    assert inputs[1]["diff"] == "diff --git a/f.py b/f.py\n@@ sess-0001\n"
+
+
 def test_stage2_refuses_records_without_diff_identity(tmp_path: Path) -> None:
     """Issue 3: Stage 2 refuses records missing base/head/diff identity instead of
     recording the stage complete over unrunnable inputs."""
@@ -236,10 +354,16 @@ def test_resume_guard_aborts_on_drifted_rerun(records_50_fixture: Path, tmp_path
 
     cfg = PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path)
     run_pipeline(cfg, dry_run=True)
+    labels = (tmp_path / "stage0" / "labels.jsonl").read_text()
+    manifest_text = (tmp_path / "manifest.json").read_text()
     run_pipeline(cfg, dry_run=True)  # identical re-run passes
     drifted = PipelineConfig(corpus=records_50_fixture, out_dir=tmp_path, learning_rate=2e-5)
     with pytest.raises(ResumeAborted, match="learning_rate"):
         run_pipeline(drifted, dry_run=True)
+    # the guard runs before any stage executes: the refused re-run overwrote no
+    # stage artifact and left the prior manifest's identity in place
+    assert (tmp_path / "stage0" / "labels.jsonl").read_text() == labels
+    assert (tmp_path / "manifest.json").read_text() == manifest_text
 
 
 def test_model_split_digest_matches_manifest(records_50_fixture: Path, tmp_path: Path) -> None:

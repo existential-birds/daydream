@@ -138,9 +138,11 @@ class RubricV2Breakdown:
         learned_outcome: Mean learned outcome score over finding texts
             (``[0, 1]``), or ``None`` when there are no findings to score.
         false_positive_penalty: CR-Bench penalty magnitude ``fp/total``
-            (``[0, 1]``); the composite term is ``−w_false_positive ×`` this.
+            (``[0, 1]``), or ``None`` when ``total`` is zero; the composite
+            term is ``−w_false_positive ×`` this.
         signal_to_noise: CR-Bench Usefulness Rate ``(total − fp)/total``
-            telemetry (not a composite term).
+            telemetry (not a composite term), or ``None`` when ``total`` is
+            zero.
         localization: Fraction of findings grounded (``grounded/total``), or
             ``None`` when ``total`` is zero.
         tool_grounded: Fraction of findings carrying tool evidence, or
@@ -161,8 +163,8 @@ class RubricV2Breakdown:
     """
 
     learned_outcome: float | None
-    false_positive_penalty: float
-    signal_to_noise: float
+    false_positive_penalty: float | None
+    signal_to_noise: float | None
     localization: float | None
     tool_grounded: float | None
     golden_overlap: float
@@ -245,8 +247,8 @@ def score_review(
 
     # CR-Bench terms: penalty magnitude fp/total (subtractive), usefulness
     # rate (total - fp)/total as Signal-to-Noise telemetry.
-    false_positive_penalty = fp_count / total_findings
-    signal_to_noise = (total_findings - fp_count) / total_findings
+    false_positive_penalty = fp_count / total_findings if total_findings else None
+    signal_to_noise = (total_findings - fp_count) / total_findings if total_findings else None
 
     # Localization term: grounded / total.
     localization: float | None = grounded / total_findings if total_findings > 0 else None
@@ -276,7 +278,7 @@ def score_review(
 
     terms: dict[str, float | None] = {
         "learned_outcome": learned,
-        "fp_penalty": -false_positive_penalty,
+        "fp_penalty": -false_positive_penalty if false_positive_penalty is not None else None,
         "localization": localization,
         "tool_grounded": tool_grounded,
         "intrinsic_composite": intrinsic_composite,

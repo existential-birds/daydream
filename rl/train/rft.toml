@@ -1,7 +1,9 @@
-# Stage-2 deterministic RFT replay. Daydream-private parameters, consumed by
-# daydream.training.rft.run_rft() — NOT a prime-rl config: RFT is an offline,
-# GPU-free deterministic replay of the frozen corpus, not an online RL run
-# (the online RL shape lives in rl.toml; the dataset-SFT shape in sft.toml).
+# Stage-2 deterministic RFT replay. Daydream-private reference parameters —
+# passed at launch via RftConfig to daydream.training.rft.run_rft(), not
+# loaded from this file (reference-only, matching the README invocation) —
+# NOT a prime-rl config: RFT is an offline, GPU-free deterministic replay of
+# the frozen corpus, not an online RL run (the online RL shape lives in
+# rl.toml; the dataset-SFT shape in sft.toml).
 #
 # The winners filter is always a breakdown-shaped spec supplied to RftConfig
 # (per-axis minimums, e.g. {"composite": 0.6, "grounding": 0.5}) — never a

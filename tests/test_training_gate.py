@@ -26,7 +26,10 @@ def frozen_split(tmp_path: Path) -> FrozenSplit:
 
 @pytest.fixture
 def trained_model(tmp_path: Path) -> OutcomeModel:
-    return train_outcome_model(_pairs(tmp_path), split={"train": 0.8, "held_out": 0.2}, seed=3)
+    labels = _pairs(tmp_path)
+    return train_outcome_model(
+        labels, split=freeze_split(labels, held_out_fraction=0.2, seed=3), seed=3
+    )
 
 
 def test_split_frozen_before_training(tmp_path: Path) -> None:
@@ -95,6 +98,6 @@ def test_gate_refuses_single_class_held_out(tmp_path: Path) -> None:
     labels = tmp_path / "skew.jsonl"
     labels.write_text("\n".join(json.dumps(r) for r in rows))
     frozen = freeze_split(labels, held_out_fraction=0.5, seed=14)
-    model = train_outcome_model(labels, split={"train": 0.5, "held_out": 0.5}, seed=11)
+    model = train_outcome_model(labels, split=frozen, seed=11)
     with pytest.raises(RuntimeError, match="class"):
         evaluate_gate(model, frozen, GateConfig())

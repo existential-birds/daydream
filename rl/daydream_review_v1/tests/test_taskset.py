@@ -442,6 +442,82 @@ def test_load_refuses_failed_gate_report(corpus_mini_dir: Path, fixture_manifest
     assert "failed" in str(excinfo.value)
 
 
+def test_load_refuses_model_not_bound_to_gate_report(
+    corpus_mini_dir: Path, fixture_manifest_path: Path, stage0_gate_report: Path, tmp_path: Path
+) -> None:
+    """M4 binding: a passed report plus a checkpoint that does not re-derive its
+    evidence_digest refuses the load — any-checkpoint-plus-any-report must not
+    schedule rollouts."""
+    model = tmp_path / "outcome-model.json"
+    model.write_text(
+        json.dumps(
+            {
+                "weights": {"bug": 1.0},
+                "bias": -0.25,
+                # Not the split the report's evidence_digest was computed over.
+                "split_digest": "some-other-split",
+                "label_ratio_reported": 0.5,
+                "train_rows": 10,
+                "held_out_rows": 4,
+                "held_out_accuracy": 0.75,
+                "model_fingerprint": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    taskset = DaydreamReviewTaskset(
+        DaydreamReviewConfig(
+            id="daydream-review-v1",
+            corpus_dir=corpus_mini_dir,
+            manifest_path=fixture_manifest_path,
+            gate_report_path=stage0_gate_report,
+            outcome_model_path=model,
+        )
+    )
+    with pytest.raises(Stage0GateRefused) as excinfo:
+        list(taskset.load())
+    assert "does not bind" in str(excinfo.value)
+    assert str(model) in str(excinfo.value)
+
+
+def test_load_refuses_missing_outcome_model(
+    corpus_mini_dir: Path, fixture_manifest_path: Path, stage0_gate_report: Path, tmp_path: Path
+) -> None:
+    """A configured-but-absent checkpoint refuses the load, not the first score."""
+    missing = tmp_path / "missing-outcome-model.json"
+    taskset = DaydreamReviewTaskset(
+        DaydreamReviewConfig(
+            id="daydream-review-v1",
+            corpus_dir=corpus_mini_dir,
+            manifest_path=fixture_manifest_path,
+            gate_report_path=stage0_gate_report,
+            outcome_model_path=missing,
+        )
+    )
+    with pytest.raises(Stage0GateRefused) as excinfo:
+        list(taskset.load())
+    assert "missing" in str(excinfo.value)
+    assert str(missing) in str(excinfo.value)
+
+
+def test_load_binds_outcome_model_to_gate_report(
+    corpus_mini_dir: Path, fixture_manifest_path: Path, stage0_gate_report: Path, outcome_model_path: Path
+) -> None:
+    """The bound pair (conftest fixtures) loads, stamping the model onto each task (M13)."""
+    taskset = DaydreamReviewTaskset(
+        DaydreamReviewConfig(
+            id="daydream-review-v1",
+            corpus_dir=corpus_mini_dir,
+            manifest_path=fixture_manifest_path,
+            gate_report_path=stage0_gate_report,
+            outcome_model_path=outcome_model_path,
+        )
+    )
+    tasks = list(taskset.load())
+    assert tasks
+    assert all(task.config.outcome_model_path == outcome_model_path for task in tasks)
+
+
 def test_load_requires_corpus_dir_flag(tmp_path: Path) -> None:
     taskset = DaydreamReviewTaskset(DaydreamReviewConfig(id="daydream-review-v1"))
     with pytest.raises(ValueError) as excinfo:

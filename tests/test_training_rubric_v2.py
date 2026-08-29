@@ -70,7 +70,8 @@ def test_fp_penalty_term_present_and_dominant_direction(model: _StubModel) -> No
         ),
     )
     fp_term = b.terms["fp_penalty"]
-    assert b.false_positive_penalty > 0 and fp_term is not None and fp_term < 0  # explicit subtractive term
+    assert b.false_positive_penalty is not None and b.false_positive_penalty > 0
+    assert fp_term is not None and fp_term < 0  # explicit subtractive term
 
 
 def test_composite_never_returns_intrinsic_or_golden_overlap_alone(model: _StubModel) -> None:
@@ -113,6 +114,19 @@ def test_missing_signal_is_none_not_zero(model: _StubModel) -> None:
         score_review(model, findings=[_finding()], fp_count=0, total_findings=1, grounded=1, breakdown=True),
     )
     assert b.terms["tool_grounded"] is None
+
+
+def test_zero_total_findings_guards_fp_and_snr_terms(model: _StubModel) -> None:
+    # Regression: fp/total and (total-fp)/total must not divide by zero when
+    # total_findings == 0; the ratio terms are then absent (None), never 0.0.
+    b = cast(
+        RubricV2Breakdown,
+        score_review(model, findings=[_finding()], fp_count=0, total_findings=0, grounded=0, breakdown=True),
+    )
+    assert b.false_positive_penalty is None
+    assert b.terms["fp_penalty"] is None  # renormalized out, not imputed 0.0
+    assert b.signal_to_noise is None
+    assert b.composite == 0.5  # learned term alone renormalized
 
 
 def test_malformed_finding_raises_with_id(model: _StubModel) -> None:

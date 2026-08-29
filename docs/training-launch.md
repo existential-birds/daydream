@@ -15,7 +15,7 @@ identity digests, as recorded in the stage manifest of the validation run:
 
 | Field | Value |
 |---|---|
-| `run_identity.corpus_digest` | `3f31e1ee266d3457fcd8f3a271fc57e3fb7fe48f29019a7f43a298bf11a03d50` |
+| `run_identity.corpus_digest` | `80cfdda8293d5854216ed1845c6228e6d8ada013152a54d924309813704854ce` |
 | `run_identity.split_digest` | `fe0a7a9559493b0cb4ef3795e5a66b4fcf8eeb718e12b44c790b4420a28a5bde` |
 | `run_identity.reward_version` | `2026.05.28-2` |
 
@@ -29,7 +29,12 @@ exported). The committed fixture is a CI-scale stand-in — not byte-identical t
 an export: it carries the Stage-0 gold outcome fields
 (`comment_id`/`text`/`label`) plus the M16 lineage field set, and the
 coordinator normalizes both the fixture shape and the exporter's
-(`session_id`/`review_output`/`outcome_label`) shape before Stage 0.
+(`session_id`/`review_output`/`outcome_label`) shape before Stage 0. Stage-2's
+RFT task identity (`base_sha`/`head_sha`/`diff`) is rebuilt from the frozen
+record; since the schema-v1 export carries no raw `diff` body, the coordinator
+materializes it from the record's `fix_diff_ref` pointer to the archived
+`diff.patch` (the reviewed-INPUT diff), so the same exporter shape is runnable
+through Stage 2 — no bespoke `diff` column is required.
 
 ### Splits
 
@@ -49,8 +54,8 @@ whose `labeler_policy_version` is absent or null (M23). The tag is metadata,
 never a drop; the loader's only refusals are the C5/C8 fail-closed gates.
 Current-policy SFT prefers native-profile traces: selection filters on
 `legacy_policy=False` first and falls back to legacy rows only when the
-native-profile pool cannot fill a stage's quota. No skill-era contract appears
-in the corpus or this pipeline.
+native-profile pool is empty (no accepted rows at all). No skill-era contract
+appears in the corpus or this pipeline.
 
 ## Model
 

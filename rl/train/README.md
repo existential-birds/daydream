@@ -5,8 +5,9 @@ Three configs live here:
 - `rl.toml` — the Stage-2/3 GRPO recipe for the `daydream-review-v1` environment.
 - `sft.toml` — the Stage-1 dataset-SFT recipe over the labeled corpus (separate
   `sft` entrypoint, not `rl @`).
-- `rft.toml` — the deterministic RFT replay parameters (daydream-private,
-  consumed by `daydream.training.rft.run_rft()`, not prime-rl).
+- `rft.toml` — the deterministic RFT replay reference parameters
+  (daydream-private, passed at launch via `RftConfig` to
+  `daydream.training.rft.run_rft()`; the file is reference-only, not prime-rl).
 
 All are
 config only — no package, no lockfile — because **prime-rl cannot be consumed as a
@@ -63,7 +64,8 @@ prompt/completion JSONL — the loader's accepted shape (`messages` column, or
 `prompt` + `completion` columns) — with gold/silver tier counts reported in the
 stage manifest.
 
-Stage-2 deterministic RFT is offline GPU-free replay (see `rft.toml`), run with
+Stage-2 deterministic RFT is offline GPU-free replay (see `rft.toml` for the
+reference parameters), run with
 the training CLI, not prime-rl:
 
 ```bash
@@ -83,7 +85,7 @@ loss.
 
 `--dry-run` runs every pydantic validator — renderer resolution, the
 LoRA/weight-broadcast interlock, the batch-size/group-size divisibility check —
-and returns before it ever touches `pynvml`, so it needs no GPU. Resolved
+and is GPU-free (it needs no GPU query/driver). Resolved
 configs land in `<output_dir>/configs/`; check that `inference.toml` came back
 with `enable_lora = true` and `max_lora_rank = 16`, which prime-rl derives from
 the trainer's LoRA block rather than taking from the file.

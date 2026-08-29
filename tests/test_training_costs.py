@@ -48,6 +48,39 @@ def test_per_run_accounting_written(tmp_path: pathlib.Path) -> None:
     assert data["stages"]["stage3"]["tokens"] > 0
     assert data["stages"]["stage0"]["usd"] == 0.2
     assert data["stages"]["stage0"]["tokens"] == 270
+
+
+def test_metrics_then_cost_event_sequence_counts_once(tmp_path: pathlib.Path) -> None:
+    """Backends emit MetricsEvent per turn and CostEvent with the same
+    aggregated usage last (claude.py:525 then claude.py:570); that real order
+    must not count the same usage/cost twice (costs.py docstring invariant).
+    """
+    stage_run_events = [
+        _StageEvents(
+            stage="stage0",
+            events=[
+                MetricsEvent(
+                    message_id="m1",
+                    prompt_tokens=125,
+                    completion_tokens=48,
+                    cached_tokens=2,
+                    cost_usd=0.17,
+                ),
+                CostEvent(
+                    cost_usd=0.17,
+                    input_tokens=125,
+                    output_tokens=48,
+                    cached_tokens=2,
+                ),
+            ],
+        ),
+    ]
+    p = record_stage_costs(cast(Any, stage_run_events), out=tmp_path / "costs.json")
+    data = json.loads(p.read_text())
+    assert data["stages"]["stage0"]["usd"] == 0.17
+    assert data["stages"]["stage0"]["tokens"] == 125 + 48
+    assert data["total_usd"] == 0.17
+    assert data["total_tokens"] == 125 + 48
 def test_reports_dollar_per_review_and_per_finding(tmp_path: object) -> None:
     costs_with_labels = [
         {

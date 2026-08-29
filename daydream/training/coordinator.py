@@ -21,6 +21,10 @@ Contract points:
   clock GPU stages ``skipped_dry``. The Stage-3 adapter *handoff* (pure file
   assembly from Stage-0 state, no GPU) is still produced on the dry path so
   the declared adapter path is loadable-shape-validated in CI.
+- **Resume guard first (M18)**: the prior manifest is validated before any
+  stage runs, so a drifted re-run aborts without overwriting the prior run's
+  stage artifacts; only the split digest (frozen by Stage 0) is rechecked
+  after Stage 0 has computed it.
 - **Atomicity**: the manifest is written temp-then-rename, mirroring the
   corpus exporter's atomic-write discipline in
   :func:`daydream.training.corpus.run_build_corpus`.
@@ -42,10 +46,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from daydream.archive import get_archive_dir
 from daydream.training import gate as gate_mod
 from daydream.training import stacks
 from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_split
-from daydream.training.lineage import RunIdentity, stage_digests, validate_resume
+from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 
@@ -169,27 +174,37 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     ``prompt``/``completion``). Gold vs silver counts are reported separately
     (M9), matching the recipe's tier accounting.
 
+    Current-policy SFT prefers native-profile traces (M23): accepted rows are
+    partitioned by the ``legacy_policy`` tag ``stacks.load_dataset`` stamps
+    (set on records whose ``labeler_policy_version`` is absent or null);
+    native rows (``legacy_policy`` falsy) are selected first, and legacy rows
+    are only used to fill the dataset when the native-profile pool is empty.
+    The tag is a selection preference, never a drop — a legacy-only corpus
+    still trains.
+
     Returns:
         ``(rows, tier_counts)`` where ``tier_counts`` has ``gold`` and
         ``silver`` counts (silver = explicitly ``tier == "silver"`` rows,
         never mixed into the gold-positive data).
     """
-    gold: list[dict[str, Any]] = []
     silver = 0
+    native: list[dict[str, Any]] = []
+    legacy: list[dict[str, Any]] = []
     for rec in records:
         label = rec.get("label") or rec.get("outcome_label")
         completion = rec.get("completion") or rec.get("text") or rec.get("review_output")
         if not isinstance(completion, str) or not completion:
             continue
         if label == "accepted":
-            gold.append(
-                {
-                    "prompt": rec.get("prompt") or _sft_prompt(rec),
-                    "completion": completion,
-                }
-            )
+            row = {
+                "prompt": rec.get("prompt") or _sft_prompt(rec),
+                "completion": completion,
+            }
+            (legacy if rec.get("legacy_policy") else native).append(row)
         elif rec.get("tier") == "silver":
             silver += 1
+    # M23: prefer native-profile rows; legacy rows only when the native pool is empty.
+    gold = native or legacy
     return gold, {"gold": len(gold), "silver": silver}
 
 
@@ -213,6 +228,41 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
+def _materialize_diff(rec: dict[str, Any]) -> str | None:
+    """Materialize the RFT diff body from the archive for production records.
+
+    Production ``run_build_corpus`` exports carry only ``fix_diff_ref`` — a
+    pointer to the archived reviewed-INPUT ``diff.patch`` — never a raw
+    ``diff`` body (``schema/v1.json`` is ``additionalProperties: false``).
+    The pointer is relative to the record's bronze run dir under the archive
+    root; an unavailable, missing, or unreadable patch returns ``None`` so
+    the caller's fail-closed identity check refuses the record rather than
+    recording Stage 2 complete over an unrunnable input.
+    """
+    ref = rec.get("fix_diff_ref")
+    if not isinstance(ref, dict) or not ref.get("available"):
+        return None
+    rel = ref.get("archive_relative_path")
+    if not isinstance(rel, str) or not rel:
+        return None
+    sid = str(rec.get("session_id") or "")
+    if not sid:
+        return None
+    archive_root = get_archive_dir()
+    # M17 derivative bundles legitimately live under ``runs/sanitized/...``,
+    # reached via a ``../sanitized/...`` pointer; anything resolving outside
+    # the archive root is treated as unavailable (fail-closed), never read.
+    target = (archive_root / "runs" / sid / rel).resolve()
+    if not target.is_relative_to(archive_root.resolve()):
+        return None
+    if not target.is_file():
+        return None
+    try:
+        return target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Materialize Stage-2 RFT replay inputs from corpus records (M16).
 
@@ -222,6 +272,12 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     validated fail-closed, matching ``run_rft``: a record missing
     base/head/diff raises naming it, so Stage 2 is never recorded complete
     over unrunnable inputs.
+
+    ``diff`` falls back to :func:`_materialize_diff` when the record carries
+    no raw ``diff`` body: production ``run_build_corpus`` exports (schema v1,
+    ``additionalProperties: false``) hold only the ``fix_diff_ref`` pointer
+    to the archived ``diff.patch``, so the documented real-archive journey
+    stays runnable through Stage 2.
 
     Raises:
         RuntimeError: When any record lacks ``base_sha``/``head_sha``/``diff``
@@ -237,6 +293,8 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         base_sha = rec.get("base_sha") or code_ctx.get("base_sha")
         head_sha = rec.get("head_sha") or code_ctx.get("head_sha")
         diff = rec.get("diff")
+        if not diff:
+            diff = _materialize_diff(rec)
         missing = [
             name
             for name, value in (("base_sha", base_sha), ("head_sha", head_sha), ("diff", diff))
@@ -291,7 +349,7 @@ def _run_stage0(
     )
     model: OutcomeModel = train_outcome_model(
         labels_path,
-        split={"train": 1.0 - config.held_out_fraction, "held_out": config.held_out_fraction},
+        split=split,
         seed=config.seed,
     )
     report = gate_mod.evaluate_gate(model, split, config.gate_config)
@@ -381,6 +439,25 @@ def _reward_weights_snapshot() -> dict[str, float]:
     }
 
 
+def _make_identity(config: PipelineConfig, corpus_digest: str, split_digest: str) -> RunIdentity:
+    """Build the locked run identity stamped into the manifest (M18)."""
+    return RunIdentity(
+        base_model=config.base_model,
+        tokenizer_renderer=config.tokenizer_renderer,
+        max_seq_len=config.max_seq_len,
+        lora_rank=config.lora_rank,
+        lora_targets=config.lora_targets,
+        optimizer=config.optimizer,
+        learning_rate=config.learning_rate,
+        corpus_digest=corpus_digest,
+        split_digest=split_digest,
+        profile_policy=config.profile_policy,
+        reward_version=REWARD_VERSION,
+        reward_weights=_reward_weights_snapshot(),
+        stack_pins=dict(config.stack_pins),
+    )
+
+
 def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
     """Run the configured stages in order and write the stage manifest.
 
@@ -402,11 +479,29 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
     """
     corpus_path = Path(config.corpus)
     records = stacks.load_dataset(corpus_path, allow_copyleft=config.allow_copyleft)
+    corpus_digest = _file_digest(corpus_path)
 
     out_dir = Path(config.out_dir)
     stage_entries: dict[str, dict[str, Any]] = {}
     stage_records: dict[str, dict[str, Any]] = {}
     gate_report: GateReport | None = None
+
+    # M18/AC4 resume guard, hoisted ahead of the stage loop: the prior
+    # manifest is read and every locked field EXCEPT split_digest (unknown
+    # until Stage 0 freezes the split) is compared before any stage runs, so
+    # a drifted re-run aborts before it can overwrite the prior run's stage
+    # artifacts. split_digest is rechecked after Stage 0 below.
+    manifest_path = out_dir / "manifest.json"
+    prior_identity: RunIdentity | None = None
+    if manifest_path.exists():
+        prior = json.loads(manifest_path.read_text(encoding="utf-8")).get("run_identity")
+        if prior is not None:
+            prior_identity = RunIdentity.from_dict(prior)
+    if prior_identity is not None:
+        # The candidate identity stands in for the not-yet-frozen split so
+        # the comparison covers every other locked field (M18 lists each
+        # drifted field); the split itself is rechecked post-Stage-0.
+        validate_resume(prior_identity, _make_identity(config, corpus_digest, prior_identity.split_digest))
 
     split_digest = ""
     for stage in config.stages:
@@ -414,6 +509,7 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         if stage == "stage0":
             entry, gate_report, frozen_split = _run_stage0(config, records, stage_dir)
             stage_entries[stage] = entry
+            stage_records[stage] = {"records": records}
             split_digest = frozen_split.digest
             continue
 
@@ -438,27 +534,21 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
                 # itself is skipped.
                 _run_gpu_stage_shim(config, records, stage, stage_dir)
             stage_entries[stage] = {"status": "skipped_dry"}
+            stage_records[stage] = {"records": records}
             continue
 
         entry = _run_gpu_stage_shim(config, records, stage, stage_dir)
         stage_entries[stage] = entry
         stage_records[stage] = {"records": records}
 
-    identity = RunIdentity(
-        base_model=config.base_model,
-        tokenizer_renderer=config.tokenizer_renderer,
-        max_seq_len=config.max_seq_len,
-        lora_rank=config.lora_rank,
-        lora_targets=config.lora_targets,
-        optimizer=config.optimizer,
-        learning_rate=config.learning_rate,
-        corpus_digest=_file_digest(corpus_path),
-        split_digest=split_digest,
-        profile_policy=config.profile_policy,
-        reward_version=REWARD_VERSION,
-        reward_weights=_reward_weights_snapshot(),
-        stack_pins=dict(config.stack_pins),
-    )
+    # The split is frozen only by Stage 0, so its digest is rechecked against
+    # the prior run here; every other locked field was compared pre-loop.
+    if prior_identity is not None and split_digest != prior_identity.split_digest:
+        raise ResumeAborted(
+            "resume aborted: locked run-identity field split_digest differs from the prior run: "
+            f"{prior_identity.split_digest!r} -> {split_digest!r}"
+        )
+    identity = _make_identity(config, corpus_digest, split_digest)
 
     adapter_path: str | None = None
     if "stage3" in stage_entries and (
@@ -474,13 +564,5 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         "adapter_path": adapter_path,
         "corpus": str(corpus_path),
     }
-    manifest_path = out_dir / "manifest.json"
-    if manifest_path.exists():
-        prior = json.loads(manifest_path.read_text(encoding="utf-8")).get("run_identity")
-        if prior is not None:
-            # M18/AC4 resume guard: a resumed run aborts loudly, never
-            # overwrites, when any locked run-identity field (including the
-            # split digest) drifted from the prior run's manifest.
-            validate_resume(RunIdentity.from_dict(prior), identity)
     _atomic_write_json(manifest_path, manifest)
     return manifest

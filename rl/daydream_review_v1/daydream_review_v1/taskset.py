@@ -35,7 +35,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
 from daydream_review_v1.corpus import harvested_corpus
-from daydream_review_v1.gate_refusal import Stage0GateRefused, require_stage0_gate
+from daydream_review_v1.gate_refusal import (
+    Stage0GateRefused,
+    require_outcome_model_bound,
+    require_stage0_gate,
+)
 from daydream_review_v1.rundir import (
     DAYDREAM_EXCLUDE as DAYDREAM_EXCLUDE,
 )
@@ -79,11 +83,30 @@ _outcome_model_cache: dict[Path, _OutcomeScorer] = {}
 
 
 def _load_outcome_model(path: Path) -> _OutcomeScorer:
-    """Load (and cache) the frozen Stage-0 outcome model checkpoint at *path*."""
+    """Load (and cache) the frozen Stage-0 outcome model checkpoint at *path*.
+
+    The load path has already bound this checkpoint to the passed gate report
+    (M4, ``require_outcome_model_bound``); this re-read is fail-closed anyway, so
+    a file that vanished or corrupted between load and scoring is a refusal with
+    the reason named, never a raw ``FileNotFoundError``/``ValueError`` inside the
+    reward path.
+    """
     cached = _outcome_model_cache.get(path)
     if cached is not None:
         return cached
-    state = json.loads(path.read_text(encoding="utf-8"))
+    if not path.is_file():
+        raise Stage0GateRefused(
+            f"Stage-0 outcome model missing at {path}: the load path validated this checkpoint "
+            "against the gate report, so a vanished file is a refusal, never a silent "
+            "intrinsic-only fallback."
+        )
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Stage0GateRefused(
+            f"Stage-0 outcome model at {path} is unreadable: {exc}. "
+            "A corrupt checkpoint is a refusal, never an implicit pass."
+        ) from exc
     scorer = _OutcomeScorer(OutcomeModel(**state))
     _outcome_model_cache[path] = scorer
     return scorer
@@ -986,7 +1009,15 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
                 "no Stage-0 gate report configured: pass --taskset.gate-report-path <gate.json>. "
                 "A Stage-3 run may not schedule rollouts until the offline gate has passed (M4)."
             )
-        require_stage0_gate(config.gate_report_path)
+        gate_report = require_stage0_gate(config.gate_report_path)
+        # M4 binding: a passed report alone is not enough. When an outcome model
+        # is configured, its checkpoint must re-derive the report's
+        # evidence_digest (split_digest / model_fingerprint + the report's
+        # clear-text measurements) — any-checkpoint-plus-any-report must not
+        # cross the Stage-3 boundary. Intrinsic-only runs (no model) have
+        # nothing to bind and stay as designed.
+        if config.outcome_model_path != Path(""):
+            require_outcome_model_bound(gate_report, config.outcome_model_path)
 
         # C5 first and unconditionally: an excluded repo must fail the load before
         # any manifest or per-record check can mask it. Slugs are compared

@@ -39,9 +39,12 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream.training.corpus import _is_admitted_outcome_gold
+
+if TYPE_CHECKING:
+    from daydream.training.gate import FrozenSplit
 
 # Gold labels usable for outcome training. ``_OUTCOME_GOLD_LABELS`` in the
 # corpus module covers the accepted class only (the corpus itself is
@@ -223,43 +226,6 @@ def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _freeze_split(
-    rows: list[dict[str, Any]], split: dict[str, float], seed: int
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    """Freeze the train/held-out split deterministically from fractions+seed.
-
-    Returns:
-        ``(train_rows, held_out_rows, split_digest)``.
-    """
-    train_frac = float(split["train"])
-    held_frac = float(split["held_out"])
-    if not (0.0 < train_frac < 1.0 and 0.0 < held_frac < 1.0) or abs(train_frac + held_frac - 1.0) > 1e-9:
-        raise ValueError(
-            f"split fractions must both be in (0, 1) and sum to 1 (got train={train_frac}, held_out={held_frac})"
-        )
-    ordered = sorted(rows, key=lambda r: str(r.get("comment_id")))
-    rng = random.Random(seed)
-    shuffled = list(ordered)
-    rng.shuffle(shuffled)
-    n_train = max(1, round(train_frac * len(shuffled)))
-    train_rows = shuffled[:n_train]
-    held_out_rows = shuffled[n_train:]
-    if not held_out_rows:
-        raise ValueError(
-            f"split leaves no held-out rows ({len(shuffled)} admitted rows with "
-            f"held_out={held_frac}); add rows or lower the held_out fraction"
-        )
-    # The split digest is the content address of the frozen partition: sorted
-    # held-out row ids plus the seed. This is deliberately the SAME payload the
-    # Stage-0 gate hashes (gate.freeze_split) and the manifest stamps as
-    # run_identity.split_digest, so the checkpoint/adapter split_digest
-    # reconciles with the manifest provenance (M18 split-digest detection).
-    held_out_ids = sorted(str(r.get("comment_id")) for r in held_out_rows)
-    digest_payload = json.dumps({"held_out_ids": held_out_ids, "seed": seed}, sort_keys=True)
-    split_digest = hashlib.sha256(digest_payload.encode()).hexdigest()
-    return train_rows, held_out_rows, split_digest
-
-
 def _train_logistic(
     examples: list[tuple[dict[str, float], float]],
     *,
@@ -289,7 +255,7 @@ def _train_logistic(
 def train_outcome_model(
     labels_path: str | Path,
     *,
-    split: dict[str, float],
+    split: FrozenSplit,
     seed: int,
     epochs: int = 20,
     lr: float = 0.5,
@@ -300,8 +266,11 @@ def train_outcome_model(
     Args:
         labels_path: JSONL labels file (one JSON object per line with
             ``comment_id``, ``text``, ``label``; optional gold-gate fields).
-        split: Frozen split fractions, ``{"train": f, "held_out": 1-f}``.
-        seed: Seed freezing the split shuffle and the SGD pass.
+        split: The frozen train/held-out partition produced by
+            :func:`daydream.training.gate.freeze_split` — the single author
+            of the split and its digest.
+        seed: Seed for the SGD training pass (the split shuffle's own seed is
+            already frozen in ``split``).
         epochs / lr / l2: Training hyperparameters (deterministic given seed).
 
     Returns:
@@ -309,8 +278,8 @@ def train_outcome_model(
 
     Raises:
         ValueError: When the file yields fewer than two classes (C9 — the
-            missing class is named), a row is unreadable or refused by the
-            gold-outcome gate, or the split fractions are invalid.
+            missing class is named), or a row is unreadable or refused by the
+            gold-outcome gate.
     """
     rows = _read_admitted_rows(labels_path)
     if not rows:
@@ -331,7 +300,9 @@ def train_outcome_model(
             "model cannot rank — training data must contain both classes."
         )
 
-    train_rows, held_out_rows, split_digest = _freeze_split(rows, split, seed)
+    train_rows = split.train_rows
+    held_out_rows = split.held_out_rows
+    split_digest = split.digest
 
     label_to_y = {"accepted": 1.0, "rejected": 0.0}
     train_examples = [(_features(str(r["text"])), label_to_y[str(r["label"])]) for r in train_rows]

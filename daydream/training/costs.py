@@ -40,18 +40,30 @@ def _accumulate(events: Iterable[AgentEvent]) -> dict[str, float]:
     ``MetricsEvent`` usage and USD are added only when no ``CostEvent``
     reported them for the stage, so the same usage/cost is never counted
     twice.
+
+    Backends emit per-turn ``MetricsEvent`` first and the ``CostEvent``
+    carrying the same aggregated usage last (Claude per call, Codex/Pi per
+    turn), so a sequence-ordered single pass would count that usage twice.
+    Pre-scan which fields any ``CostEvent`` in the stage reported, then
+    treat those fields as CostEvent-owned for the whole stage; ``MetricsEvent``
+    supplies only fields no ``CostEvent`` reported.
     """
     usd = 0.0
     tokens = 0
-    cost_tokens_seen = False
     cost_usd_seen = False
+    cost_tokens_seen = False
+    events = tuple(events)
+    for event in events:
+        if isinstance(event, CostEvent):
+            if event.cost_usd is not None:
+                cost_usd_seen = True
+            if event.input_tokens is not None or event.output_tokens is not None:
+                cost_tokens_seen = True
     for event in events:
         if isinstance(event, CostEvent):
             if event.cost_usd is not None:
                 usd += event.cost_usd
-                cost_usd_seen = True
             if event.input_tokens is not None or event.output_tokens is not None:
-                cost_tokens_seen = True
                 tokens += (event.input_tokens or 0) + (event.output_tokens or 0)
         elif isinstance(event, MetricsEvent):
             if event.cost_usd is not None and not cost_usd_seen:
