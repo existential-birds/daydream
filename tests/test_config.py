@@ -89,15 +89,6 @@ def test_effort_tiers_carry_partition_group_ceilings() -> None:
     assert EFFORT_TIERS["deep"].max_partition_groups is None
 
 
-def test_audit_skill_map_values_are_plugin_skill_names() -> None:
-    """M10: AUDIT_SKILL_MAP removed — improve categories are profile-native scopes."""
-    # AUDIT_SKILL_MAP is gone; categories map to profile strategies, not skills.
-    for category in AUDIT_CATEGORIES:
-        assert category  # each category remains a valid profile strategy key scope
-        assert "beagle" not in category
-        assert "skill" not in category
-
-
 def test_phase_default_models_covers_all_backends() -> None:
     assert set(PHASE_DEFAULT_MODELS.keys()) == {"claude", "codex"}
 

@@ -567,10 +567,6 @@ def _daydream_body(*fps: str) -> str:
     return "\n".join(finding_marker(fp) for fp in fps) + "\n" + DAYDREAM_FOOTER
 
 
-def _threads_response(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return comments
-
-
 def test_pr_merge_signal_preserves_state() -> None:
     """Open PR keeps state='open'; closed-unmerged keeps 'closed' (M11)."""
     gh = _fake_gh_responder({

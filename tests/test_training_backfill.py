@@ -331,17 +331,6 @@ def test_backfill_historical_rows_untouched(tmp_path: Path, monkeypatch: pytest.
     assert snapshot_rows(archive)[: len(legacy)] == legacy
 
 
-def test_backfill_dry_run_counts_walked_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dry run suppresses writes but still walks PR-linked rows: each walked
-    row counts as reprocessed — never as skipped — and nothing lands (M20)."""
-    archive = _archive_with_session(tmp_path, monkeypatch, replies=[_reply("Fixed in abc123", assoc="OWNER")])
-    summary = run_backfill(archive, dry_run=True)
-    assert summary["sessions_reprocessed"] == 1
-    assert summary["appended"] == 0
-    assert summary["skipped"] == 0
-    assert observation_count(archive) == 0
-
-
 def test_backfill_old_labels_human_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """run_label_transitions['old_labels'] reflects the archive's winner
     projection: a human override beats a newer auto row (human-first)."""

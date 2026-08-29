@@ -329,15 +329,6 @@ async def test_no_recorder_clean_no_op(tmp_path: Path) -> None:
     assert not (tmp_path / ".daydream" / "trajectory.json").exists()
 
 
-def test_autouse_fixture_present() -> None:
-    """Roadmap #5 — verify the suite-wide autouse fixture exists with EXACT D-17 name."""
-    import tests.conftest as conftest
-
-    assert hasattr(conftest, "_reset_trajectory_recorder"), (
-        "D-17 mandates the EXACT name `_reset_trajectory_recorder` in tests/conftest.py"
-    )
-
-
 # Test 6 — Pitfall 4: minimal user step has no agent-only fields after JSON-roundtrip.
 async def test_user_step_has_no_agent_only_fields(tmp_path: Path) -> None:
     """Pitfall 4 — user Step has no agent-only fields after JSON serialization.

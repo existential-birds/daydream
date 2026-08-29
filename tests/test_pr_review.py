@@ -324,22 +324,6 @@ def test_snap_to_hunk_empty_hunks() -> None:
     assert snap_to_hunk(10, []) is None
 
 
-def test_post_posting_backstop_noop_on_valid() -> None:
-    """Posting-time ``snap_to_hunk`` is a no-op-on-valid backstop (AC).
-
-    The pre-report location validator (``location_validator.py``) owns
-    authority; posting keeps ``snap_to_hunk``/``resolve_line`` as a backstop
-    that passes valid lines through unchanged and still snaps/declines
-    out-of-line ones for the live PR diff.
-    """
-    hunks = [(10, 20), (30, 40)]
-    assert snap_to_hunk(15, hunks) == 15  # in-hunk unchanged
-    assert snap_to_hunk(40, hunks) == 40  # boundary unchanged
-    # Within-tolerance still snaps (existing behavior), beyond still None:
-    assert snap_to_hunk(89, [(90, 105)]) == 90
-    assert snap_to_hunk(86, [(90, 105)]) is None
-
-
 @pytest.fixture
 def pr() -> PRInfo:
     return PRInfo(

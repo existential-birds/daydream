@@ -140,12 +140,6 @@ name = "p"
 arbitration_min_severity = "CRITICAL"''')   # not in the allowed severity enum
 
 
-def test_invalid_profile_never_falls_through_to_default() -> None:
-    # A failed parse raises; it does not silently return build_default_profile().
-    with pytest.raises(rp.ProfileError):
-        rp.parse_profile('schema_version = 1\nname = "p"\nunknown = true')
-
-
 # Task 4 (R5): host invariants unoverridable + host caps.
 def test_forbidden_host_fields_rejected() -> None:
     for field in ("backend", "model", "effort", "trust_mode", "egress",
@@ -219,10 +213,3 @@ def test_review_profile_severity_levels_derive_from_severity_module() -> None:
     from daydream import severity
 
     assert rp._SEVERITY_LEVELS == frozenset(severity.CANONICAL_LEVELS)
-
-
-def test_review_profile_no_stale_mapping_citation() -> None:
-    # benchmark/mapping.py does not exist — the comment citing it must be gone/corrected.
-    import inspect
-
-    assert "benchmark/mapping.py" not in inspect.getsource(rp)

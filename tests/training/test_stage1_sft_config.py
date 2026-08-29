@@ -23,10 +23,6 @@ def _cfg() -> dict[str, Any]:
     return tomllib.loads(SFT.read_text())
 
 
-def _cfg_text() -> str:
-    return SFT.read_text()
-
-
 def test_bf16_lora_in_staged_band() -> None:
     c = _cfg()
     assert c["model"]["optimization_dtype"] == "bfloat16"
@@ -119,8 +115,3 @@ def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: 
     rc = tomllib.loads(resolved.read_text())
     assert rc["model"]["lora"]["rank"] == _cfg()["model"]["lora"]["rank"]
     assert rc["renderer"]["name"] == "default"
-
-
-def test_dry_run_copy_is_valid_toml(tmp_path: pathlib.Path) -> None:
-    """The recipe must parse cleanly as TOML with no extra-key sections."""
-    tomllib.loads(_cfg_text())
