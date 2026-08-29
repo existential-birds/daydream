@@ -16,6 +16,8 @@ from daydream.deep.prompts import (
     build_generic_fallback_prompt,
     build_merge_prompt,
     build_per_stack_prompt,
+    build_supervise_prompt,
+    build_suppression_prompt,
     build_structural_prompt,
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
@@ -1600,3 +1602,63 @@ def test_rubric_after_strategy_text(tmp_path: Path) -> None:
         assert prompts[prompt].index(severity.SEVERITY_RUBRIC) > prompts[prompt].index(
             _default_strategy(strategy_stage)
         )
+
+
+# =============================================================================
+# Issue #972 R1.3 — adjudication restatements cite the severity rubric
+# =============================================================================
+
+
+def _adjudication_prompts(tmp_path: Path) -> dict[str, str]:
+    p = _paths(tmp_path)
+    return {
+        "build_arbiter_prompt": build_arbiter_prompt(
+            strategy=_default_strategy("arbitration"),
+            arbiter_input_path=tmp_path / "arbiter-input.json",
+            diff_path=p["diff_path"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            cwd=p["cwd"],
+        ),
+        "build_suppression_prompt": build_suppression_prompt(
+            strategy=_default_strategy("suppression"),
+            suppression_input_path=tmp_path / "suppression-input.json",
+            diff_path=p["diff_path"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            cwd=p["cwd"],
+        ),
+        "build_merge_prompt": build_merge_prompt(
+            strategy=_default_strategy("merge"),
+            **_merge_paths(tmp_path),  # type: ignore[arg-type]
+        ),
+        "build_supervise_prompt": build_supervise_prompt(
+            strategy=_default_strategy("supervision"),
+            supervise_input_path=tmp_path / "supervise-input.json",
+            diff_path=p["diff_path"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            cwd=p["cwd"],
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "builder",
+    ["build_arbiter_prompt", "build_suppression_prompt", "build_merge_prompt", "build_supervise_prompt"],
+)
+def test_adjudication_prompts_reference_severity_rubric(builder: str, tmp_path: Path) -> None:
+    """R1.3: each adjudication restatement prompt cites the shared severity rubric."""
+    from daydream import severity
+
+    prompt = _adjudication_prompts(tmp_path)[builder]
+    assert severity.SEVERITY_RUBRIC in prompt or "severity rubric" in prompt
+
+
+@pytest.mark.parametrize(
+    "builder",
+    ["build_arbiter_prompt", "build_suppression_prompt", "build_merge_prompt", "build_supervise_prompt"],
+)
+def test_adjudication_prompts_no_divergent_severity_fragment(builder: str, tmp_path: Path) -> None:
+    """R1.3: no adjudication prompt retains a bare "high | medium" restatement."""
+    assert "high | medium" not in _adjudication_prompts(tmp_path)[builder]
