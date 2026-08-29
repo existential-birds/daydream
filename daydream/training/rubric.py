@@ -34,7 +34,7 @@ from daydream.training.labeler_signals import (
 
 PosteriorSource = Literal["pr_review", "local_branch", "none"]
 
-PerFindingLabel = Literal["accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown", "contested"]
+PerFindingLabel = Literal["accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]
 
 _DECISIVE = ("accepted", "rejected")
 _NON_DECISIVE = ("ambiguous", "unanswered", "missing")

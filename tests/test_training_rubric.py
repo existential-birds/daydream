@@ -20,7 +20,7 @@ from daydream.training.rubric import (
 
 def test_rubric_serializes_to_dict_with_pr_source() -> None:
     rub = Rubric(
-        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
+        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z", state="merged", draft=False),
         fix_applied=FixAppliedSignal("applied", 2, 2, ["c1", "c2"]),
         comment_resolution=CommentResolutionSignal(1, 1, 0),
         local_commit_applied=None,
@@ -29,6 +29,9 @@ def test_rubric_serializes_to_dict_with_pr_source() -> None:
     d = rub.to_dict()
     assert d["posterior_source"] == "pr_review"
     assert d["pr_merge"]["merged"] is True
+    assert d["pr_merge"]["merged_at"] == "2026-01-01T00:00:00Z"
+    assert d["pr_merge"]["state"] == "merged"
+    assert d["pr_merge"]["draft"] is False
     assert d["fix_applied"]["hunks_applied"] == 2
 
 
@@ -47,13 +50,15 @@ def test_rubric_serializes_with_local_source() -> None:
 def _fp_rubric(
     pr_merge: PRMergeSignal, resolutions: list[PerFindingResolution], source: PosteriorSource = "pr_review"
 ) -> Rubric:
+    # CommentResolutionSignal invariant: unresolved = total - replied.
+    replied = sum(r.disposition == "accepted" for r in resolutions)
     return Rubric(
         pr_merge=pr_merge,
         fix_applied=FixAppliedSignal("unknown", 0, 0, []),
         comment_resolution=CommentResolutionSignal(
             len(resolutions),
-            sum(r.disposition == "accepted" for r in resolutions),
-            sum(r.disposition in ("unanswered", "missing") for r in resolutions),
+            replied,
+            len(resolutions) - replied,
         ),
         local_commit_applied=None,
         posterior_source=source,
@@ -112,6 +117,36 @@ def test_run_label_local_branch_unchanged() -> None:
         posterior_source="local_branch",
     )
     assert derive_outcome_label(rub) == "accepted"
+
+
+def test_run_label_local_branch_rejected() -> None:
+    """local_branch with ``rejected`` verdict maps to ``rejected`` (rubric.py:113-116)."""
+    rub = Rubric(
+        pr_merge=PRMergeSignal(False, None),
+        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+        comment_resolution=CommentResolutionSignal(0, 0, 0),
+        local_commit_applied=LocalCommitAppliedSignal("rejected"),
+        posterior_source="local_branch",
+    )
+    assert derive_outcome_label(rub) == "rejected"
+
+
+def test_run_label_local_branch_unknown() -> None:
+    """local_branch with any other verdict maps to ``unknown`` (rubric.py:116-117)."""
+    rub = Rubric(
+        pr_merge=PRMergeSignal(False, None),
+        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+        comment_resolution=CommentResolutionSignal(0, 0, 0),
+        local_commit_applied=LocalCommitAppliedSignal("unknown"),
+        posterior_source="local_branch",
+    )
+    assert derive_outcome_label(rub) == "unknown"
+
+
+def test_run_label_no_signal_is_unknown() -> None:
+    """posterior_source ``none`` always maps to ``unknown`` (rubric.py:118)."""
+    rub = _fp_rubric(MERGED, [_res("accepted")], source="none")
+    assert derive_outcome_label(rub) == "unknown"
 
 
 def test_per_finding_labels_come_from_dispositions() -> None:

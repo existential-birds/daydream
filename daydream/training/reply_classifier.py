@@ -10,14 +10,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-REPLY_CLASSIFIER_VERSION = "reply-classifier-v1"
+from daydream.training.labeler_versions import (
+    REPLY_CLASSIFIER_VERSION as REPLY_CLASSIFIER_VERSION,
+)
 
 #: Logins that never qualify as reply authors (daydream's own accounts).
 _DAYDREAM_AGENT_LOGINS = frozenset({"daydream-agent", "daydream-bot"})
 
 _QUALIFYING_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
-
-_DECISIVE = ("accepted", "rejected")
 
 # (pattern, kind) pairs. Matching is per-line, case-insensitive, whole-phrase
 # with word boundaries — never bare substrings.
@@ -73,9 +73,7 @@ def _sentence_offset(sentence: str, text: str, start: int) -> int:
     return start - idx if idx >= 0 else start
 
 
-def _match_rules(
-    text: str, rules: tuple[tuple[str, str], ...], *, guard_negation: bool
-) -> bool:
+def _match_rules(text: str, rules: tuple[tuple[str, str], ...], *, guard_negation: bool) -> bool:
     for pattern, _kind in rules:
         for m in re.finditer(pattern, text, re.IGNORECASE):
             if guard_negation and _is_negated(text, m.start()):
@@ -104,10 +102,8 @@ def _direction(body: str) -> str:
         has_accept = _match_rules(line, _ACCEPT_RULES, guard_negation=True)
         has_wontfix = bool(re.search(_DISPUTE_RULES[0][0], line, re.IGNORECASE))
         has_dispute = _dispute_present(line)
-        has_reject = _match_rules(line, _REJECT_RULES, guard_negation=False) or (
-            has_wontfix and has_dispute
-        )
-        has_factual = _match_rules(line, _FACTUAL_DISAGREEMENT_RULES, guard_negation=False)
+        has_reject = _match_rules(line, _REJECT_RULES, guard_negation=True) or (has_wontfix and has_dispute)
+        has_factual = _match_rules(line, _FACTUAL_DISAGREEMENT_RULES, guard_negation=True)
         if has_accept:
             directions.add("accepted")
         if has_reject or has_factual:
@@ -182,25 +178,3 @@ def classify_reply(reply: dict[str, Any]) -> str:
     if not isinstance(body, str) or not body.strip():
         return "ambiguous"
     return _direction(body)
-
-
-def classify_replies(replies: list[dict[str, Any]]) -> str:
-    """Aggregate reply classifications conservatively (M18/M22).
-
-    Filters to qualifying authors, drops ambiguous votes, and returns the
-    single decisive label, ``"ambiguous"`` on conflict, or ``"ambiguous"``
-    when no decisive vote exists. Deterministic: identical input yields
-    identical output.
-    """
-    votes: set[str] = set()
-    for reply in replies:
-        if not isinstance(reply, dict):
-            continue
-        if not _identity_gates_pass(reply):
-            continue
-        label = classify_reply(reply)
-        if label in _DECISIVE:
-            votes.add(label)
-    if len(votes) == 1:
-        return votes.pop()
-    return "ambiguous"

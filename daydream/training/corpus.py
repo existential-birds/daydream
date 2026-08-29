@@ -873,6 +873,11 @@ def _is_admitted(
     on its intrinsic score alone — there is no deduction to remove here. This
     invariant is pinned by
     ``test_is_admitted_min_reward_compares_intrinsic_only``.
+
+    A row admitted through the intrinsic ``min_reward`` path must still not
+    carry an outcome-gold label that the gold-admission guard rejects — the
+    caller drops such a label, so a legacy/contested/unevidenced ``accepted``
+    never re-enters the gold population via the reward back door.
     """
     if filters.include_all_labels:
         return True
@@ -1056,6 +1061,19 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
             decisive_only=decisive_only,
         ):
             continue
+        # The intrinsic ``min_reward`` path admits a row on its composite score
+        # alone (C5/M16). That must not smuggle an outcome-gold label whose
+        # evidence fails the gold-admission guard into the corpus as gold: a
+        # legacy NULL-policy ``accepted``, a contested/ambiguous mix, or an
+        # unevidenced (local_branch) accept would otherwise re-enter the
+        # accepted/gold population through the back door. Such a row is still
+        # admitted (the intrinsic path is unchanged) but only as an unlabeled
+        # intrinsic row — its label is dropped. Current-policy, evidenced,
+        # decisive-only gold keeps its label.
+        if label in _OUTCOME_GOLD_LABELS and not _is_admitted_outcome_gold(
+            label, has_posterior, labeler_policy_version, decisive_mix, decisive_only
+        ):
+            label = None
         after_filters += 1
 
         archive_path = Path(row["archive_path"])

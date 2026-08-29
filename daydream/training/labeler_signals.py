@@ -71,12 +71,18 @@ class PRMergeSignal:
     Attributes:
         merged: ``True`` if the PR is marked merged on GitHub.
         merged_at: ISO-8601 timestamp of merge, or ``None``.
+        author_login: GitHub login of the PR author, or ``None`` when the
+            pull payload does not expose one (or the row has no PR). The
+            M6 gate uses it to count a PR-author reply as qualifying even
+            when their ``author_association`` is not
+            OWNER/MEMBER/COLLABORATOR (fork PRs, first-time contributors).
     """
 
     merged: bool
     merged_at: str | None
     state: Literal["open", "closed", "merged", "unknown"] = "unknown"
     draft: bool = False
+    author_login: str | None = None
 
 
 @dataclass(frozen=True)
@@ -390,6 +396,7 @@ def pr_merge_signal(
     if repo is None or number is None:
         return PRMergeSignal(merged=False, merged_at=None)
     payload = gh_api(repo, f"repos/{repo}/pulls/{number}")
+    user = payload.get("user") or {}
     return PRMergeSignal(
         merged=bool(payload.get("merged", False)),
         merged_at=payload.get("merged_at"),
@@ -401,6 +408,7 @@ def pr_merge_signal(
             else "unknown"
         ),
         draft=bool(payload.get("draft", False)),
+        author_login=user.get("login"),
     )
 
 

@@ -514,13 +514,18 @@ def test_per_finding_resolution_signal_deleted_comment() -> None:
 
 
 def test_per_finding_resolution_signal_single_finding() -> None:
-    """Standard single-finding case: reply body drives the disposition."""
+    """Standard single-finding case: reply body drives the disposition (M22).
+
+    The reply avoids a pre-matching negation token so the reject phrase is not
+    canceled by the negation guard ("Not a bug — already handled" now fails
+    closed to ambiguous: the sentence-level ``not`` negates ``already handled``).
+    """
     row = {"pr_repo": "org/repo", "pr_number": 42}
     gh = _fake_gh_responder(
         {
             ("org/repo", "repos/org/repo/pulls/42/comments"): [
                 _daydream_finding_comment(9, _FP_A),
-                _comment(10, "Not a bug — already handled", in_reply_to=9, login="human"),
+                _comment(10, "This is already handled upstream", in_reply_to=9, login="human"),
             ],
         }
     )

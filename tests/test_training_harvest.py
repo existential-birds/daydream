@@ -124,7 +124,7 @@ _REPLIED_FINDING: list[dict[str, Any]] = [
 
 # Daydream's footer-marked comment with NO reply, authored as a normal human
 # user (not a ``[bot]``): one unresolved daydream issue, which the rubric must
-# read as ``contested``, never ``accepted``.
+# read as ``unanswered``, never ``accepted``.
 _UNRESOLVED_FINDING: list[dict[str, Any]] = [
     {
         "id": 1,
@@ -233,7 +233,7 @@ def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: s
 
 def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) -> None:
     """A merged PR with a findings.json in the archive yields per-finding labels
-    joined by fingerprint: the replied finding is accepted, the unreplied one contested."""
+    joined by fingerprint: the replied finding is accepted, the unreplied one unanswered."""
     fp_a = "a" * 64
     fp_b = "b" * 64
     run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
@@ -379,6 +379,107 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
     assert rb["posterior_cost"] == 0.5
     # The qualifying reply author joins the reviewer set alongside the review author.
     assert payload.reviewer_logins == ["alice", "amelia"]
+
+
+def test_build_annotation_fork_pr_author_reply_is_decisive(tmp_path: Path) -> None:
+    """M6 wiring (issues #2/#4): a fork-PR author's reply is decisive.
+
+    A fork/contributor author (``author_association`` ``NONE``) whose login
+    matches the pull's author must be able to cast the decisive vote through
+    the production harvest path — ``pr_author_logins`` is now threaded into
+    ``per_finding_resolution_signal`` via ``build_annotation``. Without the
+    wiring the reply is ``excluded:non-qualifying``, the finding stays
+    ``unanswered``, and the run would resolve to ``unknown`` instead.
+    """
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    _write_findings(run_dir, _FP_A)
+    row = {"session_id": "s_fork_auth", "pr_repo": "o/r", "pr_number": 13, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    reply_created = "2026-08-02T10:00:00Z"
+    comments = [
+        {
+            "id": 1,
+            "in_reply_to_id": None,
+            "user": {"login": "daydream-runner"},
+            "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
+        },
+        {
+            "id": 2,
+            "in_reply_to_id": 1,
+            "user": {"login": "prfiona", "type": "User"},
+            "author_association": "NONE",  # fork contributor
+            "body": "Fixed in abc123",      # decisive accept
+            "created_at": reply_created,
+        },
+    ]
+
+    def fork_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments"):
+            return comments
+        if endpoint.endswith("/reviews"):
+            return []
+        # The pull payload carries the PR author == the fork reply author.
+        return {
+            "merged": True,
+            "merged_at": "2026-08-03T00:00:00Z",
+            "state": "merged",
+            "user": {"login": "prfiona"},
+        }
+
+    payload = build_annotation(
+        row, run_dir=run_dir, archive_dir=tmp_path, gh_api=fork_gh, repo_clone=tmp_path,
+    )
+    assert payload.labels == ["accepted"]
+    # The PR-author reply is the decisive evidence, so it sets valid_at (M12).
+    assert payload.valid_at == reply_created
+    rubric = json.loads(payload.rubric_json)
+    assert rubric.get("per_finding_outcomes") == ["accepted"]
+
+
+def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path) -> None:
+    """M6 wiring (issues #2/#4): a formal-review author's reply is decisive.
+
+    A reviewer author (not OWNER/MEMBER/COLLABORATOR) whose login comes back
+    from the ``/reviews`` lookup counts under the M6 gate through the same
+    ``review_author_logins`` plumbing in ``build_annotation``.
+    """
+    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    _write_findings(run_dir, _FP_A)
+    row = {"session_id": "s_review_auth", "pr_repo": "o/r", "pr_number": 14, "head_sha": "h",
+           "base_branch": "main", "archive_path": str(run_dir),
+           "grounding_rate": 1.0, "changed_files": "[]"}
+    comments = [
+        {
+            "id": 1,
+            "in_reply_to_id": None,
+            "user": {"login": "daydream-runner"},
+            "body": f"finding\n\n{finding_marker(_FP_A)}\n\n{DAYDREAM_FOOTER}",
+        },
+        {
+            "id": 2,
+            "in_reply_to_id": 1,
+            "user": {"login": "revbob", "type": "User"},
+            "author_association": "NONE",  # reviewed the PR but not a maintainer
+            "body": "False positive, the linter is wrong here",
+            "created_at": "2026-08-02T09:00:00Z",
+        },
+    ]
+
+    def review_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if endpoint.endswith("/comments"):
+            return comments
+        if endpoint.endswith("/reviews"):
+            return [{"user": {"login": "revbob"}}]
+        return {"merged": True, "merged_at": "2026-08-03T00:00:00Z", "state": "merged",
+                "user": {"login": "someone-else"}}
+
+    payload = build_annotation(
+        row, run_dir=run_dir, archive_dir=tmp_path, gh_api=review_gh, repo_clone=tmp_path,
+    )
+    assert payload.labels == ["rejected"]
+    rubric = json.loads(payload.rubric_json)
+    assert rubric.get("per_finding_outcomes") == ["rejected"]
 
 
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path: Path) -> None:

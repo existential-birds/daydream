@@ -15,8 +15,9 @@ Failure policy:
 * A *benign* PR absence (fork/deleted PR 404, unpushed-SHA 422, detected via
   :func:`~daydream.training.harvest._is_benign_pr_absence`) degrades inside
   ``build_annotation`` to a local-branch rubric whose outcome is ``unknown``;
-  the backfill stores that as ``["unknown"]`` — fail closed, never decisive
-  (M19/M22).
+  the backfill stores that as the empty label list (harvest's serialization)
+  — fail closed, never decisive (M19/M22), and byte-identical to the harvest
+  writer so the M14 auto-dedup tuple matches between the two writers.
 * Transient per-row failures count in ``summary["errors"]`` and never derail
   subsequent rows (harvest's isolation pattern). ``RateLimitError`` aborts the
   sweep cleanly, preserving the remaining queue for a later re-run.
@@ -228,13 +229,12 @@ def run_backfill(
                     f"backfill: PR evidence absent for session {row['session_id']} "
                     f"({type(exc).__name__}: {exc}); labeling unknown (fail closed)",
                 )
-                labels = ["unknown"]
+                labels: list[str] = []
                 transitions[row["session_id"]] = {
                     "old_labels": old_labels,
                     "new_labels": labels,
                 }
                 pr_state_counts["unknown"] += 1
-                class_balance["unknown"] += 1
                 if dry_run:
                     summary["sessions_reprocessed"] += 1
                     continue
@@ -249,9 +249,10 @@ def run_backfill(
                 summary["appended" if appended else "skipped"] += 1
                 summary["sessions_reprocessed"] += 1
                 continue
-            # Fail closed (M19): an unknown outcome is stored as ["unknown"],
-            # never as an empty/decisive label set.
-            labels = payload.labels or ["unknown"]
+            # Fail closed (M19): an unknown outcome is stored as the empty
+            # label list — harvest's serialization — so the M14 dedup tuple
+            # stays byte-identical between the two writers, never decisive.
+            labels = payload.labels
             transitions[row["session_id"]] = {
                 "old_labels": old_labels,
                 "new_labels": labels,

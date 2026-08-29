@@ -193,7 +193,7 @@ def test_backfill_fails_closed_on_deleted_comments(tmp_path: Path, monkeypatch: 
     archive = _archive_with_session(tmp_path, monkeypatch, replies=None, gh_error=404)
     run_backfill(archive, dry_run=False)
     rows = all_observations(archive)
-    assert rows[-1]["labels"] == '["unknown"]'
+    assert rows[-1]["labels"] == '[]'
 
 
 def test_backfill_report_is_machine_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +246,7 @@ def test_backfill_fails_closed_on_benign_escape(tmp_path: Path, monkeypatch: pyt
     assert summary["appended"] == 1
     assert summary["errors"] == 0
     rows = all_observations(tmp_path / "archive")
-    assert rows[-1]["labels"] == '["unknown"]'
+    assert rows[-1]["labels"] == '[]'
     assert rows[-1]["pr_state"] is None
 
 

@@ -2298,7 +2298,7 @@ def test_dedup_includes_policy_version_and_digest(tmp_path: Path) -> None:
     assert append_label_observation(tmp_path, "sess-1", **kw) is False       # identical → dedup
     kw2 = {**kw, "labeler_version": "980-policy2"}
     assert append_label_observation(tmp_path, "sess-1", **kw2) is True       # policy bump → append
-    kw3 = {**kw, "reply_evidence_digest": "e" * 64}
+    kw3 = {**kw2, "reply_evidence_digest": "e" * 64}
     assert append_label_observation(tmp_path, "sess-1", **kw3) is True       # edited reply → append
 
 

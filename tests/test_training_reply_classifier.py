@@ -4,7 +4,6 @@ import pytest
 
 from daydream.training.reply_classifier import (
     REPLY_CLASSIFIER_VERSION,
-    classify_replies,
     classify_reply,
     is_qualifying_author,
 )
@@ -31,6 +30,10 @@ def _reply(body: str, login: str = "maintainer", assoc: str = "MEMBER", bot: str
         ("not fixed yet, still reproduces", "ambiguous"),   # M22: negation fails closed
         ("", "ambiguous"),                                  # empty body
         ("Fixed in abc123. Though the other finding was a false positive.", "ambiguous"),  # mixed direction
+        # M22: negating a reject phrase fails closed to ambiguous, never 'rejected'.
+        ("This is not a false positive — it reproduces on main.", "ambiguous"),
+        ("This is not intentional; it's a real bug.", "ambiguous"),
+        ("This is not applicable to this PR.", "rejected"),  # affirm 'not applicable' is still a rejection
     ],
 )
 def test_classify_directional_rules(body: str, expected: str) -> None:
@@ -66,27 +69,6 @@ def test_qualifying_author_rules() -> None:
         is True
     )
     assert is_qualifying_author(_reply("x", bot="Bot", login="ci[bot]"), pr_author_logins=set()) is False
-
-
-def test_conflicting_replies_fail_closed_to_ambiguous() -> None:
-    """One accept + one reject from qualifying humans ⇒ ambiguous (M22)."""
-    replies = [
-        {"id": 1, **_reply("Fixed in abc123")},
-        {"id": 2, **_reply("False positive", login="other", assoc="NONE")},
-    ]
-    assert classify_replies(replies) == "ambiguous"
-
-
-def test_bot_only_replies_yield_no_decisive_label() -> None:
-    """Bot-only replies never produce accepted/rejected (M22)."""
-    replies = [{"id": 1, **_reply("Fixed in abc123", bot="Bot", login="app[bot]"), "is_self_reply": False}]
-    assert classify_replies(replies) == "ambiguous"
-
-
-def test_self_replies_yield_no_decisive_label() -> None:
-    """The daydream account replying to its own finding ⇒ ambiguous (M5/M22)."""
-    replies = [{"id": 1, **_reply("Fixed in abc123", login="daydream-agent"), "is_self_reply": True}]
-    assert classify_replies(replies) == "ambiguous"
 
 
 def test_classifier_version_is_exported() -> None:

@@ -441,6 +441,8 @@ def _build_rubric_pr(
     repo_clone: Path,
     pr_merge: PRMergeSignal | None = None,
     changed_files: list[str],
+    pr_author_logins: frozenset[str] = frozenset(),
+    review_author_logins: frozenset[str] = frozenset(),
 ) -> Rubric:
     """Compose all four signals for a row that originated from a PR.
 
@@ -451,6 +453,11 @@ def _build_rubric_pr(
             fetched here as before.
         changed_files: Pre-decoded ``changed_files`` for ``row`` (the caller
             already decoded the JSON column via ``_row_changed_files``).
+        pr_author_logins: Logins whose replies count as PR-author judgment
+            under the M6 gate (passed through to
+            :func:`~daydream.training.labeler_signals.per_finding_resolution_signal`).
+        review_author_logins: Logins whose replies count as formal-review
+            judgment under the M6 gate.
     """
     signal_row = {**row, "changed_files": changed_files}
     if pr_merge is None:
@@ -482,6 +489,8 @@ def _build_rubric_pr(
             recorded_fingerprints=recorded_fingerprints,
             gh_api=gh_api,
             threads=comment_threads,
+            pr_author_logins=pr_author_logins,
+            review_author_logins=review_author_logins,
         )
         rubric = replace(rubric, per_finding_resolutions=list(per_finding))
     return rubric
@@ -720,16 +729,12 @@ def build_annotation(
             # Merge confirmed, so the PR provably exists; a secondary comment-fetch
             # GitError is transient and must propagate, not discard the confirmed
             # PRMergeSignal by degrading to local.
-            rubric = _build_rubric_pr(
-                row,
-                gh_api=gh_api,
-                repo_clone=repo_clone,
-                pr_merge=_pr_merge,
-                changed_files=changed_files,
-            )
-            valid_at = _decisive_evidence_valid_at(rubric)
-            if valid_at is None and rubric.pr_merge.merged:
-                valid_at = rubric.pr_merge.merged_at
+            # Resolve the human reviewer set BEFORE composing the per-finding
+            # rubric so the M6 gate can count PR-author and formal-review-author
+            # logins (issues #2/#4): a decisive reply from a fork-PR author or
+            # review author whose association is not OWNER/MEMBER/COLLABORATOR
+            # must not be excluded. An auxiliary-lookup GitError keeps the same
+            # degrade semantics as before — empty reviewer set, no prior.
             try:
                 reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
             except RateLimitError:
@@ -738,17 +743,28 @@ def build_annotation(
                 # Reviewer-set prior only refines the decided outcome; an
                 # auxiliary-lookup failure degrades to no prior, keeping the label.
                 reviewer_logins = []
-                outcome_prior = None
-                prior_n = 0
-            else:
-                pooled, prior_n = reviewer_set_penalty_prior(
-                    archive_dir,
-                    reviewer_logins,
-                    before_valid_at=valid_at or datetime.now(timezone.utc).isoformat(),
-                    exclude_session=row["session_id"],
-                    repo_slug=row.get("repo_slug"),
-                )
-                outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
+            rubric = _build_rubric_pr(
+                row,
+                gh_api=gh_api,
+                repo_clone=repo_clone,
+                pr_merge=_pr_merge,
+                changed_files=changed_files,
+                pr_author_logins=(
+                    frozenset({_pr_merge.author_login}) if _pr_merge.author_login else frozenset()
+                ),
+                review_author_logins=frozenset(reviewer_logins),
+            )
+            valid_at = _decisive_evidence_valid_at(rubric)
+            if valid_at is None and rubric.pr_merge.merged:
+                valid_at = rubric.pr_merge.merged_at
+            pooled, prior_n = reviewer_set_penalty_prior(
+                archive_dir,
+                reviewer_logins,
+                before_valid_at=valid_at or datetime.now(timezone.utc).isoformat(),
+                exclude_session=row["session_id"],
+                repo_slug=row.get("repo_slug"),
+            )
+            outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
         rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
             row, repo_clone=repo_clone, clone_resolved=clone_resolved

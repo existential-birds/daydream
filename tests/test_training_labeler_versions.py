@@ -15,8 +15,9 @@ def test_versions_are_independent() -> None:
 
 def test_evidence_digest_is_deterministic() -> None:
     """reply_evidence_digest is a stable sha256 over the canonical evidence JSON."""
-    a = lv.reply_evidence_digest([{"id": 1, "body": "fixed in abc"}])
-    b = lv.reply_evidence_digest([{"id": 1, "body": "fixed in abc"}])
+    replies = [{"id": 1, "body": "fixed in abc"}, {"id": 2, "body": "fixed too"}]
+    a = lv.reply_evidence_digest(replies)
+    b = lv.reply_evidence_digest(list(reversed(replies)))
     c = lv.reply_evidence_digest([{"id": 1, "body": "not fixed"}])
     assert a == b and a != c
     assert len(a) == 64
