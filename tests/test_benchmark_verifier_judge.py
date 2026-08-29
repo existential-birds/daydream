@@ -390,6 +390,17 @@ _REWARD_KEYS = {
     "clean_task",
     "clean_pass",
     "verifier_error",
+    "location_exact",
+    "location_near",
+    "location_file",
+    "location_miss",
+    "location_credit",
+    "location_present",
+    "severity_exact",
+    "severity_within_1",
+    "severity_mean_distance",
+    "severity_credit",
+    "severity_present",
 }
 
 
