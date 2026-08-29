@@ -4,20 +4,13 @@ One strict, versioned, immutable review-profile value — resolved once per run
 and recorded by canonical digest — so a future optimizer can mutate it,
 benchmark it, and attribute results to the exact policy it tested.
 
-Task 1 (R2): the strict profile model + stage schema + packaged default.
-Later tasks add canonical serialization (R4), digests (R4), fail-closed
-validation (R3), host invariants/caps (R5), typed clone (R8), normal-run
-precedence + path-escape guard (R9), and the Harbor explicit-only resolver
-mode (R10).
-
 The model is deliberately separate from the lenient ``config_file.py``
 loader: an invalid profile fails the run naming its source, it never
 degrades to a default (R3).
 
 Default strategy content (R7) is copied verbatim from named production
-symbols with ``copied:`` provenance — never newly-written prose. The full
-#886-authored replacement blocks land with #886; every stage here has a real
-nonempty copy already.
+symbols with ``copied:`` provenance — never newly-written prose. Every stage
+has a real nonempty copy already.
 """
 
 from __future__ import annotations

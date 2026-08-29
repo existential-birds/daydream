@@ -392,7 +392,7 @@ def _render(agg: _RunAgg) -> str:
 
 
 def _render_rollup(agg: _RunAgg) -> list[str]:
-    """Visible rollup (M1) — Mode line removed per the summarize cleanup."""
+    """Render the visible run rollup."""
     return [
         f"- **Model:** {_rollup_model(agg)}",
         f"- **Cost:** {_rollup_cost(agg)}",

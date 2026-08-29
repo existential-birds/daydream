@@ -61,7 +61,6 @@ from daydream.improve.plans import (
     PlanWriteSession,
     _attempt_diagnostic,
     load_rejections,
-    plan_slug,
     prune_stale_reanchor_worktrees,
     reanchored_plan_rows,
     record_plan_write_diagnostics,
@@ -83,7 +82,7 @@ from daydream.improve.prompts import (
     build_plan_writer_repair_prompt,
 )
 from daydream.improve.publish import ImprovePublishError, IssuePublisher
-from daydream.improve.render import markdown_cell
+from daydream.improve.render import markdown_cell, plan_slug
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint

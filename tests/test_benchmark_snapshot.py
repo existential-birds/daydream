@@ -169,14 +169,6 @@ _SHA_HEAD = 'd9a75fd29107db73ef6cb08f877e644381c31f25'
 _SHA_HEAD_TREE = '100c61d903cabfd705776af46193bc55d494940d'
 
 
-def _seed_base_tree() -> str:
-    return 'a54e8fefe4dd3ffe592efe5fc64eb32f9eb7dbd4'
-
-
-def _seed_head_tree() -> str:
-    return '100c61d903cabfd705776af46193bc55d494940d'
-
-
 # ---------------------------------------------------------------------------
 # Task 0: spike -- the bare mirror retains full history for rename tracing
 # ---------------------------------------------------------------------------
@@ -386,7 +378,7 @@ def test_resolve_base_and_trees(tmp_path: Path) -> None:
     trees = sn.resolve_trees(m, base, _SHA_HEAD)
     assert isinstance(trees, tuple)
     bt, ht = trees
-    assert bt == _seed_base_tree() and ht == _seed_head_tree()
+    assert bt == _SHA_BASE2_TREE and ht == _SHA_HEAD_TREE
     assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
 
 
@@ -403,8 +395,8 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
     sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
-    assert sn.degenerate(m, _seed_base_tree(), _seed_base_tree()) == "equal_trees"
-    assert sn.degenerate(m, _seed_base_tree(), _seed_head_tree()) is None   # real change
+    assert sn.degenerate(m, _SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
+    assert sn.degenerate(m, _SHA_BASE2_TREE, _SHA_HEAD_TREE) is None   # real change
     d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     assert re.fullmatch(r"[0-9a-f]{64}", d)
 
@@ -428,8 +420,8 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
     base_commit = sn.rev_parse(m, "refs/heads/base")
     head_commit = sn.rev_parse(m, "refs/heads/head")
-    assert sn.rev_parse(m, f"{base_commit}^{{tree}}") == _seed_base_tree()
-    assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _seed_head_tree()
+    assert sn.rev_parse(m, f"{base_commit}^{{tree}}") == _SHA_BASE2_TREE
+    assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _SHA_HEAD_TREE
     assert sn.rev_parse(m, f"{head_commit}^") == base_commit           # single parent
     # determinism: rebuild and compare bytes against the first build's hash
     first = storage.sha256_file(bundle)
@@ -480,7 +472,7 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     # must not raise: the clone's diff digest must equal the mirror's
-    sn.validate_offline_clone(bundle, _seed_base_tree(), _seed_head_tree(), diff_sha,
+    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha,
                               workdir=tmp_path)
 
 
@@ -517,12 +509,12 @@ def test_offline_clone_validates(tmp_path: Path) -> None:
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    sn.validate_offline_clone(bundle, _seed_base_tree(), _seed_head_tree(), diff_sha,
+    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha,
                               workdir=tmp_path)
     bad = tmp_path / "snapshots" / "bad.bundle"
     bad.write_bytes(bundle.read_bytes()[: len(bundle.read_bytes()) // 2])
     with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(bad, _seed_base_tree(), _seed_head_tree(), diff_sha,
+        sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha,
                                   workdir=tmp_path)
 
 
@@ -538,7 +530,7 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
     sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
-    base_tree, head_tree = _seed_base_tree(), _seed_head_tree()
+    base_tree, head_tree = _SHA_BASE2_TREE, _SHA_HEAD_TREE
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
 
     valid = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -621,7 +613,7 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
     assert ready["status"] == "ready"
     assert ready["original_base_sha"] == _SHA_BASE2 and ready["original_head_sha"] == _SHA_HEAD
     assert ready["requested_base_sha"] == _SHA_BASE2
-    assert ready["base_tree_sha"] == _seed_base_tree() and ready["head_tree_sha"] == _seed_head_tree()
+    assert ready["base_tree_sha"] == _SHA_BASE2_TREE and ready["head_tree_sha"] == _SHA_HEAD_TREE
     assert re.fullmatch(r"[0-9a-f]{64}", ready["diff_sha256"])
     assert re.fullmatch(r"[0-9a-f]{64}", ready["bundle_sha256"])
     expect_rel = f"snapshots/{case_id_for(1, _SHA_HEAD)}.bundle"

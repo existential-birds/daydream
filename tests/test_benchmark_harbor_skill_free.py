@@ -1,7 +1,7 @@
 """Harbor skill-free gate (M16): the controlled entrypoint runs native, skill-free.
 
-The real end-to-end Python + mixed-stack Harbor run is the #783-dependent e2e in
-``test_benchmark_e2e.py``; this module proves the controlled wiring: no
+The real end-to-end Python + mixed-stack Harbor run is outside this module;
+these tests prove the controlled wiring: no
 ``DAYDREAM_SKILLS_DIR``, no Beagle probe, and the candidate profile still
 resolves via the explicit-only Harbor resolver.
 """

@@ -1,8 +1,6 @@
 """Shared Codex mock-process builder.
 
-Consolidates the two formerly-duplicated ``_make_mock_process`` helpers
-(``tests/contract/_loaders.py`` lines variant and ``tests/test_backend_codex.py``
-fixture variant) into one builder. The returned ``MagicMock`` reproduces the
+The returned ``MagicMock`` reproduces the
 exact ``stdout``/``stdin``/``wait``/``returncode``/``terminate``/``kill`` shape
 that ``CodexBackend.execute`` drives via
 ``daydream.backends.codex.asyncio.create_subprocess_exec``.

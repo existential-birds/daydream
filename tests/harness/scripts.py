@@ -103,7 +103,7 @@ async def drive_codex(
 ) -> list[AgentEvent]:
     """Drive a real ``CodexBackend`` over *lines*, collecting emitted events.
 
-    Thin helper: ``make_mock_process`` (the consolidated builder from Task 3) +
+    Thin helper: ``make_mock_process`` +
     a patch of the Codex subprocess boundary + a real ``CodexBackend``. No
     swallowing — events flow straight from the genuine parser, so a missing or
     malformed structured output surfaces as a failed assertion in the caller.

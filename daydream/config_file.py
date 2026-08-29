@@ -34,8 +34,7 @@ class DaydreamFileConfig:
         model: Global default model, or None if unset.
         backend: Global default backend name, or None if unset.
         reasoning_effort: Global default reasoning-effort override, or None if
-            unset. Only consumed by the Codex backend today (forwarded as
-            ``-c model_reasoning_effort=...``); ignored for claude/pi.
+            unset. Passed through to supported backends that accept it.
         phases: Per-phase sub-tables mapping phase name to a dict of keys
             (e.g. ``{"fix": {"backend": "codex", "model": "..."}}``).
         shallow_fanout_threshold: Max changed-file count that triggers the

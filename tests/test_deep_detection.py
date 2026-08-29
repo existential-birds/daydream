@@ -1,6 +1,6 @@
 """Stack detection routing tests (D-11..D-16).
 
-Covers ``daydream.deep.detection.detect_stacks`` implemented in plan 05-01.
+Covers ``daydream.deep.detection.detect_stacks`` and its routing contracts.
 """
 from pathlib import Path
 from typing import Any

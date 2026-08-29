@@ -1,4 +1,3 @@
-# tests/test_cli.py
 """Tests for CLI argument parsing."""
 import os
 import subprocess

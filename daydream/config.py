@@ -18,12 +18,11 @@ Exports:
         research DeepSeek V4 Flash default).
     DEFAULT_EXPLORATION_MODEL: str - Default model for the EXPLORE phase.
     PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] - Per-backend per-phase default
-        model mapping. Outer key is backend name ("claude" or "codex"),
+        model mapping. Outer key is backend name,
         inner key is the phase name (lowercase, e.g. "review", "parse", "fix"),
         value is the concrete model id.
     PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] - Per-backend per-phase default
-        reasoning effort, same key shape as PHASE_DEFAULT_MODELS. Only consumed by
-        the Codex backend.
+        reasoning effort, same key shape as PHASE_DEFAULT_MODELS.
     STRUCTURE_STACK_NAME: str - Stack identifier emitted by detect_stacks for the
         structural meta-stack assignment.
 """

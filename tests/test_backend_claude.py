@@ -1,4 +1,3 @@
-# tests/test_backend_claude.py
 """Tests for ClaudeBackend."""
 from collections.abc import AsyncIterator
 from pathlib import Path

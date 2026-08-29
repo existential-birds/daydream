@@ -88,7 +88,7 @@ def test_script_and_events_together_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_every_execute_argument_is_recorded() -> None:
-    """The recorders replace the per-test ``captured_*`` nonlocal lists."""
+    """Each execute argument is retained for inspection."""
     backend = ScriptedBackend()
 
     await _drain(backend, "first", max_turns=7, output_schema={"type": "object"}, read_only=True)

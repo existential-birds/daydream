@@ -41,10 +41,6 @@ def strip_ansi(text: str) -> str:
 # Mock Backends
 
 
-# The prompt-dispatching MockBackend was consolidated onto the shared
-# PhaseDispatchBackend (tests/harness/phase_backend.py). emit_cost=True preserves
-# the old CostEvent-on-non-structured-turns shape; parse_results=[[issue]] yields
-# one issue on the first parse, matching the old single-issue dispatch.
 _FULL_FLOW_ISSUE = {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
 
 
@@ -872,4 +868,3 @@ async def test_exploration_enriched_output_both_flows(tmp_path: Path, make_work:
         assert issues
         assert "confidence" in issues[0]
         assert "rationale" in issues[0]
-

@@ -104,7 +104,7 @@ def test_phase_default_models_claude_tier_assignments() -> None:
     claude = PHASE_DEFAULT_MODELS["claude"]
     # PARSE is the cheap tier
     assert claude["parse"] == "claude-haiku-4-5"
-    # Expensive tier: REVIEW, WONDER, MERGE, PR_FEEDBACK, VET, PLAN_WRITE
+    # Expensive tier: REVIEW, WONDER, MERGE, VET, PLAN_WRITE
     for phase in ("review", "wonder", "merge", "vet", "plan_write"):
         assert claude[phase] == "claude-opus-5"
     # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, RECON, AUDIT

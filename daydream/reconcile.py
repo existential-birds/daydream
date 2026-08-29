@@ -6,10 +6,9 @@ from the hidden ``daydream-finding`` markers embedded in posted comment bodies
 current run's fingerprints into new / matched / stale.
 
 Stale inline findings are minimized via the GraphQL ``minimizeComment``
-mutation with classifier ``OUTDATED`` — the Task 0 spike showed
-``resolveReviewThread`` is forbidden for the least-privilege App installation
-token (``pull_requests: write, contents: read, metadata: read``) while
-``minimizeComment`` succeeds with the same token.
+mutation with classifier ``OUTDATED``. The least-privilege App installation
+token (``pull_requests: write, contents: read, metadata: read``) permits this
+operation while ``resolveReviewThread`` is unavailable.
 
 This module performs no posting and no artifact I/O; it talks to GitHub only
 through `daydream.git_ops.gh_api`.
@@ -243,8 +242,8 @@ def resolve_threads(target_dir: Path, stale: list[PriorFinding]) -> tuple[int, i
     """Mark stale findings outdated via GraphQL ``minimizeComment``.
 
     One mutation per stale finding, keyed on the carrying comment's GraphQL
-    node id (``resolveReviewThread`` is forbidden for the least-privilege
-    installation token — Task 0 spike). Best-effort: a failure on one
+    node id (``resolveReviewThread`` is unavailable to the least-privilege
+    installation token). Best-effort: a failure on one
     finding warns and continues, matching the `daydream.pr_review` posture.
 
     Returns:

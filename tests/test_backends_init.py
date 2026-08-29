@@ -1,4 +1,3 @@
-# tests/test_backends_init.py
 """Tests for the backend protocol and the ``create_backend`` factory.
 
 The ``AgentEvent`` dataclass field/default assertions live in
@@ -104,7 +103,7 @@ async def test_backend_execute_accepts_agents_kwarg() -> None:
 
 
 def test_create_backend_forwards_reasoning_effort_to_every_driver() -> None:
-    """All three backends carry the resolved effort, not just Codex."""
+    """Each configured backend carries the resolved reasoning effort."""
     from daydream.backends import create_backend
 
     for name in ("claude", "codex", "pi"):

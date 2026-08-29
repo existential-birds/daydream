@@ -1,4 +1,4 @@
-"""Task 6 (R9): normal-run four-source precedence + path-escape guard.
+"""Tests for review-profile precedence, confinement, and CLI resolution.
 
 Precedence: explicit_path > DAYDREAM_REVIEW_PROFILE env > repo-committed
 file_config.review_profile > packaged default. Invalid higher-precedence
@@ -88,7 +88,6 @@ def test_invalid_explicit_fails_naming_source(monkeypatch: pytest.MonkeyPatch) -
     assert "bad-profile.toml" in str(e.value)
 
 
-# Task 7 (R1, R9): resolve-once plumbing via RunConfig.
 def test_runconfig_carries_resolved_profile_and_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.runner import RunConfig
     p = tmp_path / "prof.toml"
@@ -104,7 +103,6 @@ def test_resolve_from_runconfig_happens_once_at_composition_root() -> None:
     resolved = rp.resolve_from_runconfig(cfg)     # seam: composition root resolves once
     assert resolved.profile.name and resolved.source_kind == "default"
 
-# Task 13: real-path CLI entry (real `daydream ... --review-profile` invocation).
 def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import os
     import re
@@ -126,7 +124,7 @@ def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatc
     p.write_text('schema_version = 1\nname = "cli-p"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     env = {**os.environ, "DAYDREAM_REVIEW_PROFILE": str(p)}
     repo_root = Path(__file__).resolve().parents[1]
-    # CLI: `daydream review --review-profile` is #886 (renamed); here prove the
+    # CLI: `daydream review --review-profile` must
     # resolver seams through a real `daydream ... --review-profile` invocation.
     out = subprocess.run(
         [sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(tmp_path)],

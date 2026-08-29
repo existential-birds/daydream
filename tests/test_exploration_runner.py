@@ -179,10 +179,6 @@ class _SpecialistMockBackend:
         return None
 
 
-# Backward compat alias for tests/test_integration.py
-_AgentsRecordingMockBackend = _SpecialistMockBackend
-
-
 # Pure helpers
 def test_count_changed_files_counts_unique_paths() -> None:
     assert count_changed_files("") == 0

@@ -4,11 +4,10 @@ Pure function. Takes parsed per-stack records + TTT alternative-review issues an
 emits ``CandidatePair`` entries where each pair shares at least one file AND has
 a normalized-title bigram Jaccard similarity >= 0.5.
 
-The merge agent (plan 05-08) adjudicates candidate pairs. This pre-filter exists
-to keep the merger's prompt small and keep quadratic-pair enumeration out of the
-LLM.
+The merge agent adjudicates candidate pairs. This pre-filter keeps the merger's
+prompt small and keeps quadratic-pair enumeration out of the LLM.
 
-Thresholds (per RESEARCH.md Open Question 3):
+Thresholds:
 
 - Bigram Jaccard similarity >= 0.5 on normalized titles
 - AND at least one shared file path

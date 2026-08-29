@@ -11,10 +11,9 @@ call against the recorder via ``get_current_recorder()``. Backends emit
 flushes to the parent Trajectory at scope exit. The Recorder writes the
 Trajectory JSON on clean ``__aexit__``.
 
-Phase 2 shipped the minimum surface: ONE ``ContextVar`` (``_RECORDER_VAR``),
-and a no-op ``Redactor``. Phase 3 adds ``fork()`` for parallel task groups
-(sibling trajectory files) reusing the single ``_RECORDER_VAR`` (D-04). Phase 4 fills
-in the Redactor rule list.
+The recorder uses one ``ContextVar`` (``_RECORDER_VAR``) to expose the active
+run, supports sibling recorders for parallel task groups, and redacts sensitive
+values before trajectory data is persisted.
 """
 
 from __future__ import annotations
@@ -1466,10 +1465,10 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
 class TrajectoryRecorder:
     """Owns the per-run ATIF Trajectory and writes it to disk on clean exit.
 
-    Phase 2 surface: ONE recorder per run, opened via ``async with`` from
-    ``runner.py``. ``__aenter__`` sets ``_RECORDER_VAR``; ``__aexit__`` writes
-    the trajectory and clears the ContextVar. Disk-write failure degrades to
-    ``print_warning`` per D-11 (Phase 4 adds the explicit fail-loud branch).
+    A recorder is opened via ``async with`` from ``runner.py``. ``__aenter__``
+    sets ``_RECORDER_VAR``; ``__aexit__`` writes the trajectory and clears the
+    context variable. Redaction failures are represented explicitly rather than
+    allowing sensitive values to pass through.
 
     Attributes:
         path: Output JSON path; default ``<target>/.daydream/runs/<session_id>/trajectory.json``.
@@ -1477,7 +1476,7 @@ class TrajectoryRecorder:
         target_dir: Repo/target directory; recorded into Trajectory.extra.
         agent_model_name: Active model name; stamped into Agent and every
             agent Step's model_name.
-        redactor: No-op in Phase 2 (D-12); Phase 4 fills in rule list.
+        redactor: Redaction policy applied before trajectory data is written.
         session_id: UUID4 for this run, supplied by the caller (CORE-07).
         steps: Sequential Steps from every Invocation, step_id 1..N.
         pr_number: GitHub PR number if reviewing a PR. Stored in trajectory extra.
