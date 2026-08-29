@@ -167,7 +167,7 @@ class Suppression:
     """
 
     enabled: bool = False
-    severity_classes: tuple[str, ...] = ("low", "medium")
+    severity_classes: tuple[str, ...] = ("low",)
     confidence_classes: tuple[str, ...] = ("LOW",)
 
 

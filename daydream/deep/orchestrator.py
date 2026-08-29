@@ -1799,7 +1799,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # off (product default) this block never runs, `select_suppression_targets`
         # is never called, and arbiter output is byte-identical. When on, it gives
         # the borderline (LOW-confidence / low-severity uncontested) findings the
-        # arbiter never sees a skeptical second opinion, dropping any it cannot
+        # arbiter never sees a skeptical second opinion (for the profile's
+        # ``Suppression.severity_classes`` severity classes), dropping any it cannot
         # confirm (fail-CLOSED, the inverse of the arbiter). The arbiter target set
         # is the exclusion set so nothing high-severity / contested is re-judged
         # here. One batched agent call, resolved via the cheaper `suppression`
@@ -1809,7 +1810,10 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 i for i, r in enumerate(all_records) if id(r) in arbitrated_ids
             ]
             suppression_targets = select_suppression_targets(
-                all_records, record_sources, suppression_exclude
+                all_records,
+                record_sources,
+                suppression_exclude,
+                severity_classes=ctx.pipeline().suppression.severity_classes,
             )
             if suppression_targets:
                 async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):

@@ -174,3 +174,16 @@ def test_suppression_length_mismatch_raises() -> None:
 
     with pytest.raises(ValueError):
         select_suppression_targets([_rec("a.py", 1, "low")], ["python", "react"])
+
+
+def test_select_suppression_targets_honors_severity_classes_knob() -> None:
+    records = [
+        {"severity": "low", "file": "a.py", "line": 1},
+        {"severity": "medium", "file": "b.py", "line": 2},
+        {"severity": "low", "confidence": "LOW", "file": "c.py", "line": 3},
+    ]
+    sources = ["s1", "s2", "s3"]
+    # Default ("low",): low-severity records selected; medium not; LOW-confidence still selected.
+    assert select_suppression_targets(records, sources) == [0, 2]
+    # Knob widened to include medium.
+    assert select_suppression_targets(records, sources, severity_classes=("low", "medium")) == [0, 1, 2]

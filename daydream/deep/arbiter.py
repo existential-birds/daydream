@@ -123,21 +123,23 @@ def select_suppression_targets(
     records: list[dict[str, Any]],
     sources: list[str],
     exclude: Iterable[int] = (),
+    severity_classes: tuple[str, ...] = ("low",),
 ) -> list[int]:
     """Return indices of borderline, uncontested records for the suppression pass (#232).
 
     The precision-mode suppression pass gives a skeptical LLM second opinion to
     *evidenced-but-minor* findings the arbiter never scrutinizes: records that are
-    ``confidence == "LOW"`` and/or ``severity == "low"`` and are neither
-    high-severity nor contested. It mirrors :func:`select_arbiter_targets` as a
+    ``confidence == "LOW"`` and/or low-severity (per ``severity_classes``) and are
+    neither high-severity nor contested. It mirrors :func:`select_arbiter_targets` as a
     pure, side-effect-free predicate so it can be unit-tested against adversarial
     shapes independent of any agent call.
 
     High-severity and contested records reach the *arbiter* (fail-open); this pass
     must never touch them, so callers pass the arbiter's target indices as
     ``exclude``. Because that set already covers every high-severity and contested
-    record, excluding it leaves only low/medium uncontested records -- of which the
-    LOW-confidence / low-severity ones are the borderline findings selected here.
+    record, excluding it leaves only higher-severity uncontested records -- of
+    which the LOW-confidence ones and those in ``severity_classes`` are the
+    borderline findings selected here.
 
     Args:
         records: Parsed per-stack records (each ideally carrying ``severity`` and
@@ -149,14 +151,28 @@ def select_suppression_targets(
         exclude: Indices to skip (the arbiter target set). A record already routed
             to the arbiter is never a suppression target.
 
+        severity_classes: Canonical severity levels the severity branch selects
+            (default ``("low",)``; the profile's ``Suppression.severity_classes``
+            governs this in the production path).
+
     Returns:
         Sorted, de-duplicated list of indices into ``records`` selected for the
         suppression pass: every ``exclude``-free record that is LOW-confidence
-        or low-severity.
+        or low-severity (per ``severity_classes``).
 
     Raises:
-        ValueError: If ``records`` and ``sources`` differ in length.
+        ValueError: If ``records`` and ``sources`` differ in length, or if
+            ``severity_classes`` contains a non-canonical severity value.
     """
+    classes = frozenset(
+        cls.lower() for cls in severity_classes
+    )
+    unknown = classes - frozenset(CANONICAL_LEVELS)
+    if unknown:
+        raise ValueError(
+            f"severity_classes must be a subset of {', '.join(sorted(CANONICAL_LEVELS))}; "
+            f"got unknown value(s): {', '.join(sorted(unknown))}"
+        )
     if len(records) != len(sources):
         raise ValueError(
             f"records/sources length mismatch: {len(records)} != {len(sources)}"
@@ -167,6 +183,6 @@ def select_suppression_targets(
     for i, record in enumerate(records):
         if i in excluded:
             continue
-        if _confidence(record) == "LOW" or _severity(record) == "low":
+        if _confidence(record) == "LOW" or _severity(record) in classes:
             selected.append(i)
     return selected

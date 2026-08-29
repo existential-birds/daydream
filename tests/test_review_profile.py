@@ -202,3 +202,7 @@ def test_clone_override_revalidates_and_rejects_forbidden() -> None:
     base = rp.build_default_profile()
     with pytest.raises(rp.ProfileError):
         rp.clone_with_overrides(base, {"intent": {"backend": "claude"}})  # host-owned
+
+
+def test_suppression_severity_classes_default_narrowed() -> None:
+    assert rp.Suppression.severity_classes == ("low",)
