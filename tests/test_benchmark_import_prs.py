@@ -379,6 +379,67 @@ def test_graphql_threads_and_replies_normalized(tmp_path: Path, fake_gh: FakeGh)
     assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
 
+def test_rest_inline_normalization_retains_original_range(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """REST anchor fields original_commit_id/original_start_line/original_line survive normalization."""
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    # one REST comment carrying the authoring-time range: original line 5, start 4,
+    # on the original commit; the head-side anchors point at the re-anchored location.
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "fix this", "path": "a.py", "line": 5, "start_line": 4,
+             "original_line": 5, "original_start_line": 4,
+             "original_commit_id": "a" * 40, "commit_id": "b" * 40,
+             "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    fake_gh._write_threads([])
+    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
+    rec = {e.database_id: e for e in doc_gi.evidence}[1]
+    assert rec.original_start_line == 4
+    assert rec.original_commit_id == "a" * 40
+    assert rec.original_line == 5
+
+
+def test_graphql_thread_maps_original_start_line(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """GraphQL thread originalStartLine survives mapping to the canonical record."""
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    # thread-only comment (no REST counterpart) canonicalized from thread fields
+    fake_gh._write_threads([
+        {"id": "thread_1", "isResolved": False, "isOutdated": False,
+         "subjectType": "LINE", "path": "a.py", "line": 5, "originalLine": 5,
+         "originalStartLine": 4,
+         "side": "RIGHT", "startSide": None,
+         "comments": {"nodes": [
+             {"id": "c1", "databaseId": 1, "body": "fix this",
+              "author": {"login": "alice", "type": "User"},
+              "createdAt": "2026-01-01T00:00:00Z",
+              "url": "https://github.com/o/r/pull/101#discussion_r1"},
+         ]}},
+    ])
+    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
+    rec = {e.database_id: e for e in doc_gi.evidence}[1]
+    assert rec.kind == "inline_comment"
+    assert rec.original_start_line == 4
+
+
 def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.schema import Location

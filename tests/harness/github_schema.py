@@ -37,6 +37,7 @@ SCHEMA_FIELDS: dict[str, set[str]] = {
         "path",
         "line",
         "originalLine",
+        "originalStartLine",
         "diffSide",
         "startDiffSide",
         "comments",

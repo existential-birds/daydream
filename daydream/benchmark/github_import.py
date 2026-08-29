@@ -482,6 +482,7 @@ def _evidence_from_inline(raw: dict[str, Any]) -> dict[str, Any]:
         "line": raw.get("line"),
         "start_line": raw.get("start_line"),
         "original_line": raw.get("original_line"),
+        "original_start_line": raw.get("original_start_line"),
         "thread_id": None,
         "review_id": str(raw["pull_request_review_id"]) if raw.get("pull_request_review_id") is not None else None,
         "reply_to_id": str(raw["in_reply_to_id"]) if raw.get("in_reply_to_id") is not None else None,
@@ -517,7 +518,8 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
       reviewThreads(first: 50, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id isResolved isOutdated subjectType path line originalLine side: diffSide startSide: startDiffSide
+          id isResolved isOutdated subjectType path line originalLine originalStartLine
+          side: diffSide startSide: startDiffSide
           comments(first: 100) {
             pageInfo { hasNextPage endCursor }
             nodes { id databaseId body author { login type: __typename } createdAt updatedAt url replyTo { id } }
@@ -562,6 +564,7 @@ def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> di
         "path": thread.get("path"),
         "line": thread.get("line"),
         "original_line": thread.get("originalLine"),
+        "original_start_line": thread.get("originalStartLine"),
         "resolved": bool(thread.get("isResolved", False)),
         "outdated": bool(thread.get("isOutdated", False)),
         "thread_id": thread.get("id"),
