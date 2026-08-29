@@ -1,11 +1,4 @@
-"""Stage-1 dataset-SFT config (rl/train/sft.toml) content + dry-path tests.
-
-Shape per Task 0's spike (plan-notes.md): the dataset-SFT entrypoint is a
-separate verb, ``sft @`` — not ``rl @`` — and its schema puts the model block
-at top level and the renderer next to it. ``[dataset]`` is a daydream-private
-table consumed by our corpus loader (M8/M9), not by prime-rl, so the dry run
-validates a copy with that table stripped.
-"""
+"""Stage-1 SFT configuration tests."""
 
 from __future__ import annotations
 

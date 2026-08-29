@@ -7,7 +7,7 @@ not copied) to:
    (``render_codex``), so the replay harness can serve each firing phase its
    own fixture.
 2. Thread a script-level ``structured_output`` dict onto the final turn so the
-   REAL backend parser (``codex.py:348-368`` / Claude ``ResultMessage``)
+   real backend parser (or Claude ``ResultMessage``)
    extracts it — the parity path for the PARSE phase's schema-constrained
    return.
 
@@ -37,8 +37,8 @@ PhaseScripts = dict[DaydreamPhase, dict[str, Any]]
 def _with_structured_output(script: dict[str, Any]) -> dict[str, Any]:
     """Return a script whose final turn carries ``json.dumps(structured_output)``.
 
-    The real Codex parser extracts structured output by ``json.loads`` of the
-    last ``agent_message`` text (``codex.py:349-353``). To satisfy it we
+    The real Codex parser extracts structured output by loading the last
+    ``agent_message`` text. To satisfy it we
     overwrite the final turn's ``text`` with the serialized structured payload.
     Scripts without a ``structured_output`` key are returned unchanged.
     """

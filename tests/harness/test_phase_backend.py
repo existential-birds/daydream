@@ -1,10 +1,8 @@
-"""Real-path test for the shared ``PhaseDispatchBackend`` (Task 10).
+"""Real-path tests for the shared ``PhaseDispatchBackend``.
 
 Drives the production shallow mode through ``runner.run`` with the shared
 phase-dispatch fake injected at the ``daydream.runner.create_backend`` seam.
-Asserts the observable outcome (exit code + parse-call count proving the
-single review→parse pass ran once and the run completed cleanly — ``--loop``
-was removed in the single-flow collapse (#330)).
+Asserts the observable outcome and that the removed parse phase is not invoked.
 """
 from pathlib import Path
 from typing import Any
@@ -52,4 +50,3 @@ async def test_shared_phase_backend_drives_shallow_pass(
     # the structural meta-stack.
     assert backend.parse_calls == 0
     assert len(backend.review_prompts) == 2
-

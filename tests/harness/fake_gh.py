@@ -478,10 +478,6 @@ class FakeGh:
         """Make ``gh pr view`` emit *response* and feed ``gh pr list``."""
         self.set_response("pr-view", value=response)
 
-    def serve_repo_view(self, name_with_owner: str) -> None:
-        """Make ``gh repo view`` emit *name_with_owner*."""
-        self.set_response("repo-view", value=name_with_owner)
-
     def serve_secret_list(self, names: list[str]) -> None:
         """Make ``gh secret list --json name`` return *names*."""
         self.set_response("secret-list", value=names)

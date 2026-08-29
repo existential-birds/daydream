@@ -2749,16 +2749,13 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
     first = {name: order.index(name) for name in set(order)}
     assert first["intent"] < first["alternatives"]
-    # Wonder now runs CONCURRENTLY with the per-stack fan-out on a multi-stack
-    # run, so it no longer strictly precedes it; the guarantee is that it joins
-    # before merge consumes the per-stack records (issue #745 removed the
-    # parse-<stack> stage -- reviewers emit records directly).
+    # Wonder runs concurrently with the per-stack fan-out, but must join before
+    # merge consumes the per-stack records.
     assert first["alternatives"] < first["merge"]
     assert first["per-stack"] < first["merge"]
     assert "parse" not in {name.lower() for name in order}
 
-    # At minimum: intent + alternatives + per-stack fan-out + merge (the
-    # parse-<stack> calls are gone; issue #745).
+    # At minimum: intent + alternatives + per-stack fan-out + merge.
     assert len(stub.calls) >= 6
     # Each stage fires a distinct execute call -- prompts must be unique.
     prompts = [c["prompt"] for c in stub.calls]
@@ -2875,12 +2872,10 @@ def _intent_prompt(stub: _StubBackend) -> str:
 
 
 def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
-    """Classify captured prompts for the five finding-producing builders (#279).
+    """Classify captured prompts for the finding-producing builders (#279).
 
-    Keys: ``per-stack``, ``generic-fallback``, ``structural``, ``arbiter``,
-    ``merge``. Per-stack matches skilled stack reviews; generic-fallback is
-    the README / missing-skill path. Structural / arbiter / merge use their
-    own stable opening phrases.
+    Keys are ``per-stack``, ``generic-fallback``, ``structural``, ``arbiter``,
+    and ``merge``; each is identified by its stable opening phrase.
     """
     by_kind: dict[str, list[str]] = {
         "per-stack": [],
@@ -3473,7 +3468,7 @@ async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
 
 
 async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-30: pre-flight notice lists stages, stacks, skill per stack, total agent count."""
+    """D-30: pre-flight notice lists stages, stacks, and agent count."""
     captured: list[dict[str, Any]] = []
 
     def _capture(
@@ -3513,8 +3508,8 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
         "cross-stack merge",
         "optional fix gate",
     ]
-    # Agent count = 2 TTT + N per-stack + N parse + 1 merge + 1 arbiter;
-    # fixture yields N=4 (python + react + generic + structure), so 2 + 2*4 + 1 + 1 = 12.
+    # The fixture yields four review assignments and the fixed TTT/merge/fix-gate
+    # work, for a total of twelve agents.
     assert notice["agent_count"] == 12
     assert notice["stack_lines"] == [
         "python: 1 file(s)",
@@ -3670,18 +3665,12 @@ def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
     registry.write_text(_registry_text(plugin_names))
 
 
-def test_run_deep_routes_missing_skill_to_generic(
+def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """When beagle-react is absent, React files route to the generic bucket.
-
-    Regression: previously orchestrator passed the full built-in stack list as
-    availability, so detect_stacks kept React as its own stack, the per-stack
-    agent raised MissingSkillError, and phase_per_stack_reviews silently
-    dropped the React findings.
-    """
+    """Detected React files retain their own stack without the plugin registry."""
     import anyio
 
     from daydream.deep import detection as _detection
@@ -3766,9 +3755,7 @@ async def test_merge_prompt_lists_records_in_sorted_order(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pre-merge parse iterates sorted(per_stack_outputs.items()) so the merge
-    prompt's records list is stable across runs regardless of which per-stack
-    task completed first."""
+    """The merge prompt lists per-stack records in stable order."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -4140,13 +4127,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     monkeypatch: pytest.MonkeyPatch,
     mute_side_effects: Mute,
 ) -> None:
-    """The deep orchestrator must call _resolve_backend with each spec phase,
-    not just 'review'. This is a wiring test, not a model-value test.
-
-    Drives a full deep flow (TTT -> per-stack -> parse -> merge -> fix gate
-    accepted -> fix-loop -> test -> commit) with the stub backend, and asserts
-    every expected phase string appears in the captured call list.
-    """
+    """The deep orchestrator resolves a backend for each required phase."""
     from daydream import runner as _runner
 
     seen_phases: list[str] = []

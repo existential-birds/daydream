@@ -50,7 +50,7 @@ def test_check_deep_artifacts_passes_when_present(tmp_path: Path) -> None:
     deep_dir.mkdir(parents=True)
     (deep_dir / "intent.md").write_text("x")
     (deep_dir / "alternatives.json").write_text("[]")
-    check_deep_artifacts("per-stack", deep_dir)  # must not raise
+    check_deep_artifacts("per-stack", deep_dir)
 
 
 def test_check_deep_artifacts_rejects_directory_shadowing_prereq(tmp_path: Path) -> None:

@@ -4452,8 +4452,8 @@ def test_intent_prompt_pointer_when_diff_is_none() -> None:
     assert "+++ b/x.py" not in prompt
 
 
-def test_intent_prompt_pointer_branch_is_byte_identical_to_pre_change() -> None:
-    """Passing inline_diff=None reproduces today's prompt exactly."""
+def test_intent_prompt_explicit_none_matches_omitted() -> None:
+    """Explicit ``inline_diff=None`` matches the omitted argument."""
     from daydream.phases import build_intent_prompt
 
     explicit_none = build_intent_prompt(
@@ -4591,4 +4591,3 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
     assert items[0]["severity_before_demotion"] == "high"  # original preserved (R2.1)
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark
-

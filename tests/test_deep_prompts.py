@@ -1077,9 +1077,8 @@ def test_per_stack_prompt_test_quality_rubric_layering_awareness(tmp_path: Path)
     assert "bypasses the observable behavior" in out
 
 
-def test_per_stack_prompt_test_quality_rubric_sits_after_skill_invocation(tmp_path: Path) -> None:
-    """#308: the rubric lands after the skill invocation so the reviewer applies
-    it to each test hunk, not ahead of the per-stack review instructions."""
+def test_per_stack_prompt_test_quality_rubric_follows_strategy(tmp_path: Path) -> None:
+    """The test-quality rubric follows the per-stack review instructions."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"),
@@ -1151,9 +1150,8 @@ def test_structural_prompt_includes_anti_slop_rubric(tmp_path: Path) -> None:
     _assert_anti_slop_anchors(out)
 
 
-def test_per_stack_prompt_anti_slop_rubric_sits_after_skill_invocation(tmp_path: Path) -> None:
-    """#314: the rubric lands after the skill invocation so the reviewer applies
-    it to the diff hunks it reviews, not ahead of the per-stack instructions."""
+def test_per_stack_prompt_anti_slop_rubric_follows_strategy(tmp_path: Path) -> None:
+    """The anti-slop rubric follows the per-stack review instructions."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"),

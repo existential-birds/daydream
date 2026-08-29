@@ -1,9 +1,4 @@
-# GOLDEN BASELINE — renders every Copy-existing builder against the CURRENT
-# (pre-extraction) default profile and freezes the byte output. Task 5+ asserts
-# the SAME strings after recomposition. The per-stack/structural/vetting
-# builders are excluded here — their output intentionally changes (skill line
-# removed + authored block inserted); those golden deltas are pinned separately
-# in Task 5.
+"""Golden coverage for builders that copy the default profile strategy."""
 from pathlib import Path
 
 from daydream import review_profile as rp
@@ -20,8 +15,7 @@ def test_golden_baseline_generic_fallback() -> None:
         files=["a.js"], diff_path=Path("/d"), intent_path=Path("/i"),
         alternatives_path=Path("/a"), output_path=Path("/o"), cwd=Path("/c"),
     )
-    # After recomposition this string must be byte-identical. Freeze the exact
-    # rendered text by asserting a stable sentinel that will survive recomposition:
+    # Check a stable sentinel in the rendered text.
     assert "language-agnostic review practices" in p
     assert "a.js" in p and "/d" in p and "/c" in p   # host runtime data present
     assert "beagle" not in p.lower() and "/beagle-" not in p

@@ -188,7 +188,7 @@ def test_clone_one_override_changes_only_that_stage() -> None:
     assert clone.digest != base.digest
     for key in rp.STAGE_KEYS:
         if key != "intent":
-            assert clone.strategies[key].content == base.strategies[key].content  # byte-identical
+            assert clone.strategies[key].content == base.strategies[key].content
     assert clone.strategies["intent"].content == "NEW INTENT STRATEGY"
 
 def test_clone_override_revalidates_and_rejects_forbidden() -> None:
