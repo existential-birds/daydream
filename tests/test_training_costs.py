@@ -1,3 +1,4 @@
+import pathlib
 """Tests for per-run cost accounting (M19).
 
 Costs are reporting-only — never a budget gate (C3). ``record_stage_costs``
@@ -8,6 +9,7 @@ never reported as 0.0 or inf).
 """
 
 import json
+from typing import Any, cast
 from dataclasses import dataclass
 
 from daydream.backends import CostEvent, MetricsEvent
@@ -17,10 +19,10 @@ from daydream.training.costs import record_stage_costs, summarize_costs
 @dataclass
 class _StageEvents:
     stage: str
-    events: list
+    events: list[object]
 
 
-def test_per_run_accounting_written(tmp_path):
+def test_per_run_accounting_written(tmp_path: pathlib.Path) -> None:
     stage_run_events = [
         _StageEvents(
             stage="stage0",
@@ -42,7 +44,7 @@ def test_per_run_accounting_written(tmp_path):
             ],
         ),
     ]
-    p = record_stage_costs(stage_run_events, out=tmp_path / "costs.json")
+    p = record_stage_costs(cast(Any, stage_run_events), out=tmp_path / "costs.json")
     data = json.loads(p.read_text())
     assert data["stages"]["stage0"]["usd"] >= 0.0
     assert data["stages"]["stage3"]["tokens"] > 0
@@ -50,7 +52,7 @@ def test_per_run_accounting_written(tmp_path):
     assert data["stages"]["stage0"]["tokens"] == 270
 
 
-def test_reports_dollar_per_review_and_per_finding(tmp_path):
+def test_reports_dollar_per_review_and_per_finding(tmp_path: object) -> None:
     costs_with_labels = [
         {
             "stages": {
@@ -67,13 +69,13 @@ def test_reports_dollar_per_review_and_per_finding(tmp_path):
         },
     ]
     s = summarize_costs(costs_with_labels)
-    assert s["usd_per_review"] > 0
-    assert s["usd_per_finding_that_mattered"] > 0  # denominator: findings a maintainer accepted
+    assert s["usd_per_review"] is not None and s["usd_per_review"] > 0
+    assert s["usd_per_finding_that_mattered"] is not None and s["usd_per_finding_that_mattered"] > 0  # denominator: findings a maintainer accepted
     assert s["usd_per_review"] == (0.5 + 1.5 + 1.0) / 3
     assert s["usd_per_finding_that_mattered"] == 3.0 / 5
 
 
-def test_zero_denominator_is_none_not_zero(tmp_path):
+def test_zero_denominator_is_none_not_zero(tmp_path: object) -> None:
     costs_with_labels = [
         {
             "stages": {"stage0": {"usd": 1.0, "tokens": 10}},

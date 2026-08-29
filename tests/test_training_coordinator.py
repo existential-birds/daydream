@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from typing import Any
 
 from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.gate import GateConfig, GateReport
@@ -138,7 +139,7 @@ def test_non_dry_run_writes_stage_outputs_and_adapter(
 
 
 @pytest.fixture
-def cli_runner():
+def cli_runner() -> Any:
     class _Runner:
         def invoke(self, argv: list[str]) -> SimpleNamespace:
             from daydream import cli
@@ -157,6 +158,6 @@ def cli_runner():
     return _Runner()
 
 
-def test_cli_verb_wired(cli_runner) -> None:
+def test_cli_verb_wired(cli_runner: Any) -> None:
     r = cli_runner.invoke(["train", "--help"])
     assert r.exit_code == 0

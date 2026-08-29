@@ -8,15 +8,17 @@ validates a copy with that table stripped.
 """
 
 from __future__ import annotations
+import pathlib
 
 import subprocess
 import tomllib
+from typing import Any
 from pathlib import Path
 
 SFT = Path(__file__).parents[2] / "rl" / "train" / "sft.toml"
 
 
-def _cfg() -> dict:
+def _cfg() -> dict[str, Any]:
     return tomllib.loads(SFT.read_text())
 
 
@@ -24,7 +26,7 @@ def _cfg_text() -> str:
     return SFT.read_text()
 
 
-def test_bf16_lora_in_staged_band():
+def test_bf16_lora_in_staged_band() -> None:
     c = _cfg()
     assert c["model"]["optimization_dtype"] == "bfloat16"
     assert c["model"]["reduce_dtype"] == "bfloat16"
@@ -33,30 +35,30 @@ def test_bf16_lora_in_staged_band():
     assert c["model"]["lora"]["alpha"] == 2.0 * c["model"]["lora"]["rank"]
 
 
-def test_lora_targets_default_projection_set():
+def test_lora_targets_default_projection_set() -> None:
     # C2 requires prime-rl's default list, so the recipe omits `target_modules`
     # rather than restating it (mirrors rl/train/rl.toml).
     assert "target_modules" not in _cfg()["model"]["lora"]
 
 
-def test_default_renderer_not_stock_qwen3():
+def test_default_renderer_not_stock_qwen3() -> None:
     # The stock qwen3 renderer injects an empty <think></think> block, which
     # corrupts cross-entropy on completions.
     assert _cfg()["renderer"]["name"] == "default"
 
 
-def test_seq_len_matches_stage3():
+def test_seq_len_matches_stage3() -> None:
     assert _cfg()["model"]["seq_len"] == 32768
 
 
-def test_no_live_teacher_algo_block():
+def test_no_live_teacher_algo_block() -> None:
     # M10: dataset SFT never routes through the live-teacher variant. There is
     # no orchestrator at all on the `sft @` entrypoint, and no [algo] block.
     assert "orchestrator" not in _cfg()
     assert "algo" not in _cfg()
 
 
-def test_gold_positive_only_dataset_gate():
+def test_gold_positive_only_dataset_gate() -> None:
     c = _cfg()
     assert c["dataset"]["gold_positive_only"] is True  # M8
     assert c["dataset"]["tier_counts_reported"] is True  # M9: gold vs silver reported separately
@@ -66,7 +68,7 @@ def test_gold_positive_only_dataset_gate():
     assert "rubric" in c["dataset"]["silver"]
 
 
-def test_dry_run_passes_without_gpu(tmp_path, prime_rl_workspace):
+def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: pathlib.Path) -> None:
     """PATTERN dry-path test: `sft @ <cfg> --dry-run` from inside the prime-rl
     workspace validates every pydantic schema without touching a GPU."""
     # Strip the daydream-private [dataset] table (prime-rl forbids extra keys);
@@ -94,6 +96,6 @@ def test_dry_run_passes_without_gpu(tmp_path, prime_rl_workspace):
     assert rc["renderer"]["name"] == "default"
 
 
-def test_dry_run_copy_is_valid_toml(tmp_path):
+def test_dry_run_copy_is_valid_toml(tmp_path: pathlib.Path) -> None:
     """The sanitizer the dry-run test relies on must see a valid document."""
     tomllib.loads(_cfg_text())
