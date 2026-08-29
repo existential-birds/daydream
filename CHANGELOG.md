@@ -480,7 +480,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **review:** Precision-mode arbiter suppression for evidenced-but-minor findings ([#248](https://github.com/existential-birds/daydream/pull/248))
 
-  The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via `--precision` or automatically when the diff exceeds 500 lines.
+  The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via the `--precision` flag (or the corresponding file-config setting); there is no automatic diff-size trigger.
 
 - **training:** Stable per-finding join key for accept/reject labels ([#246](https://github.com/existential-birds/daydream/pull/246))
 
