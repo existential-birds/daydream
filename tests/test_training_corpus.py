@@ -26,8 +26,10 @@ from daydream.training.corpus import (
     _build_query,
     _build_record,
     _is_admitted,
+    _is_admitted_outcome_gold,
     run_build_corpus,
 )
+from daydream.training.labeler_versions import LABELER_POLICY_VERSION
 from daydream.training.reward import PosteriorBreakdown, RewardBreakdown
 from tests.fixtures.training.build_archive import build_fixture_archive
 
@@ -44,6 +46,7 @@ def _seed_run_with_annotation(
     reward_version: str = "r1",
     rubric_json: str | None = None,
     has_posterior: bool | None = None,
+    labeler_policy_version: str | None = LABELER_POLICY_VERSION,
     observed_at: str,
     valid_at: str,
     pipeline_status: str = "unknown",
@@ -122,6 +125,20 @@ def _seed_run_with_annotation(
         # every caller means. A local_branch row passes has_posterior=False.
         has_posterior=(label is not None) if has_posterior is None else has_posterior,
     )
+    # Stamp the policy axis: current-policy seeds (default
+    # LABELER_POLICY_VERSION) are admitted as outcome gold; None models a
+    # legacy row stamped before the reply-classifier policy axis existed.
+    import sqlite3
+
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        conn.execute(
+            "UPDATE label_observations SET labeler_policy_version = ? WHERE session_id = ?",
+            (labeler_policy_version, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     # append_label_observation stamps observed_at with wall clock; overwrite it
     # so as_of pins in tests are deterministic.
     import sqlite3
@@ -616,3 +633,137 @@ def test_cli_build_corpus_default_excludes_failed_pipelines(tmp_path: Path, arch
     lines2 = [line for line in out2.read_text().splitlines() if line.strip()]
     assert len(lines2) == 1
     assert json.loads(lines2[0])["session_id"] == "bad-run"
+
+
+LEGACY: dict[str, Any] = {"label": "accepted", "has_posterior": True, "labeler_policy_version": None,
+                          "decisive_mix": False, "decisive_only": True}
+MIXED: dict[str, Any]  = {**LEGACY, "labeler_policy_version": LABELER_POLICY_VERSION, "decisive_mix": True}
+AMBIG: dict[str, Any]  = {
+    **LEGACY, "labeler_policy_version": LABELER_POLICY_VERSION, "decisive_mix": False, "decisive_only": False}
+GOOD: dict[str, Any]   = {**LEGACY, "labeler_policy_version": LABELER_POLICY_VERSION}
+
+
+def test_gold_admission_rejects_legacy_observations() -> None:
+    """Legacy reply-count/merge-presence rows are excluded from outcome-bearing gold (M16/M22)."""
+    assert _is_admitted_outcome_gold(**LEGACY) is False
+
+
+def test_gold_admission_rejects_mixed_and_ambiguous() -> None:
+    assert _is_admitted_outcome_gold(**MIXED) is False
+    assert _is_admitted_outcome_gold(**AMBIG) is False
+
+
+def test_gold_admission_accepts_current_clean_evidence() -> None:
+    assert _is_admitted_outcome_gold(**GOOD) is True
+
+
+def test_is_admitted_label_path_respects_filters_labels() -> None:
+    """The label path requires both filters.labels membership and the gold guard.
+
+    A ``labels=()`` filter admits nothing on the label path even when the row
+    is current-policy gold — and a clean gold row still admits under the
+    default ``("accepted",)`` filter, so the guard never narrows the default.
+    """
+    assert _is_admitted("accepted", None, CorpusFilters(labels=()), **
+                        {k: v for k, v in GOOD.items() if k != "label"}) is False
+    assert _is_admitted(**GOOD, composite_reward=None, filters=CorpusFilters()) is True
+
+
+def test_min_reward_path_unaffected() -> None:
+    """The intrinsic min_reward path keeps its existing contract (no creep)."""
+    assert _is_admitted("rejected", 1.0, CorpusFilters(min_reward=0.5)) is True
+
+
+def test_min_reward_path_drops_legacy_and_unevidenced_gold_label(tmp_path: Path, archive_dir: Any) -> None:
+    """The min_reward back door must not admit a failed-guard ``accepted`` as gold (#980).
+
+    The intrinsic ``min_reward`` path keeps admitting rows, but an outcome-gold
+    ``accepted`` whose evidence fails the gold-admission guard (legacy NULL
+    policy, or unevidenced local_branch) is admitted only as an unlabeled
+    intrinsic row — its label is dropped so it never re-enters the accepted/gold
+    population. A current-policy, evidenced, decisive-only ``accepted`` admitted
+    via ``min_reward`` keeps its label.
+    """
+    decisive = json.dumps(
+        {"posterior_source": "pr_review", "per_finding_outcomes": ["accepted", "accepted"]}
+    )
+    kw_composite_reward = 0.9
+    kw_observed_at = "2026-03-01T00:00:00+00:00"
+    kw_valid_at = "2026-03-01T00:00:00+00:00"
+    # Legacy NULL-policy mislabeled accept: admitted intrinsically, label dropped.
+    _seed_run_with_annotation(
+        archive_dir, "s-legacy", label="accepted", rubric_json=decisive,
+        has_posterior=True, labeler_policy_version=None,
+        composite_reward=kw_composite_reward, observed_at=kw_observed_at,
+        valid_at=kw_valid_at,
+    )
+    # Unevidenced local_branch accept: admitted intrinsically, label dropped.
+    _seed_run_with_annotation(
+        archive_dir, "s-local", label="accepted", rubric_json=decisive,
+        has_posterior=False,
+        composite_reward=kw_composite_reward, observed_at=kw_observed_at,
+        valid_at=kw_valid_at,
+    )
+    # Current-policy evidenced accept: keeps its gold label.
+    _seed_run_with_annotation(
+        archive_dir, "s-good", label="accepted", rubric_json=decisive,
+        has_posterior=True,
+        composite_reward=kw_composite_reward, observed_at=kw_observed_at,
+        valid_at=kw_valid_at,
+    )
+    out = tmp_path / "corpus.jsonl"
+    run_build_corpus(BuildCorpusConfig(
+        out_path=out, archive_dir=archive_dir,
+        filters=CorpusFilters(min_reward=0.5),
+        as_of="2026-04-01T00:00:00+00:00",
+    ))
+    labels = {json.loads(line)["session_id"]: json.loads(line)["outcome_label"]
+              for line in out.read_text().splitlines()}
+    assert labels["s-good"] == "accepted"
+    assert labels["s-legacy"] is None
+    assert labels["s-local"] is None
+
+
+def test_gold_admission_gates_legacy_and_ambiguous_rows_in_build(tmp_path: Path, archive_dir: Any) -> None:
+    """Real-path gold guard: legacy NULL-policy and rubric-ambiguous rows are excluded (M16/M22).
+
+    The pure ``_is_admitted_outcome_gold`` tests above drive the guard in
+    isolation; this drives the same gate through ``run_build_corpus`` so the
+    ``_rubric_decisive_only`` derivation from the persisted ``rubric_json`` —
+    including its FALSE branch on ambiguous ``per_finding_outcomes`` and the
+    legacy ``labeler_policy_version=None`` row — is exercised end-to-end.
+    """
+    decisive_rubric = json.dumps(
+        {"posterior_source": "pr_review", "per_finding_outcomes": ["accepted", "accepted"]}
+    )
+    ambiguous_rubric = json.dumps(
+        {"posterior_source": "pr_review", "per_finding_outcomes": ["accepted", "ambiguous"]}
+    )
+    kw_composite_reward = 0.9
+    kw_has_posterior = True
+    kw_observed_at = "2026-05-01T00:00:00+00:00"
+    kw_valid_at = "2026-04-01T00:00:00+00:00"
+    # Current-policy + decisive rubric: admitted as gold.
+    _seed_run_with_annotation(
+        tmp_path, "s-good", label="accepted", rubric_json=decisive_rubric,
+        has_posterior=kw_has_posterior, composite_reward=kw_composite_reward,
+        observed_at=kw_observed_at, valid_at=kw_valid_at,
+    )
+    # Current-policy + ambiguous rubric: ``_rubric_decisive_only`` returns False, so no gold.
+    _seed_run_with_annotation(
+        tmp_path, "s-ambiguous", label="accepted", rubric_json=ambiguous_rubric,
+        has_posterior=kw_has_posterior, composite_reward=kw_composite_reward,
+        observed_at=kw_observed_at, valid_at=kw_valid_at,
+    )
+    # Legacy NULL policy + decisive rubric: the policy gate rejects it.
+    _seed_run_with_annotation(
+        tmp_path, "s-legacy", label="accepted", rubric_json=decisive_rubric,
+        labeler_policy_version=None,
+        has_posterior=kw_has_posterior, composite_reward=kw_composite_reward,
+        observed_at=kw_observed_at, valid_at=kw_valid_at,
+    )
+    out = tmp_path / "corpus.jsonl"
+    run_build_corpus(_cfg(tmp_path, out_path=out))
+
+    emitted = [json.loads(line)["session_id"] for line in out.read_text().splitlines()]
+    assert emitted == ["s-good"]

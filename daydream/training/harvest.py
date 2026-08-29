@@ -54,15 +54,19 @@ Annotation builder:
   unpushed-SHA 422) degrades the row to its local-branch posterior; every other
   reviewer-signal, prior-query, posterior-fetch, and git error propagates to the
   caller, which isolates per-row.
-* ``valid_at`` is the PR merge timestamp for PR rows and ``None`` for
-  non-PR/local rows (the write layer collapses ``None`` → ``observed_at``).
+* ``valid_at`` is the earliest qualifying decisive-evidence timestamp — the
+  ``created_at`` of a reply supporting an ``accepted``/``rejected`` disposition
+  (M12) — falling back to the PR merge timestamp when no decisive evidence
+  exists, and ``None`` for non-PR/local rows (the write layer collapses
+  ``None`` → ``observed_at``).
 
 Orchestrator (:func:`run_harvest`):
 
 * **Idempotent and re-runnable:** every indexed run is considered on every
-  pass, but the write layer dedups on ``(evidence_sha, reward_version)`` — a
-  re-harvest with unchanged evidence is a no-op (counted in ``skipped``). A
-  ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
+  pass, but the write layer dedups on ``(evidence_sha, labeler_policy_version,
+  reply_evidence_digest, labels, has_posterior)`` — a re-harvest with unchanged
+  evidence is a no-op (counted in ``skipped``). A ``LABELER_POLICY_VERSION`` or
+  reply-evidence change alters the dedup key and so appends a fresh
   generation, letting older ``as_of`` pins still resolve their original
   generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 * **Per-row error isolation:** an exception on one row counts in ``errors`` and
@@ -101,7 +105,7 @@ from daydream.archive.index import (
     set_run_pr_link,
 )
 from daydream.git_ops import GitError, RateLimitError
-from daydream.training import reward
+from daydream.training import labeler_versions, reward
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.base_sha import materialize_base_sha
 from daydream.training.labeler_signals import (
@@ -119,7 +123,7 @@ from daydream.training.labeler_signals import (
     reviewer_logins_signal,
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
-from daydream.training.rubric import Rubric, derive_outcome_label, derive_per_finding_labels
+from daydream.training.rubric import Rubric, derive_outcome_label
 from daydream.trajectory import redact_text as _redact_text
 from daydream.ui import create_console, print_warning
 
@@ -440,6 +444,8 @@ def _build_rubric_pr(
     repo_clone: Path,
     pr_merge: PRMergeSignal | None = None,
     changed_files: list[str],
+    pr_author_logins: frozenset[str] = frozenset(),
+    review_author_logins: frozenset[str] = frozenset(),
 ) -> Rubric:
     """Compose all four signals for a row that originated from a PR.
 
@@ -450,13 +456,23 @@ def _build_rubric_pr(
             fetched here as before.
         changed_files: Pre-decoded ``changed_files`` for ``row`` (the caller
             already decoded the JSON column via ``_row_changed_files``).
+        pr_author_logins: Logins whose replies count as PR-author judgment
+            under the M6 gate (passed through to
+            :func:`~daydream.training.labeler_signals.per_finding_resolution_signal`).
+        review_author_logins: Logins whose replies count as formal-review
+            judgment under the M6 gate.
     """
     signal_row = {**row, "changed_files": changed_files}
     if pr_merge is None:
         pr_merge = pr_merge_signal(signal_row, gh_api=gh_api)
     # Fetch + index the PR's review comments once; both resolution signals
     # consume this index instead of each hitting the /comments endpoint.
-    comment_threads = index_pr_review_comments(signal_row, gh_api=gh_api)
+    recorded_fingerprints = _row_recorded_fingerprints(row)
+    comment_threads = index_pr_review_comments(
+        signal_row,
+        gh_api=gh_api,
+        session_fingerprints=recorded_fingerprints,
+    )
     comments = comment_resolution_signal(signal_row, gh_api=gh_api, threads=comment_threads)
     fix = _safe_fix_applied(
         signal_row,
@@ -470,15 +486,16 @@ def _build_rubric_pr(
         local_commit_applied=None,
         posterior_source="pr_review",
     )
-    recorded_fingerprints = _row_recorded_fingerprints(row)
     if recorded_fingerprints:
         per_finding = per_finding_resolution_signal(
             signal_row,
             recorded_fingerprints=recorded_fingerprints,
             gh_api=gh_api,
             threads=comment_threads,
+            pr_author_logins=pr_author_logins,
+            review_author_logins=review_author_logins,
         )
-        rubric = replace(rubric, per_finding_labels=list(derive_per_finding_labels(rubric, per_finding)))
+        rubric = replace(rubric, per_finding_resolutions=list(per_finding))
     return rubric
 
 
@@ -526,11 +543,14 @@ def _pr_state_for_rubric(rubric: Rubric) -> str | None:
     """Map a PR-review rubric to a sqlite ``pr_state`` discriminator.
 
     For local-branch rubrics returns ``None`` so the column reflects "no PR
-    associated".
+    associated". An unmerged PR preserves its live GitHub ``state`` (M11) —
+    ``open`` stays ``open`` rather than being collapsed to ``closed``.
     """
     if rubric.posterior_source != "pr_review":
         return None
-    return "merged" if rubric.pr_merge.merged else "closed"
+    if rubric.pr_merge.merged:
+        return "merged"
+    return rubric.pr_merge.state if rubric.pr_merge.state in ("open", "closed") else "closed"
 
 
 # Per-run annotation builder
@@ -545,9 +565,11 @@ class AnnotationPayload:
             ``"unknown"``, else a single-element list).
         pr_state: sqlite ``pr_state`` discriminator (``"merged"``/``"closed"``
             for PR rows, ``None`` for local-branch rows).
-        valid_at: The valid-time of the posterior outcome — the PR merge
-            timestamp for PR rows, ``None`` for non-PR/local rows (the write
-            layer collapses ``None`` → ``observed_at``).
+        valid_at: The valid-time of the posterior outcome — the earliest
+            qualifying decisive-evidence timestamp (M12), falling back to the
+            PR merge timestamp when no decisive evidence exists, and ``None``
+            for non-PR/local rows (the write layer collapses ``None`` →
+            ``observed_at``).
         reward_version: The :data:`daydream.training.reward.REWARD_VERSION`
             observed at scoring time.
         reward_json: ``json.dumps`` of the full
@@ -570,6 +592,12 @@ class AnnotationPayload:
             penalty. ``local_branch`` rows keep their label but are **not**
             posterior evidence (a local commit is not a maintainer acting in a
             PR), so they carry ``False`` and no ``posterior_cost``.
+        reply_classifier_version: The
+            :data:`~daydream.training.labeler_versions.REPLY_CLASSIFIER_VERSION`
+            that produced the per-finding dispositions (M13 version axis).
+        reply_evidence_digest: Stable digest over the session's combined reply
+            evidence (M14 dedup input), or ``None`` when no reply evidence
+            exists.
     """
 
     labels: list[str]
@@ -582,6 +610,8 @@ class AnnotationPayload:
     rubric_json: str | None
     reviewer_logins: list[str]
     has_posterior: bool
+    reply_classifier_version: str | None = None
+    reply_evidence_digest: str | None = None
 
 
 def _degrade_to_local(
@@ -609,6 +639,7 @@ def build_annotation(
     gh_api: Any,
     repo_clone: Path,
     clone_resolved: bool = True,
+    valid_at_override: str | None = None,
 ) -> AnnotationPayload:
     """Build one run's bitemporal annotation payload (pure of DB writes).
 
@@ -653,10 +684,17 @@ def build_annotation(
             row. When ``False`` the local-branch posterior is forced to
             ``"unknown"`` rather than risking a ``"rejected"`` mislabel from a
             commit check that had no repository to inspect.
+        valid_at_override: Explicit valid-time that beats the derived
+            decisive-evidence timestamp when supplied (wired from the backfill
+            CLI); ``None`` keeps the derived value.
 
     Returns:
-        A frozen :class:`AnnotationPayload`. ``valid_at`` is the PR merge
-        timestamp for PR rows and ``None`` for non-PR/local rows.
+        A frozen :class:`AnnotationPayload`. ``valid_at`` is the earliest
+        qualifying decisive-evidence timestamp (the ``created_at`` of an
+        accepted/rejected-supporting reply, M12); when no decisive evidence
+        exists it falls back to the PR merge timestamp for merged PR rows and
+        ``None`` otherwise (and for non-PR/local rows). An explicit
+        ``valid_at_override`` wins over the derived value.
 
     Raises:
         AssertionError: When the scored breakdown does not carry the canonical
@@ -694,14 +732,12 @@ def build_annotation(
             # Merge confirmed, so the PR provably exists; a secondary comment-fetch
             # GitError is transient and must propagate, not discard the confirmed
             # PRMergeSignal by degrading to local.
-            rubric = _build_rubric_pr(
-                row,
-                gh_api=gh_api,
-                repo_clone=repo_clone,
-                pr_merge=_pr_merge,
-                changed_files=changed_files,
-            )
-            valid_at = rubric.pr_merge.merged_at
+            # Resolve the human reviewer set BEFORE composing the per-finding
+            # rubric so the M6 gate can count PR-author and formal-review-author
+            # logins (issues #2/#4): a decisive reply from a fork-PR author or
+            # review author whose association is not OWNER/MEMBER/COLLABORATOR
+            # must not be excluded. An auxiliary-lookup GitError keeps the same
+            # degrade semantics as before — empty reviewer set, no prior.
             try:
                 reviewer_logins = reviewer_logins_signal(row, gh_api=gh_api)
             except RateLimitError:
@@ -710,17 +746,28 @@ def build_annotation(
                 # Reviewer-set prior only refines the decided outcome; an
                 # auxiliary-lookup failure degrades to no prior, keeping the label.
                 reviewer_logins = []
-                outcome_prior = None
-                prior_n = 0
-            else:
-                pooled, prior_n = reviewer_set_penalty_prior(
-                    archive_dir,
-                    reviewer_logins,
-                    before_valid_at=valid_at or datetime.now(timezone.utc).isoformat(),
-                    exclude_session=row["session_id"],
-                    repo_slug=row.get("repo_slug"),
-                )
-                outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
+            rubric = _build_rubric_pr(
+                row,
+                gh_api=gh_api,
+                repo_clone=repo_clone,
+                pr_merge=_pr_merge,
+                changed_files=changed_files,
+                pr_author_logins=(
+                    frozenset({_pr_merge.author_login}) if _pr_merge.author_login else frozenset()
+                ),
+                review_author_logins=frozenset(reviewer_logins),
+            )
+            valid_at = _decisive_evidence_valid_at(rubric)
+            if valid_at is None and rubric.pr_merge.merged:
+                valid_at = rubric.pr_merge.merged_at
+            pooled, prior_n = reviewer_set_penalty_prior(
+                archive_dir,
+                reviewer_logins,
+                before_valid_at=valid_at or datetime.now(timezone.utc).isoformat(),
+                exclude_session=row["session_id"],
+                repo_slug=row.get("repo_slug"),
+            )
+            outcome_prior = pooled if prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     else:
         rubric, valid_at, reviewer_logins, outcome_prior, prior_n = _degrade_to_local(
             row, repo_clone=repo_clone, clone_resolved=clone_resolved
@@ -728,6 +775,8 @@ def build_annotation(
 
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
+    if valid_at_override is not None:
+        valid_at = valid_at_override
 
     inputs = assemble_scoring_inputs(run_dir, row)
     # Only a maintainer acting on a real PR is posterior evidence; a local commit
@@ -758,7 +807,50 @@ def build_annotation(
         rubric_json=json.dumps(rubric.to_dict()),
         reviewer_logins=reviewer_logins,
         has_posterior=isinstance(rb, reward.PosteriorBreakdown),
+        reply_classifier_version=labeler_versions.REPLY_CLASSIFIER_VERSION,
+        reply_evidence_digest=_reply_evidence_digest(rubric),
     )
+
+
+def _decisive_evidence_valid_at(rubric: Rubric) -> str | None:
+    """Earliest qualifying decisive-evidence timestamp from the rubric (M12).
+
+    Scans the per-finding resolutions' persisted evidence for ``created_at``
+    stamps of replies that support the resolution's ``accepted``/``rejected``
+    disposition: an entry counts only when its author qualified (the
+    ``reason`` is not ``excluded:*``) AND the reply's own ``classifier_label``
+    matches the disposition — so an earlier qualifying-but-ambiguous reply
+    never pulls ``valid_at`` before the reply that actually decided the
+    finding. Malformed entries (missing/blank ``created_at``) are skipped for
+    the min computation; when no decisive timestamp exists the caller falls
+    back to the merge time or ``None`` — never a fabricated timestamp.
+    """
+    stamps: list[str] = []
+    for resolution in rubric.per_finding_resolutions or []:
+        if resolution.disposition not in ("accepted", "rejected"):
+            continue
+        for entry in resolution.evidence:
+            if not isinstance(entry, dict):
+                continue
+            reason = entry.get("reason")
+            if not isinstance(reason, str) or reason.startswith("excluded:"):
+                continue
+            if entry.get("classifier_label") != resolution.disposition:
+                continue
+            created_at = entry.get("created_at")
+            if isinstance(created_at, str) and created_at:
+                stamps.append(created_at)
+    return min(stamps) if stamps else None
+
+
+def _reply_evidence_digest(rubric: Rubric) -> str | None:
+    """Stable digest over the session's combined reply evidence (M14).
+
+    ``None`` when no reply evidence was collected, so a digest-less row never
+    collides with a digested one under the versioned dedup key.
+    """
+    evidence = [entry for res in rubric.per_finding_resolutions or [] for entry in res.evidence]
+    return labeler_versions.reply_evidence_digest(evidence) if evidence else None
 
 
 # Repo resolution — source_path first, then identity-based clone (issue #981):
@@ -906,11 +998,12 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
     ``reviewer_logins`` and the ``has_posterior`` population discriminator).
 
     **Idempotent and re-runnable:** every indexed run is considered, but the
-    write layer dedups on ``(evidence_sha, reward_version)`` — a re-harvest with
+    write layer dedups on ``(evidence_sha, labeler_policy_version,
+    reply_evidence_digest, labels, has_posterior)`` — a re-harvest with
     unchanged evidence is a no-op counted in ``skipped``. A later
-    ``REWARD_VERSION`` bump changes the dedup key and so appends a fresh
-    generation, letting older ``as_of`` pins still resolve their original
-    generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
+    ``LABELER_POLICY_VERSION`` or reply-evidence change alters the dedup key
+    and so appends a fresh generation, letting older ``as_of`` pins still
+    resolve their original generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
 
     Per-row error isolation: an exception on one row counts in ``errors`` and
     does not derail subsequent rows. Configuration errors (missing
@@ -930,7 +1023,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
         raise FileNotFoundError(msg)
 
     # Queue every indexed run (optionally prefix-filtered); the write layer makes
-    # re-harvest idempotent by deduping unchanged (evidence_sha, reward_version).
+    # re-harvest idempotent by deduping unchanged evidence (evidence_sha,
+    # labeler_policy_version, reply_evidence_digest, labels, has_posterior).
     if config.session_filter:
         queue = query_runs(
             config.archive_dir,
@@ -1013,7 +1107,7 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     row["session_id"],
                     labels=payload.labels,
                     pr_state=payload.pr_state,
-                    labeler_version=reward.REWARD_VERSION,
+                    labeler_version=labeler_versions.LABELER_POLICY_VERSION,
                     evidence_sha=payload.evidence_sha,
                     rubric_json=payload.rubric_json,
                     valid_at=payload.valid_at,
@@ -1022,11 +1116,14 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                     composite_reward=payload.composite_reward,
                     reviewer_logins=payload.reviewer_logins,
                     has_posterior=payload.has_posterior,
+                    reply_classifier_version=payload.reply_classifier_version,
+                    reply_evidence_digest=payload.reply_evidence_digest,
                 )
                 if appended:
                     summary["annotated"] += 1
                 else:
-                    # Deduped: unchanged evidence/reward-version is a no-op re-run.
+                    # Deduped: unchanged evidence/policy/digest/labels/posterior
+                    # is a no-op re-run.
                     summary["skipped"] += 1
                 # Either way the row is "done" for resume — re-running must not re-fetch it.
                 if cache is not None:

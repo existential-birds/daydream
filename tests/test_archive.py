@@ -1413,12 +1413,23 @@ def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path) -> None:
                                       labeler_version="rv1", evidence_sha="shaA", source="auto")
     assert first is True and second is False
     assert len(label_observation_history(tmp_path, "s-dedup")) == 1
-    # A reward_version change DOES append:
+    # A labeler_policy_version change DOES append: the M14 auto-dedup tuple is
+    # (evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
+    # has_posterior, reward_version), so this append fires on the
+    # labeler_version bump:
     third = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
                                      labeler_version="rv2", evidence_sha="shaA",
                                      reward_version="rv2", source="auto")
     assert third is True
     assert len(label_observation_history(tmp_path, "s-dedup")) == 2
+    # An independent reward_version bump (identical evidence AND policy) also
+    # appends: reward_version is part of the M14 tuple, so the freshly
+    # computed reward_json/composite_reward must not be silently discarded.
+    fourth = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                      labeler_version="rv2", evidence_sha="shaA",
+                                      reward_version="rv3", source="auto")
+    assert fourth is True
+    assert len(label_observation_history(tmp_path, "s-dedup")) == 3
 
 
 def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path) -> None:
@@ -2302,3 +2313,108 @@ def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
     assert row["pipeline_status"] == "failed"
     assert row["daydream_version"] == "0.27.0"
     assert row["daydream_dirty"] == 0
+
+
+# Task 7: versioned reply-label columns, digest-keyed dedup, legacy marking
+
+
+_LEGACY_ROW_OBSERVED_AT_SNAPSHOT = "2026-03-04T05:06:07+00:00"
+
+# Old DDL: everything up to (but excluding) the four reply-label/legacy columns.
+_PRE_REPLY_LABEL_DDL = """
+CREATE TABLE IF NOT EXISTS label_observations (
+    session_id       TEXT NOT NULL,
+    observed_at      TEXT NOT NULL,
+    labels           TEXT NOT NULL,
+    pr_state         TEXT,
+    labeler_version  TEXT NOT NULL,
+    evidence_sha     TEXT,
+    rubric_json      TEXT,
+    valid_at         TEXT,
+    reward_version   TEXT,
+    reward_json      TEXT,
+    composite_reward REAL,
+    reviewer_logins  TEXT,
+    has_posterior    INTEGER NOT NULL DEFAULT 0,
+    source           TEXT NOT NULL DEFAULT 'auto',
+    PRIMARY KEY (session_id, observed_at)
+)
+"""
+
+
+def _seed_pre_reply_label_row(archive_dir: Path, session_id: str) -> None:
+    """Insert a label_observations row using the DDL that predates the four new columns."""
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    try:
+        conn.execute("DROP TABLE IF EXISTS label_observations")
+        conn.execute(_PRE_REPLY_LABEL_DDL)
+        conn.execute(
+            "INSERT INTO label_observations "
+            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, _LEGACY_ROW_OBSERVED_AT_SNAPSHOT, '["accepted"]', "merged", "v1", "sha1"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_append_label_observation_persists_versions_and_digest(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-1")
+    ok = append_label_observation(
+        tmp_path, "sess-1", labels=["contested"], pr_state="open",
+        labeler_version="980-policy", evidence_sha="abc",
+        reply_classifier_version="980-r1", reply_evidence_digest="d" * 64,
+    )
+    assert ok is True
+    row = latest_label_observation(tmp_path, "sess-1")
+    assert row is not None
+    assert row["reply_classifier_version"] == "980-r1"
+    assert row["reply_evidence_digest"] == "d" * 64
+    assert row["labeler_policy_version"] == "980-policy"
+
+
+def test_dedup_includes_policy_version_and_digest(tmp_path: Path) -> None:
+    """Unchanged evidence + bumped policy version ⇒ new generation, not dedup (M14/M22)."""
+    _seed_one_run(tmp_path, "sess-1")
+    kw: dict[str, Any] = dict(labels=["contested"], pr_state="open", labeler_version="980-policy",
+              evidence_sha="abc", reply_classifier_version="980-r1", reply_evidence_digest="d" * 64)
+    assert append_label_observation(tmp_path, "sess-1", **kw) is True
+    assert append_label_observation(tmp_path, "sess-1", **kw) is False       # identical → dedup
+    kw2 = {**kw, "labeler_version": "980-policy2"}
+    assert append_label_observation(tmp_path, "sess-1", **kw2) is True       # policy bump → append
+    kw3 = {**kw2, "reply_evidence_digest": "e" * 64}
+    assert append_label_observation(tmp_path, "sess-1", **kw3) is True       # edited reply → append
+
+
+def test_human_rows_keep_precedence_over_newer_auto(tmp_path: Path) -> None:
+    """Human observation wins in the runs cache even after a newer auto append (M14/M22)."""
+    _seed_one_run(tmp_path, "sess-1")
+    append_label_observation(tmp_path, "sess-1", labels=["contested"], pr_state="open",
+                             labeler_version="980-policy", evidence_sha="abc",
+                             reply_classifier_version="980-r1", reply_evidence_digest="d" * 64)
+    append_label_observation(tmp_path, "sess-1", labels=["rejected"], pr_state="open",
+                             labeler_version="human", evidence_sha="abc", source="human")
+    append_label_observation(tmp_path, "sess-1", labels=["accepted"], pr_state="open",
+                             labeler_version="980-policy2", evidence_sha="abc",
+                             reply_classifier_version="980-r1", reply_evidence_digest="f" * 64)
+    row = query_runs(tmp_path, "session_id = ?", ("sess-1",))[0]
+    assert row["outcome_labels"] == '["rejected"]' and row["labeled_at"] is not None
+    obs = latest_label_observation(tmp_path, "sess-1")
+    assert obs is not None and obs["source"] == "human" and obs["labels"] == '["rejected"]'
+
+
+def test_migration_marks_legacy_rows(tmp_path: Path) -> None:
+    """Pre-existing auto rows are marked legacy='legacy' and never mutated otherwise (M17/M22)."""
+    _seed_one_run(tmp_path, "sess-legacy")
+    _seed_pre_reply_label_row(tmp_path, "sess-legacy")
+
+    # The production connection path must ALTER-ADD the new columns and stamp history.
+    upsert_run(tmp_path, make_manifest(session_id="sess-legacy-2"))
+
+    rows = label_observation_history(tmp_path, "sess-legacy")
+    assert rows
+    assert all(r["legacy"] == "legacy" for r in rows if r["labeler_policy_version"] is None)
+    # original labels/observed_at untouched:
+    assert rows[0]["observed_at"] == _LEGACY_ROW_OBSERVED_AT_SNAPSHOT
+    assert rows[0]["labels"] == '["accepted"]'

@@ -825,12 +825,71 @@ def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> 
     return datetime.fromisoformat(valid_at) > datetime.fromisoformat(as_of)
 
 
+_OUTCOME_GOLD_LABELS = frozenset({"accepted"})
+
+
+def _rubric_decisive_only(annotation: dict[str, Any] | None) -> bool:
+    """Derive the ``decisive_only`` flag from the observation's rubric JSON.
+
+    ``True`` when every per-finding disposition in ``per_finding_outcomes`` is
+    decisive (accepted/rejected) — or when the rubric carries no finding-level
+    evidence at all, in which case there is nothing to contradict a decisive
+    run label. A missing or malformed rubric is not itself disqualifying: the
+    legacy gate is ``labeler_policy_version is None``, which the guard checks
+    separately (M16) — that coercion, not this default, is what excludes
+    legacy rows.
+    """
+    raw_rubric = annotation.get("rubric_json") if annotation else None
+    if not isinstance(raw_rubric, str) or not raw_rubric:
+        return True
+    try:
+        rubric = json.loads(raw_rubric)
+    except json.JSONDecodeError:
+        return True
+    if not isinstance(rubric, dict):
+        return True
+    outcomes = rubric.get("per_finding_outcomes")
+    if not isinstance(outcomes, list) or not outcomes:
+        return True
+    return all(d in ("accepted", "rejected") for d in outcomes)
+
+
+def _is_admitted_outcome_gold(
+    label: str | None,
+    has_posterior: bool,
+    labeler_policy_version: str | None,
+    decisive_mix: bool,
+    decisive_only: bool,
+) -> bool:
+    """Gold-admission guard for outcome-bearing observations (M16/M22).
+
+    Admitted iff the label is an accepted-class gold label **and** the row
+    carries posterior evidence **and** the reply-classifier policy version is
+    known **and** the run-level rubric is decisive-only (no contested mix of
+    accepted/rejected dispositions, no ambiguous findings). Legacy rows —
+    reply-count / merge-presence gold with no ``labeler_policy_version`` — are
+    rejected: a missing policy version is the guard working, never a silent
+    fallback to admitted.
+    """
+    return (
+        label is not None
+        and label in _OUTCOME_GOLD_LABELS
+        and has_posterior
+        and labeler_policy_version is not None
+        and not decisive_mix
+        and decisive_only
+    )
+
+
 def _is_admitted(
     label: str | None,
     composite_reward: float | None,
     filters: CorpusFilters,
     *,
     has_posterior: bool = False,
+    labeler_policy_version: str | None = None,
+    decisive_mix: bool = False,
+    decisive_only: bool = True,
 ) -> bool:
     """Decide whether a run is admitted into the corpus.
 
@@ -838,7 +897,8 @@ def _is_admitted(
 
     - ``include_all_labels=True`` ⇒ always admit.
     - Otherwise admit when the pinned ``label`` is in ``filters.labels``
-      **and the row carries posterior evidence** (C9 accepted-only), **OR**
+      **and** it passes the gold-admission guard **and the row carries
+      posterior evidence** (C9 accepted-only), **OR**
       when ``filters.min_reward`` is set and the intrinsic
       ``composite_reward`` is present and ``>= min_reward``.
 
@@ -850,6 +910,13 @@ def _is_admitted(
     tiers. Rows whose label is not backed by a posterior are admissible only via
     the explicit intrinsic ``min_reward`` path or ``include_all_labels``.
 
+    The ``label in filters.labels`` conjunct keeps ``filters.labels``
+    authoritative for what counts as an admissible label (e.g. ``labels=()``
+    admits nothing on the label path); the gold-admission guard
+    (``_is_admitted_outcome_gold``) then constrains those rows to current-policy,
+    decisive-only rubric evidence, so legacy reply-count/merge rows and
+    contested mixes never enter the corpus as gold.
+
     The ``min_reward`` comparison is intrinsic-only **by construction** (C5),
     not by stripping a posterior term. Post-C5 the stored ``composite_reward``
     *is* the pure intrinsic composite (correctness + grounding − length
@@ -859,10 +926,17 @@ def _is_admitted(
     on its intrinsic score alone — there is no deduction to remove here. This
     invariant is pinned by
     ``test_is_admitted_min_reward_compares_intrinsic_only``.
+
+    A row admitted through the intrinsic ``min_reward`` path must still not
+    carry an outcome-gold label that the gold-admission guard rejects — the
+    caller drops such a label, so a legacy/contested/unevidenced ``accepted``
+    never re-enters the gold population via the reward back door.
     """
     if filters.include_all_labels:
         return True
-    if label is not None and label in filters.labels and has_posterior:
+    if label is not None and label in filters.labels and _is_admitted_outcome_gold(
+        label, has_posterior, labeler_policy_version, decisive_mix, decisive_only
+    ):
         return True
     if filters.min_reward is not None and composite_reward is not None and composite_reward >= filters.min_reward:
         return True
@@ -1027,8 +1101,32 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         composite_reward = annotation.get("composite_reward") if annotation is not None else None
         # A leaked posterior is not evidence at this pin, so it cannot admit on the label path.
         has_posterior = bool(annotation.get("has_posterior")) and not posterior_leak if annotation else False
-        if not _is_admitted(label, composite_reward, config.filters, has_posterior=has_posterior):
+        labeler_policy_version = annotation.get("labeler_policy_version") if annotation else None
+        decisive_mix = label == "contested"
+        decisive_only = _rubric_decisive_only(annotation)
+        if not _is_admitted(
+            label,
+            composite_reward,
+            config.filters,
+            has_posterior=has_posterior,
+            labeler_policy_version=labeler_policy_version,
+            decisive_mix=decisive_mix,
+            decisive_only=decisive_only,
+        ):
             continue
+        # The intrinsic ``min_reward`` path admits a row on its composite score
+        # alone (C5/M16). That must not smuggle an outcome-gold label whose
+        # evidence fails the gold-admission guard into the corpus as gold: a
+        # legacy NULL-policy ``accepted``, a contested/ambiguous mix, or an
+        # unevidenced (local_branch) accept would otherwise re-enter the
+        # accepted/gold population through the back door. Such a row is still
+        # admitted (the intrinsic path is unchanged) but only as an unlabeled
+        # intrinsic row — its label is dropped. Current-policy, evidenced,
+        # decisive-only gold keeps its label.
+        if label in _OUTCOME_GOLD_LABELS and not _is_admitted_outcome_gold(
+            label, has_posterior, labeler_policy_version, decisive_mix, decisive_only
+        ):
+            label = None
         after_filters += 1
 
         archive_path = _resolve_projection_path(row)
