@@ -133,6 +133,30 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     return str(bare), dev_tip, pr2_head
 
 
+def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
+    """Bare origin with a pure rename: main (authoring->rename) + refs/pull/1/head.
+
+    Commit 1 authors ``old.py``; commit 2 renames it to ``new.py`` via
+    ``git mv`` with no content change (a 100% rename). Returns
+    ``(bare, authoring_sha, head_sha)``.
+    """
+    repo = tmp_path / "rename_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
+    authoring_sha = _commit(repo, "author old.py")
+    _git(repo, "mv", "old.py", "new.py")
+    head_sha = _commit(repo, "rename old.py to new.py")
+
+    bare = tmp_path / "origin_rename.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    return str(bare), authoring_sha, head_sha
+
+
 # Deterministic SHAs/trees produced by ``_seed_origin`` (verified at seed build).
 _SHA_BASE1 = 'cae67fc3eb4c5d3dd3353ca7fb41f909837bf0a2'
 _SHA_BASE1_TREE = '2cd99bd20f7b3bac54014e20db1831d64b2c4fc9'
@@ -150,6 +174,48 @@ def _seed_base_tree() -> str:
 
 def _seed_head_tree() -> str:
     return '100c61d903cabfd705776af46193bc55d494940d'
+
+
+# ---------------------------------------------------------------------------
+# Task 0: spike -- the bare mirror retains full history for rename tracing
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) -> None:
+    """The shared bare mirror must support both rename-tracing primitives the
+    authoring-anchor derivation depends on: ``git log --follow`` (path history
+    across renames) and ``git diff -M`` (rename detection). This pins the spec's
+    Key Decision -- that a plain bare mirror (no shallow flags, plain fetch)
+    retains full history -- so the rename-derivation strategy is sound.
+
+    Spike finding (recorded task notes): in the bare mirror, ``git log`` with
+    no start commit resolves to the symbolic ``HEAD`` -> ``refs/heads/main``,
+    which is never fetched (the mirror carries only ``base_tip`` + pull/explicit
+    refs), so the dotless form fails with "current branch 'main' does not have
+    any commits yet". The decision survives: full history is retained, and
+    ``--follow`` works as long as the caller names a start commit -- which the
+    anchor helper always will (it traces from a concrete head/authoring SHA).
+    If either probe fails, mirror handling must be revised (or the decision
+    re-routed to the spec) before any anchor task runs.
+    """
+    from daydream.benchmark import snapshot as sn
+
+    origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    assert sn.rev_parse(m, "refs/pull/1/head") == head_sha
+
+    # (a) --follow (with an explicit start commit) must surface BOTH commits
+    # when tracing the pre-rename path -- the bare mirror retains full history.
+    traced = _git(m, "log", "--follow", "--format=%H", head_sha, "--", "old.py").splitlines()
+    assert authoring_sha in traced, f"authoring commit missing from log --follow: {traced}"
+    assert head_sha in traced, f"rename commit missing from log --follow: {traced}"
+    assert traced[0] == head_sha  # most recent commit first
+
+    # (b) diff -M must emit a pure rename record R100 old.py -> new.py.
+    statuses = _git(m, "diff", "--name-status", authoring_sha, head_sha, "-M")
+    assert "R100\told.py\tnew.py" in statuses, f"no R100 rename record in: {statuses!r}"
 
 
 # ---------------------------------------------------------------------------
