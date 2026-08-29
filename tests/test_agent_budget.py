@@ -37,7 +37,7 @@ from daydream.trajectory import (
 
 
 def test_agent_has_no_missing_skill_error() -> None:
-    """M17: agent.py carries no skill-resolution error path."""
+    """The agent module has no obsolete skill-resolution error path."""
     import daydream.agent as agent
 
     assert not hasattr(agent, "MissingSkillError")

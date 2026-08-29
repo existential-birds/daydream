@@ -1,16 +1,12 @@
-"""Integration tests: agent.run_agent + TrajectoryRecorder (MAP-01..07).
+"""Integration tests for ``run_agent`` and ``TrajectoryRecorder``.
 
 Per D-18, tests follow schema-validity + behavior-predicate patterns. No
 full-tree snapshot equality (Pitfall 11). Each test that produces a
 trajectory asserts ``daydream.atif.validate(traj) is True`` plus one or
 two specific behavioral predicates.
 
-Sequencing note (Plan 02-05 / 02-06): Plan 05 introduces a required
-keyword-only ``phase`` argument to ``run_agent``; Plan 06 updates every
-call site to pass it. Until Plan 06 lands, the full 343-test suite is
-INTENTIONALLY red (the transitional sentinel raises a clear TypeError
-on un-updated call sites). These integration tests are self-contained —
-they pass ``phase=DaydreamPhase.X`` directly and validate in isolation.
+The tests also enforce that ``phase`` remains a required keyword-only argument
+at the public boundary.
 """
 
 from __future__ import annotations
@@ -292,29 +288,20 @@ async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) 
 
 
 def test_run_agent_requires_phase_keyword() -> None:
-    """Signature change (D-05) — phase is keyword-only.
-
-    Plan 05 introduces the keyword-only ``phase`` argument. Plan 07
-    re-tightens to a strict required-no-default; through Plans 05–06 a
-    transitional sentinel default keeps the suite recoverable. This test
-    enforces the keyword-only kind, which is the part that survives the
-    transition.
-    """
+    """The public ``phase`` argument is keyword-only."""
     sig = inspect.signature(run_agent)
     assert "phase" in sig.parameters
     assert sig.parameters["phase"].kind == inspect.Parameter.KEYWORD_ONLY
 
 
 async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) -> None:
-    """D-05 transitional — missing phase raises TypeError with a clear message."""
+    """Omitting the required ``phase`` argument raises ``TypeError``."""
     backend = MockBackend([
         TextEvent(text="ok"),
         ResultEvent(structured_output=None, continuation=None),
     ])
     with pytest.raises(TypeError) as excinfo:
-        # Intentionally call without the required `phase` kwarg.
         await run_agent(backend, tmp_path, "hi")  # type: ignore[call-arg]
-    # Error message should reference the phase argument.
     assert "phase" in str(excinfo.value).lower()
 
 

@@ -59,8 +59,7 @@ def _compare_steps(left: list[Step], right: list[Step]) -> None:
 
 @pytest.mark.asyncio
 async def test_claude_and_codex_produce_identical_steps(tmp_path: Path) -> None:
-    """The canonical script must produce byte-identical message / reasoning /
-    tool_calls / observation results across both backends."""
+    """The canonical script must produce identical selected Step fields."""
     from tests.contract._loaders import claude_loader, codex_loader
 
     claude_steps = await _run_backend_against_canonical(claude_loader, tmp_path / "claude")
@@ -70,12 +69,7 @@ async def test_claude_and_codex_produce_identical_steps(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_claude_and_codex_produce_identical_steps_read_only(tmp_path: Path) -> None:
-    """Both backends must produce byte-identical Step shapes when read_only=True.
-
-    Ensures the read_only kwarg added to Backend.execute() is forwarded
-    consistently by both backends and does not alter the observable AgentEvent
-    stream in a backend-specific way.
-    """
+    """Both backends must produce identical selected Step fields in read-only mode."""
     from tests.contract._loaders import claude_loader, codex_loader
 
     claude_steps = await _run_backend_against_canonical(

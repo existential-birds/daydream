@@ -1,4 +1,3 @@
-# tests/test_exploration.py
 """Tests for exploration context data structures and prompt rendering."""
 from __future__ import annotations
 

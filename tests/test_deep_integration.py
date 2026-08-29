@@ -494,7 +494,7 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
       - generic-fallback: config-trace + trust-model, NOT cross-file.
 
     ``multi_stack_target`` (api.py + App.tsx + README.md) routes one file to
-    each of the three builders when every built-in stack skill is available, so
+    each of the three built-in stack builders, so
     all three gate assignments are exercised in a single real run.
     """
     from daydream.deep.prompts import (
@@ -502,10 +502,6 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
         CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
         TRUST_MODEL_INSTRUCTION,
     )
-
-    # Pin all built-in stack skills as available so api.py -> python and
-    # App.tsx -> react route per-stack instead of collapsing into generic under
-    # the hermetic no-plugin skill registry.
 
     backend = _ClaudeShape(multi_stack_target)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
@@ -594,9 +590,6 @@ async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
         WIRE_CONTRACT_GENERIC_INSTRUCTION,
         WIRE_CONTRACT_RUST_INSTRUCTION,
     )
-
-    # Pin all built-in stack skills as available so src/main.rs -> rust routes
-    # per-stack instead of collapsing into generic.
 
     backend = _ClaudeShape(rust_wire_target)
     exit_code = await _run_deep(

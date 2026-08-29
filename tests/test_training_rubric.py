@@ -108,7 +108,7 @@ def test_run_label_no_decisive_evidence_is_unknown() -> None:
 
 
 def test_run_label_local_branch_unchanged() -> None:
-    """The local-branch posterior semantics are byte-stable (Out of Scope)."""
+    """The local-branch posterior semantics remain unchanged."""
     rub = Rubric(
         pr_merge=PRMergeSignal(False, None),
         fix_applied=FixAppliedSignal("unknown", 0, 0, []),

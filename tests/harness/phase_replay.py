@@ -26,9 +26,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
-from daydream.backends import Backend
-from daydream.backends.claude import ClaudeBackend
-from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase, get_current_recorder
 from tests.contract._loaders import (
     _MockAssistantMessage,
@@ -106,7 +103,6 @@ def codex_subprocess_for_phases(phase_scripts: PhaseScripts) -> AbstractContextM
         side_effect=factory,
     )
 
-
 def claude_messages_for_phases(phase_scripts: PhaseScripts) -> AbstractContextManager[Any]:
     """Patch the Claude SDK client to serve per-phase message streams.
 
@@ -161,55 +157,3 @@ def claude_messages_for_phases(phase_scripts: PhaseScripts) -> AbstractContextMa
         ToolUseBlock=_MockToolUseBlock,
         ToolResultBlock=_MockToolResultBlock,
     )
-
-
-def replay_through_runner(
-    driver: str, phase_scripts: PhaseScripts
-) -> AbstractContextManager[Any]:
-    """Replay *phase_scripts* through ``runner.run`` for the given *driver*.
-
-    Combines the driver's boundary patch with a patch of
-    ``daydream.runner.create_backend`` so ``runner.run`` builds the real backend
-    while its external boundary is stubbed per phase. Composes as a single
-    context manager so a ``with replay_through_runner(...):`` block wraps a
-    ``run(config)`` call end-to-end.
-
-    Args:
-        driver: ``"codex"`` or ``"claude"``.
-        phase_scripts: ``{DaydreamPhase: script}`` map served per firing phase.
-
-    Returns:
-        A context manager combining the create_backend seam and the boundary
-        stub.
-
-    Raises:
-        ValueError: When *driver* is not ``"codex"`` or ``"claude"``.
-    """
-    if driver == "codex":
-        boundary = codex_subprocess_for_phases(phase_scripts)
-
-        def make_backend(name: str, model: Any = None) -> Backend:
-            return CodexBackend(model=model)
-    elif driver == "claude":
-        boundary = claude_messages_for_phases(phase_scripts)
-
-        def make_backend(name: str, model: Any = None) -> Backend:
-            return ClaudeBackend(model=model)
-    else:
-        raise ValueError(f"unknown driver {driver!r}; expected 'codex' or 'claude'")
-
-    create_backend_patch = patch(
-        "daydream.runner.create_backend",
-        side_effect=make_backend,
-    )
-
-    class _Combined:
-        def __enter__(self) -> None:
-            boundary.__enter__()
-            create_backend_patch.__enter__()
-
-        def __exit__(self, *exc: Any) -> None:
-            create_backend_patch.__exit__(*exc)
-            boundary.__exit__(*exc)
-
-    return _Combined()

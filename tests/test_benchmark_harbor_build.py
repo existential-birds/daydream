@@ -255,25 +255,6 @@ def _inject_body(ws: Path, case_id: str, body: str) -> None:
     storage.atomic_write_yaml(path, raw)
 
 
-def _compile(ws: Path) -> Any:
-    from daydream.benchmark.harbor import build
-    return build.compile_workspace(ws)
-
-
-def _harbor_file_sha(ws: Path, rel: str) -> str:
-    import hashlib as _hashlib
-    data = (ws / "harbor" / rel).read_bytes()
-    return _hashlib.sha256(data).hexdigest()
-
-
-def _tree_bytes(ws: Path) -> dict[str, bytes]:
-    out: dict[str, bytes] = {}
-    for p in sorted(ws.rglob("*")):
-        if p.is_file():
-            out[str(p.relative_to(ws))] = p.read_bytes()
-    return out
-
-
 def _harbor_tree_bytes(ws: Path) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     base = ws / "harbor"

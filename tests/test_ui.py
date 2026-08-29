@@ -146,10 +146,10 @@ def test_prompt_user_returns_typed_value_interactively(monkeypatch: pytest.Monke
 @pytest.mark.parametrize(
     "message",
     [
-        "Cleanup review output after completion? [y/N]",  # runner.py:814 (file deletion)
-        "Post these as a PR review? [y/N]",  # pr_review.py:854 (external mutation)
-        "Use suggested command instead?",  # phases.py:1729
-        "Commit and push changes? [y/N]",  # phases.py:1788 (git push)
+        "Cleanup review output after completion? [y/N]",
+        "Post these as a PR review? [y/N]",
+        "Use suggested command instead?",
+        "Commit and push changes? [y/N]",
     ],
 )
 def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch: pytest.MonkeyPatch, message: Any) -> None:

@@ -2488,15 +2488,7 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """Zero stack skills → generic routing → the audit still runs and plans land.
-
-    This is the "works for everyone" baseline the generalist fallback exists to
-    guarantee. It relies on the autouse ``_hermetic_skill_availability`` fixture
-    (an empty plugin registry with no stack plugins), so it deliberately does NOT
-    call ``_pin_stack_availability``. Every stack falls
-    back to generic, collapsing the monorepo into a single generic audit group;
-    the flow must still produce one plan per selected finding.
-    """
+    """The audit still runs when no external stack plugins are available."""
     stub = install_improve_stub(
         monkeypatch,
         improve_monorepo_target,
@@ -2507,9 +2499,7 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    # Built-in detection drives the audit groups (M1/M3): the monorepo's
-    # python + react + docs files route to their detected stacks, never
-    # collapsed to generic by plugin presence.
+    # Built-in detection drives the audit groups independently of plugin presence.
     coverage = json.loads(
         improve_artifact(improve_monorepo_target, "coverage.json").read_text(
             encoding="utf-8"
