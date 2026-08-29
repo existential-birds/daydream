@@ -433,7 +433,7 @@ def test_build_annotation_fork_pr_author_reply_is_decisive(tmp_path: Path) -> No
     assert payload.labels == ["accepted"]
     # The PR-author reply is the decisive evidence, so it sets valid_at (M12).
     assert payload.valid_at == reply_created
-    rubric = json.loads(payload.rubric_json)
+    rubric = json.loads(payload.rubric_json or "{}")
     assert rubric.get("per_finding_outcomes") == ["accepted"]
 
 
@@ -478,7 +478,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
         row, run_dir=run_dir, archive_dir=tmp_path, gh_api=review_gh, repo_clone=tmp_path,
     )
     assert payload.labels == ["rejected"]
-    rubric = json.loads(payload.rubric_json)
+    rubric = json.loads(payload.rubric_json or "{}")
     assert rubric.get("per_finding_outcomes") == ["rejected"]
 
 

@@ -685,25 +685,29 @@ def test_min_reward_path_drops_legacy_and_unevidenced_gold_label(tmp_path: Path,
     decisive = json.dumps(
         {"posterior_source": "pr_review", "per_finding_outcomes": ["accepted", "accepted"]}
     )
-    kwargs = dict(
-        composite_reward=0.9,
-        observed_at="2026-03-01T00:00:00+00:00",
-        valid_at="2026-03-01T00:00:00+00:00",
-    )
+    kw_composite_reward = 0.9
+    kw_observed_at = "2026-03-01T00:00:00+00:00"
+    kw_valid_at = "2026-03-01T00:00:00+00:00"
     # Legacy NULL-policy mislabeled accept: admitted intrinsically, label dropped.
     _seed_run_with_annotation(
         archive_dir, "s-legacy", label="accepted", rubric_json=decisive,
-        has_posterior=True, labeler_policy_version=None, **kwargs,
+        has_posterior=True, labeler_policy_version=None,
+        composite_reward=kw_composite_reward, observed_at=kw_observed_at,
+        valid_at=kw_valid_at,
     )
     # Unevidenced local_branch accept: admitted intrinsically, label dropped.
     _seed_run_with_annotation(
         archive_dir, "s-local", label="accepted", rubric_json=decisive,
-        has_posterior=False, **kwargs,
+        has_posterior=False,
+        composite_reward=kw_composite_reward, observed_at=kw_observed_at,
+        valid_at=kw_valid_at,
     )
     # Current-policy evidenced accept: keeps its gold label.
     _seed_run_with_annotation(
         archive_dir, "s-good", label="accepted", rubric_json=decisive,
-        has_posterior=True, **kwargs,
+        has_posterior=True,
+        composite_reward=kw_composite_reward, observed_at=kw_observed_at,
+        valid_at=kw_valid_at,
     )
     out = tmp_path / "corpus.jsonl"
     run_build_corpus(BuildCorpusConfig(
@@ -733,24 +737,28 @@ def test_gold_admission_gates_legacy_and_ambiguous_rows_in_build(tmp_path: Path,
     ambiguous_rubric = json.dumps(
         {"posterior_source": "pr_review", "per_finding_outcomes": ["accepted", "ambiguous"]}
     )
-    kwargs = dict(
-        composite_reward=0.9,
-        has_posterior=True,
-        observed_at="2026-05-01T00:00:00+00:00",
-        valid_at="2026-04-01T00:00:00+00:00",
-    )
+    kw_composite_reward = 0.9
+    kw_has_posterior = True
+    kw_observed_at = "2026-05-01T00:00:00+00:00"
+    kw_valid_at = "2026-04-01T00:00:00+00:00"
     # Current-policy + decisive rubric: admitted as gold.
     _seed_run_with_annotation(
-        tmp_path, "s-good", label="accepted", rubric_json=decisive_rubric, **kwargs
+        tmp_path, "s-good", label="accepted", rubric_json=decisive_rubric,
+        has_posterior=kw_has_posterior, composite_reward=kw_composite_reward,
+        observed_at=kw_observed_at, valid_at=kw_valid_at,
     )
     # Current-policy + ambiguous rubric: ``_rubric_decisive_only`` returns False, so no gold.
     _seed_run_with_annotation(
-        tmp_path, "s-ambiguous", label="accepted", rubric_json=ambiguous_rubric, **kwargs
+        tmp_path, "s-ambiguous", label="accepted", rubric_json=ambiguous_rubric,
+        has_posterior=kw_has_posterior, composite_reward=kw_composite_reward,
+        observed_at=kw_observed_at, valid_at=kw_valid_at,
     )
     # Legacy NULL policy + decisive rubric: the policy gate rejects it.
     _seed_run_with_annotation(
         tmp_path, "s-legacy", label="accepted", rubric_json=decisive_rubric,
-        labeler_policy_version=None, **kwargs,
+        labeler_policy_version=None,
+        has_posterior=kw_has_posterior, composite_reward=kw_composite_reward,
+        observed_at=kw_observed_at, valid_at=kw_valid_at,
     )
     out = tmp_path / "corpus.jsonl"
     run_build_corpus(_cfg(tmp_path, out_path=out))
