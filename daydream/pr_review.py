@@ -91,6 +91,9 @@ class ParsedIssue:
         fingerprint: Deterministic SHA256 identity for cross-run dedup. Set on
             canonical merged findings and alt-review issues; None on other
             construction paths.
+        location_distrust: True when location validation demoted this finding
+            (its citation was beyond tolerance), issue #972 R2. Blocks approval
+            regardless of the (demoted) severity and renders a demotion note.
     """
 
     path: str
@@ -101,6 +104,7 @@ class ParsedIssue:
     confidence: str | None = None
     severity: str | None = None
     fingerprint: str | None = None
+    location_distrust: bool = False
 
 
 @dataclass
@@ -131,6 +135,8 @@ class ItemFields:
     severity: str | None
     confidence: str | None
     is_cross_stack: bool
+    location_distrust: bool = False
+    severity_before_demotion: str | None = None
 
 
 @dataclass
@@ -313,6 +319,9 @@ def extract_item_fields(
     severity = str(raw.get("severity", "")).strip().lower() or None
     confidence = str(raw.get("confidence", "")).strip().upper() or None
     is_cross_stack = str(raw.get("lens", "")).strip() == "cross-stack"
+    location_distrust = bool(raw.get("location_distrust"))
+    before = raw.get("severity_before_demotion")
+    severity_before_demotion = str(before).strip().lower() or None if before else None
     return ItemFields(
         path=path,
         line_int=line_int,
@@ -321,6 +330,8 @@ def extract_item_fields(
         severity=severity,
         confidence=confidence,
         is_cross_stack=is_cross_stack,
+        location_distrust=location_distrust,
+        severity_before_demotion=severity_before_demotion,
     )
 
 
@@ -348,6 +359,16 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
             body_parts.append(f"**Severity:** {fields.severity}")
         if fields.confidence:
             body_parts.append(f"**Confidence:** {fields.confidence}")
+        if fields.location_distrust:
+            # First production reader of the location-distrust signal (issue
+            # #972 R2): the demotion is visible on the report, never silent.
+            if fields.severity_before_demotion:
+                body_parts.append(
+                    "**Location:** unverified citation "
+                    f"(severity demoted from {fields.severity_before_demotion})"
+                )
+            else:
+                body_parts.append("**Location:** unverified citation (severity demoted)")
         if fields.rationale and fields.rationale != fields.description:
             body_parts.append(fields.rationale)
         body = "\n\n".join(body_parts)
@@ -363,6 +384,7 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                 fingerprint=compute_fingerprint(
                     fields.path, fields.description, fields.rationale
                 ),
+                location_distrust=fields.location_distrust,
             )
         )
     return out
@@ -1097,6 +1119,21 @@ def _severity_blocks_approval(severity: str | None) -> bool:
     return severity is not None and severity.lower() not in _NON_BLOCKING_SEVERITIES
 
 
+def _finding_blocks_approval(severity: str | None, location_distrust: bool) -> bool:
+    """Whether one finding blocks an approval, demotion-aware (issue #972 R2).
+
+    A finding marked ``location_distrust=True`` was judged at a higher severity
+    and demoted by location validation (its citation was beyond tolerance);
+    the demoted severity must not silently make it non-blocking. This check is
+    deliberately separate from ``_severity_blocks_approval`` (and NOT folded
+    into ``_NON_BLOCKING_SEVERITIES``) so off-vocabulary severity strings keep
+    failing closed for their own reason.
+    """
+    if location_distrust:
+        return True
+    return _severity_blocks_approval(severity)
+
+
 def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> bool:
     """Whether an opted-in review may post as an approval (issue #343).
 
@@ -1110,7 +1147,8 @@ def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> b
     if not approve_on_clean:
         return False
     return not any(
-        _severity_blocks_approval(issue.severity) for issue in classified.all_issues()
+        _finding_blocks_approval(issue.severity, issue.location_distrust)
+        for issue in classified.all_issues()
     )
 
 
@@ -1490,7 +1528,8 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and not any(
-        _severity_blocks_approval(finding.severity) for finding in artifact.findings
+        _finding_blocks_approval(finding.severity, finding.location_distrust)
+        for finding in artifact.findings
     )
 
     if classified.is_empty() and not can_approve:
@@ -1551,4 +1590,5 @@ def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
         confidence=finding.confidence,
         severity=finding.severity,
         fingerprint=finding.fingerprint,
+        location_distrust=finding.location_distrust,
     )

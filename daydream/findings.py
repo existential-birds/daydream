@@ -76,6 +76,11 @@ FINDINGS_SCHEMA: dict[str, Any] = {
                     "severity": {"type": ["string", "null"]},
                     "confidence": {"type": ["string", "null"]},
                     "is_cross_stack": {"type": "boolean"},
+                    # Optional (issue #972 R2): findings written by a Phase A
+                    # that ran location validation carry the demotion mark so
+                    # the poster's approval gate stays demotion-aware. Absent
+                    # on older artifacts — treated as False on load.
+                    "location_distrust": {"type": "boolean"},
                 },
             },
         },
@@ -101,6 +106,8 @@ class ArtifactFinding:
         severity: Severity label, or None.
         confidence: Confidence label, or None.
         is_cross_stack: Whether the finding came from the cross-stack merge.
+        location_distrust: True when location validation demoted the finding
+            (citation beyond tolerance); absent on older artifacts -> False.
     """
 
     fingerprint: str
@@ -112,6 +119,7 @@ class ArtifactFinding:
     severity: str | None
     confidence: str | None
     is_cross_stack: bool
+    location_distrust: bool = False
 
 
 @dataclass
@@ -145,6 +153,7 @@ def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> di
         "severity": issue.severity,
         "confidence": issue.confidence,
         "is_cross_stack": issue.is_cross_stack,
+        "location_distrust": issue.location_distrust,
     }
 
 

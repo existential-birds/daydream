@@ -1138,3 +1138,38 @@ def test_file_hunks_gh_fallback_handles_subprocess_error(
         git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42
     )
     assert hunks == []
+
+
+def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
+    """R2.2: a judged-high finding demoted to low by location validation must
+    still block APPROVE — demotion is visible, never approval-silencing."""
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline_issues=[
+            ParsedIssue(path="a.py", line=10, title="t", body="b",
+                        severity="low", location_distrust=True)
+        ],
+    )
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "COMMENT"
+
+
+def test_parsed_issues_carry_location_distrust_and_report_note() -> None:
+    """R2 visibility: the demotion reaches the human-read issue body and the
+    machine-readable flag rides on the ParsedIssue."""
+    items = [
+        {
+            "file": "a.py",
+            "line": 10,
+            "description": "off-citation",
+            "rationale": "r",
+            "severity": "low",
+            "confidence": "LOW",
+            "severity_before_demotion": "high",
+            "location_distrust": True,
+        }
+    ]
+    issues = parsed_issues_from_items(items)
+    assert len(issues) == 1
+    assert issues[0].location_distrust is True
+    assert "**Location:** unverified citation (severity demoted from high)" in issues[0].body

@@ -4418,9 +4418,11 @@ def _append_structural_and_write_merged(
     # makes that order structurally unreachable (issue #745). The validator
     # snaps in-tolerance citations to the nearest hunk boundary (aligning the
     # evidence citation) and demotes-with-annotation beyond-tolerance ones
-    # (severity/confidence lowered, ``location_note`` carried through
-    # normalize_items), so no unverified citation reaches the report at full
-    # severity. Fail-open: a missing index validates nothing (pre-change
+    # (severity/confidence lowered, ``location_note``, plus the non-destructive
+    # demotion fields ``severity_before_demotion``/``location_distrust``, all
+    # carried through normalize_items unchanged), so no unverified citation
+    # reaches the report at full severity while the original judgment stays
+    # recoverable. Fail-open: a missing index validates nothing (pre-change
     # behavior); the validator never raises and never rejects.
     evidenced = _evidence_gate_then_validate(
         base_items + structural_items, items_path
