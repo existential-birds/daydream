@@ -794,6 +794,125 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str]:
     return str(bare), base_sha, head_sha
 
 
+def _seed_anchor_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str, str]:
+    """Bare origin with authored-rename history + re-seeded PR header.
+
+    main holds the base commit (a.py + old.py); the feature branch's authoring
+    commit edits a.py, then the head commit renames old.py -> new.py. Returns
+    ``(origin_url, base_sha, authoring_sha, head_sha)`` so import-time anchor
+    derivation can trace the authoring-time path through the mirror.
+    """
+    import shutil as _sh
+
+    repo = tmp_path / "anchor_wt"
+    if repo.exists():
+        _sh.rmtree(repo)
+    repo.mkdir()
+    _seed_git(repo, "init", "-b", "main")
+    _seed_write(repo, "readme.txt", "README\n")
+    _seed_write(repo, "a.py", "A1 = 1\nA2 = 1\nA3 = 1\nA4 = 1\nA5 = 1\n")
+    _seed_write(repo, "old.py", "O1 = 1\nO2 = 1\n")
+    _seed_commit(repo, "base")
+    base_sha = _seed_git(repo, "rev-parse", "HEAD")
+    _seed_git(repo, "checkout", "-b", "feature")
+    _seed_write(repo, "a.py", "A1 = 1\nA1b = 1\nA2 = 1\nA3 = 1\nA4 = 1\nA5 = 1\n")
+    authoring_sha = _seed_commit(repo, "edit a.py on feature")
+    _seed_git(repo, "mv", "old.py", "new.py")
+    head_sha = _seed_commit(repo, "rename old.py to new.py")
+    bare = tmp_path / "anchor_origin.git"
+    if bare.exists():
+        _sh.rmtree(bare)
+    bare.mkdir()
+    _seed_git(bare, "init", "--bare")
+    _seed_git(repo, "remote", "add", "origin", str(bare))
+    _seed_git(repo, "push", "origin", "main:main")
+    _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
+    # Re-seed the canned PR header so base.sha/head.sha are the origin's real SHAs.
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": base_sha}
+    header["head"] = {"ref": "feature", "sha": head_sha}
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    return str(bare), base_sha, authoring_sha, head_sha
+
+
+def test_materialization_derives_anchors_per_comment(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """Two REST inline comments on one PR over a real origin: ``_case_materialize``
+    derives a strict authoring anchor for each — one authored at the selected
+    head, one authored earlier whose observed (re-anchored) path traces a rename
+    back to its authoring-time name via the mirror. The anchors land on the
+    persisted import document's evidence records.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)                   # identity + canned PR for pr 101
+    origin_url, _base_sha, authoring_sha, head_sha = _seed_anchor_origin(tmp_path, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "fix at head", "commit_id": head_sha, "original_commit_id": head_sha,
+             "path": "a.py", "line": 5, "original_line": 5, "original_start_line": 4,
+             "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            {"id": 2, "node_id": "DIFF_2", "user": {"login": "carol", "type": "User"},
+             "body": "fix old file", "commit_id": head_sha, "original_commit_id": authoring_sha,
+             "path": "new.py", "line": 2, "original_line": 2, "original_start_line": 1,
+             "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r2"},
+        ],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    imp = load_json_strict(ws / "imports" / "pr-000101.json")
+    anchors = {e["database_id"]: e["authoring_anchor"] for e in imp["evidence"]}
+    # authored at the selected head: derived with the head commit on a.py
+    at_head = anchors[1]
+    assert at_head is not None and at_head["status"] == "derived"
+    assert at_head["commit_id"] == head_sha and at_head["path"] == "a.py"
+    assert at_head["start_line"] == 4 and at_head["end_line"] == 5
+    # authored earlier on old.py, re-anchored by GitHub onto new.py: the mirror
+    # rename trace recovers the authoring-time path.
+    earlier = anchors[2]
+    assert earlier is not None and earlier["status"] == "derived"
+    assert earlier["commit_id"] == authoring_sha and earlier["path"] == "old.py"
+    assert earlier["start_line"] == 1 and earlier["end_line"] == 2
+
+
+def test_materialization_fails_closed_without_mirror(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """Import-only materialization (no root/origin -> no freeze mirror) never
+    guesses anchors: every evidence record stays anchor-less, so projection can
+    treat it as not-exact (Task 5) instead of trusting GitHub's re-anchored data.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "fix this", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 4, "original_line": 4, "original_start_line": 3,
+             "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    imp = load_json_strict(ws / "imports" / "pr-000101.json")
+    rec = next(e for e in imp["evidence"] if e["database_id"] == 1)
+    assert rec["kind"] == "inline_comment"
+    assert rec["authoring_anchor"] is None
+
+
 def test_import_freezes_cases_ready_with_bundle(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict, sha256_file

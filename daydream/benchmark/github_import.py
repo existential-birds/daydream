@@ -1102,6 +1102,85 @@ def _referenced_evidence_ids(curation: dict[str, Any]) -> set[int]:
     return ids
 
 
+def _anchor_fail_closed(
+    status: Literal["history-unavailable", "path-unavailable", "range-unavailable"],
+) -> schema.AuthoringAnchor:
+    """One fail-closed authoring anchor: the fixed status, and nothing else.
+
+    Every non-``derived`` status keeps all four data fields unset (the schema's
+    ``_derived_iff_populated`` invariant), so a closed anchor can never be
+    mistaken for a real authoring-time location.
+    """
+    return schema.AuthoringAnchor(
+        version=1, status=status, commit_id=None, path=None, start_line=None, end_line=None,
+    )
+
+
+def _derive_one_anchor(
+    record: schema.EvidenceRecord,
+    mirror_repo: Path,
+    head_sha: str,
+) -> schema.AuthoringAnchor:
+    """Derive one root inline record's strict authoring anchor, fail-closed.
+
+    An ``original_commit_id`` is traced through the pinned mirror via
+    :func:`daydream.benchmark.snapshot.derive_authoring_path` (the observed
+    path when it exists in the authoring tree, else the unique rename between
+    the authoring commit and the mapped head); every failure — a missing
+    authoring commit, an ambiguous rename trace, a missing authoring range, or
+    a hard git failure — maps to a fixed closed status with all data fields
+    unset. Exactly one path may fill the anchor: a mirror-derived one. The
+    observed ``original_path`` is reclassified as observed data and is never
+    stored as the authoring path.
+    """
+    original_commit_id = record.original_commit_id
+    if original_commit_id is None:
+        return _anchor_fail_closed("history-unavailable")
+    start = record.original_start_line or record.original_line
+    end = record.original_line
+    if start is None or end is None:
+        return _anchor_fail_closed("range-unavailable")
+    path = record.path or record.original_path
+    if path is None:
+        return _anchor_fail_closed("path-unavailable")
+    try:
+        authoring_path = snapshot.derive_authoring_path(
+            mirror_repo, original_commit_id, path, head_sha
+        )
+    except snapshot.AnchorDerivationError as exc:
+        # The closed reason rides on the exception; anything else is history.
+        if exc.reason == "path-unavailable":
+            return _anchor_fail_closed("path-unavailable")
+        return _anchor_fail_closed("history-unavailable")
+    except git_ops.GitError:
+        # A hard git failure (subprocess/OS-level, e.g. a rename-trace diff
+        # timeout) fails the anchor closed rather than aborting the import.
+        return _anchor_fail_closed("history-unavailable")
+    return schema.AuthoringAnchor(
+        version=1, status="derived", commit_id=original_commit_id,
+        path=authoring_path, start_line=start, end_line=end,
+    )
+
+
+def _derive_authoring_anchors(
+    doc: schema.ImportDocument,
+    mirror_repo: Path,
+    head_sha: str,
+) -> None:
+    """Derive (or fail closed) the authoring anchor of every root inline record.
+
+    Called once per materialized head, immediately before candidate projection
+    and only when the freeze mirror is available: the same mirror-derived
+    anchor the projection consumes (Task 5) is what the caller persists onto
+    the import document. Replies are evidence (never candidates), so they
+    carry no anchor.
+    """
+    for record in doc.evidence:
+        if record.kind != "inline_comment" or record.reply_to_id is not None:
+            continue
+        record.authoring_anchor = _derive_one_anchor(record, mirror_repo, head_sha)
+
+
 def _case_materialize(
     doc: schema.ImportDocument,
     number: int,
@@ -1158,7 +1237,6 @@ def _case_materialize(
             continue
         seen.add(head_sha)
         case_id = schema.case_id_for(number, head_sha)
-        candidates = project_candidates(doc, head_sha)
         curation: dict[str, Any] = {
             "state": "draft",
             "snapshot_attested": False,
@@ -1209,7 +1287,15 @@ def _case_materialize(
                     f"PR {number} freeze of curated case {case_id} is unreplayable "
                     f"({error.get('reason')}): {error.get('detail')}"
                 )
+            # Strict authoring anchors: derived from the authenticated mirror
+            # (the same one the freeze just populated) immediately before
+            # projection. Derivation mutates the typed doc's evidence records
+            # in place and always fails closed — an anchor can never be
+            # guessed, and an anchor failure never kills the import.
+            _derive_authoring_anchors(doc, snapshot.mirror(root), head_sha)
         else:
+            # Imported status: no freeze, no mirror — anchors stay unset
+            # (projection treats the missing anchor as not-exact, Task 5).
             snapshot_doc = {
                 "status": "imported",
                 "policy": "final_pr_head" if head_token == "final" else "explicit_head",
@@ -1221,6 +1307,9 @@ def _case_materialize(
                 "original_head_sha": head_sha,
                 "error": None,
             }
+        # Projection runs after the freeze branch so per-head candidates
+        # consume the derived authoring anchors (or their absence, closed).
+        candidates = project_candidates(doc, head_sha)
         case_doc: dict[str, Any] = {
             "schema_version": 2,
             "case_id": case_id,
@@ -1538,6 +1627,11 @@ def _import_one_pr(
                 if db_id not in new_by_id
                 or not (new_by_id[db_id] <= prior_by_id.get(db_id, set()))
             }
+        # The digest the materializer stamps into every case's source block is
+        # computed here, before materialization mutates the doc. The persisted
+        # import document is re-serialized afterwards so the derived authoring
+        # anchors land on disk, and the ledger + case source blocks are
+        # re-stamped to one digest over those final bytes.
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
         # Refresh/re-import never orphans a previously pinned case: materialize
@@ -1553,6 +1647,17 @@ def _import_one_pr(
             prior_pinned=prior_pinned, prior_policy=prior_policy,
             changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
+        # Re-serialize the mutated doc (authoring anchors derived on the typed
+        # evidence records during materialization), recompute the fetch payload
+        # digest over the same blocks, and keep every digest in lockstep.
+        final_doc = doc.model_dump(mode="json")
+        doc.fetch.payload_sha256 = _payload_sha256(
+            {k: final_doc[k] for k in ("schema_version", "repository", "pull_request", "evidence")}
+        )
+        import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
+        import_sha256 = hashlib.sha256(import_bytes).hexdigest()
+        for _, _, case_doc in cases:
+            case_doc["source"]["import_sha256"] = import_sha256
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
             tx.stage(import_file, import_bytes)
             for rel, content in bundle_rels:
