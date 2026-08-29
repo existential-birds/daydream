@@ -26,6 +26,7 @@ from daydream.backends.osprey import (
     OspreyError,
     OspreyTerminalError,
     OspreyUnsupportedOption,
+    _drain_stderr,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
@@ -64,10 +65,12 @@ class _FakeProcess:
         returncode: int = 0,
         stderr_lines: list[str] | None = None,
         stderr_held_open: bool = False,
+        stdout_reader: asyncio.StreamReader | None = None,
+        stderr_reader: asyncio.StreamReader | None = None,
     ) -> None:
-        self.stdout = _FakeStdout(lines)
+        self.stdout = stdout_reader or _FakeStdout(lines)
         self._stderr_eof = asyncio.Event() if stderr_held_open else None
-        self.stderr = _FakeStderr(stderr_lines or [], self._stderr_eof)
+        self.stderr = stderr_reader or _FakeStderr(stderr_lines or [], self._stderr_eof)
         self.returncode = returncode
         self.pid = 137
 
@@ -114,6 +117,13 @@ def _stream(
     ], returncode
 
 
+def _over_limit_reader(payload: bytes) -> asyncio.StreamReader:
+    reader = asyncio.StreamReader(limit=64)
+    reader.feed_data(payload)
+    reader.feed_eof()
+    return reader
+
+
 async def _collect(
     backend: OspreyBackend,
     lines: list[dict[str, object]],
@@ -127,12 +137,16 @@ async def _collect(
     persist_session: bool = True,
     stderr_lines: list[str] | None = None,
     stderr_held_open: bool = False,
+    stdout_reader: asyncio.StreamReader | None = None,
+    stderr_reader: asyncio.StreamReader | None = None,
 ) -> tuple[list[AgentEvent], AsyncMock]:
     process = _FakeProcess(
         lines,
         returncode=returncode,
         stderr_lines=stderr_lines,
         stderr_held_open=stderr_held_open,
+        stdout_reader=stdout_reader,
+        stderr_reader=stderr_reader,
     )
     exec_mock = AsyncMock(return_value=process)
     terminate_mock = AsyncMock(side_effect=lambda _process: process.close_stderr())
@@ -154,6 +168,66 @@ async def _collect(
             )
         ]
     return events, exec_mock
+
+
+@pytest.mark.asyncio
+async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
+    stdout = _over_limit_reader(b"x" * 65)
+    backend = OspreyBackend(osprey_binary="fake")
+
+    with pytest.raises(OspreyError, match=r"(?i)stdout.*limit") as exc_info:
+        await _collect(
+            backend,
+            [],
+            stdout_reader=stdout,
+        )
+
+    assert exc_info.value.category == "PROTOCOL"
+    assert backend._processes == []
+
+
+@pytest.mark.asyncio
+async def test_oversized_stderr_diagnostic_does_not_fail_successful_run() -> None:
+    lines, _ = _stream()
+    stderr = _over_limit_reader(b"diagnostic" * 8)
+
+    events, _ = await _collect(
+        OspreyBackend(osprey_binary="fake"),
+        lines,
+        stderr_reader=stderr,
+    )
+
+    assert [type(event) for event in events] == [ResultEvent]
+
+
+@pytest.mark.asyncio
+async def test_oversized_stderr_diagnostic_is_reported_on_process_failure() -> None:
+    lines, _ = _stream()
+    stderr = _over_limit_reader(b"provider authentication failed" * 3)
+
+    with pytest.raises(OspreyError, match="stderr diagnostic line exceeded stream limit"):
+        await _collect(
+            OspreyBackend(osprey_binary="fake"),
+            lines,
+            returncode=1,
+            stderr_reader=stderr,
+        )
+
+
+@pytest.mark.asyncio
+async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> None:
+    secret = "sk-realvalue123"
+    diagnostics: list[str] = []
+    stderr = asyncio.StreamReader(limit=2_048)
+    stderr.feed_data((f"OPENAI_API_KEY={secret} " + "x" * 1_024 + "\n").encode())
+    stderr.feed_eof()
+
+    await _drain_stderr(stderr, diagnostics)
+
+    assert len(diagnostics) == 1
+    assert len(diagnostics[0]) <= 500
+    assert secret not in diagnostics[0]
+    assert "[REDACTED_ENV_VAR]" in diagnostics[0]
 
 
 @pytest.mark.asyncio
@@ -202,6 +276,12 @@ def test_factory_builds_verified_osprey_jsonl_command() -> None:
         "fake-osprey",
         "agent",
         "--events-jsonl",
+        "--observation-budget-update-bytes",
+        "65536",
+        "--observation-budget-inline-bytes",
+        "262144",
+        "--observation-budget-admission-bytes",
+        "2097152",
         "--model",
         "test-model",
         "hello",
@@ -497,7 +577,19 @@ def test_command_forwards_verified_policy_resume_fork_and_schema_flags(tmp_path:
         max_turns=3,
         read_only=True,
     )
-    assert command[:5] == ["fake", "agent", "--events-jsonl", "--model", "m"]
+    assert command[:11] == [
+        "fake",
+        "agent",
+        "--events-jsonl",
+        "--observation-budget-update-bytes",
+        "65536",
+        "--observation-budget-inline-bytes",
+        "262144",
+        "--observation-budget-admission-bytes",
+        "2097152",
+        "--model",
+        "m",
+    ]
     assert "--read-only" in command
     assert command[command.index("--fork-from") + 1] == "s"
     assert command[command.index("--output-schema") + 1].endswith("schema.json")

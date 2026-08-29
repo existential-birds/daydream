@@ -30,14 +30,17 @@ normal environment/configuration; credentials are never placed in argv.
 | Headless approval | `--approval deny-untrusted`; interactive approval values fail before launch |
 | Sandbox / roots | `--sandbox`, repeatable `--allowed-root` |
 | Turn/stream limits | `--max-turns`, `--turn-timeout`, `--stream-idle-timeout-secs`, `--streaming-timeout-secs` |
+| Observation budget | Always enables Osprey's 64 KiB per-update, 256 KiB per-call inline, and 2 MiB aggregate admission limits so tool streaming remains below Daydream's JSONL framing limit |
 | Result caps/spill | `--tool-result-cap`, `--tool-result-head`, `--tool-result-tail`, `--tool-result-max-lines`, `--tool-result-raw-dir` |
 | Structured output | Writes the supplied JSON Schema to a temporary file and passes `--output-schema`; the file is removed after the subprocess ends |
 | Persistence | Osprey sessions are persistent by default; `resume` and `fork` map to `--resume` and `--fork-from`. `persist_session=False` fails closed because this CLI has no ephemeral-session flag |
 | Provider/base URL | Resolved by Osprey config/environment; the current CLI exposes no verified provider/base-url flags |
 
-Omitting an option preserves Osprey’s own defaults. Unsupported options are
-typed `OspreyUnsupportedOption` errors rather than silently dropped security
-or policy settings.
+Except for the adapter-enforced observation budget, omitting an option preserves
+Osprey’s own defaults. Unsupported options are typed `OspreyUnsupportedOption`
+errors rather than silently dropped security or policy settings. Osprey's
+sandbox lane does not currently apply the per-update or per-call observation
+caps, so the adapter's framing guard remains authoritative in sandboxed runs.
 
 ## Stream and terminal semantics
 
@@ -52,7 +55,10 @@ Other terminal outcomes (`failed`, `cancelled`, `max_continuations`,
 producer’s outcome when the subprocess exits successfully. A non-zero subprocess
 exit is a backend failure even if the stream reported a terminal outcome. Missing
 headers, malformed required fields, unknown event names, and truncated streams
-are also explicit bounded backend failures.
+are also explicit bounded backend failures. A stdout JSONL record exceeding the
+10 MiB framing limit raises a typed `OspreyProtocolError`; an oversized stderr
+diagnostic is discarded with a bounded sentinel while the adapter continues to
+drain the diagnostic pipe.
 
 ## Identity and tool calls
 
