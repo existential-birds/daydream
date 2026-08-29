@@ -201,7 +201,8 @@ def total_agent_count(stack_count: int) -> int:
 
     Formula: 2 (TTT intent + alternative-review) + N per-stack reviews
     + N per-stack parse passes + 1 cross-stack merge + 1 conditional
-    arbiter (Opus pass over high-severity / contested findings). The
+    arbiter (Opus pass over findings at or above the profile's
+    ``Arbitration.min_severity`` — default high — plus contested findings). The
     arbiter fires when qualifying findings exist; the pre-flight estimate
     always includes it so users aren't surprised by the extra Opus call.
     The fix-gate agents are user-gated and excluded from the estimate.
@@ -1749,7 +1750,10 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         ctx.pipeline().arbitration.enabled
         and (config.start_at != "merge" or not adjudication_marker.is_file())
     ):
-        arbiter_targets = select_arbiter_targets(all_records, record_sources)
+        arbiter_targets = select_arbiter_targets(
+            all_records, record_sources,
+            min_severity=ctx.pipeline().arbitration.min_severity,
+        )
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
         # are indices into this pre-apply list; once records are dropped the

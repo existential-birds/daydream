@@ -7,13 +7,16 @@ arbiter, so it can be unit-tested against adversarial shapes (mixed-severity,
 multi-stack, same-``file:line`` collisions) independent of any agent call.
 
 A record is selected when EITHER:
-  - it is ``severity == "high"`` (heavy findings always get the Opus second look), OR
+  - its severity is at or above the ``min_severity`` knob (default ``"high"``;
+    heavy findings always get the Opus second look), OR
   - it is *contested*: the same ``(file, line)`` location is surfaced by two or
     more distinct stacks that disagree on severity. Divergent severity at one
     location is exactly the case a cheaper model is most likely to mis-rank.
 
-Low/medium uncontested findings never reach the arbiter — that is the whole
-point of the cost split.
+With the default knob, low/medium uncontested findings never reach the arbiter —
+that is the whole point of the cost split. Lowering ``min_severity`` (the
+profile's ``Arbitration.min_severity``) widens the severity branch; the contested
+branch is unaffected.
 
 Residual risk: a genuinely-high issue that a cheaper per-stack model under-ranked
 as an isolated, uncontested medium/low at a unique location is also never
@@ -25,6 +28,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
+
+from daydream.severity import CANONICAL_LEVELS, SEVERITY_RANK
 
 
 def _severity(record: dict[str, Any]) -> str:
@@ -39,27 +44,50 @@ def _confidence(record: dict[str, Any]) -> str:
     return value.upper() if isinstance(value, str) else ""
 
 
+def _at_or_above(min_severity: str) -> frozenset[str]:
+    """Return every canonical level ranked at or above ``min_severity``.
+
+    Raises:
+        ValueError: If ``min_severity`` is not a canonical severity level
+            (fail loud — an unknown knob value must never silently widen or
+            narrow selection).
+    """
+    if min_severity not in SEVERITY_RANK:
+        raise ValueError(
+            f"min_severity must be one of {', '.join(CANONICAL_LEVELS)}; got {min_severity!r}"
+        )
+    rank = SEVERITY_RANK[min_severity]
+    return frozenset(level for level, level_rank in SEVERITY_RANK.items() if level_rank <= rank)
+
+
 def select_arbiter_targets(
     records: list[dict[str, Any]],
     sources: list[str],
+    min_severity: str = "high",
 ) -> list[int]:
     """Return the indices of records that need arbiter re-review.
 
     Args:
         records: Parsed per-stack records (each ideally carrying ``severity``,
             ``file``, ``line``). Records missing ``severity`` are treated as
-            non-high and only become selectable through the contested path.
+            below the severity knob and only become selectable through the
+            contested path.
         sources: Per-record originating stack name, positionally aligned with
             ``records`` (``len(sources) == len(records)``).
+        min_severity: Lowest canonical severity level the severity branch
+            selects (``"high"`` by default; ``"medium"`` also selects medium
+            records, ``"low"`` selects everything). The contested branch is
+            independent of this knob.
 
     Returns:
         Sorted, de-duplicated list of indices into ``records`` selected for the
-        arbiter: every high-severity record, plus every record at a
+        arbiter: every record at or above ``min_severity``, plus every record at a
         ``(file, line)`` location contested across >=2 stacks with divergent
         severity.
 
     Raises:
-        ValueError: If ``records`` and ``sources`` differ in length.
+        ValueError: If ``records`` and ``sources`` differ in length, or if
+            ``min_severity`` is not a canonical severity level.
     """
     if len(records) != len(sources):
         raise ValueError(
@@ -68,9 +96,12 @@ def select_arbiter_targets(
 
     selected: set[int] = set()
 
-    # High severity: always arbitrated.
+    # Severity branch: everything at or above the ``min_severity`` knob
+    # (default "high" — the profile's ``Arbitration.min_severity`` governs this
+    # in the production path).
+    eligible = _at_or_above(min_severity)
     for i, record in enumerate(records):
-        if _severity(record) == "high":
+        if _severity(record) in eligible:
             selected.add(i)
 
     # Contested: same (file, line) reported by >=2 distinct stacks that disagree

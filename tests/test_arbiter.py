@@ -34,6 +34,19 @@ def _rec_conf(file: str, line: int, severity: str, confidence: str) -> dict[str,
     return rec
 
 
+def test_select_arbiter_targets_honors_min_severity_knob() -> None:
+    records = [
+        {"severity": "medium", "file": "a.py", "line": 1},
+        {"severity": "high", "file": "b.py", "line": 2},
+        {"severity": "low", "file": "c.py", "line": 3},
+    ]
+    sources = ["s1", "s2", "s3"]
+    # Default unchanged: only the high record is selected.
+    assert select_arbiter_targets(records, sources) == [1]
+    # Knob lowered: medium is now arbitrated too.
+    assert select_arbiter_targets(records, sources, min_severity="medium") == [0, 1]
+
+
 def test_mixed_severity_multi_stack_collision_selects_high_and_contested() -> None:
     # Index map:
     #  0 python  api.py:10  high     -> selected (high severity)
