@@ -283,3 +283,22 @@ def test_removed_docs_not_recreated() -> None:
 
 def test_no_project_local_skill_instruction() -> None:
     assert "SKILL.md" not in RUNBOOK.read_text(encoding="utf-8")
+
+
+# --- Prioritized curation contract (issue-879) ---
+
+def test_prioritization_contract_documented() -> None:
+    runbook = (ROOT / "docs" / "benchmark.md").read_text(encoding="utf-8")
+    for phrase in (
+        "prioritized", "advisory", "all evidence is retained",
+        "does not establish semantic correctness",
+    ):
+        assert phrase in runbook, f"runbook must describe the prioritization contract ({phrase!r})"
+    plan = (ROOT / "docs" / "plans" / "2026-08-21-private-pr-harbor-benchmarks.md").read_text(
+        encoding="utf-8"
+    )
+    for phrase in (
+        "prioritized", "advisory", "only explicit curator actions create gold",
+        "resolution", "outdated",
+    ):
+        assert phrase in plan, f"plan must document the prioritization contract ({phrase!r})"

@@ -162,6 +162,35 @@ All workspace writes are atomic and journaled (`prepared | committing |
 complete`) under the workspace lock, so a crash mid-mutation restores either the
 whole before- or after-state — never a checksum-drifted partial.
 
+#### Prioritized evidence view
+
+The evidence list renders in a **prioritized** view: entries are grouped into
+fixed, labeled bands in deterministic order — undecided and unchanged items
+float to the top, likely-already-actioned items sink. Each entry may carry a
+reason-code legend line explaining its placement:
+
+- Signal reasons: `resolved` (record marked resolved), `outdated` (record
+  marked outdated), `anchor-delta-*` (the authoring anchor's content changed or
+  moved between the authoring commit and the pinned snapshot head — an
+  intersecting change at the anchor location vs the same file elsewhere), and
+  `pr-author-reply` (the PR author replied later in the thread).
+- Availability causes: `commit-non-ancestor`, `commit-unavailable`,
+  `anchor-unavailable`, `facts-missing`.
+- Classification causes: `dismissed`, `decided-by-*`, `non-candidate`.
+
+Each signal is advisory: it reorders and annotates the display only, and
+does not establish semantic correctness — signals never alter the band's
+acceptance rules, and never mutate curation state. Only explicit curator
+actions (accept, edit, exclude, attest) create gold findings or exclusions.
+Every band is display-only: all evidence is retained and reachable, and the
+priority ordering is scoped to the pinned snapshot head and recomputed on
+refresh.
+
+Under the hood, comparison facts (commit relation and anchor delta against
+the pinned head) are computed once at case materialization/refresh and stored
+additively on the case document under a `prioritization` key. The prioritized
+projection itself is derived at read time and is never persisted.
+
 ### Authoring anchors and exact acceptance
 
 Exact single-keystroke acceptance of an inline review candidate is judged
@@ -190,6 +219,11 @@ fields.
   `re-anchored`, when the anchor derives on a commit other than the selected
   head. Review bodies are file-agnostic and keep their single submission
   `commit_id` gate.
+- An anchor delta between the authoring commit and the pinned snapshot head
+  feeds the advisory prioritized view only: a change intersecting the anchor
+  range and a change elsewhere in the same file are surfaced as distinct
+  reason codes. Neither signal establishes semantic correctness — only
+  explicit curator actions create gold or exclusions.
 - `curate` shows the authoring commit prefix (`auth:`) beside the observed
   re-anchored `commit_id` (`commit:`) and the fixed not-exact reason whenever
   exact acceptance is unavailable, so you can see at a glance whether a record
