@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from daydream import git_ops, pr_review
+from daydream.findings import ArtifactFinding
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
     ParsedIssue,
@@ -1198,3 +1199,53 @@ def test_null_severity_does_not_block_approval(
     payload = build_payload(pr, classified, approve_on_clean=True)
     assert payload["event"] == "APPROVE"
     assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
+
+
+def test_artifact_off_vocabulary_severity_blocks_approval() -> None:
+    """R1/F1: an off-vocabulary label ('critical') folded to None at the Phase A
+    boundary must still block the artifact-backed approve gate.
+
+    The raw off-vocabulary signal rides through the artifact as
+    ``severity_off_vocabulary`` so the poster's gate fails closed even though
+    ``severity`` reads ``None``.
+    """
+    finding = ArtifactFinding(
+        fingerprint="f" * 64,
+        path="a.py",
+        line=10,
+        placement="inline",
+        title="t",
+        body="b",
+        severity=None,  # "critical" was folded to None by Phase A normalization
+        confidence="HIGH",
+        is_cross_stack=False,
+        severity_off_vocabulary=True,
+    )
+    issue = pr_review._issue_from_artifact_finding(finding)
+    assert issue.severity is None
+    assert issue.severity_off_vocabulary is True
+    # The approval gate blocks on the off-vocabulary signal even with severity None.
+    assert pr_review._finding_blocks_approval(
+        issue.severity, issue.location_distrust, issue.severity_off_vocabulary
+    ) is True
+
+
+def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
+    """Present-but-null severity (wire ``severity: null``) is not an asserted
+    off-vocabulary label: it models an omitted severity and does not block."""
+    finding = ArtifactFinding(
+        fingerprint="f" * 64,
+        path="a.py",
+        line=10,
+        placement="inline",
+        title="t",
+        body="b",
+        severity=None,
+        confidence="HIGH",
+        is_cross_stack=False,
+        severity_off_vocabulary=False,
+    )
+    issue = pr_review._issue_from_artifact_finding(finding)
+    assert pr_review._finding_blocks_approval(
+        issue.severity, issue.location_distrust, issue.severity_off_vocabulary
+    ) is False

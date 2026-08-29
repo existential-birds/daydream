@@ -22,7 +22,7 @@ _IMPACT_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
 _EFFORT_UNITS = {"S": 1, "M": 2, "L": 3}
 _RISK_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
 _CONFIDENCE_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
-_SEVERITY_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2, "CRITICAL": 3}
+_SEVERITY_ORDER = {"LOW": 0, "MED": 1, "HIGH": 2}
 _CHANGE_SHAPES = {
     "delete",
     "reuse",
@@ -452,16 +452,14 @@ def _map_axis_severity(value: object) -> str | None:
     """Map a finding's severity to the audit-axis vocabulary, or ``None``.
 
     Canonical lowercase levels (``daydream.severity``) map to their uppercase
-    axis names; values already in the axis vocabulary pass through as known
-    vocabulary (not an unknown passthrough). Anything else — unknown, absent,
-    ``None`` — maps to ``None`` so the caller can omit the axis instead of
-    promoting it to a conservative fallback (P-BOUNDARY, issue #972 R3.1/R6.2).
+    axis names. Anything else — unknown, absent, ``None``, or off-canonical
+    (e.g. ``"CRITICAL"``) — maps to ``None`` so the caller can omit the axis
+    instead of promoting it to a conservative fallback (P-BOUNDARY, issue
+    #972 R3.1/R6.2).
     """
     normalized = normalize_severity(value)
     if normalized is not None:
         return {"low": "LOW", "medium": "MED", "high": "HIGH"}[normalized]
-    if isinstance(value, str) and value in _SEVERITY_ORDER:
-        return value
     return None
 
 

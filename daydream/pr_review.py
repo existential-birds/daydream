@@ -95,6 +95,11 @@ class ParsedIssue:
         location_distrust: True when location validation demoted this finding
             (its citation was beyond tolerance), issue #972 R2. Blocks approval
             regardless of the (demoted) severity and renders a demotion note.
+        severity_off_vocabulary: True when this issue carried a present severity
+            string outside the canonical vocabulary (e.g. ``"critical"``). The
+            boundary folds such labels into ``None`` for ``severity`` (so the
+            canonical render path stays clean), but the gate must still fail
+            closed on them rather than read them as an omitted severity.
     """
 
     path: str
@@ -106,6 +111,7 @@ class ParsedIssue:
     severity: str | None = None
     fingerprint: str | None = None
     location_distrust: bool = False
+    severity_off_vocabulary: bool = False
 
 
 @dataclass
@@ -138,6 +144,7 @@ class ItemFields:
     is_cross_stack: bool
     location_distrust: bool = False
     severity_before_demotion: str | None = None
+    severity_off_vocabulary: bool = False
 
 
 @dataclass
@@ -261,11 +268,31 @@ def _normalize_severity(raw: dict[str, Any]) -> str | None:
     Total: never raises. Present-but-null severities (the wire schema emits
     ``severity: null``) and omitted keys both map to ``None``, as do unknown
     or non-string values — never the string ``"none"``. Unknown string
-    severities (e.g. ``"critical"``) also map to ``None`` here; the approval
-    gate independently fails closed on raw strings in paths that skip this
-    helper.
+    severities (e.g. ``"critical"``) also map to ``None`` here so the
+    canonical render path stays clean; callers must pair this with
+    :func:`_severity_off_vocabulary` so a present-but-off-vocabulary label
+    still fails closed at the approval gate instead of looking like a model
+    that omitted severity.
     """
     return normalize_severity(raw.get("severity"))
+
+
+def _severity_off_vocabulary(raw: dict[str, Any]) -> bool:
+    """True when ``raw`` carries a present, non-empty severity string outside
+    the canonical vocabulary (e.g. ``"critical"``).
+
+    ``_normalize_severity`` folds such labels into ``None``, but a raw
+    off-vocabulary label is a severity the model asserted — it must not be
+    indistinguishable from an omitted severity at the approval gate. The gate
+    blocks on this flag, restoring the documented fail-closed invariant for
+    off-vocabulary labels (issue #972).
+    """
+    value = raw.get("severity")
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and normalize_severity(value) is None
+    )
 
 
 def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
@@ -309,6 +336,7 @@ def alt_issues_to_parsed(alt_issues: list[dict[str, Any]]) -> list[ParsedIssue]:
                     body=body,
                     confidence=confidence,
                     severity=severity,
+                    severity_off_vocabulary=_severity_off_vocabulary(raw),
                     fingerprint=compute_fingerprint(str(path), title, description),
                 )
             )
@@ -346,6 +374,7 @@ def extract_item_fields(
         is_cross_stack=is_cross_stack,
         location_distrust=location_distrust,
         severity_before_demotion=severity_before_demotion,
+        severity_off_vocabulary=_severity_off_vocabulary(raw),
     )
 
 
@@ -399,6 +428,7 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                     fields.path, fields.description, fields.rationale
                 ),
                 location_distrust=fields.location_distrust,
+                severity_off_vocabulary=fields.severity_off_vocabulary,
             )
         )
     return out
@@ -1133,7 +1163,11 @@ def _severity_blocks_approval(severity: str | None) -> bool:
     return severity is not None and severity.lower() not in _NON_BLOCKING_SEVERITIES
 
 
-def _finding_blocks_approval(severity: str | None, location_distrust: bool) -> bool:
+def _finding_blocks_approval(
+    severity: str | None,
+    location_distrust: bool,
+    severity_off_vocabulary: bool = False,
+) -> bool:
     """Whether one finding blocks an approval, demotion-aware (issue #972 R2).
 
     A finding marked ``location_distrust=True`` was judged at a higher severity
@@ -1141,9 +1175,14 @@ def _finding_blocks_approval(severity: str | None, location_distrust: bool) -> b
     the demoted severity must not silently make it non-blocking. This check is
     deliberately separate from ``_severity_blocks_approval`` (and NOT folded
     into ``_NON_BLOCKING_SEVERITIES``) so off-vocabulary severity strings keep
-    failing closed for their own reason.
+    failing closed for their own reason. ``severity_off_vocabulary`` carries
+    that signal: a present-but-off-canonical label (e.g. ``"critical"``) is
+    folded into ``None`` at the boundary but was still a severity the model
+    asserted, so it blocks rather than reading as an omitted severity.
     """
     if location_distrust:
+        return True
+    if severity_off_vocabulary:
         return True
     return _severity_blocks_approval(severity)
 
@@ -1161,7 +1200,9 @@ def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> b
     if not approve_on_clean:
         return False
     return not any(
-        _finding_blocks_approval(issue.severity, issue.location_distrust)
+        _finding_blocks_approval(
+            issue.severity, issue.location_distrust, issue.severity_off_vocabulary
+        )
         for issue in classified.all_issues()
     )
 
@@ -1542,7 +1583,11 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and not any(
-        _finding_blocks_approval(finding.severity, finding.location_distrust)
+        _finding_blocks_approval(
+            finding.severity,
+            finding.location_distrust,
+            finding.severity_off_vocabulary,
+        )
         for finding in artifact.findings
     )
 
@@ -1605,4 +1650,5 @@ def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
         severity=finding.severity,
         fingerprint=finding.fingerprint,
         location_distrust=finding.location_distrust,
+        severity_off_vocabulary=finding.severity_off_vocabulary,
     )

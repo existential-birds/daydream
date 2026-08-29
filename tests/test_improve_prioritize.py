@@ -417,3 +417,6 @@ def test_prioritize_unknown_severity_maps_explicitly() -> None:
     assert prioritize._map_axis_severity(None) is None
     assert prioritize._map_axis_severity("high") == "HIGH"
     assert prioritize._map_axis_severity("weird") is None
+    # The axis vocabulary is 3-level; the off-canonical "CRITICAL" must not
+    # pass through as raw, exactly as the docstring asserts.
+    assert prioritize._map_axis_severity("CRITICAL") is None

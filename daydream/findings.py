@@ -81,6 +81,11 @@ FINDINGS_SCHEMA: dict[str, Any] = {
                     # the poster's approval gate stays demotion-aware. Absent
                     # on older artifacts — treated as False on load.
                     "location_distrust": {"type": "boolean"},
+                    # Optional (issue #972): present-but-off-canonical severity
+                    # strings fold into ``None`` at the boundary but must still
+                    # block the poster's approval gate; the raw signal rides
+                    # through here. Absent on older artifacts -> False on load.
+                    "severity_off_vocabulary": {"type": "boolean"},
                 },
             },
         },
@@ -108,6 +113,11 @@ class ArtifactFinding:
         is_cross_stack: Whether the finding came from the cross-stack merge.
         location_distrust: True when location validation demoted the finding
             (citation beyond tolerance); absent on older artifacts -> False.
+        severity_off_vocabulary: True when the finding carried a present
+            severity string outside the canonical vocabulary (e.g.
+            "critical") that was folded into ``None`` at the boundary. The
+            poster's approval gate must still block on it, so the raw signal
+            rides through the artifact; absent on older artifacts -> False.
     """
 
     fingerprint: str
@@ -120,6 +130,7 @@ class ArtifactFinding:
     confidence: str | None
     is_cross_stack: bool
     location_distrust: bool = False
+    severity_off_vocabulary: bool = False
 
 
 @dataclass
@@ -154,6 +165,7 @@ def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> di
         "confidence": issue.confidence,
         "is_cross_stack": issue.is_cross_stack,
         "location_distrust": issue.location_distrust,
+        "severity_off_vocabulary": issue.severity_off_vocabulary,
     }
 
 

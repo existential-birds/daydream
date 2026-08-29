@@ -23,11 +23,14 @@ CANONICAL_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 """The canonical severity vocabulary: the only declaration of the levels."""
 
 SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
-"""Sort rank mirroring ``phases._SEVERITY_RANK`` exactly.
+"""Sort rank for the canonical levels (high < medium < low).
 
-Unknown or absent values rank as medium (``1``) at the sort site via
-``SEVERITY_RANK.get(value, 1)``. This is a sort rank, not a severity
-assignment: it does not constitute a fallback severity policy.
+The single source of truth consumed by both the deep arbiter (target
+selection) and the deep/shallow fix-loop sort site (``phases.severity_sorted``),
+so a reorder anywhere can never silently diverge. Unknown or absent values
+rank as medium (``1``) at the sort site via ``SEVERITY_RANK.get(value, 1)``.
+This is a sort rank, not a severity assignment: it does not constitute a
+fallback severity policy.
 """
 
 
