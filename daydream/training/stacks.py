@@ -46,7 +46,16 @@ def load_dataset(
             stripped = line.strip()
             if not stripped:
                 continue
-            records.append(json.loads(stripped))
+            record = json.loads(stripped)
+            # M23 legacy tagging: a row whose labeler policy version is absent
+            # (or null) was admitted under the legacy reply-count/merge-presence
+            # gold policy. Tag it explicitly — current-policy SFT prefers
+            # native-profile traces, and this flag is how downstream selection
+            # tells the two classes apart. Tagging is metadata, never a drop:
+            # the loader's only refusals are the C5/C8 fail-closed gates above.
+            policy_version = record.get("labeler_policy_version")
+            record["legacy_policy"] = not (isinstance(policy_version, str) and policy_version)
+            records.append(record)
 
     excluded = {slug.casefold() for slug in load_exclusion_list()}
     excluded_offenders = sorted(

@@ -56,7 +56,11 @@ def test_load_corpus_returns_all_clean_records(tmp_path: Path) -> None:
     recs = [_rec(repo="acme/one"), _rec(repo="acme/two", label="rejected")]
     p = tmp_path / "corpus.jsonl"
     p.write_text("\n".join(json.dumps(r) for r in recs), encoding="utf-8")
-    assert stacks.load_dataset(p) == recs
+    loaded = stacks.load_dataset(p)
+    # Records carry the M23 legacy_policy tag on admission; everything else
+    # round-trips exactly.
+    expected = [{**r, "legacy_policy": True} for r in recs]
+    assert loaded == expected
 
 
 def test_load_corpus_names_all_offenders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,3 +85,26 @@ def test_exclusion_gate_runs_before_copyleft_gate(tmp_path: Path, monkeypatch: p
     p.write_text("\n".join(json.dumps(r) for r in recs), encoding="utf-8")
     with pytest.raises(ValueError, match="excluded"):
         stacks.load_dataset(p)
+
+
+def test_load_dataset_tags_legacy_policy_rows(tmp_path: Path) -> None:
+    """M23: rows without a labeler policy version are tagged legacy_policy=True.
+
+    The tag is metadata the loader adds on admission (the loader never
+    drop-and-warns); current-policy SFT prefers native-profile traces, and the
+    tag is what lets downstream selection distinguish the two classes.
+    """
+    legacy = _rec(repo="acme/legacy")
+    native = {**_rec(repo="acme/native"), "labeler_policy_version": "0.9.8-policy-r1"}
+    p = tmp_path / "corpus.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in (legacy, native)), encoding="utf-8")
+    out = stacks.load_dataset(p)
+    assert out[0]["legacy_policy"] is True
+    assert out[1]["legacy_policy"] is False
+
+
+def test_load_dataset_empty_policy_version_is_legacy(tmp_path: Path) -> None:
+    p = tmp_path / "corpus.jsonl"
+    p.write_text(json.dumps({**_rec(repo="acme/x"), "labeler_policy_version": None}), encoding="utf-8")
+    out = stacks.load_dataset(p)
+    assert out[0]["legacy_policy"] is True

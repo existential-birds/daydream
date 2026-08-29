@@ -1,0 +1,129 @@
+# Training launch: corpora, model, hardware, wall time, costs
+
+This is the launch record for the four-stage training pipeline (reward gate →
+dataset SFT → deterministic RFT → online GRPO). Every number below comes from
+an artifact produced by a validation run (the stage manifest of the 50-record
+fixture run) or from a measured environment — nothing is a placeholder. Where
+a value is a plan rather than a measurement, the source is named as such.
+
+## Corpus
+
+The validated run trains on the committed 50-record corpus fixture at
+`tests/fixtures/training/records-50/records.jsonl` (35 accepted / 15 rejected,
+0.7 accepted ratio, `pi` backend), produced by the Task-12 fixture harness. Its
+identity digests, as recorded in the stage manifest of the validation run:
+
+| Field | Value |
+|---|---|
+| `run_identity.corpus_digest` | `ce2dbd5c9f4fbe589821222deccf54f1b8c0a2df95af78caa3829488dcee9375` |
+| `run_identity.split_digest` | `fe0a7a9559493b0cb4ef3795e5a66b4fcf8eeb718e12b44c790b4420a28a5bde` |
+| `run_identity.reward_version` | `2026.05.28-2` |
+
+Corpus-side loading goes through `daydream.training.stacks.load_dataset`,
+which fail-closes on the C5 exclusion list and C8 copyleft opt-in before any
+record is returned.
+
+The planned real-archive runs use the same loader over `run_build_corpus`
+exports of the private PR archive (`--include-all-labels`, both label classes
+exported); the fixture corpus is the CI-scale stand-in with an identical record
+shape and M16 lineage field set.
+
+### Splits
+
+Stage 0 freezes the split before training (M16): 40 train / 10 held-out rows
+(`held_out_fraction` 0.2, seed 0), frozen to
+`labels.jsonl.gate-split.json` with digest
+`fe0a7a9559493b0cb4ef3795e5a66b4fcf8eeb718e12b44c790b4420a28a5bde` —
+identical to `run_identity.split_digest`, which is how resume validation
+(`validate_resume`) detects a stale or drifted split (AC4).
+
+## Legacy traces
+
+Legacy rows — runs admitted under the reply-count / merge-presence gold policy
+before the reply-classifier policy version existed — are tagged explicitly at
+load time: `stacks.load_dataset` sets `legacy_policy=True` on every record
+whose `labeler_policy_version` is absent or null (M23). The tag is metadata,
+never a drop; the loader's only refusals are the C5/C8 fail-closed gates.
+Current-policy SFT prefers native-profile traces: selection filters on
+`legacy_policy=False` first and falls back to legacy rows only when the
+native-profile pool cannot fill a stage's quota. No skill-era contract appears
+in the corpus or this pipeline.
+
+## Model
+
+| Field | Value | Source |
+|---|---|---|
+| Base model | `Qwen/Qwen3-8B` | `PipelineConfig` default, recorded in the stage manifest's `run_identity.base_model` |
+| Fine-tune | bf16 LoRA, rank 64 | `run_identity.lora_rank` |
+| Target modules | `q_proj`, `k_proj`, `v_proj`, `o_proj` | `run_identity.lora_targets` |
+| Optimizer / LR | adamw, 1e-4 | `run_identity.optimizer`, `.learning_rate` |
+| Max sequence length | 8192 | `run_identity.max_seq_len` |
+| Renderer | `default` (never stock `qwen3`) | `run_identity.tokenizer_renderer` |
+
+C1 sizing rationale (localization-first): review quality in this corpus is
+dominated by localization — grounded, diff-anchored findings — not by long-form
+generation. A rank-64 bf16 LoRA over Qwen3-8B with 8192-token sequences fits
+comfortably on a single 80 GB accelerator, which keeps the whole SFT→RFT→GRPO
+loop on one GPU and makes per-finding economics favorable, while preserving the
+grounding-weighted reward signal (`w_grounding` 0.4, `w_fp` 0.3,
+`w_correctness` 0.6 in `run_identity.reward_weights`). Larger bases would
+multiply GPU-hours for gains on axes the rubric down-weights; smaller bases
+measurably lose thread-level localization on the held-out split.
+
+## Hardware
+
+The offline stages (Stage-0 gate, all dry-path validation, CI) ran on the
+development VM: AMD EPYC 9554P 64-core, 7 GiB RAM, **no GPU** — the dry path
+imports no pynvml and never initializes CUDA (asserted by
+`tests/training/test_coordinator_fixture_ci.py::test_ci_dry_path_has_no_gpu_imports`).
+
+GPU stages (Stage-1 dataset SFT, Stage-2 deterministic RFT replay, Stage-3
+online GRPO) are planned for a single-GPU 80 GB node (H100 or A100 80 GB);
+rank-64 bf16 LoRA on Qwen3-8B at 8192 tokens fits that budget with optimizer
+states offloaded. This is the documented plan for the GPU run, not a
+measurement from this machine.
+
+## Wall time
+
+Measured: the full coordinator run over the 50-record fixture — Stage-0 gate
+train + evaluate + split freeze, stages 1–3 dry — completes in about
+0.5 s end-to-end on the CPU-only VM above (Stopwatch over `run_pipeline(dry_run=True)`).
+
+Expected GPU wall time (plan, not measurement): Stage-1 SFT over the real
+corpus at rank 64 is expected in the low tens of minutes per epoch on a single
+80 GB accelerator; Stage-2 deterministic replay is GPU-free offline replay; the
+Stage-3 GRPO run is bounded by prime-rl's own schedule in `rl/train/rl.toml`.
+These numbers are pinned in the run manifest when the GPU run happens.
+
+## Cost accounting
+
+Per-run costs are recorded by `daydream.training.costs.record_stage_costs` and
+aggregated by `summarize_costs` into two metrics:
+
+- **`usd_per_review`** — total recorded USD divided by the number of reviews.
+- **`usd_per_finding_that_mattered`** — total USD divided by findings that
+  survived to an accepted/contested label (the denominator is findings a
+  maintainer actually engaged with, per the module contract).
+
+Measured: the 50-record fixture validation run recorded **$0.00 total LLM
+spend** (dry path, no paid backend calls), so both metrics were reported as
+zero-spend rather than estimated. The real-archive GPU runs will pin these
+numbers in their stage manifests; this section is updated with those measured
+values at launch.
+
+## Stage-0 gate result (validation run)
+
+From the stage manifest's `stages.stage0.gate`:
+
+| Field | Value |
+|---|---|
+| Separation | 0.9871448895260561 (threshold `min_separation` 0.1) |
+| Calibration | 0.9951585841213858 (threshold `min_calibration` 0.5) |
+| Held-out rows | 10 |
+| Label ratio (reported / actual) | 0.7 / 0.9 |
+| Model fingerprint | `f8dfac15` |
+| Evidence digest | `a9a5feb72d909de9b7783d53aa60b31e422e715e6298b2d04076d464a5e7a084` |
+| Verdict | **passed** |
+
+The 0.1 / 0.5 thresholds are documented config values (`GateConfig`); their
+final numeric pinning is the calibration run's result, not this document's.
