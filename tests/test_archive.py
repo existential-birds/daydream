@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from daydream.archive import _copy_bundle, _read_fix_quality_gate, archive_run, get_archive_dir
-from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_git_context
+from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
     append_label_observation,
     bulk_latest_label_observations,
@@ -82,21 +82,34 @@ class _MockConfig:
     loop: bool = False
     archive: bool = True
     run_eval: bool = False
+    dump_artifacts: str | None = None
+    trajectory_hub_repo: str | None = None
     file_config: DaydreamFileConfig | None = None
     findings_out: str | None = None
 
 
-@pytest.mark.parametrize(
-    ("remote_url", "expected"),
-    [
-        pytest.param("git@github.com:org/repo.git", "org/repo", id="ssh"),
-        pytest.param("https://github.com/org/repo.git", "org/repo", id="https"),
-        pytest.param("https://github.com/org/repo", "org/repo", id="https_no_dot_git"),
-        pytest.param("not-a-url", None, id="invalid"),
-    ],
-)
-def test_parse_repo_slug(remote_url: str, expected: str | None) -> None:
-    assert _parse_repo_slug(remote_url) == expected
+def _run_git_init_with_credential_origin(repo: Path, origin_url: str) -> None:
+    """git init + one commit + credential-bearing origin remote."""
+    for argv in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        ["git", "remote", "add", "origin", origin_url],
+    ):
+        subprocess.run(argv, cwd=repo, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+
+
+def test_capture_git_context_stores_credential_free_remote(tmp_path: Path) -> None:
+    # Real git repo whose origin carries credentials (M3, real-path test).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git_init_with_credential_origin(repo, "https://user:ghp_canaryfake123@github.com/o/r.git")
+    ctx = capture_git_context(repo)
+    assert ctx.repo_slug == "o/r"
+    assert ctx.remote_url == "https://github.com/o/r"
+    assert "ghp_canaryfake123" not in (ctx.remote_url or "")
+    assert "@" not in (ctx.remote_url or "")
 
 
 def test_capture_git_context_real_repo(tmp_path: Path) -> None:
@@ -646,6 +659,16 @@ def test_upsert_run_creates_db(tmp_path: Path) -> None:
     assert (tmp_path / "index.db").exists()
 
 
+def test_upsert_run_never_persists_credential_bearing_url(tmp_path: Path) -> None:
+    # M4: even if upstream normalization is bypassed, the row is clean.
+    m = make_manifest(remote_url="https://user:ghp_bypassfake@github.com/o/r.git")
+    upsert_run(tmp_path, m)
+    row = query_runs(tmp_path)[0]
+    assert row["remote_url"] == "https://github.com/o/r"
+    assert row["repo_slug"] == "o/r"
+    assert "ghp_bypassfake" not in (row["remote_url"] or "")
+
+
 def test_upsert_and_query_round_trip(tmp_path: Path) -> None:
     m = make_manifest()
     upsert_run(tmp_path, m)
@@ -1174,6 +1197,68 @@ def test_copy_bundle_findings_artifact_skipped_without_findings_out(tmp_path: Pa
     _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert not (run_dir / "findings.json").exists()
+
+
+def test_dump_artifacts_refuses_credential_bearing_bundle(
+    tmp_path: Path,
+    archive_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M12: a bundle whose serialized artifacts carry a credential is not copied to
+    the ``--dump-artifacts`` destination — the scan gate refuses the copy, warns
+    with a value-free summary, and the archive run continues (non-fatal)."""
+    session_id = "abcd1234-0000-0000-0000-000000000000"
+    config = _MockConfig(dump_artifacts=str(tmp_path / "dump"))
+
+    target, _, _ = _setup_bundle(tmp_path, session_id)
+    # Inject a credential into the serialized trajectory the bundle will carry.
+    traj_path = target / ".daydream" / "runs" / session_id / "trajectory.json"
+    traj = json.loads(traj_path.read_text())
+    traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
+    traj_path.write_text(json.dumps(traj))
+
+    recorder = _MockRecorder(session_id=session_id)
+
+    archive_run(
+        recorder=cast(TrajectoryRecorder, recorder),
+        target_dir=target,
+        config=cast(RunConfig, config),
+        status="complete",
+    )
+
+    # The run itself is still archived (the gate is dump-path-only), but the
+    # user-specified destination never receives the dirty bundle.
+    dest = tmp_path / "dump"
+    assert not (dest / "manifest.json").exists()
+    assert not (dest / "trajectory.json").exists()
+
+    # The warning is value-free (M11): the credential never echoes.
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "ghp_canaryfake123" not in out
+
+
+def test_dump_artifacts_copies_clean_bundle(
+    tmp_path: Path, archive_dir: Path
+) -> None:
+    """The clean path is unchanged: a scan-clean bundle is copied wholesale."""
+    session_id = "abcd1234-0000-0000-0000-000000000000"
+    config = _MockConfig(dump_artifacts=str(tmp_path / "dump"))
+    target, _, _ = _setup_bundle(tmp_path, session_id)
+    recorder = _MockRecorder(session_id=session_id)
+
+    archive_run(
+        recorder=cast(TrajectoryRecorder, recorder),
+        target_dir=target,
+        config=cast(RunConfig, config),
+        status="complete",
+    )
+
+    dest = tmp_path / "dump"
+    assert (dest / "manifest.json").is_file()
+    assert (dest / "trajectory.json").is_file()
+    run_dir = archive_dir / "runs" / session_id
+    assert (dest / "manifest.json").read_text() == (run_dir / "manifest.json").read_text()
 
 
 def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:

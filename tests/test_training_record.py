@@ -141,6 +141,7 @@ def test_record_validates_against_v1_schema() -> None:
         ]
     }
     record = _build_record(manifest_row, trajectory, stack="python")
+    assert record is not None
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     jsonschema.validate(record, schema)
 
@@ -162,11 +163,13 @@ def test_record_diff_ref_reflects_archive_state(
     trajectory: dict[str, Any] = {"steps": []}
 
     record = _build_record(manifest_row, trajectory, stack="python")
+    assert record is not None
     assert record[ref_name]["available"] is False
     assert record[ref_name]["archive_relative_path"] == archive_relative_path
 
     (tmp_path / archive_relative_path).write_text("diff --git a/x b/x\n", encoding="utf-8")
     record = _build_record(manifest_row, trajectory, stack="python")
+    assert record is not None
     assert record[ref_name]["available"] is True
 
 
@@ -185,6 +188,7 @@ def test_record_code_context_sourced_from_manifest_dict(tmp_path: Path) -> None:
     trajectory: dict[str, Any] = {"steps": []}
 
     record = _build_record(manifest_row, trajectory, stack="python", manifest=manifest)
+    assert record is not None
 
     assert record["code_context"]["base_sha"] == "deadbeef" * 5
     assert record["code_context"]["changed_files"] == ["src/a.py", "src/b.py"]
@@ -194,6 +198,7 @@ def test_record_code_context_falls_back_when_manifest_missing(tmp_path: Path) ->
     """A manifest without ``code_context`` yields base_sha=None, changed_files=[]."""
     manifest_row = _make_manifest_row(archive_path=str(tmp_path))
     record = _build_record(manifest_row, {"steps": []}, stack=None, manifest={})
+    assert record is not None
 
     assert record["code_context"]["base_sha"] is None
     assert record["code_context"]["changed_files"] == []
@@ -208,12 +213,14 @@ def test_record_review_output_loaded_from_archive(tmp_path: Path) -> None:
     manifest_row = _make_manifest_row(archive_path=str(tmp_path))
 
     record = _build_record(manifest_row, {"steps": []}, stack="python")
+    assert record is not None
     assert record["review_output"] == "# Review\nLooks good.\n"
 
 
 def test_record_review_output_none_when_file_absent(tmp_path: Path) -> None:
     manifest_row = _make_manifest_row(archive_path=str(tmp_path))
     record = _build_record(manifest_row, {"steps": []}, stack="python")
+    assert record is not None
     assert record["review_output"] is None
 
 
@@ -236,6 +243,7 @@ def test_build_record_reads_review_output_from_deep_subdir(tmp_path: Path) -> No
     (archive / "deep" / "review-output.md").write_text("# Deep review\n")
     row = {"session_id": "abc", "archive_path": str(archive), "outcome_labels": "[]"}
     record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert record is not None
     assert record["review_output"] == "# Deep review\n"
 
 
@@ -247,6 +255,7 @@ def test_build_record_prefers_root_review_output_over_deep(tmp_path: Path) -> No
     (archive / "deep" / "review-output.md").write_text("# Deep\n")
     row = {"session_id": "abc", "archive_path": str(archive), "outcome_labels": "[]"}
     record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert record is not None
     assert record["review_output"] == "# Root\n"
 
 
@@ -255,6 +264,7 @@ def test_build_record_surfaces_rubric_when_present(tmp_path: Path) -> None:
            "outcome_labels": '["accepted"]'}
     annotation = {"rubric_json": '{"pr_merge": {"merged": true}, "posterior_source": "pr_review"}'}
     record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={}, annotation=annotation)
+    assert record is not None
     assert record["rubric"] == {"pr_merge": {"merged": True}, "posterior_source": "pr_review"}
     assert record["posterior_source"] == "pr_review"
 
@@ -262,6 +272,7 @@ def test_build_record_surfaces_rubric_when_present(tmp_path: Path) -> None:
 def test_build_record_omits_rubric_when_absent(tmp_path: Path) -> None:
     row = {"session_id": "abc", "archive_path": str(tmp_path), "outcome_labels": "[]"}
     record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={})
+    assert record is not None
     assert "rubric" not in record
     assert "posterior_source" not in record
 
@@ -271,4 +282,5 @@ def test_build_record_propagates_local_branch_source(tmp_path: Path) -> None:
            "outcome_labels": '["accepted"]'}
     annotation = {"rubric_json": '{"posterior_source": "local_branch"}'}
     record = _build_record(row, _MIN_TRAJECTORY, stack="python", manifest={}, annotation=annotation)
+    assert record is not None
     assert record["posterior_source"] == "local_branch"

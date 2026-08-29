@@ -37,6 +37,7 @@ The module is intentionally dependency-free: stdlib only.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -48,6 +49,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Generator, Literal, overload
+from urllib.parse import urlparse
 
 _logger = logging.getLogger(__name__)
 
@@ -1692,7 +1694,11 @@ def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int 
     """
     proc = _run_git(repo, ["fetch", remote, refspec], timeout=timeout, retries=0)
     if proc.returncode != 0:
-        raise GitError(f"git fetch {remote} {refspec} failed in {repo}: {proc.stderr.strip()}")
+        from daydream.trajectory import redact_text
+
+        raise GitError(
+            f"git fetch {_safe_url_desc(remote)} {refspec} failed in {repo}: {redact_text(proc.stderr.strip())}"
+        )
 
 
 def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
@@ -1709,6 +1715,96 @@ def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
     proc = _run_git(repo, ["checkout", "--detach", sha], timeout=timeout, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git checkout --detach {sha} failed in {repo}: {proc.stderr.strip()}")
+
+
+def _safe_url_desc(url: str) -> str:
+    """Reduce a remote URL to a credential-free description (host/path).
+
+    Issue #981: error messages must never echo a URL that may carry userinfo
+    credentials. HTTP(S) URLs are reduced to ``host/path``; anything else
+    (local paths, scp-form remotes) passes through :func:`redact_text`.
+    """
+    from daydream.trajectory import redact_text
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return redact_text(url)
+    if parsed.scheme and parsed.hostname:
+        return f"{parsed.hostname}{parsed.path}"
+    return redact_text(url)
+
+
+def _run_clone(
+    remote_url: str, cmd: list[str], timeout: int, env: dict[str, str] | None = None
+) -> None:
+    """Run a prepared ``git clone`` argv and map failures to :class:`GitError`.
+
+    Shared by :func:`clone` and :func:`clone_with_token`, which differ only in
+    argv prefix and environment. ``env=None`` inherits the parent environment,
+    matching :func:`clone`'s current behavior.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+            cmd,  # noqa: S607 - git is a trusted command
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        from daydream.trajectory import redact_text
+
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {type(exc).__name__}: {redact_text(str(exc))}"
+        ) from exc
+    if proc.returncode != 0:
+        from daydream.trajectory import redact_text
+
+        raise GitError(
+            f"git clone {_safe_url_desc(remote_url)} failed: {redact_text(proc.stderr.strip())}"
+        )
+
+
+def clone_with_token(
+    remote_url: str,
+    target: Path,
+    token: str | None = None,
+    *,
+    blobless: bool = False,
+    timeout: int = 300,
+) -> None:
+    """Clone a reconstructed identity URL with optional out-of-band auth.
+
+    Issue #981: the URL must already be credential-free (a canonical HTTPS
+    identity like ``https://github.com/owner/repo``). When *token* is set,
+    auth is injected out-of-band via the git-config environment variables
+    (``GIT_CONFIG_*``) carrying the base64 ``Authorization`` header — never on
+    argv, in the URL, or in a config file. Without a token, plain clone
+    applies (ambient credential helper). ``GIT_TERMINAL_PROMPT=0`` fails
+    closed on auth errors instead of prompting.
+    """
+    cmd = ["git"]
+    env: dict[str, str] = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if token:
+        # Issue #981: auth travels out-of-band via git config environment
+        # variables, never on argv. The base64 Authorization header is
+        # trivially recoverable, so putting it on argv (via -c
+        # http.extraHeader) would leak the token; GIT_CONFIG_* keeps it out of
+        # the command line, honoring the contract that no token lands on argv.
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+            }
+        )
+    cmd.append("clone")
+    if blobless:
+        cmd.append("--filter=blob:none")
+    cmd += [remote_url, str(target)]
+    _run_clone(remote_url, cmd, timeout, env=env)
 
 
 def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int = 300) -> None:
@@ -1730,17 +1826,7 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int
     if blobless:
         cmd.append("--filter=blob:none")
     cmd += [remote_url, str(target)]
-    try:
-        proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            cmd,  # noqa: S607 - git is a trusted command
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(f"git clone {remote_url} failed: {type(exc).__name__}: {exc}") from exc
-    if proc.returncode != 0:
-        raise GitError(f"git clone {remote_url} failed: {proc.stderr.strip()}")
+    _run_clone(remote_url, cmd, timeout)
 
 
 def checkout_paths(repo: Path, paths: list[Path]) -> None:

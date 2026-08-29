@@ -523,6 +523,7 @@ def test_build_record_emits_posterior_discriminator_only_for_labeled(tmp_path: P
         reward=labeled_reward,
         composite_reward=labeled_composite,
     )
+    assert rec_labeled is not None
     intrinsic_reward, intrinsic_composite = _annotation_reward(_ann_with_intrinsic_reward_json(), "s")
     rec_intrinsic = _build_record(
         manifest_row,
@@ -532,6 +533,7 @@ def test_build_record_emits_posterior_discriminator_only_for_labeled(tmp_path: P
         reward=intrinsic_reward,
         composite_reward=intrinsic_composite,
     )
+    assert rec_intrinsic is not None
 
     assert "posterior_cost" in rec_labeled["reward"]
     assert "posterior_cost" not in rec_intrinsic.get("reward", {})
