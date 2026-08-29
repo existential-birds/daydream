@@ -339,12 +339,13 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
     """Read-only view of one case document and its per-candidate evidence.
 
     Returns the raw case dict where each candidate gains an in-memory (never
-    persisted) ``evidence`` sub-dict ``{kind, author, commit_id, resolved,
-    outdated}`` joined by ``source_id`` from the import file the case doc
-    references; a candidate whose ``source_id`` matches no evidence record has
-    no ``evidence`` key (absent, not ``None``). Additionally the case gains an
-    in-memory ``evidence`` list of every import evidence record (all kinds),
-    each augmented with a ``candidate_index``. A missing/unreadable import
+    persisted) ``evidence`` sub-dict ``{kind, author, commit_id,
+    authoring_commit_id, not_exact_reason, resolved, outdated}`` joined by
+    ``source_id`` from the import file the case doc references; a candidate
+    whose ``source_id`` matches no evidence record has no ``evidence`` key
+    (absent, not ``None``). Additionally the case gains an in-memory
+    ``evidence`` list of every import evidence record (all kinds), each
+    augmented with a ``candidate_index``. A missing/unreadable import
     file for a case that references it propagates the storage error.
     """
     raw = _load_case(root, case_id)
@@ -364,17 +365,29 @@ def _evidence_projection(
     """Read the import evidence once and join records by ``source_id``.
 
     Maps each evidence record's source_id to a read-only projection sub-dict
-    (never persisted). A case that references an import file that is
-    missing/unreadable raises the storage error — no projection is fabricated.
+    (never persisted): the observed ``commit_id`` stays explanatory, the strict
+    authoring commit comes from the record's ``authoring_anchor.commit_id``
+    (None on a fail-closed/missing anchor — never the re-anchored id), and the
+    candidate's ``not_exact_reason`` rides verbatim from the fixed closed set
+    (None for an exact-acceptable candidate). A case that references an import
+    file that is missing/unreadable raises the storage error — no projection
+    is fabricated.
     """
     source = raw.get("source") or {}
     import_file = source.get("import_file")
     if not import_file:
         return {}
     import_data = storage.load_json_strict(Path(root) / import_file)
+    candidate_reasons = {
+        c.get("source_id"): c.get("not_exact_reason")
+        for c in (raw.get("candidates") or [])
+        if c.get("source_id")
+    }
     projection: dict[str, dict[str, Any]] = {}
     for ev in import_data.get("evidence") or []:
         author = ev.get("author") or {}
+        anchor = ev.get("authoring_anchor")
+        anchor_commit = anchor.get("commit_id") if isinstance(anchor, dict) else None
         projection[ev["source_id"]] = {
             "kind": ev.get("kind"),
             "author": {
@@ -382,6 +395,8 @@ def _evidence_projection(
                 "type": author.get("type"),
             },
             "commit_id": ev.get("commit_id"),
+            "authoring_commit_id": anchor_commit,
+            "not_exact_reason": candidate_reasons.get(ev["source_id"]),
             "resolved": ev.get("resolved", False),
             "outdated": ev.get("outdated", False),
         }

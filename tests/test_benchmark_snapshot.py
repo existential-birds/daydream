@@ -133,6 +133,60 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     return str(bare), dev_tip, pr2_head
 
 
+def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
+    """Bare origin with a pure rename: main (authoring->rename) + refs/pull/1/head.
+
+    Commit 1 authors ``old.py``; commit 2 renames it to ``new.py`` via
+    ``git mv`` with no content change (a 100% rename). Returns
+    ``(bare, authoring_sha, head_sha)``.
+    """
+    repo = tmp_path / "rename_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
+    authoring_sha = _commit(repo, "author old.py")
+    _git(repo, "mv", "old.py", "new.py")
+    head_sha = _commit(repo, "rename old.py to new.py")
+
+    bare = tmp_path / "origin_rename.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    return str(bare), authoring_sha, head_sha
+
+
+def _seed_weird_byte_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
+    """Bare origin whose rename trace contains a non-UTF-8 pathname byte.
+
+    Commit 1 authors ``old.py`` (built via ``git mv`` only); commit 2 renames
+    the file to ``new.py`` and adds a second file whose name carries a raw
+    0xff byte (built at runtime via ``chr(0xDCFF)`` so the test source stays
+    plain UTF-8). The ``git diff --name-status -z -M`` stream between the two
+    commits therefore carries an undecodable byte in an ``A`` row, which
+    strict text-mode decoding cannot round-trip. Returns
+    ``(bare, authoring_sha, head_sha)``.
+    """
+    weird = "weird" + chr(0xDCFF) + ".txt"
+    repo = tmp_path / "weird_byte_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
+    authoring_sha = _commit(repo, "author old.py")
+    _git(repo, "mv", "old.py", "new.py")
+    _write(repo, weird, b"non-utf8 filename\n")
+    head_sha = _commit(repo, "rename old.py to new.py; add weird byte file")
+
+    bare = tmp_path / "origin_weird_byte.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    return str(bare), authoring_sha, head_sha
+
+
 # Deterministic SHAs/trees produced by ``_seed_origin`` (verified at seed build).
 _SHA_BASE1 = 'cae67fc3eb4c5d3dd3353ca7fb41f909837bf0a2'
 _SHA_BASE1_TREE = '2cd99bd20f7b3bac54014e20db1831d64b2c4fc9'
@@ -150,6 +204,173 @@ def _seed_base_tree() -> str:
 
 def _seed_head_tree() -> str:
     return '100c61d903cabfd705776af46193bc55d494940d'
+
+
+# ---------------------------------------------------------------------------
+# Task 0: spike -- the bare mirror retains full history for rename tracing
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) -> None:
+    """The shared bare mirror must support both rename-tracing primitives the
+    authoring-anchor derivation depends on: ``git log --follow`` (path history
+    across renames) and ``git diff -M`` (rename detection). This pins the spec's
+    Key Decision -- that a plain bare mirror (no shallow flags, plain fetch)
+    retains full history -- so the rename-derivation strategy is sound.
+
+    Spike finding (recorded task notes): in the bare mirror, ``git log`` with
+    no start commit resolves to the symbolic ``HEAD`` -> ``refs/heads/main``,
+    which is never fetched (the mirror carries only ``base_tip`` + pull/explicit
+    refs), so the dotless form fails with "current branch 'main' does not have
+    any commits yet". The decision survives: full history is retained, and
+    ``--follow`` works as long as the caller names a start commit -- which the
+    anchor helper always will (it traces from a concrete head/authoring SHA).
+    If either probe fails, mirror handling must be revised (or the decision
+    re-routed to the spec) before any anchor task runs.
+    """
+    from daydream.benchmark import snapshot as sn
+
+    origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    assert sn.rev_parse(m, "refs/pull/1/head") == head_sha
+
+    # (a) --follow (with an explicit start commit) must surface BOTH commits
+    # when tracing the pre-rename path -- the bare mirror retains full history.
+    traced = _git(m, "log", "--follow", "--format=%H", head_sha, "--", "old.py").splitlines()
+    assert authoring_sha in traced, f"authoring commit missing from log --follow: {traced}"
+    assert head_sha in traced, f"rename commit missing from log --follow: {traced}"
+    assert traced[0] == head_sha  # most recent commit first
+
+    # (b) diff -M must emit a pure rename record R100 old.py -> new.py.
+    statuses = _git(m, "diff", "--name-status", authoring_sha, head_sha, "-M")
+    assert "R100\told.py\tnew.py" in statuses, f"no R100 rename record in: {statuses!r}"
+
+
+def _seed_anchor_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str, str]:
+    """Bare origin with no renames: main (authoring->edit) + ``refs/pull/N/head``.
+
+    Commit 1 authors ``a.py``; commit 2 edits it in place (a plain ``M`` diff,
+    no rename records). Returns ``(bare, authoring_sha, head_sha)``.
+    """
+    repo = tmp_path / "anchor_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "a.py", "def a() -> int:\n    return 1\n")
+    authoring_sha = _commit(repo, "author a.py")
+    repo.joinpath("a.py").write_text("def a() -> int:\n    return 2\n")
+    _git(repo, "add", "a.py")
+    head_sha = _commit(repo, "edit a.py")
+
+    bare = tmp_path / "anchor_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/{pr}/head", check=False)
+    return str(bare), authoring_sha, head_sha
+
+
+def _seed_double_rename_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str, str]:
+    """Bare origin with two renames in one diff: main (authoring->rename) + PR ref.
+
+    Commit 1 authors ``old1.py`` and ``old2.py``; commit 2 renames both (via
+    ``git mv``, no content change) so ``git diff -M`` emits two ``R100`` rows.
+    Returns ``(bare, authoring_sha, head_sha)``.
+    """
+    repo = tmp_path / "dbl_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "old1.py", "def old1() -> int:\n    return 1\n")
+    _write(repo, "old2.py", "def old2() -> int:\n    return 2\n")
+    authoring_sha = _commit(repo, "author old1 old2")
+    _git(repo, "mv", "old1.py", "new1.py")
+    _git(repo, "mv", "old2.py", "new2.py")
+    head_sha = _commit(repo, "rename both")
+
+    bare = tmp_path / "dbl_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/{pr}/head", check=False)
+    return str(bare), authoring_sha, head_sha
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (plan): fail-closed authoring-path derivation over the pinned mirror
+# ---------------------------------------------------------------------------
+
+
+def test_derive_authoring_path_direct_hit(tmp_path: Path) -> None:
+    """A path that exists in the authoring tree derives to itself -- the
+    authoring commit is present and ``cat-file`` succeeds, so no rename trace
+    (and no ``mapped_sha`` consultation) is needed."""
+    from daydream.benchmark import snapshot
+
+    origin, authoring_sha, head_sha = _seed_anchor_origin(tmp_path)
+    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = snapshot.mirror(tmp_path)
+    assert snapshot.derive_authoring_path(m, authoring_sha, "a.py", head_sha) == "a.py"
+
+
+def test_derive_authoring_path_rename_traced(tmp_path: Path) -> None:
+    """A path absent from the authoring tree whose head name is the ``R`` dest
+    of a mirror rename trace resolves to the authoring-time (old) name."""
+    from daydream.benchmark import snapshot
+
+    origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
+    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = snapshot.mirror(tmp_path)
+    assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
+
+
+def test_derive_authoring_path_rename_trace_survives_non_utf8_paths(tmp_path: Path) -> None:
+    """A rename trace containing a non-UTF-8 pathname byte does not raise
+    UnicodeDecodeError: the ``-z`` output is captured as bytes and
+    surrogateescape-decoded (the git_ops.ls_files pattern), so an unrelated
+    undecodable path elsewhere in the traced authoring..mapped range cannot
+    abort derivation as a ValueError -- the trace still resolves the clean
+    UTF-8 rename and fail-closed handling stays authoritative."""
+    from daydream.benchmark import snapshot
+
+    origin, authoring_sha, head_sha = _seed_weird_byte_rename_origin(tmp_path)
+    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = snapshot.mirror(tmp_path)
+    # The traced path itself is clean UTF-8; the non-UTF-8 byte appears only as
+    # a ``D`` row in the whole-repo diff stream pre-fix would still crash it.
+    assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
+
+
+def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
+    """Derivation never guesses: a missing authoring commit is
+    ``history-unavailable``; a path that is neither in the authoring tree nor an
+    exact rename dest fails ``path-unavailable`` -- even when the diff does
+    contain rename candidates (the two-R-row diff must not be resolved by
+    picking among the candidates)."""
+    from daydream.benchmark import snapshot
+
+    anchor_origin, anchor_auth, anchor_head = _seed_anchor_origin(tmp_path, pr=1)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[anchor_head], origin_url=anchor_origin)
+    dbl_origin, dbl_auth, dbl_head = _seed_double_rename_origin(tmp_path, pr=3)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 3, explicit_shas=[dbl_head], origin_url=dbl_origin)
+    m = snapshot.mirror(tmp_path)
+
+    sha_absent = ("0" * 40, "a.py", anchor_head)  # (a) commit absent
+    sha_present = (anchor_auth, "missing.py", anchor_head)  # (b) no rename, no path
+    sha_ambiguous = (dbl_auth, "missing.py", dbl_head)  # (c) two R-candidates
+    for args, expected_reason in [
+        (sha_absent, "history-unavailable"),
+        (sha_present, "path-unavailable"),
+        (sha_ambiguous, "path-unavailable"),
+    ]:
+        with pytest.raises(snapshot.AnchorDerivationError) as exc:
+            snapshot.derive_authoring_path(m, *args)
+        assert expected_reason in str(exc.value)
 
 
 # ---------------------------------------------------------------------------

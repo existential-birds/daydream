@@ -132,6 +132,7 @@ def _seed_candidate(fake_gh: FakeGh, *, number: int = 101, head_sha: str) -> Non
         "original_commit_id": head_sha,
         "path": "feature.py",
         "line": 2,
+        "original_line": 2,
         "subject_type": "line",
         "side": "RIGHT",
         "in_reply_to_id": None,
@@ -851,6 +852,38 @@ def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path: Path,
     # no timestamps anywhere in any compiled file or lock
     lock_text = (ws / "harbor" / "benchmark.lock.json").read_text()
     assert "created_at" not in lock_text and "timestamp" not in lock_text
+
+
+def test_harbor_bytes_identical_under_anchor_metadata_change(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """Anchor metadata never reaches the compiled tree or the lock digest:
+    flipping only a persisted evidence record's authoring anchor (derived ->
+    fail-closed path-unavailable, nothing else) yields byte-identical Harbor
+    tree and lock. Harbor/build.py consumes case docs + curated findings, never
+    the import document's anchor fields -- this pins that boundary."""
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    case = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    import_path = ws / case["source"]["import_file"]
+    imp = storage.load_json_strict(import_path)
+    rec = next(e for e in imp["evidence"] if e.get("authoring_anchor"))
+    assert rec["authoring_anchor"]["status"] == "derived"
+
+    lock_a = build.compile_workspace(ws)
+    tree_a = _harbor_tree_bytes(ws)
+
+    # derived -> path-unavailable: flip the status AND unset the derived data
+    # fields (the schema's fail-closed shape), nothing else in the record.
+    rec["authoring_anchor"] = {
+        "version": 1, "status": "path-unavailable",
+        "commit_id": None, "path": None, "start_line": None, "end_line": None,
+    }
+    storage.atomic_write_json(import_path, imp)
+
+    lock_b = build.compile_workspace(ws)
+    tree_b = _harbor_tree_bytes(ws)
+    assert lock_a == lock_b and tree_a == tree_b
 
 
 def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path, fake_gh: FakeGh) -> None:

@@ -111,7 +111,10 @@ def render_case(case: dict[str, Any]) -> str:
     """Render a plain-text snapshot header + numbered evidence list.
 
     Every evidence entry shows its number, kind, author login (+ ``[bot]`` for a
-    bot), commit prefix, and — where the record carries one — its review
+    bot), the re-anchored ``commit_id`` prefix (labeled ``commit:``) and — where
+    the record carries a strict ``authoring_anchor`` — the authoring commit
+    prefix (labeled ``auth:``), the fixed ``not_exact_reason`` whenever exact
+    acceptance is unavailable, and — where the record carries one — its review
     ``state`` (e.g. ``APPROVED``/``COMMENTED``/``CHANGES_REQUESTED``), the
     ``path:line`` anchor, resolved/outdated markers, and a body preview (first
     ~120 chars). Candidate records additionally show their title. Sources from
@@ -157,9 +160,18 @@ def render_case(case: dict[str, Any]) -> str:
             markers += " [resolved]"
         if ev.get("outdated"):
             markers += " [outdated]"
+        authoring = ""
+        auth_anchor = ev.get("authoring_anchor")
+        if isinstance(auth_anchor, dict) and auth_anchor.get("commit_id"):
+            authoring = f" auth:{auth_anchor['commit_id'][:12]}"
+        reason = ""
+        if cand is not None and not cand.get("exact_acceptable"):
+            reason_tag = cand.get("not_exact_reason")
+            if reason_tag:
+                reason = f" [{reason_tag}]"
         preview = (ev.get("body") or "").replace("\n", " ")[:120]
         line_parts = [
-            f"  {i}. [{kind}] {login} {commit}{state_tag} {anchor}{markers}",
+            f"  {i}. [{kind}] {login} commit:{commit}{authoring}{reason}{state_tag} {anchor}{markers}",
             f"      {preview or '-'}",
         ]
         if cand is not None:

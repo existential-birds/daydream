@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+import daydream.benchmark.schema as schema
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
@@ -350,6 +351,56 @@ def test_evidence_requires_canonical_source_id_and_body_hash() -> None:
     e2["body_sha256"] = "zz"
     with pytest.raises(ValidationError):
         EvidenceRecord.model_validate(e2)
+
+
+def _anchor_payload(status: str, commit_id: str | None = "a" * 40) -> dict[str, Any]:
+    """An AuthoringAnchor payload with data fields set only for the derived status."""
+    if status == "derived":
+        return {
+            "version": 1,
+            "status": status,
+            "commit_id": commit_id,
+            "path": "a.py",
+            "start_line": 4,
+            "end_line": 5,
+        }
+    return {
+        "version": 1,
+        "status": status,
+        "commit_id": None,
+        "path": None,
+        "start_line": None,
+        "end_line": None,
+    }
+
+
+def test_evidence_record_accepts_authoring_anchor_and_original_start_line() -> None:
+    rec = EvidenceRecord.model_validate(_evidence("inline_comment", 7))
+    payload = rec.model_dump(mode="json")
+    payload["original_start_line"] = 4
+    payload["authoring_anchor"] = {
+        "version": 1,
+        "status": "derived",
+        "commit_id": "a" * 40,
+        "path": "a.py",
+        "start_line": 4,
+        "end_line": 5,
+    }
+    parsed = schema.EvidenceRecord.model_validate(payload)
+    assert parsed.original_start_line == 4
+    assert parsed.authoring_anchor is not None
+    assert parsed.authoring_anchor.path == "a.py"
+
+
+def test_authoring_anchor_fail_closed_statuses_validate() -> None:
+    for status in ("derived", "history-unavailable", "path-unavailable", "range-unavailable"):
+        payload = _anchor_payload(status)  # commit/path/lines None unless status == "derived"
+        anchor = schema.AuthoringAnchor.model_validate(payload)
+        assert anchor.status == status
+    with pytest.raises(ValidationError):
+        schema.AuthoringAnchor.model_validate(_anchor_payload("derived", commit_id=None))
+    with pytest.raises(ValidationError):
+        schema.AuthoringAnchor.model_validate({"version": 1, "status": "guessed"})
 
 
 def _valid_case_dict() -> dict[str, Any]:

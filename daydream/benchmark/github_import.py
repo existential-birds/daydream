@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
+from pydantic import ValidationError
 
 from daydream import git_ops
 from daydream.benchmark import curation as cu
@@ -482,6 +483,7 @@ def _evidence_from_inline(raw: dict[str, Any]) -> dict[str, Any]:
         "line": raw.get("line"),
         "start_line": raw.get("start_line"),
         "original_line": raw.get("original_line"),
+        "original_start_line": raw.get("original_start_line"),
         "thread_id": None,
         "review_id": str(raw["pull_request_review_id"]) if raw.get("pull_request_review_id") is not None else None,
         "reply_to_id": str(raw["in_reply_to_id"]) if raw.get("in_reply_to_id") is not None else None,
@@ -517,7 +519,8 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
       reviewThreads(first: 50, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id isResolved isOutdated subjectType path line originalLine side: diffSide startSide: startDiffSide
+          id isResolved isOutdated subjectType path line originalLine originalStartLine
+          side: diffSide startSide: startDiffSide
           comments(first: 100) {
             pageInfo { hasNextPage endCursor }
             nodes { id databaseId body author { login type: __typename } createdAt updatedAt url replyTo { id } }
@@ -562,6 +565,7 @@ def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> di
         "path": thread.get("path"),
         "line": thread.get("line"),
         "original_line": thread.get("originalLine"),
+        "original_start_line": thread.get("originalStartLine"),
         "resolved": bool(thread.get("isResolved", False)),
         "outdated": bool(thread.get("isOutdated", False)),
         "thread_id": thread.get("id"),
@@ -841,21 +845,62 @@ def _title_ok(title: str) -> bool:
 def _anchor_location(
     evidence: schema.EvidenceRecord,
 ) -> tuple[schema.Location | None, str | None]:
-    """Project a RIGHT-side inline anchor to a ``Location``, or the block reason.
+    """Project a RIGHT-side inline anchor exclusively from its authoring anchor.
 
-    Returns ``(location, None)`` on a usable anchor, or ``(None, reason)`` when
-    the anchor is unusable or the comment is not a right-side line anchor.
+    The strict versioned ``authoring_anchor`` (derived at case materialization
+    from the authenticated mirror) is the single source of the projected
+    ``Location``; the re-anchored observed fields (``path``/``start_line``/
+    ``line``/``original_path``) never feed it. Returns ``(location, None)`` on
+    a usable derived anchor, or ``(None, reason)`` from the fixed closed set
+    — ``side`` (LEFT/mixed-side), ``history-unavailable`` (no anchor ever
+    derived: import-only snapshot or a pre-anchor import), ``path-unavailable``
+    / ``range-unavailable`` (derivation failed closed on exactly that). A
+    locationless file-level comment returns ``(None, reason)`` too: its
+    location is always None, but exact acceptance is gated by the same
+    commit/anchor exactness as its line-level siblings — a missing anchor
+    fails closed to ``history-unavailable``, a fail-closed derivation to its
+    own status, and even a derived anchor cannot satisfy the exact-acceptance
+    "usable authoring location" requirement, so it is ``range-unavailable``.
     """
     if evidence.subject_type == "file":
-        return None, None
+        anchor = evidence.authoring_anchor
+        if anchor is None:
+            # No strict anchor: never trust GitHub's re-anchored fields. As
+            # with line comments, a missing anchor fails closed rather than
+            # projecting exact off an unverifiable position.
+            return None, "history-unavailable"
+        if anchor.status != "derived":
+            # 1:1 mapping of the fail-closed derivation status to the fixed
+            # reason, matching the line-level branch.
+            return None, anchor.status
+        # Derived but locationless: no authoring line range exists for a
+        # file-level comment, and inline exact acceptance requires a usable
+        # authoring location — stay edit-required.
+        return None, "range-unavailable"
     if evidence.side == "LEFT" or evidence.start_side == "LEFT":
         return None, "side"
-    path = evidence.original_path or evidence.path
-    start = evidence.start_line or evidence.line
-    end = evidence.line or evidence.start_line
-    if not path or start is None or end is None or start < 1 or end < start:
-        return None, "anchor"
-    return schema.Location(path=path, start_line=start, end_line=end), None
+    anchor = evidence.authoring_anchor
+    if anchor is None:
+        # No strict anchor: never trust GitHub's re-anchored fields. A missing
+        # anchor means the authoring history was never derived (no mirror) or
+        # does not exist in this import — fail closed to edit-required.
+        return None, "history-unavailable"
+    if anchor.status != "derived":
+        # 1:1 mapping of the fail-closed derivation status to the fixed reason.
+        return None, anchor.status
+    if (
+        anchor.start_line is None
+        or anchor.end_line is None
+        or anchor.start_line < 1
+        or anchor.end_line < anchor.start_line
+    ):
+        return None, "range-unavailable"
+    if anchor.path is None:
+        return None, "path-unavailable"
+    return (
+        schema.Location(path=anchor.path, start_line=anchor.start_line, end_line=anchor.end_line),
+        None,
+    )
 
 
 def _project_one(evidence: schema.EvidenceRecord, head_sha: str) -> schema.Candidate:
@@ -872,14 +917,26 @@ def _project_one(evidence: schema.EvidenceRecord, head_sha: str) -> schema.Candi
         if anchor_reason is not None:
             exact = False
             reason = anchor_reason
-    # review bodies are file-agnostic: no location, no side constraint
+        elif (
+            evidence.authoring_anchor is not None
+            and evidence.authoring_anchor.status == "derived"
+            and evidence.authoring_anchor.commit_id != head_sha
+        ):
+            # A derived anchor on any other commit means GitHub re-anchored
+            # the comment (its re-anchored ``commit_id`` may even equal the
+            # head). Exact acceptance is judged solely from the anchor.
+            exact = False
+            reason = "re-anchored"
+    elif evidence.commit_id != head_sha:
+        # review bodies are file-agnostic: no location, no side constraint,
+        # and their single submission commit_id (reviews expose no inline
+        # re-anchoring fields) still gates exact acceptance.
+        exact = False
+        reason = "commit"
 
     if not title_ok:
         exact = False
         reason = "title"
-    if evidence.commit_id != head_sha:
-        exact = False
-        reason = "commit"
     if evidence.outdated:
         exact = False
         reason = "outdated"
@@ -906,9 +963,19 @@ def project_candidates(
     Root inline comments with a non-empty body and ``COMMENTED`` /
     ``CHANGES_REQUESTED`` review bodies become candidates; pure approvals,
     replies, and conversation comments are retained as evidence only.
-    Projection never raises — an underivable title, a LEFT-side anchor, an
-    unusable anchor, an off-head commit, an outdated, or a dismissed record all
-    set ``exact_acceptable`` low with a ``not_exact_reason``.
+    Projection never raises — an underivable title, a LEFT-side anchor, a
+    missing or fail-closed authoring anchor, a re-anchored inline record,
+    an off-head review submission, an outdated, or a dismissed record all
+    set ``exact_acceptable`` low with a ``not_exact_reason`` from the fixed
+    closed set (``re-anchored``, ``history-unavailable``, ``path-unavailable``,
+    ``range-unavailable``, ``side``, ``title``, ``commit``, ``outdated``,
+    ``dismissed``). Inline exact acceptance derives solely from the authoring
+    anchor's commit matching *head_sha*; review bodies key off their
+    submission ``commit_id``. A locationless file-level comment is never
+    exactly acceptable: it gates on the same anchor exactness, projecting its
+    location as None and carrying the anchor's closed status
+    (``history-unavailable`` when no anchor ever derived, ``range-unavailable``
+    for a derived anchor that still offers no usable authoring location).
     """
     cands: list[schema.Candidate] = []
     for evidence in doc.evidence:
@@ -944,17 +1011,33 @@ def _evidence_projection_hash(rec: dict[str, Any]) -> str:
 
     One digest per physical evidence record over exactly the fields that feed
     candidate projection and the curated review surface: body sha, author
-    (login/type), commit anchors, path/line anchors, side, subject type,
+    (login/type), commit anchors, re-anchored path/line anchors, the strict
+    authoring anchor (version/status/commit/path/range), sides, subject type,
     reply status (replies are evidence, never candidates), resolution
     state, dismissal, and review state. Values use ``.get()``
     defaults (``False`` for booleans, ``None`` for optional fields, ``""`` for
     strings) so an absent pre-canonicalization key equals the canonical
     default. ``kind``/``source_id``/``database_id``/``url``/timestamps are
     excluded: they are format-drift/metadata-sensitive and must not flip the
-    signature.
+    signature. A pre-canonicalization record with no anchor key hashes like
+    the canonical ``authoring_anchor``-less default, so a pure format/metadata
+    change stays stable while a genuine anchor change flips the digest.
     """
     author_raw = rec.get("author")
     author = author_raw if isinstance(author_raw, dict) else {}
+    anchor_raw = rec.get("authoring_anchor")
+    anchor: dict[str, Any] | None
+    if isinstance(anchor_raw, dict):
+        anchor = {
+            "version": anchor_raw.get("version"),
+            "status": anchor_raw.get("status"),
+            "commit_id": anchor_raw.get("commit_id"),
+            "path": anchor_raw.get("path"),
+            "start_line": anchor_raw.get("start_line"),
+            "end_line": anchor_raw.get("end_line"),
+        }
+    else:
+        anchor = None
     values: dict[str, Any] = {
         "body_sha256": str(rec.get("body_sha256") or ""),
         "author.login": str(author.get("login") or ""),
@@ -966,6 +1049,8 @@ def _evidence_projection_hash(rec: dict[str, Any]) -> str:
         "line": rec.get("line"),
         "start_line": rec.get("start_line"),
         "original_line": rec.get("original_line"),
+        "original_start_line": rec.get("original_start_line"),
+        "authoring_anchor": anchor,
         "side": rec.get("side"),
         "start_side": rec.get("start_side"),
         "subject_type": rec.get("subject_type"),
@@ -979,7 +1064,11 @@ def _evidence_projection_hash(rec: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[int, str]]:
+def _evidence_signature_from_doc(
+    doc: schema.ImportDocument,
+    *,
+    downgrade_start_line: set[int] | None = None,
+) -> frozenset[tuple[int, str]]:
     """Projection signature: one ``(database_id, projection_hash)`` per evidence record.
 
     Keyed on the physical comment id rather than ``source_id`` so the refresh
@@ -997,11 +1086,33 @@ def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[
     change (a comment added/removed/edited, re-anchored, or re-resolved) still
     flips the digest. Deletion is carried by the set: a removed record's
     ``database_id`` simply disappears (no fallback hash).
+
+    *downgrade_start_line* names the database ids whose prior import predates
+    the ``original_start_line`` field (the key is absent from the persisted raw
+    dict, e.g. a legacy multi-line comment); for exactly those ids the fresh
+    canonical value is a pure schema-upgrade artifact, so the record is hashed
+    without the key — identical to the prior absent-key form — and the
+    one-time upgrade cannot flip the signature and stale curated cases.
     """
     return frozenset(
-        (e.database_id, _evidence_projection_hash(e.model_dump(mode="json")))
+        (e.database_id, _evidence_projection_hash(_signature_dict(e, downgrade_start_line=downgrade_start_line)))
         for e in doc.evidence
     )
+
+
+def _signature_dict(
+    e: schema.EvidenceRecord, *, downgrade_start_line: set[int] | None = None
+) -> dict[str, Any]:
+    """One record's projection-hash dict, schema-upgrade normalized.
+
+    Trades the canonical ``model_dump`` shape for one where ``original_start_line``
+    is dropped when the record's id is in *downgrade_start_line* (see
+    :func:`_evidence_signature_from_doc`) so legacy and fresh hashes agree.
+    """
+    rd = e.model_dump(mode="json")
+    if downgrade_start_line is not None and e.database_id in downgrade_start_line:
+        rd.pop("original_start_line", None)
+    return rd
 
 
 def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[int, str]]:
@@ -1017,6 +1128,54 @@ def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[int, st
         (int(e["database_id"]), _evidence_projection_hash(e))
         for e in raw.get("evidence", [])
     )
+
+
+def _backfill_prior_anchors(doc: schema.ImportDocument, prior_raw: dict[str, Any]) -> None:
+    """Restore the prior import's persisted authoring anchors onto a fresh doc.
+
+    ``fetch_and_normalize`` rebuilds every record from live GitHub, so an
+    authoring anchor exists only in the persisted import document -- a refresh
+    would otherwise compare an anchor-less fresh signature against the prior
+    record's anchored one and flip every previously-derived id, staling every
+    curated case that references it (the one-time anchor-era flip). Each fresh
+    root inline record copies the prior record's anchor for the same physical
+    comment (``database_id``) when one was persisted; a record the prior import
+    left anchor-less stays unset so the mirror derivation in
+    :func:`_derive_authoring_anchors` backfills exactly those (Task 7). The
+    physical comment id is unique per record on both sides; a pre-canonical
+    duplicate may appear twice for one id, and the first anchor-bearing copy
+    wins -- the REST copy is the only kind that ever carries one. A record
+    whose authoring_anchor is present but invalid (or that lacks its
+    database_id) is corrupt prior state and raises
+    :class:`~daydream.benchmark.storage.WorkspaceCorrupt` -- the caller stages
+    a ledger failure instead of letting ValidationError/KeyError abort the run.
+    """
+    prior_by_id: dict[int, schema.AuthoringAnchor] = {}
+    for e in prior_raw.get("evidence", []):
+        anchor_raw = e.get("authoring_anchor")
+        if not isinstance(anchor_raw, dict):
+            continue
+        try:
+            db_id = int(e["database_id"])
+            if db_id not in prior_by_id:
+                prior_by_id[db_id] = schema.AuthoringAnchor.model_validate(anchor_raw)
+        except (KeyError, ValidationError) as exc:
+            # A persisted evidence record whose authoring_anchor is present but
+            # invalid (or that lacks its database_id) is corrupt prior state:
+            # fail closed via the module's WorkspaceCorrupt convention (caught
+            # by the caller's WorkspaceError arm, which stages a ledger failure)
+            # instead of letting ValidationError/KeyError escape the run
+            # unhandled and crash the whole import.
+            raise storage.WorkspaceCorrupt(
+                "prior import evidence record has an invalid authoring_anchor"
+                " or a missing database_id"
+            ) from exc
+    for record in doc.evidence:
+        if record.kind != "inline_comment" or record.reply_to_id is not None:
+            continue
+        prior = prior_by_id.get(record.database_id)
+        if prior is not None and record.authoring_anchor is None:
+            record.authoring_anchor = prior
 
 
 def _task_input_signature_from_doc(doc: schema.ImportDocument) -> str:
@@ -1099,6 +1258,155 @@ def _referenced_evidence_ids(curation: dict[str, Any]) -> set[int]:
     return ids
 
 
+def _referenced_projection_changed(
+    prior: dict[str, Any],
+    prior_case_candidates: dict[str, dict[str, Any]],
+    fresh_candidates: list[schema.Candidate],
+) -> bool:
+    """True when a referenced candidate re-projected differently on refresh.
+
+    A preserved historical finding must keep byte-matching its candidate
+    projection (title/body/location) or the next validation raises. The
+    referenced-evidence *changed_ids* arm only catches projection changes
+    driven by raw evidence edits; a projection-basis change carries no raw
+    field flip: a record the prior import left anchor-less gains a
+    mirror-derived authoring anchor, and its ``Location`` switches from the
+    pre-anchor projection to the authoring-time one -- so it never enters
+    *changed_ids* and the stale gate would silently re-project under the
+    preserved curation. Compare each referenced candidate's persisted
+    ``Location`` with the freshly projected one (among the byte-match fields
+    the anchor derivation can only move the ``Location``); any change stales
+    the case like the raw-evidence arms. A referenced candidate that vanished
+    is a change too (the *changed_ids* arm already stales it; kept here so the
+    flag stays monotone).
+    """
+    referenced = _referenced_evidence_ids(prior)
+    if not referenced:
+        return False
+    fresh_by_source: dict[str, dict[str, Any]] = {
+        c.source_id: c.model_dump(mode="json") for c in fresh_candidates
+    }
+    for source_id, prior_candidate in prior_case_candidates.items():
+        if _referenced_evidence_id(source_id) not in referenced:
+            continue
+        fresh_candidate = fresh_by_source.get(source_id)
+        if fresh_candidate is None:
+            return True
+        if prior_candidate.get("location") != fresh_candidate.get("location"):
+            return True
+    return False
+
+
+def _anchor_fail_closed(
+    status: Literal["history-unavailable", "path-unavailable", "range-unavailable"],
+) -> schema.AuthoringAnchor:
+    """One fail-closed authoring anchor: the fixed status, and nothing else.
+
+    Every non-``derived`` status keeps all four data fields unset (the schema's
+    ``_derived_iff_populated`` invariant), so a closed anchor can never be
+    mistaken for a real authoring-time location.
+    """
+    return schema.AuthoringAnchor(
+        version=1, status=status, commit_id=None, path=None, start_line=None, end_line=None,
+    )
+
+
+def _derive_one_anchor(
+    record: schema.EvidenceRecord,
+    mirror_repo: Path,
+    head_sha: str,
+) -> schema.AuthoringAnchor:
+    """Derive one root inline record's strict authoring anchor, fail-closed.
+
+    An ``original_commit_id`` is traced through the pinned mirror via
+    :func:`daydream.benchmark.snapshot.derive_authoring_path` (the observed
+    path when it exists in the authoring tree, else the unique rename between
+    the authoring commit and the mapped head); every failure — a missing
+    authoring commit, an ambiguous rename trace, a missing or inverted
+    authoring range, a mirror-derived path the schema's relative-path rule
+    rejects, or a hard git failure — maps to a fixed closed status with all
+    data fields unset. Exactly one path may fill the anchor: a mirror-derived
+    one. The observed ``original_path`` is reclassified as observed data and
+    is never stored as the authoring path.
+    """
+    original_commit_id = record.original_commit_id
+    if original_commit_id is None:
+        return _anchor_fail_closed("history-unavailable")
+    start = record.original_start_line or record.original_line
+    end = record.original_line
+    if start is None or end is None:
+        return _anchor_fail_closed("range-unavailable")
+    if start > end:
+        # GitHub does not guarantee the authoring range ordering; the schema's
+        # ``_derived_iff_populated`` validator rejects an inverted span, so
+        # fail this record closed to its existing fixed status instead of
+        # letting a ValidationError escape and abort the whole import run.
+        return _anchor_fail_closed("range-unavailable")
+    path = record.path or record.original_path
+    if path is None:
+        return _anchor_fail_closed("path-unavailable")
+    try:
+        authoring_path = snapshot.derive_authoring_path(
+            mirror_repo, original_commit_id, path, head_sha
+        )
+    except snapshot.AnchorDerivationError as exc:
+        # The closed reason rides on the exception; anything else is history.
+        if exc.reason == "path-unavailable":
+            return _anchor_fail_closed("path-unavailable")
+        return _anchor_fail_closed("history-unavailable")
+    except git_ops.GitError:
+        # A hard git failure (subprocess/OS-level, e.g. a rename-trace diff
+        # timeout) fails the anchor closed rather than aborting the import.
+        return _anchor_fail_closed("history-unavailable")
+    try:
+        return schema.AuthoringAnchor(
+            version=1, status="derived", commit_id=original_commit_id,
+            path=authoring_path, start_line=start, end_line=end,
+        )
+    except ValidationError:
+        # The observed original_* fields already validated (per-field >= 1 and
+        # the ordering guard above); the mirror-derived authoring_path is the
+        # only remaining input the shared relative-path rule can reject (git
+        # permits filenames it forbids, e.g. ``:``). Fail this record closed
+        # rather than aborting the import run: an anchor failure never kills
+        # the import.
+        return _anchor_fail_closed("path-unavailable")
+
+
+def _derive_authoring_anchors(
+    doc: schema.ImportDocument,
+    mirror_repo: Path,
+    head_sha: str,
+    changed_ids: set[int] | None = None,
+) -> None:
+    """Derive (or fail closed) the authoring anchor of every root inline record.
+
+    Called once per materialized head, immediately before candidate projection
+    and only when the freeze mirror is available: the same mirror-derived
+    anchor the projection consumes (Task 5) is what the caller persists onto
+    the import document. A record that already carries an anchor (restored by
+    :func:`_backfill_prior_anchors` from the prior import document) keeps it —
+    refresh backfills only records that are missing one (Task 7), so the
+    persisted anchor is stable across refreshes and a restored anchor never
+    re-stales curated cases on its own (it re-produces the identical candidate
+    ``Location``) — except a record whose ``database_id`` sits in *changed_ids*
+    (its projection hash flipped against the prior import, a genuine
+    content/anchor edit): that record is re-derived so a stale anchor cannot
+    linger on changed evidence. A record that genuinely gains its first anchor
+    here re-projects its candidate differently; the per-case stale gate
+    surfaces that via :func:`_referenced_projection_changed` instead of
+    silently re-projecting preserved curation. Replies are evidence (never
+    candidates), so they carry no anchor.
+    """
+    for record in doc.evidence:
+        if record.kind != "inline_comment" or record.reply_to_id is not None:
+            continue
+        if record.authoring_anchor is None or (
+            changed_ids is not None and record.database_id in changed_ids
+        ):
+            record.authoring_anchor = _derive_one_anchor(record, mirror_repo, head_sha)
+
+
 def _case_materialize(
     doc: schema.ImportDocument,
     number: int,
@@ -1110,6 +1418,7 @@ def _case_materialize(
     repo_slug: str = "",
     origin_url: str | None = None,
     prior_curations: dict[str, dict[str, Any]] | None = None,
+    prior_candidates: dict[str, dict[str, dict[str, Any]]] | None = None,
     prior_pinned: dict[str, str] | None = None,
     prior_policy: dict[str, str] | None = None,
     changed_ids: set[int] | None = None,
@@ -1126,10 +1435,18 @@ def _case_materialize(
     import with no prior ``final_pr_head`` pin uses the live
     ``pull_request.head.sha``. When a prior curated case exists, its curation
     is carried over; it is flipped to ``stale`` with attestation cleared iff
-    *task_input_changed* (PR-wide) or its own referenced evidence ids
-    intersect *changed_ids* (a referenced record changed or disappeared).
-    An unreferenced evidence change never stales it and an untouched PR keeps
-    it ready — findings/exclusions are never overwritten by refresh. A freeze
+    *task_input_changed* (PR-wide), a referenced candidate's ``Location``
+    changed on re-projection (*prior_candidates* — the projection-basis arm:
+    a mirror-derived authoring anchor re-projects a record the prior import
+    left anchor-less, a change no raw field carries into *changed_ids*), or
+    its own referenced evidence ids intersect *changed_ids* (a referenced
+    record changed or disappeared). An unreferenced evidence change never
+    stales it and an untouched PR keeps it ready — findings/exclusions are
+    never overwritten by refresh. On
+    refresh, evidence records the prior import left anchor-less are backfilled
+    with mirror-derived authoring anchors (or a fail-closed status) against
+    the same pinned head — records already carrying a restored anchor keep it
+    unless a genuine edit flipped their projection signature. A freeze
     of an existing ``ready|stale`` case that comes back ``unreplayable`` (the
     pinned head became unreachable after a force-push/rebased branch) raises
     :class:`~daydream.git_ops.GitError` instead of writing an unreplayable
@@ -1155,7 +1472,6 @@ def _case_materialize(
             continue
         seen.add(head_sha)
         case_id = schema.case_id_for(number, head_sha)
-        candidates = project_candidates(doc, head_sha)
         curation: dict[str, Any] = {
             "state": "draft",
             "snapshot_attested": False,
@@ -1166,16 +1482,7 @@ def _case_materialize(
             "case_exclusion": None,
         }
         if prior_curations and case_id in prior_curations:
-            prior = prior_curations[case_id]
-            curation = dict(prior)
-            should_stale = task_input_changed or (
-                changed_ids is not None
-                and bool(_referenced_evidence_ids(prior) & changed_ids)
-            )
-            if should_stale and prior.get("state") in ("ready", "stale"):
-                curation["state"] = "stale"
-                curation["snapshot_attested"] = False
-                cu._invalidate_task_spec_approval(curation)
+            curation = dict(prior_curations[case_id])
         if root is not None and origin_url is not None and base_sha and head_sha:
             policy = "final_pr_head" if head_token == "final" else "explicit_head"
             snapshot_doc, bundle_bytes = snapshot.freeze_one(
@@ -1206,7 +1513,18 @@ def _case_materialize(
                     f"PR {number} freeze of curated case {case_id} is unreplayable "
                     f"({error.get('reason')}): {error.get('detail')}"
                 )
+            # Strict authoring anchors: derived from the authenticated mirror
+            # (the same one the freeze just populated) immediately before
+            # projection. Derivation mutates the typed doc's evidence records
+            # in place and always fails closed — an anchor can never be
+            # guessed, and an anchor failure never kills the import. On
+            # refresh, records whose prior anchor was restored by the caller
+            # keep it (only missing anchors are backfilled), unless their id is
+            # in *changed_ids* (a genuine edit re-derives its anchor).
+            _derive_authoring_anchors(doc, snapshot.mirror(root), head_sha, changed_ids)
         else:
+            # Imported status: no freeze, no mirror — anchors stay unset
+            # (projection treats the missing anchor as not-exact, Task 5).
             snapshot_doc = {
                 "status": "imported",
                 "policy": "final_pr_head" if head_token == "final" else "explicit_head",
@@ -1218,6 +1536,34 @@ def _case_materialize(
                 "original_head_sha": head_sha,
                 "error": None,
             }
+        # Projection runs after the freeze branch so per-head candidates
+        # consume the derived authoring anchors (or their absence, closed).
+        candidates = project_candidates(doc, head_sha)
+        if prior_curations and case_id in prior_curations:
+            prior = prior_curations[case_id]
+            # The stale gate runs after projection so its third arm can see
+            # the derived projections. Three independent signals: the PR-wide
+            # task-input arm (title/body/base/head — refresh only), the
+            # referenced-evidence arm (database_ids whose projection hash
+            # changed or disappeared — refresh AND plain re-import), and the
+            # projection-basis arm: a record the prior import left anchor-less
+            # gains a mirror-derived anchor here, which re-projects its
+            # Location from the authoring-time fields — a change no raw field
+            # carries, so it never enters changed_ids, while a preserved
+            # historical finding byte-matching the newly projected candidate
+            # now fails. Feed that derivation-induced re-projection into the
+            # stale gate rather than silently carrying preserved curation over
+            # an invalidated candidate basis.
+            should_stale = task_input_changed or _referenced_projection_changed(
+                prior, (prior_candidates or {}).get(case_id, {}), candidates
+            ) or (
+                changed_ids is not None
+                and bool(_referenced_evidence_ids(prior) & changed_ids)
+            )
+            if should_stale and prior.get("state") in ("ready", "stale"):
+                curation["state"] = "stale"
+                curation["snapshot_attested"] = False
+                cu._invalidate_task_spec_approval(curation)
         case_doc: dict[str, Any] = {
             "schema_version": 2,
             "case_id": case_id,
@@ -1364,22 +1710,25 @@ def _prior_import_state(
     frozenset[tuple[int, str]] | None,
     str | None,
     dict[str, dict[str, Any]],
+    dict[str, dict[str, dict[str, Any]]],
     str,
     dict[str, str],
     dict[str, str],
     list[str],
 ]:
-    """Prior import signatures, curations, path, pins, policies, and heads.
+    """Prior import signatures, curations, candidates, path, pins, policies, heads.
 
     Returns the prior evidence signature, task-input signature, per-case
-    curations, the import path, each prior case's pinned
-    ``snapshot.original_head_sha`` (``prior_pinned``), each prior case's
-    ``snapshot.policy`` (``prior_policy``), and the prior ledger entry's
-    ``requested_heads``. A missing prior state (no ``fetched`` ledger entry, or
-    no persisted import/case to read) yields ``None`` for both signatures,
-    empty curations/pins/policies/heads, and the default import path — the
-    normal first-run path. A *present-but-corrupt* prior import or curation
-    file is fatal: :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
+    curations, per-case projected candidates (``prior_candidates``:
+    case_id -> source_id -> candidate dict — the candidate basis the prior
+    curation's findings/exclusions were validated against), the import path,
+    each prior case's pinned ``snapshot.original_head_sha`` (``prior_pinned``),
+    each prior case's ``snapshot.policy`` (``prior_policy``), and the prior
+    ledger entry's ``requested_heads``. A missing prior state (no ``fetched``
+    ledger entry, or no persisted import/case to read) yields ``None`` for
+    both signatures, empty curations/candidates/pins/policies/heads, and the
+    default import path — the normal first-run path. A *present-but-corrupt*
+    prior import or curation file is fatal: :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
     from the strict loaders propagates so a refresh fails before any network
     fetch or mutation, never silently healing corrupt prior state to
     ``None``/``draft``. A ``ready``/``stale`` prior case missing its pinned
@@ -1390,6 +1739,7 @@ def _prior_import_state(
     prior_sig: frozenset[tuple[int, str]] | None = None
     prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
+    prior_candidates: dict[str, dict[str, dict[str, Any]]] = {}
     prior_pinned: dict[str, str] = {}
     prior_policy: dict[str, str] = {}
     prior_requested_heads: list[str] = list(existing.get("requested_heads", [])) if existing else []
@@ -1418,6 +1768,13 @@ def _prior_import_state(
             cur = case_raw.get("curation")
             if isinstance(cur, dict):
                 prior_curations[case_id] = cur
+            candidates = case_raw.get("candidates")
+            if isinstance(candidates, list):
+                prior_candidates[case_id] = {
+                    c["source_id"]: c
+                    for c in candidates
+                    if isinstance(c, dict) and c.get("source_id")
+                }
             snapshot = case_raw.get("snapshot") or {}
             original_head_sha = snapshot.get("original_head_sha")
             if (
@@ -1440,6 +1797,7 @@ def _prior_import_state(
         prior_sig,
         prior_task_sig,
         prior_curations,
+        prior_candidates,
         import_file,
         prior_pinned,
         prior_policy,
@@ -1477,9 +1835,22 @@ def _import_one_pr(
     refresh: bool,
     origin_url: str | None = None,
 ) -> int:
-    """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
-    prior_sig, prior_task_sig, prior_curations, import_file, prior_pinned, prior_policy, \
-        prior_requested_heads = _prior_import_state(root, raw, number)
+    """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure.
+
+    On refresh/re-import the persisted authoring anchors are backfilled onto
+    the freshly fetched doc before the staleness comparison, so an anchor-era
+    refresh neither stales curated cases on the one-time anchor backfill nor
+    re-derives anchors the prior import already settled. Evidence records the
+    prior import left anchor-less gain derived anchors (or a fail-closed
+    status) whenever the freeze mirror is available — never guessed, never
+    silently left exact. A record whose derived anchor re-projects its
+    candidate differently than the prior import's candidate flips its curated
+    case stale via the projection-basis arm in :func:`_case_materialize`, so
+    refresh never silently re-projects preserved curation onto a candidate
+    basis the findings no longer byte-match.
+    """
+    prior_sig, prior_task_sig, prior_curations, prior_candidates, import_file, prior_pinned, \
+        prior_policy, prior_requested_heads = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
         # Head-immutable task input: an existing final_pr_head case pins the
@@ -1490,11 +1861,30 @@ def _import_one_pr(
         pinned = _pinned_head_sha(prior_policy, prior_pinned)
         if pinned is not None:
             doc.pull_request.head.sha = pinned
-        # Two independent stale signals: the per-case referenced-evidence arm
-        # (database_ids whose projection hash changed or disappeared — runs on
-        # refresh AND plain re-import) and the PR-wide task-input arm (the
-        # title/body/base/head a reviewer was shown — refresh only). A
-        # metadata-only change updates checksums without staling.
+        # Anchor backfill for refresh/re-import: fetch_and_normalize rebuilds
+        # every record from live GitHub, so a persisted authoring anchor exists
+        # only on the prior import document. Restore those anchors onto the
+        # fresh doc BEFORE the projection-signature comparison — the anchor
+        # fields are in the projection whitelist, and comparing an anchor-less
+        # fresh signature against an anchored prior one would flip every
+        # previously-derived id and stale every curated case that references
+        # it. Records the prior import left anchor-less stay unset;
+        # _case_materialize then derives exactly those (plus genuinely changed
+        # ids) when the mirror is available.
+        prior_raw: dict[str, Any] | None = None
+        if prior_sig is not None:
+            prior_raw = storage.load_json_strict(
+                storage.resolve_authoring_path(root, import_file)
+            )
+            _backfill_prior_anchors(doc, prior_raw)
+        # Two independent stale signals computed here: the per-case
+        # referenced-evidence arm (database_ids whose projection hash changed
+        # or disappeared — runs on refresh AND plain re-import) and the
+        # PR-wide task-input arm (the title/body/base/head a reviewer was
+        # shown — refresh only). A third, per-case projection-basis arm fires
+        # in _case_materialize when a derived authoring anchor re-projects a
+        # referenced candidate differently (see _referenced_projection_changed).
+        # A metadata-only change updates checksums without staling.
         task_input_changed = (
             refresh
             and prior_task_sig is not None
@@ -1527,7 +1917,23 @@ def _import_one_pr(
             for db_id, proj_hash in prior_sig:
                 prior_by_id.setdefault(db_id, set()).add(proj_hash)
             new_by_id: dict[int, set[str]] = {}
-            for db_id, proj_hash in _evidence_signature_from_doc(doc):
+            # One-time schema-era format upgrade: prior files written before
+            # the authoring-range field existed persist no ``original_start_line``
+            # key, while the canonical dump now carries a real value (e.g. 4 on
+            # a multi-line comment). Hash the fresh side as if the field were
+            # absent for exactly those ids so the upgrade cannot flip the
+            # signature and stale curated cases referencing the record (the
+            # anchor backfill covers the anchor field; this covers the raw
+            # authoring-range field the anchor backfill does not restore).
+            assert prior_raw is not None  # loaded above whenever prior_sig is not None
+            legacy_without_start_line: set[int] = {
+                int(e["database_id"])
+                for e in prior_raw.get("evidence", [])
+                if "original_start_line" not in e
+            }
+            for db_id, proj_hash in _evidence_signature_from_doc(
+                doc, downgrade_start_line=legacy_without_start_line
+            ):
                 new_by_id.setdefault(db_id, set()).add(proj_hash)
             changed_ids = {
                 db_id
@@ -1535,6 +1941,11 @@ def _import_one_pr(
                 if db_id not in new_by_id
                 or not (new_by_id[db_id] <= prior_by_id.get(db_id, set()))
             }
+        # The digest the materializer stamps into every case's source block is
+        # computed here, before materialization mutates the doc. The persisted
+        # import document is re-serialized afterwards so the derived authoring
+        # anchors land on disk, and the ledger + case source blocks are
+        # re-stamped to one digest over those final bytes.
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
         # Refresh/re-import never orphans a previously pinned case: materialize
@@ -1546,10 +1957,21 @@ def _import_one_pr(
         cases, bundle_rels = _case_materialize(
             doc, number, materialize_heads, import_file, import_sha256,
             root=root, repo_slug=repo, origin_url=origin_url,
-            prior_curations=prior_curations,
+            prior_curations=prior_curations, prior_candidates=prior_candidates,
             prior_pinned=prior_pinned, prior_policy=prior_policy,
             changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
+        # Re-serialize the mutated doc (authoring anchors derived on the typed
+        # evidence records during materialization), recompute the fetch payload
+        # digest over the same blocks, and keep every digest in lockstep.
+        final_doc = doc.model_dump(mode="json")
+        doc.fetch.payload_sha256 = _payload_sha256(
+            {k: final_doc[k] for k in ("schema_version", "repository", "pull_request", "evidence")}
+        )
+        import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
+        import_sha256 = hashlib.sha256(import_bytes).hexdigest()
+        for _, _, case_doc in cases:
+            case_doc["source"]["import_sha256"] = import_sha256
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
             tx.stage(import_file, import_bytes)
             for rel, content in bundle_rels:
