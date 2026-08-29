@@ -139,6 +139,25 @@ def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path: Path) -
     assert m["micro_precision"] == 1.0 and m["micro_recall"] == 2.0 / 3.0
 
 
+def test_range_distance_cannot_drift_from_hunk_index() -> None:
+    """The verifier's private range_distance copy must stay semantically
+    byte-locked to daydream.hunk_index.range_distance (issue #971 R8)."""
+    import inspect
+
+    from daydream import hunk_index
+    from daydream.benchmark.harbor import verifier_core as vc
+    host = inspect.getsource(hunk_index.range_distance)
+    # the copy is private and stdlib-only; assert the arithmetic body matches
+    for line in ("if start <= line <= end:", "if line < start:", "return start - line"):
+        assert line in host and line in inspect.getsource(vc._range_distance)
+    assert "import daydream" not in inspect.getsource(vc)
+
+
+def test_location_tolerance_meets_floor() -> None:
+    from daydream.benchmark.harbor import verifier_core as vc
+    assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
+
+
 def test_metric_helper_functions_cannot_drift_from_verifier_core() -> None:
     """The metric.py template's helper functions must stay byte-identical to verifier_core.
 

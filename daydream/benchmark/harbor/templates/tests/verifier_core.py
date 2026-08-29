@@ -12,6 +12,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Final
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_CANDIDATE_FINDINGS = 100
@@ -467,6 +468,33 @@ class Reward:
             "clean_pass": self.clean_pass,
             "verifier_error": self.verifier_error,
         }
+
+
+LOCATION_TOLERANCE: Final = 3
+# Minimum boundary tolerance for location-tier classification (issue #971 R2):
+# below 3 lines the "near" tier would measure the posting snapper's behavior,
+# not the reviewer's actual localization accuracy.
+
+_RANGE_DISTANCE_DOC = """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
+
+``0`` when ``line`` lies inside the range, else the distance to the nearer
+boundary (``start`` when ``line`` is below it, ``end`` when above).
+
+Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
+(the source of truth); policed against drift by
+``tests/test_benchmark_verifier_assets.py`` (issue #971 R8).
+"""
+
+
+def _range_distance(line: int, start: int, end: int) -> int:
+    if start <= line <= end:
+        return 0
+    if line < start:
+        return start - line
+    return line - end
+
+
+_range_distance.__doc__ = _RANGE_DISTANCE_DOC
 
 
 def _f1(precision: float, recall: float) -> float:
