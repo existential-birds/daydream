@@ -12,8 +12,6 @@ schemas plus their invariants:
   evidence + candidate records with stable ``github:<kind>:<id>`` source IDs.
 
 Every model uses ``extra="forbid"`` so an unknown field is a schema violation.
-Later tasks add derived workspace state, transitions, and the ``0/2/1``
-classifier.
 """
 
 from __future__ import annotations

@@ -808,7 +808,7 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
 # contested findings *before* the merge, plus a per-file ``verdicts`` array
 # (issue #742) so a file marked ``clean`` in the review is distinguishable from
 # one never reviewed (``not_reviewed``). The shared FEEDBACK_SCHEMA stays
-# severity-free (the shallow loop and PR-feedback parse paths never need it);
+# severity-free (the shallow parse path never needs it);
 # only deep-mode's pre-merge per-stack parse opts into this richer record shape.
 #
 # Derived from FEEDBACK_SCHEMA to avoid silent drift: we deep-copy the base
@@ -1733,8 +1733,8 @@ async def phase_parse_feedback(
     # Per-file verdict surface (issue #742). Deep-mode's per-stack parse emits
     # the schema-required ``verdicts`` array, so the prompt must teach the
     # verdict-line shape and its sub-fields; otherwise the strict-mode model
-    # emits ``[]``/``lines_read: 0`` in production. Shallow / PR-feedback /
-    # sweep callers pass ``include_verdicts=False`` and get no verdict
+    # emits ``[]``/``lines_read: 0`` in production. Shallow / sweep callers
+    # pass ``include_verdicts=False`` and get no verdict
     # instruction, keeping their prompt byte-identical to prior behavior.
     verdict_line = (
         '{"path": "path/to/file.py", "lines_read": 42, '
@@ -1804,7 +1804,7 @@ async def phase_parse_feedback(
     feedback_items: list[dict[str, Any]] = raw_items if isinstance(raw_items, list) else []
 
     # Structural evidence gate (issue #227, AC3): the default parse path
-    # (shallow loop + PR-feedback ingestion, ``input_path is None``) never
+    # (the shallow loop, ``input_path is None``) never
     # produces merged-items.json, so it bypasses the gate in
     # ``_append_structural_and_write_merged``. Apply the same ``_is_evidenced``
     # drop the deep merge path uses, but ONLY here: the deep pre-merge

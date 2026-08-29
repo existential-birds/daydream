@@ -734,18 +734,6 @@ def _compute_diff_ref(cwd: Path) -> str:
     return "HEAD"
 
 
-def _get_head_sha(cwd: Path) -> str | None:
-    """Get the current HEAD commit SHA.
-
-    Returns:
-        The full SHA string, or None if the command fails.
-    """
-    try:
-        return git_ops.head_sha(cwd)
-    except GitError:
-        return None
-
-
 def _run_posts_to_github(config: RunConfig) -> bool:
     """Return whether the selected run can write to GitHub.
 

@@ -12,7 +12,7 @@ Public surface:
   stage, and records every call so tests can assert ordering, ``agents=``
   absence, and per-stack isolation.
 * ``install_stub_backend`` -- patch ``create_backend`` to return one stub
-  instance, with optional skill-availability / exploration pinning.
+  instance, with optional exploration pinning.
 * ``silence`` -- silence noise-only UI helpers in the deep orchestrator and
   phases (``prompts=False`` leaves the real prompt seam in place).
 * ``force_interactive`` -- pin a TTY stdin and unset ``CI`` so a test drives the

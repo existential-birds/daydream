@@ -90,7 +90,6 @@ def _append_ledger_run_raw(ws: Path, run_id: Any, *, job_dir: Any, state: Any, e
 
 
 # ---------------------------------------------------------------------------
-# Task 1: clean subcommand surface + --derived union
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +122,6 @@ def test_handle_clean_routes_to_clean_workspace(tmp_path: Path, monkeypatch: pyt
 
 
 # ---------------------------------------------------------------------------
-# Task 2: CleanReport + empty-selection no-op
 # ---------------------------------------------------------------------------
 
 
@@ -146,7 +144,6 @@ def test_clean_no_flags_deletes_nothing_and_preserves_gold(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Task 3: --cache
 # ---------------------------------------------------------------------------
 
 
@@ -175,7 +172,6 @@ def test_clean_cache_absent_target_is_already_clean(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 4: --trajectories
 # ---------------------------------------------------------------------------
 
 
@@ -209,7 +205,6 @@ def test_clean_trajectories_absent_dir_is_already_clean(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 5: --jobs (ledger-driven job-dir deletion + cleaned state)
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +235,6 @@ def test_clean_jobs_already_cleaned_run_is_noop(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 6: --jobs recorded-image removal via the docker_rm seam
 # ---------------------------------------------------------------------------
 
 
@@ -282,7 +276,6 @@ def test_clean_jobs_removed_true_env_skipped(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 7: partial Docker failure tolerance
 # ---------------------------------------------------------------------------
 
 
@@ -425,7 +418,6 @@ def test_clean_jobs_cleans_run_whose_job_dir_never_materialized(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# Task 8: containment + symlink-escape rejection (fails closed)
 # ---------------------------------------------------------------------------
 
 
@@ -453,7 +445,6 @@ def test_non_contained_ledger_job_dir_rejected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 9: --all --yes total-deletion gate
 # ---------------------------------------------------------------------------
 
 
@@ -520,7 +511,6 @@ def test_clean_all_preserves_curated_when_derived_stage_soft_fails(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
-# Task 11: acceptance matrix — locking, idempotency, derived-union
 # ---------------------------------------------------------------------------
 
 

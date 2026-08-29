@@ -10,10 +10,6 @@ The materialization is opportunistic: callers invoke it only when
 return ``None`` without mutating the manifest, so the caller can proceed
 with ``base_sha=None``.
 
-Spike rationale: a one-shot recoverability probe across the local archive
-(`.beagle/concepts/training-ready-corpus/spike-base-sha.md`) returned a
-100% resolve rate, which routed the design to lazy on-read materialization
-rather than a one-shot offline backfill.
 """
 
 from __future__ import annotations

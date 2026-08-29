@@ -134,7 +134,7 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tu
     _seed_git(repo, "push", "origin", "main:main")
     _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
     # Seed the preflight identity + repo-access responses (idempotent — this
-    # helper is used directly by the spike test, which does not call
+    # helper is used directly by this test, which does not call
     # ``_seed_preflight``), then re-seed the canned PR header so
     # base.sha/head.sha are the real origin SHAs.
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
@@ -200,7 +200,7 @@ def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -
     """Seed a frozen ``ready`` workspace with a mixed evidence set.
 
     Mirrors :func:`_seed_ready_case` but seeds three evidence kinds so a case
-    has exactly five evidence records (per the verified spike composition):
+    has exactly five evidence records:
     inline replies and pure approvals and conversation comments that are
     evidence-only, plus one exact candidate and one non-exact candidate.
     Returns ``(ws, case_id, head_sha)``.
@@ -655,7 +655,6 @@ def test_list_cases_evidence_count_counts_all_evidence(tmp_path: Path, fake_gh: 
 
 
 def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path: Path, fake_gh: FakeGh) -> None:
-    # numstat + evidence-count claims confirmed by tests/test_spike_issue775_reads.py
     from daydream.benchmark import curation as cu
     ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
 
@@ -793,7 +792,6 @@ def test_get_case_exposes_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) ->
 
 
 def test_get_case_attaches_evidence_projection(tmp_path: Path, fake_gh: FakeGh) -> None:
-    # evidence-join claim confirmed by tests/test_spike_issue775_reads.py
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
 

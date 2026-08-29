@@ -27,19 +27,9 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 from daydream.trajectory import DaydreamPhase, get_current_recorder
-from tests.contract._loaders import (
-    _MockAssistantMessage,
-    _MockResultMessage,
-    _MockTextBlock,
-    _MockThinkingBlock,
-    _MockToolResultBlock,
-    _MockToolUseBlock,
-    _MockUserMessage,
-)
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.scripts import (
     PhaseScripts,
-    build_claude_messages_for_phase,
     render_codex,
 )
 
@@ -101,59 +91,4 @@ def codex_subprocess_for_phases(phase_scripts: PhaseScripts) -> AbstractContextM
     return patch(
         "daydream.backends.codex.asyncio.create_subprocess_exec",
         side_effect=factory,
-    )
-
-def claude_messages_for_phases(phase_scripts: PhaseScripts) -> AbstractContextManager[Any]:
-    """Patch the Claude SDK client to serve per-phase message streams.
-
-    The SDK-patch analog of :func:`codex_subprocess_for_phases`, mirroring
-    ``tests/contract/_loaders.py:167-176``. The scripted client's
-    ``receive_response`` reads the firing phase via ``current_phase()`` and
-    replays that phase's synthesized Claude messages.
-
-    Args:
-        phase_scripts: ``{DaydreamPhase: script}`` map. Each script is rendered
-            to Claude SDK messages once, up front.
-
-    Raises:
-        AssertionError: When the firing phase is absent from *phase_scripts*.
-    """
-    rendered = {
-        phase: build_claude_messages_for_phase(script)
-        for phase, script in phase_scripts.items()
-    }
-
-    class _ScriptedClient:
-        def __init__(self, options: Any = None) -> None:
-            self.options = options
-
-        async def __aenter__(self) -> "_ScriptedClient":
-            return self
-
-        async def __aexit__(self, *_args: Any) -> None:
-            return None
-
-        async def query(self, prompt: str) -> None:
-            return None
-
-        async def receive_response(self) -> Any:
-            phase = _firing_phase()
-            if phase not in rendered:
-                raise AssertionError(
-                    f"Claude SDK fired for phase {phase.name} with no fixture in "
-                    f"phase_scripts (have: {sorted(p.name for p in rendered)})"
-                )
-            for message in rendered[phase]:
-                yield message
-
-    return patch.multiple(
-        "daydream.backends.claude",
-        ClaudeSDKClient=_ScriptedClient,
-        AssistantMessage=_MockAssistantMessage,
-        UserMessage=_MockUserMessage,
-        ResultMessage=_MockResultMessage,
-        TextBlock=_MockTextBlock,
-        ThinkingBlock=_MockThinkingBlock,
-        ToolUseBlock=_MockToolUseBlock,
-        ToolResultBlock=_MockToolResultBlock,
     )

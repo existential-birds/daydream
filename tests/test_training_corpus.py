@@ -196,8 +196,8 @@ def test_record_with_reward_validates_against_schema(tmp_path: Path, archive_dir
     jsonschema.validate(json.loads(out.read_text().splitlines()[0]), schema)
 
 
-# Migrated from tests/test_training_export.py — the §9 fixture matrix drives
-# run_build_corpus end-to-end against a real SQLite index (silver annotations seeded by build_fixture_archive).
+# The §9 fixture matrix drives run_build_corpus end-to-end against a real
+# SQLite index (silver annotations seeded by build_fixture_archive).
 def test_export_emits_valid_jsonl(tmp_path: Path) -> None:
     """Every emitted line is valid JSON and validates against schema v1."""
     build_fixture_archive(tmp_path)

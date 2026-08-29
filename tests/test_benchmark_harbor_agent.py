@@ -13,7 +13,7 @@ from tests.harness.fake_gh import FakeGh
 
 
 def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Task 0 spike: a per-case task.toml [environment].env block transmits the
+    """A per-case task.toml [environment].env block transmits the
     opaque case key through a real compile, stays byte-deterministic, and is
     accepted by Harbor's Task model (skip-guarded: Harbor is an optional extra)."""
     pytest.importorskip("harbor")
@@ -47,7 +47,6 @@ def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -
     assert Task(str(case), disable_verification=True) is not None
 
 # ---------------------------------------------------------------------------
-# Task 1: candidate findings builder (merged items -> findings)
 # ---------------------------------------------------------------------------
 
 
@@ -114,7 +113,6 @@ def test_build_candidate_findings_enforces_verifier_bounds_fail_closed() -> None
 
 
 # ---------------------------------------------------------------------------
-# Task 2: candidate artifact assembly + caps + atomic write
 # ---------------------------------------------------------------------------
 
 
@@ -153,12 +151,11 @@ def test_artifact_write_failure_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 3: render_task_toml — reviewer-only host policy + case env threading
 # ---------------------------------------------------------------------------
 
 
 def test_render_job_config_backend_passthrough_is_not_pi_locked(fake_gh: FakeGh) -> None:
-    """Task 6 should-have: the rendered job config passes DAYDREAM_REVIEW_BACKEND
+    """The rendered job config passes DAYDREAM_REVIEW_BACKEND
     through with a pi default; the value is a pi|claude selection validated
     downstream by the agent/entrypoint allowlist, not pi-locked here."""
     import yaml
@@ -220,7 +217,6 @@ def test_render_task_toml_keeps_agent_verifier_host_boundaries() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 4: entrypoint — controlled in-container runner
 # ---------------------------------------------------------------------------
 
 
@@ -278,7 +274,6 @@ def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi(
 
 
 # ---------------------------------------------------------------------------
-# Task 5: entrypoint — publish candidate artifact + failure modes
 # ---------------------------------------------------------------------------
 
 
@@ -333,7 +328,6 @@ def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 6: DaydreamReviewAgent — lifecycle + network-free setup
 # ---------------------------------------------------------------------------
 
 
@@ -444,7 +438,6 @@ def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 7: agent run() — Pi guarantee + allowlist child env + isolation
 # ---------------------------------------------------------------------------
 
 
@@ -585,7 +578,6 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: 
 
 
 # ---------------------------------------------------------------------------
-# Task 8: populate_context_post_run — trajectory metrics -> AgentContext
 # ---------------------------------------------------------------------------
 
 
@@ -653,7 +645,6 @@ def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path: Pa
 
 
 # ---------------------------------------------------------------------------
-# Task 9: validate --compiled agent-import preflight
 # ---------------------------------------------------------------------------
 
 
@@ -694,7 +685,6 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
 
 
 # ---------------------------------------------------------------------------
-# Task 10: end-to-end real-path test — exact findings + explicit empty review
 # ---------------------------------------------------------------------------
 
 
@@ -812,7 +802,6 @@ class Executed:
 
 
 # ---------------------------------------------------------------------------
-# Task 11: one local fake-backend Harbor task + make check
 # ---------------------------------------------------------------------------
 
 
@@ -829,7 +818,7 @@ def test_local_harbor_task_with_fake_backend(
     and the real runner + publisher complete to a candidate artifact -- so the
     env-injection, allowlist child-env traversal, and setup probe are all
     executed, not skipped. Only the in-docker nftables sandbox itself needs a
-    Harbor-capable runtime this host does not provide (plan §14); that half is
+    Harbor-capable runtime this host does not provide; that half is
     documented, but the runnable gate is a genuine executed pass."""
     import asyncio
     import importlib

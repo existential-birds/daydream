@@ -620,7 +620,7 @@ def _handle_benchmark_aggregate(args: argparse.Namespace) -> int:
 
 
 def _handle_benchmark_command(argv: list[str]) -> int:
-    """Handle ``daydream benchmark init|status|validate|build-harbor|upgrade|import-prs|curate``.
+    """Handle the ``daydream benchmark`` subcommands.
 
     Returns an exit code; ``daydream.cli.main`` translates it to a
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/

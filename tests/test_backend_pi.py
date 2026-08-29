@@ -1,4 +1,3 @@
-# tests/test_backend_pi.py
 """Tests for PiBackend with canned JSONL fixtures.
 
 Mirrors ``tests/test_backend_codex.py``: the subprocess is mocked via

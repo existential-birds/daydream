@@ -1,4 +1,3 @@
-# tests/test_cli_verbs.py
 """Tests for verb-first dispatch and the default-``review`` shim.
 
 ``_first_verb`` is the pure routing primitive: it inspects the leading token

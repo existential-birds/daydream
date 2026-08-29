@@ -1,4 +1,3 @@
-# tests/test_archive.py
 """Unit tests for the daydream.archive package.
 
 Covers git_context, manifest, index, and the top-level archive_run flow.
@@ -1854,7 +1853,7 @@ def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
 
 
 # Canonical UTC timestamp contract: one spelling at write time, strict as_of
-# validation at the entry boundary, and legacy "Z" rows purged at bootstrap.
+# validation at the entry boundary, and legacy "Z" rows preserved at bootstrap.
 
 
 def test_canonical_utc_iso_converts_and_rejects() -> None:
@@ -2260,18 +2259,12 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
 
 
 
-def _deep(tmp_path: Path, name: str, data: Any) -> None:
-    d = tmp_path / ".daydream" / "deep"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / name).write_text(json.dumps(data), encoding="utf-8")
-
-
 def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: MakeConfig) -> None:
     from daydream.archive import _archive_run_inner
     from tests.harness.trajectory import make_recorder
-    _deep(tmp_path, "merged-items.json", {"items": []})
-    _deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
-    _deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
     recorder = make_recorder(tmp_path)  # run_flow NORMAL; fake config with archive=False
     config = make_config(tmp_path, archive=False)
     _archive_run_inner(recorder=recorder, target_dir=tmp_path, config=config,

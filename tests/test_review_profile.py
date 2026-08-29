@@ -1,10 +1,4 @@
-"""Task 1 (R2): strict review-profile model + stage schema.
-
-Test-first per the implementation plan (tasks 1-13 of issue #885).
-This task: strict model with stage schema. Digests (R3), parse (R4),
-fail-closed validation (R3), host caps (R5), typed clone (R8), provenance (R9/R12),
-and Harbor delivery (R10/R11) land in later tasks — not here.
-"""
+"""Tests for the strict review-profile model and stage schema."""
 from pathlib import Path
 
 import pytest

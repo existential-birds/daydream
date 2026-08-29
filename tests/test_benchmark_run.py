@@ -1,7 +1,5 @@
 """Hermetic suite for the `daydream benchmark run` supervisor (issue #781).
 
-Task 1: parser + dispatch routing.
-Task 2: fail-closed preflight checks.
 """
 import json
 from pathlib import Path
@@ -113,7 +111,6 @@ def _seed_compiled_task(ws: Path, *, reviewer: Any, judge: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 1: parser + dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -148,7 +145,6 @@ def test_handle_benchmark_run_routes_to_supervisor(tmp_path: Path, monkeypatch: 
 
 
 # ---------------------------------------------------------------------------
-# Task 2: fail-closed preflight checks
 # ---------------------------------------------------------------------------
 
 
@@ -271,7 +267,6 @@ def test_preflight_uses_live_docker_capability_by_default(tmp_path: Path, monkey
 
 
 # ---------------------------------------------------------------------------
-# Task 3: pre-run spend summary
 # ---------------------------------------------------------------------------
 
 
@@ -291,7 +286,6 @@ def test_pre_run_summary_lists_all_required_fields(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 4: runtime/harbor.json cleanup ledger
 # ---------------------------------------------------------------------------
 
 
@@ -332,7 +326,6 @@ def test_ledger_rejects_non_contained_job_dir(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 5: Harbor result parsing + Oracle receipt
 # ---------------------------------------------------------------------------
 
 
@@ -348,7 +341,7 @@ def test_oracle_parse_success_writes_receipt(tmp_path: Path) -> None:
     job_dir = ws / "harbor" / "jobs" / "run-1"
     verifier = job_dir / "case-abc" / "verifier"
     verifier.mkdir(parents=True)
-    # spike-confirmed layout: reward.json lives under <trial>/verifier/
+    # reward.json lives under <trial>/verifier/
     (verifier / "reward.json").write_text(json.dumps(_score(1.0)))
     ok, _ = run_mod._parse_job_results(job_dir)
     assert ok is True
@@ -395,7 +388,6 @@ def test_oracle_no_receipt_on_unscored_task(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 6: default-run gate
 # ---------------------------------------------------------------------------
 
 
@@ -451,7 +443,6 @@ def test_gate_passes_when_inputs_match(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 7: run_run orchestrator + unrelated-CWD acceptance
 # ---------------------------------------------------------------------------
 
 
@@ -532,7 +523,6 @@ def test_run_refuses_without_yes_and_no_confirm(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 8: full acceptance matrix
 # ---------------------------------------------------------------------------
 
 
@@ -603,7 +593,6 @@ def test_default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
     assert not (ws / "runtime" / "harbor.json").exists()  # blocked run leaves no running entry
 
 # ---------------------------------------------------------------------------
-# Task 10: run supervisor persists trial environments into the cleanup ledger
 # ---------------------------------------------------------------------------
 
 
@@ -672,7 +661,6 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Task 10: provenance — reviewer effort and Daydream wheel digest
 # ---------------------------------------------------------------------------
 
 
@@ -703,7 +691,7 @@ def test_ledger_records_reviewer_effort_when_present(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 2 (issue #909): Oracle mapping decoupled from unverified calibration
+# Oracle mapping accepts the legacy calibration field without using it.
 # ---------------------------------------------------------------------------
 
 
