@@ -1246,11 +1246,6 @@ def test_gh_issue_list_returns_empty_on_failure(
     assert git_ops.gh_issue_list(repo) == []
 
 
-def test_wrong_branch_error_is_raisable() -> None:
-    with pytest.raises(WrongBranchError):
-        raise WrongBranchError("expected feat, got main")
-
-
 # --- gh wrappers (skipped when gh missing) ----------------------------------
 
 

@@ -58,7 +58,6 @@ def test_fixture_provenance_declares_unverified_llm_origin() -> None:
 
 
 def test_every_pair_renders_within_24kib() -> None:
-    # Uses the loader/fixture-load API built in Task 2; marker for the executor.
     from daydream.benchmark.harbor.calibrate import _load_fixture, _load_judge_template
     sr = _load_judge_template()
     for p in _load_fixture():

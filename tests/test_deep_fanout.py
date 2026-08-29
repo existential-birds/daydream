@@ -204,23 +204,13 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work: Ca
     assert "simulated react failure" in failures["react"]
 
 
-class _PiShapeBackend(ScriptedBackend):
-    """Mock backend that uses PiBackend's real skill formatter."""
-
-    def __init__(self) -> None:
-        super().__init__(events=_REVIEW_TURN)
-        from daydream.backends.pi import PiBackend
-
-        self._pi = PiBackend(model="glm-5.2")
-
-
 async def test_per_stack_prompts_are_skill_free(
     tmp_path: Path, make_work: Callable[..., WorkContext]
 ) -> None:
     """M12: built-in stacks dispatch native per-stack prompts with no /skill: token."""
     from daydream.config import STRUCTURE_STACK_NAME
 
-    backend = _PiShapeBackend()
+    backend = ScriptedBackend(events=_REVIEW_TURN)
     diff, intent, alts = _mk_context_files(tmp_path)
 
     # Every built-in stack dispatches through the native profile strategy.

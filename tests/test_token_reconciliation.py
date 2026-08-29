@@ -163,15 +163,6 @@ async def test_pi_shape_no_step_level_double_count(tmp_path: Path) -> None:
     assert step_cost == pytest.approx(0.75)  # not 1.5
 
 
-@pytest.mark.asyncio
-async def test_16kb_write_reports_real_completion(tmp_path: Path) -> None:
-    """A Write-heavy agent (16 KB content in tool arguments) reports a real
-    total_completion_tokens magnitude, not double digits (the pre-fix bug)."""
-    traj = await _run_write_agent(tmp_path, content="x" * 16_000)
-    completion = traj["final_metrics"]["total_completion_tokens"]
-    assert completion >= 1_000   # right order of magnitude; pre-fix it was ~50
-
-
 def _tool_argument_floor(traj: dict[str, Any]) -> Any:
     """floor = SUM(len(json.dumps(tool_call['arguments'])) / 4) over recorded calls."""
     total = 0

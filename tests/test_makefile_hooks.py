@@ -243,9 +243,6 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
         "GIT_COMMITTER_NAME": "daydream CI",
         "GIT_COMMITTER_EMAIL": "ci@daydream.invalid",
     }
-    # RL block starts after the docker pair: indices 9-13.
-    rl_argv = argvs[9:]
-    assert [r["cwd"] for r in recs if r["args"] in rl_argv] or True
     assert argvs[-5] == ["lock", "--check"]
     assert argvs[-4] == ["sync"]
     assert argvs[-3] == ["run", "ruff", "check", "."]

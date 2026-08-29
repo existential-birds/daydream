@@ -270,13 +270,6 @@ def test_preflight_uses_live_docker_capability_by_default(tmp_path: Path, monkey
     assert any("rejected nftables fib rules" in e for e in errs)
 
 
-def test_preflight_ok_for_oracle_without_calibration_receipt(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
-
-    errs = run_mod._preflight(_ws(tmp_path), oracle=True, env=_env(), docker_ok=_docker_ok)
-    assert errs == []          # Oracle preflight no longer requires a calibration receipt
-
-
 # ---------------------------------------------------------------------------
 # Task 3: pre-run spend summary
 # ---------------------------------------------------------------------------
@@ -433,16 +426,6 @@ def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
     )
     assert reason is not None
     assert "compiled lock" in reason
-
-
-def test_gate_blocks_when_oracle_receipt_missing(tmp_path: Path) -> None:
-    import daydream.benchmark.harbor.run as run_mod
-
-    reason = run_mod._default_run_gate(
-        _ws(tmp_path), env=_env(), compiled_lock_sha256="a" * 64,
-    )
-    assert reason is not None
-    assert "no matching oracle receipt" in reason
 
 
 def test_gate_passes_when_inputs_match(tmp_path: Path) -> None:

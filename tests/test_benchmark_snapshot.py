@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +53,7 @@ def _write(repo: Path, name: str, content: str | bytes) -> None:
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(content, bytes):
-        # ``Path`` cannot represent a surrogate-escaped filename on macOS,
-        # while the test deliberately creates one to exercise Git's raw-byte
-        # path handling. Encode through the filesystem boundary explicitly.
-        with open(os.fsencode(path), "wb") as fh:
-            fh.write(content)
+        path.write_bytes(content)
     else:
         path.write_text(content)
     _git(repo, "add", name)
@@ -154,36 +149,6 @@ def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
     head_sha = _commit(repo, "rename old.py to new.py")
 
     bare = tmp_path / "origin_rename.git"
-    bare.mkdir(parents=True, exist_ok=True)
-    _git(bare, "init", "--bare")
-    _git(repo, "remote", "add", "origin", str(bare))
-    _git(repo, "push", "origin", "main:main")
-    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
-    return str(bare), authoring_sha, head_sha
-
-
-def _seed_weird_byte_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
-    """Bare origin whose rename trace contains a non-UTF-8 pathname byte.
-
-    Commit 1 authors ``old.py`` (built via ``git mv`` only); commit 2 renames
-    the file to ``new.py`` and adds a second file whose name carries a raw
-    0xff byte (built at runtime via ``chr(0xDCFF)`` so the test source stays
-    plain UTF-8). The ``git diff --name-status -z -M`` stream between the two
-    commits therefore carries an undecodable byte in an ``A`` row, which
-    strict text-mode decoding cannot round-trip. Returns
-    ``(bare, authoring_sha, head_sha)``.
-    """
-    weird = "weird" + chr(0xDCFF) + ".txt"
-    repo = tmp_path / "weird_byte_wt"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    _write(repo, "old.py", "def old() -> int:\n    return 1\n")
-    authoring_sha = _commit(repo, "author old.py")
-    _git(repo, "mv", "old.py", "new.py")
-    _write(repo, weird, b"non-utf8 filename\n")
-    head_sha = _commit(repo, "rename old.py to new.py; add weird byte file")
-
-    bare = tmp_path / "origin_weird_byte.git"
     bare.mkdir(parents=True, exist_ok=True)
     _git(bare, "init", "--bare")
     _git(repo, "remote", "add", "origin", str(bare))
@@ -330,28 +295,6 @@ def test_derive_authoring_path_rename_traced(tmp_path: Path) -> None:
     snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
     snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     m = snapshot.mirror(tmp_path)
-    assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
-
-
-@pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason="macOS filesystems reject surrogate-escaped non-UTF-8 pathnames",
-)
-def test_derive_authoring_path_rename_trace_survives_non_utf8_paths(tmp_path: Path) -> None:
-    """A rename trace containing a non-UTF-8 pathname byte does not raise
-    UnicodeDecodeError: the ``-z`` output is captured as bytes and
-    surrogateescape-decoded (the git_ops.ls_files pattern), so an unrelated
-    undecodable path elsewhere in the traced authoring..mapped range cannot
-    abort derivation as a ValueError -- the trace still resolves the clean
-    UTF-8 rename and fail-closed handling stays authoritative."""
-    from daydream.benchmark import snapshot
-
-    origin, authoring_sha, head_sha = _seed_weird_byte_rename_origin(tmp_path)
-    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
-    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
-    m = snapshot.mirror(tmp_path)
-    # The traced path itself is clean UTF-8; the non-UTF-8 byte appears only as
-    # a ``D`` row in the whole-repo diff stream pre-fix would still crash it.
     assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
 
 

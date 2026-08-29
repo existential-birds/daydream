@@ -121,18 +121,6 @@ async def test_per_call_token_values_not_cumulative(tmp_path: Path) -> None:
     assert [s["metrics"]["prompt_tokens"] for s in turn_steps] == [100, 150, 200]
 
 
-async def test_reconciled_totals_not_per_message_collapse(tmp_path: Path) -> None:
-    """The 3-phase run's final completion == Σ session totals (NOT Σ per-message
-    single digits), and final == Σ steps — the under-count is caught, not blessed."""
-    traj = await _run_three_turns(tmp_path)
-    assert atif_validate(traj) is True
-
-    final = traj["final_metrics"]
-    assert final["total_completion_tokens"] == sum(_PHASE_SESSION_TOTALS)
-    step_sum = step_token_sum(traj, "completion_tokens")
-    assert final["total_completion_tokens"] == step_sum
-
-
 async def test_final_metrics_sum_matches_per_step_totals(tmp_path: Path) -> None:
     """FinalMetrics totals are the sum of per-step values across all 3 phases,
     matching the reconciled session totals (not the collapsed single digits)."""

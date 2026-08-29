@@ -536,18 +536,6 @@ async def test_execute_passes_none_when_no_agents(patch_sdk: Any) -> None:
     assert agents_val is None
 
 
-def test_backend_protocol_agents_param_is_dict_typed() -> None:
-    """The Backend protocol's execute.agents annotation must be dict[str, AgentDefinition]."""
-    from daydream.backends import Backend
-
-    annotations = Backend.execute.__annotations__
-    assert "agents" in annotations
-    annotation = annotations["agents"]
-    # Annotation may be a string (from __future__ annotations) or a real type
-    annotation_str = annotation if isinstance(annotation, str) else repr(annotation)
-    assert "dict[str, AgentDefinition]" in annotation_str
-
-
 # Helpers for TurnEndEvent tests (Task 6)
 
 
@@ -620,19 +608,6 @@ async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: An
     second_text_idx = events.index(texts[1])
     assert first_text_idx < turn_ends[0][0] < second_text_idx
     assert second_text_idx < turn_ends[1][0]
-
-
-# Skill guard removal
-
-
-def test_no_skill_guard_registered() -> None:
-    """M14: no PreToolUse skill guard is wired; an attempted Skill call is not executable."""
-    from daydream.backends import claude as c
-
-    assert not hasattr(c, "_make_skill_guard")
-    assert not hasattr(c, "_prompt_skill_keys")
-    assert not hasattr(c, "_CHAINABLE_SKILL_NAMESPACE_PREFIX")
-
 
 
 def test_claude_agent_sdk_has_shielded_teardown() -> None:

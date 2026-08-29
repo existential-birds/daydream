@@ -359,26 +359,6 @@ def test_phase_primitives_unmodified() -> None:
     assert not leaked, f"forbidden phase wrappers present: {leaked}"
 
 
-def test_existing_tests_still_collect() -> None:
-    """D-40: existing tests still import and collect.
-
-    Loads the target test modules by absolute file path via ``importlib``
-    so the check doesn't depend on ``tests`` being resolvable as a package
-    on ``sys.path`` — a sibling repository can shadow that name when
-    multiple projects share a ``PYTHONPATH`` root.
-    """
-    import importlib.util
-
-    tests_dir = Path(__file__).parent
-    for name in ("test_cli", "test_integration", "test_deep_orchestrator", "test_phases"):
-        spec = importlib.util.spec_from_file_location(
-            f"_d40_probe_{name}", tests_dir / f"{name}.py"
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-
 async def test_deep_default_backend_line_is_phase_agnostic(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,

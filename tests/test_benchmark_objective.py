@@ -428,24 +428,6 @@ def test_identity_to_dict_is_single_source_for_all_projections(tmp_path: Path) -
     assert objective.identity_to_dict(suite.identity) == per_run
 
 
-def test_shared_trial_walker_skips_non_dirs_and_matches_parse_job_results(tmp_path: Path) -> None:
-    """Issue #888 anti-slop: objective._parse_task_rows reuses run's trial walker.
-
-    The shared ``run_mod._iter_trial_dirs`` skips non-directory siblings and
-    yields the same sorted trials the oracle path traverses.
-    """
-    import daydream.benchmark.harbor.run as run_mod
-
-    ws = _complete_ws(tmp_path)
-    job_dir = ws / "harbor" / "jobs" / "run-1"
-    (job_dir / "README.txt").write_text("not a trial")
-    trials = [p.name for p in run_mod._iter_trial_dirs(job_dir)]
-    assert "README.txt" not in trials
-    assert trials == sorted(
-        p.name for p in job_dir.iterdir() if p.is_dir()
-    )
-
-
 def test_objective_metric_dict_includes_axis_keys() -> None:
     # Shape parity (P-NUMERIC-ROW): the objective projection must carry the
     # exact key set the authoritative aggregate_metrics returns.

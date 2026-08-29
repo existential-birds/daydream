@@ -136,21 +136,6 @@ def test_import_only_snapshot_records_requested_base_sha(tmp_path: Path, fake_gh
     assert snapshot["requested_base_sha"] == "b" * 40
 
 
-def test_fetch_normalizes_null_body_to_empty_string(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import github_import as gi
-
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
-    header = dict(_PR_HEADER)
-    header["body"] = None                          # GitHub returns null for empty
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
-               "repos/o/r/issues/101/comments"):
-        fake_gh.set_response("GET", ep, [])
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    assert doc.pull_request.body == ""             # null -> empty string, never "None"
-
-
 @pytest.mark.parametrize("body_field,expected", [
     (None, ""),                      # null body -> empty
     ("", ""),                        # empty body
@@ -1977,32 +1962,6 @@ def test_graphql_review_threads_retries_rate_limit_then_fails(
     threads = gi_mod._graphql_review_threads(ws, "o/r", 101)
     assert threads == []
     assert calls["n"] == 3, "rate-limit retry should make 3 attempts"
-
-
-def test_spike_nested_comments_paginate_past_100(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import github_import as gi
-
-    ws = tmp_path / "ws"
-    (ws / "imports").mkdir(parents=True)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    for ep, val in [("repos/o/r/pulls/101/reviews", list[Any]()),
-                    ("repos/o/r/pulls/101/comments", list[Any]()),
-                    ("repos/o/r/issues/101/comments", list[Any]())]:
-        fake_gh.set_response("GET", ep, val)
-    # thread "thread_1" carries 150 replies split across nested pages of 100+50
-    comments = [{"id": f"c{i}", "databaseId": 1000 + i, "body": f"r{i}",
-                 "author": {"login": "dave", "type": "User"},
-                 "createdAt": f"2026-01-01T00:00:{i % 60:02d}Z",
-                 "url": f"https://github.com/o/r/pull/101#discussion_r{1000+i}"}
-                for i in range(1, 151)]
-    fake_gh._serve_thread_comments("thread_1", comments, page_size=100)
-    fake_gh._write_threads([{"id": "thread_1", "isResolved": False,
-        "isOutdated": False, "subjectType": "LINE", "path": "a.py", "line": 4,
-        "side": "RIGHT", "comments": {"nodes": comments[:100]}}], number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    ids = {e.database_id for e in doc.evidence}
-    assert {1000 + i for i in range(1, 151)} <= ids     # all 150 collected
-    assert len([e for e in doc.evidence if 1000 <= e.database_id <= 1150]) == 150
 
 
 def test_graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeGh) -> None:

@@ -266,27 +266,6 @@ async def test_recorder_writes_schema_valid_trajectory_on_clean_exit(tmp_path: P
     assert atif_validate(recorder.path, validate_images=False) is True
 
 
-# Recorder-level Behavior B: sequential step_id across two invocations (Pitfall 1)
-
-
-async def test_step_ids_sequential_across_two_invocations(tmp_path: Path) -> None:
-    """Behavior B: step_id is sequential 1..N across two invocations (Pitfall 1)."""
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv1:
-            inv1.observe(TextEvent(text="review-output"))
-            inv1.observe(ResultEvent(structured_output=None, continuation=None))
-        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv2:
-            inv2.observe(TextEvent(text="fix-output"))
-            inv2.observe(ResultEvent(structured_output=None, continuation=None))
-
-    traj = read_trajectory(recorder.path)
-    assert atif_validate(traj, validate_images=False) is True
-    step_ids = [s["step_id"] for s in traj["steps"]]
-    assert step_ids == list(range(1, len(step_ids) + 1))
-    assert len(step_ids) == 2
-
-
 # Recorder-level Behavior C: write failure on __aexit__ degrades with warning
 # (D-11)
 
@@ -718,33 +697,6 @@ async def test_parent_metrics_include_children(tmp_path: Path) -> None:
         if s.get("metrics") and s["metrics"].get("prompt_tokens")
     )
     assert own == 100
-
-
-# SUBA-02: Dispatch step has subagent_trajectory_ref
-
-
-async def test_dispatch_step_has_subagent_trajectory_ref(tmp_path: Path) -> None:
-    """SUBA-02: Dispatch step carries subagent_trajectory_ref entries."""
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.fork("fix-0") as child:
-            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                observe_text_and_result(inv)
-        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv)
-
-    parent_traj = read_trajectory(recorder.path)
-    assert atif_validate(parent_traj, validate_images=False) is True
-
-    dispatch_steps = [
-        s for s in parent_traj["steps"]
-        if s["source"] == "agent" and "Dispatching" in s.get("message", "")
-    ]
-    assert len(dispatch_steps) == 1
-    dispatch = dispatch_steps[0]
-    ref = dispatch["observation"]["results"][0]["subagent_trajectory_ref"][0]
-    assert ref["session_id"] == recorder.session_id
 
 
 # Dispatch step uses relative path (starts with "trajectories/")

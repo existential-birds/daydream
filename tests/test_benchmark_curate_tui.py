@@ -154,7 +154,7 @@ def test_action_accept_invalid_index_mutates_nothing(tmp_path: Path, fake_gh: Fa
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
     run_curate_tui(ws, case_id, read_line=_scripted("a", "999", "q"))  # bad idx
-    assert path.read_bytes() == before                       # unchanged
+    assert path.read_bytes() == before
 
 
 def test_action_accept_non_exact_candidate_offers_edit_path(
@@ -175,7 +175,7 @@ def test_action_accept_non_exact_candidate_offers_edit_path(
     after_rewrite = path.read_bytes()
 
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "q"))
-    assert path.read_bytes() == after_rewrite                 # unchanged
+    assert path.read_bytes() == after_rewrite
     assert "not exactly acceptable" in capsys.readouterr().out
 
 
@@ -233,7 +233,7 @@ def test_editor_nonzero_exit_leaves_state_unchanged(
     monkeypatch.delenv("EDITOR", raising=False)
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
-    assert path.read_bytes() == before                       # unchanged
+    assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
 
 
