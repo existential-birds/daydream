@@ -93,8 +93,13 @@ class ParsedIssue:
             canonical merged findings and alt-review issues; None on other
             construction paths.
         location_distrust: True when location validation demoted this finding
-            (its citation was beyond tolerance), issue #972 R2. Blocks approval
-            regardless of the (demoted) severity and renders a demotion note.
+            (its citation was beyond tolerance), issue #972 R2. Renders a
+            demotion note; blocks approval only when the finding was demoted
+            from a blocking original severity (see ``severity_before_demotion``).
+        severity_before_demotion: The original severity before location-
+            validation demotion, if any; the approval gate compares it against
+            the blocking set so an initially-low or never-asserted severity
+            stays non-blocking despite the demotion mark.
         severity_off_vocabulary: True when this issue carried a present severity
             string outside the canonical vocabulary (e.g. ``"critical"``). The
             boundary folds such labels into ``None`` for ``severity`` (so the
@@ -111,6 +116,7 @@ class ParsedIssue:
     severity: str | None = None
     fingerprint: str | None = None
     location_distrust: bool = False
+    severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False
 
 
@@ -428,6 +434,7 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
                     fields.path, fields.description, fields.rationale
                 ),
                 location_distrust=fields.location_distrust,
+                severity_before_demotion=fields.severity_before_demotion,
                 severity_off_vocabulary=fields.severity_off_vocabulary,
             )
         )
@@ -1167,20 +1174,25 @@ def _finding_blocks_approval(
     severity: str | None,
     location_distrust: bool,
     severity_off_vocabulary: bool = False,
+    severity_before_demotion: str | None = None,
 ) -> bool:
     """Whether one finding blocks an approval, demotion-aware (issue #972 R2).
 
     A finding marked ``location_distrust=True`` was judged at a higher severity
     and demoted by location validation (its citation was beyond tolerance);
-    the demoted severity must not silently make it non-blocking. This check is
-    deliberately separate from ``_severity_blocks_approval`` (and NOT folded
-    into ``_NON_BLOCKING_SEVERITIES``) so off-vocabulary severity strings keep
+    the demoted severity must not silently make it non-blocking. The demotion
+    mark is written for any beyond-tolerance record regardless of its original
+    severity, so the gate only re-blocks when the pre-demotion severity carried
+    via ``severity_before_demotion`` was itself blocking; an originally-low or
+    never-asserted severity stays non-blocking. This check is deliberately
+    separate from ``_severity_blocks_approval`` (and NOT folded into
+    ``_NON_BLOCKING_SEVERITIES``) so off-vocabulary severity strings keep
     failing closed for their own reason. ``severity_off_vocabulary`` carries
     that signal: a present-but-off-canonical label (e.g. ``"critical"``) is
     folded into ``None`` at the boundary but was still a severity the model
     asserted, so it blocks rather than reading as an omitted severity.
     """
-    if location_distrust:
+    if location_distrust and _severity_blocks_approval(severity_before_demotion):
         return True
     if severity_off_vocabulary:
         return True
@@ -1201,7 +1213,10 @@ def _is_clean_review(classified: _ClassifiedIssues, approve_on_clean: bool) -> b
         return False
     return not any(
         _finding_blocks_approval(
-            issue.severity, issue.location_distrust, issue.severity_off_vocabulary
+            issue.severity,
+            issue.location_distrust,
+            issue.severity_off_vocabulary,
+            issue.severity_before_demotion,
         )
         for issue in classified.all_issues()
     )
@@ -1587,6 +1602,7 @@ def post_findings_from_artifact(
             finding.severity,
             finding.location_distrust,
             finding.severity_off_vocabulary,
+            finding.severity_before_demotion,
         )
         for finding in artifact.findings
     )
@@ -1650,5 +1666,6 @@ def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
         severity=finding.severity,
         fingerprint=finding.fingerprint,
         location_distrust=finding.location_distrust,
+        severity_before_demotion=finding.severity_before_demotion,
         severity_off_vocabulary=finding.severity_off_vocabulary,
     )

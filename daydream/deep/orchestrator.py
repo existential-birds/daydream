@@ -1753,6 +1753,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         arbiter_targets = select_arbiter_targets(
             all_records, record_sources,
             min_severity=ctx.pipeline().arbitration.min_severity,
+            contested_location=ctx.pipeline().arbitration.contested_location,
         )
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
@@ -1814,6 +1815,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 record_sources,
                 suppression_exclude,
                 severity_classes=ctx.pipeline().suppression.severity_classes,
+                confidence_classes=ctx.pipeline().suppression.confidence_classes,
             )
             if suppression_targets:
                 async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):

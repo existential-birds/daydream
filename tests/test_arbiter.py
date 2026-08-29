@@ -187,3 +187,53 @@ def test_select_suppression_targets_honors_severity_classes_knob() -> None:
     assert select_suppression_targets(records, sources) == [0, 2]
     # Knob widened to include medium.
     assert select_suppression_targets(records, sources, severity_classes=("low", "medium")) == [0, 1, 2]
+
+
+def test_select_suppression_targets_honors_confidence_classes_knob() -> None:
+    """The profile's ``Suppression.confidence_classes`` governs the confidence
+    branch live, not a hardcoded LOW predicate (fail-open fix): widening to
+    include MEDIUM routes otherwise-borderline MEDIUM-confidence findings to the
+    suppression pass, narrowing to HIGH excludes LOW-confidence ones."""
+    records = [
+        {"severity": "medium", "confidence": "LOW", "file": "a.py", "line": 1},
+        {"severity": "medium", "confidence": "MEDIUM", "file": "b.py", "line": 2},
+        {"severity": "medium", "confidence": "HIGH", "file": "c.py", "line": 3},
+    ]
+    sources = ["s1", "s2", "s3"]
+    # Default ("LOW",): LOW-confidence selected; MEDIUM- and HIGH-confidence not.
+    assert select_suppression_targets(records, sources) == [0]
+    # Widened to include MEDIUM: now selects LOW- and MEDIUM-confidence.
+    assert select_suppression_targets(
+        records, sources, confidence_classes=("LOW", "MEDIUM")
+    ) == [0, 1]
+    # Narrowed to HIGH (or any other non-LOW selection) must NOT silently fall
+    # back to the old LOW-only branch -- the knob is live in both directions.
+    assert select_suppression_targets(records, sources, confidence_classes=("HIGH",)) == [2]
+
+
+def test_suppression_rejects_unknown_confidence_class() -> None:
+    import pytest
+
+    records = [_rec_conf("a.py", 1, "low", "LOW")]
+    with pytest.raises(ValueError):
+        select_suppression_targets(records, ["python"], confidence_classes=("LOW", "GUESSED"))
+
+
+def test_select_arbiter_targets_honors_contested_location_knob() -> None:
+    """The profile's ``Arbitration.contested_location`` gates the contested
+    branch of arbiter selection: disabling it leaves only the severity branch,
+    so divergent-severity multi-stack collisions no longer route to the arbiter."""
+    records = [
+        _rec("api.py", 10, "high"),
+        _rec("api.py", 10, "medium"),
+    ]
+    sources = ["python", "react"]
+    # Default on: the medium finding is contested with the high one and is selected.
+    assert select_arbiter_targets(records, sources) == [0, 1]
+    # Knob off: only the severity branch selects; the contested medium drops out.
+    assert select_arbiter_targets(records, sources, contested_location=False) == [0]
+    # Severity branch still fully live when the contested branch is disabled:
+    # lowering min_severity to medium pulls the medium finding back in.
+    assert select_arbiter_targets(
+        records, sources, min_severity="medium", contested_location=False
+    ) == [0, 1]

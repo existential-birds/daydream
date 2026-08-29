@@ -1148,11 +1148,47 @@ def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
         inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
         inline_issues=[
             ParsedIssue(path="a.py", line=10, title="t", body="b",
-                        severity="low", location_distrust=True)
+                        severity="low", location_distrust=True,
+                        severity_before_demotion="high")
         ],
     )
     payload = build_payload(pr, classified, approve_on_clean=True)
     assert payload["event"] == "COMMENT"
+
+
+def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
+    """#336: a demoted finding whose ORIGINAL severity was already low (or never
+    asserted) must not block APPROVE — the location_distrust mark is written for
+    every beyond-tolerance record, but only a demotion from a blocking severity
+    keeps the gate closed."""
+    for before in ("low", None):
+        classified = pr_review._ClassifiedIssues(
+            inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+            inline_issues=[
+                ParsedIssue(path="a.py", line=10, title="t", body="b",
+                            severity="low", location_distrust=True,
+                            severity_before_demotion=before)
+            ],
+        )
+        payload = build_payload(pr, classified, approve_on_clean=True)
+        assert payload["event"] == "APPROVE"
+
+
+def test_demoted_low_finding_approval_gate_does_not_block() -> None:
+    """#336: the approval-gate unit check itself — location_distrust alone no
+    longer blocks once the original severity was low or never asserted."""
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, "low"
+    ) is False
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, None
+    ) is False
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, "high"
+    ) is True
+    assert pr_review._finding_blocks_approval(
+        "low", True, False, "medium"
+    ) is True
 
 
 def test_parsed_issues_carry_location_distrust_and_report_note() -> None:

@@ -1215,6 +1215,11 @@ def _apply_vet_verdicts(
         mapped_severity = _map_axis_severity(severity)
         if mapped_severity is not None:
             corrected["severity"] = mapped_severity
+        elif "severity" in corrected:
+            # Off-vocabulary mappers to None must not pass through raw: omit
+            # the axis so a corrected member and its work package stay in sync
+            # (P-BOUNDARY, issue #972 R3.1/R6.2).
+            del corrected["severity"]
         # Unlike the other corrected fields, ``None`` is a meaningful vet
         # correction here: it explicitly retracts an audit-time reuse target.
         if "reuse_target" in verdict:

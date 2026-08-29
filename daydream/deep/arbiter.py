@@ -31,6 +31,10 @@ from typing import Any
 
 from daydream.severity import CANONICAL_LEVELS, SEVERITY_RANK
 
+# Canonical confidence vocabulary (uppercase HIGH|MEDIUM|LOW schema enum,
+# mirroring ``review_profile._CONFIDENCE_LEVELS``).
+_CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
+
 
 def _severity(record: dict[str, Any]) -> str:
     """Normalize a record's severity to a lowercase string ("" when absent).
@@ -70,6 +74,7 @@ def select_arbiter_targets(
     records: list[dict[str, Any]],
     sources: list[str],
     min_severity: str = "high",
+    contested_location: bool = True,
 ) -> list[int]:
     """Return the indices of records that need arbiter re-review.
 
@@ -84,12 +89,17 @@ def select_arbiter_targets(
             selects (``"high"`` by default; ``"medium"`` also selects medium
             records, ``"low"`` selects everything). The contested branch is
             independent of this knob.
+        contested_location: Whether the contested branch (same ``(file, line)``
+            reported by >=2 distinct stacks with divergent severity) selects
+            records (default ``True``; the profile's
+            ``Arbitration.contested_location`` governs this in the production
+            path).
 
     Returns:
         Sorted, de-duplicated list of indices into ``records`` selected for the
         arbiter: every record at or above ``min_severity``, plus every record at a
         ``(file, line)`` location contested across >=2 stacks with divergent
-        severity.
+        severity (when ``contested_location`` is enabled).
 
     Raises:
         ValueError: If ``records`` and ``sources`` differ in length, or if
@@ -112,15 +122,16 @@ def select_arbiter_targets(
 
     # Contested: same (file, line) reported by >=2 distinct stacks that disagree
     # on severity. Group by location, then test cross-stack severity divergence.
-    by_location: dict[tuple[Any, Any], list[int]] = defaultdict(list)
-    for i, record in enumerate(records):
-        by_location[(record.get("file"), record.get("line"))].append(i)
+    if contested_location:
+        by_location: dict[tuple[Any, Any], list[int]] = defaultdict(list)
+        for i, record in enumerate(records):
+            by_location[(record.get("file"), record.get("line"))].append(i)
 
-    for indices in by_location.values():
-        stacks = {sources[i] for i in indices}
-        severities = {_severity(records[i]) for i in indices if _severity(records[i])}
-        if len(stacks) >= 2 and len(severities) >= 2:
-            selected.update(indices)
+        for indices in by_location.values():
+            stacks = {sources[i] for i in indices}
+            severities = {_severity(records[i]) for i in indices if _severity(records[i])}
+            if len(stacks) >= 2 and len(severities) >= 2:
+                selected.update(indices)
 
     return sorted(selected)
 
@@ -130,12 +141,13 @@ def select_suppression_targets(
     sources: list[str],
     exclude: Iterable[int] = (),
     severity_classes: tuple[str, ...] = ("low",),
+    confidence_classes: tuple[str, ...] = ("LOW",),
 ) -> list[int]:
     """Return indices of borderline, uncontested records for the suppression pass (#232).
 
     The precision-mode suppression pass gives a skeptical LLM second opinion to
     *evidenced-but-minor* findings the arbiter never scrutinizes: records that are
-    ``confidence == "LOW"`` and/or low-severity (per ``severity_classes``) and are
+    in ``confidence_classes`` and/or low-severity (per ``severity_classes``) and are
     neither high-severity nor contested. It mirrors :func:`select_arbiter_targets` as a
     pure, side-effect-free predicate so it can be unit-tested against adversarial
     shapes independent of any agent call.
@@ -144,7 +156,7 @@ def select_suppression_targets(
     must never touch them, so callers pass the arbiter's target indices as
     ``exclude``. Because that set already covers every high-severity and contested
     record, excluding it leaves only higher-severity uncontested records -- of
-    which the LOW-confidence ones and those in ``severity_classes`` are the
+    which the ones in ``confidence_classes`` and those in ``severity_classes`` are the
     borderline findings selected here.
 
     Args:
@@ -160,15 +172,20 @@ def select_suppression_targets(
         severity_classes: Canonical severity levels the severity branch selects
             (default ``("low",)``; the profile's ``Suppression.severity_classes``
             governs this in the production path).
+        confidence_classes: Canonical uppercase confidence levels the confidence
+            branch selects (default ``("LOW",)``; the profile's
+            ``Suppression.confidence_classes`` governs this in the production
+            path).
 
     Returns:
         Sorted, de-duplicated list of indices into ``records`` selected for the
-        suppression pass: every ``exclude``-free record that is LOW-confidence
-        or low-severity (per ``severity_classes``).
+        suppression pass: every ``exclude``-free record that is in
+        ``confidence_classes`` or low-severity (per ``severity_classes``).
 
     Raises:
-        ValueError: If ``records`` and ``sources`` differ in length, or if
-            ``severity_classes`` contains a non-canonical severity value.
+        ValueError: If ``records`` and ``sources`` differ in length, if
+            ``severity_classes`` contains a non-canonical severity value, or if
+            ``confidence_classes`` contains a non-canonical confidence value.
     """
     classes = frozenset(
         cls.lower() for cls in severity_classes
@@ -178,6 +195,13 @@ def select_suppression_targets(
         raise ValueError(
             f"severity_classes must be a subset of {', '.join(sorted(CANONICAL_LEVELS))}; "
             f"got unknown value(s): {', '.join(sorted(unknown))}"
+        )
+    confidence = frozenset(cnf.upper() for cnf in confidence_classes)
+    unknown_conf = confidence - _CONFIDENCE_LEVELS
+    if unknown_conf:
+        raise ValueError(
+            f"confidence_classes must be a subset of {', '.join(sorted(_CONFIDENCE_LEVELS))}; "
+            f"got unknown value(s): {', '.join(sorted(unknown_conf))}"
         )
     if len(records) != len(sources):
         raise ValueError(
@@ -189,6 +213,6 @@ def select_suppression_targets(
     for i, record in enumerate(records):
         if i in excluded:
             continue
-        if _confidence(record) == "LOW" or _severity(record) in classes:
+        if _confidence(record) in confidence or _severity(record) in classes:
             selected.append(i)
     return selected

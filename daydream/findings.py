@@ -86,6 +86,12 @@ FINDINGS_SCHEMA: dict[str, Any] = {
                     # block the poster's approval gate; the raw signal rides
                     # through here. Absent on older artifacts -> False on load.
                     "severity_off_vocabulary": {"type": "boolean"},
+                    # Optional: the original severity before a location-
+                    # validation demotion, so the poster's approval gate only
+                    # re-blocks a demoted finding when that original severity
+                    # was itself blocking. Absent on older artifacts -> None on
+                    # load.
+                    "severity_before_demotion": {"type": ["string", "null"]},
                 },
             },
         },
@@ -113,6 +119,10 @@ class ArtifactFinding:
         is_cross_stack: Whether the finding came from the cross-stack merge.
         location_distrust: True when location validation demoted the finding
             (citation beyond tolerance); absent on older artifacts -> False.
+        severity_before_demotion: Original severity before a location-
+            validation demotion, if any; the poster's approval gate checks it
+            so only a demotion from a blocking severity stays blocking. Absent
+            on older artifacts -> None.
         severity_off_vocabulary: True when the finding carried a present
             severity string outside the canonical vocabulary (e.g.
             "critical") that was folded into ``None`` at the boundary. The
@@ -130,6 +140,7 @@ class ArtifactFinding:
     confidence: str | None
     is_cross_stack: bool
     location_distrust: bool = False
+    severity_before_demotion: str | None = None
     severity_off_vocabulary: bool = False
 
 
@@ -165,6 +176,7 @@ def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> di
         "confidence": issue.confidence,
         "is_cross_stack": issue.is_cross_stack,
         "location_distrust": issue.location_distrust,
+        "severity_before_demotion": issue.severity_before_demotion,
         "severity_off_vocabulary": issue.severity_off_vocabulary,
     }
 

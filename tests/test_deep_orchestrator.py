@@ -5186,6 +5186,17 @@ def _merged_item_descriptions(target: Path) -> list[str]:
     return [it.get("description", "") for it in items]
 
 
+# Issue #336 review: the profile's ``suppression_confidence_classes`` must govern
+# the suppression confidence branch LIVE (fail-open fix). The borderline finding
+# here is MEDIUM-confidence / medium-severity uncontested: invisible to the default
+# LOW-only confidence branch AND the default low-only severity branch, so it is the
+# sole discriminator for whether the confidence knob is wired through.
+_CONFIDENCE_KNOB_STACKS: dict[str, dict[str, Any]] = {
+    "python": {"severity": "high", "confidence": "HIGH", "file": "api.py", "line": 1},
+    "react": {"severity": "medium", "confidence": "MEDIUM", "file": "App.tsx", "line": 1},
+}
+
+
 # A borderline LOW-severity sibling sharing one (file, line) with a HIGH finding
 # from the SAME stack (py_module.py:7). Single stack -> uncontested, so only the
 # HIGH one is an arbiter target. Other stacks stay on api.py:1 (no severity) so
@@ -5336,6 +5347,78 @@ async def test_precision_on_keeps_low_finding_with_evidence(
     files = _merged_item_files(multi_stack_target)
     assert "App.tsx" in files, f"a confirmed borderline finding must be kept:\n{files}"
     assert "api.py" in files
+
+
+async def test_precision_confidence_classes_default_keeps_medium_conf_finding(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``suppression_confidence_classes`` ("LOW",): a MEDIUM-confidence,
+    medium-severity uncontested finding is selected by neither the LOW-only
+    confidence branch nor the low-only severity branch, so the suppression pass
+    has no target for it and it survives to merge. Binary first half: the knob is
+    NOT silently widening selection by default."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        merge_echo_records=True,
+        parse_by_stack=_CONFIDENCE_KNOB_STACKS,
+        suppression_keep=False,
+    )
+
+    exit_code = await _run_deep(multi_stack_target, precision_mode=True)
+    assert exit_code == 0
+
+    files = _merged_item_files(multi_stack_target)
+    assert "App.tsx" in files, f"a MEDIUM finding must survive the default LOW-only branches:\n{files}"
+    assert "api.py" in files
+
+    sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
+    assert sup_calls == [], (
+        "a MEDIUM-confidence / medium-severity finding must NOT reach suppression "
+        "under the default LOW-only confidence + low-only severity classes"
+    )
+
+
+async def test_precision_confidence_classes_widened_routes_medium_conf_to_suppression(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Profile ``suppression_confidence_classes = ("LOW", "MEDIUM")`` widens the
+    confidence branch LIVE: the same MEDIUM-confidence medium-severity finding is
+    now a suppression target and is dropped (keep=false) instead of surviving
+    unreviewed. Regression for the fail-open bug where the knob was accepted but
+    inert and the predicate hardcoded LOW."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(
+        monkeypatch,
+        multi_stack_target,
+        merge_echo_records=True,
+        parse_by_stack=_CONFIDENCE_KNOB_STACKS,
+        suppression_keep=False,
+    )
+
+    exit_code = await _run_deep(
+        multi_stack_target,
+        precision_mode=True,
+        review_profile=_profile_with_pipeline(
+            suppression_confidence_classes=("LOW", "MEDIUM")
+        ),
+    )
+    assert exit_code == 0
+
+    files = _merged_item_files(multi_stack_target)
+    assert "App.tsx" not in files, (
+        f"widened confidence classes must route the MEDIUM finding into suppression:\n{files}"
+    )
+    assert "api.py" in files
+
+    sup_calls = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
+    assert len(sup_calls) == 1, (
+        f"widened confidence knob must fire the suppression pass exactly once:"
+        f"{len(sup_calls)}"
+    )
 
 
 # Issue #343: config-gated bot APPROVE for clean deep reviews.
