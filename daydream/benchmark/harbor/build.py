@@ -23,6 +23,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from daydream import severity
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 
@@ -196,6 +197,18 @@ def bounded_pr_context(
     )
 
 
+def _gold_severity_label(value: object) -> str:
+    """Label a gold-finding severity for Task.md emission.
+
+    Canonical severity values are lowercased via ``severity.normalize_severity``;
+    a null (or otherwise unknown) severity becomes the explicit labeled string
+    ``"unknown"``. This is a gold-fixture emission label, not a canonical
+    severity level (R6.2: mapped-or-labeled, never silent).
+    """
+    normalized = severity.normalize_severity(value)
+    return normalized if normalized is not None else "unknown"
+
+
 def render_task_spec(case_doc: dict[str, Any], *, instruction: str) -> bytes:
     """Deterministic per-case Task.md render; the single source shared by [r] approval and compile (D3)."""
     pull_request = case_doc.get("pull_request") or {}
@@ -205,7 +218,7 @@ def render_task_spec(case_doc: dict[str, Any], *, instruction: str) -> bytes:
     if findings:
         counts: dict[str, int] = {}
         for finding in findings:
-            severity = str(finding.get("severity") or "unknown")
+            severity = _gold_severity_label(finding.get("severity"))
             counts[severity] = counts.get(severity, 0) + 1
         severity_summary = ", ".join(
             f"{count} {severity}" for severity, count in sorted(counts.items())
@@ -217,7 +230,7 @@ def render_task_spec(case_doc: dict[str, Any], *, instruction: str) -> bytes:
             "are graded, never the raw review-thread text."
         )
         stable_summary = "\n".join(
-            f"- {f.get('severity') or 'unknown'}: {f.get('title') or ''}"
+            f"- {_gold_severity_label(f.get('severity'))}: {f.get('title') or ''}"
             for f in findings
         )
     else:

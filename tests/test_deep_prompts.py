@@ -16,9 +16,9 @@ from daydream.deep.prompts import (
     build_generic_fallback_prompt,
     build_merge_prompt,
     build_per_stack_prompt,
+    build_structural_prompt,
     build_supervise_prompt,
     build_suppression_prompt,
-    build_structural_prompt,
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE

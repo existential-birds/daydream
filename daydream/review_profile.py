@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from daydream import severity
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
 
 
@@ -80,11 +81,12 @@ STAGE_KEYS: frozenset[str] = frozenset(
 )
 
 
-# Host-owned severity/confidence vocabularies (R5; mirror the repo's allowed
-# sets: severity is the lowercase low|medium|high scale -- benchmark/mapping.py,
-# benchmark/cli.py:284-287; confidence is the uppercase HIGH|MEDIUM|LOW schema
-# enum -- phases.py:4048,4250, deep/prompts.py arbiter/suppression/merge).
-_SEVERITY_LEVELS: frozenset[str] = frozenset(("low", "medium", "high"))
+# Host-owned severity/confidence vocabularies (R5): severity derives from the
+# canonical vocabulary in daydream/severity.py (CANONICAL_LEVELS -- the only
+# declaration of the lowercase low|medium|high scale); confidence is the
+# uppercase HIGH|MEDIUM|LOW schema enum -- phases.py:4048,4250,
+# deep/prompts.py arbiter/suppression/merge).
+_SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
 _CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
 
 

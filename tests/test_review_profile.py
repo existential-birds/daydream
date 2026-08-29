@@ -213,3 +213,16 @@ def test_parse_review_strategy_has_no_default_to_high_hint() -> None:
     strategy must no longer carry the "Default to high" severity instruction
     (parse stage removed, issue #745)."""
     assert "Default to high" not in rp.build_default_profile().strategies["parse"].content
+
+
+def test_review_profile_severity_levels_derive_from_severity_module() -> None:
+    from daydream import severity
+
+    assert rp._SEVERITY_LEVELS == frozenset(severity.CANONICAL_LEVELS)
+
+
+def test_review_profile_no_stale_mapping_citation() -> None:
+    # benchmark/mapping.py does not exist — the comment citing it must be gone/corrected.
+    import inspect
+
+    assert "benchmark/mapping.py" not in inspect.getsource(rp)
