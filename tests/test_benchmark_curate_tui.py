@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from tests.harness.fake_gh import FakeGh
-from tests.test_benchmark_curation import _seed_ready_case, _seed_ready_case_mixed
+from tests.test_benchmark_curation import _reanchor_frozen_inline, _seed_ready_case, _seed_ready_case_mixed
 
 
 def _scripted(*lines: Any) -> Any:
@@ -91,6 +91,21 @@ def test_run_curate_tui_unknown_action_reprompts(
     rc = run_curate_tui(ws, case_id, read_line=_scripted("z9", "q"))
     assert rc == 0
     assert "unknown" in capsys.readouterr().out
+
+
+def test_render_case_shows_authoring_commit_and_fixed_reason(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """The evidence row surfaces the strict authoring commit (short form) and the
+    fixed not-exact reason whenever exact acceptance is unavailable, next to the
+    re-anchored commit_id -- the two commits are never conflated."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import render_case
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    _reanchor_frozen_inline(ws, case_id, authoring_commit="b" * 40)
+    out = render_case(cu.get_case(ws, case_id))
+    assert f"auth:{'b' * 12}" in out       # authoring commit short form, labeled
+    assert "[re-anchored]" in out          # fixed reason shown for the non-exact candidate
+    assert "feature.py:2" in out           # anchor display unchanged
 
 
 def test_run_curate_tui_queue_bogus_case_id_reprompts(

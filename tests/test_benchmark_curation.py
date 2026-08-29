@@ -16,7 +16,12 @@ import yaml
 
 from daydream import git_ops
 from daydream.benchmark.schema import derive_finding_id
-from daydream.benchmark.storage import atomic_write_yaml, load_yaml_strict
+from daydream.benchmark.storage import (
+    atomic_write_json,
+    atomic_write_yaml,
+    load_json_strict,
+    load_yaml_strict,
+)
 from tests.harness.fake_gh import FakeGh
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -811,6 +816,67 @@ def test_get_case_attaches_evidence_projection(tmp_path: Path, fake_gh: FakeGh) 
     view2 = cu.get_case(ws, case_id)
     assert "evidence" not in view2["candidates"][-1]   # unmatched source, absent
     assert "evidence" in view2["candidates"][0]        # matched source, still joined
+
+
+def _reanchor_frozen_inline(ws: Path, case_id: str, *, authoring_commit: str) -> str:
+    """Post-normalize the frozen inline evidence + candidate to a re-anchored record.
+
+    The seed's import derives the authoring anchor onto the head (exact); this
+    rewrites the frozen artifacts so the strict anchor points at a foreign
+    authoring commit while GitHub's re-anchored ``commit_id`` still equals the
+    head -- the exact false-positive shape the anchor gating must surface.
+    Returns the evidence source_id.
+    """
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    imp = load_json_strict(ws / raw["source"]["import_file"])
+    rec = next(e for e in imp["evidence"] if e["kind"] == "inline_comment")
+    rec["authoring_anchor"] = {
+        "version": 1,
+        "status": "derived",
+        "commit_id": authoring_commit,
+        "path": "feature.py",
+        "start_line": 2,
+        "end_line": 2,
+    }
+    atomic_write_json(ws / raw["source"]["import_file"], imp)
+    cand = next(c for c in raw["candidates"] if c["source_id"] == rec["source_id"])
+    cand["exact_acceptable"] = False
+    cand["not_exact_reason"] = "re-anchored"
+    atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    return rec["source_id"]
+
+
+def test_curation_projection_shows_authoring_commit_and_reason(tmp_path: Path, fake_gh: FakeGh) -> None:
+    # existing get_case flow -- a re-anchored inline comment (GitHub moved the
+    # comment onto the head, but its strict authoring anchor points at the
+    # original commit) must project the anchor's commit and the fixed
+    # not_exact_reason verbatim, never the re-anchored id.
+    from daydream.benchmark import curation as cu
+
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    _reanchor_frozen_inline(ws, case_id, authoring_commit="b" * 40)
+
+    view = cu.get_case(ws, case_id)
+    cand = next(c for c in view["candidates"] if not c["exact_acceptable"])
+    proj = cand["evidence"]
+    assert proj["authoring_commit_id"] == "b" * 40
+    assert proj["not_exact_reason"] == "re-anchored"
+    assert proj["commit_id"] == head_sha   # re-anchored id still surfaced, explained not trusted
+
+
+def test_curation_view_never_mutates_files(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """get_case (and its projection join) is strictly read-only: neither the
+    case YAML nor the import JSON it joins against may change a byte."""
+    from daydream.benchmark import curation as cu
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    import_file = ws / raw["source"]["import_file"]
+    case_before = (ws / "cases" / f"{case_id}.yaml").read_bytes()
+    import_before = import_file.read_bytes()
+    cu.get_case(ws, case_id)
+    assert (ws / "cases" / f"{case_id}.yaml").read_bytes() == case_before
+    assert import_file.read_bytes() == import_before
 
 
 def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path: Path, fake_gh: FakeGh) -> None:
