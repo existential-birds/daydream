@@ -497,6 +497,73 @@ def _range_distance(line: int, start: int, end: int) -> int:
 _range_distance.__doc__ = _RANGE_DISTANCE_DOC
 
 
+_SEVERITY_RANK: Final = {"high": 3, "medium": 2, "low": 1}
+"""Severity vocabulary rank (issue #971 R3); validated upstream by
+``_validate_severity``, so an unknown value here is a programming error."""
+
+_SEVERITY_CREDIT: Final = {0: 1.0, 1: 0.5, 2: 0.0}
+"""Severity-agreement credit per rank distance; distance 2 is the maximum
+reachable from the validated high/medium/low vocabulary."""
+
+
+def location_tier(
+    g_path: str,
+    g_start: int,
+    g_end: int,
+    c_path: str,
+    c_start: int,
+    c_end: int,
+    tolerance: int,
+) -> str:
+    """Classify one matched pair's location agreement into exactly one tier.
+
+    Tiers: ``"exact"`` (same path, distance 0), ``"near"`` (same path,
+    distance ``<= tolerance``), ``"file"`` (same path, distance beyond
+    tolerance), ``"miss"`` (different path). Distance is the candidate
+    range's distance to the inclusive gold range ``[g_start, g_end]``: a
+    single-line candidate is a point-in-range check; a multi-line candidate
+    range (candidate.py normally sets ``start_line == end_line``) scores 0
+    when the ranges overlap at all (both endpoints checked against the gold
+    range), else the nearer-boundary distance.
+    """
+    if g_path != c_path:
+        return "miss"
+    d_start = _range_distance(c_start, g_start, g_end)
+    d_end = _range_distance(c_end, g_start, g_end)
+    distance = min(d_start, d_end)
+    if distance == 0:
+        return "exact"
+    if distance <= tolerance:
+        return "near"
+    return "file"
+
+
+def severity_distance(g_sev: str | None, c_sev: str | None) -> int | None:
+    """Return ``abs(rank(gold) - rank(candidate))`` for the severity axis.
+
+    ``None`` when either side is ``None`` (axis absent -- never imputed,
+    mirroring the missing-signal doctrine in ``daydream/training/reward.py``).
+    Unknown severity strings cannot occur (validated by ``_validate_severity``
+    upstream); an unexpected value raises :class:`VerifierError` rather than
+    being coerced.
+    """
+    if g_sev is None or c_sev is None:
+        return None
+    g_rank = _SEVERITY_RANK.get(g_sev)
+    c_rank = _SEVERITY_RANK.get(c_sev)
+    if g_rank is None or c_rank is None:
+        raise VerifierError(f"unknown severity, got {g_sev!r}/{c_sev!r}")
+    return abs(g_rank - c_rank)
+
+
+def severity_credit(distance: int) -> float:
+    """Map a severity rank distance to partial credit: 0->1.0, 1->0.5, 2->0.0."""
+    try:
+        return _SEVERITY_CREDIT[distance]
+    except KeyError:
+        raise VerifierError(f"severity distance out of range, got {distance!r}") from None
+
+
 def _f1(precision: float, recall: float) -> float:
     if precision + recall == 0:
         return 1.0

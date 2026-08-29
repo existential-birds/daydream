@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from daydream.benchmark.harbor import verifier_core as vc
 from daydream.benchmark.harbor.verifier_core import (
     CandidateFinding,
     GoldFinding,
@@ -543,3 +544,49 @@ def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
     r = score_review(gold, art, vs)
     assert (r.tp, r.fp, r.fn) == (2, 0, 0)
     assert r.reward == 1.0 and r.verifier_error == 0
+
+
+# ---------------------------------------------------------------------------
+# location-tier + severity-distance helpers (issue #971, task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_location_tier_classification() -> None:
+    # exact: same path, distance 0 inside the range
+    assert vc.location_tier("a.py", 10, 12, "a.py", 10, 12, 3) == "exact"
+    # near: same path, within tolerance
+    assert vc.location_tier("a.py", 10, 12, "a.py", 15, 15, 3) == "near"
+    # file: same path, beyond tolerance
+    assert vc.location_tier("a.py", 10, 12, "a.py", 100, 100, 3) == "file"
+    # miss: different path
+    assert vc.location_tier("a.py", 10, 12, "b.py", 10, 12, 3) == "miss"
+
+
+def test_location_tier_spans_overlap_counts_exact() -> None:
+    # multi-line candidate range overlapping the gold range at all -> exact
+    assert vc.location_tier("a.py", 10, 20, "a.py", 18, 25, 3) == "exact"
+    # non-overlapping span uses the nearer boundary distance
+    assert vc.location_tier("a.py", 10, 20, "a.py", 22, 24, 3) == "near"
+    assert vc.location_tier("a.py", 10, 20, "a.py", 30, 32, 3) == "file"
+
+
+def test_severity_distance_and_credit() -> None:
+    assert vc.severity_distance("high", "high") == 0
+    assert vc.severity_distance("high", "low") == 2
+    assert vc.severity_distance("low", "medium") == 1
+    assert vc.severity_credit(0) == 1.0
+    assert vc.severity_credit(1) == 0.5
+    assert vc.severity_credit(2) == 0.0
+
+
+def test_severity_distance_none_is_absent() -> None:
+    assert vc.severity_distance(None, "high") is None
+    assert vc.severity_distance("high", None) is None
+    assert vc.severity_distance(None, None) is None
+
+
+def test_severity_distance_unknown_raises() -> None:
+    with pytest.raises(VerifierError):
+        vc.severity_distance("critical", "high")
+    with pytest.raises(VerifierError):
+        vc.severity_distance("high", "info")
