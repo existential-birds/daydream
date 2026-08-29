@@ -218,6 +218,113 @@ def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) ->
     assert "R100\told.py\tnew.py" in statuses, f"no R100 rename record in: {statuses!r}"
 
 
+def _seed_anchor_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str, str]:
+    """Bare origin with no renames: main (authoring->edit) + ``refs/pull/N/head``.
+
+    Commit 1 authors ``a.py``; commit 2 edits it in place (a plain ``M`` diff,
+    no rename records). Returns ``(bare, authoring_sha, head_sha)``.
+    """
+    repo = tmp_path / "anchor_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "a.py", "def a() -> int:\n    return 1\n")
+    authoring_sha = _commit(repo, "author a.py")
+    repo.joinpath("a.py").write_text("def a() -> int:\n    return 2\n")
+    _git(repo, "add", "a.py")
+    head_sha = _commit(repo, "edit a.py")
+
+    bare = tmp_path / "anchor_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/{pr}/head", check=False)
+    return str(bare), authoring_sha, head_sha
+
+
+def _seed_double_rename_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str, str]:
+    """Bare origin with two renames in one diff: main (authoring->rename) + PR ref.
+
+    Commit 1 authors ``old1.py`` and ``old2.py``; commit 2 renames both (via
+    ``git mv``, no content change) so ``git diff -M`` emits two ``R100`` rows.
+    Returns ``(bare, authoring_sha, head_sha)``.
+    """
+    repo = tmp_path / "dbl_wt"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "old1.py", "def old1() -> int:\n    return 1\n")
+    _write(repo, "old2.py", "def old2() -> int:\n    return 2\n")
+    authoring_sha = _commit(repo, "author old1 old2")
+    _git(repo, "mv", "old1.py", "new1.py")
+    _git(repo, "mv", "old2.py", "new2.py")
+    head_sha = _commit(repo, "rename both")
+
+    bare = tmp_path / "dbl_origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/{pr}/head", check=False)
+    return str(bare), authoring_sha, head_sha
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (plan): fail-closed authoring-path derivation over the pinned mirror
+# ---------------------------------------------------------------------------
+
+
+def test_derive_authoring_path_direct_hit(tmp_path: Path) -> None:
+    """A path that exists in the authoring tree derives to itself -- the
+    authoring commit is present and ``cat-file`` succeeds, so no rename trace
+    (and no ``mapped_sha`` consultation) is needed."""
+    from daydream.benchmark import snapshot
+
+    origin, authoring_sha, head_sha = _seed_anchor_origin(tmp_path)
+    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = snapshot.mirror(tmp_path)
+    assert snapshot.derive_authoring_path(m, authoring_sha, "a.py", head_sha) == "a.py"
+
+
+def test_derive_authoring_path_rename_traced(tmp_path: Path) -> None:
+    """A path absent from the authoring tree whose head name is the ``R`` dest
+    of a mirror rename trace resolves to the authoring-time (old) name."""
+    from daydream.benchmark import snapshot
+
+    origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
+    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    m = snapshot.mirror(tmp_path)
+    assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
+
+
+def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
+    """Derivation never guesses: a missing authoring commit is
+    ``history-unavailable``; a path that is neither in the authoring tree nor an
+    exact rename dest fails ``path-unavailable`` -- even when the diff does
+    contain rename candidates (the two-R-row diff must not be resolved by
+    picking among the candidates)."""
+    from daydream.benchmark import snapshot
+
+    anchor_origin, anchor_auth, anchor_head = _seed_anchor_origin(tmp_path, pr=1)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[anchor_head], origin_url=anchor_origin)
+    dbl_origin, dbl_auth, dbl_head = _seed_double_rename_origin(tmp_path, pr=3)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 3, explicit_shas=[dbl_head], origin_url=dbl_origin)
+    m = snapshot.mirror(tmp_path)
+
+    sha_absent = ("0" * 40, "a.py", anchor_head)  # (a) commit absent
+    sha_present = (anchor_auth, "missing.py", anchor_head)  # (b) no rename, no path
+    sha_ambiguous = (dbl_auth, "missing.py", dbl_head)  # (c) two R-candidates
+    for args, expected_reason in [
+        (sha_absent, "history-unavailable"),
+        (sha_present, "path-unavailable"),
+        (sha_ambiguous, "path-unavailable"),
+    ]:
+        with pytest.raises(snapshot.AnchorDerivationError) as exc:
+            snapshot.derive_authoring_path(m, *args)
+        assert expected_reason in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # Task 1: shared bare-mirror establishment + PR ref fetch
 # ---------------------------------------------------------------------------

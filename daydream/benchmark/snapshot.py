@@ -188,6 +188,87 @@ def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -
     return out or None
 
 
+class AnchorDerivationError(git_ops.GitError):
+    """Fail-closed authoring-path derivation failure, carrying a closed reason.
+
+    ``reason`` is one of ``"history-unavailable"`` (the authoring commit, or
+    the rename-trace diff over it, is unavailable in the mirror) or
+    ``"path-unavailable"`` (the path cannot be traced to a unique
+    authoring-time name). Never a free-form string and never a guessed path:
+    the caller maps it to a fixed anchor status.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        super().__init__(f"{reason}: {detail}")
+
+
+def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapped_sha: str) -> str:
+    """Derive the authoring-time path for *path* from a strict, versioned anchor.
+
+    Three-step, fail-closed derivation over the pinned mirror:
+
+    1. the authoring commit must resolve in the mirror -- absence raises
+       :class:`AnchorDerivationError` with reason ``"history-unavailable"``;
+    2. if ``path`` exists in the authoring tree, it derives to itself (the
+       common same-path case needs no rename trace);
+    3. otherwise the rename trace between the authoring commit and the
+       ``mapped_sha`` commit (the commit GitHub re-anchored the review onto)
+       must contain exactly one ``R<score>`` row whose *new* name is ``path``
+       -- exactly one match returns the old name; zero or multiple matches
+       raise reason ``"path-unavailable"`` (never a guess among rename
+       candidates); a failed diff raises ``"history-unavailable"``.
+
+    All git failure paths propagate through :class:`git_ops.GitError`
+    semantics; nothing is silently coerced to a fallback path.
+
+    The diff runs with ``-z`` so paths containing spaces/quote characters are
+    emitted raw (no C-style quoting to unparse), and records are NUL-split:
+    rename rows carry three fields (``R<score>``, old, new) and every other
+    status row carries two (status, path).
+    """
+    verify = git_ops._run_git(mirror_repo, ["rev-parse", "--verify", f"{authoring_sha}^{{commit}}"], retries=0)
+    if verify.returncode != 0:
+        raise AnchorDerivationError(
+            "history-unavailable",
+            f"authoring commit {authoring_sha[:12]} is absent from the mirror {mirror_repo}",
+        )
+    exists = git_ops._run_git(mirror_repo, ["cat-file", "-e", f"{authoring_sha}:{path}"], retries=0)
+    if exists.returncode == 0:
+        return path
+    trace = git_ops._run_git(
+        mirror_repo,
+        ["diff", "--name-status", "-z", "-M", authoring_sha, mapped_sha],
+        retries=0,
+    )
+    if trace.returncode != 0:
+        raise AnchorDerivationError(
+            "history-unavailable",
+            f"git diff --name-status -M {authoring_sha} {mapped_sha} failed in {mirror_repo}: {trace.stderr.strip()}",
+        )
+    fields = [f for f in trace.stdout.split("\0") if f]
+    matches: list[str] = []
+    i = 0
+    while i < len(fields):
+        status = fields[i]
+        if status.startswith("R"):
+            if i + 2 >= len(fields):
+                break
+            old, new = fields[i + 1], fields[i + 2]
+            if new == path:
+                matches.append(old)
+            i += 3
+        else:
+            i += 2
+    if len(matches) == 1:
+        return matches[0]
+    raise AnchorDerivationError(
+        "path-unavailable",
+        f"path {path!r} has no unique authoring-time name between "
+        f"{authoring_sha[:12]} and {mapped_sha[:12]} (matches={len(matches)})",
+    )
+
+
 def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str) -> str | tuple[str, str]:
     """Peel ``^{tree}`` for both commits, or return ``"missing_object"``."""
     def _tree(sha: str) -> str | None:
