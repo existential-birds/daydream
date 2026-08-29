@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
+from daydream.git_ops import GitError
 
 # ---------------------------------------------------------------------------
 # real-git seed helpers (deterministic commit SHAs)
@@ -1108,8 +1109,8 @@ def test_anchor_delta_unavailable_on_git_failure(
     m, base, orphan, heads = _delta_mirror(tmp_path)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
-        raise git_ops.GitError("forced failure")
+        raise GitError("forced failure")
 
-    monkeypatch.setattr(sn.git_ops, "_run_git", _boom)
+    monkeypatch.setattr(git_ops, "_run_git", _boom)
     assert sn.anchor_delta(m, base, heads["edit"],
                            _anchor("wide.py", 10, 10, base)) == "unavailable"

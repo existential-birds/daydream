@@ -2861,7 +2861,9 @@ def test_facts_version_bump_alone_never_stales(tmp_path: Path, fake_gh: FakeGh) 
     ) == 0
     refreshed = load_yaml_strict(case_path)
     assert refreshed["curation"]["state"] == "ready"           # version bump alone does not stale
-    assert refreshed["prioritization"]["extraction_version"] == gi.EXTRACTION_VERSION
+    from daydream.benchmark.schema import EXTRACTION_VERSION
+
+    assert refreshed["prioritization"]["extraction_version"] == EXTRACTION_VERSION
 
 
 def test_equivalent_imports_produce_identical_facts_and_rank(tmp_path: Path, fake_gh: FakeGh) -> None:
