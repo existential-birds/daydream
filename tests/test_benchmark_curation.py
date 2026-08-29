@@ -843,7 +843,7 @@ def _reanchor_frozen_inline(ws: Path, case_id: str, *, authoring_commit: str) ->
     cand["exact_acceptable"] = False
     cand["not_exact_reason"] = "re-anchored"
     atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-    return rec["source_id"]
+    return str(rec["source_id"])
 
 
 def test_curation_projection_shows_authoring_commit_and_reason(tmp_path: Path, fake_gh: FakeGh) -> None:
