@@ -225,7 +225,8 @@ def _fake_gh_merged_per_finding(merged_at: str, fp_replied: str, fp_unreplied: s
                 "user": {"login": "daydream-runner"},
                 "body": f"finding\n\n{finding_marker(fp_unreplied)}\n\n{DAYDREAM_FOOTER}",
             },
-            {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "applied"},
+            {"id": 3, "in_reply_to_id": 1, "user": {"login": "human"},
+             "author_association": "MEMBER", "body": "applied"},
         ],
     )
 

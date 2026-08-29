@@ -37,6 +37,7 @@ from daydream.training.reply_classifier import (
     _identity_gates_pass,
     _login,
     classify_reply,
+    is_qualifying_author,
 )
 
 # Version-stable footer prefix: matching only this prefix (not the full
@@ -157,6 +158,11 @@ def _reply_evidence(
                 "created_at": reply.get("created_at", ""),
                 "body_sha256": hashlib.sha256((reply.get("body") or "").encode("utf-8")).hexdigest(),
                 "reason": _reply_reason(reply, pr_author_logins, review_author_logins),
+                # Per-reply classifier axis (``classify_reply`` output): the field
+                # harvest's ``_decisive_evidence_valid_at`` filters on, so an earlier
+                # qualifying-but-ambiguous reply never moves ``valid_at`` ahead of
+                # the reply that actually decided the disposition (M12).
+                "classifier_label": classify_reply(reply),
             }
         )
     return evidence
@@ -164,18 +170,32 @@ def _reply_evidence(
 
 def _disposition_for_replies(
     replies: list[dict[str, Any]],
-    evidence: list[dict[str, Any]],
+    pr_author_logins: frozenset[str],
+    review_author_logins: frozenset[str],
 ) -> PerFindingDisposition:
-    """Map replies to a disposition via the versioned classifier (M1/M4).
+    """Map replies to a disposition via the versioned classifier (M1/M4/M6).
 
     Deleted/inaccessible comments never reach here (``missing`` is decided
     by the join, so a deleted comment can never map to ``rejected``).
+
+    Only replies whose author qualifies under the M6 gate
+    (:func:`is_qualifying_author`) may cast a decisive vote — the same gate
+    the persisted evidence ``reason`` records (``_reply_reason``). A reply
+    whose own evidence says ``excluded:non-qualifying`` must not decide the
+    finding, or harvest's ``_decisive_evidence_valid_at`` would drop its
+    timestamp as excluded while the disposition kept its vote (M6).
     """
-    if not any(isinstance(reply, dict) and _identity_gates_pass(reply) for reply in replies):
+    if not any(
+        isinstance(reply, dict)
+        and is_qualifying_author(reply, pr_author_logins, review_author_logins)
+        for reply in replies
+    ):
         return "unanswered"
     votes: set[PerFindingDisposition] = set()
     for reply in replies:
-        if not isinstance(reply, dict) or not _identity_gates_pass(reply):
+        if not isinstance(reply, dict):
+            continue
+        if not is_qualifying_author(reply, pr_author_logins, review_author_logins):
             continue
         label = classify_reply(reply)
         if label in ("accepted", "rejected"):
@@ -700,7 +720,9 @@ def per_finding_resolution_signal(
             PerFindingResolution(
                 fingerprint=fingerprint,
                 comment_id=comment_id,
-                disposition=_disposition_for_replies(replies, evidence),
+                disposition=_disposition_for_replies(
+                    replies, pr_author_logins, review_author_logins
+                ),
                 evidence=evidence,
                 evidence_digest=reply_evidence_digest(evidence),
             )

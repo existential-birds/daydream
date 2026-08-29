@@ -282,8 +282,13 @@ def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
         ],
     )
     # Stamp history exactly once (M17): rows written before the reply-label
-    # columns existed have ``labeler_policy_version IS NULL`` — the condition is
-    # its own idempotency guard, so pre-existing rows are marked ``legacy`` on
-    # first open and never rewritten afterwards. No row's labels/observed_at/
+    # columns existed have ``labeler_policy_version IS NULL``. The additional
+    # ``legacy = 'auto'`` condition is the actual idempotency guard — once a
+    # row is marked ``legacy`` it stops matching, so later connection opens do
+    # not re-execute the UPDATE (or rewrite matched rows into the WAL) even
+    # though ``labeler_policy_version`` stays NULL. No row's labels/observed_at/
     # rubric_json is ever written here.
-    conn.execute("UPDATE label_observations SET legacy = 'legacy' WHERE labeler_policy_version IS NULL")
+    conn.execute(
+        "UPDATE label_observations SET legacy = 'legacy' "
+        "WHERE labeler_policy_version IS NULL AND legacy = 'auto'"
+    )

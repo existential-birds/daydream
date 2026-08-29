@@ -1328,12 +1328,23 @@ def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path) -> None:
                                       labeler_version="rv1", evidence_sha="shaA", source="auto")
     assert first is True and second is False
     assert len(label_observation_history(tmp_path, "s-dedup")) == 1
-    # A reward_version change DOES append:
+    # A labeler_policy_version change DOES append: the M14 auto-dedup tuple is
+    # (evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
+    # has_posterior, reward_version), so this append fires on the
+    # labeler_version bump:
     third = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
                                      labeler_version="rv2", evidence_sha="shaA",
                                      reward_version="rv2", source="auto")
     assert third is True
     assert len(label_observation_history(tmp_path, "s-dedup")) == 2
+    # An independent reward_version bump (identical evidence AND policy) also
+    # appends: reward_version is part of the M14 tuple, so the freshly
+    # computed reward_json/composite_reward must not be silently discarded.
+    fourth = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
+                                      labeler_version="rv2", evidence_sha="shaA",
+                                      reward_version="rv3", source="auto")
+    assert fourth is True
+    assert len(label_observation_history(tmp_path, "s-dedup")) == 3
 
 
 def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path) -> None:

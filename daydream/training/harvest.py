@@ -54,8 +54,11 @@ Annotation builder:
   unpushed-SHA 422) degrades the row to its local-branch posterior; every other
   reviewer-signal, prior-query, posterior-fetch, and git error propagates to the
   caller, which isolates per-row.
-* ``valid_at`` is the PR merge timestamp for PR rows and ``None`` for
-  non-PR/local rows (the write layer collapses ``None`` → ``observed_at``).
+* ``valid_at`` is the earliest qualifying decisive-evidence timestamp — the
+  ``created_at`` of a reply supporting an ``accepted``/``rejected`` disposition
+  (M12) — falling back to the PR merge timestamp when no decisive evidence
+  exists, and ``None`` for non-PR/local rows (the write layer collapses
+  ``None`` → ``observed_at``).
 
 Orchestrator (:func:`run_harvest`):
 
@@ -550,9 +553,11 @@ class AnnotationPayload:
             ``"unknown"``, else a single-element list).
         pr_state: sqlite ``pr_state`` discriminator (``"merged"``/``"closed"``
             for PR rows, ``None`` for local-branch rows).
-        valid_at: The valid-time of the posterior outcome — the PR merge
-            timestamp for PR rows, ``None`` for non-PR/local rows (the write
-            layer collapses ``None`` → ``observed_at``).
+        valid_at: The valid-time of the posterior outcome — the earliest
+            qualifying decisive-evidence timestamp (M12), falling back to the
+            PR merge timestamp when no decisive evidence exists, and ``None``
+            for non-PR/local rows (the write layer collapses ``None`` →
+            ``observed_at``).
         reward_version: The :data:`daydream.training.reward.REWARD_VERSION`
             observed at scoring time.
         reward_json: ``json.dumps`` of the full
@@ -792,11 +797,14 @@ def _decisive_evidence_valid_at(rubric: Rubric) -> str | None:
     """Earliest qualifying decisive-evidence timestamp from the rubric (M12).
 
     Scans the per-finding resolutions' persisted evidence for ``created_at``
-    stamps of replies that support an ``accepted``/``rejected`` disposition
-    (non-excluded authors only). Malformed entries (missing/blank
-    ``created_at``) are skipped for the min computation; when no decisive
-    timestamp exists the caller falls back to the merge time or ``None`` —
-    never a fabricated timestamp.
+    stamps of replies that support the resolution's ``accepted``/``rejected``
+    disposition: an entry counts only when its author qualified (the
+    ``reason`` is not ``excluded:*``) AND the reply's own ``classifier_label``
+    matches the disposition — so an earlier qualifying-but-ambiguous reply
+    never pulls ``valid_at`` before the reply that actually decided the
+    finding. Malformed entries (missing/blank ``created_at``) are skipped for
+    the min computation; when no decisive timestamp exists the caller falls
+    back to the merge time or ``None`` — never a fabricated timestamp.
     """
     stamps: list[str] = []
     for resolution in rubric.per_finding_resolutions or []:
@@ -807,6 +815,8 @@ def _decisive_evidence_valid_at(rubric: Rubric) -> str | None:
                 continue
             reason = entry.get("reason")
             if not isinstance(reason, str) or reason.startswith("excluded:"):
+                continue
+            if entry.get("classifier_label") != resolution.disposition:
                 continue
             created_at = entry.get("created_at")
             if isinstance(created_at, str) and created_at:
@@ -1081,7 +1091,8 @@ async def run_harvest(config: HarvestConfig) -> dict[str, int]:
                 if appended:
                     summary["annotated"] += 1
                 else:
-                    # Deduped: unchanged evidence/reward-version is a no-op re-run.
+                    # Deduped: unchanged evidence/policy/digest/labels/posterior
+                    # is a no-op re-run.
                     summary["skipped"] += 1
                 # Either way the row is "done" for resume — re-running must not re-fetch it.
                 if cache is not None:

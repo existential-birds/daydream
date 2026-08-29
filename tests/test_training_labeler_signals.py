@@ -187,13 +187,26 @@ def test_disposition_accepted_on_qualifying_accept() -> None:
 
 
 def test_disposition_rejected_on_false_positive() -> None:
-    (res,) = _resolve([("False positive, path is unreachable", {"login": "dev", "assoc": "NONE"})])
+    (res,) = _resolve([("False positive, path is unreachable", {"login": "dev", "assoc": "MEMBER"})])
     assert res.disposition == "rejected"
 
 
 def test_disposition_ambiguous_on_question() -> None:
-    (res,) = _resolve([("Is this still true on 3.12?", {"login": "dev", "assoc": "NONE"})])
+    (res,) = _resolve([("Is this still true on 3.12?", {"login": "dev", "assoc": "MEMBER"})])
     assert res.disposition == "ambiguous"
+
+
+def test_disposition_non_qualifying_author_does_not_vote() -> None:
+    """A decisive-text reply from a non-qualifying author never casts a vote.
+
+    assoc NONE with no PR/review-author match persists evidence reason
+    ``excluded:non-qualifying``, so the disposition must agree (M6): no
+    qualifying reply means ``unanswered``, and the timestamp is not decisive
+    evidence either.
+    """
+    (res,) = _resolve([("Fixed in abc123", {"login": "dev", "assoc": "NONE"})])
+    assert res.disposition == "unanswered"
+    assert res.evidence[0]["reason"] == "excluded:non-qualifying"
 
 
 def test_disposition_unanswered_on_bot_only_and_self_replies() -> None:

@@ -39,7 +39,11 @@ from typing import Any
 
 from rich.console import Console
 
-from daydream.archive.index import append_label_observation, query_runs
+from daydream.archive.index import (
+    append_label_observation,
+    latest_label_observation,
+    query_runs,
+)
 from daydream.git_ops import GitError, RateLimitError
 from daydream.training import labeler_versions
 from daydream.training.harvest import (
@@ -75,20 +79,12 @@ def _latest_labels(archive_dir: Path, session_id: str) -> list[str] | None:
     """Latest existing observation's labels for a session, or ``None``.
 
     Read *before* the append so the report's ``run_label_transitions`` records
-    the old winning generation, not the one backfill just wrote.
+    the old winning generation, not the one backfill just wrote. Uses the
+    archive's winner projection (human-first precedence, then recency) so a
+    human override coexisting with a newer auto row still reads as the human
+    generation.
     """
-    import sqlite3
-
-    conn = sqlite3.connect(archive_dir / "index.db")
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT labels FROM label_observations WHERE session_id = ? "
-            "ORDER BY observed_at DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
-    finally:
-        conn.close()
+    row = latest_label_observation(archive_dir, session_id)
     if row is None or row["labels"] is None:
         return None
     try:
@@ -146,7 +142,10 @@ def run_backfill(
     Args:
         archive_dir: Archive root containing ``index.db``.
         dry_run: Build annotations but suppress writes (and the report's
-            post-write transitions stay prospective).
+            post-write transitions stay prospective). Walked PR-linked rows
+            still count in ``sessions_reprocessed`` but never in ``skipped``,
+            so the summary distinguishes 'nothing changed' from 'dry run
+            suppressed writes'.
         session_filter: Optional ``session_id`` prefix restricting the queue.
         report_path: When given, write the M20 machine-readable report JSON
             (``sort_keys=True``) after the observation loop; a write failure
@@ -237,7 +236,7 @@ def run_backfill(
                 pr_state_counts["unknown"] += 1
                 class_balance["unknown"] += 1
                 if dry_run:
-                    summary["skipped"] += 1
+                    summary["sessions_reprocessed"] += 1
                     continue
                 appended = append_label_observation(
                     archive_dir,
@@ -267,7 +266,11 @@ def run_backfill(
             for label in labels:
                 class_balance[str(label)] += 1
             if dry_run:
-                summary["skipped"] += 1
+                # Suppressed write, not a deduped no-op: count the row as
+                # walked; ``skipped`` stays reserved for deduped no-ops (M18)
+                # so the summary distinguishes 'nothing changed' from 'dry run
+                # suppressed writes'.
+                summary["sessions_reprocessed"] += 1
                 continue
             appended = append_label_observation(
                 archive_dir,
