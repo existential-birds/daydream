@@ -612,6 +612,121 @@ def test_anchor_fields_flip_projection_signature() -> None:
     assert gi._evidence_projection_hash(d) != h1
 
 
+def test_file_level_comment_exactness_gated_by_anchor() -> None:
+    """A locationless file-level inline comment never projects exact.
+
+    Its ``Location`` is always None, but exact acceptance is gated by the same
+    commit/anchor exactness as its line-level siblings: a missing anchor fails
+    closed to ``history-unavailable``, a fail-closed derivation maps 1:1 to its
+    status, and even a derived anchor cannot satisfy the "usable authoring
+    location" requirement — ``range-unavailable``.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import schema
+
+    def project(anchor: schema.AuthoringAnchor | None) -> schema.Candidate:
+        rec = schema.EvidenceRecord(
+            source_id="github:inline_comment:1",
+            kind="inline_comment",
+            database_id=1,
+            node_id="DIFF_1",
+            author=schema._EvidenceAuthor(login="alice", type="User"),
+            body="fix this",
+            body_sha256=hashlib.sha256(b"fix this").hexdigest(),
+            created_at=_TS,
+            updated_at=_TS,
+            commit_id="a" * 40,
+            original_commit_id="a" * 40,
+            subject_type="file",
+            authoring_anchor=anchor,
+            is_bot=False,
+            url="https://github.com/o/r/pull/101#discussion_r1",
+        )
+        return gi._project_one(rec, head_sha="a" * 40)
+
+    no_anchor = project(None)
+    assert no_anchor.location is None
+    assert no_anchor.exact_acceptable is False
+    assert no_anchor.not_exact_reason == "history-unavailable"
+
+    closed = project(schema.AuthoringAnchor(
+        version=1, status="path-unavailable", commit_id=None, path=None,
+        start_line=None, end_line=None,
+    ))
+    assert closed.location is None
+    assert closed.exact_acceptable is False
+    assert closed.not_exact_reason == "path-unavailable"
+
+    derived_off_head = project(schema.AuthoringAnchor(
+        version=1, status="derived", commit_id="b" * 40, path="a.py",
+        start_line=4, end_line=5,
+    ))
+    assert derived_off_head.location is None
+    assert derived_off_head.exact_acceptable is False
+    assert derived_off_head.not_exact_reason == "range-unavailable"
+
+    derived_at_head = project(schema.AuthoringAnchor(
+        version=1, status="derived", commit_id="a" * 40, path="a.py",
+        start_line=4, end_line=5,
+    ))
+    assert derived_at_head.location is None
+    assert derived_at_head.exact_acceptable is False
+    assert derived_at_head.not_exact_reason == "range-unavailable"
+
+
+def test_derive_one_anchor_inverted_range_and_bad_path_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Derived-anchor validations can never abort the import run.
+
+    An inverted authoring range (``original_start_line > original_line``, which
+    the schema's ``_derived_iff_populated`` rejects) and a mirror-derived path
+    the shared relative-path rule rejects (git permits ``:`` filenames) each
+    map to the existing fail-closed status instead of a ValidationError
+    escaping to abort every PR in the batch.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import schema
+
+    def rec(*, original_start_line: int, original_line: int) -> schema.EvidenceRecord:
+        return schema.EvidenceRecord(
+            source_id="github:inline_comment:1",
+            kind="inline_comment",
+            database_id=1,
+            node_id="DIFF_1",
+            author=schema._EvidenceAuthor(login="alice", type="User"),
+            body="fix this",
+            body_sha256=hashlib.sha256(b"fix this").hexdigest(),
+            created_at=_TS,
+            updated_at=_TS,
+            commit_id="a" * 40,
+            original_commit_id="a" * 40,
+            path="a.py",
+            original_path="a.py",
+            original_line=original_line,
+            original_start_line=original_start_line,
+            subject_type="line",
+            side="RIGHT",
+            is_bot=False,
+            url="https://github.com/o/r/pull/101#discussion_r1",
+        )
+
+    mirror = tmp_path / "mirror.git"
+    # inverted range: the guard fires before the mirror is consulted
+    inverted = gi._derive_one_anchor(rec(original_start_line=8, original_line=4), mirror, "a" * 40)
+    assert inverted.status == "range-unavailable"
+    assert inverted.commit_id is None and inverted.path is None
+
+    # a mirror-derived path the schema's relative-path rule rejects -> closed
+    monkeypatch.setattr(
+        "daydream.benchmark.snapshot.derive_authoring_path",
+        lambda *a, **k: "weird:file.py",
+    )
+    bad_path = gi._derive_one_anchor(rec(original_start_line=4, original_line=5), mirror, "a" * 40)
+    assert bad_path.status == "path-unavailable"
+    assert bad_path.commit_id is None and bad_path.path is None
+
+
 def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.schema import Location
@@ -670,6 +785,11 @@ def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: Fake
     assert right.location == Location(path="a.py", start_line=4, end_line=5)
     assert right.exact_acceptable is True
     assert by_src["github:inline_comment:2"].location is None       # file-level
+    # A locationless file-level comment is never exactly acceptable: it gates on
+    # the same commit/anchor exactness as line comments, and this direct
+    # fetch-and-project path never derived an anchor, so it fails closed.
+    assert by_src["github:inline_comment:2"].exact_acceptable is False
+    assert by_src["github:inline_comment:2"].not_exact_reason == "history-unavailable"
     assert by_src["github:inline_comment:3"].exact_acceptable is False  # LEFT
     assert by_src["github:review:5"].location is None               # review body
     assert by_src["github:review:5"].exact_acceptable is True
@@ -1093,6 +1213,41 @@ def test_materialization_fails_closed_without_mirror(tmp_path: Path, fake_gh: Fa
     assert rec["authoring_anchor"] is None
 
 
+def test_materialization_inverted_authoring_range_fails_closed(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """GitHub does not guarantee the authoring range ordering: an inverted
+    ``original_start_line > original_line`` fails that record's derived anchor
+    closed to ``range-unavailable`` — the whole import completes (rc 0) instead
+    of a schema ValidationError aborting the run.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_sha, authoring_sha, head_sha = _seed_anchor_origin(tmp_path, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "inverted range", "commit_id": head_sha, "original_commit_id": authoring_sha,
+             "path": "new.py", "line": 4, "original_line": 4, "original_start_line": 8,
+             "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=origin_url) == 0
+    imp = load_json_strict(ws / "imports" / "pr-000101.json")
+    rec = next(e for e in imp["evidence"] if e["database_id"] == 1)
+    assert rec["authoring_anchor"] == {
+        "version": 1, "status": "range-unavailable",
+        "commit_id": None, "path": None, "start_line": None, "end_line": None,
+    }
+
+
 def test_import_freezes_cases_ready_with_bundle(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict, sha256_file
@@ -1410,6 +1565,53 @@ def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path: Path, f
     assert {e["kind"] for e in refreshed["evidence"]} == {"inline_comment"}
 
 
+def test_refresh_legacy_without_original_start_line_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """A legacy multi-line comment record (persisted before the authoring-range
+    field existed, so its raw dict has no ``original_start_line`` key) must not
+    flip its projection signature on the first post-upgrade refresh: the fresh
+    canonical value is a pure format-upgrade artifact, so the id the curated
+    case references stays out of changed_ids and the case stays ready.
+    """
+    import json
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 5, "start_line": 4, "original_line": 5,
+             "original_start_line": 4, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    # Rewrite the persisted import in the pre-authoring-range shape: the field
+    # is absent from every evidence record. The hash the prior signature uses
+    # then encodes ``original_start_line=None`` (absent-key default).
+    import_path = ws / "imports" / "pr-000101.json"
+    raw = load_json_strict(import_path)
+    raw["evidence"] = [
+        {k: v for k, v in e.items() if k != "original_start_line"}
+        for e in raw["evidence"]
+    ]
+    assert all("original_start_line" not in e for e in raw["evidence"])
+    import_path.write_text(json.dumps(raw, indent=2))
+    # refresh with IDENTICAL GitHub content: the fresh fetch re-adds the field
+    # with the same value, so the one-time upgrade must not stale curated gold.
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"           # NOT staled by the field addition
+    assert case["curation"]["findings"]                   # curated gold preserved
+
+
 def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -1612,12 +1814,19 @@ def test_refresh_unchanged_signature_preserves_curation(tmp_path: Path, fake_gh:
     assert after["state"] != "draft", "curation must not reset to draft on unchanged refresh"
 
 
-def test_refresh_backfills_anchors_preserving_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """A pre-anchor import (no ``authoring_anchor`` on any persisted record)
-    gains derived anchors on refresh against a real mirror, while prior
-    curation state/findings/exclusions survive unchanged -- and a second
-    refresh reuses the persisted anchors instead of flipping every record's
-    signature and staling the curated case."""
+def test_refresh_derived_anchor_projection_flip_stales_curated_case(
+    tmp_path: Path, fake_gh: FakeGh,
+) -> None:
+    """A pre-anchor import gains derived anchors on refresh against a real
+    mirror. A record the prior import left anchor-less re-projects its
+    candidate from the derived authoring anchor — its Location switches from
+    the anchor-less projection to the authoring-time range, a change no raw
+    field carries into changed_ids — so the curated case that references it
+    must flip stale instead of being silently carried ready over a candidate
+    basis the preserved finding no longer byte-matches. A second refresh
+    reuses the persisted anchors (no new projection change) and keeps the
+    state/findings stable; the refresh never overwrites curation.
+    """
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_json_strict, load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
@@ -1640,20 +1849,22 @@ def test_refresh_backfills_anchors_preserving_curation(tmp_path: Path, fake_gh: 
     )
     # pre-anchor-era import: hermetic (origin_url=None) so there is no freeze
     # mirror and no record can carry an authoring anchor -- the persisted
-    # import document is anchor-less everywhere.
+    # import document is anchor-less everywhere and the candidate Location is
+    # None (not-exact).
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     imp = load_json_strict(ws / "imports" / "pr-000101.json")
     assert all(e.get("authoring_anchor") is None for e in imp["evidence"])
     raw = load_yaml_strict(ws / "benchmark.yaml")
     case_id = raw["cases"][0]["case_id"]
-    _curate_case(ws, f"{case_id}.yaml")
     prior_case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    prior_state = prior_case["curation"]["state"]
-    prior_findings = prior_case["curation"]["findings"]
-    prior_exclusions = prior_case["curation"]["exclusions"]
-    # refresh with the mirror available: anchors derive against the pinned head
-    # and land on the persisted records; the backfill must NOT stale the
-    # curated case (its findings/exclusions survive verbatim).
+    assert prior_case["candidates"][0]["location"] is None   # pre-anchor basis
+    _curate_case(ws, f"{case_id}.yaml")
+    prior_findings = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"]
+    prior_exclusions = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"]
+    # refresh with the mirror available: the derived anchor re-projects record
+    # 1's Location onto the authoring-time range, so the referenced curated
+    # case must flip stale -- it is NOT silently re-projected ready under a
+    # candidate basis the preserved finding no longer byte-matches.
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
     ) == 0
@@ -1664,18 +1875,80 @@ def test_refresh_backfills_anchors_preserving_curation(tmp_path: Path, fake_gh: 
         "path": "a.py", "start_line": 4, "end_line": 5,
     }
     case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert case["curation"]["state"] == prior_state
-    assert case["curation"]["findings"] == prior_findings
+    assert case["curation"]["state"] == "stale"
+    assert case["curation"]["snapshot_attested"] is False
+    assert "task_spec_sha256" not in case["curation"]  # approval invalidated
+    assert case["curation"]["findings"] == prior_findings   # curation never overwritten
     assert case["curation"]["exclusions"] == prior_exclusions
-    # a second refresh must reuse the persisted anchors: the evidence signature
-    # stays stable (anchor fields are in the projection whitelist), so the
-    # referenced curated case stays ready rather than staling on the backfill.
+    assert case["candidates"][0]["location"] == {"path": "a.py", "start_line": 4, "end_line": 5}
+    # a second refresh reuses the persisted anchors: no record re-projects, so
+    # neither the anchor backfill nor the signature comparison stales anything
+    # further -- the stale state and preserved curation stay exactly as-is.
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
     ) == 0
     case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert case["curation"]["state"] == prior_state
+    assert case["curation"]["state"] == "stale"
     assert case["curation"]["findings"] == prior_findings
+    assert case["curation"]["exclusions"] == prior_exclusions
+
+
+def test_refresh_pre_anchor_projected_location_flip_stales_without_mirror(
+    tmp_path: Path, fake_gh: FakeGh,
+) -> None:
+    """A pre-anchor workspace whose persisted candidates were projected from
+    the observed fields (the pre-anchor projection, e.g. ``{a.py, 5, 5}`` for a
+    comment carrying ``line`` 5 and ``start_line`` 5) re-projects those
+    candidates to the anchor-less shape (``Location`` None) on a hermetic
+    anchor-era refresh: the projection-basis change carries no raw-field flip,
+    so changed_ids stays empty, yet the curated case that references the
+    record must still flip stale — keeping it ready would make the next
+    validate_case raise "does not byte-match its candidate projection" with
+    refresh having reported success. No mirror is involved: this is the plain
+    re-import defect.
+    """
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "fix this", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 5, "start_line": 5, "original_line": 5,
+             "original_start_line": 4, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    imp = load_json_strict(ws / "imports" / "pr-000101.json")
+    assert all(e.get("authoring_anchor") is None for e in imp["evidence"])
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    case_id = raw["cases"][0]["case_id"]
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    # The pre-anchor era projected this record's candidate from the observed
+    # fields (path x start_line/line) and persisted that Location on the case.
+    prior_case = load_yaml_strict(case_path)
+    assert prior_case["candidates"][0]["location"] is None      # current code, anchor-less
+    prior_case["candidates"][0]["location"] = {"path": "a.py", "start_line": 5, "end_line": 5}
+    case_path.write_text(yaml.safe_dump(prior_case, sort_keys=False))
+    _curate_case(ws, f"{case_id}.yaml")
+    prior_findings = load_yaml_strict(case_path)["curation"]["findings"]
+    # hermetic refresh: identical RAW evidence, so changed_ids stays empty, but
+    # the fresh projection is the anchor-less shape the current code derives --
+    # the referenced candidate's Location flips and the case must go stale.
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(case_path)
+    assert case["curation"]["state"] == "stale"
+    assert case["curation"]["snapshot_attested"] is False
+    assert case["curation"]["findings"] == prior_findings   # curation never overwritten
+    assert case["candidates"][0]["location"] is None        # fresh anchor-less basis
 
 
 def test_graphql_review_threads_retries_rate_limit_then_fails(
@@ -1986,12 +2259,14 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path: Path) -> None:
         prior_sig,
         prior_task_sig,
         curations,
+        prior_candidates,
         _,
         prior_pinned,
         prior_policy,
         prior_heads,
     ) = gi._prior_import_state(ws, raw, 202)
     assert prior_sig is None and prior_task_sig is None and curations == {}
+    assert prior_candidates == {}
     assert prior_pinned == {} and prior_policy == {} and prior_heads == []
 
 
