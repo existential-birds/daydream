@@ -1081,6 +1081,38 @@ def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[int, st
     )
 
 
+def _backfill_prior_anchors(doc: schema.ImportDocument, prior_raw: dict[str, Any]) -> None:
+    """Restore the prior import's persisted authoring anchors onto a fresh doc.
+
+    ``fetch_and_normalize`` rebuilds every record from live GitHub, so an
+    authoring anchor exists only in the persisted import document -- a refresh
+    would otherwise compare an anchor-less fresh signature against the prior
+    record's anchored one and flip every previously-derived id, staling every
+    curated case that references it (the one-time anchor-era flip). Each fresh
+    root inline record copies the prior record's anchor for the same physical
+    comment (``database_id``) when one was persisted; a record the prior import
+    left anchor-less stays unset so the mirror derivation in
+    :func:`_derive_authoring_anchors` backfills exactly those (Task 7). The
+    physical comment id is unique per record on both sides; a pre-canonical
+    duplicate may appear twice for one id, and the first anchor-bearing copy
+    wins -- the REST copy is the only kind that ever carries one.
+    """
+    prior_by_id: dict[int, schema.AuthoringAnchor] = {}
+    for e in prior_raw.get("evidence", []):
+        anchor_raw = e.get("authoring_anchor")
+        if not isinstance(anchor_raw, dict):
+            continue
+        db_id = int(e["database_id"])
+        if db_id not in prior_by_id:
+            prior_by_id[db_id] = schema.AuthoringAnchor.model_validate(anchor_raw)
+    for record in doc.evidence:
+        if record.kind != "inline_comment" or record.reply_to_id is not None:
+            continue
+        prior = prior_by_id.get(record.database_id)
+        if prior is not None and record.authoring_anchor is None:
+            record.authoring_anchor = prior
+
+
 def _task_input_signature_from_doc(doc: schema.ImportDocument) -> str:
     """Deterministic sha256 over the header fields that feed the compiled context.
 
@@ -1225,19 +1257,29 @@ def _derive_authoring_anchors(
     doc: schema.ImportDocument,
     mirror_repo: Path,
     head_sha: str,
+    changed_ids: set[int] | None = None,
 ) -> None:
     """Derive (or fail closed) the authoring anchor of every root inline record.
 
     Called once per materialized head, immediately before candidate projection
     and only when the freeze mirror is available: the same mirror-derived
     anchor the projection consumes (Task 5) is what the caller persists onto
-    the import document. Replies are evidence (never candidates), so they
-    carry no anchor.
+    the import document. A record that already carries an anchor (restored by
+    :func:`_backfill_prior_anchors` from the prior import document) keeps it —
+    refresh backfills only records that are missing one (Task 7), so the
+    persisted anchor is stable across refreshes and never re-stales curated
+    cases — except a record whose ``database_id`` sits in *changed_ids* (its
+    projection hash flipped against the prior import, a genuine content/anchor
+    edit): that record is re-derived so a stale anchor cannot linger on changed
+    evidence. Replies are evidence (never candidates), so they carry no anchor.
     """
     for record in doc.evidence:
         if record.kind != "inline_comment" or record.reply_to_id is not None:
             continue
-        record.authoring_anchor = _derive_one_anchor(record, mirror_repo, head_sha)
+        if record.authoring_anchor is None or (
+            changed_ids is not None and record.database_id in changed_ids
+        ):
+            record.authoring_anchor = _derive_one_anchor(record, mirror_repo, head_sha)
 
 
 def _case_materialize(
@@ -1270,7 +1312,11 @@ def _case_materialize(
     *task_input_changed* (PR-wide) or its own referenced evidence ids
     intersect *changed_ids* (a referenced record changed or disappeared).
     An unreferenced evidence change never stales it and an untouched PR keeps
-    it ready — findings/exclusions are never overwritten by refresh. A freeze
+    it ready — findings/exclusions are never overwritten by refresh. On
+    refresh, evidence records the prior import left anchor-less are backfilled
+    with mirror-derived authoring anchors (or a fail-closed status) against
+    the same pinned head — records already carrying a restored anchor keep it
+    unless a genuine edit flipped their projection signature. A freeze
     of an existing ``ready|stale`` case that comes back ``unreplayable`` (the
     pinned head became unreachable after a force-push/rebased branch) raises
     :class:`~daydream.git_ops.GitError` instead of writing an unreplayable
@@ -1350,8 +1396,11 @@ def _case_materialize(
             # (the same one the freeze just populated) immediately before
             # projection. Derivation mutates the typed doc's evidence records
             # in place and always fails closed — an anchor can never be
-            # guessed, and an anchor failure never kills the import.
-            _derive_authoring_anchors(doc, snapshot.mirror(root), head_sha)
+            # guessed, and an anchor failure never kills the import. On
+            # refresh, records whose prior anchor was restored by the caller
+            # keep it (only missing anchors are backfilled), unless their id is
+            # in *changed_ids* (a genuine edit re-derives its anchor).
+            _derive_authoring_anchors(doc, snapshot.mirror(root), head_sha, changed_ids)
         else:
             # Imported status: no freeze, no mirror — anchors stay unset
             # (projection treats the missing anchor as not-exact, Task 5).
@@ -1628,7 +1677,16 @@ def _import_one_pr(
     refresh: bool,
     origin_url: str | None = None,
 ) -> int:
-    """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
+    """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure.
+
+    On refresh/re-import the persisted authoring anchors are backfilled onto
+    the freshly fetched doc before the staleness comparison, so an anchor-era
+    refresh neither stales curated cases on the one-time anchor backfill nor
+    re-derives anchors the prior import already settled. Evidence records the
+    prior import left anchor-less gain derived anchors (or a fail-closed
+    status) whenever the freeze mirror is available — never guessed, never
+    silently left exact.
+    """
     prior_sig, prior_task_sig, prior_curations, import_file, prior_pinned, prior_policy, \
         prior_requested_heads = _prior_import_state(root, raw, number)
     try:
@@ -1641,6 +1699,22 @@ def _import_one_pr(
         pinned = _pinned_head_sha(prior_policy, prior_pinned)
         if pinned is not None:
             doc.pull_request.head.sha = pinned
+        # Anchor backfill for refresh/re-import: fetch_and_normalize rebuilds
+        # every record from live GitHub, so a persisted authoring anchor exists
+        # only on the prior import document. Restore those anchors onto the
+        # fresh doc BEFORE the projection-signature comparison — the anchor
+        # fields are in the projection whitelist, and comparing an anchor-less
+        # fresh signature against an anchored prior one would flip every
+        # previously-derived id and stale every curated case that references
+        # it. Records the prior import left anchor-less stay unset;
+        # _case_materialize then derives exactly those (plus genuinely changed
+        # ids) when the mirror is available.
+        prior_raw: dict[str, Any] | None = None
+        if prior_sig is not None:
+            prior_raw = storage.load_json_strict(
+                storage.resolve_authoring_path(root, import_file)
+            )
+            _backfill_prior_anchors(doc, prior_raw)
         # Two independent stale signals: the per-case referenced-evidence arm
         # (database_ids whose projection hash changed or disappeared — runs on
         # refresh AND plain re-import) and the PR-wide task-input arm (the

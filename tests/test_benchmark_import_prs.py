@@ -1612,6 +1612,72 @@ def test_refresh_unchanged_signature_preserves_curation(tmp_path: Path, fake_gh:
     assert after["state"] != "draft", "curation must not reset to draft on unchanged refresh"
 
 
+def test_refresh_backfills_anchors_preserving_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """A pre-anchor import (no ``authoring_anchor`` on any persisted record)
+    gains derived anchors on refresh against a real mirror, while prior
+    curation state/findings/exclusions survive unchanged -- and a second
+    refresh reuses the persisted anchors instead of flipping every record's
+    signature and staling the curated case."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)                   # identity + canned PR for pr 101
+    origin_url, _base_sha, authoring_sha, head_sha = _seed_anchor_origin(tmp_path, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "fix at head", "commit_id": head_sha, "original_commit_id": authoring_sha,
+             "path": "a.py", "line": 5, "original_line": 5, "original_start_line": 4,
+             "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    # pre-anchor-era import: hermetic (origin_url=None) so there is no freeze
+    # mirror and no record can carry an authoring anchor -- the persisted
+    # import document is anchor-less everywhere.
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    imp = load_json_strict(ws / "imports" / "pr-000101.json")
+    assert all(e.get("authoring_anchor") is None for e in imp["evidence"])
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    case_id = raw["cases"][0]["case_id"]
+    _curate_case(ws, f"{case_id}.yaml")
+    prior_case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    prior_state = prior_case["curation"]["state"]
+    prior_findings = prior_case["curation"]["findings"]
+    prior_exclusions = prior_case["curation"]["exclusions"]
+    # refresh with the mirror available: anchors derive against the pinned head
+    # and land on the persisted records; the backfill must NOT stale the
+    # curated case (its findings/exclusions survive verbatim).
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
+    ) == 0
+    imp = load_json_strict(ws / "imports" / "pr-000101.json")
+    rec = next(e for e in imp["evidence"] if e["database_id"] == 1)
+    assert rec["authoring_anchor"] == {
+        "version": 1, "status": "derived", "commit_id": authoring_sha,
+        "path": "a.py", "start_line": 4, "end_line": 5,
+    }
+    case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert case["curation"]["state"] == prior_state
+    assert case["curation"]["findings"] == prior_findings
+    assert case["curation"]["exclusions"] == prior_exclusions
+    # a second refresh must reuse the persisted anchors: the evidence signature
+    # stays stable (anchor fields are in the projection whitelist), so the
+    # referenced curated case stays ready rather than staling on the backfill.
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
+    ) == 0
+    case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert case["curation"]["state"] == prior_state
+    assert case["curation"]["findings"] == prior_findings
+
+
 def test_graphql_review_threads_retries_rate_limit_then_fails(
     tmp_path: Path,
     fake_gh: FakeGh,
