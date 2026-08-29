@@ -1189,6 +1189,23 @@ def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh
     assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
 
 
+def test_task_md_prose_describes_reported_axes_contract(tmp_path: Path, fake_gh: FakeGh) -> None:
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    spec = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT).decode()
+    assert "reported" in spec  # axes are reported, never gating
+    assert "severity, location, and content are graded" not in spec  # the false claim is gone (R10)
+
+
+def test_template_version_is_bumped() -> None:
+    from daydream.benchmark.harbor import build
+
+    assert build.TEMPLATE_VERSION == "3"  # one schema step (R12)
+
+
 def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_gh: FakeGh) -> None:
     import hashlib
 
