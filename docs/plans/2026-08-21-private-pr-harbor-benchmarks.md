@@ -385,14 +385,25 @@ The single-keystroke candidate projection is deterministic:
 - use the complete normalized source body as `body`;
 - set `severity: null`;
 - for a root inline comment with `subject_type=line`, `side=RIGHT`, and
-  `start_side` absent or RIGHT, copy original path and `start_line or line`
-  through `line`; for `subject_type=file` and a review body, use a null
-  location; LEFT-side/deletion or mixed-side anchors require edit; and
-- expose exact acceptance only when the evidence commit equals the case's
-  selected original head SHA, the record is not outdated/dismissed, and the
-  projected path/line validates in that head tree. Evidence from another
-  commit is never automatically re-anchored; the curator must use edit, choose
-  the snapshot-valid location, and receives `provenance.kind=edited`.
+  `start_side` absent or RIGHT, project the location from the record's derived
+  authoring anchor — the authoring-time path plus `start_line`/`end_line` —
+  never from the observed re-anchored `path`/`start_line`/`original_path`
+  fields (the authoring path is the mirror-traced rename of the observed path
+  at the authoring commit); for `subject_type=file` and a review body, use a
+  null location; LEFT-side/deletion or mixed-side anchors require edit; and
+- expose exact acceptance only when the record's authoring anchor is
+  `derived` and its `authoring_anchor.commit_id` equals the case's selected
+  original head SHA, the record is not outdated/dismissed, and the projected
+  authoring location is usable. Every other inline case fails closed to
+  edit-required with a fixed reason: `history-unavailable` (no anchor ever
+  derived: import-only snapshot or a pre-anchor import), `path-unavailable`
+  or `range-unavailable` (derivation failed closed on exactly that),
+  `re-anchored` (the anchor derives on some other commit), or the existing
+  `side`/`title`/`outdated`/`dismissed`; review bodies are file-agnostic and
+  keep their single submission `commit_id` gate (`commit`). Evidence from
+  another commit is never automatically re-anchored; the curator must use
+  edit, choose the snapshot-valid location, and receives
+  `provenance.kind=edited`.
 
 `historical` provenance means title/body/severity/location are byte-for-byte
 equal to this projection from exactly one source ID. Any split, merge, wording,

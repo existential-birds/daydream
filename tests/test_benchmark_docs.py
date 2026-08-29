@@ -233,6 +233,19 @@ def test_claude_has_no_active_legacy_benchmark_reference() -> None:
         assert token not in text, f"legacy token {token!r} must not appear in CLAUDE.md"
 
 
+# --- Authoring anchors (issue-826) ---
+
+def test_docs_describe_anchor_model_and_reasons() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    for needle in ("authoring", "re-anchored", "history-unavailable", "path-unavailable",
+                   "range-unavailable"):
+        assert needle in text, f"runbook must describe the authoring anchor ({needle!r})"
+    plan = (ROOT / "docs" / "plans" / "2026-08-21-private-pr-harbor-benchmarks.md").read_text(
+        encoding="utf-8"
+    )
+    assert "original head SHA" in plan  # §5 bullet names authoring_anchor.commit_id, not commit_id
+
+
 # --- Change-scope guards (out-of-scope) ---
 
 def test_removed_docs_not_recreated() -> None:

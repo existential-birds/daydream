@@ -162,6 +162,41 @@ All workspace writes are atomic and journaled (`prepared | committing |
 complete`) under the workspace lock, so a crash mid-mutation restores either the
 whole before- or after-state — never a checksum-drifted partial.
 
+### Authoring anchors and exact acceptance
+
+Exact single-keystroke acceptance of an inline review candidate is judged
+solely from a strict, versioned **authoring anchor** on the evidence record —
+the authoring commit/path/line range as it existed when the comment was
+written — never from GitHub's re-anchored `commit_id`/`path`/`start_line`
+fields.
+
+- Anchors are derived **once, during case materialization**, from the
+  authenticated mirror, immediately before candidate projection, and only for
+  root inline comments (replies are evidence, never candidates). An
+  `imported`-status snapshot — no freeze, no mirror — and any pre-anchor
+  import leave the anchor unset, and exact acceptance fails closed.
+- Derivation is fail-closed. An anchor is `derived` (carrying the authoring
+  commit, the mirror-traced authoring path — the observed path when it exists
+  in the authoring tree, else its unique rename between the authoring commit
+  and the mapped head — and the authoring line range) or carries exactly one
+  fixed closed status with all data unset: `history-unavailable` (no authoring
+  commit or a failed rename trace), `path-unavailable` (no unique authoring
+  path), or `range-unavailable` (no authoring line range). A guessed or
+  ambiguous path never becomes an anchor.
+- Inline exact acceptance requires a `derived` anchor whose `commit_id` equals
+  the snapshot's selected original head SHA, a usable authoring location, a
+  projectable title, and a record that is neither `outdated` nor `dismissed`.
+  Everything else is edit-required with a fixed not-exact reason — including
+  `re-anchored`, when the anchor derives on a commit other than the selected
+  head. Review bodies are file-agnostic and keep their single submission
+  `commit_id` gate.
+- `curate` shows the authoring commit prefix (`auth:`) beside the observed
+  re-anchored `commit_id` (`commit:`) and the fixed not-exact reason whenever
+  exact acceptance is unavailable, so you can see at a glance whether a record
+  projects exactly or needs manual edit. `import-prs --refresh` recomputes
+  anchors only for records that are missing one or genuinely changed;
+  curation state is preserved.
+
 ## 3. Build and run
 
 ### `build-harbor` — package the workspace for Harbor
