@@ -81,6 +81,7 @@ injection seams.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, replace
@@ -92,6 +93,7 @@ import anyio
 from rich.console import Console
 
 from daydream import git_ops
+from daydream.archive.git_safe import _DEFAULT_HOSTS, normalize_remote_url
 from daydream.archive.index import (
     append_label_observation,
     query_runs,
@@ -118,6 +120,7 @@ from daydream.training.labeler_signals import (
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label, derive_per_finding_labels
+from daydream.trajectory import redact_text as _redact_text
 from daydream.ui import create_console, print_warning
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
@@ -758,7 +761,9 @@ def build_annotation(
     )
 
 
-# Repo resolution — three-tier priority: source_path → clone cache → None
+# Repo resolution — source_path first, then identity-based clone (issue #981):
+# the archived remote_url is only ever normalized to a credential-free HTTPS
+# identity; hosts outside the allowlist fail closed.
 
 
 def _resolve_repo_for_row(
@@ -809,11 +814,21 @@ def _resolve_repo_for_row(
                     fetched_repos.add(cached_repo)
         else:
             cached_repo.parent.mkdir(parents=True, exist_ok=True)
-            git_ops.clone(remote_url, cached_repo, blobless=True)
+            # Issue #981: never clone the archived raw URL. Normalize it to a
+            # credential-free HTTPS identity and fail closed on untrusted
+            # hosts or unparseable input. Token, if any, travels out-of-band.
+            identity, canonical = normalize_remote_url(
+                remote_url, allowed_hosts=_DEFAULT_HOSTS
+            )
+            if identity is None or canonical is None:
+                return None
+            token = os.environ.get("DAYDREAM_GIT_TOKEN")
+            git_ops.clone_with_token(canonical, cached_repo, token, blobless=True)
     except (GitError, OSError) as exc:
+        redacted = _redact_text(str(exc))
         print_warning(
             console or create_console(),
-            f"harvest: repo resolution failed for {repo_slug}: {type(exc).__name__}: {exc}",
+            f"harvest: repo resolution failed for {repo_slug}: {type(exc).__name__}: {redacted}",
         )
         if not (cached_repo / ".git").exists():
             return None

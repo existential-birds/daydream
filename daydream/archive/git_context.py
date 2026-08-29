@@ -9,11 +9,11 @@ Exports:
     capture_git_context: Capture current git state from a directory.
 """
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from daydream import git_ops
+from daydream.archive.git_safe import normalize_remote_url
 from daydream.git_ops import BranchNotFoundError, GitError
 
 
@@ -43,25 +43,6 @@ class GitContext:
     changed_files: list[str] = field(default_factory=list)
 
 
-_SSH_REMOTE_RE = re.compile(r"[^@]+@[^:]+:(.+?)(?:\.git)?$")
-_HTTPS_REMOTE_RE = re.compile(r"https?://[^/]+/(.+?)(?:\.git)?$")
-
-
-def _parse_repo_slug(remote_url: str) -> str | None:
-    """Extract ``owner/repo`` from a git remote URL.
-
-    Handles both SSH (``git@github.com:owner/repo.git``) and HTTPS
-    (``https://github.com/owner/repo.git``) formats.
-    """
-    m = _SSH_REMOTE_RE.match(remote_url)
-    if m:
-        return m.group(1)
-    m = _HTTPS_REMOTE_RE.match(remote_url)
-    if m:
-        return m.group(1)
-    return None
-
-
 def capture_git_context(target_dir: Path) -> GitContext:
     """Capture current git state from *target_dir*.
 
@@ -70,9 +51,16 @@ def capture_git_context(target_dir: Path) -> GitContext:
     """
     ctx = GitContext()
 
-    ctx.remote_url = git_ops.remote_url(target_dir)
-    if ctx.remote_url:
-        ctx.repo_slug = _parse_repo_slug(ctx.remote_url)
+    raw_remote = git_ops.remote_url(target_dir)
+    if raw_remote:
+        repo_slug, canonical_url = normalize_remote_url(raw_remote)
+        # Fail closed: an unparseable raw URL is never stored, not even
+        # credential-stripped. Identity alone is None for hosts outside the
+        # allowlist, but the credential-stripped canonical URL is still kept.
+        if canonical_url is not None:
+            ctx.remote_url = canonical_url
+            if repo_slug is not None:
+                ctx.repo_slug = repo_slug
 
     try:
         ctx.branch = git_ops.current_branch(target_dir)

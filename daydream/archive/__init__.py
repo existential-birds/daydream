@@ -35,6 +35,13 @@ if TYPE_CHECKING:
     from daydream.workspace import WorkContext
 
 
+def _warn(message: str) -> None:
+    """Print a one-line warning through the daydream console (never raises)."""
+    from daydream.ui import create_console, print_warning
+
+    print_warning(create_console(), message)
+
+
 def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
     """Whether the executed flow runs the deep cross-stack/single-stack merge.
 
@@ -250,8 +257,20 @@ def _archive_run_inner(
     #    so it includes the manifest and evaluation written above.
     if config.dump_artifacts:
         dest = Path(config.dump_artifacts)
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(run_dir, dest, dirs_exist_ok=True)
+        from daydream.archive import scan
+
+        # Fail-closed: a bundle whose serialized artifacts carry a credential is
+        # never copied to a user-specified directory. The run itself is already
+        # archived; the dump is skipped with a value-free warning (M11/M12).
+        scan_result = scan.scan_run_dir(run_dir)
+        if not scan_result.clean:
+            _warn(
+                f"Refusing --dump-artifacts copy of {recorder.session_id}: bundle "
+                f"secret scan found problems ({scan_result.summary()})"
+            )
+        else:
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(run_dir, dest, dirs_exist_ok=True)
 
 
 def _read_json_artifact(path: Path, expected_type: type) -> Any | None:
