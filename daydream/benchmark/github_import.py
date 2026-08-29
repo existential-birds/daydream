@@ -1373,6 +1373,58 @@ def _derive_one_anchor(
         return _anchor_fail_closed("path-unavailable")
 
 
+EXTRACTION_VERSION = 1
+
+
+def _extract_prioritization_facts(
+    doc: schema.ImportDocument,
+    mirror_repo: Path,
+    base_tip: str,
+    head_sha: str,
+    candidate_ids: set[str],
+) -> schema.PrioritizationFacts:
+    """Per-evidence snapshot-comparison facts against the pinned head.
+
+    Consumes exactly each record's ``authoring_anchor`` (the #826 contract —
+    never GitHub's re-anchored fields). The commit relation classifies the
+    record's authoring commit against the pinned head; the anchor delta
+    measures the base_tip..head-classified interaction from that same
+    authoring commit to the head, so an at-head comment's anchored region is
+    by definition unchanged by the PR's own diff. Both helpers fail closed
+    to ``unavailable``; a defensive per-record catch maps an unexpected git
+    failure to ``unavailable`` on both axes without failing the import.
+    """
+    candidates: dict[str, schema.PrioritizationCandidate] = {}
+    non_candidates: dict[str, schema.PrioritizationCandidate] = {}
+    for record in doc.evidence:
+        commit = record.commit_id or record.original_commit_id or head_sha
+        relation: str = "unavailable"
+        delta: str = "unavailable"
+        try:
+            relation = snapshot.commit_relation(mirror_repo, base_tip, head_sha, commit)
+            anchor = (
+                record.authoring_anchor.model_dump(mode="json")
+                if record.authoring_anchor
+                else None
+            )
+            delta = snapshot.anchor_delta(mirror_repo, commit, head_sha, anchor)
+        except git_ops.GitError:
+            pass
+        entry = schema.PrioritizationCandidate(
+            commit_relation=relation,  # type: ignore[arg-type]
+            anchor_delta=delta,  # type: ignore[arg-type]
+        )
+        (candidates if record.source_id in candidate_ids else non_candidates)[
+            record.source_id
+        ] = entry
+    return schema.PrioritizationFacts(
+        extraction_version=EXTRACTION_VERSION,
+        head_sha=head_sha,
+        candidates=candidates,
+        non_candidates=non_candidates,
+    )
+
+
 def _derive_authoring_anchors(
     doc: schema.ImportDocument,
     mirror_repo: Path,
@@ -1452,6 +1504,16 @@ def _case_materialize(
     :class:`~daydream.git_ops.GitError` instead of writing an unreplayable
     snapshot over the curated case — the refresh then fails like the sibling
     fetch-failure path (rc != 0, last-good linkage kept).
+
+    On a ``ready`` freeze, per-evidence snapshot-comparison facts (commit
+    relation + anchor delta against the pinned head, via
+    :mod:`daydream.benchmark.snapshot`) are computed once here — where the
+    authenticated mirror is already populated — and persisted on the case
+    document under the additive ``prioritization`` key (schema_version stays
+    2). Imported-status and unreplayable snapshots persist no key. Facts are
+    read-projection input only and live on the case doc alone, so every hash
+    surface (import payload, evidence signatures, projection hashes,
+    staleness signatures) is untouched.
     """
     pull_request = doc.pull_request
     base_sha = pull_request.base.sha
@@ -1539,6 +1601,15 @@ def _case_materialize(
         # Projection runs after the freeze branch so per-head candidates
         # consume the derived authoring anchors (or their absence, closed).
         candidates = project_candidates(doc, head_sha)
+        facts: schema.PrioritizationFacts | None = None
+        if root is not None and origin_url is not None and snapshot_doc["status"] == "ready":
+            facts = _extract_prioritization_facts(
+                doc,
+                snapshot.mirror(root),
+                base_sha,
+                head_sha,
+                {c.source_id for c in candidates},
+            )
         if prior_curations and case_id in prior_curations:
             prior = prior_curations[case_id]
             # The stale gate runs after projection so its third arm can see
@@ -1573,6 +1644,8 @@ def _case_materialize(
             "curation": curation,
             "candidates": [c.model_dump(mode="json") for c in candidates],
         }
+        if facts is not None:
+            case_doc["prioritization"] = facts.model_dump(mode="json")
         out.append((case_id, f"cases/{case_id}.yaml", case_doc))
     return out, bundle_drops
 
