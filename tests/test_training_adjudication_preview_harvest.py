@@ -6,13 +6,15 @@ from pathlib import Path
 import pytest
 
 from daydream.archive.hydrate import HydrationError, MovingBranchError
+from daydream.training.adjudication.harvest import AdjudicationDriftError, run_harvest
 from daydream.training.adjudication.preview import run_preview
 
 
-def _hydrated_index(tmp_path: Path) -> Path:
+def _hydrated_index(tmp_path: Path, *, profiles: list[str] | None = None) -> Path:
     """Hydrated-index root in the sessions.jsonl shape the queue builder consumes
     (same fixture pattern as tests/test_cli_adjudicate.py: one ambiguous + one
     unanswered finding across two sessions)."""
+    profiles = profiles or ["pr_review", "pr_review"]
     root = tmp_path / "index"
     root.mkdir()
     sessions = [
@@ -21,7 +23,7 @@ def _hydrated_index(tmp_path: Path) -> Path:
             "resolutions": [{
                 "fingerprint": "fp-b", "disposition": "unanswered",
                 "evidence": [{"reply_id": "r1", "body_sha256": "abc"}],
-                "evidence_digest": "d2" * 32, "profile": "pr_review", "stack": "python",
+                "evidence_digest": "d2" * 32, "profile": profiles[0], "stack": "python",
             }],
         },
         {
@@ -29,7 +31,7 @@ def _hydrated_index(tmp_path: Path) -> Path:
             "resolutions": [{
                 "fingerprint": "fp-a", "disposition": "ambiguous",
                 "evidence": [{"reply_id": "r2", "body_sha256": "abd"}],
-                "evidence_digest": "d1" * 32, "profile": "pr_review", "stack": "python",
+                "evidence_digest": "d1" * 32, "profile": profiles[1], "stack": "python",
             }],
         },
     ]
@@ -121,6 +123,44 @@ def test_preview_malformed_evidence_raises_value_error_naming_source(tmp_path: P
     sessions_path.write_text(
         "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
     )
-    import pytest
     with pytest.raises(ValueError, match="fp-b"):
         run_preview(root, tmp_path / "ledger.json")
+
+
+def test_harvest_fails_closed_and_requeues_on_digest_drift(tmp_path: Path) -> None:
+    root = _hydrated_index(tmp_path)
+    ledger = tmp_path / "ledger.json"
+    run_preview(root, ledger)
+    drifted = _mutate_one_digest(root, tmp_path / "root2")
+    with pytest.raises(AdjudicationDriftError) as excinfo:
+        run_harvest(drifted, ledger, tmp_path / "out")
+    assert excinfo.value.requeued_record_ids  # affected findings requeued, nothing merged
+    assert not (tmp_path / "out").exists()  # fail closed: export never written on drift
+
+
+def test_harvest_identity_and_digests_stable_without_drift(tmp_path: Path) -> None:
+    root = _hydrated_index(tmp_path)
+    ledger = tmp_path / "ledger.json"
+    run_preview(root, ledger)
+    out_a, out_b = tmp_path / "a", tmp_path / "b"
+    summary_a = run_harvest(root, ledger, out_a)
+    summary_b = run_harvest(root, ledger, out_b)
+    assert summary_a["export_sha256"] == summary_b["export_sha256"]
+    # Preview identities == harvest identities (AC 8 identity/digest stability).
+    ledger_items = json.loads(ledger.read_text())["items"]
+    exported = [
+        json.loads(line) for line in (out_a / "adjudication.jsonl").read_text().splitlines()
+    ]
+    assert sorted(i["record_id"] for i in ledger_items) == sorted(e["record_id"] for e in exported)
+    digests = {e["record_id"]: e["evidence_digest"] for e in exported}
+    assert all(digests[i["record_id"]] == i["evidence_digest"] for i in ledger_items)
+
+
+def test_posterior_feed_is_pr_review_only(tmp_path: Path) -> None:
+    root = _hydrated_index(tmp_path, profiles=["pr_review", "task"])
+    ledger = tmp_path / "ledger.json"
+    run_preview(root, ledger)
+    summary = run_harvest(root, ledger, tmp_path / "out")
+    assert all(e["posterior_eligible"] is False
+               for e in summary["exported"] if e["profile"] != "pr_review")
+    assert all(e["posterior_eligible"] is False for e in summary["exported"])  # no human judgment yet
