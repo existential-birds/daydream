@@ -68,17 +68,13 @@ def test_corpus_build_and_label_route(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
 def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert _run_main(["corpus"]) == 2
-<<<<<<< HEAD
-    out = capsys.readouterr().out
-    assert "calibrate-reward" in out
-=======
     captured = capsys.readouterr()
-    assert "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub}" in captured.out
+    assert "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub,calibrate-reward}" in captured.out
     assert "harvest" in captured.out
     assert "build" in captured.out
     assert "build-v2" in captured.out
     assert "label" in captured.out
->>>>>>> origin/main
+    assert "calibrate-reward" in captured.out
 
 
 def test_bare_harvest_is_unknown_verb_treated_as_review_target(
