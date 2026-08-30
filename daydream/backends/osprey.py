@@ -583,6 +583,16 @@ class OspreyBackend:
                     raw_line = await anext(stream)
                 except StopAsyncIteration:
                     break
+                except UnicodeDecodeError as exc:
+                    # A non-UTF-8 byte makes the transport's strict stdout
+                    # decode raise here; fall through to the non-JSON diagnosis
+                    # the pre-transport loop produced via errors="replace"
+                    # instead of mislabeling the line as over-limit.
+                    raw = exc.object.decode(errors="replace").strip()
+                    raise OspreyProtocolError(
+                        "Osprey emitted a non-JSON line in JSONL mode: "
+                        f"{_bounded_diagnostics([raw])}"
+                    ) from exc
                 except ValueError as exc:
                     raise OspreyProtocolError(
                         "Osprey stdout JSONL line exceeded the "
@@ -593,6 +603,7 @@ class OspreyBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError as exc:
+                    transport.note_diagnostic(raw_line)
                     raise OspreyProtocolError(
                         "Osprey emitted a non-JSON line in JSONL mode: "
                         f"{_bounded_diagnostics([raw_line])}"

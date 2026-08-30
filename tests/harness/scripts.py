@@ -120,7 +120,7 @@ async def drive_codex(
     backend = CodexBackend(model="codex-test-model")
     events: list[AgentEvent] = []
     with patch(
-        "daydream.backends.codex.asyncio.create_subprocess_exec",
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
         return_value=mock_proc,
     ):
         async for event in backend.execute(Path("/tmp"), "go", output_schema=output_schema):

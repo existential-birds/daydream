@@ -391,6 +391,8 @@ async def test_execute_finally_reaps_process_after_exit() -> None:
     proc = captured.procs[0]
     assert proc.returncode == 0
     assert proc.reaped, "the finally must reap the child even after clean exit"
+    assert proc._transport.closed, "the finally must release the pipe fds even after clean exit"
+    assert backend._transports == [], "the finally must drop the transport from the backend list"
 
 
 @pytest.mark.asyncio

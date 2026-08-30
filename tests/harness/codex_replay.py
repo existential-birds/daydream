@@ -3,7 +3,7 @@
 The returned ``MagicMock`` reproduces the
 exact ``stdout``/``stdin``/``wait``/``returncode``/``terminate``/``kill`` shape
 that ``CodexBackend.execute`` drives via
-``daydream.backends.codex.asyncio.create_subprocess_exec``.
+``daydream.backends._transport.asyncio.create_subprocess_exec``.
 """
 
 from pathlib import Path

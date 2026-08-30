@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import enum
 from collections.abc import AsyncIterator, Callable
-from typing import TYPE_CHECKING
 
 import anyio
 
@@ -21,9 +20,6 @@ from daydream.backends._subprocess import (
     readline_with_idle_timeout,
     terminate_process,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 class StdinMode(enum.Enum):
@@ -235,5 +231,8 @@ class CliTransport:
             proc for t in transports for proc in t.processes if proc.returncode is None
         ])
         with anyio.CancelScope(shield=True):
-            for t in transports:
+            # Iterate a snapshot: a backend's teardown ``finally`` removes its
+            # transport from this caller-owned list in place while we await, so
+            # a live iteration can raise 'list changed size during iteration'.
+            for t in list(transports):
                 await t.drain_finished()

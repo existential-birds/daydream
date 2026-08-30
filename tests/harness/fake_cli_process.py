@@ -60,8 +60,10 @@ class _FakePipeTransport:
 
     def __init__(self, proc: FakeCliProcess) -> None:
         self._proc = proc
+        self.closed = False
 
     def close(self) -> None:
+        self.closed = True
         self._proc._release_pipes()
 
 
@@ -156,7 +158,13 @@ def install_fake_cli_process(
     stdout_reader: asyncio.StreamReader | None = None,
     stderr_reader: asyncio.StreamReader | None = None,
 ) -> FakeCliSpawner:
-    """Patch ``create_subprocess_exec`` as seen by the *cli* backend module.
+    """Patch ``create_subprocess_exec`` at the transport seam.
+
+    ``cli`` names the backend under test; every spawn is asserted to carry
+    that name as its first argv element, so a test whose declared cli no
+    longer matches what the transport actually launches fails loudly here
+    (e.g. after a backend switches transports) instead of silently driving
+    the wrong process shape.
 
     Every launch gets a fresh :class:`FakeCliProcess` with the given shape and
     is recorded on the returned spawner, so tests can assert how many
@@ -168,6 +176,9 @@ def install_fake_cli_process(
     spawner = FakeCliSpawner()
 
     async def fake_exec(*args: Any, **kwargs: Any) -> FakeCliProcess:
+        assert args[0] == cli, (
+            f"spawned CLI argv[0] {args[0]!r} does not match declared cli {cli!r}"
+        )
         proc = FakeCliProcess(
             lines,
             hang=hang,

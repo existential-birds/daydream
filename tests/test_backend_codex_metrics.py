@@ -44,7 +44,7 @@ async def test_metrics_event_emitted_at_turn_completed() -> None:
     """
     backend = CodexBackend(model="gpt-5.3-codex")
     mock_proc = _make_mock_process("turn_completed_with_usage.jsonl")
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "test"):
             events.append(event)
@@ -77,7 +77,7 @@ async def test_cost_event_still_emitted() -> None:
     """
     backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_with_usage.jsonl")
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "test"):
             events.append(event)
@@ -94,7 +94,7 @@ async def test_partial_usage_skips_metrics_event() -> None:
     """usage missing output_tokens => no MetricsEvent emitted (EVNT-02 requires both as int)."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = _make_mock_process("turn_completed_partial_usage.jsonl")
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "test"):
             events.append(event)

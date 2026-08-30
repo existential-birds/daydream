@@ -869,6 +869,8 @@ class PiBackend:
         finally:
             if transport is not None:
                 await transport.terminate()
+                if transport in self._transports:
+                    self._transports.remove(transport)
 
     async def cancel(self) -> None:
         """Cancel all running Pi processes.

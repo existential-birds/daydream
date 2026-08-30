@@ -316,7 +316,7 @@ async def codex_loader(
     mock_proc = make_mock_process(lines)
     backend = CodexBackend(model="codex-test-model")
     with patch(
-        "daydream.backends.codex.asyncio.create_subprocess_exec",
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
         return_value=mock_proc,
     ):
         async for event in backend.execute(Path("/tmp"), "go", read_only=read_only):

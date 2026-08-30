@@ -142,6 +142,28 @@ async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() -> None:
+    """A non-UTF-8 byte must surface as a non-JSON line, not an over-limit line.
+
+    The transport decodes stdout strictly (byte-identical backend messages
+    were promised pre-refactor), so a 0xff byte raises UnicodeDecodeError — a
+    ValueError — which must be routed to the non-JSON diagnosis (what the old
+    ``errors=\"replace\"`` loop produced), never mislabeled as the
+    10485760-byte-limit error.
+    """
+    stdout = _over_limit_reader(b'{"event"' + b"\xff" + b"}\n")
+    backend = OspreyBackend(osprey_binary="fake")
+
+    with pytest.raises(OspreyError, match=r"non-JSON line in JSONL mode") as exc_info:
+        await _collect(backend, [], stdout_reader=stdout)
+
+    assert exc_info.value.category == "PROTOCOL"
+    assert "byte limit" not in str(exc_info.value)
+    assert "\ufffd" in str(exc_info.value)
+    assert backend._transports == []
+
+
+@pytest.mark.asyncio
 async def test_oversized_stderr_diagnostic_does_not_fail_successful_run() -> None:
     lines, _ = _stream()
     stderr = _over_limit_reader(b"diagnostic" * 8)

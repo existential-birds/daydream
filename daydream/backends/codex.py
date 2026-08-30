@@ -441,6 +441,7 @@ class CodexBackend:
                     if len(non_json_lines) >= 20:
                         non_json_lines.pop(0)
                     non_json_lines.append(raw_line)
+                    transport.note_diagnostic(raw_line)
                     _logger.debug("codex: non-JSON line skipped: %r", raw_line[:80])
                     continue
 
@@ -694,6 +695,8 @@ class CodexBackend:
         finally:
             if transport is not None:
                 await transport.terminate()
+                if transport in self._transports:
+                    self._transports.remove(transport)
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
             if shared_checkout is not None:
