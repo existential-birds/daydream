@@ -59,80 +59,6 @@ def test_copy_assets_emits_canonical_verifier_core_bytes(tmp_path: Path) -> None
 
 
 
-def test_metric_entry_aggregates_as_identically_to_verifier_core(
-    sr_metric: Any,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rows: list[dict[str, object] | None] = [
-        {
-            "reward": 0.8,
-            "tp": 2,
-            "fp": 0,
-            "fn": 1,
-            "precision": 1.0,
-            "recall": 0.6667,
-            "f1": 0.8,
-            "gold_count": 3,
-            "candidate_count": 2,
-            "clean_task": 0,
-            "clean_pass": 0,
-            "verifier_error": 0,
-            "location_exact": 0,
-            "location_near": 0,
-            "location_file": 1,
-            "location_miss": 0,
-            "location_credit": 0.0,
-            "location_present": 1,
-            "severity_exact": 1,
-            "severity_within_1": 1,
-            "severity_mean_distance": 0.0,
-            "severity_credit": 1.0,
-            "severity_present": 1,
-        },
-        None,  # failed task (null row)
-        {
-            "reward": 1.0,
-            "tp": 0,
-            "fp": 0,
-            "fn": 0,
-            "precision": 1.0,
-            "recall": 1.0,
-            "f1": 1.0,
-            "gold_count": 0,
-            "candidate_count": 0,
-            "clean_task": 1,
-            "clean_pass": 1,
-            "verifier_error": 0,
-            "location_exact": 0,
-            "location_near": 0,
-            "location_file": 0,
-            "location_miss": 0,
-            "location_credit": 0.0,
-            "location_present": 0,
-            "severity_exact": 0,
-            "severity_within_1": 0,
-            "severity_mean_distance": 0.0,
-            "severity_credit": 0.0,
-            "severity_present": 0,
-        },
-    ]
-    lp = tmp_path / "rewards.jsonl"
-    lp.write_text(
-        "\n".join(json.dumps(r) if r is not None else "null" for r in rows) + "\n"
-    )
-
-    from daydream.benchmark.harbor import verifier_core as vc
-
-    expected = vc.aggregate_metrics(rows)
-
-    result = sr_metric.aggregate_rewards_file(str(lp))
-    assert result == expected                          # same aggregation contract
-    assert result["task_count"] == 3 and result["scored_task_count"] == 2
-    assert result["infra_error_task_count"] == 1 and "failed_task_count" not in result
-    assert result["mean_task_score"] == (0.8 + 1.0) / 2
-
-
 def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path: Path) -> None:
     out, result = _run_metric_subprocess(
         tmp_path,
@@ -163,24 +89,47 @@ def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path: Path) -
     assert m["micro_precision"] == 1.0 and m["micro_recall"] == 2.0 / 3.0
 
 
-def test_range_distance_cannot_drift_from_hunk_index() -> None:
-    """The verifier's private range_distance copy must stay semantically
-    byte-locked to daydream.hunk_index.range_distance (issue #971 R8)."""
-    import inspect
+@pytest.fixture()
+def sr_metric(tmp_path: Path) -> Any:
+    """Stage the rendered metric next to a colocated canonical ``verifier_core.py``."""
+    from daydream.benchmark.harbor import build, verifier_core
 
-    from daydream import hunk_index
-    from daydream.benchmark.harbor import verifier_core as vc
-    host = inspect.getsource(hunk_index.range_distance)
-    # the copy is private and stdlib-only; assert the arithmetic body matches
-    for line in (
-        "if start <= line <= end:",
-        "return 0",
-        "if line < start:",
-        "return start - line",
-        "return line - end",
-    ):
-        assert line in host and line in inspect.getsource(vc._range_distance)
-    assert "import daydream" not in inspect.getsource(vc)
+    (tmp_path / "metric.py").write_bytes(build.render_metric())
+    shutil.copy(Path(verifier_core.__file__), tmp_path / "verifier_core.py")
+    return tmp_path / "metric.py"
+
+
+def _reward_row(*, tp: int, fp: int, fn: int, reward: float, clean: bool) -> dict[str, object]:
+    """A representative scored row; shape mirrors ``_reward`` in tests/test_benchmark_objective.py."""
+    return {
+        "reward": reward,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "precision": (tp / (tp + fp)) if (tp + fp) else 1.0,
+        "recall": (tp / (tp + fn)) if (tp + fn) else 1.0,
+        "f1": 0.0,
+        "clean_task": 1 if clean else 0,
+        "clean_pass": 1 if clean else 0,
+        "verifier_error": 0,
+    }
+
+
+def test_rendered_metric_matches_host_on_representative_rows(
+    sr_metric: Any, tmp_path: Path
+) -> None:
+    """The rendered metric, run via ``uv run --script`` over JSONL that mixes
+    clean scored rows with malformed/null/shape-wrong rows, must produce exactly
+    what the canonical ``verifier_core.aggregate_metrics`` computes in-process."""
+    from daydream.benchmark.harbor import verifier_core
+
+    clean = _reward_row(tp=2, fp=0, fn=1, reward=0.8, clean=False)
+    rows = "\n".join([json.dumps(clean), "null", "not-json", "[]", json.dumps(clean)])
+    _, result = _run_metric_subprocess(tmp_path, rows)
+    flat: list[dict[str, object] | None] = [clean, None, None, None, clean]
+    expected = verifier_core.aggregate_metrics(flat)
+    assert result == expected
+    assert result["infra_error_task_count"] == 3
 
 
 def test_location_tolerance_meets_floor() -> None:

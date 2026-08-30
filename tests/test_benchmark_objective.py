@@ -218,15 +218,11 @@ def test_objective_rejects_identity_disagreement(tmp_path: Path) -> None:
     assert "compiled_lock" in str(e.value).lower()
 
 
-def test_objective_metrics_equal_verifier_core_and_metric_py(tmp_path: Path) -> None:
-    import types
-
-    from daydream.benchmark.harbor import build, verifier_core
-
-    def _compiled_metric() -> Any:
-        mod = types.ModuleType("metric")
-        exec(compile(build.render_metric().decode("utf-8"), "metric.py", "exec"), mod.__dict__)
-        return mod
+def test_objective_metrics_equal_verifier_core(tmp_path: Path) -> None:
+    """Run-objective fields must equal the canonical scorer directly — the same
+    module the deployed metric loads (cross-surface equality is structural:
+    one module, both consumers import it)."""
+    from daydream.benchmark.harbor import verifier_core
 
     ws = _complete_ws(tmp_path, trials=[_reward(tp=2, fp=1, fn=0, reward=0.8),
                                         _reward(tp=1, fp=0, fn=1, reward=0.5), None])
@@ -242,9 +238,6 @@ def test_objective_metrics_equal_verifier_core_and_metric_py(tmp_path: Path) -> 
     assert run.objective.f1 == expected["micro_f1"]
     assert run.objective.task_count == expected["task_count"]
     assert run.objective.infra_error_task_count == expected["infra_error_task_count"]
-    jsonl = _rows_to_jsonl(flat, tmp_path / "flat.jsonl")
-    via_metric = _compiled_metric().aggregate_rewards_file(str(jsonl))
-    assert run.objective._as_metric_dict() == via_metric
 
 
 def test_objective_tokens_cost_absent_when_unrecorded(tmp_path: Path) -> None:
@@ -343,21 +336,10 @@ def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path: P
     """Task 11 gate: pooled output equals the authoritative scoring.
 
     The pooled ``SuiteObjective`` must equal ``verifier_core.aggregate_metrics``
-    over the exact flattened cross-run rows byte-for-value after numeric
-    normalization, and must also equal what the deployed generated
-    ``metric.py`` would compute over the same JSONL (the authoritative corpus
-    scorer — ``build.render_metric`` inlines ``verifier_core.aggregate_metrics``).
+    — the canonical module — over the exact flattened cross-run rows, the same
+    module the deployed metric loads at runtime.
     """
-    import types
-
-    from daydream.benchmark.harbor import build, verifier_core
-
-    def _rendered_metric() -> Any:
-        # The deployed ``metric.py`` is the template with the authoritative
-        # ``aggregate_metrics`` body spliced in at build time.
-        mod = types.ModuleType("metric")
-        exec(compile(build.render_metric().decode("utf-8"), "metric.py", "exec"), mod.__dict__)
-        return mod
+    from daydream.benchmark.harbor import verifier_core
 
     # Two compatible workspaces with a realistic, comparison-eligible mix: scored
     # and gold-free clean tasks (an infra-error ``None`` trial would make the entry
@@ -373,8 +355,6 @@ def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path: P
     b_rows = objective.read_completed_run(b, "r2", env={}).task_rows
     flat = a_rows + b_rows   # the exact flattened per-task rows across both runs
     assert suite.objective._as_metric_dict() == verifier_core.aggregate_metrics(flat)
-    jsonl = _rows_to_jsonl(flat, tmp_path / "gate.jsonl")
-    assert suite.objective._as_metric_dict() == _rendered_metric().aggregate_rewards_file(str(jsonl))
 
 
 def test_suite_manifest_validation(tmp_path: Path) -> None:
