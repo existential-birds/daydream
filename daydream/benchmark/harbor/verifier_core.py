@@ -3,7 +3,7 @@
 Stdlib-only (dataclasses, hashlib, json, re) so this module can be
 deployed byte-for-byte into a judge-free Harbor verifier image. This file is
 the canonical scorer (issue #1004): the build copies it directly into each
-case. No daydream source, no pydantic, no third-party imports.
+case. No daydream source and no third-party imports of any kind.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ GOLD_FINDING_KEYS = {"finding_id", "title", "body", "severity", "path", "start_l
 
 
 class VerifierError(Exception):
-    """Raised on any invalid verifier input (mirrors a pydantic error)."""
+    """Raised on any invalid verifier input (validation-failures-as-exception)."""
 
 
 # ---------------------------------------------------------------------------

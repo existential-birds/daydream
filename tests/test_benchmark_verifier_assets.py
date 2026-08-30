@@ -208,3 +208,53 @@ def test_aggregate_metrics_axis_absent_is_zero_pairs_not_raise() -> None:
     m = verifier_core.aggregate_metrics(rows)  # type: ignore[arg-type]
     assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
     assert m["location_exact_rate"] == 0.0  # absent axis = missing signal, not 1.0
+
+
+def test_deployed_scoring_surfaces_are_stdlib_only_and_daydream_free() -> None:
+    """Both deployed scoring surfaces — the rendered metric and the colocated
+    canonical copy — must stay stdlib-only and free of any ``daydream`` import."""
+    from daydream.benchmark.harbor import build
+
+    metric_text = build.render_metric().decode("utf-8")
+    canonical = (REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_text()
+    for surface_name, text in (("metric", metric_text), ("canonical", canonical)):
+        assert "import daydream" not in text, surface_name
+        assert "from daydream" not in text, surface_name
+        assert "pydantic" not in text, surface_name
+
+
+def test_deployed_canonical_copy_exposes_score_review_surface(tmp_path: Path) -> None:
+    """``score_review.py`` consumes (``VerifierError``, ``Verdict``, ``validate_exact_keys``,
+    ``validate_candidate_artifact``, ``score_review``, ``derive_candidate_id``) from the
+    deployed canonical file; the copy emitted by ``_copy_assets`` must define each."""
+    from daydream.benchmark.harbor.build import _copy_assets
+
+    out = dict(_copy_assets(tmp_path))
+    deployed = tmp_path / "tests" / "verifier_core.py"
+    assert deployed.exists()
+    assert out["tests/verifier_core.py"] == _sha256(
+        REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
+    )
+
+    import sys
+    import types
+
+    # dataclasses resolves cls.__module__ via sys.modules at decoration time,
+    # so register the namespace as a module before exec (P1 spike pitfall).
+    mod = types.ModuleType("deployed_verifier_core")
+    ns = mod.__dict__
+    sys.modules[mod.__name__] = mod
+    try:
+        exec(compile(deployed.read_text(), "verifier_core.py", "exec"), ns)  # noqa: S102
+    finally:
+        del sys.modules[mod.__name__]
+    for name in (
+        "VerifierError",
+        "Verdict",
+        "validate_exact_keys",
+        "validate_candidate_artifact",
+        "score_review",
+        "derive_candidate_id",
+    ):
+        assert name in ns and ns[name] is not None, name
+
