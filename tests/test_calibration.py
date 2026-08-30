@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -491,10 +492,17 @@ def test_committed_stage0_files_join_and_misalign_refused(
 def test_build_fixture_replays_byte_identical(committed_fixture: Path, tmp_path: Path) -> None:
     """The checked-in generator regenerates the committed files byte-for-byte."""
     replay = tmp_path / "replay"
+    # The generator imports the top-level ``daydream`` package, which would
+    # resolve to an installed copy (or nothing) rather than this checkout;
+    # pin the child interpreter to the repo root so replay is always enforced.
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
     subprocess.run(
         [sys.executable, str(committed_fixture / "build_fixture.py"), "--out", str(replay)],
         check=True,
         cwd=Path(__file__).parent.parent,
+        env=env,
     )
     committed = [
         p.relative_to(committed_fixture)

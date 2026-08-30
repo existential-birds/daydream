@@ -18,7 +18,12 @@ live reward used by the harvest pipeline.
 
 ## Input bundle (wire format)
 
-`--corpus-dir` must hold exactly three files:
+`--corpus-dir` must hold `corpus.jsonl`, `lineage.json`, and `SHA256SUMS`;
+the runtime gates only those named paths and digest-verifies every file
+listed in `SHA256SUMS`, so additional files are tolerated. The in-repo
+reference producer (`tests/fixtures/training/calibration/build_fixture.py`)
+writes five files: the three required ones plus `curation-manifest.json` and
+a `_SUCCESS` completion marker.
 
 - `corpus.jsonl` — one JSON object per line, each with `schema_version: "2"`,
   `record_id`, `session_id`, `repo_slug`, `reward_version`, and a `lineage`

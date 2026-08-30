@@ -1333,7 +1333,8 @@ def _parse_candidates(raw: list[str]) -> dict[str, list[float]]:
     """Parse ``AXIS=V1,V2,...`` candidate flags into a grid mapping.
 
     Raises:
-        ValueError: on a flag missing ``=`` or holding non-float points.
+        ValueError: on a flag missing ``=``, holding non-float points, or
+            repeating an axis already given in an earlier flag.
     """
     candidates: dict[str, list[float]] = {}
     for spec in raw:
@@ -1346,7 +1347,13 @@ def _parse_candidates(raw: list[str]) -> dict[str, list[float]]:
             values = [float(p) for p in points.split(",")]
         except ValueError as exc:
             raise ValueError(f"--candidate {spec!r} has non-float grid points") from exc
-        candidates[axis.strip()] = values
+        axis = axis.strip()
+        if axis in candidates:
+            raise ValueError(
+                f"--candidate {spec!r} repeats axis {axis!r} (already given as "
+                f"{candidates[axis]}); pass all points for one axis in a single flag"
+            )
+        candidates[axis] = values
     return candidates
 
 

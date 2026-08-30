@@ -6,9 +6,10 @@ gate raises :class:`CalibrationError` naming the offending record/field, and no
 artifact is ever written unless all gates pass.
 
 Split membership is re-derived read-only from ``lineage.json`` (salt +
-holdout/val rates) via a deterministic hash of the record id, mirroring the
-corpus-v2 projector contract; each record's stored ``lineage['split']`` must
-match its re-derived split, and the derived train/val/holdout sets must stay
+holdout/val rates) via a deterministic hash of the record id - the corpus-v2
+split derivation whose canonical definition lives in this module and in
+``docs/calibration.md``. Each record's stored ``lineage['split']`` must match
+its re-derived split, and the derived train/val/holdout sets must stay
 pairwise disjoint (a duplicated record id means the corpus was hand-edited).
 
 Reward weights, thresholds, and grid ranges come exclusively from
@@ -117,8 +118,9 @@ class CalibrationConfig:
 def assign_split(record_id: str, *, holdout_rate: float, val_rate: float, salt: str) -> str:
     """Deterministically re-derive a record's split from its id (read-only).
 
-    Mirrors the corpus-v2 split contract: a seeded hash of ``salt:record_id``
-    selects holdout / val / train in fixed rate order.
+    The corpus-v2 split derivation (canonical here; documented in
+    ``docs/calibration.md``): a seeded hash of ``salt:record_id`` selects
+    holdout / val / train in fixed rate order.
     """
     digest = hashlib.sha256(f"{salt}:{record_id}".encode("utf-8")).digest()
     u = int.from_bytes(digest[:8], "big") / float(1 << 64)
@@ -281,6 +283,8 @@ def _load_inputs(
     config: CalibrationConfig, record_ids: list[str]
 ) -> tuple[dict[str, bool], dict[str, dict[str, float]]]:
     """Join gold labels and intrinsic breakdowns onto the corpus by record_id."""
+    _gate(config.gold_labels.exists(), f"missing gold labels at {config.gold_labels}")
+    _gate(config.breakdowns.exists(), f"missing breakdowns at {config.breakdowns}")
     gold_raw = json.loads(config.gold_labels.read_text())
     _gate(isinstance(gold_raw, dict), f"{config.gold_labels}: gold labels must be an object keyed by record_id")
     known_ids = set(record_ids)
@@ -333,6 +337,7 @@ def _bootstrap_auc_ci(
     scores: list[float], labels: list[bool], seed: int, resamples: int
 ) -> tuple[float, float]:
     """Seeded percentile bootstrap CI over paired (score, label) resamples."""
+    _gate(resamples >= 1, f"bootstrap_resamples must be >= 1 (got {resamples})")
     rng = random.Random(seed)
     n = len(scores)
     aucs = []
@@ -360,10 +365,13 @@ def _point_biserial(values: list[float], labels: list[bool]) -> float:
 
 
 def _grid(axis: str, values: list[float] | None, grid_points: int) -> list[float]:
-    """Resolve a candidate axis's configured range to ``grid_points`` grid values.
+    """Resolve a candidate axis's ``grid_points`` evenly spaced grid values.
 
-    A candidate axis with no supplied range is an error naming the axis — there
-    are no built-in reward defaults to fall back on.
+    The exact user-supplied values are always part of the grid, so every
+    ``--candidate AXIS=V1,...`` point the user asked to score is scored even
+    when it falls between the evenly spaced steps. An axis with no supplied
+    range is an error naming the axis — there are no built-in reward defaults
+    to fall back on.
     """
     if not values:
         raise CalibrationError(
@@ -373,7 +381,9 @@ def _grid(axis: str, values: list[float] | None, grid_points: int) -> list[float
         return sorted(round(float(v), 4) for v in values)
     lo, hi = min(values), max(values)
     step = (hi - lo) / (grid_points - 1)
-    return sorted({round(lo + i * step, 4) for i in range(grid_points)})
+    points = {round(float(v), 4) for v in values}
+    points.update(round(lo + i * step, 4) for i in range(grid_points))
+    return sorted(points)
 
 
 def _threshold_decision_metrics(
@@ -431,10 +441,15 @@ def _compute_metrics(
     }
 
     axes = sorted({axis for axes_map in breakdowns.values() for axis in axes_map})
-    per_axis_correlations = {
-        f"{axis}_axis": _point_biserial([breakdowns[rid][axis] for rid in record_ids], labels)
-        for axis in axes
-    }
+    per_axis_correlations: dict[str, float] = {}
+    for axis in axes:
+        _gate(
+            all(axis in breakdowns[rid] for rid in record_ids),
+            f"breakdown axis {axis!r} is absent from breakdowns for at least one corpus record",
+        )
+        per_axis_correlations[f"{axis}_axis"] = _point_biserial(
+            [breakdowns[rid][axis] for rid in record_ids], labels
+        )
 
     # AUC is rank-invariant under any monotone transform, so the bootstrap CI
     # is per-axis; the candidate grid is resolved into per-point decision
@@ -484,6 +499,10 @@ def _load_stage0_scores(
     record and every record must have a score — no partial join. When
     ``config.model_digest`` is set, every score must carry the same digest.
     """
+    _gate(
+        config.stage0_scores.exists(),  # type: ignore[union-attr]
+        f"missing stage-0 scores at {config.stage0_scores}",
+    )
     raw = json.loads(config.stage0_scores.read_text())  # type: ignore[union-attr]
     _gate(
         isinstance(raw, dict),
@@ -709,6 +728,10 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     lineage_path = corpus_dir / "lineage.json"
     _gate(corpus_path.exists(), f"missing corpus at {corpus_path}")
     _gate(lineage_path.exists(), f"missing lineage at {lineage_path}")
+    _gate(config.gold_labels.exists(), f"missing gold labels at {config.gold_labels}")
+    _gate(config.breakdowns.exists(), f"missing breakdowns at {config.breakdowns}")
+    if config.stage0_scores is not None:
+        _gate(config.stage0_scores.exists(), f"missing stage-0 scores at {config.stage0_scores}")
 
     if "digest" in config.corruptions:
         # Test seam: tamper with the corpus so the pristine manifest mismatches.
@@ -745,8 +768,30 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
             f"record {rid}: license decision {decision!r} is not one of {sorted(_ALLOWED_LICENSE_DECISIONS)}",
         )
 
-    holdout_rate = float(bundle["holdout_rate"])
-    val_rate = float(bundle["val_rate"])
+    holdout_rate_raw = bundle["holdout_rate"]
+    val_rate_raw = bundle["val_rate"]
+    _gate(
+        isinstance(holdout_rate_raw, (int, float)) and not isinstance(holdout_rate_raw, bool),
+        f"{lineage_path}: holdout_rate {holdout_rate_raw!r} is not numeric",
+    )
+    _gate(
+        isinstance(val_rate_raw, (int, float)) and not isinstance(val_rate_raw, bool),
+        f"{lineage_path}: val_rate {val_rate_raw!r} is not numeric",
+    )
+    holdout_rate = float(holdout_rate_raw)
+    val_rate = float(val_rate_raw)
+    _gate(
+        0.0 <= holdout_rate <= 1.0,
+        f"{lineage_path}: holdout_rate {holdout_rate!r} is outside [0, 1]",
+    )
+    _gate(
+        0.0 <= val_rate <= 1.0,
+        f"{lineage_path}: val_rate {val_rate!r} is outside [0, 1]",
+    )
+    _gate(
+        holdout_rate + val_rate <= 1.0,
+        f"{lineage_path}: holdout_rate + val_rate {holdout_rate + val_rate!r} exceeds 1.0",
+    )
     splits = _check_splits(records, str(bundle["salt"]), holdout_rate, val_rate)
 
     input_digests = {
