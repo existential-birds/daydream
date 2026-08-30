@@ -69,11 +69,18 @@ def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: 
     return bundle_dir
 
 
+def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
+    from daydream.training.corpus_v2.projector import BuildCorpusV2Config
+
+    return BuildCorpusV2Config(out_dir=out_dir, bundle_dir=bundle_dir, annotations_snapshot=snapshot, **kw)
+
+
 def _write_annotations_snapshot(
     bundle_dir: Path,
     *,
     valid_at: str = "2026-01-01T00:00:00+00:00",
     session_id: str = "sess-a",
+    dispositions: list[str] | None = None,
 ) -> Path:
     """Task 0A side-car shape: a digest-pinned JSONL of per-finding
     resolution records keyed by fingerprint, exported alongside the bundle
@@ -92,28 +99,17 @@ def _write_annotations_snapshot(
         json.dumps(trajectory) + "\n"
     )
     snapshot_path = bundle_dir / "annotations-snapshot.jsonl"
-    rows = [
-        {
-            "session_id": session_id,
-            "fingerprint": "a1" * 32,
-            "disposition": "accepted",
-            "evidence": [{"comment_id": 1, "created_at": "2026-02-01T00:00:00+00:00",
-                          "classifier_label": "accepted", "valid_at": valid_at}],
-        },
-        {
-            "session_id": session_id,
-            "fingerprint": "b2" * 32,
-            "disposition": "rejected",
-            "evidence": [{"comment_id": 2, "created_at": "2026-02-02T00:00:00+00:00",
-                          "classifier_label": "rejected", "valid_at": valid_at}],
-        },
-        {
-            "session_id": session_id,
-            "fingerprint": "c3" * 32,
-            "disposition": "ambiguous",
-            "evidence": [],
-        },
-    ]
+    fps = ["a1" * 32, "b2" * 32, "c3" * 32]
+    rows = []
+    for i, disposition in enumerate(dispositions or ["accepted", "rejected", "ambiguous"]):
+        evidence = (
+            [{"comment_id": i + 1, "created_at": "2026-02-01T00:00:00+00:00",
+              "classifier_label": disposition, "valid_at": valid_at}]
+            if disposition in ("accepted", "rejected")
+            else []
+        )
+        rows.append({"session_id": session_id, "fingerprint": fps[i % len(fps)],
+                     "disposition": disposition, "evidence": evidence})
     snapshot_path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
     _write_sumsums(bundle_dir)  # the snapshot + trajectory join the digest pin
     return snapshot_path
@@ -357,3 +353,26 @@ def test_run_level_contested_aggregate_never_erases_split() -> None:
                                                      _res("b2" * 32, "rejected")]}))
     assert all(r["outcome_label"] != "contested" for r in records)
     assert sorted(str(r["disposition"]) for r in records) == ["accepted", "rejected"]
+
+
+# ---------------------------------------------------------------------------
+# Task 9: summary + full lineage + adjudication report
+# ---------------------------------------------------------------------------
+
+from daydream.training.corpus_v2.projector import run_build_corpus_v2  # noqa: E402
+
+
+def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected", "ambiguous"])
+    summary = run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    assert set(summary) >= {"records_by_type", "records_by_tier", "records_by_split",
+                            "caps", "exclusions_by_reason"}
+    assert summary["records_by_type"]["outcome-finding"] >= 2
+    lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
+    for key in ("hub_commit", "curation_id", "content_digests", "labeler_policy_version",
+                "reply_classifier_version", "rubric_schema_version", "as_of", "valid_at"):
+        assert key in lineage, key
+    adj_report = tmp_path / "out" / "adjudication-report.json"
+    assert adj_report.is_file()
+    assert "missing" in adj_report.read_text()

@@ -13,6 +13,7 @@ content-derived splits → refuse posterior evidence → write split manifests
 atomically with a lineage pin.
 """
 
+import hashlib
 import json
 import os
 import tempfile
@@ -73,6 +74,10 @@ class BuildCorpusV2Config:
     val_rate: float = 0.1
     salt: str = "daydream-corpus-v2"
     caps: dict[str, int] = field(default_factory=dict)
+    labeler_policy_version: str = "1"
+    reply_classifier_version: str = "1"
+    rubric_schema_version: str = "per-finding-resolutions-v1"
+    license: str | None = None
 
     def __post_init__(self) -> None:
         if self.as_of is not None:
@@ -199,7 +204,10 @@ def project_findings(
                     "fingerprint": fingerprint,
                     "disposition": disposition,
                     "evidence": evidence,
-                    "reason": f"non-decisive disposition {disposition!r}",
+                    "exclusion_reason": (
+                        f"non-decisive disposition {disposition!r} — missing decisive "
+                        "human verdict (evidence carried for the adjudication pass)"
+                    ),
                 }
             )
 
@@ -208,7 +216,20 @@ def project_findings(
     return records
 
 
-def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, int]:
+def _count_by(records: list[Record], key: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in records:
+        k = key(r)
+        counts[k] = counts.get(k, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _caps_applied(records: list[Record], caps: dict[str, int]) -> dict[str, int]:
+    """Final per-tier population (what the caps resolved to), deterministic."""
+    return _count_by(records, lambda r: str(r["tier"])) if caps else {}
+
+
+def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     """Top-level corpus v2 projection (mirrors ``corpus.py:985``'s pipeline
     contract). Pure — no git, no network; ``base_sha``/hub commit come from
     the curation manifest only.
@@ -224,8 +245,12 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, int]:
     manifest byte is a function of the immutable inputs, so re-runs are
     byte-for-byte identical).
 
-    Returns a summary dict with ``total``, ``emitted``, per-split counts and
-    ``adjudication`` (non-decisive findings routed to the human pass).
+    Returns a summary dict with ``total``/``emitted``, per-type/per-tier/
+    per-split counts, the ``caps`` block (configured vs applied), and
+    ``exclusions_by_reason`` — all derived from the final population in
+    deterministic order. Non-decisive findings land in the human
+    ``adjudication-report.json`` with their evidence (D8: report output, not
+    a pipeline stage).
     """
     bundle = load_curated_bundle(config.bundle_dir)
     snapshot_rows = _load_snapshot(config.annotations_snapshot)
@@ -285,13 +310,33 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, int]:
     records.sort(key=lambda r: str(r["record_id"]))
     adjudication.sort(key=lambda r: str(r["fingerprint"]))
 
+    # Post-segmentation caps (D6): caps bind after segmentation and split
+    # assignment, over the deduplicated final population. Excess records of a
+    # capped tier are excluded (never silently dropped) and named in the
+    # summary, lineage, and exclusion reasons.
+    exclusions_by_reason: dict[str, int] = {"non-decisive-adjudication": len(adjudication)}
+    if config.caps:
+        kept: list[Record] = []
+        per_tier: dict[str, int] = {}
+        for rec in records:
+            tier = str(rec["tier"])
+            limit = config.caps.get(tier)
+            if limit is not None and per_tier.get(tier, 0) >= limit:
+                exclusions_by_reason[f"tier-cap:{tier}"] = (
+                    exclusions_by_reason.get(f"tier-cap:{tier}", 0) + 1
+                )
+                continue
+            per_tier[tier] = per_tier.get(tier, 0) + 1
+            kept.append(rec)
+        records = kept
+
     canonical = _dump_jsonl(records)
     _atomic_write(config.out_dir / "corpus.jsonl", canonical)
     for split_name, filename in _SPLIT_FILENAMES.items():
         split_records = [r for r in records if cast(dict[str, Any], r["lineage"])["split"] == split_name]
         _atomic_write(config.out_dir / filename, _dump_jsonl(split_records))
     _atomic_write(
-        config.out_dir / "adjudication.json",
+        config.out_dir / "adjudication-report.json",
         json.dumps(adjudication, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
     )
 
@@ -304,17 +349,44 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, int]:
     for r in records:
         lineage_field = cast(dict[str, Any], r["lineage"])
         split_counts[str(lineage_field["split"])] += 1
+    # Every Req-11 field: hub commit, curation id, content digests, policy/
+    # classifier/rubric versions, as_of + valid_at pins, split assignment,
+    # exclusion reasons, and the C5/license decision. Nothing silently dropped.
+    valid_at = config.as_of
+    for row in snapshot_rows.values():
+        for item in row.get("evidence") or []:
+            if isinstance(item, Mapping) and item.get("valid_at"):
+                candidate = str(item["valid_at"])
+                if valid_at is None or candidate > valid_at:
+                    valid_at = candidate
+    content_digests: dict[str, str] = {
+        batch.session_id: batch.content_digest for batch in bundle.admitted if batch.content_digest
+    }
+    content_digests[config.annotations_snapshot.name] = hashlib.sha256(
+        config.annotations_snapshot.read_bytes()
+    ).hexdigest()
     lineage = {
         "schema_version": "corpus-v2",
         "curation_id": bundle.curation_id,
+        "hub_commit": bundle.source_hub_commit,
         "source_hub_commit": bundle.source_hub_commit,
+        "content_digests": content_digests,
         "annotations_snapshot": config.annotations_snapshot.name,
+        "labeler_policy_version": config.labeler_policy_version,
+        "reply_classifier_version": config.reply_classifier_version,
+        "rubric_schema_version": config.rubric_schema_version,
         "as_of": config.as_of,
+        "valid_at": valid_at,
+        "license": config.license,
         "salt": config.salt,
         "holdout_rate": config.holdout_rate,
         "val_rate": config.val_rate,
         "trajectory_set_hash": _trajectory_set_hash(sorted(set(included_sessions))),
+        "split_assignment": split_counts,
         "split_counts": split_counts,
+        "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
+        "caps": {"configured": dict(sorted(config.caps.items())),
+                 "applied": _caps_applied(records, config.caps)},
         "adjudication_count": len(adjudication),
     }
     _atomic_write(
@@ -327,4 +399,10 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, int]:
         "emitted": len(records),
         "adjudication": len(adjudication),
         **{f"split_{name}": count for name, count in split_counts.items()},
+        "records_by_type": _count_by(records, lambda r: str(r["record_type"])),
+        "records_by_tier": _count_by(records, lambda r: str(r["tier"])),
+        "records_by_split": dict(split_counts),
+        "caps": {"configured": dict(sorted(config.caps.items())),
+                 "applied": _caps_applied(records, config.caps)},
+        "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
     }
