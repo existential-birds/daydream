@@ -16,11 +16,19 @@ from typing import Any
 
 import pytest
 
-from daydream.training.calibration import CalibrationConfig, CalibrationError, run_calibration
+from daydream.training.calibration import (
+    CalibrationConfig,
+    CalibrationError,
+    assign_split,
+    run_calibration,
+)
 
 AS_OF = "2026-01-01T00:00:00+00:00"
 VALID_AT = "2025-12-01T00:00:00+00:00"
-SALT = "cal-salt-1"
+#: Salt chosen so the derived holdout keeps >2 records with both gold classes:
+#: a 1-2 record holdout forces every stage-0 marginal to exactly 0.0 / +/-1,
+#: hiding regressions in the residualization math.
+SALT = "cal-salt-2"
 LABEL_STAMPS = {
     "labeler_policy_version": "980-policy-r1",
     "reply_classifier_version": "980-classifier-r1",
@@ -51,7 +59,9 @@ def _record(i: int) -> dict[str, Any]:
         "repo_slug": "acme/widgets",
         "reward_version": REWARD_VERSION,
         "lineage": {
-            "split": "train",
+            # Stored split must equal the split re-derived by run_calibration
+            # from the fixture salt + split rates (0.1/0.1 in lineage.json).
+            "split": assign_split(f"rec-{i:04d}", holdout_rate=0.1, val_rate=0.1, salt=SALT),
             "as_of": AS_OF,
             "valid_at": VALID_AT,
             "license_decision": "allow",
@@ -100,13 +110,15 @@ def _build_fixture(tmp_path: Path) -> Path:
         for i in range(4)
     }
     (tmp_path / "breakdowns.json").write_text(json.dumps(breakdowns, sort_keys=True) + "\n")
-    # Stage-0 score files: aligned (one entry per record) and misaligned (unknown record_id).
+    # Stage-0 score files: aligned (one entry per record) and misaligned (unknown
+    # record_id, plus one corpus record whose score is dropped).
     scores = {
         f"rec-{i:04d}": {"score": 0.3 + 0.1 * i, "model_digest": "sha256:stage0-model-1"}
         for i in range(4)
     }
     (tmp_path / "stage0-scores-aligned.json").write_text(json.dumps(scores, sort_keys=True) + "\n")
     misaligned = dict(scores)
+    del misaligned["rec-0000"]  # drop a corpus record's score (missing-score direction)
     misaligned["rec-ghost"] = {"score": 0.9, "model_digest": "sha256:stage0-model-1"}
     (tmp_path / "stage0-scores-misaligned.json").write_text(
         json.dumps(misaligned, sort_keys=True) + "\n"
@@ -165,16 +177,21 @@ def test_clean_corpus_passes_gates(tmp_path: Path, fixture_corpus: Path) -> None
 
 
 def test_statistics_are_exact_and_deterministic(fixture_corpus: Path, tmp_path: Path) -> None:
-    result = run_calibration(_config(fixture_corpus, tmp_path, seed=42))
+    candidates = {"w_fp": [0.3, 0.6]}  # straddles the fixture's w_fp values
+    result = run_calibration(_config(fixture_corpus, tmp_path, seed=42, candidates=candidates))
     m = result["metrics"]
     assert m["length_distribution"]["median"] == round(m["length_distribution"]["median"], 4)
     assert {"median", "iqr"} <= set(m["length_distribution"])
     assert set(m["class_balance"]) == {"accepted", "rejected"}
     assert m["per_axis_correlations"]["w_fp_axis"] <= 1.0
-    lo, hi = m["auc_bootstrap_ci"]["w_fp=0.3"]
+    lo, hi = m["auc_bootstrap_ci"]["w_fp"]
     assert lo < hi
+    # the candidate grid genuinely differentiates the per-point metrics
+    assert m["threshold_metrics"]["w_fp=0.3"] != m["threshold_metrics"]["w_fp=0.6"]
     # same seed ⇒ identical bytes
-    run_calibration(_config(fixture_corpus, tmp_path / "r2", out_dir=tmp_path / "r2", seed=42))
+    run_calibration(
+        _config(fixture_corpus, tmp_path / "r2", out_dir=tmp_path / "r2", seed=42, candidates=candidates)
+    )
     assert (tmp_path / "out" / "calibration.json").read_bytes() == \
         (tmp_path / "r2" / "calibration.json").read_bytes()
 
@@ -194,15 +211,61 @@ def test_missing_required_field_fails_closed(tmp_path: Path, fixture_corpus: Pat
         run_calibration(_config(fixture_corpus, tmp_path, **{"drop-session": True}))
 
 
+def test_stored_split_mismatch_fails_closed(tmp_path: Path) -> None:
+    """A stored lineage.split that diverges from the re-derived split is refused."""
+    root = _build_fixture(tmp_path)
+    corpus_dir = root / "corpus"
+    records = [
+        json.loads(line)
+        for line in (corpus_dir / "corpus.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    lineage = json.loads((corpus_dir / "lineage.json").read_text())
+    rid = str(records[0]["record_id"])
+    derived = assign_split(
+        rid,
+        holdout_rate=float(lineage["holdout_rate"]),
+        val_rate=float(lineage["val_rate"]),
+        salt=str(lineage["salt"]),
+    )
+    records[0]["lineage"]["split"] = "val" if derived != "val" else "holdout"
+    payload = "\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n"
+    (corpus_dir / "corpus.jsonl").write_text(payload)
+    (corpus_dir / "SHA256SUMS").write_text(
+        f"{hashlib.sha256(payload.encode()).hexdigest()}  corpus.jsonl\n"
+    )
+    with pytest.raises(CalibrationError, match="stored split.*does not match"):
+        run_calibration(_config(root, tmp_path))
+
+
 # --- Task 3 (M4): stage-0 marginal analysis + explicit unavailable marker ---
 
 
 def test_stage0_scores_report_marginal_value(fixture_corpus: Path, tmp_path: Path) -> None:
     scores = fixture_corpus / "stage0-scores-aligned.json"  # keyed by record_id + model_digest
-    result = run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
+    result = run_calibration(
+        _config(
+            fixture_corpus,
+            tmp_path,
+            stage0_scores=scores,
+            model_digest="sha256:stage0-model-1",
+        )
+    )
     s0 = result["stage0_analysis"]
     assert s0["status"] == "ok"
-    assert set(s0["marginal_value_per_axis"]) >= {"correctness", "grounding"}
+    marginal = s0["marginal_value_per_axis"]
+    assert set(marginal) >= {"correctness", "grounding"}
+    # Non-degenerate: a tiny holdout would force every marginal to exactly
+    # 0.0 / +/-1 and hide regressions, so at least one axis must be interior.
+    assert any(-1.0 < v < 1.0 for v in marginal.values())
+
+
+def test_stage0_scores_require_model_digest(tmp_path: Path, fixture_corpus: Path) -> None:
+    # --model-digest is documented as required with --stage0-scores; a missing
+    # digest must fail closed instead of silently skipping verification.
+    scores = fixture_corpus / "stage0-scores-aligned.json"
+    with pytest.raises(CalibrationError, match="model-digest is required"):
+        run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
 
 
 def test_stage0_absent_is_explicit_unavailable(fixture_corpus: Path, tmp_path: Path) -> None:
@@ -213,7 +276,36 @@ def test_stage0_absent_is_explicit_unavailable(fixture_corpus: Path, tmp_path: P
 def test_stage0_misaligned_records_are_refused(fixture_corpus: Path, tmp_path: Path) -> None:
     scores = fixture_corpus / "stage0-scores-misaligned.json"
     with pytest.raises(CalibrationError, match="stage-0 score.*no matching record"):
-        run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
+        run_calibration(
+            _config(
+                fixture_corpus,
+                tmp_path,
+                stage0_scores=scores,
+                model_digest="sha256:stage0-model-1",
+            )
+        )
+
+
+def test_stage0_missing_score_for_corpus_record_is_refused(
+    fixture_corpus: Path, tmp_path: Path
+) -> None:
+    """Reverse no-partial-join direction: a corpus record with no stage-0 score
+    fails closed (the gate at calibration.py:467), not the unknown-record_id gate."""
+    raw = json.loads((fixture_corpus / "stage0-scores-misaligned.json").read_text())
+    del raw["rec-ghost"]  # keep only the dropped-record direction
+    dropped = tmp_path / "stage0-scores-dropped.json"
+    dropped.write_text(json.dumps(raw, sort_keys=True) + "\n")
+    with pytest.raises(
+        CalibrationError, match="missing stage-0 score for corpus record 'rec-0000'"
+    ):
+        run_calibration(
+            _config(
+                fixture_corpus,
+                tmp_path / "r2",
+                stage0_scores=dropped,
+                model_digest="sha256:stage0-model-1",
+            )
+        )
 
 
 # --- Task 5 (M5, M6, S1, S2): versioned artifact + reproducible report ---
@@ -358,16 +450,39 @@ def test_committed_stage0_files_join_and_misalign_refused(
             committed_fixture,
             tmp_path,
             stage0_scores=committed_fixture / "stage0-scores-aligned.json",
+            model_digest="sha256:calibration-stage0-model-1",
             **shared,
         )
     )
     assert result["stage0_analysis"]["status"] == "ok"
+    # The committed fixture's derived holdout must stay non-degenerate; an
+    # all-+/-1 marginal means a fixture change collapsed the holdout draw and
+    # regressions would go undetected.
+    marginal = result["stage0_analysis"]["marginal_value_per_axis"]
+    assert any(-1.0 < v < 1.0 for v in marginal.values())
     with pytest.raises(CalibrationError, match="no matching record"):
         run_calibration(
             _config(
                 committed_fixture,
                 tmp_path / "r2",
                 stage0_scores=committed_fixture / "stage0-scores-misaligned.json",
+                model_digest="sha256:calibration-stage0-model-1",
+                **shared,
+            )
+        )
+    # Reverse direction of the same no-partial-join gate: drop the unknown
+    # record_id so only the corpus record missing its score remains.
+    raw = json.loads((committed_fixture / "stage0-scores-misaligned.json").read_text())
+    del raw["rec-ghost"]
+    dropped = tmp_path / "stage0-scores-dropped.json"
+    dropped.write_text(json.dumps(raw, sort_keys=True) + "\n")
+    with pytest.raises(CalibrationError, match="missing stage-0 score for corpus record 'rec-0000'"):
+        run_calibration(
+            _config(
+                committed_fixture,
+                tmp_path / "r3",
+                stage0_scores=dropped,
+                model_digest="sha256:calibration-stage0-model-1",
                 **shared,
             )
         )

@@ -180,7 +180,7 @@ The pipeline has three stages:
 2. **Label.** Override the automated outcome for a run. The manual label beats the automated label.
 3. **Build.** Project the annotations into a JSONL training corpus. Add a lineage manifest.
 
-`calibrate-reward` validates a corpus-v2 bundle and emits a deterministic, versioned reward-calibration artifact. See [docs/calibration.md](docs/calibration.md).
+`calibrate-reward` validates a pinned calibration bundle and emits a deterministic, versioned reward-calibration artifact (input wire format: [docs/calibration.md](docs/calibration.md)).
 
 The build stage applies a temporal-leakage guard. It prevents future data from leaking into the past. It applies C5, C8, and C9 filters. It stratifies the corpus by stack.
 

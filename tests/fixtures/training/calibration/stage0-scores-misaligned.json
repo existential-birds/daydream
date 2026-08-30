@@ -1,8 +1,4 @@
 {
-  "rec-0000": {
-    "model_digest": "sha256:calibration-stage0-model-1",
-    "score": 0.3
-  },
   "rec-0001": {
     "model_digest": "sha256:calibration-stage0-model-1",
     "score": 0.35

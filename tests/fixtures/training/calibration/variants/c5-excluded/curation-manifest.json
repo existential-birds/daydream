@@ -1,7 +1,7 @@
 {
   "accepted_count": 6,
   "constraints": {
-    "C5_exclusion": "clean corpus repo slugs are synthetic and absent from the exclusion list",
+    "C5_exclusion": "contains excluded repo slug(s): getsentry/sentry",
     "C8_copyleft": "clean corpus repo slugs are absent from the copyleft list",
     "gpu_free": true
   },

@@ -14,7 +14,7 @@ Layout (consumed by ``daydream.training.calibration.run_calibration``):
 - ``gold.json``        — gold labels keyed by record_id: ``{"accepted": bool}``
 - ``breakdowns.json``  — per-axis intrinsic breakdowns keyed by record_id
 - ``stage0-scores-aligned.json``    — one score per corpus record
-- ``stage0-scores-misaligned.json`` — aligned scores plus one unknown record_id
+- ``stage0-scores-misaligned.json`` — aligned scores plus one unknown record_id and one corpus record dropped
 - ``variants/``        — deliberate corruption bundles, one gate each:
                          ``c5-excluded/`` (C5 exclusion list slug),
                          ``posterior/`` (valid_at posterior to as_of),
@@ -33,6 +33,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from daydream.training.calibration import assign_split
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.labeler_versions import (
     LABELER_POLICY_VERSION,
@@ -43,7 +44,10 @@ from daydream.training.reward import REWARD_VERSION
 
 AS_OF = "2026-01-01T00:00:00+00:00"
 VALID_AT = "2025-12-01T00:00:00+00:00"
-SALT = "calibration-fixture-salt"
+#: Salt chosen so the derived holdout split is non-degenerate for the 12-record
+#: corpus (>=3 records, mixed gold labels): a 2-record holdout forces every
+#: stage-0 marginal point-biserial to exactly +/-1, hiding regressions.
+SALT = "calibration-fixture-salt-nondegenerate"
 RECORD_COUNT = 12
 STAGE0_MODEL_DIGEST = "sha256:calibration-stage0-model-1"
 
@@ -62,7 +66,10 @@ def _record(i: int) -> dict[str, Any]:
         "repo_slug": REPO_SLUGS[i],
         "reward_version": REWARD_VERSION,
         "lineage": {
-            "split": "train",
+            # Stored split must equal the split run_calibration re-derives from
+            # the bundle salt + split rates (0.2/0.2 in _lineage()); the
+            # stored-split gate compares them fail-closed.
+            "split": assign_split(f"rec-{i:04d}", holdout_rate=0.2, val_rate=0.2, salt=SALT),
             "as_of": AS_OF,
             "valid_at": VALID_AT,
             "license_decision": "allow",
@@ -103,6 +110,7 @@ def _stage0_scores(aligned: bool) -> dict[str, dict[str, Any]]:
         for i in range(RECORD_COUNT)
     }
     if not aligned:
+        del scores["rec-0000"]  # drop a corpus record's score (missing-score direction)
         scores["rec-ghost"] = {"score": 0.9, "model_digest": STAGE0_MODEL_DIGEST}
     return scores
 
@@ -119,15 +127,21 @@ def _lineage() -> dict[str, Any]:
     }
 
 
-def _manifest() -> dict[str, Any]:
+def _manifest(records: list[dict[str, Any]]) -> dict[str, Any]:
     gold = _gold()
+    excluded_hits = sorted(set(load_exclusion_list()) & {r["repo_slug"] for r in records})
+    c5_claim = (
+        f"contains excluded repo slug(s): {', '.join(excluded_hits)}"
+        if excluded_hits
+        else "clean corpus repo slugs are synthetic and absent from the exclusion list"
+    )
     return {
         "description": "Synthetic corpus-v2 bundle for calibrate-reward fixtures (issue #999)",
         "record_count": RECORD_COUNT,
         "accepted_count": sum(1 for v in gold.values() if v["accepted"]),
         "rejected_count": sum(1 for v in gold.values() if not v["accepted"]),
         "constraints": {
-            "C5_exclusion": "clean corpus repo slugs are synthetic and absent from the exclusion list",
+            "C5_exclusion": c5_claim,
             "C8_copyleft": "clean corpus repo slugs are absent from the copyleft list",
             "gpu_free": True,
         },
@@ -159,7 +173,7 @@ def _write_bundle(corpus_dir: Path, records: list[dict[str, Any]], *, sums_over_
     corpus_dir.mkdir(parents=True, exist_ok=True)
     (corpus_dir / "corpus.jsonl").write_bytes(_jsonl_bytes(records))
     _write_json(corpus_dir / "lineage.json", _lineage())
-    _write_json(corpus_dir / "curation-manifest.json", _manifest())
+    _write_json(corpus_dir / "curation-manifest.json", _manifest(records))
     (corpus_dir / "_SUCCESS").write_text("")
     _sha256sums(corpus_dir, ["corpus.jsonl", "lineage.json", "curation-manifest.json"])
     if sums_over_tampered:

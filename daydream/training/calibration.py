@@ -1,12 +1,14 @@
 """Deterministic reward-calibration tooling (issue #999, M2 validation matrix).
 
-``run_calibration`` validates a corpus-v2 bundle fail-closed before any
-statistics are computed: every gate raises :class:`CalibrationError` naming the
-offending record/field, and no artifact is ever written unless all gates pass.
+``run_calibration`` validates a calibration bundle (wire format documented in
+``docs/calibration.md``) fail-closed before any statistics are computed: every
+gate raises :class:`CalibrationError` naming the offending record/field, and no
+artifact is ever written unless all gates pass.
 
 Split membership is re-derived read-only from ``lineage.json`` (salt +
 holdout/val rates) via a deterministic hash of the record id, mirroring the
-corpus-v2 projector contract; the derived train/val/holdout sets must stay
+corpus-v2 projector contract; each record's stored ``lineage['split']`` must
+match its re-derived split, and the derived train/val/holdout sets must stay
 pairwise disjoint (a duplicated record id means the corpus was hand-edited).
 
 Reward weights, thresholds, and grid ranges come exclusively from
@@ -108,6 +110,8 @@ class CalibrationConfig:
         unknown = self.corruptions - _CORRUPTION_FLAGS
         if unknown:
             raise CalibrationError(f"unknown corruption flags: {sorted(unknown)}")
+        if self.stage0_scores is not None and self.model_digest is None:
+            raise CalibrationError("--model-digest is required when --stage0-scores is given")
 
 
 def assign_split(record_id: str, *, holdout_rate: float, val_rate: float, salt: str) -> str:
@@ -179,9 +183,13 @@ def _check_digests(corpus_dir: Path) -> None:
     for entry in sums_path.read_text().splitlines():
         if not entry.strip():
             continue
-        expected, _, name = entry.partition("  ")
+        expected, sep, name = entry.partition("  ")
+        _gate(
+            bool(sep and expected.strip() and name.strip()),
+            f"SHA256SUMS line {entry!r} is malformed (expected '<sha256>  <name>')",
+        )
         target = corpus_dir / name.strip()
-        _gate(target.exists(), f"SHA256SUMS names missing file {target}")
+        _gate(target.is_file(), f"SHA256SUMS names missing file {target}")
         actual = hashlib.sha256(target.read_bytes()).hexdigest()
         _gate(actual == expected.strip(), f"digest mismatch for {target}")
 
@@ -199,9 +207,8 @@ def _check_record_schema(record: dict[str, Any], index: int) -> str:
         record["schema_version"] == _RECORD_SCHEMA_VERSION,
         f'record {rid}: schema_version {record["schema_version"]!r} is not "{_RECORD_SCHEMA_VERSION}"',
     )
-    _parse_iso(str(lineage["as_of"]), f"record {rid}: lineage.as_of")
-    valid_at = _parse_iso(str(lineage["valid_at"]), f"record {rid}: lineage.valid_at")
     as_of = _parse_iso(str(lineage["as_of"]), f"record {rid}: lineage.as_of")
+    valid_at = _parse_iso(str(lineage["valid_at"]), f"record {rid}: lineage.valid_at")
     _gate(
         valid_at <= as_of,
         f"record {rid}: valid_at {lineage['valid_at']} is posterior to as_of {lineage['as_of']}",
@@ -237,6 +244,12 @@ def _check_splits(
     for record in records:
         rid = str(record["record_id"])
         split = assign_split(rid, holdout_rate=holdout_rate, val_rate=val_rate, salt=salt)
+        stored = str(record["lineage"]["split"])
+        _gate(
+            stored == split,
+            f"record {rid}: stored split {stored!r} does not match the split "
+            f"re-derived from lineage.json ({split!r}) via calibration.assign_split",
+        )
         derived[split].add(rid)
         prior = seen.get(rid)
         _gate(
@@ -270,9 +283,10 @@ def _load_inputs(
     """Join gold labels and intrinsic breakdowns onto the corpus by record_id."""
     gold_raw = json.loads(config.gold_labels.read_text())
     _gate(isinstance(gold_raw, dict), f"{config.gold_labels}: gold labels must be an object keyed by record_id")
+    known_ids = set(record_ids)
     gold: dict[str, bool] = {}
     for rid, value in gold_raw.items():
-        _gate(rid in set(record_ids), f"{config.gold_labels}: gold label for unknown record_id {rid!r}")
+        _gate(rid in known_ids, f"{config.gold_labels}: gold label for unknown record_id {rid!r}")
         _gate(
             isinstance(value, dict) and isinstance(value.get("accepted"), bool),
             f'{config.gold_labels}: gold label for {rid!r} must be {{"accepted": bool}}',
@@ -282,7 +296,7 @@ def _load_inputs(
     _gate(isinstance(breakdown_raw, dict), f"{config.breakdowns}: breakdowns must be an object keyed by record_id")
     breakdowns: dict[str, dict[str, float]] = {}
     for rid, axes in breakdown_raw.items():
-        _gate(rid in set(record_ids), f"{config.breakdowns}: breakdown for unknown record_id {rid!r}")
+        _gate(rid in known_ids, f"{config.breakdowns}: breakdown for unknown record_id {rid!r}")
         _gate(isinstance(axes, dict), f"{config.breakdowns}: breakdown for {rid!r} must be an object")
         for axis, value in axes.items():
             _gate(isinstance(value, (int, float)) and not isinstance(value, bool),
@@ -362,6 +376,33 @@ def _grid(axis: str, values: list[float] | None, grid_points: int) -> list[float
     return sorted({round(lo + i * step, 4) for i in range(grid_points)})
 
 
+def _threshold_decision_metrics(
+    scores: list[float], labels: list[bool], threshold: float
+) -> dict[str, float]:
+    """Precision / recall / specificity of ``accepted iff axis >= threshold``.
+
+    These are the per-candidate statistics: unlike AUC, they vary with the
+    cut-off, so the ``--candidate``/``--grid-points`` resolution genuinely
+    differentiates the ``axis=point`` rows.
+    """
+    tp = fp = fn = tn = 0
+    for score, label in zip(scores, labels):
+        predicted = score >= threshold
+        if predicted and label:
+            tp += 1
+        elif predicted and not label:
+            fp += 1
+        elif not predicted and label:
+            fn += 1
+        else:
+            tn += 1
+    return {
+        "precision": tp / (tp + fp) if tp + fp else 0.0,
+        "recall": tp / (tp + fn) if tp + fn else 0.0,
+        "specificity": tn / (tn + fp) if tn + fp else 0.0,
+    }
+
+
 def _compute_metrics(
     records: list[dict[str, Any]],
     gold: dict[str, bool],
@@ -395,22 +436,28 @@ def _compute_metrics(
         for axis in axes
     }
 
+    # AUC is rank-invariant under any monotone transform, so the bootstrap CI
+    # is per-axis; the candidate grid is resolved into per-point decision
+    # metrics (precision/recall/specificity at each cut-off) below.
     auc_bootstrap_ci: dict[str, list[float]] = {}
+    threshold_metrics: dict[str, dict[str, float]] = {}
     for axis, values in config.candidates.items():
         _gate(
             all(axis in breakdowns[rid] for rid in record_ids),
             f"candidate axis {axis!r} is absent from breakdowns for at least one corpus record",
         )
         scores = [breakdowns[rid][axis] for rid in record_ids]
+        lo, hi = _bootstrap_auc_ci(scores, labels, config.seed, config.bootstrap_resamples)
+        auc_bootstrap_ci[axis] = [lo, hi]
         for point in _grid(axis, values, config.grid_points):
-            lo, hi = _bootstrap_auc_ci(scores, labels, config.seed, config.bootstrap_resamples)
-            auc_bootstrap_ci[f"{axis}={point}"] = [lo, hi]
+            threshold_metrics[f"{axis}={point}"] = _threshold_decision_metrics(scores, labels, point)
 
     return {
         "length_distribution": length_distribution,
         "class_balance": class_balance,
         "per_axis_correlations": per_axis_correlations,
         "auc_bootstrap_ci": auc_bootstrap_ci,
+        "threshold_metrics": threshold_metrics,
     }
 
 
@@ -539,9 +586,15 @@ def _render_report(
     lines += ["", "## Per-axis correlations", ""]
     for name, value in sorted(metrics["per_axis_correlations"].items()):
         lines.append(f"- `{name}`: {value}")
-    lines += ["", "## AUC bootstrap CIs", ""]
+    lines += ["", "## AUC bootstrap CIs (per axis)", ""]
     for name, ci in sorted(metrics["auc_bootstrap_ci"].items()):
         lines.append(f"- `{name}`: [{ci[0]}, {ci[1]}]")
+    lines += ["", "## Candidate decision metrics (accepted iff axis >= point)", ""]
+    for name, dm in sorted(metrics["threshold_metrics"].items()):
+        lines.append(
+            f"- `{name}`: precision={dm['precision']}, recall={dm['recall']}, "
+            f"specificity={dm['specificity']}"
+        )
     lines += ["", "## Stage-0 analysis", ""]
     stage0 = artifact["stage0_analysis"]
     if stage0["status"] == "ok":
@@ -564,9 +617,14 @@ def _write_outputs(
     stage0_analysis: dict[str, Any],
     input_digests: dict[str, str],
     corpus_digest: str,
+    bundle: dict[str, Any],
+    version_stamps: dict[str, str],
 ) -> None:
     """Build the artifact + report from already-computed numbers and write both
-    atomically, last: any earlier failure leaves neither file in place."""
+    with ``calibration.json`` replaced last: a failure between the two replaces
+    leaves the previously recorded artifact — and its run identity — in place,
+    so a same-run re-run overwrites both and self-heals the directory. Temp
+    files are cleaned up on every path."""
     warnings: list[str] = []
     if stage0_analysis["status"] != "ok":
         warnings.append("stage-0 score file not supplied; marginal analysis unavailable")
@@ -581,6 +639,16 @@ def _write_outputs(
         "input_digests": input_digests,
         "corpus_digest": corpus_digest,
         "split_digest": _split_digest(splits),
+        "lineage": {
+            "schema_version": bundle["schema_version"],
+            "content_digests": bundle.get("content_digests"),
+            "as_of": bundle["as_of"],
+            "valid_at": bundle["valid_at"],
+            "salt": bundle["salt"],
+            "holdout_rate": float(bundle["holdout_rate"]),
+            "val_rate": float(bundle["val_rate"]),
+        },
+        "version_stamps": version_stamps,
         "candidate_settings": _candidate_grid(config),
         "metrics": metrics,
         "stage0_analysis": stage0_analysis,
@@ -595,8 +663,12 @@ def _write_outputs(
     report_tmp = config.out_dir / ".report.md.tmp"
     artifact_tmp.write_text(artifact_payload)
     report_tmp.write_text(report_payload)
-    os.replace(artifact_tmp, config.out_dir / "calibration.json")
-    os.replace(report_tmp, config.out_dir / "report.md")
+    try:
+        os.replace(report_tmp, config.out_dir / "report.md")
+        os.replace(artifact_tmp, config.out_dir / "calibration.json")
+    finally:
+        artifact_tmp.unlink(missing_ok=True)
+        report_tmp.unlink(missing_ok=True)
 
 
 def _check_out_dir_collision(config: CalibrationConfig) -> None:
@@ -656,6 +728,7 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     )
 
     records = _load_jsonl(corpus_path)
+    _gate(bool(records), f"{corpus_path}: corpus contains no records")
     _apply_corruptions(records, config.corruptions)
     for index, record in enumerate(records):
         rid = _check_record_schema(record, index)
@@ -685,13 +758,27 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     if config.stage0_scores is not None:
         input_digests[config.stage0_scores.name] = _sha256_of(config.stage0_scores)
     corpus_digest = input_digests["corpus.jsonl"]
+    version_stamps = {
+        "labeler_policy_version": LABELER_POLICY_VERSION,
+        "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
+        "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
+        "reward_version": REWARD_VERSION,
+    }
 
     record_ids = [str(r["record_id"]) for r in records]
     gold, breakdowns = _load_inputs(config, record_ids)
     metrics = _compute_metrics(records, gold, breakdowns, config)
     stage0_analysis = _stage0_analysis(config, record_ids, splits, gold, breakdowns)
     _write_outputs(
-        config, len(records), splits, metrics, stage0_analysis, input_digests, corpus_digest
+        config,
+        len(records),
+        splits,
+        metrics,
+        stage0_analysis,
+        input_digests,
+        corpus_digest,
+        bundle,
+        version_stamps,
     )
 
     return {

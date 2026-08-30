@@ -1220,14 +1220,15 @@ def _build_calibrate_reward_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream corpus calibrate-reward``.
 
     Drives :func:`daydream.training.calibration.run_calibration`: validate a
-    corpus-v2 bundle fail-closed, compute deterministic calibration statistics
-    with bootstrap CIs, and emit a byte-reproducible calibration artifact —
-    without touching any reward default (issue #999).
+    pinned calibration bundle (wire format in ``docs/calibration.md``)
+    fail-closed, compute deterministic calibration statistics with bootstrap
+    CIs, and emit a byte-reproducible calibration artifact — without touching
+    any reward default (issue #999).
     """
     parser = argparse.ArgumentParser(
         prog="daydream corpus calibrate-reward",
         description=(
-            "Validate a corpus-v2 bundle fail-closed and emit a deterministic, "
+            "Validate a pinned calibration bundle fail-closed and emit a deterministic, "
             "versioned reward-calibration artifact with Stage-0 marginal "
             "analysis (issue #999). Never mutates reward defaults."
         ),
@@ -1238,7 +1239,7 @@ def _build_calibrate_reward_parser() -> argparse.ArgumentParser:
         required=True,
         dest="corpus_dir",
         metavar="PATH",
-        help="Corpus-v2 output directory holding corpus.jsonl + lineage.json + SHA256SUMS.",
+        help="Calibration bundle directory holding corpus.jsonl + lineage.json + SHA256SUMS.",
     )
     parser.add_argument(
         "--gold-labels",
@@ -1839,7 +1840,7 @@ _CORPUS_USAGE = (
     "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
-    "  calibrate-reward  validate a corpus-v2 bundle and emit a deterministic reward-calibration artifact"
+    "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact"
 )
 
 _EXT_USAGE = (
