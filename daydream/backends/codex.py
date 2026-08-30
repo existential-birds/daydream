@@ -32,11 +32,12 @@ from daydream.backends import (
     TurnEndEvent,
     resolve_fanout_concurrency,
 )
-from daydream.backends._subprocess import (
-    cancel_processes,
-    readline_with_idle_timeout,
-    stream_idle_timeout_s,
-    terminate_process,
+from daydream.backends._subprocess import stream_idle_timeout_s
+from daydream.backends._transport import (
+    CliTransport,
+    StderrPolicy,
+    StdinMode,
+    TransportExitError,
 )
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
@@ -231,7 +232,7 @@ class CodexBackend:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 8)
-        self._processes: list[asyncio.subprocess.Process] = []
+        self._transports: list[CliTransport] = []
         # Disposable read-only checkouts shared across concurrent execute() calls
         # (built once per cwd, refcounted; cleaned up when the last holder exits).
         self._checkout_lock = asyncio.Lock()
@@ -344,7 +345,7 @@ class CodexBackend:
                 unmatched_seq += 1
             return item_id
 
-        proc: asyncio.subprocess.Process | None = None
+        transport: CliTransport | None = None
         execution_cwd = cwd
         shared_checkout: _SharedCheckout | None = None
 
@@ -411,37 +412,26 @@ class CodexBackend:
             # own cwd is never the source path. Path-hiding, not physical.
             child_env = _isolated_child_env(cwd, execution_cwd)
 
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+            if execution_cwd != cwd:
+                # Rebind the prompt so no rendering of the caller's source
+                # path appears in the bytes written to the isolated subprocess.
+                prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
+
+            transport = CliTransport(
+                "codex",
+                args,
+                stdin_mode=StdinMode.PIPE,
+                stdin_data=prompt.encode(),
+                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
-                start_new_session=True,
                 env=child_env,
                 cwd=str(execution_cwd) if execution_cwd != cwd else None,
             )
-            self._processes.append(proc)
-
-            if proc.stdin:
-                if execution_cwd != cwd:
-                    # Rebind the prompt so no rendering of the caller's source
-                    # path appears in the bytes written to the isolated subprocess.
-                    prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
-                proc.stdin.write(prompt.encode())
-                proc.stdin.close()
+            self._transports.append(transport)
+            await transport.start()
 
             idle_timeout_s = stream_idle_timeout_s()
-            while True:
-                if proc.stdout is None:
-                    break
-                line = await readline_with_idle_timeout(
-                    proc.stdout, cli="codex", timeout_s=idle_timeout_s
-                )
-                if not line:
-                    break
-
-                raw_line = line.decode().strip()
+            async for raw_line in transport.lines(lambda: idle_timeout_s):
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
@@ -685,20 +675,25 @@ class CodexBackend:
                 elif event_type not in ("turn.started",):
                     pass
 
-            await proc.wait()
+            # Reap the child (the transport raises TransportExitError on a
+            # non-zero exit; _check_return_code below formats the backend-
+            # specific message from the code and captured diagnostics).
+            try:
+                await transport.wait()
+            except TransportExitError:
+                pass
 
             # Fail fast on non-zero exit: if codex crashed without emitting a
             # turn.failed event, surface the failure with diagnostic output
             # instead of reporting a successful completion with empty/partial
             # output.
-            self._check_return_code(proc.returncode, non_json_lines)
+            self._check_return_code(transport.returncode, non_json_lines)
             if _pending_result is not None:
                 yield _pending_result
 
         finally:
-            if proc is not None:
-                await terminate_process(proc)
-            self._processes = [active for active in self._processes if active is not proc]
+            if transport is not None:
+                await transport.terminate()
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
             if shared_checkout is not None:
@@ -713,7 +708,7 @@ class CodexBackend:
 
         Sends SIGTERM, waits briefly, then SIGKILL if still running.
         """
-        await cancel_processes(self._processes)
+        await CliTransport.cancel_all(self._transports)
 
     @staticmethod
     def _extract_text(item: dict[str, Any]) -> str:

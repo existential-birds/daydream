@@ -37,7 +37,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 async def _run_fixture(backend: Any, prompt: Any, fixture: Any, **kwargs: Any) -> Any:
     """Drive ``execute`` over a canned fixture and collect the event list."""
     mock_proc = make_mock_process_from_fixture(fixture)
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         return [event async for event in backend.execute(Path("/tmp"), prompt, **kwargs)]
 
 
@@ -143,7 +143,7 @@ async def test_turn_failed_raises() -> None:
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("turn_failed.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CodexError, match="Model returned an error") as exc_info:
             async for _ in backend.execute(Path("/tmp"), "Fail"):
                 pass
@@ -162,7 +162,7 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     mock_proc.returncode = 1
 
     events = []
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CodexError, match="return code 1") as exc_info:
             async for event in backend.execute(Path("/tmp"), "Fail"):
                 events.append(event)
@@ -181,7 +181,7 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
     mock_proc = make_mock_process([])
     mock_proc.returncode = 1
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CodexError, match="return code 1") as exc_info:
             async for _ in backend.execute(Path("/tmp"), "Fail"):
                 pass
@@ -199,7 +199,7 @@ async def test_continuation_token_resumes() -> None:
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "Continue", continuation=token):
             pass
 
@@ -249,7 +249,7 @@ async def test_codex_read_only_uses_read_only_sandbox(
         captured["args"] = flat
         return mock_proc
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         async for _ in CodexBackend(model="fixture-model").execute(
             source, f"Audit repository at {source}", read_only=True,
         ):
@@ -296,7 +296,7 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
 
     monkeypatch.setattr("daydream.backends.codex.git_ops.clone", boom)
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CodexError, match="failed to create disposable read-only checkout"):
             async for _ in CodexBackend(model="fixture-model").execute(source, "Audit", read_only=True):
                 pass
@@ -376,7 +376,7 @@ async def test_codex_read_only_resume_is_refused(
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CodexError, match="cannot be resumed"):
             async for _ in backend.execute(source, "Continue", continuation=token, read_only=True):
                 pass
@@ -420,7 +420,7 @@ async def test_codex_read_only_parallel_calls_share_one_clone(
         async for _ in backend.execute(source, f"Audit {source}", read_only=True):
             pass
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         await asyncio.gather(drive(), drive())
 
     assert len(build_calls) == 1, "the two concurrent calls must share one clone build"
@@ -468,7 +468,7 @@ async def test_codex_read_only_mirrors_symlinks_and_unstaged_deletions(
         captured["doomed_present"] = (isolated / "services/taste/lexer.go").exists()
         return mock_proc
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         async for _ in CodexBackend(model="fixture-model").execute(source, "Audit", read_only=True):
             pass
 
@@ -486,7 +486,7 @@ async def test_codex_default_uses_full_access_sandbox() -> None:
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "p"):
             pass
 
@@ -511,7 +511,7 @@ async def test_codex_default_full_access_at_worktree_skips_isolation(
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(source, "p"):
             pass
 
@@ -527,7 +527,7 @@ async def test_codex_reasoning_effort_appends_config_override() -> None:
     backend = CodexBackend(model="fixture-model", reasoning_effort="high")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "p"):
             pass
 
@@ -541,7 +541,7 @@ async def test_codex_no_reasoning_effort_omits_config_override() -> None:
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), "p"):
             pass
 
@@ -555,7 +555,7 @@ async def test_spawn_uses_start_new_session() -> None:
     backend = CodexBackend(model="gpt-5.1-codex")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     with patch(
-        "daydream.backends.codex.asyncio.create_subprocess_exec",
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
         return_value=mock_proc,
     ) as mock_exec:
         events = []
@@ -565,26 +565,36 @@ async def test_spawn_uses_start_new_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_finally_closes_transport_after_process_exit() -> None:
-    """Even when the CLI already exited, the finally closes the transport.
+async def test_execute_finally_reaps_process_and_closes_pipes_after_exit() -> None:
+    """Even when the CLI already exited, the finally reaps it and closes stdin.
 
     A grandchild holding the pipe write end means the stream never reaches EOF,
-    so the fd is only released by an explicit transport close.
+    so the fds are only released by an explicit teardown.
     """
+    from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
+
     backend = CodexBackend(model="gpt-5.1-codex")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    mock_proc.returncode = 0  # process already exited
-    mock_proc._transport = MagicMock()
+    captured = FakeCliSpawner()
 
-    with patch(
-        "daydream.backends.codex.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "hello"):
-            events.append(event)
+    async def fake_exec(*args: Any, **kwargs: Any) -> FakeCliProcess:
+        proc = FakeCliProcess(
+            [
+                '{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}',
+                '{"type":"turn.completed","usage":{}}',
+            ],
+            exit_code=0,
+        )
+        captured.procs.append(proc)
+        return proc
 
-    mock_proc._transport.close.assert_called_once()
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
+        events = [event async for event in backend.execute(Path("/tmp"), "hello")]
+
+    assert events  # the turn ran to completion
+    proc = captured.procs[0]
+    assert proc.returncode == 0
+    assert proc.reaped, "the finally must reap the child even after clean exit"
+    assert proc.stdin.closed, "the finally must close the stdin pipe"
 
 
 @pytest.mark.asyncio
@@ -629,7 +639,7 @@ async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
         process.kill = MagicMock()
         return process
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         events = [event async for event in backend.execute(Path("/tmp"), "large event")]
 
     text_events = [e for e in events if isinstance(e, TextEvent)]
@@ -712,7 +722,7 @@ async def test_codex_synthesizes_cost_for_known_model() -> None:
     ]
 
     mock_proc = make_mock_process(lines)
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "Synth"):
             events.append(event)
@@ -760,7 +770,7 @@ async def test_codex_cost_none_for_unknown_model() -> None:
     ]
 
     mock_proc = make_mock_process(lines)
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "Unknown"):
             events.append(event)
@@ -848,7 +858,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     async def consume_second() -> list[object]:
         return [event async for event in backend.execute(Path("/tmp"), "second")]
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         first_iter = backend.execute(Path("/tmp"), "first")
         first_event = await anext(first_iter)
         assert isinstance(first_event, TextEvent)
