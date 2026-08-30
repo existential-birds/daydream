@@ -24,7 +24,6 @@ URL or writes a models.json override.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
@@ -51,10 +50,13 @@ from daydream.backends import (
 from daydream.backends._subprocess import (
     DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
-    cancel_processes,
-    readline_with_idle_timeout,
     stream_idle_timeout_s,
-    terminate_process,
+)
+from daydream.backends._transport import (
+    CliTransport,
+    StderrPolicy,
+    StdinMode,
+    TransportExitError,
 )
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.json_utils import extract_json
@@ -486,7 +488,7 @@ class PiBackend:
         self.retry_attempts = _pi_retry_attempts()
         self.retry_base_delay_s = _pi_retry_base_delay()
         self.retry_max_delay_s = _pi_retry_max_delay()
-        self._processes: list[asyncio.subprocess.Process] = []
+        self._transports: list[CliTransport] = []
 
     async def execute(
         self,
@@ -651,25 +653,20 @@ class PiBackend:
         saw_finish_reason = False
         saw_turn_start = False
 
-        proc: asyncio.subprocess.Process | None = None
+        transport: CliTransport | None = None
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=str(cwd),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                # Merge stderr into stdout (matching CodexBackend). stderr=PIPE
-                # here would never be drained — a latent deadlock if pi writes
-                # more than the OS pipe buffer (~64KB) to stderr. The parse loop
-                # below already `continue`s past non-JSON lines, so stray stderr
-                # text mixed into stdout is harmlessly skipped.
-                stderr=asyncio.subprocess.STDOUT,
+            transport = CliTransport(
+                "pi",
+                args,
+                stdin_mode=StdinMode.DEVNULL,
+                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
-                start_new_session=True,
+                cwd=str(cwd),
             )
-            self._processes.append(proc)
+            self._transports.append(transport)
+            await transport.start()
 
             response_idle_timeout_s = stream_idle_timeout_s(
                 default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
@@ -679,22 +676,11 @@ class PiBackend:
             )
             active_tool_calls = 0
             is_first_line = True
-            while True:
-                if proc.stdout is None:
-                    break
-                line = await readline_with_idle_timeout(
-                    proc.stdout,
-                    cli="pi",
-                    timeout_s=(
-                        tool_idle_timeout_s
-                        if active_tool_calls > 0
-                        else response_idle_timeout_s
-                    ),
-                )
-                if not line:
-                    break
-
-                raw_line = line.decode().strip()
+            async for raw_line in transport.lines(
+                lambda: tool_idle_timeout_s
+                if active_tool_calls > 0
+                else response_idle_timeout_s
+            ):
                 if not raw_line:
                     continue
                 try:
@@ -813,13 +799,19 @@ class PiBackend:
                 # tool_execution_update are streaming-only; the full content is
                 # already captured at message_end / tool_execution_end.
 
-            await proc.wait()
+            # Reap the child (the transport raises TransportExitError on a
+            # non-zero exit; the check below formats the backend-specific
+            # message from the code and captured stderr lines).
+            try:
+                await transport.wait()
+            except TransportExitError:
+                pass
 
             # Fail fast on non-zero exit: if pi crashed without emitting a
             # turn_end error event, surface the failure with diagnostic output
             # instead of reporting a successful completion with empty/partial
             # output.
-            returncode = proc.returncode
+            returncode = transport.returncode
             if returncode is not None and returncode != 0:
                 stderr_tail = "\n".join(stderr_lines[-10:])
                 if stderr_lines:
@@ -875,9 +867,8 @@ class PiBackend:
             )
 
         finally:
-            if proc is not None:
-                await terminate_process(proc)
-            self._processes = [active for active in self._processes if active is not proc]
+            if transport is not None:
+                await transport.terminate()
 
     async def cancel(self) -> None:
         """Cancel all running Pi processes.
@@ -885,4 +876,4 @@ class PiBackend:
         Sends SIGTERM, waits briefly, then SIGKILL if still running (mirrors
         ``CodexBackend.cancel``).
         """
-        await cancel_processes(self._processes)
+        await CliTransport.cancel_all(self._transports)

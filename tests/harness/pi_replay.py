@@ -3,7 +3,7 @@
 Mirrors :mod:`tests.harness.codex_replay`. The returned ``MagicMock``
 reproduces the exact ``stdout``/``wait``/``returncode``/``terminate``/``kill``
 shape that ``PiBackend.execute`` drives via
-``daydream.backends.pi.asyncio.create_subprocess_exec``.
+``daydream.backends._transport.asyncio.create_subprocess_exec``.
 
 Pi's prompt is a positional argument (not stdin like Codex), so the mock does
 not need a writable stdin handle — but ``PiBackend.execute`` opens the process

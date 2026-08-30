@@ -16,7 +16,9 @@ OS semantics modeled by :class:`FakeCliProcess`:
 - ``wait()`` resolves only once the child has exited, and marks it
   ``reaped`` — the fake equivalent of "gone from the process table".
 
-:func:`install_fake_cli_process` patches ``asyncio.create_subprocess_exec``
+:func:`install_fake_cli_process` patches ``asyncio.create_subprocess_exec`` at
+the transport seam (``daydream.backends._transport``), where the codex/pi
+backends now spawn via :class:`~daydream.backends._transport.CliTransport`,
 as seen by the backend module, so everything of daydream's runs for real —
 argv construction, the readline loop, the idle window, the shielded
 SIGTERM→SIGKILL teardown — only the OS fork is replaced (the same seam
@@ -129,6 +131,6 @@ def install_fake_cli_process(
         return proc
 
     monkeypatch.setattr(
-        f"daydream.backends.{cli}.asyncio.create_subprocess_exec", fake_exec
+        "daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec
     )
     return spawner
