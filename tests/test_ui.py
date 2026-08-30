@@ -1,4 +1,5 @@
 """Tests for daydream.ui helpers."""
+
 from __future__ import annotations
 
 from io import StringIO

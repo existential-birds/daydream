@@ -6,6 +6,7 @@ tool-call ceiling. On abort, the invocation's event iterator is closed, the
 recorder Invocation is marked aborted via ``inv.mark_aborted(reason)``, and the
 partial output is returned without cancelling sibling backend invocations.
 """
+
 from __future__ import annotations
 
 import asyncio
