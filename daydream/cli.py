@@ -543,6 +543,139 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     return 0
 
 
+def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream corpus build-v2 [...]``.
+
+    Mirrors the v1 ``corpus build`` parser in style; dispatches to the
+    deterministic per-finding corpus v2 projector over a curated bundle.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream corpus build-v2",
+        description="Project curated-bundle per-finding resolutions into deterministic, "
+        "frozen-split corpus-v2 training records.",
+    )
+
+    parser.add_argument(
+        "--bundle-root",
+        type=Path,
+        required=True,
+        metavar="DIR",
+        help="Hydrated curated-bundle root (must contain _SUCCESS, SHA256SUMS, "
+        "curation-manifest.json)",
+    )
+    parser.add_argument(
+        "--annotations-snapshot",
+        type=Path,
+        required=True,
+        dest="annotations_snapshot",
+        metavar="PATH",
+        help="Side-car JSONL of per-finding resolutions keyed by fingerprint, "
+        "digest-pinned alongside the bundle",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Output path; corpus-v2.jsonl, the split manifests, and lineage.json "
+        "are written beside it (its parent directory)",
+    )
+
+    parser.add_argument(
+        "--max-stack-share",
+        type=float,
+        default=None,
+        dest="max_stack_share",
+        help="Not supported by build-v2: the v2 projection applies per-tier caps "
+        "(BuildCorpusV2Config.caps), so passing this flag is refused",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print the projection summary, write nothing",
+    )
+
+    parser.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        dest="as_of",
+        metavar="ISO_TS",
+        help="ISO-8601 transaction-time pin; evidence dated after this instant "
+        "refuses the build (default: latest)",
+    )
+
+    return parser
+
+
+def _handle_build_corpus_v2_command(argv: list[str]) -> int:
+    """Handle ``daydream corpus build-v2 --bundle-root <dir> [...]``.
+
+    Drives :func:`daydream.training.corpus_v2.run_build_corpus_v2` synchronously
+    (no agent work, no network — a pure projection over the curated bundle plus
+    the annotations snapshot). Mirrors :func:`_handle_build_corpus_command`'s
+    structure: returns an exit code; ``main()`` translates it into a process
+    exit. Errors are fail-closed: a refused build exits non-zero with the
+    exception message and writes nothing.
+    """
+    import tempfile
+    from dataclasses import replace
+
+    from daydream.training.corpus_v2 import BuildCorpusV2Config, run_build_corpus_v2
+    from daydream.ui import create_console, print_error, print_success
+
+    parser = _build_build_corpus_v2_parser()
+    args = parser.parse_args(argv)
+
+    if args.max_stack_share is not None:
+        if not (0.0 < args.max_stack_share <= 1.0):
+            print_error(create_console(), "Invalid --max-stack-share", "Must be in (0, 1].")
+            return 1
+        print_error(
+            create_console(),
+            "Unsupported --max-stack-share",
+            "corpus build-v2 applies per-tier caps (BuildCorpusV2Config.caps); "
+            "per-stack share caps are not part of the v2 projection.",
+        )
+        return 1
+
+    # --out names the corpus JSONL; the projector writes its canonical file set
+    # (corpus.jsonl, corpus-v2.jsonl, split manifests, lineage.json) into that
+    # directory, finishing with _SUCCESS — so the whole set, twin included, is
+    # covered by the fail-closed completeness gate.
+    out_dir = args.out.parent
+    try:
+        # BuildCorpusV2Config is the single validation boundary for --as-of
+        # (UTC-only, canonical +00:00 spelling out) — normalize_as_of runs in
+        # __post_init__, so an unparseable pin refuses here, not as a traceback.
+        config = BuildCorpusV2Config(
+            out_dir=out_dir,
+            bundle_dir=args.bundle_root,
+            annotations_snapshot=args.annotations_snapshot,
+            as_of=args.as_of,
+        )
+    except ValueError as exc:
+        print_error(create_console(), "Invalid --as-of", str(exc))
+        return 1
+    try:
+        if args.dry_run:
+            with tempfile.TemporaryDirectory() as td:
+                summary = run_build_corpus_v2(replace(config, out_dir=Path(td)))
+        else:
+            summary = run_build_corpus_v2(config)
+    except (OSError, ValueError, TypeError) as exc:
+        print_error(create_console(), "Corpus v2 build refused", str(exc))
+        return 1
+    print_success(
+        create_console(),
+        f"Corpus v2 build complete: {summary['emitted']} records "
+        f"({summary['adjudication']} to adjudication) in {out_dir}",
+    )
+    return 0
+
+
 def _build_improve_parser(
     subverb: str | None = None,
 ) -> argparse.ArgumentParser:
@@ -1616,17 +1749,19 @@ def _handle_train_command(argv: list[str]) -> int:
 _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "harvest": _handle_harvest_command,
     "build": _handle_build_corpus_command,
+    "build-v2": _handle_build_corpus_v2_command,
     "label": _handle_label_command,
     "hydrate-hub": _handle_hydrate_hub_command,
 }
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build,label,hydrate-hub} ...\n"
+    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
     "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
+    "  build-v2  project curated-bundle per-finding resolutions into corpus-v2 records\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive"
 )
