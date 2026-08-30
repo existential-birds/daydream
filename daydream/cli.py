@@ -22,6 +22,9 @@ top-level ``TARGET`` positional):
       into a JSONL training corpus plus a lineage manifest
     - ``corpus label <session-prefix> --outcome {accepted,contested,rejected,unknown}``
       — record an authoritative human outcome label that overrides automated ones
+    - ``corpus hydrate-hub`` — turn a pinned private-Hub trajectory snapshot into a
+      verified, sanitized, harvestable local staging archive and publish it additively
+      back to the Hub under ``curated/<curation-id>/``
 - ``daydream train --corpus <path> --out <dir>`` — run the four-stage
   training pipeline (stage0 offline gate → stage1 SFT → stage2 RFT →
   stage3 adapter) and write a stage manifest (``--dry-run`` is the GPU-free
@@ -1146,6 +1149,216 @@ def _handle_harvest_command(argv: list[str]) -> int:
     return 0
 
 
+def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream corpus hydrate-hub [...]``.
+
+    Drives :func:`daydream.archive.hydrate.run_hydrate_hub`: pin a private-Hub
+    snapshot revision, download it resumably into a staging directory, run the
+    fail-closed ingest gate, and publish the sanitized output additively under
+    ``curated/<curation-id>/`` — reporting success only after the clean-room
+    verification cycle passes.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream corpus hydrate-hub",
+        description=(
+            "Hydrate a pinned private-Hub trajectory snapshot into a verified, "
+            "sanitized, harvestable staging archive and publish it additively "
+            "back to the Hub under curated/<curation-id>/ (issue #982)."
+        ),
+    )
+    parser.add_argument(
+        "--source-repo",
+        type=str,
+        required=True,
+        dest="source_repo",
+        metavar="REPO_ID",
+        help="Source private Hub dataset repo (e.g. org/ds) holding the snapshot.",
+    )
+    parser.add_argument(
+        "--source-revision",
+        type=str,
+        required=True,
+        dest="source_revision",
+        metavar="REV",
+        help=(
+            "Pinned source commit: an exact 40-char SHA or unique hex prefix. "
+            "Moving branches/tags require --exploratory."
+        ),
+    )
+    parser.add_argument(
+        "--destination-repo",
+        type=str,
+        required=True,
+        dest="destination_repo",
+        metavar="REPO_ID",
+        help="Destination private Hub repo for the sanitized output (must be private).",
+    )
+    parser.add_argument(
+        "--stage-dir",
+        type=Path,
+        required=True,
+        dest="stage_dir",
+        metavar="PATH",
+        help="Local staging directory for downloads, ingest, and the rebuildable index.",
+    )
+    parser.add_argument(
+        "--exploratory",
+        action="store_true",
+        dest="exploratory",
+        help="Opt in to a moving branch/tag source revision (output is non-canonical).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Plan only: pin, download, ingest, and tally — no Hub publication.",
+    )
+    return parser
+
+
+def _run_hydrate_hub(config: Any) -> Any:
+    """Thin module-attribute wrapper around the hydrate orchestrator.
+
+    Lives at module level so tests can monkeypatch ``cli._run_hydrate_hub``
+    (the same seam discipline as harvest's ``run_harvest`` lookup).
+    """
+    from daydream.archive.hydrate import run_hydrate_hub
+
+    return run_hydrate_hub(config)
+
+
+def _handle_hydrate_hub_command(argv: list[str]) -> int:
+    """Handle ``daydream corpus hydrate-hub [...]``.
+
+    Fail-closed, fatal semantics (unlike ``hub.py``'s warn-everything): a
+    missing ``HF_TOKEN`` or a moving-branch revision without ``--exploratory``
+    exits 1 before any Hub access. Success prints the immutable output commit
+    SHA plus a value-free summary (counts and reason-code tallies only). Any
+    ``HydrationError`` is ``redact_text``-processed before display.
+
+    Returns:
+        ``0`` on a verified run (or a completed ``--dry-run`` plan); ``1`` on
+        any validation or hydration failure.
+    """
+    import os
+
+    from daydream.archive import hydrate as _hydrate
+    from daydream.trajectory import redact_text
+    from daydream.ui import create_console
+
+    parser = _build_hydrate_hub_parser()
+    console = create_console()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        if exc.code == 0:
+            raise
+        print_error(
+            console,
+            "Invalid arguments",
+            "corpus hydrate-hub requires --source-repo, --source-revision, "
+            "--destination-repo, and --stage-dir.",
+        )
+        return 1
+
+    # Moving-branch rejection is checkable locally (no client, no token): a
+    # revision that is neither a full SHA nor a hex prefix is a symbolic ref.
+    revision = args.source_revision.strip().lower()
+    if not args.exploratory and not (
+        _hydrate._FULL_SHA_RE.fullmatch(revision) or _hydrate._HEX_PREFIX_RE.fullmatch(revision)
+    ):
+        print_error(
+            console,
+            "Moving source revision",
+            f"ref {revision!r} is a moving branch/tag, not a pinned commit; pass "
+            "--exploratory to accept it (output is non-canonical), or pin an exact "
+            "40-char commit SHA.",
+        )
+        return 1
+
+    # Token precheck: fail closed before any Hub access; name the env var,
+    # never the token.
+    if not os.environ.get("HF_TOKEN"):
+        print_error(
+            console,
+            "HF_TOKEN is not set",
+            "hydration requires a read token for the private Hub repo. "
+            "Export HF_TOKEN and retry.",
+        )
+        return 1
+
+    stage_dir = args.stage_dir.expanduser()
+    config = _hydrate.HydrateHubConfig(
+        source_repo=args.source_repo,
+        source_revision=revision,
+        destination_repo=args.destination_repo,
+        stage_dir=stage_dir,
+        exploratory=args.exploratory,
+    )
+    if args.dry_run:
+        return _hydrate_hub_dry_run(config, console)
+
+    try:
+        summary = globals()["_run_hydrate_hub"](config)
+    except _hydrate.HydrationError as exc:
+        print_error(console, "Hydration failed", redact_text(str(exc)))
+        return 1
+    if not summary.verified:
+        print_error(
+            console,
+            "Hydration not verified",
+            "the clean-room verification cycle did not pass; no success marker "
+            "was published.",
+        )
+        return 1
+    print_success(
+        console,
+        f"hydration verified: curation {summary.curation_id} published at commit "
+        f"{summary.output_commit_sha}",
+    )
+    print_info(
+        console,
+        f"dry-run admitted {summary.dry_run_admitted} batch(es); "
+        f"verify admitted {summary.verify_admitted} batch(es)",
+    )
+    return 0
+
+
+def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
+    """Plan-only hydrate pass: pin, download, ingest, tally — no publication."""
+    from daydream.archive import hydrate as _hydrate
+    from daydream.trajectory import redact_text
+
+    try:
+        client = _hydrate._make_client(config.destination_repo)
+        source_commit = _hydrate.resolve_source_revision(
+            client, config.source_revision, exploratory=config.exploratory
+        )
+        _hydrate.download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
+        _hydrate.ingest_bundles(config.stage_dir, revision=source_commit)
+        _hydrate.dedupe_admitted(config.stage_dir, revision=source_commit)
+        ledger = _hydrate.build_import_ledger(
+            config.stage_dir, revision=source_commit, source_commit=source_commit
+        )
+    except _hydrate.HydrationError as exc:
+        print_error(console, "Hydration dry-run failed", redact_text(str(exc)))
+        return 1
+    tallies = ledger.get("tallies", {})
+    rejections = ledger.get("rejections", [])
+    reason_tally: dict[str, int] = {}
+    for rejection in rejections:
+        code = str(rejection.get("reason_code"))
+        reason_tally[code] = reason_tally.get(code, 0) + 1
+    print_info(
+        console,
+        f"dry-run plan for curation {ledger.get('curation_id')}: pinned {source_commit}; "
+        f"admitted {tallies.get('imported', 0)} batch(es); "
+        f"rejected {len(rejections)} batch(es); "
+        f"reason codes: {reason_tally or 'none'}; no publication performed",
+    )
+    return 0
+
+
 def _build_list_reanchored_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream improve list-reanchored <target>``.
 
@@ -1400,16 +1613,18 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "harvest": _handle_harvest_command,
     "build": _handle_build_corpus_command,
     "label": _handle_label_command,
+    "hydrate-hub": _handle_hydrate_hub_command,
 }
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build,label} ...\n"
+    "usage: daydream corpus {harvest,build,label,hydrate-hub} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
     "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
-    "  label     record an authoritative human outcome label that overrides automated ones"
+    "  label     record an authoritative human outcome label that overrides automated ones\n"
+    "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive"
 )
 
 _EXT_USAGE = (
@@ -1831,8 +2046,10 @@ def _shutdown_and_exit(console: Console, title: str, message: str) -> None:
     sys.exit(1)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Run the CLI entry point.
+
+    ``argv`` defaults to ``sys.argv[1:]``; tests may pass an explicit list.
 
     Dispatch is verb-first (see :func:`_first_verb` and :data:`KNOWN_VERBS`):
     the leading token selects a verb, and anything that is not an explicit
@@ -1843,7 +2060,8 @@ def main() -> None:
     Verbs:
         - ``review`` (default) — the review/fix loop (bare ``daydream <target>``)
         - ``summarize`` — print run-info markdown for a trajectory
-        - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label``)
+        - ``corpus`` — data-pipeline namespace (``harvest`` / ``build`` / ``label`` /
+          ``hydrate-hub``)
         - ``train`` — four-stage training pipeline (``--dry-run`` for GPU-free CI)
         - ``post-findings`` — validate a findings artifact and post new
           findings to the PR (privileged Phase B poster; unattended)
@@ -1864,7 +2082,7 @@ def main() -> None:
 
     # Verb-first dispatch: non-``review`` verbs are short-circuited here (each
     # owns its parser and exit code); everything else flows into ``_parse_args``.
-    argv = sys.argv[1:]
+    argv = list(argv) if argv is not None else sys.argv[1:]
     # ``bench`` was the legacy benchmark verb, removed in favor of
     # ``daydream benchmark``. Reject it explicitly instead of letting
     # ``_first_verb`` fall through to the review path with ``bench`` as a
