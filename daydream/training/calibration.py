@@ -19,10 +19,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +38,19 @@ from daydream.training.reward import REWARD_VERSION
 
 __all__ = ["CalibrationConfig", "CalibrationError", "assign_split", "run_calibration"]
 
-#: Artifact schema version for calibration output (emitted by a later milestone).
+#: Artifact schema version for calibration output.
 ARTIFACT_SCHEMA_VERSION = "calibration-artifact-v1"
+
+
+def _tool_version() -> str:
+    """Package version of the running daydream distribution (deterministic per install)."""
+    try:
+        return metadata.version("daydream")
+    except metadata.PackageNotFoundError:  # pragma: no cover - dev checkouts
+        return "0.0.0"
+
+
+TOOL_VERSION = _tool_version()
 
 _RECORD_SCHEMA_VERSION = "2"
 _LINEAGE_SCHEMA_VERSION = "corpus-v2"
@@ -484,25 +497,106 @@ def _stage0_analysis(
     return {"status": "ok", "marginal_value_per_axis": marginal}
 
 
-def _write_artifact(
+def _sha256_of(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _split_digest(splits: dict[str, set[str]]) -> str:
+    """S1: digest pinning the re-derived split membership over record ids."""
+    payload = json.dumps(
+        {name: sorted(ids) for name, ids in sorted(splits.items())}, sort_keys=True
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _candidate_grid(config: CalibrationConfig) -> dict[str, list[float]]:
+    return {
+        axis: _grid(axis, values, config.grid_points)
+        for axis, values in sorted(config.candidates.items())
+    }
+
+
+def _render_report(
+    artifact: dict[str, Any], record_count: int, class_balance: dict[str, int]
+) -> str:
+    """Human summary derived from the same in-memory numbers as the artifact."""
+    metrics = artifact["metrics"]
+    lines = [
+        "# Reward calibration report",
+        "",
+        f"- Run: `{artifact['run_id']}`",
+        f"- Artifact schema: `{artifact['schema_version']}` (tool {artifact['tool_version']})",
+        f"- Resampling seed: {artifact['resampling_seed']}",
+        f"- Records: {record_count} (accepted {class_balance['accepted']}, rejected {class_balance['rejected']})",
+        f"- Corpus digest: `{artifact['corpus_digest']}`",
+        f"- Split digest: `{artifact['split_digest']}`",
+        "",
+        "## Candidate settings",
+        "",
+    ]
+    for axis, grid in artifact["candidate_settings"].items():
+        lines.append(f"- `{axis}` grid: {json.dumps(grid)}")
+    lines += ["", "## Per-axis correlations", ""]
+    for name, value in sorted(metrics["per_axis_correlations"].items()):
+        lines.append(f"- `{name}`: {value}")
+    lines += ["", "## AUC bootstrap CIs", ""]
+    for name, ci in sorted(metrics["auc_bootstrap_ci"].items()):
+        lines.append(f"- `{name}`: [{ci[0]}, {ci[1]}]")
+    lines += ["", "## Stage-0 analysis", ""]
+    stage0 = artifact["stage0_analysis"]
+    if stage0["status"] == "ok":
+        for axis, value in sorted(stage0["marginal_value_per_axis"].items()):
+            lines.append(f"- `{axis}` marginal value: {value}")
+    else:
+        lines.append("- unavailable (no stage-0 score file supplied)")
+    if artifact["warnings"]:
+        lines += ["", "## Warnings", ""]
+        for warning in artifact["warnings"]:
+            lines.append(f"- {warning}")
+    return "\n".join(lines) + "\n"
+
+
+def _write_outputs(
     config: CalibrationConfig,
     record_count: int,
+    splits: dict[str, set[str]],
     metrics: dict[str, Any],
     stage0_analysis: dict[str, Any],
+    input_digests: dict[str, str],
+    corpus_digest: str,
 ) -> None:
-    config.out_dir.mkdir(parents=True, exist_ok=True)
+    """Build the artifact + report from already-computed numbers and write both
+    atomically, last: any earlier failure leaves neither file in place."""
+    warnings: list[str] = []
+    if stage0_analysis["status"] != "ok":
+        warnings.append("stage-0 score file not supplied; marginal analysis unavailable")
     artifact = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "tool_version": TOOL_VERSION,
         "run_id": config.run_id,
-        "seed": config.seed,
+        "resampling_seed": config.seed,
         "grid_points": config.grid_points,
         "bootstrap_resamples": config.bootstrap_resamples,
         "record_count": record_count,
+        "input_digests": input_digests,
+        "corpus_digest": corpus_digest,
+        "split_digest": _split_digest(splits),
+        "candidate_settings": _candidate_grid(config),
         "metrics": metrics,
         "stage0_analysis": stage0_analysis,
+        "warnings": warnings,
     }
-    payload = json.dumps(_round4(artifact), sort_keys=True, indent=2) + "\n"
-    (config.out_dir / "calibration.json").write_text(payload)
+    rounded = _round4(artifact)
+    artifact_payload = json.dumps(rounded, sort_keys=True, indent=2) + "\n"
+    report_payload = _render_report(rounded, record_count, metrics["class_balance"])
+
+    config.out_dir.mkdir(parents=True, exist_ok=True)
+    artifact_tmp = config.out_dir / ".calibration.json.tmp"
+    report_tmp = config.out_dir / ".report.md.tmp"
+    artifact_tmp.write_text(artifact_payload)
+    report_tmp.write_text(report_payload)
+    os.replace(artifact_tmp, config.out_dir / "calibration.json")
+    os.replace(report_tmp, config.out_dir / "report.md")
 
 
 def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
@@ -556,17 +650,32 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     val_rate = float(bundle["val_rate"])
     splits = _check_splits(records, str(bundle["salt"]), holdout_rate, val_rate)
 
+    input_digests = {
+        "corpus.jsonl": _sha256_of(corpus_path),
+        "lineage.json": _sha256_of(lineage_path),
+        config.gold_labels.name: _sha256_of(config.gold_labels),
+        config.breakdowns.name: _sha256_of(config.breakdowns),
+    }
+    if config.stage0_scores is not None:
+        input_digests[config.stage0_scores.name] = _sha256_of(config.stage0_scores)
+    corpus_digest = input_digests["corpus.jsonl"]
+
     record_ids = [str(r["record_id"]) for r in records]
     gold, breakdowns = _load_inputs(config, record_ids)
     metrics = _compute_metrics(records, gold, breakdowns, config)
     stage0_analysis = _stage0_analysis(config, record_ids, splits, gold, breakdowns)
-    _write_artifact(config, len(records), metrics, stage0_analysis)
+    _write_outputs(
+        config, len(records), splits, metrics, stage0_analysis, input_digests, corpus_digest
+    )
 
     return {
         "run_id": config.run_id,
         "record_count": len(records),
         "schema_version": ARTIFACT_SCHEMA_VERSION,
-        "seed": config.seed,
+        "tool_version": TOOL_VERSION,
+        "resampling_seed": config.seed,
+        "corpus_digest": corpus_digest,
+        "split_digest": _split_digest(splits),
         "metrics": metrics,
         "stage0_analysis": stage0_analysis,
     }

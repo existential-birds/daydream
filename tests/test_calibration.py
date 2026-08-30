@@ -216,6 +216,37 @@ def test_stage0_misaligned_records_are_refused(fixture_corpus: Path, tmp_path: P
         run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
 
 
+# --- Task 5 (M5, M6, S1, S2): versioned artifact + reproducible report ---
+
+
+def test_artifact_schema_and_byte_replay(fixture_corpus: Path, tmp_path: Path) -> None:
+    run_calibration(_config(fixture_corpus, tmp_path, seed=7))
+    art = json.loads((tmp_path / "out" / "calibration.json").read_text())
+    assert art["schema_version"] == "calibration-artifact-v1"
+    assert art["tool_version"] and art["resampling_seed"] == 7
+    assert art["input_digests"]["corpus.jsonl"].startswith("sha256:")
+    assert art["corpus_digest"] and art["split_digest"]  # S1
+    assert {str(c) for c in art["candidate_settings"]} >= {"w_fp"}
+    first = (tmp_path / "out" / "calibration.json").read_bytes()
+    run_calibration(_config(fixture_corpus, tmp_path, out_dir=tmp_path / "replay", seed=7))
+    assert (tmp_path / "replay" / "calibration.json").read_bytes() == first  # M6
+    assert (tmp_path / "out" / "report.md").read_text().count("w_fp") >= 1  # M5b
+
+
+def test_report_is_reproducible_too(fixture_corpus: Path, tmp_path: Path) -> None:  # S2
+    run_calibration(_config(fixture_corpus, tmp_path, seed=7))
+    a = (tmp_path / "out" / "report.md").read_bytes()
+    run_calibration(_config(fixture_corpus, tmp_path, out_dir=tmp_path / "r2", seed=7))
+    assert (tmp_path / "r2" / "report.md").read_bytes() == a
+
+
+def test_no_artifact_on_failure(tmp_path: Path, fixture_corpus: Path) -> None:
+    with pytest.raises(CalibrationError):
+        run_calibration(_config(fixture_corpus, tmp_path, out_dir=tmp_path / "out", digest=True))
+    assert not (tmp_path / "out" / "calibration.json").exists()
+    assert not (tmp_path / "out" / "report.md").exists()
+
+
 # --- Task 4 (M8): committed synthetic fixture under tests/fixtures/training ---
 
 COMMITTED_FIXTURE = Path(__file__).parent / "fixtures" / "training" / "calibration"
