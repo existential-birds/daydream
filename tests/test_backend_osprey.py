@@ -184,6 +184,7 @@ async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes
         stdout_reader=stdout,
     )
 
+    assert isinstance(events[0], TextEvent)
     assert events[0].text == "x\ufffd"
     assert type(events[-1]) is ResultEvent
 
