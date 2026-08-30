@@ -18,9 +18,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from daydream.trajectory import redact_text
+
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,39}$")
 
 
 class HydrationError(Exception):
@@ -33,6 +39,63 @@ class HubUnavailableError(HydrationError):
 
 class HubDownloadError(HydrationError):
     """A requested path/revision does not exist in the Hub repo (fail-closed)."""
+
+
+class MovingBranchError(HydrationError):
+    """A symbolic ref (moving branch/tag) was requested without ``exploratory=True``."""
+
+
+def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bool) -> str:
+    """Resolve ``revision`` to a pinned, immutable commit SHA (issue #982 M2).
+
+    - A full 40-hex SHA is verified to exist and returned unchanged.
+    - A hex short prefix (4-39 chars) resolves to the unique matching commit
+      SHA; an ambiguous or unknown prefix is a fail-closed :class:`HydrationError`.
+    - Any other name is a symbolic ref (moving branch/tag) and raises
+      :class:`MovingBranchError` — naming the ref and ``exploratory`` — unless
+      ``exploratory=True``, in which case it resolves to the ref's current SHA.
+      Exploratory output is flagged non-canonical downstream; canonical v1 runs
+      must pin an exact SHA.
+
+    Client errors are redacted via ``daydream.trajectory.redact_text`` before
+    being re-raised as :class:`HydrationError`, so no credential material ever
+    reaches the console or ledger.
+    """
+    revision = revision.strip().lower()
+    if _FULL_SHA_RE.fullmatch(revision):
+        try:
+            client.repo_info(revision=revision)  # verify it exists
+        except HydrationError as exc:
+            raise HydrationError(redact_text(str(exc))) from exc
+        return revision
+
+    if _HEX_PREFIX_RE.fullmatch(revision):
+        list_revisions = getattr(client, "list_revisions", None)
+        matches = (
+            [r for r in list_revisions() if r.startswith(revision)]
+            if callable(list_revisions)
+            else []
+        )
+        if len(matches) > 1:
+            raise HydrationError(
+                redact_text(f"ambiguous revision prefix {revision!r}: {len(matches)} matching commits")
+            )
+        if len(matches) == 1:
+            return str(matches[0])
+        # Not a known prefix — fall through to symbolic-ref resolution so a
+        # hex-named ref still gets the moving-branch treatment below.
+
+    try:
+        info = client.repo_info(revision=revision)
+    except HydrationError as exc:
+        raise HydrationError(redact_text(f"unknown revision {revision!r}: {exc}")) from exc
+    if not exploratory:
+        raise MovingBranchError(
+            f"ref {revision!r} is a moving branch/tag, not a pinned commit; pass "
+            "exploratory=True to accept it (output is non-canonical), or pin an "
+            "exact 40-char commit SHA"
+        )
+    return info.sha
 
 
 @dataclass(frozen=True)
@@ -141,6 +204,14 @@ class HfHubClient:
             return list(self._api.list_repo_files(self._repo_id, repo_type="dataset"))
         except Exception as exc:
             raise HubDownloadError(f"list_repo_files failed for {self._repo_id}: {exc}") from exc
+
+    def list_revisions(self) -> list[str]:
+        """Commit SHAs known to the Hub, for short-prefix resolution (best effort)."""
+        try:
+            commits = self._api.list_repo_commits(self._repo_id, repo_type="dataset")
+            return [str(c.commit_id) for c in commits]
+        except Exception as exc:  # enumeration is best-effort; fail closed on use
+            raise HubDownloadError(f"list_repo_commits failed for {self._repo_id}: {exc}") from exc
 
     def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
         try:

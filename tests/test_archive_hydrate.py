@@ -113,3 +113,48 @@ class TestHydrateRules:
         assert hydrate_rules.legacy_pipeline_status(
             pipeline_status="unknown", deep_artifacts=None) == ("excluded", "pipeline_status_evidence_absent")
         assert hydrate_rules.legacy_pipeline_status(pipeline_status="failed", deep_artifacts=None) == "failed"
+
+
+class TestResolveRevision:
+    def test_exact_sha_passes_through(self) -> None:
+        hub = make_fake_hub(Path("/tmp"))
+        hub.commit_revision("a" * 40)
+        assert hydrate.resolve_source_revision(hub, "a" * 40, exploratory=False) == "a" * 40
+
+    def test_short_prefix_resolves_to_full_sha(self) -> None:
+        hub = make_fake_hub(Path("/tmp"))
+        hub.commit_revision("abcdef1234567890" + "0" * 24)
+        assert hydrate.resolve_source_revision(hub, "abcdef12", exploratory=False) == "abcdef1234567890" + "0" * 24
+
+    def test_moving_branch_rejected_without_optin(self) -> None:
+        hub = make_fake_hub(Path("/tmp"))
+        hub.commit_revision("a" * 40, ref="main")  # branch ref, not immutable
+        with pytest.raises(hydrate.MovingBranchError, match="exploratory"):
+            hydrate.resolve_source_revision(hub, "main", exploratory=False)
+
+    def test_moving_branch_allowed_with_exploratory_flag(self) -> None:
+        hub = make_fake_hub(Path("/tmp"))
+        hub.commit_revision("b" * 40, ref="main")
+        assert hydrate.resolve_source_revision(hub, "main", exploratory=True) == "b" * 40
+
+    def test_unknown_revision_fails_closed(self) -> None:
+        hub = make_fake_hub(Path("/tmp"))
+        with pytest.raises(hydrate.HydrationError):
+            hydrate.resolve_source_revision(hub, "deadbeef" * 5, exploratory=False)
+
+    def test_ambiguous_prefix_fails_closed(self) -> None:
+        hub = make_fake_hub(Path("/tmp"))
+        hub.commit_revision("ab12" + "1" * 36)
+        hub.commit_revision("ab12" + "2" * 36)
+        with pytest.raises(hydrate.HydrationError, match="ambiguous"):
+            hydrate.resolve_source_revision(hub, "ab12", exploratory=False)
+
+    def test_client_error_is_redacted(self) -> None:
+        class LeakyHub(FakeHub):
+            def repo_info(self, revision: str | None = None) -> hydrate.RepoInfo:
+                raise hydrate.HubDownloadError("boom https://user:hf_token_secret@huggingface.co/x")
+
+        hub = LeakyHub(repo_id="org/private-ds")
+        with pytest.raises(hydrate.HydrationError) as excinfo:
+            hydrate.resolve_source_revision(hub, "c" * 40, exploratory=False)
+        assert "hf_token_secret" not in str(excinfo.value)
