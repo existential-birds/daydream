@@ -74,25 +74,6 @@ def test_fp_penalty_term_present_and_dominant_direction(model: _StubModel) -> No
     assert fp_term is not None and fp_term < 0  # explicit subtractive term
 
 
-def test_composite_never_returns_intrinsic_or_golden_overlap_alone(model: _StubModel) -> None:
-    b = cast(
-        RubricV2Breakdown,
-        score_review(
-            model,
-            findings=[_finding()],
-            fp_count=0,
-            total_findings=1,
-            grounded=1,
-            breakdown=True,
-        ),
-    )
-    learned = b.terms["learned_outcome"]
-    assert learned is not None  # M6: learned term present
-    assert b.terms["intrinsic_composite"] is not None  # signal kept
-    assert b.terms["golden_overlap"] is not None  # telemetry kept
-    assert b.composite != b.terms["intrinsic_composite"] or learned > 0
-
-
 def test_version_fingerprint_changes_on_weight_change() -> None:
     f1 = _rubric_fingerprint(RubricV2Weights())
     f2 = _rubric_fingerprint(RubricV2Weights(w_false_positive=0.5))

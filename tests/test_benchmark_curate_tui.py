@@ -124,13 +124,32 @@ def test_run_curate_tui_queue_bogus_case_id_reprompts(
     assert "unknown case bogus-id" in out
 
 
-def test_reason_frozensets_are_the_service_constants() -> None:
-    """The client must not carry its own reason lists; a reason added on the
-    service side is visible to the TUI automatically (no drift)."""
-    import daydream.benchmark.curate_tui as tui
+def test_action_exclude_evidence_persists_supported_reason(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from daydream.benchmark import curation as cu
-    assert tui._EVIDENCE_REASONS is cu._EVIDENCE_REASONS
-    assert tui._CASE_EXCLUSION_REASONS is cu._CASE_EXCLUSION_REASONS
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    source_id = cu.get_case(ws, case_id)["evidence"][0]["source_id"]
+
+    run_curate_tui(
+        ws,
+        case_id,
+        read_line=_scripted("x", "1", "fixed_before_snapshot", "", "q"),
+    )
+
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["exclusions"] == [
+        {"source_id": source_id, "reason": "fixed_before_snapshot", "note": None}
+    ]
+    assert raw["curation"]["state"] == "draft"
+    out = capsys.readouterr().out
+    assert "excluded 1 evidence source(s)" in out
+    assert "fixed_before_snapshot" in out
 
 
 def test_action_accept_persists_historical_finding(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -154,7 +173,7 @@ def test_action_accept_invalid_index_mutates_nothing(tmp_path: Path, fake_gh: Fa
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
     run_curate_tui(ws, case_id, read_line=_scripted("a", "999", "q"))  # bad idx
-    assert path.read_bytes() == before                       # unchanged
+    assert path.read_bytes() == before
 
 
 def test_action_accept_non_exact_candidate_offers_edit_path(
@@ -175,7 +194,7 @@ def test_action_accept_non_exact_candidate_offers_edit_path(
     after_rewrite = path.read_bytes()
 
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "q"))
-    assert path.read_bytes() == after_rewrite                 # unchanged
+    assert path.read_bytes() == after_rewrite
     assert "not exactly acceptable" in capsys.readouterr().out
 
 
@@ -233,7 +252,7 @@ def test_editor_nonzero_exit_leaves_state_unchanged(
     monkeypatch.delenv("EDITOR", raising=False)
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
-    assert path.read_bytes() == before                       # unchanged
+    assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
 
 

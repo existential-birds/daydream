@@ -1,9 +1,4 @@
-# GOLDEN BASELINE — renders every Copy-existing builder against the CURRENT
-# (pre-extraction) default profile and freezes the byte output. Task 5+ asserts
-# the SAME strings after recomposition. The per-stack/structural/vetting
-# builders are excluded here — their output intentionally changes (skill line
-# removed + authored block inserted); those golden deltas are pinned separately
-# in Task 5.
+"""Golden coverage for builders that copy the default profile strategy."""
 from pathlib import Path
 
 from daydream import review_profile as rp
@@ -20,8 +15,7 @@ def test_golden_baseline_generic_fallback() -> None:
         files=["a.js"], diff_path=Path("/d"), intent_path=Path("/i"),
         alternatives_path=Path("/a"), output_path=Path("/o"), cwd=Path("/c"),
     )
-    # After recomposition this string must be byte-identical. Freeze the exact
-    # rendered text by asserting a stable sentinel that will survive recomposition:
+    # Check a stable sentinel in the rendered text.
     assert "language-agnostic review practices" in p
     assert "a.js" in p and "/d" in p and "/c" in p   # host runtime data present
     assert "beagle" not in p.lower() and "/beagle-" not in p
@@ -56,7 +50,7 @@ def test_authored_blocks_land_verbatim() -> None:
     assert p.strategies["improve.vetting"].source == "authored: #886 NATIVE_IMPROVE_VET_STRATEGY"
 
 
-def test_copy_existing_stages_byte_identical_after_strategy_threading() -> None:
+def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None:
     from daydream.deep.coverage import build_uncovered_sweep_prompt
     from daydream.deep.prompts import (
         build_supervise_prompt,
@@ -64,29 +58,68 @@ def test_copy_existing_stages_byte_identical_after_strategy_threading() -> None:
         build_verification_prompt,
     )
     from daydream.phases import build_alternative_review_prompt, build_intent_prompt
-    p = rp.build_default_profile()
-    sv = build_supervise_prompt(strategy=p.strategies["supervision"].content,
-        supervise_input_path=Path("/in"), diff_path=Path("/d"),
-        intent_path=Path("/i"), alternatives_path=Path("/a"), cwd=Path("/c"))
-    sup = build_suppression_prompt(strategy=p.strategies["suppression"].content,
-        suppression_input_path=Path("/in"), diff_path=Path("/d"),
-        intent_path=Path("/i"), alternatives_path=Path("/a"), cwd=Path("/c"))
-    ver = build_verification_prompt(strategy=p.strategies["verification"].content,
-        items=[{"id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "description": "x"}],
-        cwd=Path("/c"), output_path=Path("/o"))
-    unc = build_uncovered_sweep_prompt(strategy=p.strategies["uncovered_review"].content,
-        file="a.py", hunks="@@", intent_path=Path("/i"), cwd=Path("/c"),
-        output_path=Path("/o"))
-    intent = build_intent_prompt(strategy=p.strategies["intent"].content,
-        diff_path="/d", inline_diff="+x")
-    alt = build_alternative_review_prompt(strategy=p.strategies["alternatives"].content,
-        intent_summary="s", diff_path="/d")
-    # Host envelope sentinels preserved:
-    assert "/in" in sv and "/in" in sup
-    assert "per-stack" in ver or "verdict" in ver
-    assert "a.py" in unc and "/i" in unc and "/c" in unc
-    assert "/d" in intent and "+x" in intent
-    assert "s" in alt and "/d" in alt
-    # No skill tokens anywhere:
+    sv = build_supervise_prompt(
+        strategy="supervise-strategy-sentinel {supervise_input_path}",
+        supervise_input_path=Path("/supervise-input.json"),
+        diff_path=Path("/review.diff"),
+        intent_path=Path("/intent.md"),
+        alternatives_path=Path("/alternatives.json"),
+        cwd=Path("/review-repo"),
+    )
+    sup = build_suppression_prompt(
+        strategy="suppression-strategy-sentinel {suppression_input_path}",
+        suppression_input_path=Path("/suppression-input.json"),
+        diff_path=Path("/review.diff"),
+        intent_path=Path("/intent.md"),
+        alternatives_path=Path("/alternatives.json"),
+        cwd=Path("/review-repo"),
+    )
+    ver = build_verification_prompt(
+        strategy="verification-strategy-sentinel",
+        items=[
+            {
+                "id": 1,
+                "lens": "per-stack",
+                "file": "changed.py",
+                "line": 1,
+                "description": "verification-candidate-sentinel",
+            }
+        ],
+        cwd=Path("/review-repo"),
+        output_path=Path("/verification.json"),
+    )
+    unc = build_uncovered_sweep_prompt(
+        strategy="uncovered-strategy-sentinel {file}",
+        file="uncovered.py",
+        hunks="@@ -1 +1 @@\n-old\n+new",
+        intent_path=Path("/intent.md"),
+        cwd=Path("/review-repo"),
+        output_path=Path("/uncovered-review.md"),
+    )
+    intent = build_intent_prompt(
+        strategy="intent-strategy-sentinel {diff_path}",
+        diff_path="/review.diff",
+        inline_diff="+new behavior",
+    )
+    alt = build_alternative_review_prompt(
+        strategy="alternative-strategy-sentinel {intent_summary} {diff_path}",
+        intent_summary="intent-summary-sentinel",
+        diff_path="/alternative.diff",
+    )
+
+    assert "supervise-strategy-sentinel" in sv
+    assert "/supervise-input.json" in sv and "/review.diff" in sv
+    assert "suppression-strategy-sentinel" in sup
+    assert "/suppression-input.json" in sup and "/review.diff" in sup
+    assert "verification-strategy-sentinel" in ver
+    assert "changed.py" in ver and "verification-candidate-sentinel" in ver
+    assert "uncovered-strategy-sentinel" in unc
+    assert "uncovered.py" in unc and "@@ -1 +1 @@" in unc
+    assert "intent-strategy-sentinel" in intent
+    assert "/review.diff" in intent and "+new behavior" in intent
+    assert "alternative-strategy-sentinel" in alt
+    assert "intent-summary-sentinel" in alt and "/alternative.diff" in alt
+
+    # Native builders must not reintroduce the removed skill-invocation framing.
     for text in (sv, sup, ver, unc, intent, alt):
         assert "/beagle-" not in text and "beagle" not in text.lower()

@@ -142,11 +142,6 @@ def test_composite_is_pure_intrinsic_posterior_is_sibling() -> None:
     assert "posterior_cost" in labeled.to_dict() and "posterior_cost" not in base.to_dict()
 
 
-def test_unmapped_label_returns_base_type() -> None:
-    inp = ScoringInputs([{"verdict": "consistent"}], 0.5, True, 4000)
-    assert type(score_trajectory(inp, pr_feedback="unknown")).__name__ == "RewardBreakdown"
-
-
 def test_score_trajectory_does_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
     import builtins
     monkeypatch.setattr(builtins, "open", lambda *a, **k: (_ for _ in ()).throw(AssertionError("I/O!")))

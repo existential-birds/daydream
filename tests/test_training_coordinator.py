@@ -71,6 +71,10 @@ def test_full_run_writes_manifest_and_adapter(
     assert set(manifest["stages"]) == {"stage0", "stage1", "stage2", "stage3"}
     assert manifest["stages"]["stage0"]["gate"]["evidence_digest"]
     assert manifest["run_identity"]["base_model"]  # LOCKED_FIELDS identity stamped (M18 tie-in)
+    adapter = Path(manifest["adapter_path"])
+    assert adapter.is_dir()
+    assert (adapter / "adapter_config.json").is_file()
+    assert (adapter / "adapter_state.json").is_file()
 
 
 def test_stage1_sft_prefers_native_profile_and_falls_back_to_legacy(

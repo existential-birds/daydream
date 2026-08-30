@@ -1,6 +1,6 @@
 """ATIF trajectory parity for CodexBackend — golden round-trip + D-04 fallback (#155).
 
-Two contract tests over a real-shape multi-turn Codex JSONL fixture:
+Contract tests over a real-shape multi-turn Codex JSONL fixture:
 
 1. **Correlation (D-04 fallback):** a multi-turn Codex fixture produces exactly
    one ``MetricsEvent`` per ``turn.completed`` (turn-granular correlation),
@@ -8,7 +8,7 @@ Two contract tests over a real-shape multi-turn Codex JSONL fixture:
    documented, tested limitation — no silent coarsening.
 
 2. **Golden round-trip:** the recorded trajectory validates cleanly against
-   the ATIF v1.6 schema, survives a load → re-validate cycle, and captures
+   the ATIF v1.7 schema, survives a load → re-validate cycle, and captures
    REASON spans (ThinkingEvent), ACT/tool spans (ToolStart/ToolResult paired
    via the item ``id``), ``Step.metrics`` with prompt/completion tokens, and
    ``cached_tokens`` surfaced from ``usage.cached_input_tokens``.

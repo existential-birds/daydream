@@ -1,4 +1,3 @@
-# tests/test_clipboard.py
 """Tests for daydream.clipboard.copy_to_clipboard detection + fallback."""
 
 from __future__ import annotations

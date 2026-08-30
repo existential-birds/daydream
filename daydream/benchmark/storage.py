@@ -186,7 +186,6 @@ class WorkspaceLock:
     def __init__(self, root: Path, *, blocking: bool = True) -> None:
         self._root = Path(root)
         self._blocking = blocking
-        self._acquired = False
 
     def __enter__(self) -> "WorkspaceLock":
         held = WorkspaceLock._held.get(self._root)
@@ -194,7 +193,6 @@ class WorkspaceLock:
             # Already holding the lock for this root in this process — reentrant
             # on the same open file description. Bump the depth and reuse the fd.
             held.depth += 1
-            self._acquired = False
             return self
 
         lock_path = self._root / ".benchmark.lock"
@@ -209,7 +207,6 @@ class WorkspaceLock:
                 f"workspace is locked by another process: {self._root}"
             ) from None
         WorkspaceLock._held[self._root] = _HeldLock(fd=fd, depth=1)
-        self._acquired = True
         return self
 
     def __exit__(self, *_exc: object) -> Literal[False]:
@@ -274,7 +271,6 @@ class Transaction:
         self._applied_count = 0
         self._state: str = "open"
         self._created_dirs: list[str] = []
-        self._journal_document: dict[str, Any] | None = None
 
     # -- journal helpers ----------------------------------------------------
 
@@ -307,7 +303,6 @@ class Transaction:
 
     def _write_journal(self) -> None:
         doc = self._build_document()
-        self._journal_document = doc
         atomic_write_json(self._journal_path(), doc, mode=0o600)
 
     # -----------------------------------------------------------------------

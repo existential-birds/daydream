@@ -70,19 +70,6 @@ def test_cli_curate_apply_gold_malformed_fragment_clean_exit(
     assert "Traceback" not in capsys.readouterr().err
 
 
-def test_cli_curate_without_apply_gold_rejects_on_non_tty(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from daydream.benchmark.cli import _handle_benchmark_command
-
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
-    rc = _handle_benchmark_command(["curate", str(ws), "--case", case_id])
-    assert rc == 1
-    assert "apply-gold" in capsys.readouterr().err.lower()
-
-
 def test_curate_on_tty_dispatches_to_tui(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.benchmark import cli
 

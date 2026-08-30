@@ -1462,8 +1462,8 @@ async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_l
 ) -> None:
     """dry_run=True: in-memory linkage preview is applied but not persisted.
 
-    The contract (harvest.py lines 832-836): when an orphan run re-links to a
-    PR, ``row['pr_number']`` and ``row['pr_repo']`` are mutated unconditionally
+    When an orphan run re-links to a PR, ``row['pr_number']`` and
+    ``row['pr_repo']`` are mutated unconditionally
     so ``build_annotation`` sees the linked PR and produces a PR-path annotation.
     The ``set_run_pr_link`` DB write is guarded by ``if not config.dry_run`` and
     must not fire.

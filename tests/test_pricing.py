@@ -317,8 +317,13 @@ def test_resolve_prices_override_wins_per_model() -> None:
 
 
 def test_resolve_prices_none_returns_builtin_copy() -> None:
-    """resolve_prices(None) returns the built-in table contents."""
-    assert resolve_prices() == MODEL_PRICES
+    """resolve_prices(None) returns an independently mutable built-in table."""
+    resolved = resolve_prices()
+    assert resolved == MODEL_PRICES
+    assert resolved is not MODEL_PRICES
+
+    resolved["gpt-5.5"] = ModelPrice(input=0.0, cached_input=0.0, output=0.0)
+    assert MODEL_PRICES["gpt-5.5"] == ModelPrice(input=5.0, cached_input=0.5, output=30.0)
 
 
 def test_compute_cost_uses_override_prices() -> None:

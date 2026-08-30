@@ -912,7 +912,7 @@ class TestUnwrapShellCommand:
 
 @pytest.mark.asyncio
 async def test_execute_raises_on_agents() -> None:
-    """CodexBackend refuses agents= with NotImplementedError (Plan 02-04)."""
+    """CodexBackend refuses the unsupported agents argument."""
     backend = CodexBackend(model="fixture-model")
     mock_agent = {"description": "test", "prompt": "test"}
 
@@ -922,8 +922,8 @@ async def test_execute_raises_on_agents() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Parser hardening (#153): deterministic tool-id correlation + observable
-# parse-failure paths. See .beagle/concepts/codex-parser-hardening/plan.md.
+# Parser hardening: deterministic tool-id correlation and observable
+# parse-failure paths.
 # ---------------------------------------------------------------------------
 
 

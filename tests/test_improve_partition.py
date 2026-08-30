@@ -172,7 +172,6 @@ def test_group_ceiling_keeps_largest_groups_and_reports_the_rest() -> None:
     stack_of = {f: "python" for p in parts for f in p.files}
     groups, omissions = group_partitions(parts, stack_of, max_files=2, max_groups=1)
     assert len(groups) == 1
-    assert groups[0].file_count == max(2, groups[0].file_count)  # largest kept
     assert omissions and all(isinstance(o, PartitionStackOmission) for o in omissions)
 
 

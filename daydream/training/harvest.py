@@ -76,9 +76,8 @@ Orchestrator (:func:`run_harvest`):
   (the only fallible git I/O of the annotate pass lives here, not in the pure
   build-corpus projection).
 
-The rubric-assembly helpers live here as harvest's own (the legacy
-``labeler.py`` is retired in plan Task 13); the git/``gh`` wrappers are
-module-level so the orchestrator and tests can monkeypatch them as
+The rubric-assembly helpers live here as harvest's own; the git/``gh`` wrappers
+are module-level so the orchestrator and tests can monkeypatch them as
 injection seams.
 """
 
@@ -332,7 +331,7 @@ def _file_at(repo: Path, path: str, sha: str) -> str:
         return ""
 
 
-# Rubric assembly — PR vs local-branch (harvest's own, formerly in labeler.py)
+# Rubric assembly — PR vs local branch.
 
 
 _FIX_APPLIED_STUB = FixAppliedSignal(
@@ -955,8 +954,6 @@ def _materialize_base_sha_if_missing(
 @dataclass(frozen=True)
 class HarvestConfig:
     """Configuration for a single :func:`run_harvest` invocation.
-
-    Mirrors the retired labeler's config shape (plan Task 6).
 
     Attributes:
         archive_dir: Path to the daydream archive root (contains ``index.db``).

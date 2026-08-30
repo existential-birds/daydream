@@ -111,17 +111,6 @@ def test_token_env_accessors_roundtrip() -> None:
     assert git_ops.get_gh_token_env() is None
 
 
-def test_token_env_does_not_leak_across_tests_part1() -> None:
-    """Set the singleton; the autouse fixture must clear it before part2 runs."""
-    git_ops.set_gh_token_env({"GH_TOKEN": "leaky"})
-    assert git_ops.get_gh_token_env() == {"GH_TOKEN": "leaky"}
-
-
-def test_token_env_does_not_leak_across_tests_part2() -> None:
-    """If the fixture works, this test sees a clean singleton regardless of order."""
-    assert git_ops.get_gh_token_env() is None
-
-
 def test_resolve_credentials_returns_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)

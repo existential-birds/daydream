@@ -1,4 +1,3 @@
-# tests/test_cli_help_tiers.py
 """Tests for the two-tier help surface (``--help`` vs ``--help-all``)."""
 
 import pytest

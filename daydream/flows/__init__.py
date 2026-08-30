@@ -1,4 +1,4 @@
-"""Flow packages: the flow engine and (as flows migrate) per-flow step functions."""
+"""Flow execution context and entry point."""
 
 from daydream.flows.engine import FlowContext, run_flow
 

@@ -1,12 +1,5 @@
 """Shared improve-flow fake ``Backend`` family and plan/recon payload builders.
 
-Extracted from ``tests/test_improve_flow.py`` so a second test module stops
-reaching into a first test module's underscore-prefixed names — the exact
-condition this harness package exists to end (see
-``tests/harness/phase_backend.py``). ``tests/test_extension_prompts_integration.py``
-imported ``_dd`` and ``_ImproveStubBackend`` straight out of the flow test file;
-both now live here under public names.
-
 :class:`ImproveStubBackend` is a *dispatch* fake: it classifies each improve
 turn off prompt substrings (repo-survey / ``IMPROVE_RECON`` / audit-specialist /
 vet / plan-writer), records every call, and serves a synthetic response per
@@ -22,7 +15,6 @@ Three subclasses bend one axis each and are otherwise the same fake:
   plan directory from inside it (proves plans land as each writer finishes).
 * :class:`OutOfOrderPlanBackend` — makes the first-selected writer finish last.
 
-This is a verbatim move: behaviour is unchanged from the pre-extraction file.
 """
 from __future__ import annotations
 

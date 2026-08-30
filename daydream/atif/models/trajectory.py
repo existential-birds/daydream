@@ -167,12 +167,10 @@ class Trajectory(BaseModel):
             if step.observation is None:
                 continue
 
-            # Collect all tool_call_ids from this step
             tool_call_ids = set()
             if step.tool_calls:
                 tool_call_ids = {tc.tool_call_id for tc in step.tool_calls}
 
-            # Check that source_call_ids reference valid tool_call_ids
             for result in step.observation.results:
                 if result.source_call_id is not None:
                     if result.source_call_id not in tool_call_ids:

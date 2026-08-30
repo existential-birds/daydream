@@ -1,11 +1,4 @@
-"""Stage-1 dataset-SFT config (rl/train/sft.toml) content + dry-path tests.
-
-Shape per Task 0's spike (plan-notes.md): the dataset-SFT entrypoint is a
-separate verb, ``sft @`` — not ``rl @`` — and its schema puts the model block
-at top level and the renderer next to it. ``[dataset]`` is a daydream-private
-table consumed by our corpus loader (M8/M9), not by prime-rl, so the dry run
-validates a copy with that table stripped.
-"""
+"""Stage-1 SFT configuration tests."""
 
 from __future__ import annotations
 
@@ -21,10 +14,6 @@ SFT = Path(__file__).parents[2] / "rl" / "train" / "sft.toml"
 
 def _cfg() -> dict[str, Any]:
     return tomllib.loads(SFT.read_text())
-
-
-def _cfg_text() -> str:
-    return SFT.read_text()
 
 
 def test_bf16_lora_in_staged_band() -> None:
@@ -119,8 +108,3 @@ def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: 
     rc = tomllib.loads(resolved.read_text())
     assert rc["model"]["lora"]["rank"] == _cfg()["model"]["lora"]["rank"]
     assert rc["renderer"]["name"] == "default"
-
-
-def test_dry_run_copy_is_valid_toml(tmp_path: pathlib.Path) -> None:
-    """The recipe must parse cleanly as TOML with no extra-key sections."""
-    tomllib.loads(_cfg_text())

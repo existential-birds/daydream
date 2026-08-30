@@ -2,8 +2,8 @@
 
 Parses trajectory JSON files and deep review artifacts, computes metrics
 across cost, tool usage, file coverage, finding quality, grounding, and
-training signal dimensions.  Output is a JSON-serializable dict consumed
-by the evaluate-trajectory Claude Code skill.
+training signal dimensions. Output is a JSON-serializable report for archive
+inspection and downstream training analysis.
 
 Usage::
 
@@ -116,12 +116,6 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
                 forked.append(data)
 
     return {"main": main, "forked": forked}
-
-
-# Helpers
-
-def _parse_iso_ts(ts: str) -> datetime:
-    return parse_iso_timestamp(ts)
 
 
 def _agent_label(filename: str) -> str:
@@ -918,7 +912,7 @@ def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         ts_list = [
-            _parse_iso_ts(s["timestamp"])
+            parse_iso_timestamp(s["timestamp"])
             for s in traj.get("steps", [])
             if s.get("timestamp")
         ]

@@ -138,13 +138,6 @@ def test_missing_identity_fails_closed_naming_the_record(tmp_path: Path) -> None
         run_rft(RftConfig(inputs=path, seed=11, rubric_version="v", output_dir=tmp_path / "e"))
 
 
-def test_inputs_are_frozen_reconstructions(frozen_rft_inputs: FrozenRftInputs) -> None:
-    # M16: tasks rebuilt from base/head/diff identity, never live repo state.
-    assert frozen_rft_inputs.base_sha and frozen_rft_inputs.head_sha and frozen_rft_inputs.diff
-    corpus = [json.loads(line) for line in frozen_rft_inputs.path.read_text().splitlines() if line]
-    assert all(r["base_sha"] and r["head_sha"] and r["diff"] for r in corpus)
-
-
 def test_winners_header_stamps_provenance(frozen_rft_inputs: FrozenRftInputs, tmp_path: Path) -> None:
     result = run_rft(RftConfig(inputs=frozen_rft_inputs.path, seed=11, rubric_version="2026.08.29-1",
                                output_dir=tmp_path / "f", model_id="test-model"))

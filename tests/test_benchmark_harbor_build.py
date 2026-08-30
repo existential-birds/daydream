@@ -255,25 +255,6 @@ def _inject_body(ws: Path, case_id: str, body: str) -> None:
     storage.atomic_write_yaml(path, raw)
 
 
-def _compile(ws: Path) -> Any:
-    from daydream.benchmark.harbor import build
-    return build.compile_workspace(ws)
-
-
-def _harbor_file_sha(ws: Path, rel: str) -> str:
-    import hashlib as _hashlib
-    data = (ws / "harbor" / rel).read_bytes()
-    return _hashlib.sha256(data).hexdigest()
-
-
-def _tree_bytes(ws: Path) -> dict[str, bytes]:
-    out: dict[str, bytes] = {}
-    for p in sorted(ws.rglob("*")):
-        if p.is_file():
-            out[str(p.relative_to(ws))] = p.read_bytes()
-    return out
-
-
 def _harbor_tree_bytes(ws: Path) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     base = ws / "harbor"
@@ -314,21 +295,6 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     bundle = tmp_path / "b.bundle"
     snapshot.build_bundle(m, base, head, bundle)
     return m, bundle.read_bytes()
-
-
-def test_persisted_pull_request_field_set_is_validated() -> None:
-    """The import persists pull_request as a typed strict submodel; the full additive
-    header field set (body, digests, html_url, merged/closed, head.ref) is present
-    on a freshly built import and validated by the schema (predate reads empty)."""
-    from daydream.benchmark.schema import ImportDocument, PullRequestMeta
-    assert ImportDocument.model_fields["pull_request"].annotation is PullRequestMeta
-    # schema enforces digests + required fields; the import builder (Task 2) always
-    # populates the additive set for new imports.
-    fields = PullRequestMeta.model_fields
-    for name in ("body", "title_sha256", "body_sha256", "html_url",
-                 "merged_at", "closed_at"):
-        assert name in fields
-    assert fields["head"].annotation is not None
 
 
 def test_spike_bundle_heads_is_exactly_base_head(tmp_path: Path) -> None:
@@ -1313,28 +1279,24 @@ def test_compiled_findings_oracle_locationless_null_severity_axes_absent(
 def test_compile_uses_shared_model_gated_loader(
     tmp_path: Path,
     fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Prove the compile path now loads cases through the workspace shared loader.
-    import daydream.benchmark.workspace as ws_mod
+    """Reject an invalid case before replacing an existing compiled workspace."""
+    from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
+    from daydream.benchmark.storage import WorkspaceCorrupt
 
-    calls = []
-    orig = ws_mod.load_case_documents
-
-    def spy(root: Any, manifest: Any) -> Any:
-        calls.append(1)
-        return orig(root, manifest)
-
-    monkeypatch.setattr(ws_mod, "load_case_documents", spy)
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
-    lock = build.compile_workspace(ws)
-    assert calls, "compile must consume the shared model-gated loader"
-    case = ws / "harbor" / key
-    assert (case / "instruction.md").exists()
-    assert (case / "tests" / "golden-review.json").exists()
-    assert lock["cases"][key]["case_id"] == case_id
+    build.compile_workspace(ws)
+    before = _harbor_tree_bytes(ws)
+
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(case_path)
+    raw["unexpected_case_field"] = "must be rejected"
+    storage.atomic_write_yaml(case_path, raw)
+
+    with pytest.raises(WorkspaceCorrupt, match=f"case cases/{case_id}.yaml is not a valid case document"):
+        build.compile_workspace(ws)
+    assert _harbor_tree_bytes(ws) == before
 
 
 def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -1375,10 +1337,39 @@ def test_task_md_prose_describes_reported_axes_contract(tmp_path: Path, fake_gh:
     assert "severity, location, and content are graded" not in spec  # the false claim is gone (R10)
 
 
-def test_template_version_is_bumped() -> None:
+def test_compile_records_template_version_and_rejects_stale_task_spec(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    import hashlib
+    import json
+
+    from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
 
-    assert build.TEMPLATE_VERSION == "4"  # two schema steps (R12 + per-row severity pairs)
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    lock = build.compile_workspace(ws)
+    key = build.derive_task_key(case_id)
+    metadata = json.loads(
+        (ws / "harbor" / key / "tests" / "verifier-metadata.json").read_bytes()
+    )
+    assert lock["template_version"] == build.TEMPLATE_VERSION
+    assert metadata["template_version"] == lock["template_version"]
+
+    before = _harbor_tree_bytes(ws)
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(case_path)
+    raw["pull_request"] = dict(raw["pull_request"])
+    raw["pull_request"]["title"] = "Changed after approval"
+    raw["pull_request"]["title_sha256"] = hashlib.sha256(
+        b"Changed after approval"
+    ).hexdigest()
+    # Retain the previously approved task-spec digest; the changed rendered
+    # spec must not replace the compiled tree without fresh approval.
+    storage.atomic_write_yaml(case_path, raw)
+
+    with pytest.raises(build.CompileError, match="task spec digest"):
+        build.compile_workspace(ws)
+    assert _harbor_tree_bytes(ws) == before
 
 
 def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_gh: FakeGh) -> None:

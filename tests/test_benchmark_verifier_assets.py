@@ -162,23 +162,42 @@ def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path: Path) -
 
 
 def test_range_distance_cannot_drift_from_hunk_index() -> None:
-    """The verifier's private range_distance copy must stay semantically
-    byte-locked to daydream.hunk_index.range_distance (issue #971 R8)."""
-    import inspect
+    """The isolated verifier must preserve the shared range-distance contract."""
+    import ast
+    import sys
 
     from daydream import hunk_index
     from daydream.benchmark.harbor import verifier_core as vc
-    host = inspect.getsource(hunk_index.range_distance)
-    # the copy is private and stdlib-only; assert the arithmetic body matches
-    for line in (
-        "if start <= line <= end:",
-        "return 0",
-        "if line < start:",
-        "return start - line",
-        "return line - end",
+
+    # These cases cover the inclusive interior, both sides of a range, and a
+    # one-line range without using either implementation as the oracle.
+    for line, start, end, expected in (
+        (15, 10, 20, 0),
+        (9, 10, 20, 1),
+        (21, 10, 20, 1),
+        (10, 10, 10, 0),
+        (9, 10, 10, 1),
+        (11, 10, 10, 1),
     ):
-        assert line in host and line in inspect.getsource(vc._range_distance)
-    assert "import daydream" not in inspect.getsource(vc)
+        assert hunk_index.range_distance(line, start, end) == expected
+        assert vc._range_distance(line, start, end) == expected
+
+    source = (
+        REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_roots = {
+        alias.name.split(".", 1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported_roots.update(
+        node.module.split(".", 1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    )
+    assert imported_roots <= sys.stdlib_module_names | {"__future__"}
 
 
 def test_location_tolerance_meets_floor() -> None:

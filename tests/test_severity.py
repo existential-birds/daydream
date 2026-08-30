@@ -1,4 +1,3 @@
-# tests/test_severity.py
 from daydream import severity
 
 

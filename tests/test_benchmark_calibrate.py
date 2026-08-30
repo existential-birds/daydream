@@ -1,5 +1,3 @@
-"""...
-"""
 import asyncio
 import hashlib
 import json
@@ -34,13 +32,29 @@ def test_fixture_covers_all_eight_categories() -> None:
 
 
 def test_fixture_is_source_free() -> None:
-    text = (_FIXTURE / "pairs.json").read_text()
+    from daydream.benchmark.harbor import calibrate
+
+    pairs = calibrate._load_fixture()
+    text = json.dumps(pairs, ensure_ascii=False)
+    raw_text = (_FIXTURE / "pairs.json").read_text(encoding="utf-8")
+    assert not _CRED.search(raw_text)
     assert not _CRED.search(text)
-    # no content lifted from the real source-derived golden-review.json fixture
-    gold = (_FIXTURE.parents[0] / "templates" / "tests" / "golden-review.json").read_text()
-    assert gold  # the real fixture is present to compare against
-    for tok in ("Cache key tenant-scoped", "0e2356faadfbf30a"):
-        assert tok not in text
+
+    # Load the source-derived gold through the packaged judge's JSON boundary,
+    # then check every meaningful title/body/digest value rather than a sample.
+    sr = calibrate._load_judge_template()
+    gold = sr._read_json(Path(sr.__file__).with_name("golden-review.json"))
+    assert isinstance(gold, list) and gold
+    source_values = {
+        value
+        for finding in gold
+        for field in ("title", "body", "finding_id")
+        if isinstance(finding, dict)
+        and isinstance(value := finding.get(field), str)
+        and len(value.strip()) > 1
+    }
+    assert source_values
+    assert all(value not in text for value in source_values)
 
 
 def test_fixture_provenance_declares_unverified_llm_origin() -> None:
@@ -58,18 +72,28 @@ def test_fixture_provenance_declares_unverified_llm_origin() -> None:
 
 
 def test_every_pair_renders_within_24kib() -> None:
-    # Uses the loader/fixture-load API built in Task 2; marker for the executor.
     from daydream.benchmark.harbor.calibrate import _load_fixture, _load_judge_template
     sr = _load_judge_template()
     for p in _load_fixture():
-        sr.render_pair_prompt(p["gold"], p["candidate"], template=sr.JUDGE_PROMPT_TEMPLATE)  # must not raise
+        prompt = sr.render_pair_prompt(
+            p["gold"], p["candidate"], template=sr.JUDGE_PROMPT_TEMPLATE
+        )
+        assert len(prompt.encode("utf-8")) <= 24 * 1024
 
 
 def test_loader_resolves_sibling_verifier_core() -> None:
-    from daydream.benchmark.harbor.calibrate import _load_judge_template
-    sr = _load_judge_template()
-    assert sr.__name__ == "score_review"
-    assert sr.verifier_core.CONFIDENCE_THRESHOLD == 0.7
+    from daydream.benchmark.harbor import calibrate
+
+    sr = calibrate._load_judge_template()
+    template_dir = (calibrate._TEMPLATES / "tests").resolve()
+    assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
+    assert Path(sr.verifier_core.__file__).resolve() == template_dir / "verifier_core.py"
+
+    verdict = sr.parse_verdict(
+        {"match": True, "confidence": 0.9, "reasoning": "known verifier call"}
+    )
+    assert isinstance(verdict, sr.verifier_core.Verdict)
+    assert verdict.match is True and verdict.confidence == 0.9
 
 
 def test_client_builder_threads_http_seam() -> None:

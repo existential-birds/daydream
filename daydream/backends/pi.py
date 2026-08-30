@@ -63,7 +63,7 @@ from daydream.json_utils import extract_json
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
 _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 
-# Known AgentSessionEvent types (see plan §4). Used to decide whether the first
+# Known AgentSessionEvent types. Used to decide whether the first
 # stdout line — the session header — also carries a dispatchable event type.
 _PI_EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -80,7 +80,7 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Read-only tool subset (plan §3). Excludes the mutating edit/bash/write tools.
+# Read-only tool subset. Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
 _PI_PROVIDER_API_KEY_ENV = {
@@ -788,7 +788,7 @@ class PiBackend:
                     if isinstance(inp, int) and isinstance(outp, int):
                         model_name = msg.get("responseModel") or msg.get("model") or self.model
                         yield MetricsEvent(
-                            message_id="",  # Pi has no per-message id (plan §5).
+                            message_id="",  # Pi has no per-message id.
                             prompt_tokens=inp,
                             completion_tokens=outp,
                             cached_tokens=cached if isinstance(cached, int) else None,
@@ -805,7 +805,7 @@ class PiBackend:
 
                 elif event_type == "agent_end":
                     # No inline finalization — Cost/Result are emitted once from
-                    # the single post-loop path below (plan §10). The loop keeps
+                    # the single post-loop path below. The loop keeps
                     # draining to EOF so the stdout pipe cannot fill mid-run.
                     pass
 
@@ -845,7 +845,7 @@ class PiBackend:
                     category="STREAM_TRUNCATION",
                 )
 
-            # Single finalization path (plan §10): runs exactly once whether
+            # Single finalization path: runs exactly once whether
             # the stream closed on agent_end or ended without it (truncated
             # output). Cost/Result are derived from fully-accumulated totals.
             if output_schema and last_assistant_text:

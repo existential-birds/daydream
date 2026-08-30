@@ -17,10 +17,8 @@ from daydream.improve.prioritize import member_alias, plan_priority
 from daydream.improve.render import (
     _redact_model_value,
     markdown_cell,
+    plan_slug,
     render_plan,
-)
-from daydream.improve.render import (
-    plan_slug as plan_slug,
 )
 from daydream.trajectory import redact_text
 from daydream.workspace import _prune_stale_locked_worktrees
@@ -998,8 +996,6 @@ class PlanWriteSession:
         self._planned_on = date.today()
         self._run_session_id = run_session_id
         plans_dir.mkdir(parents=True, exist_ok=True)
-        self._index_path = plans_dir / "README.md"
-        self._sidecar_path = plans_dir / PLAN_INDEX_FILENAME
         self._non_interactive_default = (
             non_interactive_default or "non-interactive default" in _index_text(plans_dir).lower()
         )

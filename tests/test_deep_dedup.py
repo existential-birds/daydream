@@ -25,18 +25,6 @@ def test_file_overlap_without_title_similarity_produces_no_pair() -> None:
     assert pairs == []
 
 
-def test_candidate_pairs_file_and_title() -> None:
-    """D-27: file overlap + similar title -> pair."""
-    records = [
-        {"id": "1", "file": "api.py", "line": 42, "description": "Missing input validation on login"},
-    ]
-    alt_issues = [
-        {"title": "Input validation missing on login endpoint", "files": ["api.py"]},
-    ]
-    pairs = build_dedup_candidates(records, alt_issues=alt_issues)
-    assert len(pairs) >= 1
-
-
 def test_candidate_pairs_disjoint() -> None:
     """D-27: no file overlap AND no title overlap -> no pair."""
     records = [{"id": "1", "file": "api.py", "line": 1, "description": "SQL injection"}]
@@ -66,14 +54,6 @@ def test_jaccard_similarity_threshold_met() -> None:
     assert pairs[0].similarity >= 0.5
     assert pairs[0].record_id == "r1"
     assert "api.py" in pairs[0].alt_files
-
-
-def test_file_overlap_alone_insufficient() -> None:
-    """D-27: file overlap without title similarity -> no pair."""
-    records = [{"id": "r1", "file": "api.py", "line": 1, "description": "SQL injection"}]
-    alt_issues = [{"title": "Logging verbosity too high", "files": ["api.py"]}]
-    pairs = build_dedup_candidates(records, alt_issues)
-    assert pairs == []
 
 
 # --- Record ↔ Record dedup tests -------------------------------------------

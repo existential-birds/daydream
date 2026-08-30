@@ -237,12 +237,6 @@ def test_cache_key_is_sensitive_to_every_component(
     assert base != exploration_cache_key("sha1", "diff", "standard", 2)
 
 
-def test_cache_version_bumped_to_3() -> None:
-    from daydream import exploration as exploration_mod
-
-    assert exploration_mod._CACHE_VERSION == 3
-
-
 def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
     """Shifting content across the newline boundary changes the key."""
     from daydream.exploration import exploration_cache_key

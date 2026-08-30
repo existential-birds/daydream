@@ -19,12 +19,10 @@ from typing import Any
 
 try:
     from harbor.agents.base import BaseAgent
-    from harbor.models.agent.context import AgentContext
 
     _HARBOR = True
 except ImportError:  # Harbor is an optional extra; degrade to plain bases.
     BaseAgent = object
-    AgentContext = object
     _HARBOR = False
 
 

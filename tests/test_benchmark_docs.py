@@ -4,7 +4,7 @@ Pins Daydream-owned docs/CLI/schema/privacy contracts only. No Harbor runtime,
 Docker, or paid hosted-model command is ever executed here; paid commands
 (calibrate-judge, run --oracle) are only asserted to be visibly marked as paid
 gates and are never run in CI. Mirrors the existing doc-contract patterns in
-tests/test_docs_contract.py and tests/test_benchmark_cli.py.
+tests/test_docs_contract.py.
 """
 from __future__ import annotations
 
@@ -244,9 +244,6 @@ def test_docs_describe_anchor_model_and_reasons() -> None:
         encoding="utf-8"
     )
     assert "original head SHA" in plan  # §5 bullet names authoring_anchor.commit_id, not commit_id
-# --- Reported location/severity axes (issue #971) ---
-
-
 # --- Reported location/severity axes (issue #971) ---
 
 def test_reward_example_documents_reported_axes() -> None:

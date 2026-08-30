@@ -1,4 +1,3 @@
-# tests/test_backend_pi.py
 """Tests for PiBackend with canned JSONL fixtures.
 
 Mirrors ``tests/test_backend_codex.py``: the subprocess is mocked via
@@ -40,7 +39,6 @@ from daydream.backends.pi import (
     PiError,
     _is_retryable_error_message,
     _is_retryable_exit_code,
-    _is_stream_truncation_message,
     _pi_error_category,
     _pi_retry_attempts,
     _pi_retry_base_delay,
@@ -782,8 +780,8 @@ async def test_live_pi_smoke() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path) -> None:
-    """A Pi-driven run must produce a trajectory.json that passes the ATIF v1.6
+async def test_pi_trajectory_is_valid_atif_v1_7(tmp_path: Path) -> None:
+    """A Pi-driven run must produce a trajectory.json that passes the ATIF v1.7
     validator (plan §8.3) — the replay/trajectory proof."""
     from daydream.atif import validate
     from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -805,7 +803,7 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path) -> None:
                 async for event in backend.execute(tmp_path, "Review"):
                     inv.observe(event)
 
-    # The trajectory file must be valid ATIF v1.6.
+    # The trajectory file must be valid ATIF v1.7.
     assert traj_path.is_file()
     assert validate(traj_path, validate_images=False)
 
@@ -1178,10 +1176,6 @@ def test_pi_error_categories_are_stable_host_codes(
 )
 def test_pi_transient_failures_are_retryable(message: str) -> None:
     assert _is_retryable_error_message(message) is True
-
-
-def test_is_stream_truncation_message() -> None:
-    assert _is_stream_truncation_message("stream ended without finish_reason") is True
 
 
 @pytest.mark.asyncio
