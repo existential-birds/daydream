@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -195,7 +197,7 @@ def test_missing_required_field_fails_closed(tmp_path: Path, fixture_corpus: Pat
 # --- Task 3 (M4): stage-0 marginal analysis + explicit unavailable marker ---
 
 
-def test_stage0_scores_report_marginal_value(fixture_corpus, tmp_path):
+def test_stage0_scores_report_marginal_value(fixture_corpus: Path, tmp_path: Path) -> None:
     scores = fixture_corpus / "stage0-scores-aligned.json"  # keyed by record_id + model_digest
     result = run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
     s0 = result["stage0_analysis"]
@@ -203,12 +205,156 @@ def test_stage0_scores_report_marginal_value(fixture_corpus, tmp_path):
     assert set(s0["marginal_value_per_axis"]) >= {"correctness", "grounding"}
 
 
-def test_stage0_absent_is_explicit_unavailable(fixture_corpus, tmp_path):
+def test_stage0_absent_is_explicit_unavailable(fixture_corpus: Path, tmp_path: Path) -> None:
     result = run_calibration(_config(fixture_corpus, tmp_path))
     assert result["stage0_analysis"] == {"status": "unavailable"}
 
 
-def test_stage0_misaligned_records_are_refused(fixture_corpus, tmp_path):
+def test_stage0_misaligned_records_are_refused(fixture_corpus: Path, tmp_path: Path) -> None:
     scores = fixture_corpus / "stage0-scores-misaligned.json"
     with pytest.raises(CalibrationError, match="stage-0 score.*no matching record"):
         run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
+
+
+# --- Task 4 (M8): committed synthetic fixture under tests/fixtures/training ---
+
+COMMITTED_FIXTURE = Path(__file__).parent / "fixtures" / "training" / "calibration"
+#: Verbatim from daydream/training/schema/exclusion.txt (C5 always-excluded list).
+C5_SLUG = "getsentry/sentry"
+
+
+@pytest.fixture
+def committed_fixture() -> Path:
+    assert (COMMITTED_FIXTURE / "build_fixture.py").exists(), "committed calibration fixture missing"
+    return COMMITTED_FIXTURE
+
+
+def test_committed_fixture_calibrates_clean(committed_fixture: Path, tmp_path: Path) -> None:
+    """The committed bundle passes every gate end-to-end through run_calibration."""
+    result = run_calibration(
+        _config(
+            committed_fixture,
+            tmp_path,
+            corpus_dir=committed_fixture / "corpus",
+            gold_labels=committed_fixture / "gold.json",
+            breakdowns=committed_fixture / "breakdowns.json",
+        )
+    )
+    assert result["record_count"] == 12
+    assert result["metrics"]["class_balance"] == {"accepted": 6, "rejected": 6}
+    artifact = json.loads((tmp_path / "out" / "calibration.json").read_text())
+    assert artifact["schema_version"] == "calibration-artifact-v1"
+
+
+def test_committed_fixture_contains_both_classes_and_c5_repo(committed_fixture: Path) -> None:
+    """Both gold classes are present, and the C5-excluded slug appears only in
+    its corruption variant — never in the clean bundle."""
+    records = [
+        json.loads(line)
+        for line in (committed_fixture / "corpus" / "corpus.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    gold = json.loads((committed_fixture / "gold.json").read_text())
+    labels = {gold[rid]["accepted"] for rid in gold}
+    assert labels == {True, False}
+    assert len(records) == 12
+    assert all(r["repo_slug"] != C5_SLUG for r in records)
+    variant_records = [
+        json.loads(line)
+        for line in (committed_fixture / "variants" / "c5-excluded" / "corpus.jsonl")
+        .read_text()
+        .splitlines()
+        if line.strip()
+    ]
+    assert any(r["repo_slug"] == C5_SLUG for r in variant_records)
+
+
+def test_committed_fixture_variant_c5_excluded_fails_closed(
+    committed_fixture: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(CalibrationError, match=r"excluded repository list \(C5\)"):
+        run_calibration(
+            _config(
+                committed_fixture,
+                tmp_path,
+                corpus_dir=committed_fixture / "variants" / "c5-excluded",
+                gold_labels=committed_fixture / "gold.json",
+                breakdowns=committed_fixture / "breakdowns.json",
+            )
+        )
+
+
+def test_committed_fixture_variant_posterior_fails_closed(
+    committed_fixture: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(CalibrationError, match="posterior to as_of"):
+        run_calibration(
+            _config(
+                committed_fixture,
+                tmp_path,
+                corpus_dir=committed_fixture / "variants" / "posterior",
+                gold_labels=committed_fixture / "gold.json",
+                breakdowns=committed_fixture / "breakdowns.json",
+            )
+        )
+
+
+def test_committed_fixture_variant_digest_tamper_fails_closed(
+    committed_fixture: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(CalibrationError, match="digest mismatch"):
+        run_calibration(
+            _config(
+                committed_fixture,
+                tmp_path,
+                corpus_dir=committed_fixture / "variants" / "digest",
+                gold_labels=committed_fixture / "gold.json",
+                breakdowns=committed_fixture / "breakdowns.json",
+            )
+        )
+
+
+def test_committed_stage0_files_join_and_misalign_refused(
+    committed_fixture: Path, tmp_path: Path
+) -> None:
+    shared = dict(
+        corpus_dir=committed_fixture / "corpus",
+        gold_labels=committed_fixture / "gold.json",
+        breakdowns=committed_fixture / "breakdowns.json",
+    )
+    result = run_calibration(
+        _config(
+            committed_fixture,
+            tmp_path,
+            stage0_scores=committed_fixture / "stage0-scores-aligned.json",
+            **shared,
+        )
+    )
+    assert result["stage0_analysis"]["status"] == "ok"
+    with pytest.raises(CalibrationError, match="no matching record"):
+        run_calibration(
+            _config(
+                committed_fixture,
+                tmp_path / "r2",
+                stage0_scores=committed_fixture / "stage0-scores-misaligned.json",
+                **shared,
+            )
+        )
+
+
+def test_build_fixture_replays_byte_identical(committed_fixture: Path, tmp_path: Path) -> None:
+    """The checked-in generator regenerates the committed files byte-for-byte."""
+    replay = tmp_path / "replay"
+    subprocess.run(
+        [sys.executable, str(committed_fixture / "build_fixture.py"), "--out", str(replay)],
+        check=True,
+        cwd=Path(__file__).parent.parent,
+    )
+    committed = [
+        p.relative_to(committed_fixture)
+        for p in committed_fixture.rglob("*")
+        if p.is_file() and p.name != "build_fixture.py" and "__pycache__" not in p.parts
+    ]
+    assert committed, "committed fixture is empty"
+    for rel in committed:
+        assert (replay / rel).read_bytes() == (committed_fixture / rel).read_bytes(), rel

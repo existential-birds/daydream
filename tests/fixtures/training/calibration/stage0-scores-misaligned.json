@@ -1,0 +1,54 @@
+{
+  "rec-0000": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.3
+  },
+  "rec-0001": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.35
+  },
+  "rec-0002": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.4
+  },
+  "rec-0003": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.45
+  },
+  "rec-0004": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.5
+  },
+  "rec-0005": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.55
+  },
+  "rec-0006": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.6
+  },
+  "rec-0007": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.65
+  },
+  "rec-0008": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.7
+  },
+  "rec-0009": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.75
+  },
+  "rec-0010": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.8
+  },
+  "rec-0011": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.85
+  },
+  "rec-ghost": {
+    "model_digest": "sha256:calibration-stage0-model-1",
+    "score": 0.9
+  }
+}

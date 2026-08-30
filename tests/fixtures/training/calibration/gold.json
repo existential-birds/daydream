@@ -1,0 +1,38 @@
+{
+  "rec-0000": {
+    "accepted": true
+  },
+  "rec-0001": {
+    "accepted": false
+  },
+  "rec-0002": {
+    "accepted": true
+  },
+  "rec-0003": {
+    "accepted": false
+  },
+  "rec-0004": {
+    "accepted": true
+  },
+  "rec-0005": {
+    "accepted": false
+  },
+  "rec-0006": {
+    "accepted": true
+  },
+  "rec-0007": {
+    "accepted": false
+  },
+  "rec-0008": {
+    "accepted": true
+  },
+  "rec-0009": {
+    "accepted": false
+  },
+  "rec-0010": {
+    "accepted": true
+  },
+  "rec-0011": {
+    "accepted": false
+  }
+}
