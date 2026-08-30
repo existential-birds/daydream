@@ -12,8 +12,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from daydream.benchmark.harbor import verifier_core
 
 REPO = Path(__file__).resolve().parents[1]
@@ -89,16 +87,6 @@ def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path: Path) -
     assert m["micro_precision"] == 1.0 and m["micro_recall"] == 2.0 / 3.0
 
 
-@pytest.fixture()
-def sr_metric(tmp_path: Path) -> Any:
-    """Stage the rendered metric next to a colocated canonical ``verifier_core.py``."""
-    from daydream.benchmark.harbor import build, verifier_core
-
-    (tmp_path / "metric.py").write_bytes(build.render_metric())
-    shutil.copy(Path(verifier_core.__file__), tmp_path / "verifier_core.py")
-    return tmp_path / "metric.py"
-
-
 def _reward_row(*, tp: int, fp: int, fn: int, reward: float, clean: bool) -> dict[str, object]:
     """A representative scored row; shape mirrors ``_reward`` in tests/test_benchmark_objective.py."""
     return {
@@ -115,9 +103,7 @@ def _reward_row(*, tp: int, fp: int, fn: int, reward: float, clean: bool) -> dic
     }
 
 
-def test_rendered_metric_matches_host_on_representative_rows(
-    sr_metric: Any, tmp_path: Path
-) -> None:
+def test_rendered_metric_matches_host_on_representative_rows(tmp_path: Path) -> None:
     """The rendered metric, run via ``uv run --script`` over JSONL that mixes
     clean scored rows with malformed/null/shape-wrong rows, must produce exactly
     what the canonical ``verifier_core.aggregate_metrics`` computes in-process."""
