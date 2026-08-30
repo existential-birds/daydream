@@ -1561,3 +1561,41 @@ def test_harbor_build_null_gold_severity_labeled_not_silent() -> None:
 
     assert build._gold_severity_label(None) == "unknown"
     assert build._gold_severity_label("HIGH") == "high"
+
+
+def test_compiled_stage_carries_canonical_module_and_metric_loads_it(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+) -> None:
+    """Compiled stage root carries the canonical verifier_core.py and the rendered
+    metric loads it end-to-end (reuses this module's `_seed_ready_workspace` +
+    `_compile` compiled-build fixture pattern)."""
+    import json
+
+    ws, _case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
+    _compile(ws)
+    stage = ws / "harbor"
+    metric = (stage / "metric.py").read_text()
+    canonical = (stage / "verifier_core.py").read_text()
+    source = (REPO / "daydream/benchmark/harbor/verifier_core.py").read_text()
+    assert canonical == source
+    assert "import daydream" not in metric and "getsource" not in metric
+    lock = json.loads((stage / "benchmark.lock.json").read_text())
+    assert "metric.py" in lock["files"] and "verifier_core.py" in lock["files"]
+    # lock hash agrees with the deployed bytes
+    assert lock["files"]["verifier_core.py"] == hashlib.sha256(
+        (stage / "verifier_core.py").read_bytes()
+    ).hexdigest()
+    # rendered metric runs end-to-end via uv against the colocated module
+    rows = stage / "rewards.jsonl"
+    rows.write_text(
+        json.dumps({"reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+                    "verifier_error": 0, "clean_task": 1, "clean_pass": 1}) + "\n"
+    )
+    out = tmp_path / "m.json"
+    proc = subprocess.run(
+        ["uv", "run", "--script", str(stage / "metric.py"),
+         "-i", str(rows), "-o", str(out)],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(out.read_text())["total_tp"] == 1
