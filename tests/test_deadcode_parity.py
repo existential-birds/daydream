@@ -86,7 +86,7 @@ def test_rl_argv_parity_makefile_and_ci() -> None:
 
 def test_hook_delegates_to_make_check() -> None:
     """Pre-push script delegates the gate (incl. deadcode) to `make check`."""
-    assert "make check" in _HOOK
+    assert any(line.strip() == "make check" for line in _HOOK.splitlines())
 
 
 def test_all_vulture_lines_use_explicit_config() -> None:

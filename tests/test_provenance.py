@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from daydream import git_ops
 from daydream.archive import provenance
 
 
@@ -22,13 +23,18 @@ def test_container_digest_unknown_when_unset(monkeypatch: pytest.MonkeyPatch) ->
     assert provenance.capture_executable_provenance().container_digest == "unknown"
 
 
-def test_commit_and_dirty_resolve_or_unknown() -> None:
+def test_commit_and_dirty_resolve_known_git_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected_sha = "a" * 40
+    monkeypatch.setattr(git_ops, "head_sha", lambda _repo: expected_sha)
+    monkeypatch.setattr(
+        git_ops,
+        "status_porcelain",
+        lambda _repo: " M tests/test_provenance.py\n",
+    )
+
     p = provenance.capture_executable_provenance()
-    # The package dir is a git checkout in CI/dev; when git state is
-    # unresolvable the field must be the explicit string "unknown", never
-    # None and never a target-repo sha.
-    assert p.commit in {"unknown"} or (p.commit and len(p.commit) == 40)
-    assert p.dirty in (True, False, "unknown")
+    assert p.commit == expected_sha
+    assert p.dirty is True
 
 
 def test_install_source_is_known_or_unknown() -> None:

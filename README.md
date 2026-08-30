@@ -182,6 +182,8 @@ The pipeline has three stages:
 
 `calibrate-reward` validates a pinned calibration bundle and emits a deterministic, versioned reward-calibration artifact (input wire format: [docs/calibration.md](docs/calibration.md)).
 
+The harvest stage clones the target repository into a local cache before scoring. Setting `DAYDREAM_GIT_TOKEN` (for example, a GitHub PAT with read access) authenticates clones of private repos. The token is injected out-of-band via git config environment variables (`http.extraHeader`). It is never embedded in the remote URL and never on the command line. Without the token, the harvest stage performs a plain clone via the ambient credential helper. A failed clone emits a warning and never blocks the harvest run. The token is only needed for private repos. See docs/runbooks/credential-remediation.md for operational guidance.
+
 The build stage applies a temporal-leakage guard. It prevents future data from leaking into the past. It applies C5, C8, and C9 filters. It stratifies the corpus by stack.
 
 ### Scoring

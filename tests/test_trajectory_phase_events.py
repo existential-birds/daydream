@@ -432,7 +432,7 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     Drives ``runner.run`` → ``_run_loop_deep`` → ``run_deep`` (the production
     default deep pipeline) with the stub backend from ``test_deep_orchestrator``.
     The orchestrator wraps the per-stack review fan-out in
-    ``phase_scope(DaydreamPhase.DEEP, stage="review")`` (issue #203 Task 6), so
+    ``phase_scope(DaydreamPhase.DEEP, stage="review")``, so
     the trajectory's ``extra["phase_events"]`` must carry the deep review
     boundary. Asserts the on-disk trajectory JSON + manifest.
     """

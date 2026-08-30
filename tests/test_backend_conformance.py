@@ -33,9 +33,8 @@ from daydream.backends import (
     MetricsEvent,
     ToolResultEvent,
     ToolStartEvent,
+    create_backend,
 )
-from daydream.backends.claude import ClaudeBackend
-from daydream.backends.codex import CodexBackend
 from tests.contract._loaders import claude_loader, codex_loader
 
 # The canonical agent script the contract suite drives both backends against
@@ -126,5 +125,11 @@ def test_backends_have_no_skill_method() -> None:
     from daydream.backends import Backend
 
     assert not hasattr(Backend, "format_skill_invocation")
-    for cls in (ClaudeBackend, CodexBackend):
-        assert not hasattr(cls, "format_skill_invocation")
+    backends = (
+        create_backend("claude", model="test-model"),
+        create_backend("codex", model="test-model"),
+        create_backend("pi", model="test-model"),
+        create_backend("osprey", model="test-model", osprey_binary="fake-osprey"),
+    )
+    for backend in backends:
+        assert not hasattr(backend, "format_skill_invocation")

@@ -166,14 +166,14 @@ if TYPE_CHECKING:
     from daydream.runner import RunConfig
     from daydream.trajectory import TrajectoryRecorder
 
-# Exploration infrastructure import guard. When Phases 1-4 are not yet
-# installed, deep mode still runs -- just without grounding context.
+# Exploration infrastructure import guard. Deep mode still runs without
+# grounding context when the optional exploration modules are unavailable.
 try:
     from daydream.exploration import ExplorationContext, safe_explore
     from daydream.exploration_runner import count_changed_files, pre_scan, select_tier
 
     EXPLORATION_AVAILABLE = True
-except ImportError:  # pragma: no cover -- only hit when Phases 1-4 absent
+except ImportError:  # pragma: no cover -- optional exploration dependency
     EXPLORATION_AVAILABLE = False
 
 # Per-file diff block splitter + the shared per-block path resolver live in
@@ -3847,11 +3847,6 @@ def _mode_of(ctx: FlowContext) -> str:
     return str(ctx.data.get("mode", "loop"))
 
 
-def _review_only_mode(ctx: FlowContext) -> bool:
-    """Review/comment modes stop after ``post-review``; no fix cycle runs."""
-    return _mode_of(ctx) in ("review", "comment")
-
-
 def _fix_cycle_enabled(ctx: FlowContext) -> bool:
     """The apply-fix gate + verify/fix/test/commit run in loop + shallow modes."""
     return _mode_of(ctx) in ("loop", "shallow")
@@ -3883,36 +3878,6 @@ def _flow_kind_for_mode(mode: str) -> DaydreamRunFlow:
     return DaydreamRunFlow.DEEP
 
 
-def _spine_fresh_ttt(ctx: FlowContext) -> bool:
-    """Fresh-run TTT gate."""
-    return _fresh_ttt(ctx)
-
-
-def _spine_before_fix(ctx: FlowContext) -> bool:
-    """``--start-at fix`` resume gate."""
-    return _before_fix_resume(ctx)
-
-
-def _spine_multi_merge(ctx: FlowContext) -> bool:
-    return _multi_stack_merge_enabled(ctx)
-
-
-def _spine_single_merge(ctx: FlowContext) -> bool:
-    return _single_stack_merge_enabled(ctx)
-
-
-def _spine_supervise(ctx: FlowContext) -> bool:
-    return _supervise_enabled(ctx)
-
-
-def _spine_uncovered(ctx: FlowContext) -> bool:
-    return _uncovered_sweep_enabled(ctx)
-
-
-def _spine_findings_out(ctx: FlowContext) -> bool:
-    return _findings_out_enabled(ctx)
-
-
 # The deep pipeline as a registered flow (D-07):
 #
 #     exploration pre-scan -> TTT intent -> TTT alternative-review ->
@@ -3936,23 +3901,23 @@ def _spine_findings_out(ctx: FlowContext) -> bool:
 # (failure) exit skips it to keep evidence (#335).
 STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="exploration", run=_step_exploration),
-    FlowStep(name="intent", run=_step_intent, enabled=_spine_fresh_ttt),
+    FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
     FlowStep(
         name="per-stack-reviews",
         run=_step_wonder_and_per_stack,
         config_phase="per_stack_review",
     ),
-    FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_spine_before_fix),
-    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_spine_uncovered, config_phase="parse"),
-    FlowStep(name="arbiter", run=_step_arbiter, enabled=_spine_multi_merge),
+    FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
+    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_uncovered_sweep_enabled, config_phase="parse"),
+    FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
     FlowStep(
-        name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_spine_multi_merge
+        name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled
     ),
-    FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_spine_single_merge),
+    FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
     FlowStep(name="load-items", run=_step_load_items),
-    FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_spine_supervise),
-    FlowStep(name="findings-out", run=_step_findings_out, enabled=_spine_findings_out),
-    FlowStep(name="post-review", run=_step_post_review, enabled=_spine_before_fix),
+    FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_supervise_enabled),
+    FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
+    FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
     # Fix cycle: loop + shallow modes only (review/comment stop after post-review).
     FlowStep(name="fix-gate", run=_step_fix_gate, enabled=_fix_cycle_enabled),
     FlowStep(name="verify", run=_step_verify, enabled=_fix_cycle_enabled),

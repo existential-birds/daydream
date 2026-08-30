@@ -1,4 +1,3 @@
-# daydream/backends/__init__.py
 """Backend abstraction layer for daydream.
 
 Defines the unified event stream, Backend protocol, and factory function.

@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Daydream training-record (JSONL) schema v2",
+  "description": "Per-finding training record projected from the curated curation bundle. Each accepted/rejected finding is its own stable, tier-classified, fully-provenanced record. Ship alongside the untouched v1 artifact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "record_type",
+    "tier",
+    "session_id",
+    "trajectory_id",
+    "task_segment",
+    "finding_fingerprint",
+    "disposition",
+    "profile",
+    "stack",
+    "lineage"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 hex digest over the canonical (session_id, trajectory_id, segment_id, fingerprint) join."
+    },
+    "record_type": {
+      "enum": ["outcome-finding"]
+    },
+    "tier": {
+      "enum": ["gold", "silver", "task-only"]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "trajectory_id": {
+      "type": "string"
+    },
+    "task_segment": {
+      "type": "string"
+    },
+    "finding_fingerprint": {
+      "type": ["string", "null"]
+    },
+    "disposition": {
+      "enum": ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_schema_version",
+        "profile_name",
+        "profile_source_kind",
+        "profile_digest"
+      ],
+      "properties": {
+        "profile_schema_version": {
+          "type": ["integer", "string", "null"]
+        },
+        "profile_name": {
+          "type": ["string", "null"]
+        },
+        "profile_source_kind": {
+          "type": ["string", "null"]
+        },
+        "profile_digest": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "stack": {
+      "type": ["string", "null"]
+    },
+    "outcome_label": {
+      "type": ["string", "null"]
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hub_commit",
+        "curation_id",
+        "content_digests",
+        "labeler_policy_version",
+        "reply_classifier_version",
+        "rubric_schema_version",
+        "as_of",
+        "valid_at",
+        "split",
+        "exclusion_reason",
+        "license_decision"
+      ],
+      "properties": {
+        "hub_commit": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "curation_id": {
+          "type": ["string", "null"]
+        },
+        "content_digests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "labeler_policy_version": {
+          "type": ["string", "null"]
+        },
+        "reply_classifier_version": {
+          "type": ["string", "null"]
+        },
+        "rubric_schema_version": {
+          "type": ["string", "null"]
+        },
+        "as_of": {
+          "type": ["string", "null"]
+        },
+        "valid_at": {
+          "type": ["string", "null"]
+        },
+        "split": {
+          "enum": ["train", "validation", "holdout"]
+        },
+        "exclusion_reason": {
+          "type": ["string", "null"]
+        },
+        "license_decision": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

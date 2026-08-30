@@ -1,4 +1,3 @@
-# tests/test_cli.py
 """Tests for CLI argument parsing."""
 import os
 import subprocess
@@ -289,21 +288,33 @@ def test_parse_args_copy_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.extra_copy == []
 
 
-def test_feedback_subcommand_is_unknown(tmp_path: Path) -> None:
-    """The removed feedback command is rejected without starting a review."""
-    repo_root = Path(__file__).resolve().parent.parent
-    (tmp_path / "a.py").write_text("x = 1\n")
-    env = {**os.environ, "DAYDREAM_SKILLS_DIR": ""}
-    result = subprocess.run(
-        [sys.executable, "-m", "daydream", "feedback", "7", "--bot", "x[bot]", str(tmp_path)],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=repo_root,
-        timeout=30,
+def test_feedback_subcommand_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The removed feedback command is rejected before review dispatch."""
+    from daydream import cli
+
+    called = False
+
+    async def fake_run(*_args: Any, **_kwargs: Any) -> int:
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "feedback", "7", "--bot", "x[bot]", "/tmp/repo"],
     )
-    assert result.returncode != 0
-    assert "feedback" not in result.stdout
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 2
+    assert not called
+    assert "unrecognized arguments: 7 --bot x[bot] /tmp/repo" in capsys.readouterr().err
 
 
 def test_phase_subtitles_include_wonder() -> None:
@@ -418,12 +429,6 @@ def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
     assert config.model == "claude-opus-5"
 
 
-def test_runconfig_has_model_field() -> None:
-    config = RunConfig(backend="claude")
-    assert hasattr(config, "model"), "RunConfig.model is the global model override source"
-    assert config.model is None
-
-
 # corpus build exit-code regression guard (Task 11 / corpus-pipeline-architecture).
 # Tier-3 subprocess test driving the real CLI through `uv run` against an empty
 # archive: catches cleanup paths (signal handlers, atexit, warnings) leaking a
@@ -450,15 +455,6 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
 # corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)
 
 
-def test_harvest_and_build_corpus_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from daydream import cli
-    called: dict[str, Any] = {}
-    monkeypatch.setattr("daydream.training.harvest.run_harvest",
-                        lambda cfg: called.setdefault("harvest", cfg) or {"annotated": 0})
-    assert cli._handle_harvest_command(["--archive-dir", str(tmp_path)]) == 0
-    assert "harvest" in called
-
-
 def test_harvest_parser_accepts_repo_clone_root() -> None:
     """--repo-clone-root is parsed and forwarded to HarvestConfig."""
     from daydream.cli import _build_harvest_parser
@@ -475,15 +471,6 @@ def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
     parser = _build_harvest_parser()
     args = parser.parse_args([])
     assert args.repo_clone_root is None
-
-
-def test_removed_verbs_no_longer_dispatch() -> None:
-    from daydream import cli
-    # export-jsonl / snapshot handlers are gone. ``label`` was reintroduced as
-    # the human-override surface (daydream label <prefix> --outcome ...).
-    assert not hasattr(cli, "_handle_export_command")
-    assert not hasattr(cli, "_handle_snapshot_command")
-    assert hasattr(cli, "_handle_label_command")
 
 
 def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -526,25 +513,44 @@ def test_runconfig_uses_stack_terminology() -> None:
     assert not hasattr(cfg, "skill")   # old name removed
 
 
-def test_real_cli_stack_entry(tmp_path: Path) -> None:
-    """Real entrypoint: --stack python reaches dispatch; --skill is rejected."""
-    import os
-    import subprocess
-    import sys
+def test_real_cli_stack_entry(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real entrypoint runs a selected stack and rejects the removed alias."""
+    from daydream import cli
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
-    repo_root = Path(__file__).resolve().parent.parent
-    (tmp_path / "a.py").write_text("x = 1\n")
-    # skill-free env: no plugin/skill registry directory.
-    env = {**os.environ, "DAYDREAM_SKILLS_DIR": ""}
-    r = subprocess.run(
-        [sys.executable, "-m", "daydream", "--review", "--stack", "python", str(tmp_path)],
-        capture_output=True, text=True, env=env, cwd=repo_root, timeout=90,
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo: None)
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch: None)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "daydream",
+            "--review",
+            "--stack",
+            "python",
+            "--no-archive",
+            "--no-eval",
+            str(multi_stack_target),
+        ],
     )
-    # The run should get past arg parsing + profile resolution (exit 0 or the
-    # review's own later failure, never an unknown-option / ProfileError).
-    assert "--skill" not in r.stderr and "ProfileError" not in r.stderr
-    r2 = subprocess.run(
-        [sys.executable, "-m", "daydream", "--review", "--skill", "python", str(tmp_path)],
-        capture_output=True, text=True, env=env, cwd=repo_root, timeout=30,
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 0
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "--review", "--skill", "python", str(multi_stack_target)],
     )
-    assert r2.returncode == 2 or "unrecognized arguments" in r2.stderr or "invalid choice" in r2.stderr
+    with pytest.raises(SystemExit) as skill_exc:
+        cli.main()
+    assert skill_exc.value.code == 2

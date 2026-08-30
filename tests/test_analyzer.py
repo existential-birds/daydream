@@ -1087,7 +1087,7 @@ def test_quality_candidate_scope_indexes_valid_peers_for_clones(
 
 
 def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path) -> None:
-    """candidate_paths=None is byte-identical to the default whole-workspace call."""
+    """An explicit ``candidate_paths=None`` preserves whole-workspace analysis."""
     ws = _quality_workspace(
         tmp_path,
         {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},
@@ -1622,8 +1622,7 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Pat
 
 
 def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path) -> None:
-    # A present-but-malformed alternatives.json must not take down
-    # analyze_findings / analyze_session (it served wonder attribution either).
+    # A malformed optional alternatives file must not take down analysis.
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)

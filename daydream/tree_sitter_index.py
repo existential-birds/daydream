@@ -16,17 +16,13 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 from tree_sitter import Language, Parser, Query, QueryCursor
 
 from daydream import git_ops
 from daydream.exploration import FileInfo
 from daydream.git_ops import GitError
-
-if TYPE_CHECKING:
-    pass
-
 
 # --- Lazy language factories -------------------------------------------------
 

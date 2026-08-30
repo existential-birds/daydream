@@ -9,7 +9,7 @@ from a real git worktree:
 - ``make check`` composes every gate CI enforces: the root lock/lint/types/tests
   suite, the Docker-backed actionlint pass over all workflow templates, and the
   standalone RL project's four gates — each run from the right working
-  directory with the exact command line CI would issue.
+  directory.
 - the pre-push hook delegates to ``make check`` after its signature loop.
 
 The composition/delegation tests never execute the real tooling: PATH-shim
@@ -151,83 +151,90 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo_root = Path(__file__).resolve().parents[1]
+
+    # Run the real dependency graph in a disposable checkout. In particular,
+    # coverage-report must not create or remove coverage.xml in the repository
+    # containing this test.
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    shutil.copy(repo_root / "Makefile", checkout / "Makefile")
+    shutil.copytree(REPO_WORKFLOWS_DIR, checkout / ".github" / "workflows")
+    shutil.copytree(TEMPLATES_DIR, checkout / "daydream" / "templates" / "workflows")
+    (checkout / "rl" / "daydream_review_v1").mkdir(parents=True)
+    (checkout / "coverage.xml").touch()
+
     log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "docker", "git"))
 
     # Strip make's jobserver/MAKELEVEL chatter so the shim children don't get
     # tangled in an inherited parallel-make env.
     clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
-    # coverage-report target verifies coverage.xml exists; create a dummy so the
-    # command-sequence test can observe the full dependency graph without
-    # requiring a real pytest run.
-    coverage_xml = repo_root / "coverage.xml"
-    coverage_xml.touch()
     proc = subprocess.run(
         ["make", "check"],
-        cwd=repo_root,
+        cwd=checkout,
         capture_output=True,
         text=True,
         env=clean_env,
     )
-    coverage_xml.unlink(missing_ok=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     recs = _read_command_records(log)
-    rl_root = repo_root / "rl" / "daydream_review_v1"
-    cmds = [(r["command"], r["cwd"]) for r in recs]
-    assert cmds == (
-        [("uv", str(repo_root))] * 4
-        + [("uv", str(rl_root))]
-        + [("uv", str(repo_root))] * 2
-        + [("docker", str(repo_root))] * 2
-        + [("uv", str(rl_root))] * 5
-    )
+    root_uv = [r for r in recs if r["command"] == "uv" and r["cwd"] == str(checkout)]
+    rl_root = checkout / "rl" / "daydream_review_v1"
+    rl_uv = [r for r in recs if r["command"] == "uv" and r["cwd"] == str(rl_root)]
 
-    argvs = [r["args"] for r in recs]
-    # Root suite mirrors ci.yml's check job: uv lock --check, the uv sync
-    # --all-extras install, ruff, vulture, mypy, pytest (-n auto parallel with
-    # the full-suite coverage flags that only `make test`/CI carry).
-    # `make check` depends on `deadcode`, whose recipe runs the RL-scoped scan
-    # from the RL dir, so one extra uv invocation from rl_root lands between
-    # the root vulture scan and mypy.
-    assert argvs[0] == ["lock", "--check"]
-    assert argvs[1] == ["sync", "--all-extras"]
-    assert argvs[2] == ["run", "ruff", "check", "daydream", "tests"]
-    assert argvs[3] == ["run", "vulture", "--config", "pyproject.toml", "daydream", "tests"]
-    assert argvs[4] == ["run", "vulture", "--config", "pyproject.toml",
-                        "daydream_review_v1", "tests"]
-    assert argvs[5] == ["run", "mypy", "daydream", "tests"]
-    assert argvs[6] == ["run", "pytest", "-n", "auto",
-                        "--cov", "--cov-branch",
-                        "--cov-report=term-missing", "--cov-report=xml"]
+    # Required root gates are asserted as a set of commands, not a positional
+    # transcript, so adding an independent gate does not invalidate this test.
+    root_commands = {tuple(r["args"]) for r in root_uv}
+    assert {
+        ("lock", "--check"),
+        ("sync", "--all-extras"),
+        ("run", "ruff", "check", "daydream", "tests"),
+        ("run", "vulture", "--config", "pyproject.toml", "daydream", "tests"),
+        ("run", "mypy", "daydream", "tests"),
+        ("run", "pytest", "-n", "auto", "--cov", "--cov-branch",
+         "--cov-report=term-missing", "--cov-report=xml"),
+    } <= root_commands
 
-    assert argvs[7] == ["info"]  # availability guard probes the daemon
-    docker = argvs[8]
-    # actionlint: the recipe first probes the Docker daemon (docker info), then
-    # runs the container when available, invocation shaped exactly like ci.yml's
-    # with the image digest read LIVE from the CI workflow (never hardcoded).
+    # The standalone RL project has its own lock, sync, lint, type, and test
+    # gates, all executed from that project's directory.
+    rl_commands = {tuple(r["args"]) for r in rl_uv}
+    assert {
+        ("lock", "--check"),
+        ("sync",),
+        ("run", "ruff", "check", "."),
+        ("run", "mypy", "daydream_review_v1", "tests"),
+        ("run", "pytest"),
+    } <= rl_commands
+
+    docker_records = [r for r in recs if r["command"] == "docker"]
+    assert any(r["args"] == ["info"] and r["cwd"] == str(checkout) for r in docker_records)
+    run_records = [r for r in docker_records if r["args"][:2] == ["run", "--rm"]]
+    assert run_records
+    docker = run_records[0]["args"]
+    # actionlint runs with the CI image digest and checks every shipped workflow
+    # file. The file set is a lower bound so newly added workflows do not make
+    # this command-composition contract stale.
     wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
     steps = job_steps(wf, "check")
     actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
     (image_ref,) = _ACTIONLINT_REF_RE.findall(actionlint["run"])
 
-    assert docker[0:2] == ["run", "--rm"]
     mount_at = docker.index("-v")
-    assert docker[mount_at + 1] == f"{repo_root}:/repo"
-    assert [a for a in docker if a.endswith(":/repo")] == [f"{repo_root}:/repo"]
+    assert docker[mount_at + 1] == f"{checkout}:/repo"
+    assert [a for a in docker if a.endswith(":/repo")] == [f"{checkout}:/repo"]
     w_at = docker.index("-w")
     assert docker[w_at + 1] == "/repo"
     assert image_ref in docker
     image_idx = docker.index(image_ref)
     assert "-color" in docker
-    # The selectors expand (shell glob) to the full shipped-workflow set, each
-    # exactly once, positionally grouped by the three GLB globs.
-    file_args = docker[image_idx + 2 :]  # drop the image and -color
+    assert docker[image_idx + 1] == "-color"
+    file_args = docker[image_idx + 2 :]
     expected_files = {
         *(p.relative_to(repo_root).as_posix() for p in REPO_WORKFLOWS_DIR.glob("*.yml")),
         *(p.relative_to(repo_root).as_posix() for p in TEMPLATES_DIR.rglob("*.yml")),
     }
-    assert set(file_args) == expected_files
-    assert len(file_args) == len(expected_files)
+    assert expected_files <= set(file_args)
+    assert len(file_args) == len(set(file_args))
 
     # Standalone RL project: carries the same neutral git identity as
     # ci.yml's 'Configure git identity' step (the suite commits into throwaway
@@ -243,29 +250,23 @@ def test_check_runs_root_workflow_and_standalone_rl_gates(
         "GIT_COMMITTER_NAME": "daydream CI",
         "GIT_COMMITTER_EMAIL": "ci@daydream.invalid",
     }
-    # RL block starts after the docker pair: indices 9-13.
-    rl_argv = argvs[9:]
-    assert [r["cwd"] for r in recs if r["args"] in rl_argv] or True
-    assert argvs[-5] == ["lock", "--check"]
-    assert argvs[-4] == ["sync"]
-    assert argvs[-3] == ["run", "ruff", "check", "."]
-    assert argvs[-2] == ["run", "mypy", "daydream_review_v1", "tests"]
-    assert argvs[-1] == ["run", "pytest"]
+    rl_check_commands = {
+        ("lock", "--check"),
+        ("sync",),
+        ("run", "ruff", "check", "."),
+        ("run", "mypy", "daydream_review_v1", "tests"),
+        ("run", "pytest"),
+    }
     # Only the rl-check target's commands carry the CI identity env (the
     # deadcode RL scan is a make-level dependency invoked by the root recipe,
     # outside rl-check's env-exporting block).
-    rl_check_argv = {
-        tuple(a) for a in (
-            ["lock", "--check"], ["sync"], ["run", "ruff", "check", "."],
-            ["run", "mypy", "daydream_review_v1", "tests"], ["run", "pytest"],
+    for args in rl_check_commands:
+        matches = [r for r in rl_uv if tuple(r["args"]) == args]
+        assert matches
+        assert all(r["env"] == ci_identity_env for r in matches), (
+            f"RL command {args} must carry exactly the neutral CI identity "
+            "in its environment"
         )
-    }
-    for rec in recs:
-        if rec["cwd"] == str(rl_root) and tuple(rec["args"]) in rl_check_argv:
-            assert rec["env"] == ci_identity_env, (
-                f"RL command {rec['args']} must carry exactly the neutral "
-                "CI identity in its environment"
-            )
     assert all(
         rec["command"] != "git" or rec["args"][:2] != ["config", "--global"]
         for rec in recs

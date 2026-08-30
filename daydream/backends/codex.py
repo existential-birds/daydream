@@ -1,4 +1,3 @@
-# daydream/backends/codex.py
 """Codex CLI subprocess backend for daydream.
 
 Spawns `codex exec --experimental-json` as an async subprocess,

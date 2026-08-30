@@ -93,11 +93,10 @@ def _flow_fix_test_steps(flow: DaydreamRunFlow, flow_name: str | None) -> tuple[
     pipeline while the label would suggest the built-in. Two labels are fixed
     by runtime mode, not the registry:
 
-    - Review/comment (``TTT``) stops after ``post-review`` (``_review_only_mode``)
-      and never runs the fix cycle, so it records neither backend.
-    - Feedback (``PR``) runs its own ``fix-items`` phase (``_step_fix_items``,
-      ``backend_for("fix")``) but never the ``test`` step, so it records a fix
-      backend only — matching the trajectory's ``_recorder_backend_names``.
+    - Review/comment (``TTT``) stops after ``post-review`` and never runs the
+      fix cycle, so it records neither backend.
+    - The legacy PR compatibility mode runs its fix phase but never the test
+      step, so it records a fix backend only.
 
     ``NORMAL``/``DEEP``/``IMPROVE``/``CUSTOM`` are classified by the registered
     pipeline (``NORMAL``/``DEEP`` → the ``deep`` flow; ``IMPROVE`` → ``improve``;

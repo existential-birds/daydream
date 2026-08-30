@@ -76,8 +76,11 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
     verifier_dir = tmp_path / "verifier"
     verifier_dir.mkdir()
     # the same template asset bundle asserted by test_generated_asset_tree_is_self_contained
-    for rel in ("score_review.py", "verifier_core.py", "judge_prompt.md", "golden-review.json"):
+    for rel in ("score_review.py", "judge_prompt.md", "golden-review.json"):
         (verifier_dir / rel).write_bytes((_TEMPLATES_TESTS / rel).read_bytes())
+    # verifier_core.py comes from the canonical host module (issue #1004)
+    (verifier_dir / "verifier_core.py").write_bytes(
+        (_TEMPLATES_TESTS.parents[1] / "verifier_core.py").read_bytes())
     # task-binding metadata: run_verifier binds the candidate to the immutable
     # verifier-metadata.json beside the gold (case id + base/head refs + digest)
     gold_bytes = (verifier_dir / "golden-review.json").read_bytes()
@@ -139,5 +142,11 @@ def test_verifier_asset_set_never_includes_task_md(tmp_path: Path, monkeypatch: 
     df = dockerfile.read_text()
     for forbidden in ("Task.md", "task_spec"):
         assert forbidden not in df, f"verifier Dockerfile must not reference {forbidden}"
-    for rel in ("score_review.py", "verifier_core.py", "judge_prompt.md", "golden-review.json", "test.sh"):
+    for rel in ("score_review.py", "judge_prompt.md", "golden-review.json", "test.sh"):
         assert (_TEMPLATES_TESTS / rel).exists()
+    # verifier_core.py is no longer a template twin: the build deploys the
+    # canonical host module directly (issue #1004).
+    assert not (_TEMPLATES_TESTS / "verifier_core.py").exists()
+    assert (
+        _TEMPLATES_TESTS.parents[1] / "verifier_core.py"
+    ).exists()

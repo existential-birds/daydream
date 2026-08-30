@@ -617,7 +617,7 @@ def reviewer_set_penalty_prior(
     ``_REVIEWER_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
     ``rejected→1.0``). The raw pooled mean and count are returned — the ``>=10``
     sufficiency threshold and the ``0.5`` default fallback are the caller's
-    responsibility (Task 8 / spec C4).
+    responsibility.
 
     Rows with malformed ``reviewer_logins`` / ``labels`` JSON are skipped with a
     :func:`warnings.warn` (mirroring ``corpus._annotation_reward``) so a single

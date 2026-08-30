@@ -462,7 +462,7 @@ def test_diff_name_only_returns_multiple_files_in_order(tmp_path: Path) -> None:
     _git(repo, "add", "alpha.txt", "beta.txt")
     _commit(repo, "add two files")
     result = git_ops.diff_name_only(repo, "main", "HEAD")
-    assert sorted(result) == ["alpha.txt", "beta.txt"]
+    assert result == ["alpha.txt", "beta.txt"]
 
 
 def test_diff_name_only_returns_empty_list_on_bad_ref(tmp_path: Path) -> None:
@@ -1244,11 +1244,6 @@ def test_gh_issue_list_returns_empty_on_failure(
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
     assert git_ops.gh_issue_list(repo) == []
-
-
-def test_wrong_branch_error_is_raisable() -> None:
-    with pytest.raises(WrongBranchError):
-        raise WrongBranchError("expected feat, got main")
 
 
 # --- gh wrappers (skipped when gh missing) ----------------------------------

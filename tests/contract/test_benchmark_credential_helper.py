@@ -14,7 +14,7 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
 
     Returns (bare_repo_path, ls-remote http url). The server 401s the first
     ``GET /repo.git/info/refs`` (query stripped) and serves the ref advertisement
-    once an Authorization header is present — exactly the spike harness.
+    once an Authorization header is present.
     """
     bare = root / "repo.git"
     subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)

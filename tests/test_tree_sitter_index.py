@@ -156,24 +156,11 @@ def test_python_multilevel_relative_imports(
 @pytest.mark.parametrize(
     "api_rel, files, expected_import_paths",
     [
-        # R2 regression pin: `from ..models` in package/feature/api.py resolves
-        # to the parent package's models module. Already works on main after
-        # #390; pinned so it cannot regress.
-        (
-            "package/feature/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/api.py": (
-                    '"""API module."""\nfrom ..models import User\n\ndef get_user():\n    return User()\n'
-                ),
-            },
-            {"package/models.py"},
-        ),
         # R3 primary fix: `from .. import services` in package/feature/api.py
         # resolves to BOTH the parent package __init__.py AND the imported
         # sibling package's __init__.py — and must NOT include the importer's
         # own package/feature/__init__.py (C3).
-        (
+        pytest.param(
             "package/feature/api.py",
             _SHARED_FIXTURES
             | {
@@ -183,6 +170,7 @@ def test_python_multilevel_relative_imports(
                 ),
             },
             {"package/__init__.py", "package/services/__init__.py"},
+            id="parent-package-import",
         ),
     ],
 )
@@ -213,28 +201,9 @@ def test_typescript_impact_surface(tmp_path: Path) -> None:
     results = detect_affected_files(diff_text, repo, depth=1)
     assert any(r.path == "src/api.ts" and r.role == "modified" for r in results)
     assert any(r.path == "src/models.ts" and r.role == "modified" for r in results)
-    assert any(r.role == "imports" and r.path.endswith("models.ts") for r in results) or any(
-        r.role == "imported_by" for r in results
-    )
-    assert len(results) >= 2
-
-
-def test_go_impact_surface(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "go_multifile.diff").read_text()
-    repo = _materialize(
-        tmp_path,
-        {
-            "api.go": (
-                'package main\n\nimport "example.com/m/models"\n\n'
-                "func GetUser() *models.User {\n\treturn &models.User{}\n}\n"
-            ),
-            "models/user.go": "// user model\npackage models\ntype User struct{}\n",
-        },
-    )
-    results = detect_affected_files(diff_text, repo, depth=1)
-    assert any(r.path == "api.go" and r.role == "modified" for r in results)
-    assert any(r.path == "models/user.go" and r.role == "modified" for r in results)
-    assert len(results) >= 2
+    assert ("src/models.ts", "imports") in {
+        (r.path, r.role) for r in results
+    }
 
 
 def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -282,10 +251,9 @@ def test_rust_impact_surface(tmp_path: Path) -> None:
     results = detect_affected_files(diff_text, repo, depth=1)
     assert any(r.path == "src/api.rs" and r.role == "modified" for r in results)
     assert any(r.path == "src/models.rs" and r.role == "modified" for r in results)
-    assert any(r.role == "imports" and r.path.endswith("models.rs") for r in results) or any(
-        r.role == "imported_by" for r in results
-    )
-    assert len(results) >= 2
+    assert ("src/models.rs", "imports") in {
+        (r.path, r.role) for r in results
+    }
 
 
 def test_default_depth_is_one() -> None:

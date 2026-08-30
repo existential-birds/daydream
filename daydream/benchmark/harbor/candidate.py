@@ -53,7 +53,7 @@ def _candidate_title(description: str) -> str:
 
 
 def _assemble_body(fields: Any) -> str:
-    """Assemble the candidate body exactly like ``benchmark.mapping``.
+    """Assemble the candidate body from the canonical finding fields.
 
     The body leads with the finding description, followed by the
     ``**Severity:**`` / ``**Confidence:**`` badges, and the rationale only when

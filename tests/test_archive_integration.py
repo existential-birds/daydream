@@ -1,4 +1,3 @@
-# tests/test_archive_integration.py
 """Integration tests for the TrajectoryRecorder on_write callback and archive pipeline.
 
 Verifies that the on_write callback fires at the right times, that the full

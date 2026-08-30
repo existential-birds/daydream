@@ -8,11 +8,6 @@ from daydream.agent import (
 )
 
 
-def test_non_interactive_defaults_false() -> None:
-    reset_state()
-    assert get_non_interactive() is False
-
-
 def test_set_and_get_non_interactive() -> None:
     try:
         set_non_interactive(True)

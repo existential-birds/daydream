@@ -278,12 +278,6 @@ def test_review_workflow_head_bound_gate(wf_path: Path) -> None:
         assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY"}
 
 
-def test_review_workflow_uses_only_model_credential() -> None:
-    """The live review gate adds no secret beyond the model credential."""
-    text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
-    assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
-
-
 @pytest.mark.parametrize(
     "wf_path",
     [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],

@@ -12,6 +12,7 @@ import pytest
 
 import daydream.benchmark.harbor.clean as clean_mod
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
+from daydream.benchmark.storage import atomic_write_json as storage_atomic_write_json
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +91,6 @@ def _append_ledger_run_raw(ws: Path, run_id: Any, *, job_dir: Any, state: Any, e
 
 
 # ---------------------------------------------------------------------------
-# Task 1: clean subcommand surface + --derived union
 # ---------------------------------------------------------------------------
 
 
@@ -123,16 +123,36 @@ def test_handle_clean_routes_to_clean_workspace(tmp_path: Path, monkeypatch: pyt
 
 
 # ---------------------------------------------------------------------------
-# Task 2: CleanReport + empty-selection no-op
 # ---------------------------------------------------------------------------
 
 
-def test_clean_report_has_exit_code_and_summary() -> None:
-    r = clean_mod.CleanReport()
-    assert r.exit_code == 0
-    lines = r.summary_lines()
-    assert isinstance(lines, list)
-    assert len(lines) >= 1   # a summary line exists
+def test_clean_report_summary_includes_populated_counters() -> None:
+    report = clean_mod.CleanReport(
+        cache_deleted=2,
+        cache_absent=1,
+        trajectory_deleted=3,
+        trajectory_absent=4,
+        job_dirs_deleted=5,
+        job_dirs_absent=6,
+        runs_cleaned=7,
+        runs_already_clean=8,
+        images_removed=9,
+        images_absent=10,
+        images_failed=11,
+        gold_deleted=12,
+        recoverable=False,
+    )
+
+    assert report.exit_code == 1
+    assert report.summary_lines() == [
+        "cache: 2 deleted, 1 absent",
+        "trajectories: 3 deleted, 4 absent",
+        "job dirs: 5 deleted, 6 absent",
+        "runs: 7 cleaned, 8 already clean",
+        "images: 9 removed, 10 absent, 11 failed",
+        "gold: 12 deleted",
+        "deletion is unrecoverable",
+    ]
 
 
 def test_clean_no_flags_deletes_nothing_and_preserves_gold(tmp_path: Path) -> None:
@@ -146,7 +166,6 @@ def test_clean_no_flags_deletes_nothing_and_preserves_gold(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Task 3: --cache
 # ---------------------------------------------------------------------------
 
 
@@ -175,7 +194,6 @@ def test_clean_cache_absent_target_is_already_clean(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 4: --trajectories
 # ---------------------------------------------------------------------------
 
 
@@ -209,7 +227,6 @@ def test_clean_trajectories_absent_dir_is_already_clean(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 5: --jobs (ledger-driven job-dir deletion + cleaned state)
 # ---------------------------------------------------------------------------
 
 
@@ -240,7 +257,6 @@ def test_clean_jobs_already_cleaned_run_is_noop(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 6: --jobs recorded-image removal via the docker_rm seam
 # ---------------------------------------------------------------------------
 
 
@@ -282,7 +298,6 @@ def test_clean_jobs_removed_true_env_skipped(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 7: partial Docker failure tolerance
 # ---------------------------------------------------------------------------
 
 
@@ -425,7 +440,6 @@ def test_clean_jobs_cleans_run_whose_job_dir_never_materialized(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# Task 8: containment + symlink-escape rejection (fails closed)
 # ---------------------------------------------------------------------------
 
 
@@ -453,7 +467,6 @@ def test_non_contained_ledger_job_dir_rejected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 9: --all --yes total-deletion gate
 # ---------------------------------------------------------------------------
 
 
@@ -520,24 +533,44 @@ def test_clean_all_preserves_curated_when_derived_stage_soft_fails(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
-# Task 11: acceptance matrix — locking, idempotency, derived-union
 # ---------------------------------------------------------------------------
 
 
 def test_workspace_lock_held_during_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = _seed_clean_ws(tmp_path)
-    (ws / "cache" / "repository.git").mkdir(parents=True)
-    held = []
-    from daydream.benchmark.storage import WorkspaceLock
+    run_id = "00000000-0000-0000-0000-0000000000f3"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "t").mkdir(parents=True)
+    _append_ledger_run(
+        ws,
+        run_id,
+        state="complete",
+        environments=[_docker_env("case-abc__1", removed=False)],
+    )
 
-    class RecordingLock(WorkspaceLock):
-        def __enter__(self) -> Any:
-            held.append(True)
-            return super().__enter__()
+    import fcntl
 
-    monkeypatch.setattr(clean_mod, "WorkspaceLock", RecordingLock)
-    clean_mod.clean_workspace(ws, jobs=True)   # ledger mutation path
-    assert held                     # a workspace lock was acquired
+    lock_held_at_write: list[bool] = []
+    real_atomic_write_json = storage_atomic_write_json
+
+    def recording_atomic_write_json(
+        path: Path, data: Any, *, mode: int = 0o600,
+    ) -> None:
+        with (ws / ".benchmark.lock").open("r+") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_held_at_write.append(True)
+            else:
+                lock_held_at_write.append(False)
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+        real_atomic_write_json(path, data, mode=mode)
+
+    monkeypatch.setattr(clean_mod, "atomic_write_json", recording_atomic_write_json)
+    report = clean_mod.clean_workspace(ws, jobs=True)
+
+    assert report.exit_code == 0 and report.job_dirs_deleted == 1
+    assert lock_held_at_write == [True]
 
 
 def test_clean_idempotent_repeat_noop(tmp_path: Path) -> None:

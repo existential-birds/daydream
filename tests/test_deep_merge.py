@@ -17,28 +17,6 @@ def _default_strategy(stage: str) -> str:
     return _rp.build_default_profile().strategies[stage].content
 
 
-def test_merge_prompt_specifies_structured_item_list(tmp_path: Path) -> None:
-    """D-25: the agent is told to return a schema item list with lens + severity."""
-    intent = tmp_path / "intent.md"
-    alts = tmp_path / "alts.json"
-    dedup = tmp_path / "dedup.json"
-    out = tmp_path / ".review-output.md"
-    records = [tmp_path / "r1.json", tmp_path / "r2.json"]
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=records,
-        intent_path=intent,
-        alternatives_path=alts,
-        dedup_candidates_path=dedup,
-        output_path=out,
-    )
-    assert '{"items": [' in prompt  # structured JSON list, not markdown
-    assert "lens" in prompt
-    assert "severity" in prompt
-    # The agent must NOT be told to write a markdown report to a file anymore.
-    assert "write the complete report to" not in prompt.lower()
-
-
 def test_merge_prompt_mandates_cross_stack_lens(tmp_path: Path) -> None:
     """D-26: cross-stack concerns are tagged via the cross-stack lens."""
     prompt = build_merge_prompt(

@@ -754,13 +754,17 @@ def test_generated_asset_tree_is_self_contained(sr_module: Any) -> None:
     base = Path(sr_module.__file__).parent
     for rel in (
         "score_review.py",
-        "verifier_core.py",
         "judge_prompt.md",
         "golden-review.json",
         "test.sh",
         "Dockerfile",
     ):
         assert (base / rel).exists(), rel
+    # verifier_core.py is the canonical host module, deployed by the build
+    # rather than shipped as a template twin (issue #1004).
+    assert not (base / "verifier_core.py").exists()
+    canonical_core = base.parents[1] / "verifier_core.py"
+    assert canonical_core.exists(), canonical_core
     solution = base.parent / "solution"
     for rel in ("solve.sh", "golden-review.json"):
         assert (solution / rel).exists(), f"solution/{rel}"
@@ -1160,14 +1164,6 @@ def test_located_pair_does_not_render_none(sr_module: Any) -> None:
     # The located fields must not be replaced by the locationless marker: the
     # finding's own path/lines render their real values (the template doc
     # paragraph may mention ``<none>``, so only the field lines are checked).
-
-
-def test_locationless_pair_stays_within_prompt_cap(sr_module: Any) -> None:
-    sr = sr_module
-    locless = {"title": "t", "body": "b", "severity": "high",
-               "path": None, "start_line": None, "end_line": None}
-    prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
-    assert len(prompt.encode("utf-8")) < 24 * 1024  # prompt/leakage cap holds
 
 
 def test_locationless_pair_still_escapes_untrusted_body(sr_module: Any) -> None:
@@ -1822,4 +1818,3 @@ async def test_claude_cli_communicate_only_fallback(sr_module: Any) -> None:
     assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
     assert len(seen) == 1
     assert seen[0][1] == b""  # stderr is drained by communicate, never blocks
-

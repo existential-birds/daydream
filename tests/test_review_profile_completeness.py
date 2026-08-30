@@ -1,10 +1,7 @@
 """Task 8 (R13): completeness guard for model-bearing stage classification.
 
-Adding a new model-bearing review stage without a corresponding profile
-strategy + host-envelope classification must fail this guard. The test
-simulates the production spine registry with a stand-in and asserts every
-registered stage carries both a profile strategy and an envelope
-classification; a stage added to the spine without either trips it.
+Every model-bearing stage must have both a profile strategy and a host-envelope
+classification.
 """
 
 from daydream import review_profile as rp

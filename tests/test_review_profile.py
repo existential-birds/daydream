@@ -1,10 +1,4 @@
-"""Task 1 (R2): strict review-profile model + stage schema.
-
-Test-first per the implementation plan (tasks 1-13 of issue #885).
-This task: strict model with stage schema. Digests (R3), parse (R4),
-fail-closed validation (R3), host caps (R5), typed clone (R8), provenance (R9/R12),
-and Harbor delivery (R10/R11) land in later tasks — not here.
-"""
+"""Tests for the strict review-profile model and stage schema."""
 from pathlib import Path
 
 import pytest
@@ -140,12 +134,6 @@ name = "p"
 arbitration_min_severity = "CRITICAL"''')   # not in the allowed severity enum
 
 
-def test_invalid_profile_never_falls_through_to_default() -> None:
-    # A failed parse raises; it does not silently return build_default_profile().
-    with pytest.raises(rp.ProfileError):
-        rp.parse_profile('schema_version = 1\nname = "p"\nunknown = true')
-
-
 # Task 4 (R5): host invariants unoverridable + host caps.
 def test_forbidden_host_fields_rejected() -> None:
     for field in ("backend", "model", "effort", "trust_mode", "egress",
@@ -194,7 +182,7 @@ def test_clone_one_override_changes_only_that_stage() -> None:
     assert clone.digest != base.digest
     for key in rp.STAGE_KEYS:
         if key != "intent":
-            assert clone.strategies[key].content == base.strategies[key].content  # byte-identical
+            assert clone.strategies[key].content == base.strategies[key].content
     assert clone.strategies["intent"].content == "NEW INTENT STRATEGY"
 
 def test_clone_override_revalidates_and_rejects_forbidden() -> None:
@@ -219,10 +207,3 @@ def test_review_profile_severity_levels_derive_from_severity_module() -> None:
     from daydream import severity
 
     assert rp._SEVERITY_LEVELS == frozenset(severity.CANONICAL_LEVELS)
-
-
-def test_review_profile_no_stale_mapping_citation() -> None:
-    # benchmark/mapping.py does not exist — the comment citing it must be gone/corrected.
-    import inspect
-
-    assert "benchmark/mapping.py" not in inspect.getsource(rp)

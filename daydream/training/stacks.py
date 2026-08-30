@@ -8,6 +8,19 @@ touches an excluded or unopted-copyleft repo fails closed.
 
 The lists themselves are owned exclusively by :mod:`daydream.training.exclusion`;
 this module re-implements no parsing.
+
+Corpus v2 adds :func:`load_dataset_v2`, an additive sibling that loads the
+frozen per-split manifests of a ``run_build_corpus_v2`` projection directory
+and refuses any record not stamped ``schema_version == "2"``. The C5/C8
+license gates are **not** enforced by any v2 code path: v2 projected records
+carry no ``repo_slug`` (no owner/repo field — the projection emits none and
+``schema/v2.json`` declares none), and the curation manifest carries no repo
+identity either, so neither the loader nor the bundle admission gates can
+evaluate the exclusion or copyleft lists. C5/C8 for v2 data is a
+curation-time responsibility: the curation process assembling the admitted
+bundle is where excluded/copyleft repos must be refused, before projection;
+no v2 consumer re-checks them. The v1 surface (``load_dataset``, its
+``legacy_policy`` stamping, and its error messages) is untouched.
 """
 
 from __future__ import annotations
@@ -16,6 +29,8 @@ import json
 from pathlib import Path
 
 from daydream.training.exclusion import load_copyleft_list, load_exclusion_list
+
+__all__ = ["load_dataset", "load_dataset_v2"]
 
 
 def load_dataset(
@@ -57,6 +72,17 @@ def load_dataset(
             record["legacy_policy"] = not (isinstance(policy_version, str) and policy_version)
             records.append(record)
 
+    _enforce_license_gates(records, path, allow_copyleft)
+    return records
+
+
+def _enforce_license_gates(
+    records: list[dict[str, object]],
+    path: str | Path,
+    allow_copyleft: frozenset[str] | set[str],
+) -> None:
+    """Shared C5/C8 fail-closed gates (see module docstring). The lists are
+    owned by :mod:`daydream.training.exclusion`; this module never parses them."""
     excluded = {slug.casefold() for slug in load_exclusion_list()}
     excluded_offenders = sorted(
         {slug for rec in records if (slug := str(rec.get("repo_slug", "")).casefold()) in excluded}
@@ -83,5 +109,61 @@ def load_dataset(
             f"C8 violation: copyleft repo(s) in corpus {path} without explicit opt-in: "
             f"{', '.join(copyleft_offenders)}. Pass these slugs via allow_copyleft to admit them."
         )
+
+
+def load_dataset_v2(path: str | Path) -> list[dict[str, object]]:
+    """Load a projected corpus v2 directory (the frozen train/validation/
+    holdout JSONL manifests from ``run_build_corpus_v2``).
+
+    ``holdout.jsonl``. A ``_SUCCESS`` completeness marker (written last by
+    the projector, mirroring the bundle's own gate) is required: a partial
+    projection left by a mid-write failure is refused, never consumed.
+
+    The C5 exclusion and C8 copyleft fail-closed gates are **not** applied by
+    this loader: v2 projected records carry no ``repo_slug`` (the record
+    shape has no owner/repo field — the projection emits none and
+    ``schema/v2.json`` declares none), so they cannot be evaluated against
+    the exclusion or copyleft lists, and no other v2 code path consults
+    those lists either. C5/C8 for v2 data lives at bundle curation time —
+    the curation process assembling the admitted bundle must refuse excluded
+    and unopted-copyleft repos before the projection is built. This loader
+    only verifies the v2 schema stamp on every record.
+
+    Args:
+        path: The projection output directory containing ``train.jsonl``,
+            ``validation.jsonl`` and ``holdout.jsonl``.
+
+    Returns:
+        The full list of v2 training-record dicts, in split-file order.
+
+    Raises:
+        ValueError: When the projection lacks its ``_SUCCESS`` marker, or
+            when any record's ``schema_version`` is not ``"2"`` (the
+            offending record id is named).
+        json.JSONDecodeError: When a line is not valid JSON — never a silent
+            skip.
+    """
+    projection_dir = Path(path)
+    if not (projection_dir / "_SUCCESS").is_file():
+        raise ValueError(
+            f"corpus v2 projection {projection_dir}: missing _SUCCESS marker — "
+            "refusing a partial or incomplete projection"
+        )
+    records: list[dict[str, object]] = []
+    for filename in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
+        with (projection_dir / filename).open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record = json.loads(stripped)  # malformed line propagates verbatim
+                schema_version = record.get("schema_version")
+                if schema_version != "2":
+                    raise ValueError(
+                        f"corpus v2 record {record.get('record_id')!r} in "
+                        f"{projection_dir / filename}: schema_version {schema_version!r} "
+                        "!= '2' — refusing a record not projected by the v2 schema"
+                    )
+                records.append(record)
 
     return records

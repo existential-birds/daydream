@@ -1,4 +1,3 @@
-# tests/test_read_only_enforcement.py
 """Cross-backend gate: each backend enforces its read-only profile under read_only.
 
 Claude refuses mutation at the tool layer (PreToolUse guard). Codex combines

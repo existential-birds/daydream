@@ -1,8 +1,9 @@
 """Pure review scoring core for the Daydream Harbor verifier.
 
 Stdlib-only (dataclasses, hashlib, json, re) so this module can be
-copied byte-for-byte into a judge-free Harbor verifier image. No daydream
-source, no pydantic, no third-party imports.
+deployed byte-for-byte into a judge-free Harbor verifier image. This file is
+the canonical scorer (issue #1004): the build copies it directly into each
+case. No daydream source and no third-party imports of any kind.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ GOLD_FINDING_KEYS = {"finding_id", "title", "body", "severity", "path", "start_l
 
 
 class VerifierError(Exception):
-    """Raised on any invalid verifier input (mirrors a pydantic error)."""
+    """Raised on any invalid verifier input (validation-failures-as-exception)."""
 
 
 # ---------------------------------------------------------------------------
@@ -511,8 +512,7 @@ _RANGE_DISTANCE_DOC = """Distance from ``line`` to the inclusive ``[start, end]`
 boundary (``start`` when ``line`` is below it, ``end`` when above).
 
 Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
-(the source of truth); policed against drift by
-``tests/test_benchmark_verifier_assets.py`` (issue #971 R8).
+(the source of truth).
 """
 
 
