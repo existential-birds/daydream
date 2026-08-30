@@ -16,11 +16,14 @@ monkeypatch seam used by tests.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import re
-from dataclasses import dataclass
-from pathlib import Path
+import time
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
 from daydream.trajectory import redact_text
@@ -39,6 +42,10 @@ class HubUnavailableError(HydrationError):
 
 class HubDownloadError(HydrationError):
     """A requested path/revision does not exist in the Hub repo (fail-closed)."""
+
+
+class StageError(HydrationError):
+    """Staging the pinned snapshot failed (download, digest, or path violation)."""
 
 
 class MovingBranchError(HydrationError):
@@ -122,6 +129,124 @@ class HubClient(Protocol):
 
     @property
     def repo_private(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    """Outcome of one :func:`download_snapshot` pass over the pinned revision."""
+
+    downloaded: int = 0
+    skipped: int = 0
+    digests: dict[str, str] = field(default_factory=dict)  # relpath -> sha256
+
+
+def _validate_relpath(relpath: str, root: Path) -> Path:
+    """Enforce the M4 trust boundary: resolve ``relpath`` strictly under ``root``.
+
+    Raises :class:`StageError` naming "traversal" when the path is absolute,
+    carries ``..`` segments, or otherwise escapes the staging root. Nothing is
+    ever written before this check passes.
+    """
+    p = PurePosixPath(relpath)
+    if p.is_absolute() or any(part == ".." for part in p.parts):
+        raise StageError(
+            redact_text(
+                f"refusing relpath {relpath!r}: traversal — path escapes the staging root"
+            )
+        )
+    target = (root / relpath).resolve()
+    if not target.is_relative_to(root.resolve()):
+        raise StageError(
+            redact_text(
+                f"refusing relpath {relpath!r}: traversal — resolved path escapes the staging root"
+            )
+        )
+    return target
+
+
+def download_snapshot(
+    client: HubClient,
+    *,
+    revision: str,
+    stage_dir: Path,
+    expect: dict[str, str] | None = None,
+) -> DownloadResult:
+    """Resumable, content-addressed download of a pinned snapshot revision (issue #982 M3).
+
+    Lists the repo's bundle content (paths under ``bundles/``), writes each
+    artifact to ``stage_dir/<revision>/<relpath>``, and records a per-artifact
+    ledger (relpath, sha256, size, fetched_at) in
+    ``stage_dir/<revision>/_download_manifest.json``.
+
+    Resume: an on-disk artifact whose sha256 matches the existing ledger record
+    is skipped, not re-downloaded; missing or mismatched artifacts are fetched,
+    re-hashed, and their records updated. ``expect`` — ``{relpath: sha256}``
+    from a pinned manifest — makes any disagreement a hard :class:`StageError`
+    naming "digest". Every relpath is validated against the staging root before
+    any write (see :func:`_validate_relpath`); download failures delete the
+    partial artifact and raise :class:`StageError` with redacted messages.
+    """
+    revision = str(revision)
+    root = stage_dir / revision
+    manifest_path = root / "_download_manifest.json"
+    records: dict[str, dict[str, Any]] = {}
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text())
+            records = {a["relpath"]: a for a in loaded.get("artifacts", [])}
+        except (OSError, ValueError, KeyError, TypeError):
+            records = {}  # corrupt ledger: rebuild from disk state
+
+    relpaths = list(client.list_repo_files())
+    downloaded = 0
+    skipped = 0
+    digests: dict[str, str] = {}
+    artifacts: list[dict[str, Any]] = []
+
+    for relpath in relpaths:
+        target = _validate_relpath(relpath, root)
+        if not relpath.startswith("bundles/"):
+            continue  # non-bundle paths (top-level manifests, etc.) are not staged here
+        expected_sha = (expect or {}).get(relpath)
+        try:
+            if target.exists():
+                existing = hashlib.sha256(target.read_bytes()).hexdigest()
+                record_sha = records.get(relpath, {}).get("sha256")
+                if expected_sha in (None, existing) and record_sha in (None, existing):
+                    digests[relpath] = existing
+                    skipped += 1
+                    artifacts.append({**records.get(relpath, {}), "relpath": relpath, "sha256": existing})
+                    continue
+            data = client.download_file(relpath, revision=revision)
+        except HydrationError as exc:
+            raise StageError(redact_text(str(exc))) from exc
+        sha = hashlib.sha256(data).hexdigest()
+        if expected_sha is not None and sha != expected_sha:
+            raise StageError(
+                redact_text(f"digest mismatch for {relpath!r}: expected {expected_sha}, got {sha}")
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".partial")
+        try:
+            tmp.write_bytes(data)
+            tmp.replace(target)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            raise StageError(redact_text(f"write failed for {relpath!r}: {exc}")) from exc
+        downloaded += 1
+        digests[relpath] = sha
+        artifacts.append(
+            {
+                "relpath": relpath,
+                "sha256": sha,
+                "size": len(data),
+                "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+
+    root.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({"revision": revision, "artifacts": artifacts}, indent=2))
+    return DownloadResult(downloaded=downloaded, skipped=skipped, digests=digests)
 
 
 def _import_hf_hub() -> Any:

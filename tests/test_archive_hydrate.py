@@ -1,6 +1,7 @@
 """Unit/component tests for the #982 hydrate module."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -158,3 +159,61 @@ class TestResolveRevision:
         with pytest.raises(hydrate.HydrationError) as excinfo:
             hydrate.resolve_source_revision(hub, "c" * 40, exploratory=False)
         assert "hf_token_secret" not in str(excinfo.value)
+
+
+class TestDownloadSnapshot:
+    def test_clean_download_layout_and_digests(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage" / "downloads"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+        manifest = json.loads((stage / ("a" * 40) / "_download_manifest.json").read_text())
+        assert len(manifest["artifacts"]) == len(SNAPSHOT)
+        art = manifest["artifacts"][0]
+        assert art["relpath"].startswith("bundles/")  # paths relative to snapshot root
+        expected = hashlib.sha256(SNAPSHOT[art["relpath"]]).hexdigest()
+        assert art["sha256"] == expected
+        assert (stage / ("a" * 40) / art["relpath"]).read_bytes() == SNAPSHOT[art["relpath"]]
+
+    def test_resume_skips_verified_artifacts(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage" / "downloads"
+        first = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+        assert first.downloaded == len(SNAPSHOT)
+        # interrupt: remove one artifact file, rerun — only it is re-fetched
+        manifest_path = stage / ("a" * 40) / "_download_manifest.json"
+        art = json.loads(manifest_path.read_text())["artifacts"][0]
+        (stage / ("a" * 40) / art["relpath"]).unlink()
+        hub.downloaded_log.clear()
+        second = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+        assert second.downloaded == 1
+        assert second.skipped == len(SNAPSHOT) - 1
+
+    def test_digest_mismatch_rejects_artifact(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        hub.files["bundles/sess-a/manifest.json"] = b'{"session_id": "sess-a", "tampered": true}'
+        stage = tmp_path / "stage" / "downloads"
+        with pytest.raises(hydrate.StageError, match="digest"):
+            hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage,
+                                      expect={"bundles/sess-a/manifest.json": "0" * 64})
+
+    def test_traversal_relpath_rejected(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        hub.files["../../escape.txt"] = b"pwned"
+        stage = tmp_path / "stage" / "downloads"
+        with pytest.raises(hydrate.StageError, match="traversal|escapes"):
+            hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+
+    def test_traversal_from_manifest_never_writes(self, tmp_path: Path) -> None:
+        """A hostile Hub listing pointing outside the staging root writes nothing outside."""
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        hub.files["bundles/../../outside.txt"] = b"pwned"
+        stage = tmp_path / "stage" / "downloads"
+        with pytest.raises(hydrate.StageError):
+            hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+        assert not (tmp_path / "outside.txt").exists()
+        assert not (tmp_path / "stage" / "outside.txt").exists()

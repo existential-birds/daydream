@@ -27,6 +27,8 @@ class FakeHub:
         self.repo_id = repo_id
         self.private = private
         self.files: dict[str, bytes] = dict(files or {})
+        # Every successful download_file() call, in order (test observation seam).
+        self.downloaded_log: list[str] = []
         self._head = head_sha
         # Revision name -> immutable snapshot of the file tree at that revision.
         self._revisions: dict[str, dict[str, bytes]] = {head_sha: dict(self.files)}
@@ -77,6 +79,7 @@ class FakeHub:
                 f"path {path_in_repo!r} not found in {self.repo_id} "
                 f"(revision={revision or self._head})"
             )
+        self.downloaded_log.append(path_in_repo)
         return tree[path_in_repo]
 
     def upload_files(self, mapping: dict[str | Path, Path], commit_message: str) -> None:
