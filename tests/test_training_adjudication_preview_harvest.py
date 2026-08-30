@@ -160,9 +160,11 @@ def test_preview_and_harvest_identity_digest_stability_gate(tmp_path: Path) -> N
     """The parallel-implementation gate: preview and harvest must agree exactly."""
     root = _hydrated_index(tmp_path)
     ledger = tmp_path / "ledger.json"
-    preview = run_preview(root, ledger)
-    summary = run_harvest(root, ledger, tmp_path / "out")
-    exported = [json.loads(l) for l in (tmp_path / "out" / "adjudication.jsonl").read_text().splitlines()]
+    run_preview(root, ledger)
+    run_harvest(root, ledger, tmp_path / "out")
+    exported = [
+        json.loads(line) for line in (tmp_path / "out" / "adjudication.jsonl").read_text().splitlines()
+    ]
     # Every queue item's identity AND digest are identical across preview ledger and harvest export.
     by_id = {e["record_id"]: e for e in exported}
     for item in json.loads(ledger.read_text())["items"]:
