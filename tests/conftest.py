@@ -4,7 +4,6 @@ import importlib.util
 import os
 import sys
 import tomllib
-import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any

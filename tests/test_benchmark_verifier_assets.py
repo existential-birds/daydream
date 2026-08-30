@@ -17,6 +17,9 @@ from daydream.benchmark.harbor import verifier_core
 REPO = Path(__file__).resolve().parents[1]
 
 
+_MISSING = object()  # sentinel: bare "verifier_core" absent from sys.modules
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -123,6 +126,30 @@ def test_location_tolerance_meets_floor() -> None:
     assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
 
 
+def test_range_distance_cannot_drift_from_hunk_index() -> None:
+    """Lock the deployed verifier's private ``_range_distance`` to the shared
+    primitive in ``daydream/hunk_index.py`` (its documented source of truth,
+    ``verifier_core.py``/``hunk_index.py``): benchmark location-tier scoring
+    must never silently diverge from the product's near-line notion."""
+    from daydream.benchmark.harbor import verifier_core as vc
+    from daydream.hunk_index import range_distance as hunk_range_distance
+
+    cases: list[tuple[int, int, int]] = [
+        (1, 5, 10),   # below the range -> distance to the start boundary
+        (4, 5, 10),   # one line below start
+        (5, 5, 10),   # on the start boundary -> inside
+        (7, 5, 10),   # inside the range
+        (10, 5, 10),  # on the end boundary -> inside
+        (11, 5, 10),  # one line above end
+        (12, 5, 10),  # above the range -> distance to the end boundary
+        (0, 0, 0),    # degenerate single-line range, on the line
+        (2, 0, 0),    # degenerate range, below
+        (0, 3, 3),    # degenerate range, above
+    ]
+    for line, start, end in cases:
+        assert vc._range_distance(line, start, end) == hunk_range_distance(line, start, end)
+
+
 def test_render_metric_loads_colocated_canonical_and_matches_host(
     tmp_path: Path,
 ) -> None:
@@ -137,11 +164,17 @@ def test_render_metric_loads_colocated_canonical_and_matches_host(
         Path(verifier_core.__file__),
         stage / "verifier_core.py",
     )
+    import sys
     import types
 
+    prior_verifier_core = sys.modules.get("verifier_core", _MISSING)
     mod = types.ModuleType("metric")
     mod.__dict__["__file__"] = str(stage / "metric.py")  # uv run --script provides this
     exec(compile((stage / "metric.py").read_text(), "metric.py", "exec"), mod.__dict__)
+    # Loading the canonical scorer must not leave the exec'd module registered
+    # under the bare name: a later `import verifier_core` in the same process
+    # would otherwise silently resolve to this compiled copy (import hygiene).
+    assert sys.modules.get("verifier_core", _MISSING) is prior_verifier_core
     rows: list[dict[str, object] | None] = [{"reward": 0.5, "tp": 1, "fp": 0, "fn": 1, "verifier_error": 0}, None]
     assert mod.aggregate_metrics(rows) == verifier_core.aggregate_metrics(rows)
 

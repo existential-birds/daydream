@@ -33,15 +33,22 @@ def _load_aggregate_metrics() -> Callable[[list[dict[str, object] | None]], dict
     The module must be registered in ``sys.modules`` *before* ``exec_module``:
     ``@dataclass`` decoration inside the canonical module resolves
     ``cls.__module__`` through ``sys.modules``, and would otherwise raise
-    ``AttributeError``.
+    ``AttributeError``. The registration is removed again in ``finally``, so a
+    later bare import of ``verifier_core`` anywhere in the same process cannot
+    silently resolve to this compiled copy.
     """
     path = Path(__file__).resolve().parent / "verifier_core.py"
     spec = importlib.util.spec_from_file_location("verifier_core", path)
     if spec is None or spec.loader is None:
         raise ModuleNotFoundError(f"cannot load canonical verifier core from {path}")
     module = importlib.util.module_from_spec(spec)
+    registered = "verifier_core" not in sys.modules
     sys.modules.setdefault("verifier_core", module)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if registered:
+            sys.modules.pop("verifier_core", None)
     return module.aggregate_metrics  # type: ignore[no-any-return]
 
 

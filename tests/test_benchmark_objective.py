@@ -127,11 +127,6 @@ def _seed_trials(ws: Path, run_id: Any, trials: Any) -> None:
             (trial / "reward.json").write_text(json.dumps(row))
 
 
-def _rows_to_jsonl(rows: Any, path: Path) -> Any:
-    path.write_text("\n".join(("null" if r is None else json.dumps(r)) for r in rows) + "\n")
-    return path
-
-
 def test_objective_resolves_complete_run_by_explicit_run_id(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
