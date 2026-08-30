@@ -1,4 +1,3 @@
-# tests/test_codex_real_cli_contract.py
 """Contract checks against REAL codex CLI output (parser-drift guard).
 
 Two layers, per issue #154:

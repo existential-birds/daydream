@@ -179,10 +179,6 @@ class _SpecialistMockBackend:
         return None
 
 
-# Backward compat alias for tests/test_integration.py
-_AgentsRecordingMockBackend = _SpecialistMockBackend
-
-
 # Pure helpers
 def test_count_changed_files_counts_unique_paths() -> None:
     assert count_changed_files("") == 0
@@ -261,7 +257,7 @@ def test_parallel_tier_launches_three_agents(tmp_path: Path) -> None:
 
     assert len(backend.execute_calls) == 3
     schemas = {call["schema"]["type"] for call in backend.execute_calls}
-    assert len(schemas) >= 1  # All are "object" type
+    assert len(schemas) >= 1
     assert all(call["read_only"] is True for call in backend.execute_calls)
     # No agents= passed and no raw diff leaked into specialist prompts.
     for call in backend.execute_calls:

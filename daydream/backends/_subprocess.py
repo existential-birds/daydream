@@ -1,4 +1,3 @@
-# daydream/backends/_subprocess.py
 """Shared subprocess lifecycle helpers for the CLI backends (codex, pi)."""
 
 from __future__ import annotations

@@ -58,7 +58,7 @@ def test_mean_task_score_and_counts() -> None:
     assert m["task_count"] == 4
     assert m["scored_task_count"] == 2
     assert m["infra_error_task_count"] == 2           # None + verifier_error==1
-    assert "failed_task_count" not in m               # removed
+    assert "failed_task_count" not in m
     assert abs(m["mean_task_score"] - (1.0 + 0.5) / 2) < 1e-9   # mean over scored only
 
 

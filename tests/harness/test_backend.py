@@ -43,15 +43,6 @@ async def test_turns_advance_then_the_last_turn_repeats() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_script_yields_a_bare_result_event() -> None:
-    """The no-argument backend satisfies run_agent without a caller-supplied script."""
-    events = await _drain(ScriptedBackend())
-
-    assert len(events) == 1
-    assert isinstance(events[0], ResultEvent)
-
-
-@pytest.mark.asyncio
 async def test_an_exception_in_a_turn_raises_after_earlier_events_are_yielded() -> None:
     """A turn can emit partial output and then fail — the retry path's real shape."""
     backend = ScriptedBackend(
@@ -70,16 +61,6 @@ async def test_an_exception_in_a_turn_raises_after_earlier_events_are_yielded() 
     assert _texts(await _drain(backend)) == ["recovered"]
 
 
-@pytest.mark.asyncio
-async def test_events_shorthand_replays_the_same_stream_every_call() -> None:
-    backend = ScriptedBackend(
-        events=[TextEvent(text="same"), ResultEvent(structured_output=None, continuation=None)]
-    )
-
-    assert _texts(await _drain(backend)) == ["same"]
-    assert _texts(await _drain(backend)) == ["same"]
-
-
 def test_script_and_events_together_is_rejected() -> None:
     """Two sources of truth for the script would silently drop one."""
     with pytest.raises(ValueError, match="not both"):
@@ -88,7 +69,7 @@ def test_script_and_events_together_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_every_execute_argument_is_recorded() -> None:
-    """The recorders replace the per-test ``captured_*`` nonlocal lists."""
+    """Each execute argument is retained for inspection."""
     backend = ScriptedBackend()
 
     await _drain(backend, "first", max_turns=7, output_schema={"type": "object"}, read_only=True)

@@ -101,7 +101,6 @@ def test_run_config_exploration_depth() -> None:
 def test_run_config_has_no_skill_availability_field() -> None:
     """M1: RunConfig no longer carries installed-skill availability."""
     assert not hasattr(RunConfig(), "skill_availability")
-    assert not hasattr(RunConfig(), "skill_availability")
 
 
 def test_run_config_has_no_bot_field() -> None:
@@ -1513,4 +1512,3 @@ def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
     assert m.review_backend is None
     assert m.fix_backend == "claude"
     assert m.test_backend == "claude"
-

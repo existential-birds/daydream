@@ -27,8 +27,7 @@ Contract points:
 - **Failure propagation**: an unreadable row raises :class:`ValueError`
   naming the row id. There is no skip-and-warn and no default label.
 
-The checkpoint on disk is written by the coordinator (a later task); this
-module returns the in-memory model plus a serializable state dict.
+This module returns the in-memory model plus a serializable state dict.
 """
 
 from __future__ import annotations

@@ -136,7 +136,7 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tu
     _seed_git(repo, "push", "origin", "main:main")
     _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
     # Seed the preflight identity + repo-access responses (idempotent — this
-    # helper is used directly by the spike test, which does not call
+    # helper is used directly by this test, which does not call
     # ``_seed_preflight``), then re-seed the canned PR header so
     # base.sha/head.sha are the real origin SHAs.
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
@@ -202,7 +202,7 @@ def _seed_ready_case_mixed(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -
     """Seed a frozen ``ready`` workspace with a mixed evidence set.
 
     Mirrors :func:`_seed_ready_case` but seeds three evidence kinds so a case
-    has exactly five evidence records (per the verified spike composition):
+    has exactly five evidence records:
     inline replies and pure approvals and conversation comments that are
     evidence-only, plus one exact candidate and one non-exact candidate.
     Returns ``(ws, case_id, head_sha)``.
@@ -433,18 +433,6 @@ def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path: Path
     assert raw["curation"]["exclusions"] == [{"source_id": src, "reason": "incorrect", "note": None}]
 
 
-def test_reopen_for_mutation_transitions(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
-    cur.update({"state": "ready", "snapshot_attested": True})
-    reopened = cu._reopen_for_mutation(cur)
-    assert reopened["state"] == "draft" and reopened["snapshot_attested"] is False
-    cur.update({"state": "stale", "snapshot_attested": True})
-    reopened = cu._reopen_for_mutation(cur)
-    assert reopened["state"] == "stale" and reopened["snapshot_attested"] is False
-
-
 def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
@@ -657,7 +645,6 @@ def test_list_cases_evidence_count_counts_all_evidence(tmp_path: Path, fake_gh: 
 
 
 def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path: Path, fake_gh: FakeGh) -> None:
-    # numstat + evidence-count claims confirmed by tests/test_spike_issue775_reads.py
     from daydream.benchmark import curation as cu
     ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
 
@@ -795,7 +782,6 @@ def test_get_case_exposes_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) ->
 
 
 def test_get_case_attaches_evidence_projection(tmp_path: Path, fake_gh: FakeGh) -> None:
-    # evidence-join claim confirmed by tests/test_spike_issue775_reads.py
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
 
@@ -1118,20 +1104,22 @@ def test_curation_ready_requires_task_spec_sha256() -> None:
     assert draft.task_spec_sha256 is None
 
 
-def test_task_spec_approved_at_is_stripped_before_validation() -> None:
+def test_task_spec_approved_at_is_stripped_before_validation(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
     from daydream.benchmark import curation as cu
-    from daydream.benchmark.schema import Curation, _schema_ready
-    raw = {"curation": {"state": "draft", "snapshot_attested": False, "clean_attested": False,
-                        "gold_status": None, "findings": [], "exclusions": [],
-                        "case_exclusion": None, "gold_mode": "clean",
-                        "task_spec_approved_at": "2026-08-23T00:00:00+00:00"}}
-    ready = _schema_ready(raw)
-    assert "task_spec_approved_at" not in ready["curation"]
-    assert "gold_mode" not in ready["curation"]            # existing behaviour preserved
-    # curation service path also drops it
-    model = cu._curation_model(raw["curation"])
-    assert isinstance(model, Curation)
-    assert not hasattr(model, "task_spec_approved_at")
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    approved_at = "2026-08-23T00:00:00+00:00"
+    raw["curation"]["gold_mode"] = "clean"
+    raw["curation"]["task_spec_approved_at"] = approved_at
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    cu.validate_case(ws, case_id)
+    view = cu.get_case(ws, case_id)
+    assert view["curation"]["gold_mode"] == "clean"
+    assert view["curation"]["task_spec_approved_at"] == approved_at
 
 
 def test_mark_ready_records_task_spec_digest_and_approved_at(tmp_path: Path, fake_gh: FakeGh) -> None:

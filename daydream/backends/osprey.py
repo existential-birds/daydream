@@ -554,7 +554,6 @@ class OspreyBackend:
         saw_session_start = False
         saw_session_end = False
         failed_message: str | None = None
-        turn_durations_ms: list[int] = []
         total_cost: float | None = None
         saw_metric_cost = False
         stderr_lines: list[str] = []
@@ -720,13 +719,10 @@ class OspreyBackend:
                     usage_reported = event.get("usage_reported")
                     if not isinstance(usage_reported, bool):
                         raise OspreyProtocolError("turn_end requires boolean usage_reported")
-                    duration = (
+                    if usage_reported:
                         _required_int(event, "duration_ms")
-                        if usage_reported
-                        else _optional_int(event, "duration_ms")
-                    )
-                    if duration is not None:
-                        turn_durations_ms.append(duration)
+                    else:
+                        _optional_int(event, "duration_ms")
                     if usage_reported:
                         prompt_tokens = _required_int(event, "prompt_tokens")
                         completion_tokens = _required_int(event, "completion_tokens")

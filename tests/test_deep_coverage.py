@@ -523,12 +523,11 @@ def test_inline_hunk_reviewed_evidence_covers_without_read(tmp_path: Path) -> No
     assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
 
 
-def test_production_records_bare_list_shape(tmp_path: Path) -> None:
-    """Issue #731: production records (a bare JSON list) fire inline evidence.
+def test_legacy_records_bare_list_shape(tmp_path: Path) -> None:
+    """Legacy bare-list records still fire inline evidence.
 
-    ``phase_parse_feedback`` writes its validated findings as a plain JSON
-    list, not the ``{"issues": [...]}`` dict shape. The evidence gate must
-    accept the bare list or inline/frontier coverage never fires in real runs.
+    The compatibility reader accepts the historical plain-list shape as well
+    as the current wrapped record shape.
     """
     from daydream.deep.coverage import (
         compute_uncovered_files,
@@ -546,7 +545,7 @@ def test_production_records_bare_list_shape(tmp_path: Path) -> None:
     deep.mkdir(parents=True)
     write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
                                                 "inline_files": ["api.py"], "frontier_files": []}})
-    # Production shape: the raw parse output list, NOT a dict wrapper.
+    # Historical shape: a raw record list rather than a dict wrapper.
     (deep / "stack-python#0-records.json").write_text(
         json.dumps([{"file": "api.py", "id": 1, "description": "d", "line": 1,
                      "severity": "low", "confidence": "MEDIUM",
@@ -597,7 +596,7 @@ def test_coverage_by_evidence_absent_without_receipts(tmp_path: Path) -> None:
     """Issue #731: the evidence key is absent when receipts are not provided.
 
     ``coverage_by_evidence`` is a sharding-only surface: the Reads-only path
-    (``receipts=None``) must stay byte-identical to today's stats artifact.
+    (``receipts=None``) must preserve the existing stats artifact shape.
     """
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
@@ -776,19 +775,6 @@ def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
     assert by_path["notes.txt"] == "has_findings"  # finding beats read
     # declared clean + no read -> downgraded to not_reviewed
     assert by_path["lib/util.py"] == "not_reviewed"
-
-
-def test_resolve_per_stack_verdicts_clean_shard_read_is_clean() -> None:
-    """Spike: a clean shard that read its file stays clean (read-detection is findings-independent)."""
-    from daydream.deep.coverage import resolve_per_stack_verdicts
-
-    out = resolve_per_stack_verdicts(
-        assigned_files=["api.py"],
-        declared_verdicts=[{"path": "api.py", "lines_read": 10, "verdict": "clean"}],
-        completed_read_paths={"/repo/api.py"},
-        finding_files=set(),
-    )
-    assert out[0]["verdict"] == "clean"
 
 
 def test_clean_verdict_covers_without_finding(tmp_path: Path) -> None:

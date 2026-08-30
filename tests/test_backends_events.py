@@ -169,19 +169,15 @@ def test_result_event_carries_the_continuation_token() -> None:
     assert event.continuation is token
 
 
-def test_metrics_event_in_agent_event_union() -> None:
-    def accept(_e: AgentEvent) -> None:
-        return None
-
-    accept(
-        MetricsEvent(
-            message_id="x",
-            prompt_tokens=0,
-            completion_tokens=0,
-            cached_tokens=None,
-            cost_usd=None,
-        )
+def test_metrics_event_is_accepted_by_agent_event_union() -> None:
+    event = MetricsEvent(
+        message_id="msg_01",
+        prompt_tokens=10,
+        completion_tokens=20,
+        cached_tokens=5,
+        cost_usd=0.001,
     )
+    assert isinstance(event, AgentEvent)
 
 
 def test_metrics_event_in_all_export() -> None:

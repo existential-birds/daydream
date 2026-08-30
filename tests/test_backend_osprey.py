@@ -24,6 +24,7 @@ from daydream.backends import (
 from daydream.backends.osprey import (
     OspreyBackend,
     OspreyError,
+    OspreyProtocolError,
     OspreyTerminalError,
     OspreyUnsupportedOption,
     _drain_stderr,
@@ -544,7 +545,9 @@ async def test_message_end_reconstructs_result_when_no_text_delta_arrives() -> N
 async def test_protocol_version_and_unknown_events_fail_closed() -> None:
     backend = OspreyBackend(osprey_binary="fake")
     bad_version = [{"event": "protocol", "version": 99}]
-    with pytest.raises(Exception, match="unsupported Osprey JSONL protocol version"):
+    with pytest.raises(
+        OspreyProtocolError, match="unsupported Osprey JSONL protocol version"
+    ):
         await _collect(backend, bad_version)
 
     unknown: list[dict[str, object]] = [
@@ -558,7 +561,7 @@ async def test_protocol_version_and_unknown_events_fail_closed() -> None:
         },
         {"event": "not-a-real-event"},
     ]
-    with pytest.raises(Exception, match="unknown Osprey JSONL event"):
+    with pytest.raises(OspreyProtocolError, match="unknown Osprey JSONL event"):
         await _collect(backend, unknown)
 
 
@@ -752,7 +755,7 @@ async def test_invalid_turn_event_order_fails_closed(
     events: list[dict[str, object]], message: str
 ) -> None:
     lines, _ = _stream(*events)
-    with pytest.raises(Exception, match=message):
+    with pytest.raises(OspreyProtocolError, match=message):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 

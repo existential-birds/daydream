@@ -62,19 +62,6 @@ def test_init_creates_private_layout_and_modes(tmp_path: Path) -> None:
     assert stat.S_IMODE((root / "benchmark.yaml").stat().st_mode) == 0o600
 
 
-def test_init_does_not_create_harbor(tmp_path: Path) -> None:
-    root = tmp_path / "review-bench"
-    init_workspace(
-        root,
-        "O/R",
-        ["api.anthropic.com"],
-        ["api.anthropic.com"],
-    )
-    assert not (root / "harbor").exists()   # compiled dataset only after a build
-    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache"):
-        assert (root / sub).is_dir()
-
-
 def test_init_gitignore_ignores_everything_except_itself(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])

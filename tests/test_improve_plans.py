@@ -507,7 +507,7 @@ def test_host_derives_the_invocation_for_each_package_manager(
     assert [item["command"] for item in commands] == [expected]
 
 
-def test_host_enumeration_skips_unreadable_and_malformed_sources(
+def test_host_enumeration_skips_malformed_package_manifest(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"

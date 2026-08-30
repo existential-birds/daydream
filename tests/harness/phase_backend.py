@@ -1,21 +1,7 @@
 """Shared phase-dispatch fake ``Backend`` for shallow review-fix-test tests.
 
-Consolidates the two genuinely-redundant prompt-heuristic dispatch mocks that
-the shallow loop and single-pass integration tests grew independently
-(``loop_mock_backend`` in ``tests/test_loop.py`` and ``MockBackend`` in
-``tests/test_integration.py``). Both classified the same four shallow phases off
-the same prompt substrings; this is the unified implementation.
-
-``PhaseDispatchBackend`` is a *dispatch* fake, not a replay fake: it routes by
-prompt heuristic (``beagle-*``/``extract json``/``fix this issue``/``test
-suite``) and serves a per-iteration ``parse_results`` queue. The per-iteration
-queue is the one place the shallow loop legitimately needs *sequence* (issues on
-iteration 1, clean on iteration 2 → exit 0) — deliberately kept OUT of the
-phase-keyed *replay* harness (``tests/harness/phase_replay.py``), which serves
-one fixture per phase per firing.
-
-It implements the 3-method ``Backend`` interface (``execute``/``cancel``/
-Backend protocol methods (``execute`` / ``cancel``). Two response modes:
+``PhaseDispatchBackend`` routes prompts to scripted events and can serve a
+per-iteration parse queue. Two response modes:
 
 * ``events``: a raw pre-built ``AgentEvent`` list yielded verbatim (the
   tool-panel / single-pass-fixture mode the old ``MockBackend(events=...)``

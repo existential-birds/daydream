@@ -4,9 +4,8 @@ Issue #745 (AC4) removed the ``parse-<stack>`` stage: per-stack reviewers emit
 ``PER_STACK_RECORD_SCHEMA`` records directly. The record artifacts and their
 deterministic ordering remain the merge's input, so the shard-naming /
 deterministic-sort contract that still owns this file is preserved here. The
-parse-specific concurrency / failure / truncation tests that were their own
-file (``test_deep_parse_concurrency``) no longer have a subject and were
-removed.
+parse-specific concurrency / failure / truncation tests that were once separate
+are now covered by the shard-ordering and merge-input tests below.
 """
 from __future__ import annotations
 

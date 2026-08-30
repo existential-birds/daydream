@@ -385,15 +385,13 @@ def print_preflight_notice(
     """Print the deep-mode pre-flight notice (D-30).
 
     Lists the stages, detected stacks, skill per stack, and total agent
-    count. The D-31 ``cost_usd=None`` caveat was removed when #194 reversed
-    D-16 (Codex now synthesizes cost at the backend layer); per-model
-    unpriceable cases surface via the renderer's "cost unavailable" marker
-    (#156) at render time instead.
+    count. Per-model unpriceable cases surface via the renderer's
+    "cost unavailable" marker at render time.
 
     Args:
         agent_count: Total agent invocation count (D-30 formula).
-        exploration_available: True when the exploration infrastructure
-            (Phases 1-4) is installed and the pre-scan is wired in.
+        exploration_available: True when the exploration infrastructure is
+            available and the pre-scan is wired in.
         sweep_note: Optional additive line for the uncovered-file sweep agent
             estimate (issue #309 finding 8). Uncovered files are not known at
             pre-flight time, so the sweep's review + parse invocations are

@@ -1,7 +1,4 @@
-"""Deep-review mode package.
-
-Exports run_deep once the orchestrator exists (plan 05-09).
-"""
+"""Public exports for deep-review mode."""
 
 from daydream.deep.artifacts import (
     alternatives_path,

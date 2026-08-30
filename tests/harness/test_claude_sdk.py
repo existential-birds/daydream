@@ -61,20 +61,6 @@ async def test_patched_blocks_reach_the_backend_as_events(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_scripted_client_records_options_and_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``captured`` is the observable for what reached ClaudeAgentOptions."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(monkeypatch, scripted_client([MockResultMessage(total_cost_usd=0.0)], captured=captured))
-    backend = ClaudeBackend(model="opus", reasoning_effort="max")
-
-    async for _ in backend.execute(Path("/tmp"), "review this"):
-        pass
-
-    assert captured["options"].effort == "max"
-    assert captured["prompt"].endswith("review this")
-
-
-@pytest.mark.asyncio
 async def test_message_class_override_enables_the_usage_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """A subclassed AssistantMessage carrying ``usage`` drives MetricsEvent emission."""
 

@@ -35,8 +35,7 @@ the ``as_of`` pin (echoed from config, or the resolved write-time when
 unpinned), and a wall-clock UTC ``created_at``. The manifest is written
 atomically (tempfile + ``os.replace``) and skipped on ``dry_run``; a completed
 non-dry-run build that emits zero records removes any prior ``lineage.json``
-(rather than writing an empty-set manifest); it subsumes the retired
-``daydream snapshot`` verb's reproducibility role.
+(rather than writing an empty-set manifest).
 
 The projection is pure: no git, no network, no manifest write-back.
 ``base_sha`` is *read* from the on-disk manifest (harvest materializes it);

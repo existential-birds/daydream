@@ -12,8 +12,8 @@ Walks the AST of every .py file under daydream/ and tests/ and rejects:
    (catches accidental re-introduction of the bracketed log prefixes,
    such as a raw print that uses the old format).
 
-Self-excludes this test file via __file__ comparison so its own
-forbidden-literal constants don't trigger a failure.
+Excludes this test file from collection because its own forbidden-literal
+constants are intentional test data, not a legacy logging reference.
 """
 
 from __future__ import annotations
@@ -76,9 +76,12 @@ SOURCE_DIRS: tuple[Path, ...] = (
 
 def _all_py_files() -> list[Path]:
     files: list[Path] = []
+    this_file = Path(__file__).resolve()
     for d in SOURCE_DIRS:
         for p in d.rglob("*.py"):
             if "__pycache__" in p.parts:
+                continue
+            if p.resolve() == this_file:
                 continue
             files.append(p)
     return sorted(files)
@@ -91,10 +94,6 @@ def _all_py_files() -> list[Path]:
 )
 def test_no_legacy_debug_logging_references(py_file: Path) -> None:
     """CUT-08: every .py file is free of forbidden debug-logging symbols and prefixes."""
-    # Self-exclude: this file references the forbidden literals; scanning itself always fails.
-    if py_file.resolve() == Path(__file__).resolve():
-        return
-
     source = py_file.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(py_file))
 

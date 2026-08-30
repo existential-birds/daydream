@@ -71,7 +71,6 @@ class TrajectoryValidator:
                             # Skip URLs - they can't be validated locally
                             if self._is_url(image_path):  # ty: ignore[invalid-argument-type]
                                 continue
-                            # Handle both absolute and relative paths
                             path_obj = Path(image_path)  # ty: ignore[invalid-argument-type]
                             if path_obj.is_absolute():
                                 full_path = path_obj
@@ -83,16 +82,13 @@ class TrajectoryValidator:
                                     f"referenced image file does not exist: {image_path}"
                                 )
 
-        # Check all steps for image references
         for step_idx, step in enumerate(trajectory_data.get("steps", [])):
             step_loc = f"trajectory.steps[{step_idx}]"
 
-            # Check message field
             message = step.get("message")
             if isinstance(message, list):
                 check_content_for_images(message, f"{step_loc}.message")
 
-            # Check observation results
             observation = step.get("observation")
             if observation:
                 for res_idx, result in enumerate(observation.get("results", [])):
@@ -120,7 +116,6 @@ class TrajectoryValidator:
         self.errors = []
         self._trajectory_dir = None
 
-        # Load trajectory if it's a string or path
         if isinstance(trajectory, (str, Path)):
             path = Path(trajectory)
             if path.exists():
@@ -147,7 +142,6 @@ class TrajectoryValidator:
             self._add_error("Trajectory must be a JSON object/dict")
             return False
 
-        # Use Pydantic for schema validation
         try:
             Trajectory(**trajectory)
         except ValidationError as e:
@@ -195,7 +189,6 @@ class TrajectoryValidator:
                     # Generic error
                     self._add_error(f"trajectory.{loc_str}: {msg}")
 
-        # Validate image paths if requested and we have a trajectory directory
         if validate_images and self._trajectory_dir is not None:
             self._validate_image_paths(trajectory)
 

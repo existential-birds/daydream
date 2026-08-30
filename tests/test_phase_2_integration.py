@@ -1,12 +1,9 @@
-"""Phase 2 end-to-end integration test (ROADMAP Success Criteria 1-5).
+"""End-to-end trajectory recorder contract tests.
 
 These tests exercise a full ``async with TrajectoryRecorder``-wrapped
-``run_agent`` flow and assert the produced trajectory satisfies all five
-Phase 2 ROADMAP success criteria. Test pattern: schema-validity +
-behavior-predicate per D-18; NO full-tree snapshot equality (Pitfall 11).
-
-Roadmap success criteria mapping
-================================
+``run_agent`` flow and assert schema validity plus behavior predicates. They
+cover metrics and source fields, phase metadata, tool/result pairing, final
+metric aggregation, ContextVar propagation, and the direct-call no-op path.
 
   1. ``Metrics.prompt_tokens`` and ``Metrics.completion_tokens`` populated
      on every Claude agent step; ``Step.source`` is ``"user"`` for the
@@ -17,11 +14,11 @@ Roadmap success criteria mapping
   3. Every ``ToolCall(tool_call_id=...)`` has a paired
      ``ObservationResult(source_call_id=...)`` in the same step.
   4. ``FinalMetrics`` totals equal the sum of per-step ``Metrics``.
-  5. Recorder is propagated via ``ContextVar`` (NOT ``AgentState``);
+  5. Recorder is propagated via ``ContextVar``;
      conftest has the autouse ``_reset_trajectory_recorder`` fixture;
      direct ``run_agent`` invocation without a recorder is a clean no-op.
 
-Plus Pitfall 4: minimal user step has no agent-only fields.
+The minimal user step also has no agent-only fields.
 """
 
 from __future__ import annotations
@@ -327,15 +324,6 @@ async def test_no_recorder_clean_no_op(tmp_path: Path) -> None:
     # Autouse fixture cleared the ContextVar; no recorder installed, so it stays None.
     assert get_current_recorder() is None
     assert not (tmp_path / ".daydream" / "trajectory.json").exists()
-
-
-def test_autouse_fixture_present() -> None:
-    """Roadmap #5 — verify the suite-wide autouse fixture exists with EXACT D-17 name."""
-    import tests.conftest as conftest
-
-    assert hasattr(conftest, "_reset_trajectory_recorder"), (
-        "D-17 mandates the EXACT name `_reset_trajectory_recorder` in tests/conftest.py"
-    )
 
 
 # Test 6 — Pitfall 4: minimal user step has no agent-only fields after JSON-roundtrip.

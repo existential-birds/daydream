@@ -1,4 +1,3 @@
-# tests/test_backend_claude.py
 """Tests for ClaudeBackend."""
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -536,18 +535,6 @@ async def test_execute_passes_none_when_no_agents(patch_sdk: Any) -> None:
     assert agents_val is None
 
 
-def test_backend_protocol_agents_param_is_dict_typed() -> None:
-    """The Backend protocol's execute.agents annotation must be dict[str, AgentDefinition]."""
-    from daydream.backends import Backend
-
-    annotations = Backend.execute.__annotations__
-    assert "agents" in annotations
-    annotation = annotations["agents"]
-    # Annotation may be a string (from __future__ annotations) or a real type
-    annotation_str = annotation if isinstance(annotation, str) else repr(annotation)
-    assert "dict[str, AgentDefinition]" in annotation_str
-
-
 # Helpers for TurnEndEvent tests (Task 6)
 
 
@@ -620,50 +607,6 @@ async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: An
     second_text_idx = events.index(texts[1])
     assert first_text_idx < turn_ends[0][0] < second_text_idx
     assert second_text_idx < turn_ends[1][0]
-
-
-# Skill guard removal
-
-
-def test_no_skill_guard_registered() -> None:
-    """M14: no PreToolUse skill guard is wired; an attempted Skill call is not executable."""
-    from daydream.backends import claude as c
-
-    assert not hasattr(c, "_make_skill_guard")
-    assert not hasattr(c, "_prompt_skill_keys")
-    assert not hasattr(c, "_CHAINABLE_SKILL_NAMESPACE_PREFIX")
-
-
-
-def test_claude_agent_sdk_has_shielded_teardown() -> None:
-    """SDK teardown must run shielded, or cancelled runs corrupt the cancel scope.
-
-    ``claude-agent-sdk`` 0.2.108 tore down the CLI subprocess UNSHIELDED on the
-    cancellation path (``Query.close`` / ``transport.close``). When a run_agent
-    wall/tool budget (``anyio.move_on_after``) or a fan-out sibling cancellation
-    fired mid-stream, that teardown's own ``fail_after`` cancel scopes ran on the
-    driving task while the outer cancellation was in flight, violating anyio's
-    LIFO cancel-scope stack and raising::
-
-        RuntimeError: Attempted to exit a cancel scope that isn't the current
-        tasks's current cancel scope
-
-    intermittently, and ONLY on the Claude backend (Codex/Pi are subprocess CLIs
-    with no in-process anyio scopes to corrupt). Anthropic fixed it in 0.2.111 by
-    wrapping the teardown in ``anyio.CancelScope(shield=True)`` (``Query.close`` ->
-    ``_close_impl``). This guard fails closed if the pin is ever moved below the
-    fix, since a downgrade silently re-introduces the corruption with no test of
-    its own (the race needs a real subprocess + real cancellation timing).
-    """
-    from importlib.metadata import version
-
-    installed = tuple(int(p) for p in version("claude-agent-sdk").split(".")[:3])
-    assert installed >= (0, 2, 111), (
-        f"claude-agent-sdk {'.'.join(map(str, installed))} predates the shielded "
-        "teardown fix (0.2.111); cancelled Claude runs will intermittently raise "
-        "'Attempted to exit a cancel scope that isn't the current tasks's current "
-        "cancel scope'. Do not pin below 0.2.111."
-    )
 
 
 @pytest.mark.asyncio

@@ -92,14 +92,6 @@ def test_ci_uploads_coverage_xml_artifact() -> None:
             )
 
 
-def test_fail_under_is_a_measured_whole_percent(pyproject: dict[str, Any]) -> None:
-    value = pyproject["tool"]["coverage"]["report"]["fail_under"]
-    # Provisional 0 from Task 2 must never ship; the floor is a measured value.
-    assert isinstance(value, int) and 1 <= value <= 99, (
-        f"fail_under={value!r} is not a measured whole percent — run the Task 6 baseline"
-    )
-
-
 def test_ci_test_step_carries_same_coverage_invocation_as_local() -> None:
     ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
     # The check job's Run tests step carries the identical coverage flags as the

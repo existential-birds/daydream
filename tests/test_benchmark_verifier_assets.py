@@ -121,6 +121,7 @@ def test_rendered_metric_matches_host_on_representative_rows(tmp_path: Path) -> 
     assert result["infra_error_task_count"] == 3
 
 
+
 def test_location_tolerance_meets_floor() -> None:
     from daydream.benchmark.harbor import verifier_core as vc
     assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)

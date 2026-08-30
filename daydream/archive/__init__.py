@@ -45,11 +45,8 @@ def _warn(message: str) -> None:
 def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
     """Whether the executed flow runs the deep cross-stack/single-stack merge.
 
-    The deep pipeline's merge step runs in every non-feedback mode -- loop and
-    shallow (NORMAL/DEEP) run the full fix cycle, and review/comment (TTT) run
-    the spine up to ``post-review`` (which still executes the merge). Feedback
-    (PR) runs only the comment-fetch prefix and never enters the spine, and
-    improve-only never invokes the deep orchestrator, so neither runs merge.
+    The deep pipeline's merge step runs for normal and review flows. Improve-only
+    and the legacy PR compatibility label do not run the merge spine.
     Custom flows are classified from their registered pipeline (a fork
     composing the built-in deep merge step is detected as it runs), mirroring
     ``_flow_fix_test_steps`` in ``archive.manifest``.

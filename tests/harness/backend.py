@@ -1,10 +1,7 @@
 """Shared scripted fake ``Backend`` for tests that mock the agent seam.
 
-The suite had grown 84 hand-rolled ``Backend`` implementations across 31 files.
-Each re-declared the same three-method surface — ``model`` / ``execute`` /
-methods (``execute`` / ``cancel``) around one or two interesting lines,
-so a protocol change meant editing 31 files and a reader had to re-verify the
-boilerplate at every site.
+``ScriptedBackend`` yields pre-built events and records its calls so tests can
+exercise orchestration through the production seams.
 
 ``ScriptedBackend`` is the *scripted* fake: it yields a pre-built turn script
 and records what it was called with. It is deliberately not a dispatch fake —

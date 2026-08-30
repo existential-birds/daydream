@@ -1,4 +1,3 @@
-# tests/test_hub_upload.py
 from __future__ import annotations
 
 import json

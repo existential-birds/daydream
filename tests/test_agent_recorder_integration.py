@@ -1,16 +1,12 @@
-"""Integration tests: agent.run_agent + TrajectoryRecorder (MAP-01..07).
+"""Integration tests for ``run_agent`` and ``TrajectoryRecorder``.
 
 Per D-18, tests follow schema-validity + behavior-predicate patterns. No
 full-tree snapshot equality (Pitfall 11). Each test that produces a
 trajectory asserts ``daydream.atif.validate(traj) is True`` plus one or
 two specific behavioral predicates.
 
-Sequencing note (Plan 02-05 / 02-06): Plan 05 introduces a required
-keyword-only ``phase`` argument to ``run_agent``; Plan 06 updates every
-call site to pass it. Until Plan 06 lands, the full 343-test suite is
-INTENTIONALLY red (the transitional sentinel raises a clear TypeError
-on un-updated call sites). These integration tests are self-contained —
-they pass ``phase=DaydreamPhase.X`` directly and validate in isolation.
+The tests also enforce that ``phase`` remains a required keyword-only argument
+at the public boundary.
 """
 
 from __future__ import annotations
@@ -102,10 +98,12 @@ async def _run_with_recorder(
 
 async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
     """MAP-01 + Pitfall 4 — Beagle prompt becomes Step(source='user'); no agent-only fields."""
-    backend = MockBackend([
-        TextEvent(text="hello back"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = MockBackend(
+        [
+            TextEvent(text="hello back"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     traj, _ = await _run_with_recorder(backend, tmp_path, prompt="hi")
     assert traj is not None
     assert atif_validate(traj) is True
@@ -121,10 +119,12 @@ async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
 
 async def test_text_event_creates_agent_step(tmp_path: Path) -> None:
     """MAP-02 — TextEvent becomes Step(source='agent', message=text)."""
-    backend = MockBackend([
-        TextEvent(text="hello back"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = MockBackend(
+        [
+            TextEvent(text="hello back"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     traj, _ = await _run_with_recorder(backend, tmp_path, prompt="hi")
     assert traj is not None
     assert atif_validate(traj) is True
@@ -135,12 +135,14 @@ async def test_text_event_creates_agent_step(tmp_path: Path) -> None:
 
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
     """CORE-06 / MAP-04 / MAP-05 / Pitfall 3 — same-step pairing."""
-    backend = MockBackend([
-        TextEvent(text="running pytest"),
-        ToolStartEvent(id="t1", name="Bash", input={"command": "pytest"}),
-        ToolResultEvent(id="t1", output="OK", is_error=False),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = MockBackend(
+        [
+            TextEvent(text="running pytest"),
+            ToolStartEvent(id="t1", name="Bash", input={"command": "pytest"}),
+            ToolResultEvent(id="t1", output="OK", is_error=False),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
     assert atif_validate(traj) is True
@@ -155,17 +157,19 @@ async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) ->
 
 async def test_metrics_event_lands_on_agent_step(tmp_path: Path) -> None:
     """MAP-06 + D-15 — cached_tokens is subset of prompt_tokens, not added."""
-    backend = MockBackend([
-        TextEvent(text="ok"),
-        MetricsEvent(
-            message_id="msg_01",
-            prompt_tokens=100,
-            completion_tokens=50,
-            cached_tokens=10,
-            cost_usd=0.001,
-        ),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = MockBackend(
+        [
+            TextEvent(text="ok"),
+            MetricsEvent(
+                message_id="msg_01",
+                prompt_tokens=100,
+                completion_tokens=50,
+                cached_tokens=10,
+                cost_usd=0.001,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
     assert atif_validate(traj) is True
@@ -183,28 +187,32 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
     """MAP-07 / Roadmap success criterion 4 — FinalMetrics totals match per-step sum."""
     recorder = make_recorder(tmp_path)
     target_path = recorder.path
-    backend1 = MockBackend([
-        TextEvent(text="first"),
-        MetricsEvent(
-            message_id="msg_01",
-            prompt_tokens=100,
-            completion_tokens=20,
-            cached_tokens=5,
-            cost_usd=0.001,
-        ),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
-    backend2 = MockBackend([
-        TextEvent(text="second"),
-        MetricsEvent(
-            message_id="msg_02",
-            prompt_tokens=200,
-            completion_tokens=40,
-            cached_tokens=15,
-            cost_usd=0.002,
-        ),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend1 = MockBackend(
+        [
+            TextEvent(text="first"),
+            MetricsEvent(
+                message_id="msg_01",
+                prompt_tokens=100,
+                completion_tokens=20,
+                cached_tokens=5,
+                cost_usd=0.001,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    backend2 = MockBackend(
+        [
+            TextEvent(text="second"),
+            MetricsEvent(
+                message_id="msg_02",
+                prompt_tokens=200,
+                completion_tokens=40,
+                cached_tokens=15,
+                cost_usd=0.002,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     async with recorder:
         await run_agent(backend1, tmp_path, "first prompt", phase=DaydreamPhase.REVIEW)
         await run_agent(backend2, tmp_path, "second prompt", phase=DaydreamPhase.FIX)
@@ -215,9 +223,7 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
 
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
     sum_prompt = sum(s["metrics"]["prompt_tokens"] for s in agent_steps if s.get("metrics"))
-    sum_completion = sum(
-        s["metrics"]["completion_tokens"] for s in agent_steps if s.get("metrics")
-    )
+    sum_completion = sum(s["metrics"]["completion_tokens"] for s in agent_steps if s.get("metrics"))
     sum_cached = sum(s["metrics"]["cached_tokens"] for s in agent_steps if s.get("metrics"))
     sum_cost = sum(s["metrics"]["cost_usd"] for s in agent_steps if s.get("metrics"))
 
@@ -230,10 +236,12 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
 
 async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
     """CORE-09 — run_agent without active recorder runs cleanly."""
-    backend = MockBackend([
-        TextEvent(text="ok"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = MockBackend(
+        [
+            TextEvent(text="ok"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     # NO TrajectoryRecorder context — recorder is None.
     out, cont, _ = await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
     assert isinstance(out, str)
@@ -245,10 +253,12 @@ async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
 
 async def test_extra_phase_and_run_flow_labels(tmp_path: Path) -> None:
     """MAP-08 + MAP-09 — every Step has both extra labels."""
-    backend = MockBackend([
-        TextEvent(text="ok"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = MockBackend(
+        [
+            TextEvent(text="ok"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     traj, _ = await _run_with_recorder(
         backend,
         tmp_path,
@@ -266,14 +276,18 @@ async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) 
     """MAP-08 + MAP-09 — phase varies per run_agent call; run_flow per recorder."""
     recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.PR)
     target_path = recorder.path
-    backend1 = MockBackend([
-        TextEvent(text="reviewing"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
-    backend2 = MockBackend([
-        TextEvent(text="fixing"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend1 = MockBackend(
+        [
+            TextEvent(text="reviewing"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
+    backend2 = MockBackend(
+        [
+            TextEvent(text="fixing"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     async with recorder:
         await run_agent(backend1, tmp_path, "review please", phase=DaydreamPhase.REVIEW)
         await run_agent(backend2, tmp_path, "fix please", phase=DaydreamPhase.FIX)
@@ -292,39 +306,43 @@ async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) 
 
 
 def test_run_agent_requires_phase_keyword() -> None:
-    """Signature change (D-05) — phase is keyword-only.
-
-    Plan 05 introduces the keyword-only ``phase`` argument. Plan 07
-    re-tightens to a strict required-no-default; through Plans 05–06 a
-    transitional sentinel default keeps the suite recoverable. This test
-    enforces the keyword-only kind, which is the part that survives the
-    transition.
-    """
+    """The public ``phase`` argument is keyword-only."""
     sig = inspect.signature(run_agent)
     assert "phase" in sig.parameters
     assert sig.parameters["phase"].kind == inspect.Parameter.KEYWORD_ONLY
 
 
 async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) -> None:
-    """D-05 transitional — missing phase raises TypeError with a clear message."""
-    backend = MockBackend([
-        TextEvent(text="ok"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    """Omitting the required ``phase`` argument raises ``TypeError``."""
+    backend = MockBackend(
+        [
+            TextEvent(text="ok"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     with pytest.raises(TypeError) as excinfo:
-        # Intentionally call without the required `phase` kwarg.
         await run_agent(backend, tmp_path, "hi")  # type: ignore[call-arg]
-    # Error message should reference the phase argument.
     assert "phase" in str(excinfo.value).lower()
+
+
+async def test_calling_run_agent_with_positional_phase_raises_typeerror(
+    tmp_path: Path,
+) -> None:
+    """The required ``phase`` argument remains keyword-only."""
+    backend = MockBackend([])
+    with pytest.raises(TypeError):
+        await run_agent(backend, tmp_path, "hi", DaydreamPhase.REVIEW)  # type: ignore[misc]
 
 
 async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
     """MAP-03 — ThinkingEvent populates Step.reasoning_content."""
-    backend = MockBackend([
-        ThinkingEvent(text="let me think..."),
-        TextEvent(text="answer"),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    backend = MockBackend(
+        [
+            ThinkingEvent(text="let me think..."),
+            TextEvent(text="answer"),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
     assert atif_validate(traj) is True
@@ -365,9 +383,7 @@ class MaxTurnsBackend:
         async def _gen() -> AsyncGenerator[AgentEvent, None]:
             for event in pre_events:
                 yield event
-            raise MaxTurnsError(
-                "Claude agent run failed: error_max_turns", subtype="error_max_turns"
-            )
+            raise MaxTurnsError("Claude agent run failed: error_max_turns", subtype="error_max_turns")
 
         return _gen()
 
@@ -416,17 +432,26 @@ async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None
 
 
 async def test_cost_event_does_not_break_recording(tmp_path: Path) -> None:
-    """CostEvent is observed but does not produce a per-step Metrics (D-14)."""
-    backend = MockBackend([
-        TextEvent(text="ok"),
-        CostEvent(cost_usd=0.005, input_tokens=50, output_tokens=10, cached_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
-    ])
+    """CostEvent contributes its usage to the agent step and final metrics."""
+    backend = MockBackend(
+        [
+            TextEvent(text="ok"),
+            CostEvent(cost_usd=0.005, input_tokens=50, output_tokens=10, cached_tokens=None),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+    )
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
     assert atif_validate(traj) is True
-    # Phase 2 prefers MetricsEvent for per-step Metrics; CostEvent path only
-    # contributes to FinalMetrics in later phases (D-14). For now we just
-    # assert the trajectory remains schema-valid with CostEvent in the stream.
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
     assert len(agent_steps) == 1
+    metrics = agent_steps[0]["metrics"]
+    assert metrics is not None
+    assert metrics["prompt_tokens"] == 50
+    assert metrics["completion_tokens"] == 10
+    assert metrics["cost_usd"] == pytest.approx(0.005)
+
+    final = traj["final_metrics"]
+    assert final["total_prompt_tokens"] == 50
+    assert final["total_completion_tokens"] == 10
+    assert final["total_cost_usd"] == pytest.approx(0.005)

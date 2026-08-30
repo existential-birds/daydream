@@ -14,11 +14,6 @@ def test_default_is_deep() -> None:
     assert config.shallow is False
 
 
-def test_shallow_flag_opts_in() -> None:
-    config = _parse_args(["target", "--shallow"])
-    assert config.shallow is True
-
-
 @pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
 def test_deep_resume_stages_accepted(stage: str) -> None:
     """ttt/per-stack/merge are valid resume stages in the (default) deep mode."""

@@ -244,9 +244,9 @@ class CompletedRun:
     state: str
     # Full compatibility identity from authoritative sources.
     identity: CompatibilityIdentity | None = None
-    # Per-task reward rows (flattened); populated in Task 2.
+    # Per-task reward rows (flattened).
     task_rows: list[dict[str, object] | None] = field(default_factory=list)
-    # Count-derived objective (populated in Task 2).
+    # Count-derived objective.
     objective: Objective | None = None
     # The validated, contained job dir this run executed under.
     job_dir: str = ""

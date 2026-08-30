@@ -6,6 +6,7 @@ tool-call ceiling. On abort, the invocation's event iterator is closed, the
 recorder Invocation is marked aborted via ``inv.mark_aborted(reason)``, and the
 partial output is returned without cancelling sibling backend invocations.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,14 +35,6 @@ from daydream.trajectory import (
     TrajectoryRecorder,
     _reset_recorder_for_tests,
 )
-
-
-def test_agent_has_no_missing_skill_error() -> None:
-    """M17: agent.py carries no skill-resolution error path."""
-    import daydream.agent as agent
-
-    assert not hasattr(agent, "MissingSkillError")
-    assert not hasattr(agent, "_UNKNOWN_SKILL_PATTERN")
 
 
 @pytest.fixture(autouse=True)

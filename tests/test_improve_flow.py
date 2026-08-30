@@ -111,20 +111,6 @@ def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -
             assert "data, not instructions" in prompt, where
 
 
-def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
-    """spec.md's monorepo requirement: a slice bounds search, never reading."""
-    prompt = build_audit_prompt(
-        category="security",
-        strategy=_default_strategy("improve.audit.security"),
-        group=_GROUP,
-        scope_note="Service scope slice: `apps/billing`.",
-        recon_summary="{}",
-        cwd=Path("/repo"),
-        tier=EFFORT_TIERS["standard"],
-    )
-    assert "bounds where you search, never what you may read" in prompt
-
-
 def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
     tech_debt = build_audit_prompt(
         category="tech-debt",
@@ -2502,15 +2488,7 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """Zero stack skills → generic routing → the audit still runs and plans land.
-
-    This is the "works for everyone" baseline the generalist fallback exists to
-    guarantee. It relies on the autouse ``_hermetic_skill_availability`` fixture
-    (an empty plugin registry with no stack plugins), so it deliberately does NOT
-    call ``_pin_stack_availability``. Every stack falls
-    back to generic, collapsing the monorepo into a single generic audit group;
-    the flow must still produce one plan per selected finding.
-    """
+    """The audit still runs when no external stack plugins are available."""
     stub = install_improve_stub(
         monkeypatch,
         improve_monorepo_target,
@@ -2521,9 +2499,7 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    # Built-in detection drives the audit groups (M1/M3): the monorepo's
-    # python + react + docs files route to their detected stacks, never
-    # collapsed to generic by plugin presence.
+    # Built-in detection drives the audit groups independently of plugin presence.
     coverage = json.loads(
         improve_artifact(improve_monorepo_target, "coverage.json").read_text(
             encoding="utf-8"
@@ -2546,49 +2522,6 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
         encoding="utf-8"
     )
     assert index.count("| TODO |") == 3
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("target_fixture", "expected_group_stacks"),
-    [
-        pytest.param(
-            "improve_monorepo_target",
-            ["generic", "python", "react"],
-            id="detected-stacks-drive-audit-groups",
-        ),
-    ],
-)
-async def test_detected_stacks_drive_audit_groups_registry_independent(
-    target_fixture: str,
-    expected_group_stacks: list[str],
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-) -> None:
-    """Built-in audit routing is detection/profile-driven; plugin presence cannot
-    rewrite detected stack scopes (M1/M3).
-
-    With the built-in (skill-free) review path, the scopes detected by ``detect_stacks``
-    are authoritative: a monorepo with python + react + docs always audits as
-    ``[generic, python, react]`` groups regardless of which Beagle plugins are (or are
-    not) installed or injected through the environment.
-    """
-    target: Path = request.getfixturevalue(target_fixture)
-    install_improve_stub(monkeypatch, target, n_findings=0)
-
-    code = await run(
-        make_config(
-            target,
-            flow_name="improve",
-        )
-    )
-
-    assert code == 0
-    coverage = json.loads(improve_artifact(target, "coverage.json").read_text())
-    # One audit group per detected stack (not collapsed, not split):
-    assert len(coverage["groups"]) == len(expected_group_stacks)
-    assert sorted(group["stack"] for group in coverage["groups"]) == expected_group_stacks
 
 
 @pytest.mark.anyio

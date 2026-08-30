@@ -4,12 +4,9 @@ Each loader is an async generator that drives one ``Backend.execute`` against
 a synthesized message stream equivalent to the canonical script and yields the
 resulting ``AgentEvent`` instances.
 
-The two backends consume different low-level message shapes (Claude SDK objects
-vs Codex JSONL bytes). What MUST be identical is the ``AgentEvent`` stream's
-effect on the trajectory recorder — i.e. the resulting list of ATIF Steps must
-match across backends. The loaders synthesize each backend's native message
-format from the same canonical dict; the contract test then compares the
-recorded Step shape across both.
+The backends consume different low-level message shapes, but must produce the
+same observable ``AgentEvent`` and trajectory Step shapes. Each loader
+synthesizes its native message format from the same canonical dict.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ Pins Daydream-owned docs/CLI/schema/privacy contracts only. No Harbor runtime,
 Docker, or paid hosted-model command is ever executed here; paid commands
 (calibrate-judge, run --oracle) are only asserted to be visibly marked as paid
 gates and are never run in CI. Mirrors the existing doc-contract patterns in
-tests/test_docs_contract.py and tests/test_benchmark_cli.py.
+tests/test_docs_contract.py.
 """
 from __future__ import annotations
 
@@ -240,13 +240,7 @@ def test_docs_describe_anchor_model_and_reasons() -> None:
     for needle in ("authoring", "re-anchored", "history-unavailable", "path-unavailable",
                    "range-unavailable"):
         assert needle in text, f"runbook must describe the authoring anchor ({needle!r})"
-    plan = (ROOT / "docs" / "plans" / "2026-08-21-private-pr-harbor-benchmarks.md").read_text(
-        encoding="utf-8"
-    )
-    assert "original head SHA" in plan  # §5 bullet names authoring_anchor.commit_id, not commit_id
-# --- Reported location/severity axes (issue #971) ---
-
-
+    assert "original head SHA" in text  # the runbook names authoring_anchor.commit_id, not commit_id
 # --- Reported location/severity axes (issue #971) ---
 
 def test_reward_example_documents_reported_axes() -> None:
@@ -291,14 +285,7 @@ def test_prioritization_contract_documented() -> None:
     runbook = (ROOT / "docs" / "benchmark.md").read_text(encoding="utf-8")
     for phrase in (
         "prioritized", "advisory", "all evidence is retained",
-        "does not establish semantic correctness",
-    ):
-        assert phrase in runbook, f"runbook must describe the prioritization contract ({phrase!r})"
-    plan = (ROOT / "docs" / "plans" / "2026-08-21-private-pr-harbor-benchmarks.md").read_text(
-        encoding="utf-8"
-    )
-    for phrase in (
-        "prioritized", "advisory", "only explicit curator actions create gold",
+        "does not establish semantic correctness", "only explicit curator actions create gold",
         "resolution", "outdated",
     ):
-        assert phrase in plan, f"plan must document the prioritization contract ({phrase!r})"
+        assert phrase in runbook, f"runbook must describe the prioritization contract ({phrase!r})"
