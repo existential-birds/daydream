@@ -1,9 +1,9 @@
-"""Byte-parity + metric-equivalence + separate-filesystem isolation for the Harbor verifier assets.
+"""Behavioral contract tests for the Harbor verifier scoring core and metric.
 
-Golden gate: the ``templates/tests/verifier_core.py`` copy must stay
-byte-identical (SHA-256) to the in-repo source so future edits to the source
-fail loudly. ``templates/metric.py``'s inlined aggregation must equal
-``verifier_core.aggregate_metrics`` field-for-field on the same rows.
+``verifier_core.aggregate_metrics`` is the canonical scorer: these tests pin
+its observable aggregation contract (pooling, zero-denominator semantics,
+absent-axis handling) plus the compiled metric's subprocess behavior, so
+later canonicalization work must preserve behavior rather than source text.
 """
 import hashlib
 import json
@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from daydream.benchmark.harbor import verifier_core
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -205,3 +207,39 @@ def test_metric_helper_functions_cannot_drift_from_verifier_core() -> None:
     for name in ("_as_int", "_as_float", "_f1", "_axis_aggregates"):
         src = inspect.getsource(getattr(vc, name))
         assert src in tmpl, f"metric.py template's {name} drifted from verifier_core.py"
+
+
+def test_aggregate_metrics_pools_tp_fp_fn_and_zero_denominators_are_one() -> None:
+    rows: list[dict[str, object] | None] = [
+        {"reward": 0.8, "tp": 2, "fp": 1, "fn": 0, "precision": 2 / 3, "recall": 1.0,
+         "f1": 0.8, "gold_count": 2, "candidate_count": 3, "clean_task": 0, "clean_pass": 0,
+         "verifier_error": 0},
+        {"reward": 1.0, "tp": 0, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0,
+         "f1": 1.0, "gold_count": 0, "candidate_count": 0, "clean_task": 1, "clean_pass": 1,
+         "verifier_error": 0},
+        None,
+    ]
+    m = verifier_core.aggregate_metrics(rows)
+    assert m["total_tp"] == 2 and m["total_fp"] == 1 and m["total_fn"] == 0
+    assert m["task_count"] == 3 and m["scored_task_count"] == 2
+    assert m["infra_error_task_count"] == 1
+
+
+def test_aggregate_metrics_empty_rows_score_one() -> None:
+    m = verifier_core.aggregate_metrics([])
+    assert m["task_count"] == 0
+    assert m["micro_f1"] == 1.0 and m["mean_task_score"] == 1.0 and m["clean_accuracy"] == 1.0
+
+
+def test_aggregate_metrics_zero_scored_rows_headline_rates_are_one() -> None:
+    rows = [{"verifier_error": 1, "reward": 0.0, "tp": 0, "fp": 0, "fn": 0}]
+    m = verifier_core.aggregate_metrics(rows)  # type: ignore[arg-type]
+    assert m["micro_precision"] == 1.0 and m["micro_recall"] == 1.0 and m["micro_f1"] == 1.0
+
+
+def test_aggregate_metrics_axis_absent_is_zero_pairs_not_raise() -> None:
+    rows = [{"reward": 1.0, "tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0,
+             "f1": 1.0, "clean_task": 1, "clean_pass": 1, "verifier_error": 0}]
+    m = verifier_core.aggregate_metrics(rows)  # type: ignore[arg-type]
+    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
+    assert m["location_exact_rate"] == 0.0  # absent axis = missing signal, not 1.0
