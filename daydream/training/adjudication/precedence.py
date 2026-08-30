@@ -65,6 +65,16 @@ def has_rater_conflict(observations: Sequence[Mapping[str, Any]]) -> bool:
     return False
 
 
+def reopen_on_digest_change(observation: Mapping[str, Any], current_digest: str) -> bool:
+    """True iff the observation's pinned evidence digest differs from the fresh digest.
+
+    Exact string comparison — no normalization and no fallback digest. Digest drift
+    deterministically reopens the item: a prior human judgment made against different
+    evidence must never be silently reused.
+    """
+    return str(observation["evidence_digest"]) != str(current_digest)
+
+
 def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Resolve one record_id's observation list to its effective adjudication.
 

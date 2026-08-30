@@ -66,3 +66,12 @@ def test_conflicting_raters_fixture_order_is_stable() -> None:
         _obs("rejected", "bob", observed="2026-08-30T11:00:00+00:00"),
     ]
     assert effective_adjudication(obs_a) == effective_adjudication(list(reversed(obs_a)))
+
+
+def test_digest_change_requeues_prior_judgment() -> None:
+    from daydream.training.adjudication.precedence import reopen_on_digest_change
+    human = _obs("accepted", "alice", digest="d" * 64)
+    # Same digest: judgment stands.
+    assert reopen_on_digest_change(human, current_digest="d" * 64) is False
+    # Digest drifted: item must reopen, not silently reuse the judgment.
+    assert reopen_on_digest_change(human, current_digest="e" * 64) is True
