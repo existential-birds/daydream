@@ -145,11 +145,9 @@ async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
 async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() -> None:
     """A non-UTF-8 byte must surface as a non-JSON line, not an over-limit line.
 
-    The transport decodes stdout strictly (byte-identical backend messages
-    were promised pre-refactor), so a 0xff byte raises UnicodeDecodeError — a
-    ValueError — which must be routed to the non-JSON diagnosis (what the old
-    ``errors=\"replace\"`` loop produced), never mislabeled as the
-    10485760-byte-limit error.
+    Osprey decodes stdout with errors="replace" (its historical contract), so
+    a 0xff byte in a line that still fails JSON parsing after repair is
+    diagnosed as non-JSON — never mislabeled as the 10485760-byte-limit error.
     """
     stdout = _over_limit_reader(b'{"event"' + b"\xff" + b"}\n")
     backend = OspreyBackend(osprey_binary="fake")
@@ -161,6 +159,33 @@ async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() 
     assert "byte limit" not in str(exc_info.value)
     assert "\ufffd" in str(exc_info.value)
     assert backend._transports == []
+
+
+@pytest.mark.asyncio
+async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes() -> None:
+    """A non-UTF-8 byte inside a JSON string is repaired with U+FFFD and the
+    event is processed normally (the historical errors="replace" contract),
+    never hard-failed as a protocol error.
+    """
+    lines, _ = _stream({"event": "text_delta", "content": "x"})
+    payload: list[bytes] = []
+    for event in lines:
+        raw = json.dumps(event).encode()
+        if event.get("event") == "text_delta":
+            raw = raw.replace(b'"x"', b'"x\xff"')
+        payload.append(raw)
+    stdout = asyncio.StreamReader(limit=2_048)
+    stdout.feed_data(b"\n".join(payload) + b"\n")
+    stdout.feed_eof()
+
+    events, _ = await _collect(
+        OspreyBackend(osprey_binary="fake"),
+        [],
+        stdout_reader=stdout,
+    )
+
+    assert events[0].text == "x\ufffd"
+    assert type(events[-1]) is ResultEvent
 
 
 @pytest.mark.asyncio

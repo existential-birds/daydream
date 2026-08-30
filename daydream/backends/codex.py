@@ -441,7 +441,6 @@ class CodexBackend:
                     if len(non_json_lines) >= 20:
                         non_json_lines.pop(0)
                     non_json_lines.append(raw_line)
-                    transport.note_diagnostic(raw_line)
                     _logger.debug("codex: non-JSON line skipped: %r", raw_line[:80])
                     continue
 

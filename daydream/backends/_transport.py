@@ -74,6 +74,7 @@ class CliTransport:
         stderr_policy: StderrPolicy = StderrPolicy.MERGE_INTO_STDOUT,
         stderr_sink: Callable[[str], None] | None = None,
         diagnostics_sink: Callable[[str], None] | None = None,
+        decode_errors: str = "strict",
         limit: int,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
@@ -88,6 +89,10 @@ class CliTransport:
         self._stderr_sink = stderr_sink
         self._diagnostics: list[str] = []
         self._diagnostics_sink = diagnostics_sink
+        # Backend decode policy: codex/pi were strict pre-transport; osprey
+        # decoded with errors="replace" and must keep doing so (see the
+        # backend's ``decode_errors="replace"`` construction below).
+        self._decode_errors = decode_errors
         self._drain_task: asyncio.Task[None] | None = None
         self.processes: list[asyncio.subprocess.Process] = []
         self._proc: asyncio.subprocess.Process | None = None
@@ -165,7 +170,9 @@ class CliTransport:
         The callable is invoked per line, so a dual-window policy (response vs
         tool-active) can switch mid-stream. Silence within the window raises
         :class:`StreamStalledError` via the shared primitive; an oversized line
-        raises ``ValueError`` unchanged.
+        raises ``ValueError`` unchanged. Lines decode with the configured
+        ``decode_errors`` (strict by default), keeping each backend's
+        historical decode contract.
         """
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
@@ -178,7 +185,7 @@ class CliTransport:
             )
             if not raw:
                 return
-            yield raw.decode().strip()
+            yield raw.decode(errors=self._decode_errors).strip()
 
     def note_diagnostic(self, line: str) -> None:
         """Record *line* as a diagnostic via the caller's sink."""
@@ -205,12 +212,14 @@ class CliTransport:
 
         Shielded so a drain awaited in a backend's teardown ``finally`` still
         completes when the caller's scope is already cancelled — the same
-        shield the cancel-sweep relies on.
+        shield the cancel-sweep relies on. Drain-task exceptions are folded
+        into the gathered result so teardown cannot mask the caller's original
+        backend error.
         """
         if self._drain_task is not None:
             task, self._drain_task = self._drain_task, None
             with anyio.CancelScope(shield=True):
-                await asyncio.gather(task)
+                await asyncio.gather(task, return_exceptions=True)
 
     async def terminate(self) -> None:
         """Group-signal, reap, and close pipes; shielded and idempotent."""
