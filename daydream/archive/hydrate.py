@@ -65,6 +65,10 @@ class MovingBranchError(HydrationError):
     """A symbolic ref (moving branch/tag) was requested without ``exploratory=True``."""
 
 
+class PublicDestinationError(HydrationError):
+    """The target Hub repo is public — hydration publishes only to private repos (M17)."""
+
+
 def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bool) -> str:
     """Resolve ``revision`` to a pinned, immutable commit SHA (issue #982 M2).
 
@@ -729,6 +733,233 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
     }
     _atomic_write_json(curated / "import-ledger.json", ledger)
     return ledger
+
+
+# ---------------------------------------------------------------------------
+# Publication: additive batches + remote resume ledger (Task 9)
+# ---------------------------------------------------------------------------
+
+_UPLOAD_ATTEMPTS = 6
+_UPLOAD_BASE_DELAY_S = 2.0
+_UPLOAD_MAX_DELAY_S = 120.0
+
+
+@dataclass(frozen=True)
+class ResumeState:
+    """Resume checkpoint derived from the remote Hub ledger (never VM-local state)."""
+
+    completed_sessions: set[str] = field(default_factory=set)
+    redownloaded: list[str] = field(default_factory=list)
+
+
+def _retry_upload(client: HubClient, mapping: dict[str | Path, Path], commit_message: str) -> None:
+    """Upload with the hub.py commit-conflict retry shape (exponential backoff).
+
+    More attempts than hub.py's warning-path loop, because hydration is fatal
+    on final failure. Content identity never changes across retries (M21).
+    """
+    for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
+        try:
+            client.upload_files(mapping, commit_message)
+            return
+        except HydrationError as exc:
+            conflict = "concurrent update" in str(exc)
+            if conflict and attempt < _UPLOAD_ATTEMPTS:
+                time.sleep(min(_UPLOAD_BASE_DELAY_S * (2 ** (attempt - 1)), _UPLOAD_MAX_DELAY_S))
+                continue
+            raise HydrationError(redact_text(str(exc))) from exc
+
+
+def _curated_upload_paths(stage: Path, curation_id: str) -> list[Path]:
+    """All staging files under ``stage/curated/<curation-id>/`` (relative, sorted)."""
+    curated = stage / "curated" / curation_id
+    if not curated.is_dir():
+        return []
+    return sorted(p for p in curated.rglob("*") if p.is_file())
+
+
+def publish_batches(client: HubClient, stage: Path, *, curation_id: str) -> None:
+    """Publish sanitized batches additively under ``curated/<curation-id>/`` (M13/M15/M16).
+
+    Hard-fails with :class:`PublicDestinationError` when the repo is not private
+    (unlike hub.py, which only warns — hydration is an operator command and a
+    public destination would leak sanitized-but-sensitive content). Uploads,
+    additively under the curated prefix only: sanitized batches under
+    ``batches/``, the import ledger, the resolution map, ``SHA256SUMS`` over the
+    published file set, and the resume ledger ``resume/ledger.jsonl`` (one
+    record per completed batch: session_id, batch digest, source commit).
+
+    Bronze safety (M10/M13): the module asserts its own upload path list never
+    leaves the ``curated/`` prefix before a single byte is written. Upload
+    failures after retries are fatal, redacted :class:`HydrationError`s;
+    content-addressed batch paths make re-upload idempotent.
+    """
+    if not client.repo_private:
+        raise PublicDestinationError(
+            "refusing to publish: the Hub repo is not private; hydration "
+            "publishes sanitized corpora only to private repos (M17)"
+        )
+    curated = stage / "curated" / curation_id
+    _stage_batches(stage, curated)
+    _write_resolution_map(stage, curated)
+    _write_resume_ledger(stage, curated, curation_id)
+    files = _curated_upload_paths(stage, curation_id)
+    if not files:
+        raise HydrationError(redact_text(f"nothing to publish under curated/{curation_id}"))
+
+    prefix = f"curated/{curation_id}/"
+    relpaths = sorted(f.relative_to(curated).as_posix() for f in files)
+    # Bronze safety gate: assert nothing escapes the curated prefix (M10/M13).
+    assert all(not p.startswith(("bronze", "runs/", "downloads/")) and ".." not in p
+               for p in relpaths), relpaths
+
+    # SHA256SUMS covers every published file except itself (self-inclusion would
+    # make the checksum file unstable across idempotent re-publishes).
+    checksums = "".join(
+        f"{hashlib.sha256((curated / p).read_bytes()).hexdigest()}  {prefix}{p}\n"
+        for p in relpaths if p != "SHA256SUMS"
+    )
+    sums_path = curated / "SHA256SUMS"
+    sums_path.write_text(checksums, encoding="utf-8")
+    files = _curated_upload_paths(stage, curation_id)
+
+    mapping: dict[str | Path, Path] = {
+        f"{prefix}{f.relative_to(curated).as_posix()}": f for f in files
+    }
+    _retry_upload(client, mapping, f"daydream hydrate {curation_id}: additive batch publication")
+
+
+def _stage_batches(stage: Path, curated: Path) -> None:
+    """Copy every admitted derivative (``stage/runs/<sid>``) into ``batches/<sid>/``."""
+    runs_dir = stage / "runs"
+    if not runs_dir.is_dir():
+        return
+    for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+        target = curated / "batches" / derivative.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.rmtree(target)  # content-addressed rewrite: same content, same digest
+        shutil.copytree(derivative, target)
+
+
+def _write_resolution_map(stage: Path, curated: Path) -> None:
+    """Materialize ``resolution-map.json`` under the curated prefix when absent.
+
+    Rebuilt from the staging index (data only, no clones); an existing file —
+    from a prior publish of the same curation id — is left untouched so the
+    published map stays stable and additive.
+    """
+    map_path = curated / "resolution-map.json"
+    if map_path.exists():
+        return
+    source_commit = None
+    ledger_path = curated / "import-ledger.json"
+    if ledger_path.is_file():
+        try:
+            source_commit = json.loads(ledger_path.read_text(encoding="utf-8")).get("source_commit")
+        except (OSError, ValueError):
+            source_commit = None
+    cmap = build_resolution_map(stage, source_commit=source_commit or "unknown")
+    _atomic_write_json(map_path, cmap)
+
+
+def _write_resume_ledger(stage: Path, curated: Path, curation_id: str) -> None:
+    """Write (append) one resume record per admitted batch under ``resume/ledger.jsonl``.
+
+    Content-addressed: re-publishing identical content produces byte-identical
+    records, so the ledger stays deduplicated (latest entry per session wins).
+    """
+    source_commit = None
+    ledger_path = curated / "import-ledger.json"
+    if ledger_path.is_file():
+        try:
+            source_commit = json.loads(ledger_path.read_text(encoding="utf-8")).get("source_commit")
+        except (OSError, ValueError):
+            source_commit = None
+    batches_dir = curated / "batches"
+    entries: dict[str, dict[str, Any]] = {}
+    if batches_dir.is_dir():
+        for batch in sorted(p for p in batches_dir.iterdir() if p.is_dir()):
+            entries[batch.name] = {
+                "session_id": batch.name,
+                "batch_digest": sanitize._derivative_digest(batch),
+                "source_commit": source_commit,
+                "curation_id": curation_id,
+                "at": _utc_now(),
+            }
+    resume_path = curated / "resume" / "ledger.jsonl"
+    existing: dict[str, dict[str, Any]] = {}
+    if resume_path.is_file():
+        try:
+            for line in resume_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    rec = json.loads(line)
+                    if rec.get("session_id"):
+                        existing[str(rec["session_id"])] = rec
+        except (OSError, ValueError):
+            existing = {}
+    # Additive ledger: first record per session wins; re-publishing identical
+    # content never rewrites history (content-addressed idempotence).
+    for sid, entry in entries.items():
+        existing.setdefault(sid, entry)
+    resume_path.parent.mkdir(parents=True, exist_ok=True)
+    resume_path.write_text(
+        "".join(json.dumps(existing[sid], sort_keys=True) + "\n" for sid in sorted(existing)),
+        encoding="utf-8",
+    )
+
+
+def resume_state(client: HubClient, *, curation_id: str, stage_dir: Path) -> ResumeState:
+    """Discover the remote resume ledger under ``curated/<curation-id>/`` (M15).
+
+    Downloads ``resume/ledger.jsonl`` when present and verifies each recorded
+    batch digest against the actual ``batches/…`` content on the Hub, hashing
+    into ``stage_dir`` (a fresh VM's empty disk is fine). Completed sessions are
+    those whose remote batch content matches the recorded digest; mismatches
+    are reported in ``redownloaded`` — what would need re-fetching. VM-local
+    artifacts are never consulted as canonical state. A missing ledger yields
+    an empty checkpoint (nothing completed); download errors on the ledger or
+    a batch are fatal, redacted :class:`HydrationError`s.
+    """
+    prefix = f"curated/{curation_id}/"
+    try:
+        raw = client.download_file(f"{prefix}resume/ledger.jsonl")
+    except HydrationError:
+        raw = None  # no checkpoint yet: nothing completed, nothing redownloaded
+    completed: set[str] = set()
+    redownloaded: list[str] = []
+    if raw is None:
+        return ResumeState(completed_sessions=completed, redownloaded=redownloaded)
+    repo_files = set(client.list_repo_files())
+    for line in raw.decode("utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError as exc:
+            raise HydrationError(redact_text(f"corrupt resume ledger entry: {exc}")) from exc
+        sid = str(entry.get("session_id") or "")
+        digest = str(entry.get("batch_digest") or "")
+        if not sid or not digest:
+            continue
+        batch_prefix = f"{prefix}batches/{sid}/"
+        batch_relpaths = sorted(p[len(batch_prefix):] for p in repo_files if p.startswith(batch_prefix))
+        if not batch_relpaths:
+            redownloaded.append(sid)
+            continue
+        batch_dir = stage_dir / "batches" / sid
+        for rel in batch_relpaths:
+            data = client.download_file(f"{batch_prefix}{rel}")
+            target = batch_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        local_digest = sanitize._derivative_digest(batch_dir)
+        if local_digest == digest:
+            completed.add(sid)
+        else:
+            redownloaded.append(sid)
+    return ResumeState(completed_sessions=completed, redownloaded=redownloaded)
 
 
 def _import_hf_hub() -> Any:

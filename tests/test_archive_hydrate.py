@@ -220,6 +220,63 @@ class TestDownloadSnapshot:
         assert not (tmp_path / "stage" / "outside.txt").exists()
 
 
+class TestPublish:
+    def _staged(self, tmp_path: Path) -> Path:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        hydrate.dedupe_admitted(stage, revision="a" * 40)
+        hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
+        return stage
+
+    def test_public_destination_hard_fails(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.private = False
+        stage = self._staged(tmp_path)
+        cid = hydrate_rules.derive_curation_id(
+            source_commit="a" * 40, sanitizer_version="1", index_schema_version="1",
+            admission_policy_version="1")
+        with pytest.raises(hydrate.PublicDestinationError, match="private"):
+            hydrate.publish_batches(hub, stage, curation_id=cid)
+        assert not any(p.startswith("curated/") for p in hub.files)  # nothing published
+
+    def test_batches_and_ledger_under_additive_prefix(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        stage = self._staged(tmp_path)
+        cid = hydrate_rules.derive_curation_id(
+            source_commit="a" * 40, sanitizer_version="1", index_schema_version="1",
+            admission_policy_version="1")
+        hydrate.publish_batches(hub, stage, curation_id=cid)
+        prefix = f"curated/{cid}/"
+        uploaded = [p for p in hub.files if p.startswith(prefix)]
+        assert any(p.startswith(prefix + "batches/") for p in uploaded)
+        assert any(p == prefix + "resume/ledger.jsonl" for p in uploaded)
+        assert any(p == prefix + "SHA256SUMS" for p in uploaded)
+        # Bronze safety (M10/M13): only curated/… paths are ever written.
+        assert not any(p.startswith("bronze") or p.startswith("runs/") for p in hub.files)
+        ledger = json.loads(hub.files[prefix + "resume/ledger.jsonl"].decode().splitlines()[0])
+        assert ledger["session_id"] == "sess-a"
+        assert ledger["batch_digest"]
+        assert ledger["source_commit"] == "a" * 40
+        # Idempotent re-upload: same content lands at the same content-addressed paths.
+        before = dict(hub.files)
+        hydrate.publish_batches(hub, stage, curation_id=cid)
+        assert hub.files == before
+
+    def test_remote_ledger_checkpoint_enables_resume(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        stage = self._staged(tmp_path)
+        cid = "cur-" + "0" * 16
+        hydrate.publish_batches(hub, stage, curation_id=cid)
+        # a fresh VM with empty disk discovers the remote ledger and skips completed batches
+        fresh = tmp_path / "fresh"
+        state = hydrate.resume_state(hub, curation_id=cid, stage_dir=fresh)
+        assert state.completed_sessions == {"sess-a"}
+        assert state.redownloaded == []  # digests verified remotely, nothing refetched
+
+
 def _staged_with(tmp_path: Path, remote_urls: dict[str, str | None]) -> Path:
     """Stage a tree: ingest + index admitted bundles carrying the given remote URLs."""
     files: dict[str, bytes] = {}
