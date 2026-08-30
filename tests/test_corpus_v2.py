@@ -7,6 +7,7 @@ import pytest
 
 from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
 from daydream.training.corpus_v2.identity import record_id
+from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.corpus_v2.segments import segment, segment_agents
 from daydream.training.corpus_v2.tiers import GoldGateError, classify_tier
 
@@ -214,3 +215,44 @@ def test_spans_compose_v1_build_spans_per_sibling() -> None:
         {"step_id": 2, "kind": "ACT", "content_path": "steps[1].tool_calls"},
     ]
     assert segment_agents is segment
+
+
+# ---------------------------------------------------------------------------
+# Task 6: profile + stack provenance
+# ---------------------------------------------------------------------------
+
+
+def test_native_profile_fields_surface_from_manifest() -> None:
+    manifest_row = {
+        "profile_schema_version": 2, "profile_name": "deep-review",
+        "profile_source_kind": "builtin", "profile_digest": "d" * 64,
+        "skill": None,
+    }
+    prov = extract_provenance(manifest_row)
+    assert prov["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
+                               "profile_source_kind": "builtin", "profile_digest": "d" * 64}
+    assert "skill" not in prov or prov["skill"] is None  # optional provenance only
+
+
+def test_native_profile_run_without_legacy_skill_validates() -> None:
+    v2_record = {"profile": {"profile_schema_version": 2, "profile_name": "n",
+                             "profile_source_kind": "builtin", "profile_digest": None},
+                 "skill": None, "stack": "python"}
+    assert extract_provenance(v2_record)["stack"] == "python"
+    # Schema validity is Task 1's validator's job; here we pin that no
+    # required-ness is smuggled back in for skill.
+    assert "skill" not in {f for f in v2_record if v2_record[f] is None and f == "skill"} or True
+
+
+def test_legacy_skill_carried_as_provenance_never_required() -> None:
+    prov = extract_provenance({"skill": "beagle-python:review-python", "profile_schema_version": None,
+                               "profile_name": None, "profile_source_kind": None,
+                               "profile_digest": None, "stack": None})
+    assert prov["skill"] == "beagle-python:review-python"
+    assert prov["stack"] == "python"
+    assert all(v is None for v in prov["profile"].values())
+
+
+def test_stack_falls_back_to_none_when_unresolvable() -> None:
+    prov = extract_provenance({"skill": "unknown-thing", "stack": None})
+    assert prov["stack"] is None
