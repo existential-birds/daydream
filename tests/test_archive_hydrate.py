@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.archive import hydrate
-from daydream.archive import hydrate_rules
+from daydream.archive import hydrate, hydrate_rules
 from daydream.archive.hydrate_client import FakeHub
 
 SNAPSHOT = {
@@ -35,7 +34,7 @@ class TestCurationManifestSchema:
     SCHEMA = Path(hydrate_rules.__file__).parent.parent / "training" / "schema" / "curation-manifest-v1.json"
     FIXTURE = Path(__file__).parent / "fixtures" / "training" / "curation-manifest-v1-fixture.json"
 
-    def _validate(self, instance: dict) -> None:
+    def _validate(self, instance: dict[str, object]) -> None:
         from jsonschema import Draft202012Validator
 
         Draft202012Validator(json.loads(self.SCHEMA.read_text())).validate(instance)
@@ -82,3 +81,35 @@ def test_hf_client_requires_token_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
     with pytest.raises(hydrate.HubUnavailableError, match="HF_TOKEN"):
         hydrate._make_client("org/private-ds", token_present=False)
+
+
+class TestHydrateRules:
+    def test_curation_id_deterministic(self) -> None:
+        kwargs = dict(source_commit="a" * 40, sanitizer_version="1.0.0",
+                      index_schema_version="1", admission_policy_version="1")
+        first = hydrate_rules.derive_curation_id(**kwargs)
+        assert first == hydrate_rules.derive_curation_id(**kwargs)
+        assert first == hydrate_rules.derive_curation_id(**kwargs)  # stable across calls
+        assert hydrate_rules.CURATION_ID_RE.fullmatch(first)
+
+    def test_curation_id_inputs_sensitive(self) -> None:
+        base = dict(source_commit="a" * 40, sanitizer_version="1.0.0",
+                    index_schema_version="1", admission_policy_version="1")
+        ids = {hydrate_rules.derive_curation_id(**{**base, k: v})
+               for k, v in [("source_commit", "b" * 40), ("sanitizer_version", "1.0.1"),
+                            ("admission_policy_version", "2")]}
+        assert len(ids) == 3  # every input changes the id
+        assert hydrate_rules.derive_curation_id(**base) not in ids
+
+    def test_fixture_exclusion_reason_codes(self, tmp_path: Path) -> None:
+        (tmp_path / "manifest.json").write_text('{"session_id": "s", "source_path": "/tmp/pytest-of-user/x"}')
+        codes = hydrate_rules.fixture_exclusion_codes(tmp_path)
+        assert "fixture_pytest_path" in codes
+
+    def test_pipeline_status_policy(self) -> None:
+        # evidence present → revalidated value; absent → stable code, never success
+        assert hydrate_rules.legacy_pipeline_status(
+            pipeline_status="unknown", deep_artifacts={"status": "succeeded"}) == "succeeded"
+        assert hydrate_rules.legacy_pipeline_status(
+            pipeline_status="unknown", deep_artifacts=None) == ("excluded", "pipeline_status_evidence_absent")
+        assert hydrate_rules.legacy_pipeline_status(pipeline_status="failed", deep_artifacts=None) == "failed"
