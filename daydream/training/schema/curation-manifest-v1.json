@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Daydream curation manifest (admission ledger) schema v1",
+  "description": "Portable, frozen contract for the hydrated-curation ledger published under curated/<curation-id>/. All path fields are repo-relative; absolute paths and parent traversal are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_hub_commit",
+    "curation_id",
+    "sanitizer_version",
+    "hydration_index_schema_version",
+    "admission_policy_version",
+    "publication_prefix",
+    "batches"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "source_hub_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "curation_id": {
+      "type": "string",
+      "pattern": "^cur-[0-9a-f]{16}$"
+    },
+    "sanitizer_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hydration_index_schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "admission_policy_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "publication_prefix": {
+      "type": "string",
+      "pattern": "^curated/cur-[0-9a-f]{16}/$"
+    },
+    "batches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "content_digest",
+          "status",
+          "reason_code",
+          "artifact_relpath"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "status": {
+            "enum": ["admitted", "quarantined", "excluded"]
+          },
+          "reason_code": {
+            "type": ["string", "null"]
+          },
+          "artifact_relpath": {
+            "type": "string",
+            "description": "Relative path only: must not start with '/' and must not contain '..' segments.",
+            "pattern": "^(?!/)(?!.*\\.\\.).+$"
+          },
+          "artifact_digest": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "manifest_relpath": {
+            "type": ["string", "null"],
+            "pattern": "^(?!/)(?!.*\\.\\.).+$"
+          }
+        }
+      }
+    }
+  }
+}
