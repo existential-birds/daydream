@@ -98,6 +98,120 @@ def test_adjudicate_show_lists_queue_and_progress(tmp_path: Path, capsys: pytest
     assert "ambiguous" in out and "unanswered" in out
 
 
+def _seed_adjudicated(tmp_path: Path) -> tuple[Path, Path]:
+    """Hydrated index + state dir with a built queue, one human decision, and
+    a digest-pinned preview ledger (export harvest input)."""
+    from daydream.training.adjudication.preview import run_preview
+
+    root = tmp_path
+    state = tmp_path / "adj"
+    _write_sessions(root)
+    assert cli._handle_corpus_command(
+        ["adjudicate", "build", "--index-root", str(root), "--state-dir", str(state)]
+    ) == 0
+    queue = json.loads((state / "queue.json").read_text())
+    record_id = str(queue[0]["record_id"])
+    assert cli._handle_corpus_command(
+        ["adjudicate", "label", "--state-dir", str(state), "--record-id", record_id,
+         "--disposition", "accepted", "--rationale", "reply confirms fix", "--labeler", "kevin"]
+    ) == 0
+    run_preview(root, state / "preview-ledger.json")
+    return root, state
+
+
+def _seed_with_conflict(tmp_path: Path) -> tuple[Path, Path]:
+    """State dir where two records each have two disagreeing human raters;
+    the first record's conflict is older than the second's."""
+    from daydream.training.adjudication.observations import append_observation
+
+    root = tmp_path
+    state = tmp_path / "adj"
+    _write_sessions(root)
+    assert cli._handle_corpus_command(
+        ["adjudicate", "build", "--index-root", str(root), "--state-dir", str(state)]
+    ) == 0
+    queue = json.loads((state / "queue.json").read_text())
+    obs_path = state / "observations.jsonl"
+    older_record, newer_record = queue[0], queue[1]
+    common = {
+        "rationale": "independent pass", "role": "rater",
+        "valid_at": "2024-01-01T00:00:00+00:00", "rubric_version": "984-adjudicate-r1",
+    }
+    append_observation(obs_path, {
+        "record_id": str(older_record["record_id"]), "disposition": "accepted",
+        "evidence_digest": str(older_record["evidence_digest"]),
+        "evidence": older_record["evidence"], "labeler": "rater-one",
+        "observed_at": "2024-01-01T00:00:00+00:00", **common,
+    })
+    append_observation(obs_path, {
+        "record_id": str(older_record["record_id"]), "disposition": "rejected",
+        "evidence_digest": str(older_record["evidence_digest"]),
+        "evidence": older_record["evidence"], "labeler": "old-conflict",
+        "observed_at": "2024-01-02T00:00:00+00:00", **common,
+    })
+    append_observation(obs_path, {
+        "record_id": str(newer_record["record_id"]), "disposition": "rejected",
+        "evidence_digest": str(newer_record["evidence_digest"]),
+        "evidence": newer_record["evidence"], "labeler": "rater-two",
+        "observed_at": "2024-02-01T00:00:00+00:00", **common,
+    })
+    append_observation(obs_path, {
+        "record_id": str(newer_record["record_id"]), "disposition": "accepted",
+        "evidence_digest": str(newer_record["evidence_digest"]),
+        "evidence": newer_record["evidence"], "labeler": "new-conflict",
+        "observed_at": "2024-02-02T00:00:00+00:00", **common,
+    })
+    return root, state
+
+
+def test_export_writes_projector_shape_and_dry_run_validates_only(tmp_path: Path) -> None:
+    root, state = _seed_adjudicated(tmp_path)
+    rc = cli._handle_corpus_command(
+        ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state),
+         "--out", str(tmp_path / "export.jsonl"), "--dry-run"])
+    assert rc == 0
+    assert not (tmp_path / "export.jsonl").exists()  # dry-run validates without writing
+    rc = cli._handle_corpus_command(
+        ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state),
+         "--out", str(tmp_path / "export.jsonl")])
+    assert rc == 0
+    rows = [json.loads(line) for line in (tmp_path / "export.jsonl").read_text().splitlines()]
+    assert len(rows) == 2
+    for row in rows:  # loadable by the projector consumer without manual JSON editing
+        assert set(row) >= {"record_id", "fingerprint", "disposition", "evidence",
+                            "evidence_digest", "exclusion_reason"}
+
+
+def test_export_requires_out_without_dry_run(tmp_path: Path) -> None:
+    root, state = _seed_adjudicated(tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        cli._handle_corpus_command(
+            ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state)])
+    assert excinfo.value.code == 2
+
+
+def test_report_subverb_prints_coverage_and_strata(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, state = _seed_adjudicated(tmp_path)
+    rc = cli._handle_corpus_command(
+        ["adjudicate", "report", "--index-root", str(root), "--state-dir", str(state)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "outcome-bearing" in out and "silver/task-only" in out
+    assert "inter-rater" in out.lower()
+
+
+def test_conflict_review_lists_disagreeing_raters_oldest_first(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, state = _seed_with_conflict(tmp_path)
+    rc = cli._handle_corpus_command(
+        ["adjudicate", "report", "--index-root", str(root), "--state-dir", str(state),
+         "--conflicts"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.index("old-conflict") < out.index("new-conflict")  # oldest-first ordering
+
+
 def test_adjudicate_unknown_subverb_exits_2() -> None:
     with pytest.raises(SystemExit):
         cli._handle_corpus_command(["adjudicate", "bogus"])
