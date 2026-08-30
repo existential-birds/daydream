@@ -78,7 +78,7 @@ async def test_real_golden_parses_to_expected_events() -> None:
     backend = CodexBackend(model="gpt-5.5")
     mock_proc = make_mock_process_from_fixture(REAL_GOLDEN)
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events: list[Any] = []
         async for event in backend.execute(Path("/tmp"), "Read README.md then hello.py"):
             events.append(event)
@@ -234,7 +234,7 @@ async def test_codex_live_smoke() -> None:
     backend = CodexBackend(model="live-smoke-model")
     from tests.harness.codex_replay import make_mock_process
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=make_mock_process(lines)):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=make_mock_process(lines)):
         events: list[Any] = []
         async for event in backend.execute(sample_repo, prompt):
             events.append(event)

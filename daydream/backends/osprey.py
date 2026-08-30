@@ -8,18 +8,15 @@ existing backend event union.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
 import os
 import tempfile
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import anyio
 
 from daydream.backends import (
     AgentEvent,
@@ -34,11 +31,12 @@ from daydream.backends import (
     TurnEndEvent,
     resolve_fanout_concurrency,
 )
-from daydream.backends._subprocess import (
-    cancel_processes,
-    readline_with_idle_timeout,
-    stream_idle_timeout_s,
-    terminate_process,
+from daydream.backends._subprocess import stream_idle_timeout_s
+from daydream.backends._transport import (
+    CliTransport,
+    StderrPolicy,
+    StdinMode,
+    TransportExitError,
 )
 from daydream.trajectory import redact_text
 
@@ -188,24 +186,14 @@ def _bounded_diagnostic_line(line: str) -> str:
     return redact_text(line)[:_MAX_DIAGNOSTIC_LINE_CHARS]
 
 
-async def _drain_stderr(stderr: asyncio.StreamReader, diagnostics: list[str]) -> None:
-    """Drain Osprey diagnostics without allowing its stderr pipe to fill."""
-    while True:
-        try:
-            line = await stderr.readline()
-        except ValueError:
-            # ``StreamReader.readline`` clears an over-limit unterminated line
-            # before raising. Stderr is diagnostic-only, so discard that line
-            # and keep draining instead of failing an otherwise valid JSONL
-            # session during teardown.
-            if len(diagnostics) < _MAX_DIAGNOSTIC_LINES:
-                diagnostics.append("stderr diagnostic line exceeded stream limit and was discarded")
-            continue
-        if not line:
-            break
-        raw = line.decode(errors="replace").strip()
-        if raw and len(diagnostics) < _MAX_DIAGNOSTIC_LINES:
-            diagnostics.append(_bounded_diagnostic_line(raw))
+def _stderr_diagnostic_sink(diagnostics: list[str]) -> Callable[[str], None]:
+    """Build the redacting, capped sink the transport's stderr drain feeds."""
+
+    def sink(line: str) -> None:
+        if len(diagnostics) < _MAX_DIAGNOSTIC_LINES:
+            diagnostics.append(_bounded_diagnostic_line(line))
+
+    return sink
 
 
 @dataclass(frozen=True)
@@ -360,7 +348,7 @@ class OspreyBackend:
         self.fanout_concurrency = resolve_fanout_concurrency(
             "DAYDREAM_OSPREY_FANOUT_CONCURRENCY", 4
         )
-        self._processes: list[asyncio.subprocess.Process] = []
+        self._transports: list[CliTransport] = []
 
     def build_command(
         self,
@@ -546,7 +534,6 @@ class OspreyBackend:
         if output_schema is not None:
             schema_path = self._write_temp_schema(output_schema)
 
-        proc: asyncio.subprocess.Process | None = None
         session_id: str | None = None
         session_model: str | None = None
         provider: str | None = None
@@ -557,13 +544,14 @@ class OspreyBackend:
         total_cost: float | None = None
         saw_metric_cost = False
         stderr_lines: list[str] = []
-        stderr_task: asyncio.Task[None] | None = None
         terminal_outcome: str | None = None
         terminal_exit_code: int | None = None
         terminal_structured_output: Any = None
         turn_text_emitted = False
         thinking_parts: list[str] = []
         protocol_state = _OspreyProtocolState()
+
+        transport: CliTransport | None = None
 
         try:
             command = self.build_command(
@@ -577,43 +565,41 @@ class OspreyBackend:
             child_env = os.environ.copy()
             if self.osprey_home is not None:
                 child_env["OSPREY_HOME"] = str(self.osprey_home)
-            proc = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(cwd),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            transport = CliTransport(
+                "osprey",
+                command,
+                stdin_mode=StdinMode.DEVNULL,
+                stderr_policy=StderrPolicy.DRAIN_TASK,
+                stderr_sink=_stderr_diagnostic_sink(stderr_lines),
+                # Replace-decode as the pre-transport osprey read loop did, so
+                # a non-UTF-8 byte inside JSON tool output is repaired and the
+                # session completes instead of hard-failing the phase.
+                decode_errors="replace",
                 limit=_OSPREY_STDOUT_LIMIT_BYTES,
                 env=child_env,
-                start_new_session=True,
+                cwd=str(cwd),
             )
-            self._processes.append(proc)
-            if proc.stderr is None:
-                raise OspreyError("Osprey stderr pipe is unavailable", category="PROCESS_START")
-            stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, stderr_lines))
+            self._transports.append(transport)
+            await transport.start()
+            stream = transport.lines(stream_idle_timeout_s)
             while True:
-                if proc.stdout is None:
-                    break
                 try:
-                    line = await readline_with_idle_timeout(
-                        proc.stdout, cli="osprey", timeout_s=stream_idle_timeout_s()
-                    )
+                    raw_line = await anext(stream)
+                except StopAsyncIteration:
+                    break
                 except ValueError as exc:
                     raise OspreyProtocolError(
                         "Osprey stdout JSONL line exceeded the "
                         f"{_OSPREY_STDOUT_LIMIT_BYTES}-byte limit"
                     ) from exc
-                if not line:
-                    break
-                raw = line.decode(errors="replace").strip()
-                if not raw:
+                if not raw_line:
                     continue
                 try:
-                    event = json.loads(raw)
+                    event = json.loads(raw_line)
                 except json.JSONDecodeError as exc:
                     raise OspreyProtocolError(
                         "Osprey emitted a non-JSON line in JSONL mode: "
-                        f"{_bounded_diagnostics([raw])}"
+                        f"{_bounded_diagnostics([raw_line])}"
                     ) from exc
                 if not isinstance(event, dict):
                     raise OspreyProtocolError("Osprey JSONL event must be an object")
@@ -775,13 +761,19 @@ class OspreyBackend:
                 else:
                     raise OspreyProtocolError(f"unknown Osprey JSONL event {event_name!r}")
 
-            await proc.wait()
+            # Reap the child first; the transport raises TransportExitError on
+            # a non-zero exit, and the check below formats the backend-specific
+            # message from the code and captured stderr lines.
+            try:
+                await transport.wait()
+            except TransportExitError:
+                pass
             # A descendant can outlive Osprey while retaining the inherited
             # stderr fd. Reap the process group and close its transports before
             # awaiting EOF so the diagnostic drain cannot hang indefinitely.
-            await terminate_process(proc)
-            await stderr_task
-            returncode = proc.returncode
+            await transport.terminate()
+            await transport.drain_finished()
+            returncode = transport.returncode
             if returncode not in (None, 0):
                 raise OspreyError(
                     f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(stderr_lines)}",
@@ -827,17 +819,14 @@ class OspreyBackend:
                 model_name=session_model,
             )
         finally:
-            with anyio.CancelScope(shield=True):
-                if proc is not None:
-                    await terminate_process(proc)
-                if stderr_task is not None:
-                    if not stderr_task.done():
-                        stderr_task.cancel()
-                    await asyncio.gather(stderr_task, return_exceptions=True)
-            self._processes = [active for active in self._processes if active is not proc]
+            if transport is not None:
+                await transport.terminate()
+                await transport.drain_finished()
+                if transport in self._transports:
+                    self._transports.remove(transport)
             if schema_path is not None:
                 Path(schema_path).unlink(missing_ok=True)
 
     async def cancel(self) -> None:
         """Terminate all active Osprey process groups and reap their pipes."""
-        await cancel_processes(self._processes)
+        await CliTransport.cancel_all(self._transports)

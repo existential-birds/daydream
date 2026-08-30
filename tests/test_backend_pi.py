@@ -71,7 +71,7 @@ async def _run_and_capture_args(
     ``(flat_args, mock_exec)`` pair so callers can also assert on kwargs.
     """
     mock_proc = make_mock_process_from_fixture(fixture)
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/tmp"), prompt, **kwargs):
             pass
     return list(mock_exec.call_args.args), mock_exec
@@ -82,7 +82,7 @@ async def test_simple_text_events() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "Say hello"):
             events.append(event)
@@ -120,7 +120,7 @@ async def test_thinking_and_tool_use_events() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("tool_use.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "Read the file"):
             events.append(event)
@@ -153,7 +153,7 @@ async def test_structured_output() -> None:
     mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         events = []
         async for event in backend.execute(Path("/tmp"), "Parse", output_schema=schema):
             events.append(event)
@@ -177,7 +177,7 @@ async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("multi_turn.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "Two turns"):
             events.append(event)
@@ -206,7 +206,7 @@ async def test_error_turn_raises_pi_error() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("error_turn.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError, match="Model returned an error"):
             async for _ in backend.execute(Path("/tmp"), "Fail"):
                 pass
@@ -258,7 +258,7 @@ async def test_ephemeral_pi_call_uses_no_session() -> None:
 
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec",
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
         return_value=mock_proc,
     ):
         result_events = [
@@ -336,7 +336,7 @@ async def test_cwd_passed_to_subprocess() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(Path("/some/repo"), "p"):
             pass
 
@@ -350,7 +350,7 @@ async def test_spawn_uses_start_new_session() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec",
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
         return_value=mock_proc,
     ) as mock_exec:
         events = []
@@ -360,36 +360,39 @@ async def test_spawn_uses_start_new_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_finally_closes_transport_after_process_exit() -> None:
+async def test_execute_finally_reaps_process_after_exit() -> None:
     """Even when the CLI already exited, the finally reaps the process group.
 
-    The helper runs unconditionally when ``proc`` is not ``None``: its first
-    group signal fires regardless of ``returncode``, so a grandchild that
-    outlived the CLI is still signalled and the pipe fds are still released by
-    the transport close.
+    The transport teardown runs unconditionally: its group signal fires
+    regardless of ``returncode``, so a grandchild that outlived the CLI is
+    still signalled and the pipe fds are still released.
     """
+    from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
+
     backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    mock_proc.returncode = 0  # process already exited
-    mock_proc._transport = MagicMock()
-    terminated: list[asyncio.subprocess.Process] = []
+    captured = FakeCliSpawner()
 
-    from daydream.backends._subprocess import terminate_process as real_terminate
+    async def fake_exec(*args: Any, **kwargs: Any) -> FakeCliProcess:
+        proc = FakeCliProcess(
+            [
+                '{"type":"session","sessionId":"pi_ses_bye"}',
+                '{"type":"agent_start"}',
+                '{"type":"agent_end","messages":[]}',
+            ],
+            exit_code=0,
+        )
+        captured.procs.append(proc)
+        return proc
 
-    async def recording_terminate(proc: asyncio.subprocess.Process, timeout: float | None = None) -> None:
-        terminated.append(proc)
-        await real_terminate(proc, timeout)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
+        events = [event async for event in backend.execute(Path("/tmp"), "hello")]
 
-    with (
-        patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc),
-        patch("daydream.backends.pi.terminate_process", side_effect=recording_terminate),
-    ):
-        events = []
-        async for event in backend.execute(Path("/tmp"), "hello"):
-            events.append(event)
-
-    assert terminated == [mock_proc]
-    mock_proc._transport.close.assert_called_once()
+    assert events  # the turn ran to completion
+    proc = captured.procs[0]
+    assert proc.returncode == 0
+    assert proc.reaped, "the finally must reap the child even after clean exit"
+    assert proc._transport.closed, "the finally must release the pipe fds even after clean exit"
+    assert backend._transports == [], "the finally must drop the transport from the backend list"
 
 
 @pytest.mark.asyncio
@@ -419,7 +422,7 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it() -> None:
     ]
     mock_proc = make_mock_process(lines)
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "Truncated"):
             events.append(event)
@@ -436,6 +439,8 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it() -> None:
 @pytest.mark.asyncio
 async def test_cancel_terminates_then_kills() -> None:
     """cancel() sends SIGTERM to all tracked processes, SIGKILL on timeout."""
+    from daydream.backends._transport import CliTransport
+
     backend = PiBackend(model="glm-5.2")
 
     proc = MagicMock()
@@ -443,7 +448,9 @@ async def test_cancel_terminates_then_kills() -> None:
     proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
-    backend._processes = [proc]
+    transport = CliTransport("pi", ["pi", "--mode", "json"], limit=1024)
+    transport.processes.append(proc)
+    backend._transports = [transport]
 
     await backend.cancel()
 
@@ -454,7 +461,7 @@ async def test_cancel_terminates_then_kills() -> None:
 @pytest.mark.asyncio
 async def test_cancel_no_op_when_no_processes() -> None:
     backend = PiBackend(model="glm-5.2")
-    backend._processes = []
+    backend._transports = []
     await backend.cancel()  # Must not raise.
 
 
@@ -512,7 +519,7 @@ async def test_stdout_limit_allows_large_jsonl_events() -> None:
         process.kill = MagicMock()
         return process
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", fake_exec):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         events = [event async for event in backend.execute(Path("/tmp"), "large")]
 
     text_events = [e for e in events if isinstance(e, TextEvent)]
@@ -535,7 +542,7 @@ async def test_missing_usage_skips_metrics_but_keeps_turn_end() -> None:
     ]
     mock_proc = make_mock_process(lines)
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = []
         async for event in backend.execute(Path("/tmp"), "p"):
             events.append(event)
@@ -561,7 +568,7 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     mock_proc = make_mock_process(lines)
     mock_proc.returncode = 1
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError, match="return code 1") as exc_info:
             async for _ in backend.execute(Path("/tmp"), "p"):
                 pass
@@ -580,7 +587,7 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
     mock_proc = make_mock_process([])
     mock_proc.returncode = 1
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError, match="return code 1") as exc_info:
             async for _ in backend.execute(Path("/tmp"), "p"):
                 pass
@@ -651,7 +658,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     async def consume_second() -> list[object]:
         return [event async for event in backend.execute(Path("/tmp"), "second")]
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", fake_exec):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         first_iter = backend.execute(Path("/tmp"), "first")
         first_event = await anext(first_iter)
         assert isinstance(first_event, TextEvent)
@@ -705,7 +712,7 @@ async def test_execute_always_passes_no_skills_never_skill(tmp_path: Path, monke
 
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process(['{"id": "s1"}'])
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         async for _ in backend.execute(tmp_path, "Review the change."):
             pass
 
@@ -799,7 +806,7 @@ async def test_pi_trajectory_is_valid_atif_v1_7(tmp_path: Path) -> None:
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
                 async for event in backend.execute(tmp_path, "Review"):
                     inv.observe(event)
 
@@ -867,7 +874,7 @@ async def test_default_model_does_not_override_pi_settings(tmp_path: Path, monke
     backend = PiBackend()
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
+        "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc
     ) as mock_exec:
         async for _ in backend.execute(tmp_path, "Reply"):
             pass
@@ -899,7 +906,7 @@ async def test_explicit_model_overrides_pi_settings(tmp_path: Path, monkeypatch:
     backend = PiBackend(model="custom-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
+        "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc
     ) as mock_exec:
         async for _ in backend.execute(tmp_path, "Reply"):
             pass
@@ -1034,7 +1041,7 @@ def _capture_pi_subprocess(monkeypatch: pytest.MonkeyPatch, captured: list[list[
         return cast(MagicMock, await real_exec(*args, **kwargs))
 
     monkeypatch.setattr(
-        "daydream.backends.pi.asyncio.create_subprocess_exec", _fake_exec
+        "daydream.backends._transport.asyncio.create_subprocess_exec", _fake_exec
     )
 
 
@@ -1188,7 +1195,7 @@ async def test_stream_eof_without_finish_reason_is_retryable_pi_error() -> None:
             '{"type":"turn_start"}',
         ]
     )
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError, match="finish_reason") as raised:
             async for _ in backend.execute(Path("/tmp"), "Truncated"):
                 pass
@@ -1208,7 +1215,7 @@ async def test_stream_eof_after_completed_earlier_turn_is_retryable_pi_error() -
             '{"type":"turn_start"}',
         ]
     )
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError, match="finish_reason") as raised:
             async for _ in backend.execute(Path("/tmp"), "Truncated"):
                 pass
@@ -1226,9 +1233,9 @@ async def test_pi_stream_timeout_is_retryable() -> None:
     mock_proc.terminate = MagicMock()
     mock_proc.kill = MagicMock()
     with (
-        patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc),
+        patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc),
         patch(
-            "daydream.backends.pi.readline_with_idle_timeout",
+            "daydream.backends._transport.readline_with_idle_timeout",
             side_effect=StreamStalledError("pi", 1.0),
         ),
     ):
@@ -1344,7 +1351,7 @@ async def test_error_turn_sets_retryable_via_classifier(error_message: Any, expe
     ]
     mock_proc = make_mock_process(lines)
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError) as exc_info:
             async for _ in backend.execute(Path("/tmp"), "p"):
                 pass
@@ -1371,7 +1378,7 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(
     mock_proc = make_mock_process(output_lines)
     mock_proc.returncode = returncode
 
-    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError) as exc_info:
             async for _ in backend.execute(Path("/tmp"), "p"):
                 pass

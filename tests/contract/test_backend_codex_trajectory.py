@@ -59,7 +59,7 @@ async def _drive_codex_through_recorder(
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             mock_proc = make_mock_process_from_fixture(fixture)
             with patch(
-                "daydream.backends.codex.asyncio.create_subprocess_exec",
+                "daydream.backends._transport.asyncio.create_subprocess_exec",
                 return_value=mock_proc,
             ):
                 async for event in backend.execute(tmp_path, "review"):

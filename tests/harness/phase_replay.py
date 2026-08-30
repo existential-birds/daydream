@@ -63,7 +63,7 @@ def _firing_phase() -> DaydreamPhase:
 def codex_subprocess_for_phases(phase_scripts: PhaseScripts) -> AbstractContextManager[Any]:
     """Patch the Codex subprocess boundary to serve per-phase fixtures.
 
-    Patches ``daydream.backends.codex.asyncio.create_subprocess_exec`` with a
+    Patches ``daydream.backends._transport.asyncio.create_subprocess_exec`` with a
     ``side_effect`` factory that, on each subprocess launch, reads the firing
     phase via ``current_phase()`` and returns ``make_mock_process`` over that
     phase's rendered Codex JSONL lines.
@@ -89,6 +89,6 @@ def codex_subprocess_for_phases(phase_scripts: PhaseScripts) -> AbstractContextM
         return make_mock_process(rendered[phase])
 
     return patch(
-        "daydream.backends.codex.asyncio.create_subprocess_exec",
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
         side_effect=factory,
     )
