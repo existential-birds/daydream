@@ -88,10 +88,27 @@ def _build_fixture(tmp_path: Path) -> Path:
     # w_fp is partially but not perfectly separable so bootstrap CIs are non-degenerate.
     w_fp = [0.55, 0.5, 0.65, 0.58]
     breakdowns = {
-        f"rec-{i:04d}": {"fidelity": 0.2 + 0.1 * i, "specificity": 0.8 - 0.1 * i, "w_fp": w_fp[i]}
+        f"rec-{i:04d}": {
+            "fidelity": 0.2 + 0.1 * i,
+            "specificity": 0.8 - 0.1 * i,
+            "correctness": 0.4 + 0.05 * i,
+            "grounding": 0.7 - 0.05 * i,
+            "w_fp": w_fp[i],
+        }
         for i in range(4)
     }
     (tmp_path / "breakdowns.json").write_text(json.dumps(breakdowns, sort_keys=True) + "\n")
+    # Stage-0 score files: aligned (one entry per record) and misaligned (unknown record_id).
+    scores = {
+        f"rec-{i:04d}": {"score": 0.3 + 0.1 * i, "model_digest": "sha256:stage0-model-1"}
+        for i in range(4)
+    }
+    (tmp_path / "stage0-scores-aligned.json").write_text(json.dumps(scores, sort_keys=True) + "\n")
+    misaligned = dict(scores)
+    misaligned["rec-ghost"] = {"score": 0.9, "model_digest": "sha256:stage0-model-1"}
+    (tmp_path / "stage0-scores-misaligned.json").write_text(
+        json.dumps(misaligned, sort_keys=True) + "\n"
+    )
     return tmp_path
 
 
@@ -173,3 +190,25 @@ def test_unknown_candidate_axis_fails_closed(tmp_path: Path, fixture_corpus: Pat
 def test_missing_required_field_fails_closed(tmp_path: Path, fixture_corpus: Path) -> None:
     with pytest.raises(CalibrationError, match="missing required field"):
         run_calibration(_config(fixture_corpus, tmp_path, **{"drop-session": True}))
+
+
+# --- Task 3 (M4): stage-0 marginal analysis + explicit unavailable marker ---
+
+
+def test_stage0_scores_report_marginal_value(fixture_corpus, tmp_path):
+    scores = fixture_corpus / "stage0-scores-aligned.json"  # keyed by record_id + model_digest
+    result = run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))
+    s0 = result["stage0_analysis"]
+    assert s0["status"] == "ok"
+    assert set(s0["marginal_value_per_axis"]) >= {"correctness", "grounding"}
+
+
+def test_stage0_absent_is_explicit_unavailable(fixture_corpus, tmp_path):
+    result = run_calibration(_config(fixture_corpus, tmp_path))
+    assert result["stage0_analysis"] == {"status": "unavailable"}
+
+
+def test_stage0_misaligned_records_are_refused(fixture_corpus, tmp_path):
+    scores = fixture_corpus / "stage0-scores-misaligned.json"
+    with pytest.raises(CalibrationError, match="stage-0 score.*no matching record"):
+        run_calibration(_config(fixture_corpus, tmp_path, stage0_scores=scores))

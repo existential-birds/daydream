@@ -401,7 +401,95 @@ def _compute_metrics(
     }
 
 
-def _write_artifact(config: CalibrationConfig, record_count: int, metrics: dict[str, Any]) -> None:
+def _axis_residuals(axis_values: list[float], preference: list[float]) -> list[float]:
+    """Least-squares residual of the axis after removing the preference term."""
+    mean_a = statistics.fmean(axis_values)
+    mean_p = statistics.fmean(preference)
+    var_p = sum((p - mean_p) ** 2 for p in preference)
+    if var_p == 0:
+        return list(axis_values)
+    cov = sum((a - mean_a) * (p - mean_p) for a, p in zip(axis_values, preference))
+    beta = cov / var_p
+    intercept = mean_a - beta * mean_p
+    return [a - (intercept + beta * p) for a, p in zip(axis_values, preference)]
+
+
+def _load_stage0_scores(
+    config: CalibrationConfig, record_ids: list[str]
+) -> dict[str, float]:
+    """Load and fail-closed join stage-0 scores onto the corpus by record_id.
+
+    The score file is a JSON object keyed by record_id, each value
+    ``{"score": float, "model_digest": str}``. Every score must match a corpus
+    record and every record must have a score — no partial join. When
+    ``config.model_digest`` is set, every score must carry the same digest.
+    """
+    raw = json.loads(config.stage0_scores.read_text())  # type: ignore[union-attr]
+    _gate(
+        isinstance(raw, dict),
+        f"{config.stage0_scores}: stage-0 scores must be an object keyed by record_id",
+    )
+    known = set(record_ids)
+    scores: dict[str, float] = {}
+    for rid, value in raw.items():
+        _gate(
+            rid in known,
+            f"{config.stage0_scores}: stage-0 score for record_id {rid!r} has no matching record in the corpus",
+        )
+        _gate(
+            isinstance(value, dict) and isinstance(value.get("score"), (int, float))
+            and not isinstance(value.get("score"), bool),
+            f'{config.stage0_scores}: stage-0 score for {rid!r} must be {{"score": float, "model_digest": str}}',
+        )
+        if config.model_digest is not None:
+            _gate(
+                value.get("model_digest") == config.model_digest,
+                f"{config.stage0_scores}: stage-0 score for {rid!r} carries model_digest"
+                f" {value.get('model_digest')!r}, expected {config.model_digest!r}",
+            )
+        scores[rid] = float(value["score"])
+    for rid in record_ids:
+        _gate(
+            rid in scores,
+            f"{config.stage0_scores}: missing stage-0 score for corpus record {rid!r}",
+        )
+    return scores
+
+
+def _stage0_analysis(
+    config: CalibrationConfig,
+    record_ids: list[str],
+    splits: dict[str, set[str]],
+    gold: dict[str, bool],
+    breakdowns: dict[str, dict[str, float]],
+) -> dict[str, Any]:
+    """M4: marginal held-out value of each intrinsic axis beyond the stage-0
+    preference score. Absent scores are reported as explicit ``unavailable`` —
+    never fabricated from defaults."""
+    if config.stage0_scores is None:
+        return {"status": "unavailable"}
+    scores = _load_stage0_scores(config, record_ids)
+    preference = [scores[rid] for rid in record_ids]
+    # Evaluate on the holdout split; fall back to the full corpus when the
+    # deterministic split leaves holdout empty (tiny synthetic corpora).
+    heldout_ids = sorted(splits["holdout"]) or sorted(record_ids)
+    heldout_index = [record_ids.index(rid) for rid in heldout_ids]
+    axes = sorted({axis for axes_map in breakdowns.values() for axis in axes_map})
+    marginal: dict[str, float] = {}
+    for axis in axes:
+        values = [breakdowns[rid][axis] for rid in record_ids]
+        residuals = _axis_residuals(values, preference)
+        labels = [gold[record_ids[i]] for i in heldout_index]
+        marginal[axis] = _point_biserial([residuals[i] for i in heldout_index], labels)
+    return {"status": "ok", "marginal_value_per_axis": marginal}
+
+
+def _write_artifact(
+    config: CalibrationConfig,
+    record_count: int,
+    metrics: dict[str, Any],
+    stage0_analysis: dict[str, Any],
+) -> None:
     config.out_dir.mkdir(parents=True, exist_ok=True)
     artifact = {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -411,6 +499,7 @@ def _write_artifact(config: CalibrationConfig, record_count: int, metrics: dict[
         "bootstrap_resamples": config.bootstrap_resamples,
         "record_count": record_count,
         "metrics": metrics,
+        "stage0_analysis": stage0_analysis,
     }
     payload = json.dumps(_round4(artifact), sort_keys=True, indent=2) + "\n"
     (config.out_dir / "calibration.json").write_text(payload)
@@ -465,12 +554,13 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
 
     holdout_rate = float(bundle["holdout_rate"])
     val_rate = float(bundle["val_rate"])
-    _check_splits(records, str(bundle["salt"]), holdout_rate, val_rate)
+    splits = _check_splits(records, str(bundle["salt"]), holdout_rate, val_rate)
 
     record_ids = [str(r["record_id"]) for r in records]
     gold, breakdowns = _load_inputs(config, record_ids)
     metrics = _compute_metrics(records, gold, breakdowns, config)
-    _write_artifact(config, len(records), metrics)
+    stage0_analysis = _stage0_analysis(config, record_ids, splits, gold, breakdowns)
+    _write_artifact(config, len(records), metrics, stage0_analysis)
 
     return {
         "run_id": config.run_id,
@@ -478,4 +568,5 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "seed": config.seed,
         "metrics": metrics,
+        "stage0_analysis": stage0_analysis,
     }
