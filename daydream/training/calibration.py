@@ -599,6 +599,30 @@ def _write_outputs(
     os.replace(report_tmp, config.out_dir / "report.md")
 
 
+def _check_out_dir_collision(config: CalibrationConfig) -> None:
+    """M7: refuse to overwrite an artifact from a different run identity.
+
+    Mirrors the fail-loud resume guard in ``lineage.validate_resume`` but
+    compares a single recorded ``run_id``. A collision is detected before any
+    computation so the prior artifact is never touched; re-running with the
+    same run id is a permitted resume/overwrite.
+    """
+    prior = config.out_dir / "calibration.json"
+    if not prior.exists():
+        return
+    try:
+        prior_run_id = json.loads(prior.read_text()).get("run_id")
+    except (json.JSONDecodeError, OSError) as exc:
+        raise CalibrationError(
+            f"output directory {config.out_dir} holds an unreadable calibration.json: {exc}"
+        ) from exc
+    _gate(
+        prior_run_id == config.run_id,
+        f"output directory {config.out_dir} holds run identity {prior_run_id!r},"
+        f" refusing to write run {config.run_id!r} over it",
+    )
+
+
 def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     """Validate the corpus bundle fail-closed; return a summary on success.
 
@@ -606,6 +630,8 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     version stamps, C5 exclusion, license decision, split re-derivation. No
     artifact or partial file is written on any failure.
     """
+    _check_out_dir_collision(config)
+
     corpus_dir = config.corpus_dir
     corpus_path = corpus_dir / "corpus.jsonl"
     lineage_path = corpus_dir / "lineage.json"
