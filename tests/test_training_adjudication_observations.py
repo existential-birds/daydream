@@ -1,5 +1,6 @@
 """Observation store: append-only, idempotent, provenance-complete."""
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -8,7 +9,7 @@ from daydream.training.adjudication.observations import append_observation, load
 R1 = "a" * 64  # record_id-shaped
 
 def _obs(record_id: str, labeler: str, disposition: str = "accepted",
-         digest: str = "e" * 64, **kw) -> dict:
+         digest: str = "e" * 64, **kw: Any) -> dict[str, Any]:
     base = {
         "record_id": record_id, "disposition": disposition,
         "evidence_digest": digest, "labeler": labeler, "role": "rater",
@@ -41,3 +42,24 @@ def test_observation_missing_required_field_raises(tmp_path: Path) -> None:
 def test_invalid_disposition_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bogus"):
         append_observation(tmp_path / "o.jsonl", _obs(R1, "alice", disposition="bogus"))
+
+def test_model_suggested_label_is_review_required_and_rejected_as_human(tmp_path: Path) -> None:
+    from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
+
+    assert ADJUDICATION_LABELER_VERSION.startswith("984-")
+    store = tmp_path / "o.jsonl"
+    # Caller omits review_required entirely; the writer must force it on.
+    model_obs = _obs(R1, "claude-classifier", role="model-suggested")
+    model_obs.pop("review_required")
+    append_observation(store, model_obs)
+    obs = load_observations(store)
+    assert obs[0]["role"] == "model-suggested"
+    assert obs[0]["review_required"] is True
+
+def test_role_adjudicator_with_model_labeler_raises(tmp_path: Path) -> None:
+    # An unreviewed LLM classifier is never a human labeler: an observation
+    # claiming adjudicator authority under a model-shaped labeler is rejected.
+    with pytest.raises(ValueError, match="labeler"):
+        append_observation(
+            tmp_path / "o.jsonl", _obs(R1, "claude-classifier", role="adjudicator")
+        )

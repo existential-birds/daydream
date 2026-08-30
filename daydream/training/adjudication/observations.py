@@ -9,11 +9,20 @@ no-op, so interrupted labeling sessions can safely re-run.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 ADJUDICATION_RUBRIC_VERSION = "984-adjudicate-r1"
+
+# Labeler names that identify a model/LLM classifier rather than a human
+# (mirrors the versioned classifier identity convention, e.g.
+# ``REPLY_CLASSIFIER_VERSION`` consumers stamping ``claude-classifier``).
+_MODEL_LABELER_RE = re.compile(
+    r"(?:^|[-_])(?:claude|gpt|llm|model|classifier|anthropic|openai|codex|gemini)(?:$|[-_0-9])",
+    re.IGNORECASE,
+)
 
 _DISPOSITIONS = frozenset({"accepted", "rejected", "ambiguous", "unknown"})
 _ROLES = frozenset({"rater", "adjudicator", "model-suggested"})
@@ -43,6 +52,11 @@ def _validate(obs: Mapping[str, Any]) -> None:
         raise ValueError(f"invalid disposition: {obs['disposition']}")
     if obs["role"] not in _ROLES:
         raise ValueError(f"invalid role: {obs['role']}")
+    if obs["role"] == "adjudicator" and _MODEL_LABELER_RE.search(obs["labeler"]):
+        raise ValueError(
+            f"labeler {obs['labeler']!r} matches a model/LLM labeler pattern and cannot "
+            "hold the adjudicator role: unreviewed model output is never an adjudicator"
+        )
     for field in ("valid_at", "observed_at"):
         try:
             datetime.fromisoformat(obs[field])
@@ -61,6 +75,10 @@ def append_observation(path: Path, obs: Mapping[str, Any]) -> None:
     the file byte-identical. Never rewrites or deletes existing lines.
     """
     _validate(obs)
+    if obs["role"] == "model-suggested":
+        # Model-suggested labels are always review-required; the writer forces
+        # the flag so callers cannot omit or clear it.
+        obs = {**obs, "review_required": True}
     line = _canonical(obs)
     if path.exists():
         for existing in path.read_text(encoding="utf-8").splitlines():

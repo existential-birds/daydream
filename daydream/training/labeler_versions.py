@@ -1,7 +1,7 @@
 """Version constants for the reply-labeling pipeline and reply evidence digest.
 
 Independent version axes (M13): rubric schema, labeler policy, reply classifier,
-and evidence digest format each evolve separately from ``reward.REWARD_VERSION``.
+adjudication labeler, and evidence digest format each evolve separately from ``reward.REWARD_VERSION``.
 This module imports nothing from the rest of the training package.
 """
 
