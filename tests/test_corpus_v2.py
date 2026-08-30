@@ -6,6 +6,7 @@ import pytest
 
 from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
 from daydream.training.corpus_v2.identity import record_id
+from daydream.training.corpus_v2.tiers import GoldGateError, classify_tier
 
 _MANIFEST = {
     "schema_version": "1",
@@ -118,3 +119,45 @@ def test_record_id_is_stable_and_discriminating() -> None:
 def test_record_id_is_deterministic_sha256_of_canonical_join() -> None:
     expected = hashlib.sha256(b"s1\x1fs1:fix-0\x1fseg-0\x1f" + b"ab" * 32).hexdigest()
     assert record_id("s1", "s1:fix-0", "seg-0", "ab" * 32) == expected
+
+
+def _resolution(
+    disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None
+) -> dict[str, object]:
+    r: dict[str, object] = {
+        "fingerprint": "ab" * 32,
+        "disposition": disposition,
+        "evidence": [{"created_at": "2026-02-01T00:00:00+00:00"}],
+    }
+    if reward is not None:
+        r["intrinsic_reward"] = reward
+    if score is not None:
+        r["llm_self_score"] = score
+    return r
+
+
+def test_decisive_dispositions_are_gold() -> None:
+    assert classify_tier(_resolution("accepted")) == "gold"
+    assert classify_tier(_resolution("rejected")) == "gold"
+
+
+def test_non_decisive_dispositions_never_gold() -> None:
+    for d in ("ambiguous", "unanswered", "missing"):
+        assert classify_tier(_resolution(d)) != "gold"
+        assert classify_tier(_resolution(d)) == "task-only"
+
+
+def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
+    # C5: a perfect intrinsic score or a confident self-score with a
+    # non-decisive disposition must not classify gold — structurally.
+    assert classify_tier(_resolution("unanswered", reward={"composite": 10.0}, score=0.99)) == "task-only"
+    with pytest.raises(TypeError):
+        classify_tier("accepted")  # type: ignore[arg-type]  # gold input must carry evidence, not a bare label
+    with pytest.raises(GoldGateError):
+        classify_tier({"fingerprint": "ab" * 32, "disposition": "accepted", "evidence": []})
+
+
+def test_tiers_are_disjoint_classes() -> None:
+    # process-trace tier is silver, never gold; eligibility is a separate field
+    tier = classify_tier(_resolution("accepted"), record_type="process-trace")
+    assert tier == "silver"  # type/decision split: ATIF process data stays silver
