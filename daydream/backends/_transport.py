@@ -14,7 +14,10 @@ import enum
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
 
+import anyio
+
 from daydream.backends._subprocess import (
+    cancel_processes,
     readline_with_idle_timeout,
     terminate_process,
 )
@@ -199,3 +202,20 @@ class CliTransport:
         """Group-signal, reap, and close pipes; shielded and idempotent."""
         if self._proc is not None:
             await terminate_process(self._proc)
+
+    @classmethod
+    async def cancel_all(cls, transports: list[CliTransport]) -> None:
+        """Cancel every tracked transport, mirroring
+        :func:`daydream.backends._subprocess.cancel_processes`.
+
+        Delegates the per-transport work to :meth:`terminate_process` via
+        :func:`cancel_processes` over the tracked live processes, so the reap is
+        shielded from the caller's cancellation and idempotent on double-call —
+        the same contract the backends' ``cancel()`` delegation relies on.
+        """
+        await cancel_processes([
+            proc for t in transports for proc in t.processes if proc.returncode is None
+        ])
+        with anyio.CancelScope(shield=True):
+            for t in transports:
+                await t.drain_finished()

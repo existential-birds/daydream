@@ -7,6 +7,10 @@ import sys
 
 import pytest
 
+from daydream.backends._subprocess import (
+    StreamStalledError,
+    stream_idle_timeout_s,
+)
 from daydream.backends._transport import (
     CliTransport,
     StderrPolicy,
@@ -92,3 +96,104 @@ async def test_transport_stderr_drain_task_feeds_sink() -> None:
     assert await t.wait() == 0
     await t.drain_finished()
     assert diagnostics == ["boom"]
+
+
+_HANGING_CLI = "import time\ntime.sleep(60)\n"
+
+# Mirrors _HOLDER_SCRIPT in tests/test_subprocess_lifecycle.py: the CLI forks a
+# `sleep` grandchild (which inherits the stdout pipe), reports readiness by
+# printing "UP", then hangs. A python CLI is used because bash defers SIGTERM
+# while a child runs, which would stall every test on TERMINATE_GRACE_S.
+_GROUP_HOLDER_CLI = (
+    "import subprocess, sys, time; "
+    "subprocess.Popen(['sleep', '60']); "
+    "print('UP', flush=True); "
+    "time.sleep(1000)"
+)
+
+
+async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
+    """Await *pgid*'s disappearance (mirrors tests/test_subprocess_lifecycle.py).
+
+    A group-signal kill reaps the direct child synchronously, but a grandchild
+    reparented to PID 1 lingers as a zombie until init reaps it — and a zombie
+    still answers ``killpg(pgid, 0)``. Polling until the group is gone makes
+    the assertion deterministic: the observable outcome is "no process remains
+    in the group", not "the group vanished by the next instruction".
+    """
+    import asyncio as _asyncio
+    import os as _os
+
+    loop = _asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while True:
+        try:
+            _os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        if loop.time() > deadline:
+            raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")
+        await _asyncio.sleep(0.01)
+
+
+async def test_transport_idle_timeout_fires_on_silent_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream that goes silent for the window raises StreamStalledError.
+
+    Feed the transport a real hanging child (never writes), with the env
+    override shrinking the window — the same env contract as production.
+    """
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.2")
+    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", _HANGING_CLI])
+    await t.start()
+    with pytest.raises(StreamStalledError) as exc:
+        [line async for line in t.lines(timeout_for_line=lambda: stream_idle_timeout_s())]
+    assert "fake CLI produced no output for 0.2s" in str(exc.value)
+    await t.terminate()  # teardown reaps the hung child
+    assert t.returncode is not None
+
+
+async def test_transport_teardown_is_idempotent_and_group_signalling() -> None:
+    """Double terminate() must not raise, and the grandchild dies with the group."""
+    import os
+
+    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", _GROUP_HOLDER_CLI])
+    await t.start()
+    proc = t.processes[0]
+    pgid = os.getpgid(proc.pid)
+    assert pgid == proc.pid  # start_new_session => session leader => pid is the pgid
+    it = t.lines(timeout_for_line=lambda: 5.0).__aiter__()
+    assert await it.__anext__() == "UP"
+    await t.terminate()
+    await t.terminate()  # double-call must not raise
+    assert t.returncode is not None
+    await _wait_for_group_gone(pgid)  # grandchild must be gone too
+
+
+async def test_transport_cancel_all_is_shielded() -> None:
+    """Cancelling the surrounding scope while lines() pends still reaps the group.
+
+    Mirrors the shielded-teardown shape in tests/test_subprocess_lifecycle.py:
+    the cancel fires mid-read, unwinds into the generator's caller, and the
+    ``finally`` teardown (cancel_all) must run to completion despite the still-
+    cancelled scope.
+    """
+    import os
+
+    import anyio
+
+    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", _GROUP_HOLDER_CLI])
+    await t.start()
+    pgid = os.getpgid(t.processes[0].pid)
+
+    async def consume() -> None:
+        try:
+            async for _ in t.lines(timeout_for_line=lambda: 5.0):
+                pass
+        finally:
+            await CliTransport.cancel_all([t])
+
+    with anyio.move_on_after(0.2) as scope:
+        await consume()
+    assert scope.cancelled_caught  # cancel fired while lines() was pending
+    assert t.returncode is not None
+    await _wait_for_group_gone(pgid)
