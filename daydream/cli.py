@@ -561,7 +561,7 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="DIR",
         help="Hydrated curated-bundle root (must contain _SUCCESS, SHA256SUMS, "
-        "curation-manifest-v1.json)",
+        "curation-manifest.json)",
     )
     parser.add_argument(
         "--annotations-snapshot",
@@ -645,12 +645,19 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     # (corpus.jsonl, split manifests, lineage.json) into that directory, and
     # corpus-v2.jsonl is published beside them as the versioned corpus.
     out_dir = args.out.parent
-    config = BuildCorpusV2Config(
-        out_dir=out_dir,
-        bundle_dir=args.bundle_root,
-        annotations_snapshot=args.annotations_snapshot,
-        as_of=args.as_of,
-    )
+    try:
+        # BuildCorpusV2Config is the single validation boundary for --as-of
+        # (UTC-only, canonical +00:00 spelling out) — normalize_as_of runs in
+        # __post_init__, so an unparseable pin refuses here, not as a traceback.
+        config = BuildCorpusV2Config(
+            out_dir=out_dir,
+            bundle_dir=args.bundle_root,
+            annotations_snapshot=args.annotations_snapshot,
+            as_of=args.as_of,
+        )
+    except ValueError as exc:
+        print_error(create_console(), "Invalid --as-of", str(exc))
+        return 1
     try:
         if args.dry_run:
             with tempfile.TemporaryDirectory() as td:
@@ -658,7 +665,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         else:
             summary = run_build_corpus_v2(config)
             (out_dir / "corpus-v2.jsonl").write_bytes((out_dir / "corpus.jsonl").read_bytes())
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         print_error(create_console(), "Corpus v2 build refused", str(exc))
         return 1
     print_success(

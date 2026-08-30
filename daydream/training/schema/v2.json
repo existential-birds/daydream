@@ -48,6 +48,12 @@
     "disposition": {
       "enum": ["accepted", "rejected", "ambiguous", "unanswered", "missing", null]
     },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
     "profile": {
       "type": "object",
       "additionalProperties": false,
@@ -59,7 +65,7 @@
       ],
       "properties": {
         "profile_schema_version": {
-          "type": ["string", "null"]
+          "type": ["integer", "string", "null"]
         },
         "profile_name": {
           "type": ["string", "null"]
@@ -73,6 +79,9 @@
       }
     },
     "stack": {
+      "type": ["string", "null"]
+    },
+    "outcome_label": {
       "type": ["string", "null"]
     },
     "lineage": {
@@ -121,7 +130,7 @@
           "type": ["string", "null"]
         },
         "split": {
-          "enum": ["train", "val", "holdout", "excluded", null]
+          "enum": ["train", "val", "validation", "holdout", "excluded", null]
         },
         "exclusion_reason": {
           "type": ["string", "null"]

@@ -25,6 +25,7 @@ from daydream.archive.index import normalize_as_of
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
 from daydream.training.corpus_v2.bundle import load_curated_bundle
 from daydream.training.corpus_v2.identity import record_id
+from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.corpus_v2.segments import segment
 from daydream.training.corpus_v2.splits import assign_split
 from daydream.training.corpus_v2.tiers import classify_tier
@@ -129,6 +130,37 @@ def _refuse_posterior_evidence(
             )
 
 
+def _provenance_for(
+    resolution_row: Mapping[str, Any], manifest_row: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Profile/stack provenance for one record (Req 8).
+
+    The resolution row's native review-profile fields win when present;
+    otherwise the batch manifest row supplies them — the values carried by
+    either row type must not be dropped at the projection boundary.
+    """
+    prov = extract_provenance(resolution_row)
+    if (
+        not any(prov["profile"].values())
+        and prov.get("skill") is None
+        and prov["stack"] is None
+    ):
+        return extract_provenance(manifest_row)
+    return prov
+
+
+def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
+    """Max ``valid_at`` over evidence items (lexicographic ISO-8601 compare),
+    never lower than the ``as_of`` pin."""
+    result = base
+    for item in evidence:
+        if isinstance(item, Mapping) and item.get("valid_at"):
+            candidate = str(item["valid_at"])
+            if result is None or candidate > result:
+                result = candidate
+    return result
+
+
 @overload
 def project_findings(session: Mapping[str, object], *, return_adjudication: Literal[False] = False) -> list[Record]: ...
 
@@ -183,6 +215,7 @@ def project_findings(
         tier = classify_tier(resolution)
         disposition = resolution.get("disposition")
         evidence = list(resolution.get("evidence") or [])
+        provenance = extract_provenance(resolution)
         record = {
             "record_id": record_id(
                 str(session_id), str(trajectory_id), str(segment_id), str(fingerprint)
@@ -190,12 +223,14 @@ def project_findings(
             "record_type": "outcome-finding",
             "session_id": session_id,
             "trajectory_id": trajectory_id,
-            "segment_id": segment_id,
+            "task_segment": segment_id,
             "finding_fingerprint": fingerprint,
             "tier": tier,
             "disposition": disposition,
             "outcome_label": disposition if tier == "gold" else None,
             "evidence": evidence,
+            "profile": provenance["profile"],
+            "stack": provenance["stack"],
         }
         records.append(record)
         if tier == "task-only":
@@ -243,7 +278,13 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     atomically, copy ``schema/v2.json`` alongside, and write ``lineage.json``
     pinning the snapshot's provenance (no wall-clock timestamps — every
     manifest byte is a function of the immutable inputs, so re-runs are
-    byte-for-byte identical).
+    byte-for-byte identical), finishing with a ``_SUCCESS`` completeness
+    marker.
+
+    Each finding is projected exactly once (the snapshot resolutions are
+    session-scoped, so sibling segments never fabricate per-segment copies);
+    non-decisive findings are excluded here and routed to the adjudication
+    report only.
 
     Returns a summary dict with ``total``/``emitted``, per-type/per-tier/
     per-split counts, the ``caps`` block (configured vs applied), and
@@ -254,11 +295,34 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     """
     bundle = load_curated_bundle(config.bundle_dir)
     snapshot_rows = _load_snapshot(config.annotations_snapshot)
+    snapshot_digest = hashlib.sha256(config.annotations_snapshot.read_bytes()).hexdigest()
 
     records: list[Record] = []
     adjudication: list[Record] = []
     included_sessions: list[str] = []
+    # The annotation resolutions are session-scoped (keyed by session_id +
+    # fingerprint, not by trajectory/segment), so each finding is projected
+    # exactly once — sibling segments never fabricate per-segment copies that
+    # could hash into different splits (D5 disjointness is per finding).
+    seen_findings: set[tuple[str, str]] = set()
+    adjudicated_findings: set[tuple[str, str]] = set()
+    # lineage valid_at is pinned over the emitted records' evidence only —
+    # snapshot rows for sessions never admitted/emitted must not drift it.
+    valid_at = config.as_of
     for batch in bundle.admitted:
+        if batch.manifest_relpath is not None:
+            manifest_path = config.bundle_dir / batch.manifest_relpath
+            try:
+                manifest_row_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"bundle {config.bundle_dir}: {batch.manifest_relpath} "
+                    f"is not valid JSON: {exc}"
+                ) from exc
+            batch_manifest_row = manifest_row_raw if isinstance(manifest_row_raw, dict) else {}
+        else:
+            batch_manifest_row = {}
+        digest_parts = [d for d in (batch.content_digest, snapshot_digest) if d]
         artifact = config.bundle_dir / batch.artifact_relpath
         for line_no, line in enumerate(artifact.read_text(encoding="utf-8").splitlines(), start=1):
             if not line.strip():
@@ -288,8 +352,21 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                 seg_records, seg_adjudication = project_findings(
                     session_view, return_adjudication=True
                 )
+                resolution_by_fp = {
+                    str(row.get("fingerprint")): row for row in resolutions
+                }
                 for rec in seg_records:
                     fingerprint = str(rec["finding_fingerprint"])
+                    key = (seg.session_id, fingerprint)
+                    if key in seen_findings:
+                        continue
+                    seen_findings.add(key)
+                    # Non-decisive findings are report output only (D8): they
+                    # never become training records, so corpus.jsonl and the
+                    # split manifests exclude them by construction while
+                    # lineage/summary count them under exclusions_by_reason.
+                    if str(rec["tier"]) == "task-only":
+                        continue
                     _refuse_posterior_evidence(
                         seg.session_id,
                         fingerprint,
@@ -302,12 +379,38 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                         val_rate=config.val_rate,
                         salt=config.salt,
                     )
-                    rec["lineage"] = {"split": split}
+                    prov = _provenance_for(
+                        resolution_by_fp.get(fingerprint, {}), batch_manifest_row
+                    )
+                    rec_valid_at = _max_valid_at(
+                        cast(list[Record], rec["evidence"]), config.as_of
+                    )
+                    if rec_valid_at is not None and (valid_at is None or rec_valid_at > valid_at):
+                        valid_at = rec_valid_at
+                    rec["profile"] = prov["profile"]
+                    rec["stack"] = prov["stack"]
+                    rec["lineage"] = {
+                        "hub_commit": bundle.source_hub_commit,
+                        "curation_id": bundle.curation_id,
+                        "content_digests": digest_parts,
+                        "labeler_policy_version": config.labeler_policy_version,
+                        "reply_classifier_version": config.reply_classifier_version,
+                        "rubric_schema_version": config.rubric_schema_version,
+                        "as_of": config.as_of,
+                        "valid_at": rec_valid_at,
+                        "split": split,
+                        "exclusion_reason": None,
+                        "license_decision": config.license,
+                    }
                     # v2 schema stamp: every projected record carries the
                     # training-record schema version it was emitted under.
                     rec["schema_version"] = "2"
-                records.extend(seg_records)
-                adjudication.extend(seg_adjudication)
+                    records.append(rec)
+                for entry in seg_adjudication:
+                    key = (seg.session_id, str(entry["fingerprint"]))
+                    if key not in adjudicated_findings:
+                        adjudicated_findings.add(key)
+                        adjudication.append(entry)
                 included_sessions.append(seg.session_id)
 
     records.sort(key=lambda r: str(r["record_id"]))
@@ -344,9 +447,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     )
 
     schema_src = Path(__file__).parent.parent / "schema" / "v2.json"
-    schema_dst = config.out_dir / "schema.json"
-    schema_dst.parent.mkdir(parents=True, exist_ok=True)
-    schema_dst.write_bytes(schema_src.read_bytes())
+    _atomic_write(config.out_dir / "schema.json", schema_src.read_text(encoding="utf-8"))
 
     split_counts = {name: 0 for name in _SPLIT_FILENAMES}
     for r in records:
@@ -355,19 +456,10 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # Every Req-11 field: hub commit, curation id, content digests, policy/
     # classifier/rubric versions, as_of + valid_at pins, split assignment,
     # exclusion reasons, and the C5/license decision. Nothing silently dropped.
-    valid_at = config.as_of
-    for row in snapshot_rows.values():
-        for item in row.get("evidence") or []:
-            if isinstance(item, Mapping) and item.get("valid_at"):
-                candidate = str(item["valid_at"])
-                if valid_at is None or candidate > valid_at:
-                    valid_at = candidate
     content_digests: dict[str, str] = {
         batch.session_id: batch.content_digest for batch in bundle.admitted if batch.content_digest
     }
-    content_digests[config.annotations_snapshot.name] = hashlib.sha256(
-        config.annotations_snapshot.read_bytes()
-    ).hexdigest()
+    content_digests[config.annotations_snapshot.name] = snapshot_digest
     lineage = {
         "schema_version": "corpus-v2",
         "curation_id": bundle.curation_id,
@@ -396,6 +488,11 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         config.out_dir / "lineage.json",
         json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
     )
+
+    # Completeness marker (mirrors the bundle's own ``_SUCCESS`` gate): the
+    # projection file set is only consumable once every member is in place,
+    # so a mid-write failure never leaves a partial projection behind.
+    _atomic_write(config.out_dir / "_SUCCESS", "ok\n")
 
     return {
         "total": len(records),

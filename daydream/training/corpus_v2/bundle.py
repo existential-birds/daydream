@@ -15,7 +15,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 _SCHEMA_PATH = Path(__file__).parent.parent / "schema" / "curation-manifest-v1.json"
-_MANIFEST_NAME = "curation-manifest-v1.json"
+# The only producer (daydream.archive.hydrate.finalize) writes the manifest as
+# ``curation-manifest.json`` under ``curated/<curation-id>/``; the bundle root
+# is that curated directory.
+_MANIFEST_NAME = "curation-manifest.json"
 _SUCCESS_NAME = "_SUCCESS"
 _SUMS_NAME = "SHA256SUMS"
 
@@ -58,12 +61,18 @@ def _gate(condition: bool, message: str) -> None:
 def _verify_sha256sums(root: Path) -> None:
     sums_path = root / _SUMS_NAME
     _gate(sums_path.is_file(), f"bundle {root}: missing {_SUMS_NAME}")
+    # daydream.archive.hydrate writes SHA256SUMS relpaths relative to the
+    # hub-checkout root under the ``curated/<curation-id>/`` prefix; the bundle
+    # root is that curated directory, so strip the prefix before resolving
+    # under the root.
+    prefix = f"curated/{root.name}/" if root.parent.name == "curated" else ""
     for line in sums_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         digest, sep, relpath = line.partition("  ")
         _gate(bool(sep), f"bundle {root}: malformed {_SUMS_NAME} line {line!r}")
-        target = root / relpath
+        resolved = relpath[len(prefix):] if prefix and relpath.startswith(prefix) else relpath
+        target = root / resolved
         if not target.is_file():
             raise BundleError(f"bundle {root}: missing artifact {relpath!r} listed in {_SUMS_NAME}")
         actual = hashlib.sha256(target.read_bytes()).hexdigest()

@@ -44,13 +44,18 @@ _MANIFEST = {
 
 def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -> None:
     lines = []
+    # Producer-realistic relpaths: daydream.archive.hydrate.finalize writes
+    # SHA256SUMS lines relative to the hub-checkout root under the
+    # ``curated/<curation-id>/`` prefix; bundle.py strips that prefix because
+    # the bundle root is the curated directory itself.
+    prefix = f"curated/{bundle_dir.name}/" if bundle_dir.parent.name == "curated" else ""
     for path in sorted(bundle_dir.rglob("*")):
         if not path.is_file() or path.name == "SHA256SUMS" or path.name == "_SUCCESS":
             continue
         rel = path.relative_to(bundle_dir).as_posix()
         if rel in exclude:
             continue
-        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {rel}")
+        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {prefix}{rel}")
     (bundle_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
@@ -60,7 +65,7 @@ def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: 
         target = bundle_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}\n")
-    (bundle_dir / "curation-manifest-v1.json").write_text(json.dumps(_MANIFEST))
+    (bundle_dir / "curation-manifest.json").write_text(json.dumps(_MANIFEST))
     _write_sumsums(bundle_dir)
     if with_success:
         (bundle_dir / "_SUCCESS").write_text("ok\n")
@@ -81,18 +86,21 @@ def _write_annotations_snapshot(
     valid_at: str = "2026-01-01T00:00:00+00:00",
     session_id: str = "sess-a",
     dispositions: list[str] | None = None,
+    n_siblings: int = 1,
 ) -> Path:
     """Task 0A side-car shape: a digest-pinned JSONL of per-finding
     resolution records keyed by fingerprint, exported alongside the bundle
     and covered by SHA256SUMS. Also gives the admitted batch a real ATIF
-    trajectory so segmentation has something to segment."""
+    trajectory so segmentation has something to segment (``n_siblings``
+    sibling subagent refs)."""
     trajectory = {
         "session_id": session_id,
         "trajectory_id": f"{session_id}:root",
         "subagent_trajectory_ref": [
-            {"trajectory_id": f"{session_id}:fix-0", "session_id": session_id, "steps": [
+            {"trajectory_id": f"{session_id}:fix-{i}", "session_id": session_id, "steps": [
                 {"step_id": 1, "source": "agent", "message": "fix"},
-            ]},
+            ]}
+            for i in range(n_siblings)
         ],
     }
     (bundle_dir / "batches" / session_id / "trajectory.jsonl").write_text(
@@ -109,7 +117,9 @@ def _write_annotations_snapshot(
             else []
         )
         rows.append({"session_id": session_id, "fingerprint": fps[i % len(fps)],
-                     "disposition": disposition, "evidence": evidence})
+                     "disposition": disposition, "evidence": evidence,
+                     "profile_schema_version": 2, "profile_name": "deep-review",
+                     "profile_source_kind": "builtin", "profile_digest": "d" * 64})
     snapshot_path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
     _write_sumsums(bundle_dir)  # the snapshot + trajectory join the digest pin
     return snapshot_path
@@ -130,7 +140,7 @@ def test_load_bundle_rejects_digest_mismatch(tmp_path: Path) -> None:
 
 def test_load_bundle_rejects_incompatible_schema_version(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    manifest_path = bundle_dir / "curation-manifest-v1.json"
+    manifest_path = bundle_dir / "curation-manifest.json"
     doc = json.loads(manifest_path.read_text())
     doc["schema_version"] = "999"
     manifest_path.write_text(json.dumps(doc))
@@ -287,7 +297,7 @@ def test_native_profile_run_without_legacy_skill_validates() -> None:
     assert extract_provenance(v2_record)["stack"] == "python"
     # Schema validity is Task 1's validator's job; here we pin that no
     # required-ness is smuggled back in for skill.
-    assert "skill" not in {f for f in v2_record if v2_record[f] is None and f == "skill"} or True
+    assert "skill" in {f for f in v2_record if v2_record[f] is None and f == "skill"}
 
 
 def test_legacy_skill_carried_as_provenance_never_required() -> None:
@@ -378,6 +388,19 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     assert "missing" in adj_report.read_text()
 
 
+def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    records = [json.loads(line) for line in
+               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    assert records
+    for rec in records:
+        assert rec["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
+                                   "profile_source_kind": "builtin", "profile_digest": "d" * 64}
+        assert "stack" in rec  # schema-required provenance key, never dropped
+
+
 # ---------------------------------------------------------------------------
 # Task 10: additive v2 loader surface (stacks.py) + v1 untouched gate
 # ---------------------------------------------------------------------------
@@ -405,6 +428,7 @@ def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
 def test_v2_loader_refuses_non_v2_record_naming_record_id(tmp_path: Path) -> None:
     out = tmp_path / "proj"
     out.mkdir()
+    (out / "_SUCCESS").write_text("ok\n")
     bad = {"schema_version": "1", "record_id": "deadbeef", "tier": "gold"}
     (out / "train.jsonl").write_text(json.dumps(bad) + "\n")
     with pytest.raises(ValueError, match="deadbeef"):
@@ -414,9 +438,101 @@ def test_v2_loader_refuses_non_v2_record_naming_record_id(tmp_path: Path) -> Non
 def test_v2_loader_refuses_malformed_line_verbatim(tmp_path: Path) -> None:
     out = tmp_path / "proj"
     out.mkdir()
+    (out / "_SUCCESS").write_text("ok\n")
     (out / "train.jsonl").write_text("{not json\n")
     with pytest.raises(json.JSONDecodeError):
         load_dataset_v2(out)
+
+
+def test_v2_loader_refuses_partial_projection_without_success_marker(tmp_path: Path) -> None:
+    # A mid-write failure leaves a partial file set behind; without the
+    # projector's _SUCCESS completeness marker the loader must refuse it
+    # rather than consume it as a complete row-set.
+    out = tmp_path / "proj"
+    out.mkdir()
+    (out / "train.jsonl").write_text("{}\n")
+    with pytest.raises(ValueError, match="_SUCCESS"):
+        load_dataset_v2(out)
+
+
+def test_emitted_records_validate_against_shipped_v2_schema(tmp_path: Path) -> None:
+    # The projector copies schema/v2.json beside its output, so every emitted
+    # record must validate against that exact artifact (TRAINING_SCHEMA_V2_PATH
+    # is the consumed-by-test canonical contract; nothing may ship a schema the
+    # projector's own output cannot satisfy).
+    from jsonschema import Draft202012Validator
+
+    from daydream.training.schema import TRAINING_SCHEMA_V2_PATH
+
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir)
+    out = tmp_path / "proj"
+    summary = run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    assert summary["emitted"] >= 1
+    validator = Draft202012Validator(json.loads(TRAINING_SCHEMA_V2_PATH.read_text()))
+    records = [
+        json.loads(line)
+        for line in (out / "corpus.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert records
+    errors = sorted(
+        (err.json_path, err.message) for rec in records for err in validator.iter_errors(rec)
+    )
+    assert not errors, errors
+    # every split-manifest record must validate too
+    for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
+        for line in (out / name).read_text().splitlines():
+            if line.strip():
+                errors = list(validator.iter_errors(json.loads(line)))
+                assert not errors, (name, errors)
+
+
+def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
+    # The snapshot resolutions are session-scoped, so one finding must never
+    # fan out into per-segment copies that could land in different splits.
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(
+        bundle_dir, dispositions=["accepted", "rejected"], n_siblings=2
+    )
+    out = tmp_path / "proj"
+    run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    records = [
+        json.loads(line)
+        for line in (out / "corpus.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 2  # one per (session, fingerprint), not per segment
+    assert len({r["record_id"] for r in records}) == len(records)
+    by_fp: dict[str, list[dict[str, Any]]] = {}
+    for rec in records:
+        by_fp.setdefault(str(rec["finding_fingerprint"]), []).append(rec)
+    assert all(len(v) == 1 for v in by_fp.values())
+
+
+def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -> None:
+    # Non-decisive findings are report output only (D8): excluded from
+    # corpus.jsonl and the split manifests, and counted as excluded in
+    # lineage/summary — the membership and the accounting must agree.
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "ambiguous"])
+    out = tmp_path / "proj"
+    summary = run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    assert summary["records_by_tier"] == {"gold": 1}
+    assert summary["exclusions_by_reason"] == {"non-decisive-adjudication": 1}
+    records = [
+        json.loads(line)
+        for line in (out / "corpus.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert all(r["tier"] != "task-only" for r in records)
+    for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
+        for line in (out / name).read_text().splitlines():
+            if line.strip():
+                assert json.loads(line)["tier"] != "task-only"
+    adjudication = json.loads((out / "adjudication-report.json").read_text())
+    assert [a["fingerprint"] for a in adjudication] == ["b2" * 32]
+    assert (out / "_SUCCESS").is_file()
 
 
 def test_v1_loader_and_v1_artifacts_unaffected(tmp_path: Path) -> None:
