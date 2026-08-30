@@ -18,7 +18,9 @@ SNAPSHOT = {
 
 
 def make_fake_hub(tmp_path: Path) -> FakeHub:
-    return FakeHub(repo_id="org/private-ds", private=True, files=dict(SNAPSHOT))
+    hub = FakeHub(repo_id="org/private-ds", private=True, files=dict(SNAPSHOT))
+    hub.commit_revision("a" * 40)
+    return hub
 
 
 def test_fake_hub_roundtrip_and_revision(tmp_path: Path) -> None:
@@ -386,6 +388,55 @@ class TestIngestAndIndex:
         stage = self._staged(tmp_path)
         hydrate.ingest_bundles(stage, revision="a" * 40)
         assert not list((stage / "runs").rglob(".git"))
+
+
+class TestFinalizeAndVerify:
+    def _config(self, tmp_path: Path) -> hydrate.HydrateHubConfig:
+        return hydrate.HydrateHubConfig(
+            source_repo="org/private-ds", source_revision="a" * 40,
+            destination_repo="org/private-ds", stage_dir=tmp_path / "stage")
+
+    def _staged(self, tmp_path: Path) -> Path:
+        hub = make_fake_hub(tmp_path)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        hydrate.dedupe_admitted(stage, revision="a" * 40)
+        hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
+        return stage
+
+    def test_success_marker_last_and_output_sha_captured(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        stage = self._staged(tmp_path)
+        summary = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
+            source_repo="org/private-ds", source_revision="a" * 40,
+            destination_repo="org/private-ds", stage_dir=stage), client=hub)
+        order = hub.commit_order
+        assert order[-1]["contains"] == ["curated/" + summary.curation_id + "/_SUCCESS"]
+        assert summary.output_commit_sha and len(summary.output_commit_sha) == 40
+
+    def test_verify_cycle_reproduces_dry_run_counts(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        self._staged(tmp_path)
+        summary = hydrate.run_hydrate_hub(self._config(tmp_path), client=hub)
+        assert summary.verified is True
+        assert summary.dry_run_admitted == summary.verify_admitted  # M19 count equality
+
+    def test_no_success_on_skipped_upload(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.fail_uploads = True
+        self._staged(tmp_path)
+        with pytest.raises(hydrate.HydrationError):
+            hydrate.run_hydrate_hub(self._config(tmp_path), client=hub)
+        assert "cur-" not in "".join(hub.uploaded_paths) or \
+            not any(p.endswith("_SUCCESS") for p in hub.uploaded_paths)
+
+    def test_no_success_on_public_destination(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.private = False
+        with pytest.raises(hydrate.PublicDestinationError):
+            hydrate.run_hydrate_hub(self._config(tmp_path), client=hub)
+        assert not any(p.endswith("_SUCCESS") for p in hub.uploaded_paths)
 
 
 class TestDedupeAndLedger:

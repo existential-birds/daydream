@@ -39,6 +39,7 @@ from daydream.archive.hydrate_rules import (
 )
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import Manifest
+from daydream.archive.scan import scan_run_dir
 from daydream.trajectory import redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -67,6 +68,10 @@ class MovingBranchError(HydrationError):
 
 class PublicDestinationError(HydrationError):
     """The target Hub repo is public — hydration publishes only to private repos (M17)."""
+
+
+class VerificationError(HydrationError):
+    """The clean-room verification cycle failed — success is never reported (M20)."""
 
 
 def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bool) -> str:
@@ -778,7 +783,9 @@ def _curated_upload_paths(stage: Path, curation_id: str) -> list[Path]:
     return sorted(p for p in curated.rglob("*") if p.is_file())
 
 
-def publish_batches(client: HubClient, stage: Path, *, curation_id: str) -> None:
+def publish_batches(
+    client: HubClient, stage: Path, *, curation_id: str, skip_sessions: set[str] | None = None
+) -> None:
     """Publish sanitized batches additively under ``curated/<curation-id>/`` (M13/M15/M16).
 
     Hard-fails with :class:`PublicDestinationError` when the repo is not private
@@ -788,6 +795,11 @@ def publish_batches(client: HubClient, stage: Path, *, curation_id: str) -> None
     ``batches/``, the import ledger, the resolution map, ``SHA256SUMS`` over the
     published file set, and the resume ledger ``resume/ledger.jsonl`` (one
     record per completed batch: session_id, batch digest, source commit).
+
+    Additive publication is resumable (M15/M16): ``skip_sessions`` — completed
+    session ids from the remote resume ledger — are omitted from the upload
+    mapping (they already exist at their content-addressed paths from prior
+    commits) while still contributing to SHA256SUMS and the resume ledger.
 
     Bronze safety (M10/M13): the module asserts its own upload path list never
     leaves the ``curated/`` prefix before a single byte is written. Upload
@@ -824,9 +836,15 @@ def publish_batches(client: HubClient, stage: Path, *, curation_id: str) -> None
     files = _curated_upload_paths(stage, curation_id)
 
     mapping: dict[str | Path, Path] = {
-        f"{prefix}{f.relative_to(curated).as_posix()}": f for f in files
+        f"{prefix}{f.relative_to(curated).as_posix()}": f
+        for f in files
+        if not any(
+            f.relative_to(curated).as_posix().startswith(f"batches/{sid}/")
+            for sid in skip_sessions or ()
+        )
     }
-    _retry_upload(client, mapping, f"daydream hydrate {curation_id}: additive batch publication")
+    if mapping:
+        _retry_upload(client, mapping, f"daydream hydrate {curation_id}: additive batch publication")
 
 
 def _stage_batches(stage: Path, curated: Path) -> None:
@@ -1074,3 +1092,267 @@ class HfHubClient:
                 )
         except Exception as exc:
             raise HydrationError(f"upload failed for {self._repo_id}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Finalization + verify-before-success cycle (Task 10, M18/M19/M20)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HydrateHubConfig:
+    """Operator configuration for ``run_hydrate_hub`` (harvest ``RunConfig`` discipline)."""
+
+    source_repo: str
+    source_revision: str
+    destination_repo: str
+    stage_dir: Path
+    exploratory: bool = False
+
+
+@dataclass
+class HydrateSummary:
+    """Outcome of one ``run_hydrate_hub`` invocation; ``verified`` gates success."""
+
+    source_commit: str
+    curation_id: str
+    output_commit_sha: str | None = None
+    dry_run_admitted: int = 0
+    verify_admitted: int = 0
+    verified: bool = False
+
+
+def _curation_manifest_doc(
+    stage: Path, *, curation_id: str, source_commit: str, ledger: dict[str, Any]
+) -> dict[str, Any]:
+    """Render the portable curation manifest (schema v1) from the real ledger (M12/M18)."""
+    batches: list[dict[str, Any]] = []
+    for entry in ledger.get("imported", []):
+        sid = str(entry["session_id"])
+        batches.append(
+            {
+                "session_id": sid,
+                "content_digest": str(entry.get("content_digest") or ""),
+                "status": "admitted",
+                "reason_code": None,
+                "artifact_relpath": f"batches/{sid}",
+                "manifest_relpath": f"batches/{sid}/manifest.json",
+            }
+        )
+    for rejection in ledger.get("rejections", []):
+        sid = str(rejection["session_id"])
+        code = rejection.get("reason_code")
+        status = "excluded" if code in hydrate_rules.EXCLUSION_CODES else "quarantined"
+        root = "excluded" if status == "excluded" else "quarantine"
+        digest = rejection.get("content_digest")
+        if not isinstance(digest, str) or not digest:
+            # Rejected bundles carry no derivative digest; derive one from the
+            # rejected copy on staging (or the session id when it was moved).
+            source_dir = stage / root / sid
+            if not source_dir.is_dir():
+                source_dir = stage / "downloads" / str(ledger["pinned_revision"]) / "bundles" / sid
+            digest = sanitize._derivative_digest(source_dir) if source_dir.is_dir() \
+                else hashlib.sha256(sid.encode()).hexdigest()
+        batches.append(
+            {
+                "session_id": sid,
+                "content_digest": str(digest),
+                "status": status,
+                "reason_code": code,
+                "artifact_relpath": f"{root}/{sid}",
+                "manifest_relpath": None,
+            }
+        )
+    return {
+        "schema_version": hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+        "source_hub_commit": str(source_commit),
+        "curation_id": curation_id,
+        "sanitizer_version": hydrate_rules.SANITIZER_VERSION,
+        "hydration_index_schema_version": hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+        "admission_policy_version": hydrate_rules.ADMISSION_POLICY_VERSION,
+        "publication_prefix": f"curated/{curation_id}/",
+        "batches": batches,
+    }
+
+
+def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit: str) -> str:
+    """Publish the curation manifest, then ``_SUCCESS`` as the terminal commit (M18).
+
+    The manifest is rendered from the real persisted import ledger and uploaded
+    first; ``curated/<curation-id>/_SUCCESS`` is uploaded as the very last
+    commit — nothing is ever uploaded after it. Returns the output commit SHA
+    (the Hub head after the ``_SUCCESS`` commit), which the verify cycle pins.
+    """
+    curated = stage / "curated" / curation_id
+    ledger_path = curated / "import-ledger.json"
+    if not ledger_path.is_file():
+        raise HydrationError(redact_text(f"no import ledger under curated/{curation_id}; cannot finalize"))
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    doc = _curation_manifest_doc(stage, curation_id=curation_id, source_commit=source_commit, ledger=ledger)
+    manifest_path = curated / "curation-manifest.json"
+    _atomic_write_json(manifest_path, doc)
+    prefix = f"curated/{curation_id}/"
+    _retry_upload(client, {f"{prefix}curation-manifest.json": manifest_path},
+                  f"daydream hydrate {curation_id}: curation manifest")
+    success_path = curated / "_SUCCESS"
+    success_path.write_text(
+        json.dumps({"curation_id": curation_id, "source_hub_commit": str(source_commit), "status": "complete"}) + "\n",
+        encoding="utf-8",
+    )
+    _retry_upload(client, {f"{prefix}_SUCCESS": success_path},
+                  f"daydream hydrate {curation_id}: success marker")
+    return str(client.repo_info().sha)
+
+
+def verify_publication(
+    client: HubClient,
+    stage: Path,
+    *,
+    output_commit_sha: str,
+    curation_id: str,
+    dry_run_admitted: int,
+    source_commit: str,
+) -> int:
+    """Clean-room verification of the published output commit (M19/M20).
+
+    Downloads exactly the pinned output commit into a fresh staging dir,
+    validates SHA256SUMS against the uploaded content, validates the curation
+    manifest against the frozen schema, rescan every published batch with
+    ``scan_run_dir`` (must be clean), rebuilds a scratch index from the
+    portable artifacts alone, and recomputes the candidate count. Any mismatch
+    raises :class:`VerificationError` — success is never reported on a failed
+    verification. Returns the verified admitted count.
+    """
+    prefix = f"curated/{curation_id}/"
+    verify_dir = stage / "_verify"
+    if verify_dir.exists():
+        shutil.rmtree(verify_dir)
+    verify_dir.mkdir(parents=True)
+
+    def _download(relpath: str) -> bytes:
+        try:
+            return client.download_file(f"{prefix}{relpath}", revision=output_commit_sha)
+        except HydrationError as exc:
+            raise VerificationError(redact_text(f"verify: published file {relpath!r} missing: {exc}")) from exc
+
+    # 1. SHA256SUMS must match every published file byte-for-byte.
+    try:
+        sums_text = _download("SHA256SUMS").decode("utf-8")
+    except VerificationError:
+        raise
+    except HydrationError as exc:
+        raise VerificationError(redact_text(f"verify: SHA256SUMS missing: {exc}")) from exc
+    for line in sums_text.splitlines():
+        if not line.strip():
+            continue
+        digest, _, relpath = line.partition("  ")
+        relpath = relpath.removeprefix(prefix)
+        actual = hashlib.sha256(_download(relpath)).hexdigest()
+        if actual != digest:
+            raise VerificationError(redact_text(f"verify: checksum mismatch for {relpath!r}"))
+
+    # 2. Curation manifest: schema-valid and consistent with the pinned inputs.
+    from jsonschema import Draft202012Validator  # noqa: PLC0415  # lazy: verify-time only
+
+    schema_path = Path(__file__).parent.parent / "training" / "schema" / "curation-manifest-v1.json"
+    doc = json.loads(_download("curation-manifest.json").decode("utf-8"))
+    errors = sorted(Draft202012Validator(json.loads(schema_path.read_text())).iter_errors(doc), key=str)
+    if errors:
+        raise VerificationError(redact_text(f"verify: curation manifest invalid: {errors[0].message}"))
+    if doc["curation_id"] != curation_id or doc["source_hub_commit"] != str(source_commit):
+        raise VerificationError(redact_text("verify: curation manifest identity mismatch"))
+    _download("_SUCCESS")  # the marker must be present at the pinned output commit
+
+    # 3. Rescan every published batch (clean-room) and rebuild the scratch index.
+    valid = {f.name for f in dataclass_fields(Manifest)}
+    for batch in doc["batches"]:
+        if batch["status"] != "admitted":
+            continue
+        sid = batch["session_id"]
+        batch_dir = verify_dir / "batches" / sid
+        for line in sums_text.splitlines():
+            if not line.strip():
+                continue
+            _, _, relpath = line.partition("  ")
+            relpath = relpath.removeprefix(prefix)
+            if not relpath.startswith(f"batches/{sid}/"):
+                continue
+            target = batch_dir / relpath.removeprefix(f"batches/{sid}/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(_download(relpath))
+        scan = scan_run_dir(batch_dir)
+        if not scan.clean:
+            raise VerificationError(redact_text(f"verify: published batch {sid!r} fails the secrets scan"))
+        if sanitize._derivative_digest(batch_dir) != batch["content_digest"]:
+            raise VerificationError(redact_text(f"verify: batch {sid!r} digest mismatch"))
+        data = _read_manifest_dict(batch_dir)
+        if data is None:
+            raise VerificationError(redact_text(f"verify: batch {sid!r} has an unreadable manifest"))
+        kwargs = {k: v for k, v in data.items() if k in valid}
+        kwargs["archive_path"] = str(batch_dir)
+        raw_url = data.get("remote_url")
+        if isinstance(raw_url, str) and raw_url.strip():
+            slug, canonical = normalize_remote_url(raw_url)
+            kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
+        else:
+            kwargs["repo_slug"], kwargs["remote_url"] = None, None
+        upsert_run(verify_dir, Manifest(**kwargs))
+
+    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle
+
+    verify_admitted = len(query_runs(verify_dir))
+    if verify_admitted != dry_run_admitted:
+        raise VerificationError(
+            redact_text(
+                f"verify: candidate count mismatch — dry run admitted {dry_run_admitted}, "
+                f"clean-room rebuild found {verify_admitted}"
+            )
+        )
+    return verify_admitted
+
+
+def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -> HydrateSummary:
+    """Orchestrate hydration end-to-end: pin, download, ingest, dedupe, publish, verify.
+
+    Composes Tasks 4–9 in order with fatal, redacted failure semantics: resolve
+    the pinned source revision, download the snapshot, run the ingest gate,
+    dedupe + ledger, publish additive batches (continuous checkpoints, M16),
+    finalize (manifest then ``_SUCCESS`` last, M18), and only then run the
+    clean-room verification cycle (M19/M20). ``client=None`` builds the
+    production :class:`HfHubClient` via :func:`_make_client`. The summary's
+    ``verified`` flag is set only after verification passes; every failure
+    path leaves it False and never uploads a success marker.
+    """
+    client = client if client is not None else _make_client(config.destination_repo)
+    if not client.repo_private:
+        raise PublicDestinationError(
+            "refusing to publish: the Hub repo is not private; hydration "
+            "publishes sanitized corpora only to private repos (M17)"
+        )
+    source_commit = resolve_source_revision(client, config.source_revision, exploratory=config.exploratory)
+    download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
+    ingest_bundles(config.stage_dir, revision=source_commit)
+    dedupe_admitted(config.stage_dir, revision=source_commit)
+    ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
+    curation_id = str(ledger["curation_id"])
+    checkpoint = resume_state(client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
+    publish_batches(
+        client, config.stage_dir, curation_id=curation_id, skip_sessions=checkpoint.completed_sessions
+    )
+    output_commit_sha = finalize(client, config.stage_dir, curation_id=curation_id, source_commit=source_commit)
+    summary = HydrateSummary(
+        source_commit=source_commit,
+        curation_id=curation_id,
+        output_commit_sha=output_commit_sha,
+        dry_run_admitted=int(ledger["tallies"]["imported"]),
+    )
+    summary.verify_admitted = verify_publication(
+        client,
+        config.stage_dir,
+        output_commit_sha=output_commit_sha,
+        curation_id=curation_id,
+        dry_run_admitted=summary.dry_run_admitted,
+        source_commit=source_commit,
+    )
+    summary.verified = True  # only after the full clean-room cycle passes (M20)
+    return summary
