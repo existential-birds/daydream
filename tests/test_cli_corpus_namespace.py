@@ -1,6 +1,7 @@
 """Tests for the ``corpus`` namespace dispatch.
 
-The data-pipeline verbs (``harvest``, ``build``/``build-corpus``, ``label``)
+The data-pipeline verbs (``harvest``, ``build``/``build-corpus``, ``label``,
+``hydrate-hub``)
 live under a ``corpus`` parent verb. ``main()`` recognizes ``corpus`` and
 dispatches the sub-verb to the existing handlers; a bare ``daydream corpus``
 prints help and exits 2. The old top-level forms are removed — ``daydream
@@ -68,7 +69,7 @@ def test_corpus_build_and_label_route(monkeypatch: pytest.MonkeyPatch, tmp_path:
 def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert _run_main(["corpus"]) == 2
     captured = capsys.readouterr()
-    assert "usage: daydream corpus {harvest,build,label}" in captured.out
+    assert "usage: daydream corpus {harvest,build,label,hydrate-hub}" in captured.out
     assert "harvest" in captured.out
     assert "build" in captured.out
     assert "label" in captured.out
