@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
+from daydream.training.corpus_v2.identity import record_id
 
 _MANIFEST = {
     "schema_version": "1",
@@ -37,7 +38,7 @@ _MANIFEST = {
 }
 
 
-def _write_sumsums(bundle_dir: Path, *, exclude: set[str] = frozenset()) -> None:
+def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -> None:
     lines = []
     for path in sorted(bundle_dir.rglob("*")):
         if not path.is_file() or path.name == "SHA256SUMS" or path.name == "_SUCCESS":
@@ -104,3 +105,16 @@ def test_load_bundle_rejects_missing_batches_file(tmp_path: Path) -> None:
     (bundle_dir / "batches" / "sess-a" / "trajectory.jsonl").unlink()
     with pytest.raises(BundleError, match="missing artifact"):
         load_curated_bundle(bundle_dir)
+
+def test_record_id_is_stable_and_discriminating() -> None:
+    a = record_id(session_id="s1", trajectory_id="s1:fix-0", segment_id="seg-0", fingerprint="ab" * 32)
+    assert a == record_id(session_id="s1", trajectory_id="s1:fix-0", segment_id="seg-0", fingerprint="ab" * 32)
+    assert record_id(session_id="s2", trajectory_id="s1:fix-0", segment_id="seg-0", fingerprint="ab" * 32) != a
+    assert record_id(session_id="s1", trajectory_id="s1:fix-1", segment_id="seg-0", fingerprint="ab" * 32) != a
+    assert record_id(session_id="s1", trajectory_id="s1:fix-0", segment_id="seg-1", fingerprint="ab" * 32) != a
+    assert record_id(session_id="s1", trajectory_id="s1:fix-0", segment_id="seg-0", fingerprint="cd" * 32) != a
+
+
+def test_record_id_is_deterministic_sha256_of_canonical_join() -> None:
+    expected = hashlib.sha256(b"s1\x1fs1:fix-0\x1fseg-0\x1f" + b"ab" * 32).hexdigest()
+    assert record_id("s1", "s1:fix-0", "seg-0", "ab" * 32) == expected
