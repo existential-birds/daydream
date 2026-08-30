@@ -431,3 +431,43 @@ def test_v1_loader_and_v1_artifacts_unaffected(tmp_path: Path) -> None:
     import daydream.training.corpus  # v1 module importable, unmodified
     v1_src = (Path(daydream.training.corpus.__file__)).read_bytes()
     assert hashlib.sha256(v1_src).hexdigest() == _V1_CORPUS_SHA_AT_PLAN_TIME
+
+
+# ---------------------------------------------------------------------------
+# Task 11: CLI wiring — ``daydream corpus build-v2``
+# ---------------------------------------------------------------------------
+
+
+def _run_cli(argv: list[str]) -> int:
+    """Drive ``cli.main`` (the production entrypoint) with ``argv``."""
+    import sys
+
+    from daydream import cli
+
+    saved = sys.argv
+    sys.argv = ["daydream", *argv]
+    try:
+        cli.main()
+    except SystemExit as exc:  # main() always exits via sys.exit
+        return int(exc.code or 0)
+    finally:
+        sys.argv = saved
+    return 0
+
+
+def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir)
+    rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
+                   "--annotations-snapshot", str(snap), "--out", str(tmp_path / "out" / "c.jsonl")])
+    assert rc == 0
+    assert (tmp_path / "out" / "corpus-v2.jsonl").is_file()
+    assert (tmp_path / "out" / "lineage.json").is_file()
+
+
+def test_cli_build_v2_refuses_missing_bundle_fail_closed(tmp_path: Path) -> None:
+    rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(tmp_path / "nope"),
+                   "--annotations-snapshot", str(tmp_path / "nope" / "snap.jsonl"),
+                   "--out", str(tmp_path / "out" / "c.jsonl")])
+    assert rc != 0
+    assert not (tmp_path / "out" / "lineage.json").exists()
