@@ -20,6 +20,9 @@ REASON_CODE_FIXTURE_TMP_ARTIFACT = "fixture_tmp_artifact"
 REASON_CODE_NON_PRODUCTION_BUNDLE = "non_production_bundle"
 REASON_CODE_PIPELINE_STATUS_EVIDENCE_ABSENT = "pipeline_status_evidence_absent"
 REASON_CODE_SECRETS_SCAN_DIRTY = "secrets_scan_dirty"
+REASON_CODE_BUNDLE_UNREADABLE = "bundle_unreadable"
+REASON_CODE_UNTRUSTED_REMOTE_HOST = "untrusted_remote_host"
+REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
 
 # ---------------------------------------------------------------------------
 # Curation-id derivation (Task 3)

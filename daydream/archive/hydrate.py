@@ -21,11 +21,23 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
+from daydream.archive import sanitize
+from daydream.archive.git_safe import normalize_remote_url
+from daydream.archive.hydrate_rules import (
+    REASON_CODE_BUNDLE_UNREADABLE,
+    REASON_CODE_SANITIZE_FAILED,
+    REASON_CODE_SECRETS_SCAN_DIRTY,
+    REASON_CODE_UNTRUSTED_REMOTE_HOST,
+)
+from daydream.archive.index import upsert_run
+from daydream.archive.manifest import Manifest
 from daydream.trajectory import redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -247,6 +259,148 @@ def download_snapshot(
     root.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps({"revision": revision, "artifacts": artifacts}, indent=2))
     return DownloadResult(downloaded=downloaded, skipped=skipped, digests=digests)
+
+
+def _read_manifest_dict(bundle_dir: Path) -> dict[str, Any] | None:
+    """Read ``manifest.json`` from ``bundle_dir``; ``None`` when absent/unparseable."""
+    path = bundle_dir / "manifest.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    """Outcome of the ingest gate for one staged session bundle (issue #982 M4/M6)."""
+
+    session_id: str
+    status: str  # "admitted" | "quarantined"
+    reason_code: str | None = None
+
+
+def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
+    """Run every staged bundle through the #981 ingest gate (issue #982 M4/M6).
+
+    For each session bundle under ``stage/downloads/<revision>/bundles/``:
+
+    1. The manifest must parse and carry a trusted remote host
+       (:func:`daydream.archive.git_safe.normalize_remote_url` identity); an
+       unreadable manifest or non-allowlisted host is quarantined (fail-closed,
+       stable reason codes) without ever dereferencing embedded paths.
+    2. ``sanitize.import_bundle`` is the sole secrets gate: a dirty bundle is
+       moved to ``stage/quarantine/<name>`` by the #981 implementation itself —
+       hydrate never forks the scan or the quarantine move.
+    3. A clean bundle is sanitized by ``sanitize.sanitize_bundle`` (release
+       scan fail-closed), and the released derivative is placed at
+       ``stage/runs/<session_id>/``. Any ``.git`` directory inside the
+       downloaded copy is stripped before sanitize so no hydrated bundle ever
+       ships one (harvest priority-1 safety, Task 0B constraint).
+
+    Identity-collision dedupe is Task 8's concern; this pass guarantees one
+    derivative per staged bundle or a quarantine result.
+    """
+    bundles_root = stage / "downloads" / str(revision) / "bundles"
+    if not bundles_root.is_dir():
+        return []
+    results: list[IngestResult] = []
+    for bundle_dir in sorted(p for p in bundles_root.iterdir() if p.is_dir()):
+        name = bundle_dir.name
+        data = _read_manifest_dict(bundle_dir)
+        if data is None:
+            results.append(IngestResult(name, "quarantined", REASON_CODE_BUNDLE_UNREADABLE))
+            continue
+        session_id = str(data.get("session_id") or name)
+        raw_url = data.get("remote_url")
+        if isinstance(raw_url, str) and raw_url.strip():
+            identity, _canonical = normalize_remote_url(raw_url)
+            if identity is None:
+                # Non-allowlisted host: rejected as admission data before any
+                # gate work; the raw copy stays in downloads, never indexed.
+                results.append(
+                    IngestResult(session_id, "quarantined", REASON_CODE_UNTRUSTED_REMOTE_HOST)
+                )
+                continue
+        gate = sanitize.import_bundle(bundle_dir, stage)
+        if gate.quarantined or not gate.imported:
+            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
+            continue
+        # Task 0B constraint: hydrated staging bundles must exclude .git (the
+        # raw download copy is daydream-staged data, safe to prune locally).
+        for git_dir in list(bundle_dir.rglob(".git")):
+            if git_dir.is_dir():
+                shutil.rmtree(git_dir)
+        try:
+            sanitized = sanitize.sanitize_bundle(bundle_dir, stage)
+        except Exception:
+            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SANITIZE_FAILED))
+            continue
+        if not sanitized.released:
+            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
+            continue
+        derivative = stage / "sanitized" / session_id
+        target = stage / "runs" / session_id
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(derivative), str(target))  # staging layout only, not the gate
+        results.append(IngestResult(session_id, "admitted"))
+    return results
+
+
+def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
+    """Rewrite an embedded ``source_path`` to a staging-local value or ``None``.
+
+    Embedded paths are data: an absolute path outside the staging root is
+    dropped (never dereferenced, never carried into the index).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        return raw
+    try:
+        p.relative_to(stage)
+    except ValueError:
+        return None
+    return raw
+
+
+def rebuild_index(stage: Path) -> None:
+    """Index every admitted derivative under ``stage/runs/`` (issue #982 M6).
+
+    Each derivative's manifest is loaded and its path/URL fields rewritten to
+    staging-local, credential-free values before ``index.upsert_run`` writes
+    the row: ``archive_path`` points inside the staging root (never the raw
+    download tree), ``source_path`` is staging-local or ``None``, and
+    ``remote_url``/``repo_slug`` come from ``normalize_remote_url`` output.
+    ``upsert_run`` errors propagate — an admitted bundle is never silently
+    skipped.
+    """
+    runs_dir = stage / "runs"
+    if not runs_dir.is_dir():
+        return
+    for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+        data = _read_manifest_dict(derivative)
+        if data is None:
+            raise HydrationError(
+                redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
+            )
+        valid = {f.name for f in dataclass_fields(Manifest)}
+        rewritten = {"archive_path", "source_path", "remote_url", "repo_slug"}
+        kwargs = {k: v for k, v in data.items() if k in valid and k not in rewritten}
+        raw_url = data.get("remote_url")
+        if isinstance(raw_url, str) and raw_url.strip():
+            slug, canonical = normalize_remote_url(raw_url)
+            kwargs["repo_slug"] = slug
+            kwargs["remote_url"] = canonical
+        else:
+            kwargs["repo_slug"] = None
+            kwargs["remote_url"] = None
+        kwargs["source_path"] = _staging_local_source_path(data.get("source_path"), stage)
+        kwargs["archive_path"] = str(derivative)
+        upsert_run(stage, Manifest(**kwargs))
 
 
 def _import_hf_hub() -> Any:

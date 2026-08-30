@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -217,3 +218,66 @@ class TestDownloadSnapshot:
             hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
         assert not (tmp_path / "outside.txt").exists()
         assert not (tmp_path / "stage" / "outside.txt").exists()
+
+
+class TestIngestAndIndex:
+    def _staged(self, tmp_path: Path, revision: str = "a" * 40) -> Path:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision(revision)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
+        return stage
+
+    def test_clean_bundle_ingested_and_indexed_staging_local(self, tmp_path: Path) -> None:
+        stage = self._staged(tmp_path)
+        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        assert [r.status for r in results] == ["admitted"]
+        row_dir = stage / "runs" / "sess-a"
+        assert row_dir.is_dir()
+        # index row carries staging-local paths only
+        from daydream.archive.index import query_runs
+        hydrate.rebuild_index(stage)
+        rows = query_runs(stage)
+        assert len(rows) == 1
+        assert rows[0]["archive_path"].startswith(str(stage))     # inside staging root
+        assert "downloads" not in rows[0]["archive_path"]         # not the raw download path
+        assert rows[0]["source_path"] is None or not Path(rows[0]["source_path"]).is_absolute() or \
+            rows[0]["source_path"].startswith(str(stage))
+
+    def test_dirty_bundle_quarantined_never_visible(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.files["bundles/sess-bad/manifest.json"] = \
+            b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        bad = [r for r in results if r.session_id == "sess-bad"]
+        assert bad and bad[0].status == "quarantined"
+        assert bad[0].reason_code == "secrets_scan_dirty"
+        # never visible to the index / harvest
+        hydrate.rebuild_index(stage)
+        from daydream.archive.index import query_runs
+        assert all(row["session_id"] != "sess-bad" for row in query_runs(stage))
+        assert (stage / "quarantine" / "sess-bad").exists()
+
+    def test_embedded_paths_never_dereferenced(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.files["bundles/sess-evil/manifest.json"] = (
+            b'{"session_id": "sess-evil", "archive_path": "/etc", "source_path": "/usr",'
+            b' "remote_url": "file:///etc/passwd"}'
+        )
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        evil = [r for r in results if r.session_id == "sess-evil"]
+        assert evil and evil[0].status == "quarantined"   # non-allowlisted host fails closed
+        # nothing outside staging was touched
+        assert not pathlib.Path("/etc/passwd.git").exists()
+
+    def test_bundles_exclude_git_dirs(self, tmp_path: Path) -> None:
+        """Task 0B constraint: no .git ships inside hydrated bundles (harvest priority-1 safety)."""
+        stage = self._staged(tmp_path)
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        assert not list((stage / "runs").rglob(".git"))
