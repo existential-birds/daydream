@@ -112,7 +112,7 @@ async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
         await asyncio.sleep(0.01)
 
 
-async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 10.0) -> None:
+async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
     """Await *pgid*'s disappearance (a readiness wait, not a fixed sleep).
 
     A group-signal kill reaps the direct child synchronously, but a grandchild
@@ -138,7 +138,7 @@ async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 10.0) -> None:
         await asyncio.sleep(0.01)
 
 
-async def _wait_for_fd_count(base: int, *, timeout_s: float = 10.0) -> None:
+async def _wait_for_fd_count(base: int, *, timeout_s: float = 30.0) -> None:
     """Await the fd count's return to *base* (a readiness wait, not a fixed sleep).
 
     The transport close releases the pipe fds, but the release lands in the

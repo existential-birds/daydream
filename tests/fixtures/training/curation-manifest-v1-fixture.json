@@ -1,0 +1,29 @@
+{
+  "schema_version": "1",
+  "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
+  "curation_id": "cur-0123456789abcdef",
+  "sanitizer_version": "1",
+  "hydration_index_schema_version": "1",
+  "admission_policy_version": "1",
+  "publication_prefix": "curated/cur-0123456789abcdef/",
+  "batches": [
+    {
+      "session_id": "sess-a",
+      "content_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "admitted",
+      "reason_code": null,
+      "artifact_relpath": "runs/sess-a/trajectory.jsonl",
+      "artifact_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "manifest_relpath": "runs/sess-a/manifest.json"
+    },
+    {
+      "session_id": "sess-b",
+      "content_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "status": "quarantined",
+      "reason_code": "secrets_scan_dirty",
+      "artifact_relpath": "quarantine/sess-b/trajectory.jsonl",
+      "artifact_digest": null,
+      "manifest_relpath": null
+    }
+  ]
+}
