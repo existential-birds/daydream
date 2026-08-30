@@ -34,6 +34,7 @@ _ITEM_KEYS = (
     "status",
     "rubric_version",
     "prior_disposition",
+    "review_required",
 )
 
 
@@ -110,8 +111,13 @@ def build_queue(
                 "status": "open",
                 "rubric_version": rubric_version,
                 "prior_disposition": None,
+                "review_required": False,
             }
             prior = (prior_observations or {}).get(str(item["record_id"]))
+            if prior is not None:
+                # Propagate a stored review-required flag (e.g. model-suggested
+                # labels) so `show` can render the item as needing review.
+                item["review_required"] = bool(prior.get("review_required", False))
             if (
                 prior is not None
                 and prior.get("role") in _HUMAN_ROLES

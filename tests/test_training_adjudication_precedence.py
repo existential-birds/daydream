@@ -75,3 +75,17 @@ def test_digest_change_requeues_prior_judgment() -> None:
     assert reopen_on_digest_change(human, current_digest="d" * 64) is False
     # Digest drifted: item must reopen, not silently reuse the judgment.
     assert reopen_on_digest_change(human, current_digest="e" * 64) is True
+
+
+def test_model_suggested_queue_item_never_gold_eligible_unreviewed() -> None:
+    from daydream.training.adjudication.observations import append_observation  # noqa: F401
+    # Model suggested 'accepted' on a queue item: stored with review_required=True.
+    obs = {"record_id": "c" * 64, "disposition": "accepted", "evidence_digest": "d" * 64,
+           "labeler": "reply-classifier-980-r1", "role": "model-suggested",
+           "rationale": "classifier says accept", "valid_at": "2026-08-30T10:00:00+00:00",
+           "observed_at": "2026-08-30T10:00:00+00:00", "rubric_version": "984-adjudicate-r1",
+           "evidence": [{"reply_id": "r1"}],
+           "review_required": True}
+    result = effective_adjudication([obs])
+    assert result["gold_eligible"] is False  # review-required ⇒ not gold, whatever the disposition
+    assert result["review_required"] is True

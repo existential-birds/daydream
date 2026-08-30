@@ -79,7 +79,7 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     """Resolve one record_id's observation list to its effective adjudication.
 
     Returns ``{"disposition", "labeler", "evidence", "evidence_digest", "role",
-    "conflict", "gold_eligible"}``. Precedence: any ``role="adjudicator"`` observation
+    "conflict", "review_required", "gold_eligible"}`. Precedence: any ``role="adjudicator"`` observation
     (latest if several), else the latest human rater by ``observed_at``, else the
     automatic entry. An empty observation list is a caller bug and raises
     ``ValueError`` naming ``record_id``.
@@ -114,7 +114,9 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     if conflict and adjudicators and adjudicators[-1].get("disposition") in DECISIVE_DISPOSITIONS:
         conflict = False
 
-    review_required = bool(effective.get("review_required", False))
+    review_required = bool(effective.get("review_required", False)) or any(
+        bool(o.get("review_required", False)) for o in (*human_raters, *adjudicators)
+    )
     gold_eligible = (
         disposition in DECISIVE_DISPOSITIONS
         and bool(evidence)
@@ -129,5 +131,6 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
         "evidence_digest": evidence_digest,
         "role": str(_required(effective, "role")),
         "conflict": conflict,
+        "review_required": review_required,
         "gold_eligible": gold_eligible,
     }
