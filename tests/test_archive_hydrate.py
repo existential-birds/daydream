@@ -329,3 +329,78 @@ class TestIngestAndIndex:
         stage = self._staged(tmp_path)
         hydrate.ingest_bundles(stage, revision="a" * 40)
         assert not list((stage / "runs").rglob(".git"))
+
+
+class TestDedupeAndLedger:
+    def _staged(self, tmp_path: Path, revision: str = "a" * 40) -> Path:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision(revision)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision=revision)
+        return stage
+
+    def test_idempotent_rerun_no_duplicates(self, tmp_path: Path) -> None:
+        stage = self._staged(tmp_path)
+        first = hydrate.dedupe_admitted(stage, revision="a" * 40)
+        assert first.admitted == 1 and first.collisions == 0
+        second = hydrate.dedupe_admitted(stage, revision="a" * 40)  # same content re-run
+        assert second.admitted == 1 and second.collisions == 0
+        from daydream.archive.index import query_runs
+        assert len(query_runs(stage)) == 1  # no duplicate rows
+
+    def test_identity_collision_quarantined(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        hydrate.dedupe_admitted(stage, revision="a" * 40)
+        # same session identity, different content -> quarantine, never overwrite
+        hub.files["bundles/sess-a/trajectory.json"] = b'{"different": true}'
+        hub.commit_revision("a" * 40)  # re-pin the mutated tree at the same revision
+        stage2_dir = stage / "downloads"
+        # re-download only the changed file then re-ingest into the same stage
+        (stage2_dir / ("a" * 40) / "bundles/sess-a/trajectory.json").unlink()
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage2_dir)
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        result = hydrate.dedupe_admitted(stage, revision="a" * 40)
+        assert result.collisions == 1
+        assert (stage / "quarantine" / "sess-a.conflict").exists() or \
+            result.collision_ids == ["sess-a"]
+        from daydream.archive.index import query_runs
+        rows = [r for r in query_runs(stage) if r["session_id"] == "sess-a"]
+        assert len(rows) == 1  # original retained, never overwritten
+
+    def test_fixture_bundle_excluded_with_code(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.files["bundles/sess-fixture/manifest.json"] = (
+            b'{"session_id": "sess-fixture", "source_path": "/tmp/pytest-of-user/test_x"}'
+        )
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        result = hydrate.dedupe_admitted(stage, revision="a" * 40)
+        assert ("sess-fixture", "fixture_pytest_path") in result.excluded
+        assert not (stage / "runs" / "sess-fixture").exists()  # never indexed/harvest-visible
+
+    def test_ledger_is_value_free(self, tmp_path: Path) -> None:
+        hub = make_fake_hub(tmp_path)
+        hub.files["bundles/sess-bad/manifest.json"] = (
+            b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
+        )
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        ledger = hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
+        text = json.dumps(ledger)
+        assert "hunter2" not in text and "user:" not in text  # no matched secret values (M11)
+        assert ledger["pinned_revision"] == "a" * 40
+        assert {"imported", "quarantined", "excluded", "rejections"} <= set(ledger)
+        assert any(e["session_id"] == "sess-bad" for e in ledger["quarantined"])
+        # ledger file persisted under the curated prefix, atomically
+        ledger_path = stage / "curated" / ledger["curation_id"] / "import-ledger.json"
+        assert ledger_path.is_file()
+        assert json.loads(ledger_path.read_text())["pinned_revision"] == "a" * 40

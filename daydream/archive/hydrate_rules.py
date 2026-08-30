@@ -23,6 +23,7 @@ REASON_CODE_SECRETS_SCAN_DIRTY = "secrets_scan_dirty"
 REASON_CODE_BUNDLE_UNREADABLE = "bundle_unreadable"
 REASON_CODE_UNTRUSTED_REMOTE_HOST = "untrusted_remote_host"
 REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
+REASON_CODE_IDENTITY_COLLISION = "identity_collision"
 
 # ---------------------------------------------------------------------------
 # Curation-id derivation (Task 3)

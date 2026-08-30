@@ -28,10 +28,11 @@ from dataclasses import fields as dataclass_fields
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
-from daydream.archive import sanitize
+from daydream.archive import hydrate_rules, sanitize
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.hydrate_rules import (
     REASON_CODE_BUNDLE_UNREADABLE,
+    REASON_CODE_IDENTITY_COLLISION,
     REASON_CODE_SANITIZE_FAILED,
     REASON_CODE_SECRETS_SCAN_DIRTY,
     REASON_CODE_UNTRUSTED_REMOTE_HOST,
@@ -280,6 +281,22 @@ class IngestResult:
     reason_code: str | None = None
 
 
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write ``payload`` to ``path`` atomically (temp file + rename); fatal on failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
     """Run every staged bundle through the #981 ingest gate (issue #982 M4/M6).
 
@@ -346,6 +363,16 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(derivative), str(target))  # staging layout only, not the gate
         results.append(IngestResult(session_id, "admitted"))
+    _atomic_write_json(
+        bundles_root.parent / "_ingest_results.json",
+        {
+            "revision": str(revision),
+            "results": [
+                {"session_id": r.session_id, "status": r.status, "reason_code": r.reason_code}
+                for r in results
+            ],
+        },
+    )
     return results
 
 
@@ -450,6 +477,258 @@ def build_resolution_map(stage: Path, *, source_commit: str) -> dict[str, Any]:
     if unavailable:
         cmap["unavailable"] = sorted(unavailable)
     return cmap
+
+
+# ---------------------------------------------------------------------------
+# Content-addressed dedupe + collision quarantine + import ledger (Task 8)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DedupeResult:
+    """Outcome of one :func:`dedupe_admitted` pass over ``stage/runs/`` (M7/M8/M9)."""
+
+    admitted: int = 0
+    skipped: int = 0
+    collisions: int = 0
+    collision_ids: list[str] = field(default_factory=list)
+    excluded: list[tuple[str, str]] = field(default_factory=list)  # (session_id, reason_code)
+
+
+def _curated_dir(stage: Path, source_commit: str) -> Path:
+    """Curated prefix for a source commit: ``stage/curated/<curation-id>/``."""
+    cid = hydrate_rules.derive_curation_id(
+        source_commit,
+        hydrate_rules.SANITIZER_VERSION,
+        hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+        hydrate_rules.ADMISSION_POLICY_VERSION,
+    )
+    return stage / "curated" / cid
+
+
+def _append_dedupe_entry(path: Path, entry: dict[str, Any]) -> None:
+    """Append one JSONL record to the dedupe ledger (same shape as sanitize progress)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+
+def _load_dedupe_ledger(path: Path) -> dict[str, dict[str, Any]]:
+    """Latest recorded dedupe entry per session id (empty when absent/corrupt)."""
+    latest: dict[str, dict[str, Any]] = {}
+    if not path.is_file():
+        return latest
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            if isinstance(entry, dict) and entry.get("session_id"):
+                latest[str(entry["session_id"])] = entry
+    except (OSError, ValueError):
+        return latest
+    return latest
+
+
+def _move_dir(source: Path, target: Path) -> None:
+    """Move a directory, replacing any prior occupant of ``target``."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.move(str(source), str(target))
+
+
+def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
+    """Content-addressed dedupe over the admitted derivatives (issue #982 M7/M8/M9).
+
+    The dedupe key is ``(session_id, derivative content digest)`` where the
+    digest is ``sanitize._derivative_digest`` over ``stage/runs/<sid>``. The
+    ledger lives at ``stage/curated/<curation-id>/dedupe.jsonl`` (append-only,
+    latest entry per session wins).
+
+    Per derivative, in order:
+
+    1. Fixture exclusion (M8): ``hydrate_rules.fixture_exclusion_codes`` runs
+       pre-dedupe; a coded bundle is moved to ``stage/excluded/<sid>/`` and
+       reported with its stable code — never indexed, never harvested.
+    2. Legacy ``pipeline_status`` revalidation (M9): a manifest carrying the
+       legacy field is revalidated via ``hydrate_rules.legacy_pipeline_status``;
+       evidence-absent rows are excluded with the stable code.
+    3. Identity collision (M7): the same ``session_id`` with a *different*
+       derivative digest is moved to ``quarantine/<sid>.conflict`` and the
+       original admitted derivative restored from the curated baseline copy —
+       the admitted derivative is never overwritten. Identical digests are
+       idempotent (no duplicate ledger entry, no duplicate index row).
+
+    Admitted sessions are indexed (idempotent ``upsert_run``); an unreadable
+    manifest on an admitted derivative is fatal. The dedupe ledger records
+    every decision as ``{session_id, status, content_digest, reason_code}``.
+    """
+    revision = str(revision)
+    curated = _curated_dir(stage, revision)
+    ledger_path = curated / "dedupe.jsonl"
+    baseline_root = curated / "admitted"
+    recorded = _load_dedupe_ledger(ledger_path)
+    result = DedupeResult()
+    runs_dir = stage / "runs"
+    if runs_dir.is_dir():
+        for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+            name = derivative.name
+            data = _read_manifest_dict(derivative)
+            if data is None:
+                raise HydrationError(
+                    redact_text(f"admitted derivative {name} has an unreadable manifest")
+                )
+            sid = str(data.get("session_id") or name)
+
+            # M8: fixture exclusion, pre-dedupe, stable codes.
+            try:
+                codes = hydrate_rules.fixture_exclusion_codes(derivative)
+            except (OSError, ValueError):
+                codes = [REASON_CODE_BUNDLE_UNREADABLE]
+            if not codes and "pipeline_status" in data:
+                # M9: revalidate the legacy field; evidence-absent never succeeds.
+                verdict = hydrate_rules.legacy_pipeline_status(
+                    data.get("pipeline_status"),
+                    data.get("deep_artifacts") if isinstance(data.get("deep_artifacts"), dict) else None,
+                )
+                if isinstance(verdict, tuple):
+                    codes = [verdict[1]]
+            if codes:
+                code = codes[0]
+                _move_dir(derivative, stage / "excluded" / sid)
+                _append_dedupe_entry(
+                    ledger_path,
+                    {"session_id": sid, "status": "excluded", "reason_code": code,
+                     "content_digest": None, "revision": revision, "at": _utc_now()},
+                )
+                result.excluded.append((sid, code))
+                continue
+
+            digest = sanitize._derivative_digest(derivative)
+            prev = recorded.get(sid)
+            if prev is not None and prev.get("status") == "admitted" \
+                    and prev.get("content_digest") not in (None, digest):
+                # Identity collision: quarantine the new derivative, restore the
+                # original admitted content — never overwrite (M7).
+                baseline = baseline_root / sid
+                if not baseline.is_dir():
+                    raise HydrationError(
+                        redact_text(
+                            f"identity collision for {sid} but no admitted baseline exists"
+                        )
+                    )
+                _move_dir(derivative, stage / "quarantine" / f"{sid}.conflict")
+                shutil.copytree(baseline, runs_dir / sid)
+                _append_dedupe_entry(
+                    ledger_path,
+                    {"session_id": sid, "status": "collision",
+                     "reason_code": REASON_CODE_IDENTITY_COLLISION,
+                     "content_digest": digest, "revision": revision, "at": _utc_now()},
+                )
+                result.collisions += 1
+                result.collision_ids.append(sid)
+                continue
+
+            baseline = baseline_root / sid
+            if not baseline.exists():
+                baseline.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(derivative, baseline)
+            _append_dedupe_entry(
+                ledger_path,
+                {"session_id": sid, "status": "admitted", "reason_code": None,
+                 "content_digest": digest, "revision": revision, "at": _utc_now()},
+            )
+            result.admitted += 1
+    rebuild_index(stage)
+    return result
+
+
+def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> dict[str, Any]:
+    """Build and persist the value-free admission ledger (issue #982 M11).
+
+    Composes the ingest results, the dedupe ledger, and the staging index into
+    ``stage/curated/<curation-id>/import-ledger.json``. Every rejection entry
+    carries only stable reason codes, session ids, and content digests — never
+    a raw URL, path, or any matched secret value. The write is atomic; a
+    failure propagates (fatal semantics) so a partial ledger can never claim
+    success.
+    """
+    revision = str(revision)
+    source_commit = str(source_commit)
+    curated = _curated_dir(stage, source_commit)
+    recorded = _load_dedupe_ledger(curated / "dedupe.jsonl")
+
+    ingest_results: list[dict[str, Any]] = []
+    ingest_path = stage / "downloads" / revision / "_ingest_results.json"
+    if ingest_path.is_file():
+        try:
+            loaded = json.loads(ingest_path.read_text(encoding="utf-8"))
+            ingest_results = list(loaded.get("results", []))
+        except (OSError, ValueError, AttributeError):
+            ingest_results = []
+
+    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle
+
+    indexed_ids = {str(row["session_id"]) for row in query_runs(stage)}
+    admitted_ids = {
+        str(e["session_id"]) for e in ingest_results if e.get("status") == "admitted"
+    } | indexed_ids
+
+    imported: list[dict[str, Any]] = []
+    for sid in sorted(admitted_ids):
+        entry = recorded.get(sid)
+        imported.append(
+            {
+                "session_id": sid,
+                "content_digest": entry.get("content_digest") if entry else None,
+            }
+        )
+
+    quarantined: list[dict[str, Any]] = []
+    for e in ingest_results:
+        if e.get("status") == "quarantined":
+            quarantined.append(
+                {"session_id": str(e["session_id"]), "reason_code": e.get("reason_code")}
+            )
+    excluded: list[dict[str, Any]] = []
+    for sid, entry in sorted(recorded.items()):
+        if entry.get("status") == "collision":
+            quarantined.append(
+                {"session_id": sid, "reason_code": entry.get("reason_code")}
+            )
+        elif entry.get("status") == "excluded":
+            excluded.append({"session_id": sid, "reason_code": entry.get("reason_code")})
+
+    rejections = [
+        {
+            "session_id": e["session_id"],
+            "reason_code": e.get("reason_code"),
+            "content_digest": (recorded.get(e["session_id"], {}) or {}).get("content_digest"),
+        }
+        for e in sorted(quarantined + excluded, key=lambda x: x["session_id"])
+    ]
+
+    ledger: dict[str, Any] = {
+        "schema_version": hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+        "pinned_revision": revision,
+        "source_commit": source_commit,
+        "curation_id": curated.name,
+        "generated_at": _utc_now(),
+        "imported": imported,
+        "quarantined": sorted(quarantined, key=lambda x: x["session_id"]),
+        "excluded": sorted(excluded, key=lambda x: x["session_id"]),
+        "rejections": rejections,
+        "tallies": {
+            "imported": len(imported),
+            "quarantined": len(quarantined),
+            "excluded": len(excluded),
+            "rejections": len(rejections),
+        },
+    }
+    _atomic_write_json(curated / "import-ledger.json", ledger)
+    return ledger
 
 
 def _import_hf_hub() -> Any:
