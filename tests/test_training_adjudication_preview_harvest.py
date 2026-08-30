@@ -156,6 +156,24 @@ def test_harvest_identity_and_digests_stable_without_drift(tmp_path: Path) -> No
     assert all(digests[i["record_id"]] == i["evidence_digest"] for i in ledger_items)
 
 
+def test_preview_and_harvest_identity_digest_stability_gate(tmp_path: Path) -> None:
+    """The parallel-implementation gate: preview and harvest must agree exactly."""
+    root = _hydrated_index(tmp_path)
+    ledger = tmp_path / "ledger.json"
+    preview = run_preview(root, ledger)
+    summary = run_harvest(root, ledger, tmp_path / "out")
+    exported = [json.loads(l) for l in (tmp_path / "out" / "adjudication.jsonl").read_text().splitlines()]
+    # Every queue item's identity AND digest are identical across preview ledger and harvest export.
+    by_id = {e["record_id"]: e for e in exported}
+    for item in json.loads(ledger.read_text())["items"]:
+        assert item["record_id"] in by_id
+        assert by_id[item["record_id"]]["evidence_digest"] == item["evidence_digest"]
+    # record_id recomputation from the exported entries round-trips.
+    from daydream.training.corpus_v2.identity import record_id as rid
+    for e in exported:
+        assert e["record_id"] == rid(e["session_id"], e["trajectory_id"], e["segment_id"], e["fingerprint"])
+
+
 def test_posterior_feed_is_pr_review_only(tmp_path: Path) -> None:
     root = _hydrated_index(tmp_path, profiles=["pr_review", "task"])
     ledger = tmp_path / "ledger.json"
