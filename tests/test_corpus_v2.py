@@ -1,11 +1,13 @@
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
 from daydream.training.corpus_v2.identity import record_id
+from daydream.training.corpus_v2.segments import segment, segment_agents
 from daydream.training.corpus_v2.tiers import GoldGateError, classify_tier
 
 _MANIFEST = {
@@ -161,3 +163,54 @@ def test_tiers_are_disjoint_classes() -> None:
     # process-trace tier is silver, never gold; eligibility is a separate field
     tier = classify_tier(_resolution("accepted"), record_type="process-trace")
     assert tier == "silver"  # type/decision split: ATIF process data stays silver
+
+
+def _traj(siblings: list[tuple[str, str]]) -> dict[str, Any]:
+    return {"trajectory_id": "s1:root", "session_id": "s1",
+            "subagent_trajectory_ref": [{"trajectory_id": t, "session_id": "s1",
+                                          "trajectory_path": p} for t, p in siblings]}
+
+
+def test_segment_order_is_fork_registration_then_descriptor() -> None:
+    # Pinned rule from Task 0B: (order_index, descriptor) total order.
+    traj = _traj([("s1:fix-1", "b.jsonl"), ("s1:fix-0", "a.jsonl")])
+    segs = segment(traj)
+    assert [s.segment_id for s in segs] == ["seg-0", "seg-1"]
+    assert [s.trajectory_id for s in segs] == ["s1:fix-1", "s1:fix-0"]
+
+
+def test_segmentation_is_idempotent_across_reprojection() -> None:
+    traj = _traj([("s1:explore-0", "e0.jsonl"), ("s1:review-2", "r2.jsonl")])
+    assert segment(traj) == segment(traj)
+
+
+def test_segment_ids_qualify_session_and_descriptor() -> None:
+    traj = _traj([("s1:fix-0", "a.jsonl")])
+    seg = segment(traj)[0]
+    assert seg.trajectory_id == "s1:fix-0" and seg.session_id == "s1"
+
+
+def test_root_alone_is_seg0() -> None:
+    segs = segment({"trajectory_id": "s1:root", "session_id": "s1"})
+    assert [s.segment_id for s in segs] == ["seg-0"]
+    assert segs[0].trajectory_id == "s1:root"
+
+
+def test_duplicate_sibling_keys_raise() -> None:
+    traj = _traj([("s1:fix-0", "a.jsonl"), ("s1:fix-0", "a.jsonl")])
+    with pytest.raises(ValueError, match="s1:fix-0"):
+        segment(traj)
+
+
+def test_spans_compose_v1_build_spans_per_sibling() -> None:
+    traj = _traj([("s1:fix-0", "a.jsonl")])
+    traj["subagent_trajectory_ref"][0]["steps"] = [
+        {"step_id": 1, "source": "agent", "message": "think"},
+        {"step_id": 2, "source": "agent", "tool_calls": [{"name": "t"}]},
+    ]
+    segs = segment(traj)
+    assert segs[0].spans == [
+        {"step_id": 1, "kind": "REASON", "content_path": "steps[0].message"},
+        {"step_id": 2, "kind": "ACT", "content_path": "steps[1].tool_calls"},
+    ]
+    assert segment_agents is segment
