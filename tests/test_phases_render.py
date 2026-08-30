@@ -163,9 +163,7 @@ async def test_arbiter_prints_kept_dropped(
 
     out = rec.export_text()
     assert len(verdicts) == 3
-    assert "kept" in out.lower()
-    assert "2" in out
-    assert "1" in out
+    assert "Arbiter: kept 2, dropped 1" in out
 
 
 @dataclass

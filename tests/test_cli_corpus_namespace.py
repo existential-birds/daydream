@@ -65,11 +65,21 @@ def test_corpus_build_and_label_route(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert label_called["argv"] == ["sess-0001", "--outcome", "accepted"]
 
 
-def test_bare_corpus_prints_help_exits_2() -> None:
+def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert _run_main(["corpus"]) == 2
+    captured = capsys.readouterr()
+    assert "usage: daydream corpus {harvest,build,label}" in captured.out
+    assert "harvest" in captured.out
+    assert "build" in captured.out
+    assert "label" in captured.out
 
 
-def test_bare_harvest_is_unknown_verb_treated_as_review_target() -> None:
+def test_bare_harvest_is_unknown_verb_treated_as_review_target(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     # 'harvest' is no longer a verb; _first_verb falls through to review,
     # which then rejects the unknown '--dry-run' flag (argparse error → exit 2).
-    assert _run_main(["harvest", "--dry-run"]) != 0
+    assert _run_main(["harvest", "--dry-run"]) == 2
+    captured = capsys.readouterr()
+    assert "unrecognized arguments" in captured.err
+    assert "--dry-run" in captured.err

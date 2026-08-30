@@ -36,14 +36,6 @@ from daydream.trajectory import (
 )
 
 
-def test_agent_has_no_missing_skill_error() -> None:
-    """The agent module has no obsolete skill-resolution error path."""
-    import daydream.agent as agent
-
-    assert not hasattr(agent, "MissingSkillError")
-    assert not hasattr(agent, "_UNKNOWN_SKILL_PATTERN")
-
-
 @pytest.fixture(autouse=True)
 def _reset_recorder() -> Any:
     _reset_recorder_for_tests()

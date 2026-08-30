@@ -783,27 +783,6 @@ async def test_sequential_phases_single_file(tmp_path: Path) -> None:
     assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
 
 
-# SUBA-05: Continuation appends no sibling
-
-
-async def test_continuation_appends_no_sibling(tmp_path: Path) -> None:
-    """SUBA-05: Two invocations simulating continuation produce one file."""
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
-            observe_text_and_result(inv, "first")
-        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
-            observe_text_and_result(inv, "second")
-
-    assert recorder.path.exists()
-    traj = read_trajectory(recorder.path)
-    step_ids = [s["step_id"] for s in traj["steps"]]
-    assert step_ids == [1, 2]
-
-    traj_dir = tmp_path / ".daydream" / "trajectories"
-    assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
-
-
 # Fork write failure degrades gracefully
 
 

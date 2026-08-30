@@ -11,7 +11,6 @@ at the public boundary.
 
 from __future__ import annotations
 
-import inspect
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -287,13 +286,6 @@ async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) 
         assert step["extra"]["daydream_run_flow"] == "pr"
 
 
-def test_run_agent_requires_phase_keyword() -> None:
-    """The public ``phase`` argument is keyword-only."""
-    sig = inspect.signature(run_agent)
-    assert "phase" in sig.parameters
-    assert sig.parameters["phase"].kind == inspect.Parameter.KEYWORD_ONLY
-
-
 async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) -> None:
     """Omitting the required ``phase`` argument raises ``TypeError``."""
     backend = MockBackend([
@@ -303,6 +295,15 @@ async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) 
     with pytest.raises(TypeError) as excinfo:
         await run_agent(backend, tmp_path, "hi")  # type: ignore[call-arg]
     assert "phase" in str(excinfo.value).lower()
+
+
+async def test_calling_run_agent_with_positional_phase_raises_typeerror(
+    tmp_path: Path,
+) -> None:
+    """The required ``phase`` argument remains keyword-only."""
+    backend = MockBackend([])
+    with pytest.raises(TypeError):
+        await run_agent(backend, tmp_path, "hi", DaydreamPhase.REVIEW)  # type: ignore[misc]
 
 
 async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
@@ -403,7 +404,7 @@ async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None
 
 
 async def test_cost_event_does_not_break_recording(tmp_path: Path) -> None:
-    """CostEvent is observed but does not produce a per-step Metrics (D-14)."""
+    """CostEvent contributes its usage to the agent step and final metrics."""
     backend = MockBackend([
         TextEvent(text="ok"),
         CostEvent(cost_usd=0.005, input_tokens=50, output_tokens=10, cached_tokens=None),
@@ -412,8 +413,15 @@ async def test_cost_event_does_not_break_recording(tmp_path: Path) -> None:
     traj, _ = await _run_with_recorder(backend, tmp_path)
     assert traj is not None
     assert atif_validate(traj) is True
-    # Phase 2 prefers MetricsEvent for per-step Metrics; CostEvent path only
-    # contributes to FinalMetrics in later phases (D-14). For now we just
-    # assert the trajectory remains schema-valid with CostEvent in the stream.
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
     assert len(agent_steps) == 1
+    metrics = agent_steps[0]["metrics"]
+    assert metrics is not None
+    assert metrics["prompt_tokens"] == 50
+    assert metrics["completion_tokens"] == 10
+    assert metrics["cost_usd"] == pytest.approx(0.005)
+
+    final = traj["final_metrics"]
+    assert final["total_prompt_tokens"] == 50
+    assert final["total_completion_tokens"] == 10
+    assert final["total_cost_usd"] == pytest.approx(0.005)

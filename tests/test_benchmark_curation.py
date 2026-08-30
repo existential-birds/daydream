@@ -433,18 +433,6 @@ def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path: Path
     assert raw["curation"]["exclusions"] == [{"source_id": src, "reason": "incorrect", "note": None}]
 
 
-def test_reopen_for_mutation_transitions(tmp_path: Path, fake_gh: FakeGh) -> None:
-    from daydream.benchmark import curation as cu
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
-    cur.update({"state": "ready", "snapshot_attested": True})
-    reopened = cu._reopen_for_mutation(cur)
-    assert reopened["state"] == "draft" and reopened["snapshot_attested"] is False
-    cur.update({"state": "stale", "snapshot_attested": True})
-    reopened = cu._reopen_for_mutation(cur)
-    assert reopened["state"] == "stale" and reopened["snapshot_attested"] is False
-
-
 def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path: Path, fake_gh: FakeGh) -> None:
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
@@ -1116,20 +1104,22 @@ def test_curation_ready_requires_task_spec_sha256() -> None:
     assert draft.task_spec_sha256 is None
 
 
-def test_task_spec_approved_at_is_stripped_before_validation() -> None:
+def test_task_spec_approved_at_is_stripped_before_validation(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
     from daydream.benchmark import curation as cu
-    from daydream.benchmark.schema import Curation, _schema_ready
-    raw = {"curation": {"state": "draft", "snapshot_attested": False, "clean_attested": False,
-                        "gold_status": None, "findings": [], "exclusions": [],
-                        "case_exclusion": None, "gold_mode": "clean",
-                        "task_spec_approved_at": "2026-08-23T00:00:00+00:00"}}
-    ready = _schema_ready(raw)
-    assert "task_spec_approved_at" not in ready["curation"]
-    assert "gold_mode" not in ready["curation"]            # existing behaviour preserved
-    # curation service path also drops it
-    model = cu._curation_model(raw["curation"])
-    assert isinstance(model, Curation)
-    assert not hasattr(model, "task_spec_approved_at")
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    approved_at = "2026-08-23T00:00:00+00:00"
+    raw["curation"]["gold_mode"] = "clean"
+    raw["curation"]["task_spec_approved_at"] = approved_at
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    cu.validate_case(ws, case_id)
+    view = cu.get_case(ws, case_id)
+    assert view["curation"]["gold_mode"] == "clean"
+    assert view["curation"]["task_spec_approved_at"] == approved_at
 
 
 def test_mark_ready_records_task_spec_digest_and_approved_at(tmp_path: Path, fake_gh: FakeGh) -> None:

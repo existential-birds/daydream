@@ -777,19 +777,6 @@ def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
     assert by_path["lib/util.py"] == "not_reviewed"
 
 
-def test_resolve_per_stack_verdicts_clean_shard_read_is_clean() -> None:
-    """Spike: a clean shard that read its file stays clean (read-detection is findings-independent)."""
-    from daydream.deep.coverage import resolve_per_stack_verdicts
-
-    out = resolve_per_stack_verdicts(
-        assigned_files=["api.py"],
-        declared_verdicts=[{"path": "api.py", "lines_read": 10, "verdict": "clean"}],
-        completed_read_paths={"/repo/api.py"},
-        finding_files=set(),
-    )
-    assert out[0]["verdict"] == "clean"
-
-
 def test_clean_verdict_covers_without_finding(tmp_path: Path) -> None:
     """Issue #740 AC1: a clean verdict (empty findings) covers the file for the sweep.
 

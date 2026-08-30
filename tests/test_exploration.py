@@ -12,27 +12,6 @@ from daydream.exploration import Convention, Dependency, ExplorationContext, Fil
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 
-def test_file_info_creates_valid_instance() -> None:
-    info = FileInfo("src/app.py", "modified", "Main entry point")
-    assert info.path == "src/app.py"
-    assert info.role == "modified"
-    assert info.summary == "Main entry point"
-
-
-def test_convention_creates_valid_instance() -> None:
-    conv = Convention("snake_case", "All functions use snake_case", "CLAUDE.md")
-    assert conv.name == "snake_case"
-    assert conv.description == "All functions use snake_case"
-    assert conv.source == "CLAUDE.md"
-
-
-def test_dependency_creates_valid_instance() -> None:
-    dep = Dependency("app.py", "utils.py", "imports")
-    assert dep.source == "app.py"
-    assert dep.target == "utils.py"
-    assert dep.relationship == "imports"
-
-
 def test_empty_exploration_context() -> None:
     ctx = ExplorationContext()
     assert ctx.affected_files == []

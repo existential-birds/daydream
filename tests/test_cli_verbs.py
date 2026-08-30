@@ -44,6 +44,10 @@ def test_improve_plan_subverb_parses_description() -> None:
     assert config.improve_plan_description == "add rate limiting"
 
 
-def test_improve_rejects_unknown_effort() -> None:
-    with pytest.raises(SystemExit):
+def test_improve_rejects_unknown_effort(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
         _parse_improve_args(["improve", "/tmp/x", "--effort", "extreme"])
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "invalid choice" in error
+    assert "extreme" in error

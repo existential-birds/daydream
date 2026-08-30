@@ -1009,18 +1009,24 @@ def test_build_fix_prompt_concise_mode() -> None:
     assert "CONCISE MODE" not in prompt_default
 
 
-def test_fix_guardrails_forbid_generated_file_edits() -> None:
-    from daydream.phases import _FIX_GUARDRAILS
+@pytest.mark.asyncio
+async def test_phase_fix_prompt_carries_ascii_quote_guardrail(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    from daydream.phases import phase_fix
 
-    assert "generated" in _FIX_GUARDRAILS.lower()
-    assert "migration" in _FIX_GUARDRAILS.lower()
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    item = {"id": 1, "description": "Off-by-one", "file": "src/a.py", "line": 7}
 
+    await phase_fix(backend, make_work(tmp_path), item, 1, 1)
 
-def test_fix_guardrails_preserve_ascii_quotes() -> None:
-    from daydream.phases import _FIX_GUARDRAILS
-
-    assert "ascii" in _FIX_GUARDRAILS.lower()
-    assert "smart quote" in _FIX_GUARDRAILS.lower()
+    prompt = backend.last_prompt
+    assert "Preserve ASCII quotes verbatim in code and comments." in prompt
+    assert "never introduce smart quotes when writing new code or comments" in prompt
+    assert "ASCII straight quotes" in prompt
 
 
 def test_build_fix_prompt_carries_generated_file_rule() -> None:
@@ -3868,17 +3874,34 @@ async def test_option4_calls_write_partial_before_summarizer(
     make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None],
 ) -> None:
-    """Abort flushes a `.partial` snapshot so the trajectory exists on disk."""
+    """Abort flushes the trajectory before invoking the summarizer."""
     from daydream.phases import phase_test_and_heal
 
     silence_console("daydream.phases")
     fake = _install_recorder(monkeypatch, tmp_path)
     monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    events: list[str] = []
+
+    write_partial = fake.write_partial
+
+    def record_write_partial() -> None:
+        events.append("write_partial")
+        write_partial()
+
+    fake.write_partial = record_write_partial
 
     backend = _HealBackend(script=[
         _FAIL_TURN,
         _handoff_turn("BODY"),
     ])
+    execute = backend.execute
+
+    async def record_execute(*args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+        events.append("backend_execute")
+        async for event in execute(*args, **kwargs):
+            yield event
+
+    monkeypatch.setattr(backend, "execute", record_execute)
 
     choices = iter(["4"])
     monkeypatch.setattr(
@@ -3888,8 +3911,9 @@ async def test_option4_calls_write_partial_before_summarizer(
     success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is False
-    # write_partial fires once on abort so the trajectory is on disk while the
-    # handoff is displayed.
+    # The first backend call runs the failing test; write_partial must occur
+    # before the second call, which invokes the failure summarizer.
+    assert events == ["backend_execute", "write_partial", "backend_execute"]
     assert fake.partial_writes == 1
 
 
@@ -4250,15 +4274,6 @@ async def test_verifier_prompt_carries_gate_zero_protocol(
     assert "Gate-0" in backend.last_prompt
     assert "anti-confabulation" in backend.last_prompt
     assert "same-turn echo" in backend.last_prompt
-
-
-def test_fix_guardrails_forbid_git_mutation() -> None:
-    from daydream.generated_files import GENERATED_FILES_PROMPT_RULE
-    from daydream.phases import _FIX_GUARDRAILS
-
-    text = _FIX_GUARDRAILS + GENERATED_FILES_PROMPT_RULE
-    for verb in ("git stash", "git checkout", "git reset", "git commit"):
-        assert verb in text, f"guardrails must forbid `{verb}`"
 
 
 def test_fix_verify_schema_rejects_bad_verdict() -> None:

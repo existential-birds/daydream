@@ -95,12 +95,29 @@ def test_ext_validate_broken_ref(ext_dir: ExtDir, capsys: pytest.CaptureFixture[
     assert "ghost" in strip_ansi(capsys.readouterr().out)
 
 
-def test_ext_validate_reports_renderer_count(capsys: pytest.CaptureFixture[str]) -> None:
-    # builtins register "finding" + "summary"; the success line names renderers
-    rc = cli._handle_ext_validate_command()
+def test_ext_validate_reports_registered_renderer_count(
+    ext_dir: ExtDir,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI summary reflects renderer slots added by a valid extension."""
+    ext_dir.write_module("def register(r): ...\n")
+    assert _run_main(["ext", "validate"]) == 0
+    baseline = strip_ansi(capsys.readouterr().out)
+
+    ext_dir.write_module(
+        "def register(r):\n"
+        "    r.override_renderer('custom', lambda *args: 'custom')\n"
+    )
+    assert _run_main(["ext", "validate"]) == 0
     out = strip_ansi(capsys.readouterr().out)
-    assert rc == 0
-    assert "2 renderers" in out
+
+    def renderer_count(text: str) -> int:
+        match = re.search(r"registry OK: .*?, (\d+) renderers", text)
+        assert match is not None, text
+        return int(match.group(1))
+
+    assert "registry OK:" in out
+    assert renderer_count(out) == renderer_count(baseline) + 1
 
 
 def test_bare_ext_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:

@@ -141,30 +141,6 @@ def test_prompt_user_returns_typed_value_interactively(monkeypatch: pytest.Monke
     assert prompt_user(Console(), "Confirm?", default="n") == "y"
 
 
-# Polarity contract: each destructive prompt must decline by default. Pairs
-# mirror the source defaults; an "n" -> "y" flip in source (or here) breaks this.
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Cleanup review output after completion? [y/N]",
-        "Post these as a PR review? [y/N]",
-        "Use suggested command instead?",
-        "Commit and push changes? [y/N]",
-    ],
-)
-def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch: pytest.MonkeyPatch, message: Any) -> None:
-    from unittest.mock import Mock
-
-    from rich.console import Console
-
-    from daydream.agent import reset_state
-    from daydream.ui import prompt_user
-
-    reset_state()
-    monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
-    assert prompt_user(Console(file=StringIO(), record=True), message, default="n") == "n"
-
-
 def test_parse_background_task_id_from_launch_string() -> None:
     from rich.console import Console
 

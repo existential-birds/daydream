@@ -462,7 +462,7 @@ def test_diff_name_only_returns_multiple_files_in_order(tmp_path: Path) -> None:
     _git(repo, "add", "alpha.txt", "beta.txt")
     _commit(repo, "add two files")
     result = git_ops.diff_name_only(repo, "main", "HEAD")
-    assert sorted(result) == ["alpha.txt", "beta.txt"]
+    assert result == ["alpha.txt", "beta.txt"]
 
 
 def test_diff_name_only_returns_empty_list_on_bad_ref(tmp_path: Path) -> None:

@@ -278,27 +278,6 @@ def test_added_line_numbers_quoted_path_with_space() -> None:
     assert _added_line_numbers(diff) == {"na\u00efve ve.py": {1}}
 
 
-def test_added_line_numbers_delegates_to_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
-    import daydream.hunk_index as hunk_index
-
-    calls = {"n": 0}
-    real = hunk_index.parse_hunks
-
-    def spy(diff_text: Any) -> Any:
-        calls["n"] += 1
-        return real(diff_text)
-
-    monkeypatch.setattr(hunk_index, "parse_hunks", spy)
-    diff = (
-        "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n"
-        "@@ -1,2 +1,4 @@\n package main\n \n+// added quote\n"
-    )
-    added = _added_line_numbers(diff)
-    assert added == {"main.go": {3}}  # the added line is new-file line 3
-    assert calls["n"] == 1
-
-
-
 def test_scrub_driver_raises_git_error_on_external_driver_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-unified attribution diff (external diff driver output) cannot be
     attributed; the driver raises the documented GitError so the caller's

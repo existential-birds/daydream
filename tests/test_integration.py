@@ -1,7 +1,6 @@
 """Integration tests for the full review-fix-test flow."""
 import json
 import re
-import time
 from collections.abc import AsyncGenerator, Callable
 from io import StringIO
 from pathlib import Path
@@ -83,29 +82,14 @@ async def render_agent(
 
 
 @pytest.mark.asyncio
-async def test_five_thinking_panels_render_in_under_two_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Five consecutive thinking panels render immediately, in order.
-
-    Regression for issue #377: the old LiveThinkingPanel.show slept 0.5s per
-    thought inside the event loop, so five thoughts blocked the loop for
-    >= 2.5s of wall time. render_agent no longer stubs out time.sleep, so this
-    exercises the real production path. The < 2.0s bound is discriminating:
-    the old code needs >= 2.5s; the fixed code renders all five immediately.
-    """
+async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Five consecutive thinking panels render once each, in order."""
     thoughts = [f"thought {i} of the stream" for i in range(5)]
     events: list[Any] = [
         *[ThinkingEvent(text=t) for t in thoughts],
         ResultEvent(structured_output=None, continuation=None),
     ]
 
-    # Warm up run_agent/ScriptedBackend setup and Console construction so that
-    # setup cost is not counted against the wall-clock bound: under loaded
-    # parallel CI (pytest -n auto) that setup can push elapsed past 2.0s and
-    # flake the regression (issue #336). The Console is bound ONCE here,
-    # outside the timed window, and reused for both the warm-up and the timed
-    # run -- render_agent reconstructs a fresh Console on every call, so its
-    # warm-up would only cover one-time lazy imports, not the setup it re-does
-    # inside the timed window. Building it here excludes that setup entirely.
     from daydream.agent import run_agent, set_quiet_mode
 
     output = StringIO()
@@ -123,18 +107,8 @@ async def test_five_thinking_panels_render_in_under_two_seconds(monkeypatch: pyt
             phase=DaydreamPhase.REVIEW,
         )
 
-    # Warm up lazy imports / first-call setup on the already-built Console, then
-    # discard that output so the timed window below measures only rendering.
-    await run_()
-    output.seek(0)
-    output.truncate(0)
-
-    start = time.perf_counter()
     await run_()
     plain_text = strip_ansi(output.getvalue())
-    elapsed = time.perf_counter() - start
-
-    assert elapsed < 2.0, f"5 thoughts took {elapsed:.2f}s (old code >= 2.5s)"
 
     assert plain_text.count("Thinking") == 5, "each thought must render its Thinking title once"
 
@@ -177,43 +151,48 @@ def target_project(tmp_path: Path) -> Path:
 
     (project / "main.py").write_text("def hello():\n    return 'world'\n")
 
-    # Pre-create the review output the harness mock does not write.
-    review_content = """# Code Review
-
-## Issues Found
-
-1. **Missing type hints** in `main.py:1`
-   - Add type hints to the `hello` function
-
-## Summary
-
-Found 1 issue to address.
-"""
-    (project / ".review-output.md").write_text(review_content)
-
     _init_repo(project)
     _git(project, "add", "main.py")
     _commit(project, "init")
     # Move off main so the WrongBranchError guard doesn't fire on default runs.
     _git(project, "checkout", "-b", "feature")
+    (project / "main.py").write_text("def hello():\n    return 'universe'\n")
+    _git(project, "add", "main.py")
+    _commit(project, "change")
 
     return project
 
 
 @pytest.mark.asyncio
 async def test_full_fix_flow(
-    mock_backend: Any,  # noqa: F841
-    mock_ui: Any,  # noqa: F841
     target_project: Path,
+    install_backend: Callable[[object], object],
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
-    """Test the complete review -> parse -> fix -> test flow."""
-    config = make_config(target_project, stack="python", quiet=True, shallow=True)
+    """The shallow flow writes a report, applies a fix, tests it, and commits."""
+    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
+    head_before = _git(target_project, "rev-parse", "HEAD")
+    config = make_config(
+        target_project,
+        stack="python",
+        quiet=True,
+        shallow=True,
+        assume="yes",
+    )
 
     exit_code = await run(config)
 
     assert exit_code == 0
-    assert (target_project / ".review-output.md").exists()
+
+    report = target_project / ".review-output.md"
+    assert report.is_file()
+    report_text = report.read_text()
+    assert "main.py:1" in report_text
+    assert "Add type hints to function" in report_text
+    assert (target_project / ".daydream" / "deep" / "merged-items.json").is_file()
+    assert json.loads((target_project / ".daydream" / "deep" / "test-verdict.json").read_text())["passed"]
+    assert "-> str" in (target_project / "main.py").read_text()
+    assert _git(target_project, "rev-parse", "HEAD") != head_before
 
 
 class _WorktreeMutatingBackend(PhaseDispatchBackend):

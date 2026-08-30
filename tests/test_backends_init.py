@@ -70,36 +70,34 @@ def test_claude_and_codex_backend_concise_fix_prompts_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_backend_execute_accepts_agents_kwarg() -> None:
-    """MockBackend (satisfying Backend protocol) should accept agents=None."""
-    from collections.abc import AsyncGenerator
+async def test_create_backend_claude_execute_accepts_agents_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A factory-created real backend accepts agents=None at the SDK boundary."""
+    from tests.harness.claude_sdk import (
+        MockAssistantMessage,
+        MockResultMessage,
+        MockTextBlock,
+        patch_claude_sdk,
+        scripted_client,
+    )
 
-    from daydream.backends import AgentEvent
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(
+        monkeypatch,
+        scripted_client(
+            [
+                MockAssistantMessage(content=[MockTextBlock(text="OK")]),
+                MockResultMessage(),
+            ],
+            captured=captured,
+        ),
+    )
+    backend = create_backend("claude", model="test")
+    events = [event async for event in backend.execute(Path("/tmp"), "test", agents=None)]
 
-    class MockBackendWithAgents:
-        model = "mock-model"
-
-        async def execute(
-            self,
-            cwd: Any,
-            prompt: Any,
-            output_schema: Any=None,
-            continuation: Any=None,
-            agents: Any=None,
-            max_turns: Any=None,
-            read_only: Any=False,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
-        async def cancel(self) -> None:
-            pass
-
-    backend = MockBackendWithAgents()
-    events = []
-    async for event in backend.execute(Path("/tmp"), "test", agents=None):
-        events.append(event)
-    assert len(events) == 1
+    assert any(isinstance(event, ResultEvent) for event in events)
+    assert getattr(captured["options"], "agents", None) is None
 
 
 def test_create_backend_forwards_reasoning_effort_to_every_driver() -> None:

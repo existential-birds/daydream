@@ -6,12 +6,13 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 
 from daydream.atif import Step
-from daydream.backends import AgentEvent
+from daydream.atif import validate as atif_validate
+from daydream.backends import AgentEvent, ToolResultEvent
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
 CANONICAL = Path(__file__).parent / "fixtures" / "canonical_script.json"
@@ -82,14 +83,91 @@ async def test_claude_and_codex_produce_identical_steps_read_only(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_pi_produces_identical_steps_to_claude(tmp_path: Path) -> None:
-    """Pi must produce the same Step shape as Claude against the canonical
-    script — the proof of ATIF trajectory parity (plan §8.2)."""
-    from tests.contract._loaders import claude_loader, pi_loader
+async def test_pi_produces_expected_steps_from_canonical_fixture(tmp_path: Path) -> None:
+    """Pi's normalized events and ATIF Steps match the canonical projection."""
+    from tests.contract._loaders import pi_loader
 
-    claude_steps = await _run_backend_against_canonical(claude_loader, tmp_path / "claude")
-    pi_steps = await _run_backend_against_canonical(pi_loader, tmp_path / "pi")
-    _compare_steps(claude_steps, pi_steps)
+    script: dict[str, Any] = json.loads(CANONICAL.read_text())
+    tool_results_by_id = {result["id"]: result for result in script["tool_results"]}
+    expected_steps: list[dict[str, Any]] = []
+    for turn in script["turns"]:
+        expected_steps.append(
+            {
+                "message": turn["text"],
+                "reasoning_content": turn.get("thinking") or None,
+                "tool_calls": [
+                    {
+                        "id": tool_call["id"],
+                        "name": tool_call["name"],
+                        "arguments": tool_call.get("input") or {},
+                    }
+                    for tool_call in turn.get("tool_calls", [])
+                ],
+                "observations": [
+                    {
+                        "id": tool_call["id"],
+                        "content": tool_results_by_id[tool_call["id"]].get("output", ""),
+                    }
+                    for tool_call in turn.get("tool_calls", [])
+                    if tool_call["id"] in tool_results_by_id
+                ],
+            }
+        )
+
+    assert expected_steps, "canonical fixture must define expected agent turns"
+    assert all(step["message"] for step in expected_steps)
+    assert any(step["tool_calls"] for step in expected_steps)
+    expected_tool_results = [
+        (result["id"], result.get("output", ""), bool(result.get("is_error", False)))
+        for result in script["tool_results"]
+    ]
+    assert expected_tool_results, "canonical fixture must define tool results"
+    assert any(is_error for _, _, is_error in expected_tool_results)
+
+    pi_events: list[AgentEvent] = []
+
+    async def recording_pi_loader(
+        loader_script: dict[str, Any], *, read_only: bool = False
+    ) -> AsyncIterator[AgentEvent]:
+        async for event in pi_loader(loader_script, read_only=read_only):
+            pi_events.append(event)
+            yield event
+
+    pi_root = tmp_path / "pi"
+    pi_steps = await _run_backend_against_canonical(recording_pi_loader, pi_root)
+
+    actual_tool_results = [
+        (event.id, event.output, event.is_error)
+        for event in pi_events
+        if isinstance(event, ToolResultEvent)
+    ]
+    assert actual_tool_results == expected_tool_results
+
+    assert len(pi_steps) == len(expected_steps)
+    for turn_number, (step, expected) in enumerate(zip(pi_steps, expected_steps, strict=True), 1):
+        assert step.step_id == turn_number
+        assert step.source == "agent"
+        assert step.message == expected["message"]
+        assert step.reasoning_content == expected["reasoning_content"]
+        assert [
+            {
+                "id": tool_call.tool_call_id,
+                "name": tool_call.function_name,
+                "arguments": tool_call.arguments,
+            }
+            for tool_call in (step.tool_calls or [])
+        ] == expected["tool_calls"]
+
+        actual_observations = [
+            {"id": result.source_call_id, "content": result.content}
+            for result in (step.observation.results if step.observation else [])
+        ]
+        assert actual_observations == expected["observations"]
+        assert (step.observation is not None) == bool(expected["observations"])
+
+    trajectory_path = pi_root / "trajectory.json"
+    assert trajectory_path.is_file(), "Pi recorder must write trajectory.json"
+    assert atif_validate(trajectory_path, validate_images=False)
 
 
 @pytest.mark.asyncio

@@ -1029,12 +1029,6 @@ def test_get_archive_dir_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert expected.is_dir()
 
 
-def test_archive_dir_fixture_isolates_env(archive_dir: Path, tmp_path: Path) -> None:
-    """Verify the autouse archive_dir fixture's contract: env points at tmp_path/archive."""
-    assert get_archive_dir() == archive_dir
-    assert archive_dir == tmp_path / "archive"
-
-
 def _make_recorder_mock(session_id: str, path: Path, *, explicit_path: bool = False) -> MagicMock:
     """Build a mock TrajectoryRecorder with session_id and path attributes."""
     recorder = MagicMock()

@@ -140,29 +140,27 @@ def test_generic_fallback_no_docs_notice_by_default(tmp_path: Path) -> None:
 
 
 def test_prompts_embed_no_full_file_contents(tmp_path: Path) -> None:
-    """D-09: prompts reference paths, never embed diffs or file bodies.
-
-    Note (issue #172, Fix B): when ``inline_diff`` is supplied the per-stack
-    prompt DOES embed the relevant diff hunks — that is the read-once
-    optimization, not a D-09 violation. This heuristic guards the default
-    (``inline_diff=None``) path only: no line longer than 400 chars there.
-    The inlined path is bounded by ``INLINE_DIFF_BUDGET_BYTES`` separately
-    (see ``test_inline_diff_byte_budget``).
-    """
+    """D-09: path-based prompts omit source bodies and retain the diff pointer."""
     p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"),
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    # Heuristic: no line longer than 400 chars (an embedded diff would blow this
-    # up). The cwd-grounding instruction (issue #221) is one fixed long line and
-    # is not file content, so exclude it from this check.
-    from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+    source_body = "def api():\n    return 'source-only sentinel'\n" + ("x" * 1024)
+    (tmp_path / "api.py").write_text(source_body)
 
-    grounding = CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path)
-    assert all(len(line) < 400 for line in out.splitlines() if line != grounding)
+    prompts = (
+        build_per_stack_prompt(
+            strategy=_default_strategy("discovery.per_stack"),
+            stack_name="python",
+            files=["api.py"],
+            **p,
+        ),
+        build_generic_fallback_prompt(
+            strategy=_default_strategy("discovery.generic_fallback"),
+            files=["api.py"],
+            **p,
+        ),
+    )
+    for prompt in prompts:
+        assert f"The full PR diff (base..HEAD) is at {p['diff_path']}." in prompt
+        assert source_body not in prompt
 
 
 def test_per_stack_prompt_points_at_diff_path(tmp_path: Path) -> None:
@@ -339,6 +337,8 @@ def test_merge_prompt_requires_structured_item_fields(tmp_path: Path) -> None:
     out = build_merge_prompt(strategy=_default_strategy("merge"), **_merge_paths(tmp_path))  # type: ignore[arg-type]
     assert '{"items": [' in out
     assert "Item fields (MANDATORY):" in out
+    assert "lens" in out
+    assert "severity" in out
     # No markdown write-to-file or bold-wrapping directive survives.
     assert "do NOT wrap it in `**...**`" not in out
     assert "write the complete report to" not in out.lower()
@@ -1020,14 +1020,44 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
 
 
 def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path) -> None:
-    """Arbiter/supervise/suppression/merge take no kwarg and always point at alts."""
-    import inspect
-
-    from daydream.deep import prompts as dp
-
-    for name in ("build_arbiter_prompt", "build_merge_prompt"):
-        sig = inspect.signature(getattr(dp, name))
-        assert "include_alternatives" not in sig.parameters, name
+    """Every adjudication prompt points at the shared alternatives artifact."""
+    p = _paths(tmp_path)
+    prompts = (
+        build_arbiter_prompt(
+            strategy=_default_strategy("arbitration"),
+            arbiter_input_path=tmp_path / "arbiter-input.json",
+            diff_path=p["diff_path"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            cwd=p["cwd"],
+        ),
+        build_suppression_prompt(
+            strategy=_default_strategy("suppression"),
+            suppression_input_path=tmp_path / "suppression-input.json",
+            diff_path=p["diff_path"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            cwd=p["cwd"],
+        ),
+        build_supervise_prompt(
+            strategy=_default_strategy("supervision"),
+            supervise_input_path=tmp_path / "supervise-input.json",
+            diff_path=p["diff_path"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            cwd=p["cwd"],
+        ),
+        build_merge_prompt(
+            strategy=_default_strategy("merge"),
+            per_stack_records_paths=[tmp_path / "python.json"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            dedup_candidates_path=tmp_path / "dedup.json",
+            output_path=tmp_path / "report.md",
+        ),
+    )
+    for prompt in prompts:
+        assert str(p["alternatives_path"]) in prompt
 
 
 # =============================================================================

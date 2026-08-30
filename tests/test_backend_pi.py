@@ -39,7 +39,6 @@ from daydream.backends.pi import (
     PiError,
     _is_retryable_error_message,
     _is_retryable_exit_code,
-    _is_stream_truncation_message,
     _pi_error_category,
     _pi_retry_attempts,
     _pi_retry_base_delay,
@@ -1177,10 +1176,6 @@ def test_pi_error_categories_are_stable_host_codes(
 )
 def test_pi_transient_failures_are_retryable(message: str) -> None:
     assert _is_retryable_error_message(message) is True
-
-
-def test_is_stream_truncation_message() -> None:
-    assert _is_stream_truncation_message("stream ended without finish_reason") is True
 
 
 @pytest.mark.asyncio

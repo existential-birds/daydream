@@ -222,28 +222,30 @@ def test_host_run_gate_threads_claude_credentials_into_supervisor_env(
 
 
 def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A Python diff resolves through the controlled entrypoint with no backend
-    # network dependency (the runner is stubbed at the production seam): the run
-    # completes, publishes the canonical artifact, and never emits a ProfileError.
+    # The runner is stubbed at its production seam, but the entrypoint still
+    # builds its controlled review config and runs the real publisher against
+    # the runner's canonical merged-items output.
     (tmp_path / "a.py").write_text("x = 1\n")
     artifact = tmp_path / "logs" / "artifacts" / "review.json"
-    artifact.parent.mkdir(parents=True)
+    seen: dict[str, Any] = {}
 
     async def _fake_run(config: Any) -> int:
+        seen["config"] = config
+        merged = Path(config.target) / ".daydream" / "deep" / "merged-items.json"
+        merged.parent.mkdir(parents=True)
+        merged.write_text(json.dumps({
+            "items": [{
+                "file": "a.py",
+                "line": 1,
+                "description": "The reviewed Python file contains an actionable issue.",
+                "rationale": "The issue is reproducible in the frozen review snapshot.",
+                "severity": "medium",
+                "confidence": "HIGH",
+            }],
+        }))
         return 0
 
-    def _fake_publish(
-        *,
-        repo_dir: Any,
-        artifact_path: Any,
-        case_id: Any,
-        base_ref: Any="base",
-        head_ref: Any="head",
-    ) -> None:
-        Path(artifact_path).write_text("{}")
-
     monkeypatch.setattr("daydream.runner.run", _fake_run)
-    monkeypatch.setattr(entrypoint, "publish_review", _fake_publish)
 
     rc = asyncio.run(entrypoint.main(monkeypatch_env={
         "DAYDREAM_REVIEW_CASE_ID": "case-python",
@@ -254,8 +256,23 @@ def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.M
         "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
     }))
     assert rc == 0
-    text = Path(artifact).read_text() if Path(artifact).exists() else ""
-    assert "ProfileError" not in text
+    config = seen["config"]
+    assert config.target == str(tmp_path)
+    assert config.backend == "pi"
+    assert config.output_mode == "review"
+    assert config.non_interactive is True
+    assert config.archive is False
+    assert config.run_eval is False
+    assert config.file_config is not None
+
+    from daydream.benchmark.harbor import verifier_core as vc
+
+    loaded = json.loads(artifact.read_text())
+    assert loaded["case_id"] == "case-python"
+    assert loaded["base_ref"] == "base"
+    assert loaded["head_ref"] == "head"
+    assert [finding["path"] for finding in loaded["findings"]] == ["a.py"]
+    assert vc.validate_candidate_artifact(loaded)
 
 
 def test_entrypoint_claude_backend_reaches_run_config(
@@ -288,26 +305,20 @@ def test_entrypoint_claude_backend_reaches_run_config(
 
 
 def test_entrypoint_env_has_no_skill_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The controlled entrypoint must never inject a skill-registry env var.
+    # Inspect the environment while the runner is executing: checking after
+    # main() returns would miss a value that the test-only cleanup restored.
     monkeypatch.delenv("DAYDREAM_SKILLS_DIR", raising=False)
     artifact = tmp_path / "logs" / "artifacts" / "review.json"
-    artifact.parent.mkdir(parents=True)
+    seen: dict[str, Any] = {}
 
     async def _fake_run(config: Any) -> int:
+        seen["skill_dir"] = os.environ.get("DAYDREAM_SKILLS_DIR")
+        merged = Path(config.target) / ".daydream" / "deep" / "merged-items.json"
+        merged.parent.mkdir(parents=True)
+        merged.write_text('{"items": []}')
         return 0
 
-    def _fake_publish(
-        *,
-        repo_dir: Any,
-        artifact_path: Any,
-        case_id: Any,
-        base_ref: Any="base",
-        head_ref: Any="head",
-    ) -> None:
-        Path(artifact_path).write_text("{}")
-
     monkeypatch.setattr("daydream.runner.run", _fake_run)
-    monkeypatch.setattr(entrypoint, "publish_review", _fake_publish)
 
     rc = asyncio.run(entrypoint.main(monkeypatch_env={
         "DAYDREAM_REVIEW_CASE_ID": "case-noskill",
@@ -318,4 +329,11 @@ def test_entrypoint_env_has_no_skill_dirs(tmp_path: Path, monkeypatch: pytest.Mo
         "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
     }))
     assert rc == 0
-    assert os.environ.get("DAYDREAM_SKILLS_DIR") is None
+    assert seen["skill_dir"] is None
+
+    from daydream.benchmark.harbor import verifier_core as vc
+
+    loaded = json.loads(artifact.read_text())
+    assert loaded["case_id"] == "case-noskill"
+    assert loaded["findings"] == []
+    assert vc.validate_candidate_artifact(loaded) == []

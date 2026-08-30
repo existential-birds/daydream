@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import jsonschema
+import pytest
 
 from daydream.archive.index import append_label_observation, upsert_run
 from daydream.archive.manifest import Manifest
@@ -365,16 +366,30 @@ def test_cli_build_corpus_invalid_max_stack_share_returns_1() -> None:
     assert rc == 1
 
 
-def test_cli_build_corpus_passes_as_of_and_min_reward(tmp_path: Path, archive_dir: Path) -> None:
-    """``--as-of`` and ``--min-reward`` thread through into the config."""
-    from daydream.cli import _build_build_corpus_parser
+def test_cli_build_corpus_passes_as_of_and_min_reward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler forwards ``--as-of`` and ``--min-reward`` to the build config."""
+    captured: list[BuildCorpusConfig] = []
 
-    parser = _build_build_corpus_parser()
-    args = parser.parse_args(
-        ["--out", str(tmp_path / "x.jsonl"), "--as-of", "2026-04-01T00:00:00+00:00", "--min-reward", "0.5"]
+    def capture_config(config: BuildCorpusConfig) -> dict[str, int]:
+        captured.append(config)
+        return {"total_runs_in_index": 0, "after_filters": 0, "after_stratify": 0, "emitted": 0}
+
+    monkeypatch.setattr("daydream.training.corpus.run_build_corpus", capture_config)
+
+    from daydream.cli import _handle_build_corpus_command
+
+    out = tmp_path / "x.jsonl"
+    rc = _handle_build_corpus_command(
+        ["--out", str(out), "--as-of", "2026-04-01T00:00:00+00:00", "--min-reward", "0.5"]
     )
-    assert args.as_of == "2026-04-01T00:00:00+00:00"
-    assert args.min_reward == 0.5
+
+    assert rc == 0
+    assert len(captured) == 1
+    config = captured[0]
+    assert config.as_of == "2026-04-01T00:00:00+00:00"
+    assert config.filters.min_reward == 0.5
 
 
 # C3 — typed population separation: pin the intrinsic-only comparison and the posterior_cost discriminator.

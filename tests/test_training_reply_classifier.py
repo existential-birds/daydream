@@ -3,7 +3,6 @@ from typing import Any
 import pytest
 
 from daydream.training.reply_classifier import (
-    REPLY_CLASSIFIER_VERSION,
     classify_reply,
     is_qualifying_author,
 )
@@ -43,10 +42,21 @@ def test_classify_directional_rules(body: str, expected: str) -> None:
 @pytest.mark.parametrize(
     "reply,expected",
     [
-        (_reply("Fixed in abc123", assoc="NONE"), "accepted"),      # PR-author path covered below
-        (_reply("Fixed in abc123", bot="Bot", login="dependabot[bot]"), "ambiguous"),  # bot excluded
-        (_reply("Fixed in abc123", login="", assoc="NONE"), "ambiguous"),  # empty author excluded
-        (_reply("Fixed in abc123", login="daydream-agent"), "ambiguous"),  # daydream self-reply excluded
+        pytest.param(
+            _reply("Fixed in abc123", bot="Bot", login="dependabot[bot]"),
+            "ambiguous",
+            id="reply1-ambiguous",
+        ),  # bot excluded
+        pytest.param(
+            _reply("Fixed in abc123", login="", assoc="NONE"),
+            "ambiguous",
+            id="reply2-ambiguous",
+        ),  # empty author excluded
+        pytest.param(
+            _reply("Fixed in abc123", login="daydream-agent"),
+            "ambiguous",
+            id="reply3-ambiguous",
+        ),  # daydream self-reply excluded
     ],
 )
 def test_qualifying_author_gates_decisive_labels(reply: dict[str, Any], expected: str) -> None:
@@ -69,8 +79,3 @@ def test_qualifying_author_rules() -> None:
         is True
     )
     assert is_qualifying_author(_reply("x", bot="Bot", login="ci[bot]"), pr_author_logins=set()) is False
-
-
-def test_classifier_version_is_exported() -> None:
-    """The rule version ties classifications to re-fetch identity (M13/M14)."""
-    assert REPLY_CLASSIFIER_VERSION
