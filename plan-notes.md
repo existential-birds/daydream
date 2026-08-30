@@ -94,3 +94,14 @@ No Key Decision invalidated: dry path works GPU-free at v0.7.0, dataset-SFT exis
 as a separate `sft` entrypoint taking prompt/completion JSONL with LoRA rank up to
 128 and `renderer.name = "default"`, and the verifiers skew resolves by pin
 discipline alone. Proceed to Task 1.
+
+## Issue-1055 Task 0 spike (2026-08-30, branch eb/daydream/issue-1055 @ HEAD)
+
+- Baseline: `pytest tests/test_corpus_v2.py tests/test_training_adjudication_preview_harvest.py -x -q` → **48 passed**.
+- Wiring import check: `run_build_corpus_v2`, `_verify_snapshot_pinned`, `append_label_observation`, `build_export_entries` all import cleanly → `wiring OK`.
+- Failure-mode capture: **no tests reference `_verify_snapshot_pinned`** (`grep -rn verify_snapshot_pinned tests/` → no hits; `-k snapshot_pinned --collect-only` → 0 collected). There is therefore no existing digest-membership contract coverage to replace — Task 9 writes the two-bundle contract tests fresh.
+- Consumer scan: sole call site of `_verify_snapshot_pinned` is `daydream/training/corpus_v2/projector.py:374` inside `run_build_corpus_v2`. `adjudication/preview.py:8` mentions it in a docstring only (not a consumer, docstring update in Task 9 is cosmetic). No other consumers exist.
+
+## Verdict
+
+Baseline green, wiring intact, `projector.py:374` is the only consumer. Spike passes; proceed to Task 1.
