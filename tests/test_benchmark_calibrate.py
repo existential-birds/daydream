@@ -87,7 +87,10 @@ def test_loader_resolves_sibling_verifier_core() -> None:
     sr = calibrate._load_judge_template()
     template_dir = (calibrate._TEMPLATES / "tests").resolve()
     assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
-    assert Path(sr.verifier_core.__file__).resolve() == template_dir / "verifier_core.py"
+    # issue #1004: the template twin is gone -- the asset's bare `import
+    # verifier_core` resolves to the canonical host module.
+    from daydream.benchmark.harbor import verifier_core as canonical_vc
+    assert sr.verifier_core is canonical_vc
 
     verdict = sr.parse_verdict(
         {"match": True, "confidence": 0.9, "reasoning": "known verifier call"}
