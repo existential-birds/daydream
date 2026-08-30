@@ -24,6 +24,7 @@ REASON_CODE_BUNDLE_UNREADABLE = "bundle_unreadable"
 REASON_CODE_UNTRUSTED_REMOTE_HOST = "untrusted_remote_host"
 REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
 REASON_CODE_IDENTITY_COLLISION = "identity_collision"
+REASON_CODE_PATH_TRAVERSAL = "path_traversal"
 
 # ---------------------------------------------------------------------------
 # Curation-id derivation (Task 3)

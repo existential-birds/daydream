@@ -112,6 +112,16 @@ class TestCollision:
         )
         quarantined = {e["session_id"]: e["reason_code"] for e in ledger["quarantined"]}
         assert quarantined.get("sess-a") == hydrate_rules.REASON_CODE_IDENTITY_COLLISION
+        # the published curation manifest lists the collided session exactly once,
+        # as quarantined at the real collision directory (never double-listed)
+        manifest = json.loads(
+            hub.files[f"curated/{rerun.curation_id}/curation-manifest.json"].decode()
+        )
+        sess_rows = [b for b in manifest["batches"] if b["session_id"] == "sess-a"]
+        assert len(sess_rows) == 1
+        assert sess_rows[0]["status"] == "quarantined"
+        assert sess_rows[0]["reason_code"] == hydrate_rules.REASON_CODE_IDENTITY_COLLISION
+        assert sess_rows[0]["artifact_relpath"] == "quarantine/sess-a.conflict"
 
 
 class TestPathTraversal:

@@ -141,6 +141,16 @@ class TestResolveRevision:
         hub.commit_revision("b" * 40, ref="main")
         assert hydrate.resolve_source_revision(hub, "main", exploratory=True) == "b" * 40
 
+    def test_symbolic_ref_not_case_folded(self) -> None:
+        """Case-sensitive refs are never silently mapped to a differently-cased name."""
+        hub = make_fake_hub(Path("/tmp"))
+        hub.commit_revision("b" * 40, ref="main")
+        with pytest.raises(hydrate.HydrationError, match="unknown revision"):
+            hydrate.resolve_source_revision(hub, "Main", exploratory=True)  # no silent fold to 'main'
+        hub.commit_revision("c" * 40, ref="Main")
+        assert hydrate.resolve_source_revision(hub, "Main", exploratory=True) == "c" * 40
+        assert hydrate.resolve_source_revision(hub, "main", exploratory=True) == "b" * 40
+
     def test_unknown_revision_fails_closed(self) -> None:
         hub = make_fake_hub(Path("/tmp"))
         with pytest.raises(hydrate.HydrationError):
@@ -204,8 +214,8 @@ class TestDownloadSnapshot:
 
     def test_traversal_relpath_rejected(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
+        hub.files["../../escape.txt"] = b"pwned"  # hostile relpath is part of the pinned snapshot
         hub.commit_revision("a" * 40)
-        hub.files["../../escape.txt"] = b"pwned"
         stage = tmp_path / "stage" / "downloads"
         with pytest.raises(hydrate.StageError, match="traversal|escapes"):
             hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
@@ -213,8 +223,8 @@ class TestDownloadSnapshot:
     def test_traversal_from_manifest_never_writes(self, tmp_path: Path) -> None:
         """A hostile Hub listing pointing outside the staging root writes nothing outside."""
         hub = make_fake_hub(tmp_path)
+        hub.files["bundles/../../outside.txt"] = b"pwned"  # pinned with the snapshot revision
         hub.commit_revision("a" * 40)
-        hub.files["bundles/../../outside.txt"] = b"pwned"
         stage = tmp_path / "stage" / "downloads"
         with pytest.raises(hydrate.StageError):
             hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
@@ -383,6 +393,51 @@ class TestIngestAndIndex:
         # nothing outside staging was touched
         assert not pathlib.Path("/etc/passwd.git").exists()
 
+    def test_traversal_session_id_quarantined_before_any_write(self, tmp_path: Path) -> None:
+        """A traversal-bearing manifest session id is quarantined pre-write (M4)."""
+        hub = FakeHub(repo_id="org/private-ds", private=True, files={
+            "bundles/sess-evil/manifest.json":
+                b'{"session_id": "../escape", "remote_url": "https://github.com/o/r"}',
+            "bundles/sess-evil/trajectory.json": b"{}",
+        })
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        evil = [r for r in results if r.session_id == "../escape"]
+        assert evil and evil[0].status == "quarantined"
+        assert evil[0].reason_code == hydrate_rules.REASON_CODE_PATH_TRAVERSAL
+        assert not (stage / "runs").exists()          # never admitted
+        assert not (stage / "quarantine").exists()    # sanitize gate never saw it
+        assert not (tmp_path / "escape").exists()     # nothing outside staging
+
+    def test_produced_nested_manifest_indexed_without_crash(self, tmp_path: Path) -> None:
+        """Real manifests nest git.* and carry a nested daydream provenance dict."""
+        from daydream.archive.manifest import Manifest
+        from daydream.archive.provenance import ExecutableProvenance
+
+        manifest = Manifest(
+            session_id="sess-real",
+            remote_url="https://github.com/octo/nested-repo",
+            repo_slug="octo/nested-repo",
+            source_path="/orig/absolute/path",
+            daydream=ExecutableProvenance(version="1.0", install_source="editable"),
+        )
+        hub = FakeHub(repo_id="org/private-ds", private=True, files={
+            "bundles/sess-real/manifest.json": json.dumps(manifest.to_dict()).encode(),
+            "bundles/sess-real/trajectory.json": b"{}",
+        })
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        assert [r.status for r in results] == ["admitted"]
+        hydrate.rebuild_index(stage)  # must not raise: nested daydream dict is dropped
+        from daydream.archive.index import query_runs
+        rows = [r for r in query_runs(stage) if r["session_id"] == "sess-real"]
+        assert len(rows) == 1
+        assert rows[0]["repo_slug"] == "octo/nested-repo"  # nested git.remote_url read
+
     def test_bundles_exclude_git_dirs(self, tmp_path: Path) -> None:
         """Task 0B constraint: no .git ships inside hydrated bundles (harvest priority-1 safety)."""
         stage = self._staged(tmp_path)
@@ -404,6 +459,23 @@ class TestFinalizeAndVerify:
         hydrate.dedupe_admitted(stage, revision="a" * 40)
         hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
         return stage
+
+    def test_verify_failure_never_publishes_success_marker(self, tmp_path: Path) -> None:
+        """A post-publication verification failure leaves no published _SUCCESS."""
+        class CorruptingHub(FakeHub):
+            def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
+                data = super().download_file(path_in_repo, revision)
+                if "/batches/" in path_in_repo and path_in_repo.endswith("trajectory.json"):
+                    return data + b"\ncorrupted"
+                return data
+
+        hub = CorruptingHub(repo_id="org/private-ds", private=True, files=dict(SNAPSHOT))
+        hub.commit_revision("a" * 40)
+        with pytest.raises(hydrate.VerificationError):
+            hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
+                source_repo="org/private-ds", source_revision="a" * 40,
+                destination_repo="org/private-ds", stage_dir=tmp_path / "stage"), client=hub)
+        assert not any(p.endswith("_SUCCESS") for p in hub.uploaded_paths)
 
     def test_success_marker_last_and_output_sha_captured(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
@@ -447,6 +519,32 @@ class TestDedupeAndLedger:
         hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
         hydrate.ingest_bundles(stage, revision=revision)
         return stage
+
+    def test_collision_durable_across_reruns(self, tmp_path: Path) -> None:
+        """A collision re-quarantines on every later run; the mutated derivative
+        is never re-admitted over the published baseline (M7 durability)."""
+        hub = make_fake_hub(tmp_path)
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision="a" * 40)
+        hydrate.dedupe_admitted(stage, revision="a" * 40)  # run 1: admit baseline
+        baseline_manifest = (stage / "runs" / "sess-a" / "manifest.json").read_bytes()
+        # mutate + re-download + re-ingest (runs 2 and 3 see the same mutated tree)
+        hub.mutate_bundle("a" * 40, "sess-a", b'{"tampered": true}')
+        for _ in range(2):
+            staged = stage / "downloads" / ("a" * 40) / "bundles" / "sess-a" / "manifest.json"
+            staged.unlink()
+            hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+            hydrate.ingest_bundles(stage, revision="a" * 40)
+            rerun = hydrate.dedupe_admitted(stage, revision="a" * 40)
+            assert rerun.collisions == 1   # every later run re-quarantines
+            assert rerun.admitted == 0     # the mutated derivative is never admitted
+        # the admitted derivative is the restored baseline, byte for byte
+        restored = stage / "runs" / "sess-a" / "manifest.json"
+        assert restored.read_bytes() == baseline_manifest
+        from daydream.archive.index import query_runs
+        assert len(query_runs(stage)) == 1  # one session row, never overwritten
 
     def test_idempotent_rerun_no_duplicates(self, tmp_path: Path) -> None:
         stage = self._staged(tmp_path)

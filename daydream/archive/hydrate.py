@@ -33,6 +33,7 @@ from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.hydrate_rules import (
     REASON_CODE_BUNDLE_UNREADABLE,
     REASON_CODE_IDENTITY_COLLISION,
+    REASON_CODE_PATH_TRAVERSAL,
     REASON_CODE_SANITIZE_FAILED,
     REASON_CODE_SECRETS_SCAN_DIRTY,
     REASON_CODE_UNTRUSTED_REMOTE_HOST,
@@ -90,24 +91,30 @@ def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bo
     being re-raised as :class:`HydrationError`, so no credential material ever
     reaches the console or ledger.
     """
-    revision = revision.strip().lower()
-    if _FULL_SHA_RE.fullmatch(revision):
+    revision = revision.strip()
+    if _FULL_SHA_RE.fullmatch(revision.lower()):
+        # Hex validation is case-insensitive and the Hub's canonical SHAs are
+        # lowercase, so fold only inside the hex branches — a symbolic ref
+        # (branch/tag name) is resolved case-sensitively below (M2 contract:
+        # no silent case-folding of symbolic refs).
+        revision = revision.lower()
         try:
             client.repo_info(revision=revision)  # verify it exists
         except HydrationError as exc:
             raise HydrationError(redact_text(str(exc))) from exc
         return revision
 
-    if _HEX_PREFIX_RE.fullmatch(revision):
+    if _HEX_PREFIX_RE.fullmatch(revision.lower()):
+        prefix = revision.lower()
         list_revisions = getattr(client, "list_revisions", None)
         matches = (
-            [r for r in list_revisions() if r.startswith(revision)]
+            [r for r in list_revisions() if r.startswith(prefix)]
             if callable(list_revisions)
             else []
         )
         if len(matches) > 1:
             raise HydrationError(
-                redact_text(f"ambiguous revision prefix {revision!r}: {len(matches)} matching commits")
+                redact_text(f"ambiguous revision prefix {prefix!r}: {len(matches)} matching commits")
             )
         if len(matches) == 1:
             return str(matches[0])
@@ -141,7 +148,7 @@ class HubClient(Protocol):
 
     def repo_info(self, revision: str | None = None) -> RepoInfo: ...
 
-    def list_repo_files(self) -> list[str]: ...
+    def list_repo_files(self, revision: str | None = None) -> list[str]: ...
 
     def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes: ...
 
@@ -186,6 +193,17 @@ def _validate_relpath(relpath: str, root: Path) -> Path:
     return target
 
 
+def _is_bare_segment(value: str) -> bool:
+    """True when ``value`` is one safe path segment (no separators, no ``..``).
+
+    Enforces the M4 trust boundary on Hub-derived session ids before they are
+    joined into a filesystem path — the same boundary :func:`_validate_relpath`
+    applies to download relpaths. An absolute, empty, ``.``/``..``, or
+    separator-bearing value can never be a bare segment.
+    """
+    return bool(value) and value not in (".", "..") and "/" not in value and "\\" not in value
+
+
 def download_snapshot(
     client: HubClient,
     *,
@@ -219,7 +237,7 @@ def download_snapshot(
         except (OSError, ValueError, KeyError, TypeError):
             records = {}  # corrupt ledger: rebuild from disk state
 
-    relpaths = list(client.list_repo_files())
+    relpaths = list(client.list_repo_files(revision=revision))
     downloaded = 0
     skipped = 0
     digests: dict[str, str] = {}
@@ -281,6 +299,20 @@ def _read_manifest_dict(bundle_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _read_manifest_field(data: dict[str, Any], key: str) -> Any:
+    """Read a provenance field from a produced manifest, with flat fallback.
+
+    The canonical producer nests ``git.remote_url`` / ``git.source_path`` /
+    ``git.repo_slug`` under ``git.*`` (``Manifest.to_dict``); hand-built
+    (test-stage / legacy flat) manifests carry the same keys top-level. Read
+    the nested spelling first, then the flat fallback.
+    """
+    git = data.get("git")
+    if isinstance(git, dict) and key in git:
+        return git[key]
+    return data.get(key)
+
+
 @dataclass(frozen=True)
 class IngestResult:
     """Outcome of the ingest gate for one staged session bundle (issue #982 M4/M6)."""
@@ -338,7 +370,13 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
             results.append(IngestResult(name, "quarantined", REASON_CODE_BUNDLE_UNREADABLE))
             continue
         session_id = str(data.get("session_id") or name)
-        raw_url = data.get("remote_url")
+        if not _is_bare_segment(session_id):
+            # M4: the manifest's session id is Hub-provided path data; reject
+            # traversal/absolute ids before any write — the sanitize gate
+            # (which mkdirs from the session id) never sees them.
+            results.append(IngestResult(session_id, "quarantined", REASON_CODE_PATH_TRAVERSAL))
+            continue
+        raw_url = _read_manifest_field(data, "remote_url")
         if isinstance(raw_url, str) and raw_url.strip():
             identity, _canonical = normalize_remote_url(raw_url)
             if identity is None:
@@ -425,8 +463,14 @@ def rebuild_index(stage: Path) -> None:
             )
         valid = {f.name for f in dataclass_fields(Manifest)}
         rewritten = {"archive_path", "source_path", "remote_url", "repo_slug"}
-        kwargs = {k: v for k, v in data.items() if k in valid and k not in rewritten}
-        raw_url = data.get("remote_url")
+        # ``daydream`` provenance is a nested dict in produced manifests; the
+        # index expects the executable-provenance object, so it is dropped from
+        # the hydrated rebuild (never coerced into a Manifest field).
+        kwargs = {
+            k: v for k, v in data.items()
+            if k in valid and k not in rewritten and k != "daydream"
+        }
+        raw_url = _read_manifest_field(data, "remote_url")
         if isinstance(raw_url, str) and raw_url.strip():
             slug, canonical = normalize_remote_url(raw_url)
             kwargs["repo_slug"] = slug
@@ -434,7 +478,7 @@ def rebuild_index(stage: Path) -> None:
         else:
             kwargs["repo_slug"] = None
             kwargs["remote_url"] = None
-        kwargs["source_path"] = _staging_local_source_path(data.get("source_path"), stage)
+        kwargs["source_path"] = _staging_local_source_path(_read_manifest_field(data, "source_path"), stage)
         kwargs["archive_path"] = str(derivative)
         upsert_run(stage, Manifest(**kwargs))
 
@@ -479,7 +523,7 @@ def build_resolution_map(stage: Path, *, source_commit: str) -> dict[str, Any]:
         session_id = str(data.get("session_id") or manifest_path.parent.name)
         if session_id in indexed:
             continue
-        raw_url = data.get("remote_url")
+        raw_url = _read_manifest_field(data, "remote_url")
         slug = normalize_remote_url(raw_url)[0] if isinstance(raw_url, str) and raw_url.strip() else None
         if slug is None and session_id not in unavailable:
             unavailable.append(session_id)
@@ -515,6 +559,17 @@ def _curated_dir(stage: Path, source_commit: str) -> Path:
     return stage / "curated" / cid
 
 
+def _dedupe_dir(stage: Path, curation_id: str) -> Path:
+    """Internal dedupe state (ledger + admitted baselines) for a curation.
+
+    Deliberately outside ``stage/curated/<curation-id>/``: the append-only
+    dedupe ledger and the admitted-baseline copies are VM-local bookkeeping and
+    are never part of the published file set (M13 publication list), so they
+    are never re-uploaded on additive runs.
+    """
+    return stage / "_dedupe" / curation_id
+
+
 def _append_dedupe_entry(path: Path, entry: dict[str, Any]) -> None:
     """Append one JSONL record to the dedupe ledger (same shape as sanitize progress)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -548,6 +603,33 @@ def _move_dir(source: Path, target: Path) -> None:
     shutil.move(str(source), str(target))
 
 
+def _deep_artifact_evidence(derivative: Path, data: dict[str, Any]) -> dict[str, object] | None:
+    """Synthesize M9 revalidation evidence from a real bundle's deep artifacts.
+
+    Produced manifests never carry a top-level ``deep_artifacts`` key; the
+    evidence lives in the bundle's ``deep/*.json`` sidecars (copied from
+    ``.daydream/deep``, keyed by stem) plus the manifest's own derived
+    ``phase_states`` / ``fix_failures`` / ``archive_status`` fields. ``None``
+    when no evidence exists — the M9 gate then excludes the bundle.
+    """
+    evidence: dict[str, object] = {}
+    deep_dir = derivative / "deep"
+    if deep_dir.is_dir():
+        for path in sorted(deep_dir.glob("*.json")):
+            try:
+                evidence[path.stem] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+    for key, value in (
+        ("fix_failures", data.get("fix_failures")),
+        ("phase_states", data.get("phase_states")),
+        ("archive_status", data.get("archive_status")),
+    ):
+        if key not in evidence and isinstance(value, (dict, str)):
+            evidence[key] = value
+    return evidence or None
+
+
 def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     """Content-addressed dedupe over the admitted derivatives (issue #982 M7/M8/M9).
 
@@ -576,9 +658,13 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     """
     revision = str(revision)
     curated = _curated_dir(stage, revision)
-    ledger_path = curated / "dedupe.jsonl"
-    baseline_root = curated / "admitted"
-    recorded = _load_dedupe_ledger(ledger_path)
+    dedupe_dir = _dedupe_dir(stage, curated.name)
+    ledger_path = dedupe_dir / "dedupe.jsonl"
+    baseline_root = dedupe_dir / "admitted"
+    # The latest *admitted* digest is the durable collision key: a later
+    # collision entry must not let a re-run re-admit the mutated derivative
+    # over the published baseline (M7 durability across re-runs).
+    admitted_digests = _latest_admitted_digests(ledger_path)
     result = DedupeResult()
     runs_dir = stage / "runs"
     if runs_dir.is_dir():
@@ -590,6 +676,12 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                     redact_text(f"admitted derivative {name} has an unreadable manifest")
                 )
             sid = str(data.get("session_id") or name)
+            if not _is_bare_segment(sid):
+                # M4: the manifest's session id must never be joined into a
+                # staging path (excluded/, quarantine/, baseline restore).
+                raise HydrationError(
+                    redact_text(f"admitted derivative {name} has an unsafe session id {sid!r}")
+                )
 
             # M8: fixture exclusion, pre-dedupe, stable codes.
             try:
@@ -597,10 +689,12 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
             except (OSError, ValueError):
                 codes = [REASON_CODE_BUNDLE_UNREADABLE]
             if not codes and "pipeline_status" in data:
-                # M9: revalidate the legacy field; evidence-absent never succeeds.
+                # M9: revalidate the legacy field against the bundle's real
+                # evidence; evidence-absent never succeeds (produced manifests
+                # never carry a top-level ``deep_artifacts`` key).
                 verdict = hydrate_rules.legacy_pipeline_status(
                     data.get("pipeline_status"),
-                    data.get("deep_artifacts") if isinstance(data.get("deep_artifacts"), dict) else None,
+                    _deep_artifact_evidence(derivative, data),
                 )
                 if isinstance(verdict, tuple):
                     codes = [verdict[1]]
@@ -616,9 +710,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
                 continue
 
             digest = sanitize._derivative_digest(derivative)
-            prev = recorded.get(sid)
-            if prev is not None and prev.get("status") == "admitted" \
-                    and prev.get("content_digest") not in (None, digest):
+            if admitted_digests.get(sid) not in (None, digest):
                 # Identity collision: quarantine the new derivative, restore the
                 # original admitted content — never overwrite (M7).
                 baseline = baseline_root / sid
@@ -691,8 +783,9 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
     revision = str(revision)
     source_commit = str(source_commit)
     curated = _curated_dir(stage, source_commit)
-    recorded = _load_dedupe_ledger(curated / "dedupe.jsonl")
-    admitted_digests = _latest_admitted_digests(curated / "dedupe.jsonl")
+    dedupe_ledger = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
+    recorded = _load_dedupe_ledger(dedupe_ledger)
+    admitted_digests = _latest_admitted_digests(dedupe_ledger)
 
     ingest_results: list[dict[str, Any]] = []
     ingest_path = stage / "downloads" / revision / "_ingest_results.json"
@@ -709,6 +802,14 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
     admitted_ids = {
         str(e["session_id"]) for e in ingest_results if e.get("status") == "admitted"
     } | indexed_ids
+    # Sessions whose latest dedupe decision is a rejection (identity collision
+    # / fixture exclusion) are recorded once, under that status: the manifest
+    # must never list them as admitted again (M7/frozen schema).
+    rejected_latest = {
+        sid for sid, entry in recorded.items()
+        if entry.get("status") in ("collision", "excluded")
+    }
+    admitted_ids -= rejected_latest
 
     imported: list[dict[str, Any]] = []
     for sid in sorted(admitted_ids):
@@ -991,10 +1092,12 @@ def resume_state(client: HubClient, *, curation_id: str, stage_dir: Path) -> Res
         if not batch_relpaths:
             redownloaded.append(sid)
             continue
+        if not _is_bare_segment(sid):
+            raise StageError(redact_text(f"refusing resume session id {sid!r}: traversal"))
         batch_dir = stage_dir / "batches" / sid
         for rel in batch_relpaths:
             data = client.download_file(f"{batch_prefix}{rel}")
-            target = batch_dir / rel
+            target = _validate_relpath(rel, batch_dir)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
         local_digest = sanitize._derivative_digest(batch_dir)
@@ -1075,14 +1178,14 @@ class HfHubClient:
 
     def repo_info(self, revision: str | None = None) -> RepoInfo:
         try:
-            info = self._api.repo_info(revision or "main", repo_type="dataset")
+            info = self._api.repo_info(self._repo_id, revision=revision, repo_type="dataset")
         except Exception as exc:  # mapped, never swallowed
             raise HubDownloadError(f"repo_info failed for {self._repo_id}: {exc}") from exc
         return RepoInfo(sha=str(info.sha), private=bool(info.private))
 
-    def list_repo_files(self) -> list[str]:
+    def list_repo_files(self, revision: str | None = None) -> list[str]:
         try:
-            return list(self._api.list_repo_files(self._repo_id, repo_type="dataset"))
+            return list(self._api.list_repo_files(self._repo_id, revision=revision, repo_type="dataset"))
         except Exception as exc:
             raise HubDownloadError(f"list_repo_files failed for {self._repo_id}: {exc}") from exc
 
@@ -1169,14 +1272,25 @@ def _curation_manifest_doc(
         code = rejection.get("reason_code")
         status = "excluded" if code in hydrate_rules.EXCLUSION_CODES else "quarantined"
         root = "excluded" if status == "excluded" else "quarantine"
+        # Rejected bundles are never published, so the relpath names the actual
+        # staging tree (portable/relative): dedupe moves identity collisions to
+        # ``quarantine/<sid>.conflict``, everything else to ``<root>/<sid>``.
+        # A non-bare session id is a traversal attempt — reference a derived
+        # hash segment instead of the raw value and never touch the filesystem.
+        segment = sid if _is_bare_segment(sid) else hashlib.sha256(sid.encode()).hexdigest()
+        collision = code == hydrate_rules.REASON_CODE_IDENTITY_COLLISION
+        relpath = f"{root}/{segment}.conflict" if collision else f"{root}/{segment}"
         digest = rejection.get("content_digest")
         if not isinstance(digest, str) or not digest:
             # Rejected bundles carry no derivative digest; derive one from the
             # rejected copy on staging (or the session id when it was moved).
-            source_dir = stage / root / sid
-            if not source_dir.is_dir():
-                source_dir = stage / "downloads" / str(ledger["pinned_revision"]) / "bundles" / sid
-            digest = sanitize._derivative_digest(source_dir) if source_dir.is_dir() \
+            candidates: list[Path] = []
+            if collision:
+                candidates.append(stage / "quarantine" / f"{segment}.conflict")
+            candidates.append(stage / root / segment)
+            candidates.append(stage / "downloads" / str(ledger["pinned_revision"]) / "bundles" / segment)
+            source_dir = next((c for c in candidates if c.is_dir()), None)
+            digest = sanitize._derivative_digest(source_dir) if source_dir is not None \
                 else hashlib.sha256(sid.encode()).hexdigest()
         batches.append(
             {
@@ -1184,7 +1298,7 @@ def _curation_manifest_doc(
                 "content_digest": str(digest),
                 "status": status,
                 "reason_code": code,
-                "artifact_relpath": f"{root}/{sid}",
+                "artifact_relpath": relpath,
                 "manifest_relpath": None,
             }
         )
@@ -1201,12 +1315,15 @@ def _curation_manifest_doc(
 
 
 def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit: str) -> str:
-    """Publish the curation manifest, then ``_SUCCESS`` as the terminal commit (M18).
+    """Publish the curation manifest and refreshed checksums (M18).
 
     The manifest is rendered from the real persisted import ledger and uploaded
-    first; ``curated/<curation-id>/_SUCCESS`` is uploaded as the very last
-    commit — nothing is ever uploaded after it. Returns the output commit SHA
-    (the Hub head after the ``_SUCCESS`` commit), which the verify cycle pins.
+    with ``SHA256SUMS`` over the final published file set. The ``_SUCCESS``
+    marker is deliberately NOT uploaded here: it is published only after the
+    clean-room verification cycle passes (verify-before-success), so a
+    verification failure can never leave a published "complete" marker.
+    Returns the output commit SHA (the Hub head after the manifest commit),
+    which the verify cycle pins.
     """
     curated = stage / "curated" / curation_id
     ledger_path = curated / "import-ledger.json"
@@ -1220,10 +1337,14 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
     # SHA256SUMS must cover the *final* published file set — including the
     # curation manifest rendered just above, which can change between runs
     # (e.g. a newly recorded identity collision). Refresh it here so the
-    # checksums always match the bytes the verify cycle will pin.
-    final_relpaths = sorted(
-        p.relative_to(curated).as_posix() for p in curated.rglob("*") if p.is_file()
-    )
+    # checksums always match the bytes the verify cycle will pin. ``_SUCCESS``
+    # is never covered: the marker does not exist at the verify commit (it is
+    # published only after verification), and a stale local marker must never
+    # leak into the pinned checksums on a re-run.
+    final_relpaths = [
+        p.relative_to(curated).as_posix()
+        for p in curated.rglob("*") if p.is_file() and p.name != "_SUCCESS"
+    ]
     checksums = "".join(
         f"{hashlib.sha256((curated / p).read_bytes()).hexdigest()}  {prefix}{p}\n"
         for p in final_relpaths if p != "SHA256SUMS"
@@ -1237,6 +1358,21 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
         },
         f"daydream hydrate {curation_id}: curation manifest + checksums",
     )
+    return str(client.repo_info().sha)
+
+
+def _publish_success_marker(
+    client: HubClient, stage: Path, *, curation_id: str, source_commit: str
+) -> None:
+    """Publish ``curated/<curation-id>/_SUCCESS`` as the terminal commit (M18).
+
+    Called only after :func:`verify_publication` passes — every failure path
+    leaves it unpublished, so a published ``_SUCCESS`` always means the
+    clean-room cycle verified the output commit. Returns nothing; the caller
+    re-reads the hub head as the final output commit SHA.
+    """
+    curated = stage / "curated" / curation_id
+    prefix = f"curated/{curation_id}/"
     success_path = curated / "_SUCCESS"
     success_path.write_text(
         json.dumps({"curation_id": curation_id, "source_hub_commit": str(source_commit), "status": "complete"}) + "\n",
@@ -1244,7 +1380,6 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
     )
     _retry_upload(client, {f"{prefix}_SUCCESS": success_path},
                   f"daydream hydrate {curation_id}: success marker")
-    return str(client.repo_info().sha)
 
 
 def verify_publication(
@@ -1304,7 +1439,9 @@ def verify_publication(
         raise VerificationError(redact_text(f"verify: curation manifest invalid: {errors[0].message}"))
     if doc["curation_id"] != curation_id or doc["source_hub_commit"] != str(source_commit):
         raise VerificationError(redact_text("verify: curation manifest identity mismatch"))
-    _download("_SUCCESS")  # the marker must be present at the pinned output commit
+    # The _SUCCESS marker is *not* expected at this commit: it is published by
+    # run_hydrate_hub only after this cycle passes (verify-before-success), so
+    # a failed verification can never leave a published "complete" marker.
 
     # 3. Rescan every published batch (clean-room) and rebuild the scratch index.
     valid = {f.name for f in dataclass_fields(Manifest)}
@@ -1331,9 +1468,9 @@ def verify_publication(
         data = _read_manifest_dict(batch_dir)
         if data is None:
             raise VerificationError(redact_text(f"verify: batch {sid!r} has an unreadable manifest"))
-        kwargs = {k: v for k, v in data.items() if k in valid}
+        kwargs = {k: v for k, v in data.items() if k in valid and k != "daydream"}
         kwargs["archive_path"] = str(batch_dir)
-        raw_url = data.get("remote_url")
+        raw_url = _read_manifest_field(data, "remote_url")
         if isinstance(raw_url, str) and raw_url.strip():
             slug, canonical = normalize_remote_url(raw_url)
             kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
@@ -1358,31 +1495,44 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     """Orchestrate hydration end-to-end: pin, download, ingest, dedupe, publish, verify.
 
     Composes Tasks 4–9 in order with fatal, redacted failure semantics: resolve
-    the pinned source revision, download the snapshot, run the ingest gate,
-    dedupe + ledger, publish additive batches (continuous checkpoints, M16),
-    finalize (manifest then ``_SUCCESS`` last, M18), and only then run the
-    clean-room verification cycle (M19/M20). ``client=None`` builds the
-    production :class:`HfHubClient` via :func:`_make_client`. The summary's
-    ``verified`` flag is set only after verification passes; every failure
-    path leaves it False and never uploads a success marker.
+    the pinned source revision from the source repo, download the snapshot,
+    run the ingest gate, dedupe + ledger, publish additive batches (continuous
+    checkpoints, M16), finalize (curation manifest + refreshed checksums, M18),
+    run the clean-room verification cycle against that pinned commit (M19/M20),
+    and only after it passes publish the ``_SUCCESS`` marker as the very last
+    commit — a verification failure never leaves a published success marker.
+    ``client=None`` builds two production :class:`HfHubClient` instances via
+    :func:`_make_client` (one for the source snapshot repo, one for the
+    destination publication repo). The summary's ``verified`` flag is set only
+    after verification passes; every failure path leaves it False and never
+    uploads a success marker.
     """
-    client = client if client is not None else _make_client(config.destination_repo)
-    if not client.repo_private:
+    # Two clients: the source repo guards the pinned snapshot, the destination
+    # repo receives the published output. Tests inject one FakeHub for both.
+    source_client = client if client is not None else _make_client(config.source_repo)
+    dest_client = client if client is not None else _make_client(config.destination_repo)
+    if not dest_client.repo_private:
         raise PublicDestinationError(
             "refusing to publish: the Hub repo is not private; hydration "
             "publishes sanitized corpora only to private repos (M17)"
         )
-    source_commit = resolve_source_revision(client, config.source_revision, exploratory=config.exploratory)
-    download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
+    source_commit = resolve_source_revision(
+        source_client, config.source_revision, exploratory=config.exploratory
+    )
+    download_snapshot(source_client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
     ingest_bundles(config.stage_dir, revision=source_commit)
     dedupe_admitted(config.stage_dir, revision=source_commit)
     ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
     curation_id = str(ledger["curation_id"])
-    checkpoint = resume_state(client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
+    checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
     publish_batches(
-        client, config.stage_dir, curation_id=curation_id, skip_sessions=checkpoint.completed_sessions
+        dest_client, config.stage_dir, curation_id=curation_id, skip_sessions=checkpoint.completed_sessions
     )
-    output_commit_sha = finalize(client, config.stage_dir, curation_id=curation_id, source_commit=source_commit)
+    # finalize pins the verify commit (manifest + checksums); _SUCCESS is
+    # uploaded only after the clean-room cycle passes (M18/M20).
+    output_commit_sha = finalize(
+        dest_client, config.stage_dir, curation_id=curation_id, source_commit=source_commit
+    )
     summary = HydrateSummary(
         source_commit=source_commit,
         curation_id=curation_id,
@@ -1390,12 +1540,16 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
         dry_run_admitted=int(ledger["tallies"]["imported"]),
     )
     summary.verify_admitted = verify_publication(
-        client,
+        dest_client,
         config.stage_dir,
         output_commit_sha=output_commit_sha,
         curation_id=curation_id,
         dry_run_admitted=summary.dry_run_admitted,
         source_commit=source_commit,
     )
+    _publish_success_marker(
+        dest_client, config.stage_dir, curation_id=curation_id, source_commit=source_commit
+    )
+    summary.output_commit_sha = str(dest_client.repo_info().sha)  # head after the _SUCCESS commit
     summary.verified = True  # only after the full clean-room cycle passes (M20)
     return summary

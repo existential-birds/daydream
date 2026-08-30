@@ -1263,9 +1263,13 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
     # Moving-branch rejection is checkable locally (no client, no token): a
     # revision that is neither a full SHA nor a hex prefix is a symbolic ref.
-    revision = args.source_revision.strip().lower()
+    # Case-fold only for the precheck regexes: a symbolic ref is forwarded
+    # case-sensitively so a case-sensitive branch/tag never silently maps to a
+    # differently-cased name (hydrate folds hex only inside its hex branches).
+    revision = args.source_revision.strip()
     if not args.exploratory and not (
-        _hydrate._FULL_SHA_RE.fullmatch(revision) or _hydrate._HEX_PREFIX_RE.fullmatch(revision)
+        _hydrate._FULL_SHA_RE.fullmatch(revision.lower())
+        or _hydrate._HEX_PREFIX_RE.fullmatch(revision.lower())
     ):
         print_error(
             console,
@@ -1330,7 +1334,7 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     from daydream.trajectory import redact_text
 
     try:
-        client = _hydrate._make_client(config.destination_repo)
+        client = _hydrate._make_client(config.source_repo)
         source_commit = _hydrate.resolve_source_revision(
             client, config.source_revision, exploratory=config.exploratory
         )

@@ -73,8 +73,13 @@ class FakeHub:
     def repo_private(self) -> bool:
         return self.private
 
-    def list_repo_files(self) -> list[str]:
-        return sorted(self.files)
+    def list_repo_files(self, revision: str | None = None) -> list[str]:
+        tree = (
+            self.files
+            if revision is None
+            else self._revision_tree(self._resolve_revision(revision))
+        )
+        return sorted(tree)
 
     def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
         tree = (
