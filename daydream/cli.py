@@ -25,6 +25,9 @@ top-level ``TARGET`` positional):
     - ``corpus hydrate-hub`` — turn a pinned private-Hub trajectory snapshot into a
       verified, sanitized, harvestable local staging archive and publish it additively
       back to the Hub under ``curated/<curation-id>/``
+    - ``corpus adjudicate <build|show|label>`` — per-finding human-label workflow:
+      build the deterministic adjudication queue, show unresolved items grouped by
+      disposition, and record provenance-complete human observations
 - ``daydream train --corpus <path> --out <dir>`` — run the four-stage
   training pipeline (stage0 offline gate → stage1 SFT → stage2 RFT →
   stage3 adapter) and write a stage manifest (``--dry-run`` is the GPU-free
@@ -1963,6 +1966,19 @@ def _handle_train_command(argv: list[str]) -> int:
 
 # Sub-verbs of the ``corpus`` namespace mapped to their handler callables.
 # ``build`` is the public name for the build-corpus projection.
+def _handle_adjudicate_command(argv: list[str]) -> int:
+    """Handle ``daydream corpus adjudicate <sub-verb> [...]`` (issue #984).
+
+    Thin wrapper over the per-finding adjudication workflow handlers
+    (``build``/``show``/``label`` in :mod:`daydream.training.adjudication.cli`);
+    exit codes propagate unchanged, and argparse rejects bare or unknown
+    sub-verbs with usage + exit 2.
+    """
+    from daydream.training.adjudication.cli import handle_adjudicate
+
+    return handle_adjudicate(argv)
+
+
 _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "harvest": _handle_harvest_command,
     "build": _handle_build_corpus_command,
@@ -1970,11 +1986,12 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "label": _handle_label_command,
     "hydrate-hub": _handle_hydrate_hub_command,
     "calibrate-reward": _handle_calibrate_reward_command,
+    "adjudicate": _handle_adjudicate_command,
 }
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub,calibrate-reward} ...\n"
+    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub,calibrate-reward,adjudicate} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
@@ -1982,7 +1999,8 @@ _CORPUS_USAGE = (
     "  build-v2  project curated-bundle per-finding resolutions into corpus-v2 records\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
-    "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact"
+    "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact\n"
+    "  adjudicate  per-finding human-label workflow: build/show/label the adjudication queue"
 )
 
 _EXT_USAGE = (
