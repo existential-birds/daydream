@@ -44,19 +44,17 @@ def _run_metric_subprocess(tmp_path: Path, rows: str, out: Path | None = None) -
     return out, json.loads(out.read_text())
 
 
-def test_verifier_core_template_is_byte_identical_to_source() -> None:
+def test_copy_assets_emits_canonical_verifier_core_bytes(tmp_path: Path) -> None:
+    from daydream.benchmark.harbor.build import _copy_assets
+
+    out = dict(_copy_assets(tmp_path))
     source = REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
-    copy = (
-        REPO
-        / "daydream"
-        / "benchmark"
-        / "harbor"
-        / "templates"
-        / "tests"
-        / "verifier_core.py"
-    )
-    assert copy.exists()
-    assert _sha256(copy) == _sha256(source)
+    deployed = tmp_path / "tests" / "verifier_core.py"
+    assert deployed.exists()
+    assert out["tests/verifier_core.py"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert not (REPO / "daydream" / "benchmark" / "harbor" / "templates" / "tests"
+                / "verifier_core.py").exists()
+
 
 
 def test_metric_entry_aggregates_as_identically_to_verifier_core(

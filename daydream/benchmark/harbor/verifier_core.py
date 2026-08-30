@@ -1,8 +1,9 @@
 """Pure review scoring core for the Daydream Harbor verifier.
 
 Stdlib-only (dataclasses, hashlib, json, re) so this module can be
-copied byte-for-byte into a judge-free Harbor verifier image. No daydream
-source, no pydantic, no third-party imports.
+deployed byte-for-byte into a judge-free Harbor verifier image. This file is
+the canonical scorer (issue #1004): the build copies it directly into each
+case. No daydream source, no pydantic, no third-party imports.
 """
 
 from __future__ import annotations

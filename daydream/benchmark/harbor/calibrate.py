@@ -41,9 +41,9 @@ def _load_template_asset(path: Path, name: str) -> Any:
     """Load a non-package template asset so a bare sibling import resolves to it.
 
     The loaded module is cached by ``name`` so repeated loads keep stable class
-    identity, and the ``sys.path`` insertion plus any ``sys.modules``
-    registrations (the module itself and transitive sibling imports like
-    ``verifier_core``) are restored afterwards, so a later bare import of the
+    identity, and any ``sys.modules`` registrations (the module itself and the
+    canonical ``verifier_core`` backing the asset's bare sibling import) are
+    restored afterwards, so a later bare import of the
     same name anywhere in the same process cannot silently resolve to the
     packaged template copy.
     """
@@ -51,7 +51,12 @@ def _load_template_asset(path: Path, name: str) -> Any:
     if cached is not None:
         return cached
     prior_modules: dict[str, Any] = dict(sys.modules)
-    sys.path.insert(0, str(path.parent))  # bare `import verifier_core` -> sibling template copy
+    # Satisfy the asset's bare `import verifier_core` from the canonical host
+    # module (issue #1004): the template twin no longer exists.
+    import daydream.benchmark.harbor.verifier_core as _canonical_vc
+
+    if "verifier_core" not in prior_modules:
+        sys.modules["verifier_core"] = _canonical_vc
     try:
         spec = importlib.util.spec_from_file_location(name, path)
         assert spec is not None and spec.loader is not None

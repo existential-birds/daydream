@@ -815,20 +815,29 @@ def improve_fixture_service(apps_dir: Path) -> str:
 # The generated Harbor verifier assets are non-package `.py` files that use a
 # bare `import verifier_core` and must never import daydream. Tests load them
 # via the repo's established importlib pattern — load a module from a file
-# path with the sibling template copy on `sys.path`, so the bare import
-# resolves to the same-dir copy — identical to how the compiled task resolves it.
+# path, with the canonical host `verifier_core` registered under its bare
+# name so the sibling import resolves — identical to how the compiled task
+# resolves it (issue #1004: the template twin no longer exists).
 _TEMPLATES = Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "harbor" / "templates"
 
 
 def _load_template_asset(path: Path, name: str) -> Any:
-    """Load a non-package template asset so a bare sibling import resolves to it."""
-    sys.path.insert(0, str(path.parent))  # bare `import verifier_core` -> sibling template copy
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Load a non-package template asset; bare `import verifier_core` hits the canonical module."""
+    from daydream.benchmark.harbor import verifier_core as _canonical_vc
+
+    registered = "verifier_core" not in sys.modules
+    if registered:
+        sys.modules["verifier_core"] = _canonical_vc
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if registered:
+            sys.modules.pop("verifier_core", None)
 
 
 @pytest.fixture(scope="session")

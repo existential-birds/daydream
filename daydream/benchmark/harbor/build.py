@@ -464,6 +464,13 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
             # packaged base-image digest and the entrypoint-free/hash-locked
             # validation actually run in the compile path, not just in tests.
             data = render_verifier_dockerfile(base_image=VERIFIER_BASE_IMAGE)
+        elif rel == "tests/verifier_core.py":
+            # The host verifier_core module *is* the canonical scorer; deploy
+            # its exact source bytes rather than a template twin.
+            src = Path(vc.__file__ if vc.__file__ is not None else "")
+            if not src.is_file():
+                raise CompileError(f"canonical verifier_core module not found at {src}")
+            data = src.read_bytes()
         else:
             data = template_text(rel).encode("utf-8")
         dst = case_stage / rel

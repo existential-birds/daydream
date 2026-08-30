@@ -754,13 +754,17 @@ def test_generated_asset_tree_is_self_contained(sr_module: Any) -> None:
     base = Path(sr_module.__file__).parent
     for rel in (
         "score_review.py",
-        "verifier_core.py",
         "judge_prompt.md",
         "golden-review.json",
         "test.sh",
         "Dockerfile",
     ):
         assert (base / rel).exists(), rel
+    # verifier_core.py is the canonical host module, deployed by the build
+    # rather than shipped as a template twin (issue #1004).
+    assert not (base / "verifier_core.py").exists()
+    canonical_core = base.parents[1] / "verifier_core.py"
+    assert canonical_core.exists(), canonical_core
     solution = base.parent / "solution"
     for rel in ("solve.sh", "golden-review.json"):
         assert (solution / rel).exists(), f"solution/{rel}"
