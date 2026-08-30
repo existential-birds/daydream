@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,60 +28,10 @@ from daydream.backends.osprey import (
     OspreyProtocolError,
     OspreyTerminalError,
     OspreyUnsupportedOption,
-    _drain_stderr,
+    _stderr_diagnostic_sink,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
-
-
-class _FakeStdout:
-    def __init__(self, lines: list[dict[str, object]]) -> None:
-        import json
-
-        self._lines = iter(json.dumps(line).encode() + b"\n" for line in lines)
-
-    async def readline(self) -> bytes:
-        try:
-            return next(self._lines)
-        except StopIteration:
-            return b""
-
-
-class _FakeStderr:
-    def __init__(self, lines: list[str], held_open: asyncio.Event | None = None) -> None:
-        self._lines = iter(line.encode() + b"\n" for line in lines)
-        self._held_open = held_open
-
-    async def readline(self) -> bytes:
-        try:
-            return next(self._lines)
-        except StopIteration:
-            if self._held_open is not None:
-                await self._held_open.wait()
-            return b""
-
-
-class _FakeProcess:
-    def __init__(
-        self,
-        lines: list[dict[str, object]],
-        returncode: int = 0,
-        stderr_lines: list[str] | None = None,
-        stderr_held_open: bool = False,
-        stdout_reader: asyncio.StreamReader | None = None,
-        stderr_reader: asyncio.StreamReader | None = None,
-    ) -> None:
-        self.stdout = stdout_reader or _FakeStdout(lines)
-        self._stderr_eof = asyncio.Event() if stderr_held_open else None
-        self.stderr = stderr_reader or _FakeStderr(stderr_lines or [], self._stderr_eof)
-        self.returncode = returncode
-        self.pid = 137
-
-    async def wait(self) -> int:
-        return self.returncode
-
-    def close_stderr(self) -> None:
-        if self._stderr_eof is not None:
-            self._stderr_eof.set()
+from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
 
 
 def _stream(
@@ -140,21 +91,24 @@ async def _collect(
     stderr_held_open: bool = False,
     stdout_reader: asyncio.StreamReader | None = None,
     stderr_reader: asyncio.StreamReader | None = None,
-) -> tuple[list[AgentEvent], AsyncMock]:
-    process = _FakeProcess(
-        lines,
-        returncode=returncode,
-        stderr_lines=stderr_lines,
-        stderr_held_open=stderr_held_open,
-        stdout_reader=stdout_reader,
-        stderr_reader=stderr_reader,
-    )
-    exec_mock = AsyncMock(return_value=process)
-    terminate_mock = AsyncMock(side_effect=lambda _process: process.close_stderr())
-    with (
-        patch("daydream.backends.osprey.asyncio.create_subprocess_exec", exec_mock),
-        patch("daydream.backends.osprey.terminate_process", new=terminate_mock),
-    ):
+) -> tuple[list[AgentEvent], FakeCliSpawner]:
+    spawner = FakeCliSpawner()
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+        proc = FakeCliProcess(
+            [json.dumps(line) for line in lines],
+            exit_code=returncode,
+            stderr_lines=stderr_lines,
+            stderr_held_open=stderr_held_open,
+            stdout_reader=stdout_reader,
+            stderr_reader=stderr_reader,
+        )
+        spawner.procs.append(proc)
+        spawner.argvs.append(tuple(str(a) for a in args))
+        spawner.kwargs.append(kwargs)
+        return proc
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         events = [
             event
             async for event in backend.execute(
@@ -168,7 +122,7 @@ async def _collect(
                 persist_session=persist_session,
             )
         ]
-    return events, exec_mock
+    return events, spawner
 
 
 @pytest.mark.asyncio
@@ -184,7 +138,7 @@ async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
         )
 
     assert exc_info.value.category == "PROTOCOL"
-    assert backend._processes == []
+    assert backend._transports == []
 
 
 @pytest.mark.asyncio
@@ -221,11 +175,11 @@ async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> No
     diagnostics: list[str] = []
     stderr = asyncio.StreamReader(limit=2_048)
     stderr.feed_data((f"OPENAI_API_KEY={secret} " + "x" * 1_024 + "\n").encode())
-    stderr.feed_eof()
+    sink = _stderr_diagnostic_sink(diagnostics)
+    for _ in range(12):
+        sink("OPENAI_API_KEY=" + secret + " " + "x" * 1_024)
 
-    await _drain_stderr(stderr, diagnostics)
-
-    assert len(diagnostics) == 1
+    assert len(diagnostics) == 10
     assert len(diagnostics[0]) <= 500
     assert secret not in diagnostics[0]
     assert "[REDACTED_ENV_VAR]" in diagnostics[0]
@@ -235,7 +189,7 @@ async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> No
 async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
     lines, _ = _stream()
 
-    events, exec_mock = await _collect(
+    events, spawner = await _collect(
         OspreyBackend(osprey_binary="fake"),
         lines,
         stderr_lines=[
@@ -245,7 +199,7 @@ async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
     )
 
     assert [type(event) for event in events] == [ResultEvent]
-    assert exec_mock.call_args.kwargs["stderr"] is asyncio.subprocess.PIPE
+    assert spawner.kwargs[0]["stderr"] is asyncio.subprocess.PIPE
 
 
 @pytest.mark.asyncio
@@ -603,10 +557,10 @@ def test_command_forwards_verified_policy_resume_fork_and_schema_flags(tmp_path:
 @pytest.mark.asyncio
 async def test_output_schema_is_temp_file_forwarded_and_cleaned(tmp_path: Path) -> None:
     lines, _ = _stream()
-    _, exec_mock = await _collect(
+    _, spawner = await _collect(
         OspreyBackend(osprey_binary="fake"), lines, output_schema={"type": "object"}
     )
-    command = list(exec_mock.call_args.args)
+    command = list(spawner.argvs[0])
     schema_path = Path(command[command.index("--output-schema") + 1])
     assert not schema_path.exists()
 
@@ -802,10 +756,22 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_delegates_to_shared_process_lifecycle() -> None:
+async def test_cancel_delegates_to_shared_transport_lifecycle() -> None:
+    """cancel() reaps every tracked transport's process group and pipes."""
+    from daydream.backends._transport import CliTransport
+
     backend = OspreyBackend(osprey_binary="fake")
-    process = MagicMock()
-    backend._processes.append(process)
-    with patch("daydream.backends.osprey.cancel_processes", new=AsyncMock()) as cancel:
-        await backend.cancel()
-    cancel.assert_awaited_once_with([process])
+
+    proc = MagicMock()
+    proc.returncode = None
+    proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    transport = CliTransport("osprey", ["osprey", "agent"], limit=1024)
+    transport.processes.append(proc)
+    backend._transports = [transport]
+
+    await backend.cancel()
+
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()

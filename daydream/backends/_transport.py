@@ -138,8 +138,20 @@ class CliTransport:
             self._drain_task = asyncio.create_task(self._drain_stderr(proc.stderr))
 
     async def _drain_stderr(self, stderr: asyncio.StreamReader) -> None:
-        async for raw in stderr:
-            line = raw.decode().strip()
+        while True:
+            try:
+                raw = await stderr.readline()
+            except ValueError:
+                # ``StreamReader.readline`` clears an over-limit unterminated
+                # line before raising. Stderr is diagnostic-only, so note the
+                # discard and keep draining instead of failing an otherwise
+                # valid JSONL session during teardown.
+                if self._stderr_sink is not None:
+                    self._stderr_sink("stderr diagnostic line exceeded stream limit and was discarded")
+                continue
+            if not raw:
+                break
+            line = raw.decode(errors="replace").strip()
             if line and self._stderr_sink is not None:
                 self._stderr_sink(line)
 
@@ -193,10 +205,16 @@ class CliTransport:
         return returncode
 
     async def drain_finished(self) -> None:
-        """Await the stderr drain task (a no-op under MERGE_INTO_STDOUT)."""
+        """Await the stderr drain task (a no-op under MERGE_INTO_STDOUT).
+
+        Shielded so a drain awaited in a backend's teardown ``finally`` still
+        completes when the caller's scope is already cancelled — the same
+        shield the cancel-sweep relies on.
+        """
         if self._drain_task is not None:
-            await asyncio.gather(self._drain_task)
-            self._drain_task = None
+            task, self._drain_task = self._drain_task, None
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(task)
 
     async def terminate(self) -> None:
         """Group-signal, reap, and close pipes; shielded and idempotent."""
