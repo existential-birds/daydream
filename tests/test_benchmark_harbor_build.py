@@ -1062,7 +1062,8 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: 
     assert not any(any(f in r for f in forbidden_substrs) for r in rels)
     # every compiled path lives under a case dir, root control files, or the metric
     root_files = {
-        "README.md", "benchmark.lock.json", "metric.py", "harbor-job.yaml", "harbor-oracle.yaml"
+        "README.md", "benchmark.lock.json", "metric.py", "verifier_core.py",
+        "harbor-job.yaml", "harbor-oracle.yaml"
     }
     assert all(r.startswith("case-") or r in root_files for r in rels)
 

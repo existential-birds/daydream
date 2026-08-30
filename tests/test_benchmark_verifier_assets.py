@@ -7,6 +7,7 @@ later canonicalization work must preserve behavior rather than source text.
 """
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ def _run_metric_subprocess(tmp_path: Path, rows: str, out: Path | None = None) -
 
     metric_path = tmp_path / "metric.py"
     metric_path.write_bytes(build.render_metric())
+    shutil.copy(REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py", tmp_path / "verifier_core.py")
     inp = tmp_path / "rewards.jsonl"
     inp.write_text(rows)
     if out is None:
@@ -186,25 +188,41 @@ def test_location_tolerance_meets_floor() -> None:
     assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
 
 
-def test_metric_helper_functions_cannot_drift_from_verifier_core() -> None:
-    """The metric.py template's helper functions must stay byte-identical to verifier_core.
+def test_render_metric_loads_colocated_canonical_and_matches_host(
+    tmp_path: Path,
+) -> None:
+    """The rendered metric must obtain aggregate_metrics by loading the colocated
+    canonical verifier_core.py from the stage root — not from a spliced body."""
+    from daydream.benchmark.harbor import build, verifier_core
 
-    ``render_metric()`` splices only ``aggregate_metrics`` into the compiled
-    metric; the ``_as_int/_as_float/_f1/_axis_aggregates`` helpers it
-    resolves at runtime are the template-local copies. They must not drift
-    from the in-repo verifier_core copies (which the corpus pool uses), or
-    the compiled metric and the pool would disagree on row coercion / f1 /
-    axis pooling. This gate makes any drift fail loudly instead of silently
-    diverging.
-    """
-    import inspect
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "metric.py").write_bytes(build.render_metric())
+    shutil.copy(
+        Path(verifier_core.__file__),
+        stage / "verifier_core.py",
+    )
+    import types
 
-    from daydream.benchmark.harbor import verifier_core as vc
+    mod = types.ModuleType("metric")
+    mod.__dict__["__file__"] = str(stage / "metric.py")  # uv run --script provides this
+    exec(compile((stage / "metric.py").read_text(), "metric.py", "exec"), mod.__dict__)
+    rows: list[dict[str, object] | None] = [{"reward": 0.5, "tp": 1, "fp": 0, "fn": 1, "verifier_error": 0}, None]
+    assert mod.aggregate_metrics(rows) == verifier_core.aggregate_metrics(rows)
 
-    tmpl = (REPO / "daydream" / "benchmark" / "harbor" / "templates" / "metric.py").read_text(encoding="utf-8")
-    for name in ("_as_int", "_as_float", "_f1", "_axis_aggregates"):
-        src = inspect.getsource(getattr(vc, name))
-        assert src in tmpl, f"metric.py template's {name} drifted from verifier_core.py"
+
+def test_metric_template_has_no_helper_duplicates_or_markers() -> None:
+    from daydream.benchmark.harbor.package import template_text
+
+    text = template_text("metric.py")
+    for banned in (
+        "__AGGREGATION_BODY",
+        "_axis_aggregates",
+        "def _f1",
+        "def _as_int",
+        "def _as_float",
+    ):
+        assert banned not in text
 
 
 def test_aggregate_metrics_pools_tp_fp_fn_and_zero_denominators_are_one() -> None:

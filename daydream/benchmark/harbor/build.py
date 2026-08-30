@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
-import inspect
 import json
 import os
 import re
@@ -30,10 +29,6 @@ from daydream.benchmark.harbor import verifier_core as vc
 TEMPLATE_VERSION = "4"
 
 
-_METRIC_AGG_BEGIN = "# __AGGREGATION_BODY_BEGIN__"
-_METRIC_AGG_END = "# __AGGREGATION_BODY_END__"
-
-
 class CompileError(Exception):
     """Raised on any compile/leakage/validation rejection."""
 
@@ -43,25 +38,35 @@ class CompileError(Exception):
 
 
 def render_metric() -> bytes:
-    """Render the compiled ``metric.py`` with its aggregation body from verifier_core.
+    """Render the compiled ``metric.py`` for a stage root.
 
-    The template's ``aggregate_metrics`` placeholder between the two marker
-    comments is replaced, markers inclusive, with ``inspect.getsource(vc.
-    aggregate_metrics)`` so the compiled metric and the in-repo corpus pool
-    share one aggregation contract and cannot drift.
+    The template carries no aggregation body of its own: at startup it loads
+    ``aggregate_metrics`` from the canonical ``verifier_core.py`` colocated
+    next to it (stdlib-only, never ``daydream``), so the compiled metric and
+    the in-repo corpus pool share one aggregation contract and cannot drift.
+    Use :func:`render_metric_stage` to stage both files together.
     """
     from daydream.benchmark.harbor.package import template_text
 
-    text = template_text("metric.py")
-    if _METRIC_AGG_BEGIN not in text or _METRIC_AGG_END not in text:
-        raise CompileError(
-            "metric.py template is missing the aggregation markers "
-            f"({_METRIC_AGG_BEGIN!r} / {_METRIC_AGG_END!r}); cannot render compiled metric"
-        )
-    start = text.index(_METRIC_AGG_BEGIN)
-    stop = text.index(_METRIC_AGG_END) + len(_METRIC_AGG_END)
-    body = inspect.getsource(vc.aggregate_metrics)
-    return (text[:start] + body + text[stop:]).encode("utf-8")
+    return template_text("metric.py").encode("utf-8")
+
+
+def render_metric_stage(stage: Path) -> tuple[bytes, bytes]:
+    """Write the compiled metric stage files into *stage* and return their bytes.
+
+    Writes ``metric.py`` plus the canonical ``verifier_core.py`` (the host
+    module's exact source) colocated at the stage root, which the metric's
+    loader resolves at startup. Fails closed with :class:`CompileError` if the
+    canonical source cannot be read.
+    """
+    metric_bytes = render_metric()
+    src = Path(vc.__file__ if vc.__file__ is not None else "")
+    if not src.is_file():
+        raise CompileError(f"canonical verifier_core module not found at {src}")
+    verifier_bytes = src.read_bytes()
+    (stage / "metric.py").write_bytes(metric_bytes)
+    (stage / "verifier_core.py").write_bytes(verifier_bytes)
+    return metric_bytes, verifier_bytes
 
 
 def derive_task_key(case_id: str) -> str:
@@ -952,14 +957,14 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
             oracle_job_bytes = render_job_config(oracle=True)
             (stage / "harbor-job.yaml").write_bytes(job_bytes)
             (stage / "harbor-oracle.yaml").write_bytes(oracle_job_bytes)
-            metric_bytes = render_metric()
-            (stage / "metric.py").write_bytes(metric_bytes)
+            metric_bytes, verifier_bytes = render_metric_stage(stage)
             (stage / "jobs").mkdir(exist_ok=True)
 
             all_files["README.md"] = hashlib.sha256(_ROOT_README.encode("utf-8")).hexdigest()
             all_files["harbor-job.yaml"] = hashlib.sha256(job_bytes).hexdigest()
             all_files["harbor-oracle.yaml"] = hashlib.sha256(oracle_job_bytes).hexdigest()
             all_files["metric.py"] = hashlib.sha256(metric_bytes).hexdigest()
+            all_files["verifier_core.py"] = hashlib.sha256(verifier_bytes).hexdigest()
             control_plane["harbor-job.yaml"] = job_bytes.decode("utf-8")
             control_plane["harbor-oracle.yaml"] = oracle_job_bytes.decode("utf-8")
 

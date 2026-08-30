@@ -850,15 +850,27 @@ def sr_module() -> Any:
 def sr_metric() -> Any:
     """The rendered ``templates/metric.py`` corpus aggregation entry module.
 
-    Execs ``build.render_metric()`` output (the compiled artifact, aggregation
-    body injected from ``verifier_core``) instead of loading the static
-    template, so tests exercise exactly what ``compile_workspace`` ships.
-    The rendered shebang / ``# /// script`` lines are comments and exec-safe.
+    Stages the compiled artifact (``build.render_metric()`` output plus the
+    colocated canonical ``verifier_core.py``, exactly what ``compile_workspace``
+    ships) and execs it with ``__file__`` pointing at the staged copy, so tests
+    exercise the deployed loader path. The rendered shebang / ``# /// script``
+    lines are comments and exec-safe.
     """
-    from daydream.benchmark.harbor import build
+    import shutil
+    import tempfile
 
+    from daydream.benchmark.harbor import build, verifier_core
+
+    stage = Path(tempfile.mkdtemp(prefix="sr-metric-"))
+    metric = stage / "metric.py"
+    metric.write_bytes(build.render_metric())
+    shutil.copy(Path(verifier_core.__file__), stage / "verifier_core.py")
     mod = types.ModuleType("metric")
-    exec(compile(build.render_metric().decode("utf-8"), "metric.py", "exec"), mod.__dict__)
+    mod.__dict__["__file__"] = str(metric)
+    try:
+        exec(compile(metric.read_text(encoding="utf-8"), "metric.py", "exec"), mod.__dict__)
+    finally:
+        sys.modules.pop("verifier_core", None)
     return mod
 
 
