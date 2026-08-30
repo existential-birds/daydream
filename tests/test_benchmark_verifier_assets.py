@@ -1,19 +1,23 @@
-"""Byte-parity + metric-equivalence + separate-filesystem isolation for the Harbor verifier assets.
+"""Behavioral contract tests for the Harbor verifier scoring core and metric.
 
-Golden gate: the ``templates/tests/verifier_core.py`` copy must stay
-byte-identical (SHA-256) to the in-repo source so future edits to the source
-fail loudly. ``templates/metric.py``'s inlined aggregation must equal
-``verifier_core.aggregate_metrics`` field-for-field on the same rows.
+``verifier_core.aggregate_metrics`` is the canonical scorer: these tests pin
+its observable aggregation contract (pooling, zero-denominator semantics,
+absent-axis handling) plus the compiled metric's subprocess behavior, so
+later canonicalization work must preserve behavior rather than source text.
 """
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
-import pytest
+from daydream.benchmark.harbor import verifier_core
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+_MISSING = object()  # sentinel: bare "verifier_core" absent from sys.modules
 
 
 def _sha256(path: Path) -> str:
@@ -30,6 +34,7 @@ def _run_metric_subprocess(tmp_path: Path, rows: str, out: Path | None = None) -
 
     metric_path = tmp_path / "metric.py"
     metric_path.write_bytes(build.render_metric())
+    shutil.copy(REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py", tmp_path / "verifier_core.py")
     inp = tmp_path / "rewards.jsonl"
     inp.write_text(rows)
     if out is None:
@@ -42,93 +47,17 @@ def _run_metric_subprocess(tmp_path: Path, rows: str, out: Path | None = None) -
     return out, json.loads(out.read_text())
 
 
-def test_verifier_core_template_is_byte_identical_to_source() -> None:
+def test_copy_assets_emits_canonical_verifier_core_bytes(tmp_path: Path) -> None:
+    from daydream.benchmark.harbor.build import _copy_assets
+
+    out = dict(_copy_assets(tmp_path))
     source = REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
-    copy = (
-        REPO
-        / "daydream"
-        / "benchmark"
-        / "harbor"
-        / "templates"
-        / "tests"
-        / "verifier_core.py"
-    )
-    assert copy.exists()
-    assert _sha256(copy) == _sha256(source)
+    deployed = tmp_path / "tests" / "verifier_core.py"
+    assert deployed.exists()
+    assert out["tests/verifier_core.py"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert not (REPO / "daydream" / "benchmark" / "harbor" / "templates" / "tests"
+                / "verifier_core.py").exists()
 
-
-def test_metric_entry_aggregates_as_identically_to_verifier_core(
-    sr_metric: Any,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rows: list[dict[str, object] | None] = [
-        {
-            "reward": 0.8,
-            "tp": 2,
-            "fp": 0,
-            "fn": 1,
-            "precision": 1.0,
-            "recall": 0.6667,
-            "f1": 0.8,
-            "gold_count": 3,
-            "candidate_count": 2,
-            "clean_task": 0,
-            "clean_pass": 0,
-            "verifier_error": 0,
-            "location_exact": 0,
-            "location_near": 0,
-            "location_file": 1,
-            "location_miss": 0,
-            "location_credit": 0.0,
-            "location_present": 1,
-            "severity_exact": 1,
-            "severity_within_1": 1,
-            "severity_mean_distance": 0.0,
-            "severity_credit": 1.0,
-            "severity_present": 1,
-        },
-        None,  # failed task (null row)
-        {
-            "reward": 1.0,
-            "tp": 0,
-            "fp": 0,
-            "fn": 0,
-            "precision": 1.0,
-            "recall": 1.0,
-            "f1": 1.0,
-            "gold_count": 0,
-            "candidate_count": 0,
-            "clean_task": 1,
-            "clean_pass": 1,
-            "verifier_error": 0,
-            "location_exact": 0,
-            "location_near": 0,
-            "location_file": 0,
-            "location_miss": 0,
-            "location_credit": 0.0,
-            "location_present": 0,
-            "severity_exact": 0,
-            "severity_within_1": 0,
-            "severity_mean_distance": 0.0,
-            "severity_credit": 0.0,
-            "severity_present": 0,
-        },
-    ]
-    lp = tmp_path / "rewards.jsonl"
-    lp.write_text(
-        "\n".join(json.dumps(r) if r is not None else "null" for r in rows) + "\n"
-    )
-
-    from daydream.benchmark.harbor import verifier_core as vc
-
-    expected = vc.aggregate_metrics(rows)
-
-    result = sr_metric.aggregate_rewards_file(str(lp))
-    assert result == expected                          # same aggregation contract
-    assert result["task_count"] == 3 and result["scored_task_count"] == 2
-    assert result["infra_error_task_count"] == 1 and "failed_task_count" not in result
-    assert result["mean_task_score"] == (0.8 + 1.0) / 2
 
 
 def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path: Path) -> None:
@@ -161,43 +90,36 @@ def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path: Path) -
     assert m["micro_precision"] == 1.0 and m["micro_recall"] == 2.0 / 3.0
 
 
-def test_range_distance_cannot_drift_from_hunk_index() -> None:
-    """The isolated verifier must preserve the shared range-distance contract."""
-    import ast
-    import sys
-
-    from daydream import hunk_index
-    from daydream.benchmark.harbor import verifier_core as vc
-
-    # These cases cover the inclusive interior, both sides of a range, and a
-    # one-line range without using either implementation as the oracle.
-    for line, start, end, expected in (
-        (15, 10, 20, 0),
-        (9, 10, 20, 1),
-        (21, 10, 20, 1),
-        (10, 10, 10, 0),
-        (9, 10, 10, 1),
-        (11, 10, 10, 1),
-    ):
-        assert hunk_index.range_distance(line, start, end) == expected
-        assert vc._range_distance(line, start, end) == expected
-
-    source = (
-        REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
-    ).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    imported_roots = {
-        alias.name.split(".", 1)[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
+def _reward_row(*, tp: int, fp: int, fn: int, reward: float, clean: bool) -> dict[str, object]:
+    """A representative scored row; shape mirrors ``_reward`` in tests/test_benchmark_objective.py."""
+    return {
+        "reward": reward,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "precision": (tp / (tp + fp)) if (tp + fp) else 1.0,
+        "recall": (tp / (tp + fn)) if (tp + fn) else 1.0,
+        "f1": 0.0,
+        "clean_task": 1 if clean else 0,
+        "clean_pass": 1 if clean else 0,
+        "verifier_error": 0,
     }
-    imported_roots.update(
-        node.module.split(".", 1)[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module is not None
-    )
-    assert imported_roots <= sys.stdlib_module_names | {"__future__"}
+
+
+def test_rendered_metric_matches_host_on_representative_rows(tmp_path: Path) -> None:
+    """The rendered metric, run via ``uv run --script`` over JSONL that mixes
+    clean scored rows with malformed/null/shape-wrong rows, must produce exactly
+    what the canonical ``verifier_core.aggregate_metrics`` computes in-process."""
+    from daydream.benchmark.harbor import verifier_core
+
+    clean = _reward_row(tp=2, fp=0, fn=1, reward=0.8, clean=False)
+    rows = "\n".join([json.dumps(clean), "null", "not-json", "[]", json.dumps(clean)])
+    _, result = _run_metric_subprocess(tmp_path, rows)
+    flat: list[dict[str, object] | None] = [clean, None, None, None, clean]
+    expected = verifier_core.aggregate_metrics(flat)
+    assert result == expected
+    assert result["infra_error_task_count"] == 3
+
 
 
 def test_location_tolerance_meets_floor() -> None:
@@ -205,22 +127,154 @@ def test_location_tolerance_meets_floor() -> None:
     assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
 
 
-def test_metric_helper_functions_cannot_drift_from_verifier_core() -> None:
-    """The metric.py template's helper functions must stay byte-identical to verifier_core.
-
-    ``render_metric()`` splices only ``aggregate_metrics`` into the compiled
-    metric; the ``_as_int/_as_float/_f1/_axis_aggregates`` helpers it
-    resolves at runtime are the template-local copies. They must not drift
-    from the in-repo verifier_core copies (which the corpus pool uses), or
-    the compiled metric and the pool would disagree on row coercion / f1 /
-    axis pooling. This gate makes any drift fail loudly instead of silently
-    diverging.
-    """
-    import inspect
-
+def test_range_distance_cannot_drift_from_hunk_index() -> None:
+    """Lock the deployed verifier's private ``_range_distance`` to the shared
+    primitive in ``daydream/hunk_index.py`` (its documented source of truth,
+    ``verifier_core.py``/``hunk_index.py``): benchmark location-tier scoring
+    must never silently diverge from the product's near-line notion."""
     from daydream.benchmark.harbor import verifier_core as vc
+    from daydream.hunk_index import range_distance as hunk_range_distance
 
-    tmpl = (REPO / "daydream" / "benchmark" / "harbor" / "templates" / "metric.py").read_text(encoding="utf-8")
-    for name in ("_as_int", "_as_float", "_f1", "_axis_aggregates"):
-        src = inspect.getsource(getattr(vc, name))
-        assert src in tmpl, f"metric.py template's {name} drifted from verifier_core.py"
+    cases: list[tuple[int, int, int]] = [
+        (1, 5, 10),   # below the range -> distance to the start boundary
+        (4, 5, 10),   # one line below start
+        (5, 5, 10),   # on the start boundary -> inside
+        (7, 5, 10),   # inside the range
+        (10, 5, 10),  # on the end boundary -> inside
+        (11, 5, 10),  # one line above end
+        (12, 5, 10),  # above the range -> distance to the end boundary
+        (0, 0, 0),    # degenerate single-line range, on the line
+        (2, 0, 0),    # degenerate range, below
+        (0, 3, 3),    # degenerate range, above
+    ]
+    for line, start, end in cases:
+        assert vc._range_distance(line, start, end) == hunk_range_distance(line, start, end)
+
+
+def test_render_metric_loads_colocated_canonical_and_matches_host(
+    tmp_path: Path,
+) -> None:
+    """The rendered metric must obtain aggregate_metrics by loading the colocated
+    canonical verifier_core.py from the stage root — not from a spliced body."""
+    from daydream.benchmark.harbor import build, verifier_core
+
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "metric.py").write_bytes(build.render_metric())
+    shutil.copy(
+        Path(verifier_core.__file__),
+        stage / "verifier_core.py",
+    )
+    import sys
+    import types
+
+    prior_verifier_core = sys.modules.get("verifier_core", _MISSING)
+    mod = types.ModuleType("metric")
+    mod.__dict__["__file__"] = str(stage / "metric.py")  # uv run --script provides this
+    exec(compile((stage / "metric.py").read_text(), "metric.py", "exec"), mod.__dict__)
+    # Loading the canonical scorer must not leave the exec'd module registered
+    # under the bare name: a later `import verifier_core` in the same process
+    # would otherwise silently resolve to this compiled copy (import hygiene).
+    assert sys.modules.get("verifier_core", _MISSING) is prior_verifier_core
+    rows: list[dict[str, object] | None] = [{"reward": 0.5, "tp": 1, "fp": 0, "fn": 1, "verifier_error": 0}, None]
+    assert mod.aggregate_metrics(rows) == verifier_core.aggregate_metrics(rows)
+
+
+def test_metric_template_has_no_helper_duplicates_or_markers() -> None:
+    from daydream.benchmark.harbor.package import template_text
+
+    text = template_text("metric.py")
+    for banned in (
+        "__AGGREGATION_BODY",
+        "_axis_aggregates",
+        "def _f1",
+        "def _as_int",
+        "def _as_float",
+    ):
+        assert banned not in text
+
+
+def test_aggregate_metrics_pools_tp_fp_fn_and_zero_denominators_are_one() -> None:
+    rows: list[dict[str, object] | None] = [
+        {"reward": 0.8, "tp": 2, "fp": 1, "fn": 0, "precision": 2 / 3, "recall": 1.0,
+         "f1": 0.8, "gold_count": 2, "candidate_count": 3, "clean_task": 0, "clean_pass": 0,
+         "verifier_error": 0},
+        {"reward": 1.0, "tp": 0, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0,
+         "f1": 1.0, "gold_count": 0, "candidate_count": 0, "clean_task": 1, "clean_pass": 1,
+         "verifier_error": 0},
+        None,
+    ]
+    m = verifier_core.aggregate_metrics(rows)
+    assert m["total_tp"] == 2 and m["total_fp"] == 1 and m["total_fn"] == 0
+    assert m["task_count"] == 3 and m["scored_task_count"] == 2
+    assert m["infra_error_task_count"] == 1
+
+
+def test_aggregate_metrics_empty_rows_score_one() -> None:
+    m = verifier_core.aggregate_metrics([])
+    assert m["task_count"] == 0
+    assert m["micro_f1"] == 1.0 and m["mean_task_score"] == 1.0 and m["clean_accuracy"] == 1.0
+
+
+def test_aggregate_metrics_zero_scored_rows_headline_rates_are_one() -> None:
+    rows = [{"verifier_error": 1, "reward": 0.0, "tp": 0, "fp": 0, "fn": 0}]
+    m = verifier_core.aggregate_metrics(rows)  # type: ignore[arg-type]
+    assert m["micro_precision"] == 1.0 and m["micro_recall"] == 1.0 and m["micro_f1"] == 1.0
+
+
+def test_aggregate_metrics_axis_absent_is_zero_pairs_not_raise() -> None:
+    rows = [{"reward": 1.0, "tp": 1, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0,
+             "f1": 1.0, "clean_task": 1, "clean_pass": 1, "verifier_error": 0}]
+    m = verifier_core.aggregate_metrics(rows)  # type: ignore[arg-type]
+    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
+    assert m["location_exact_rate"] == 0.0  # absent axis = missing signal, not 1.0
+
+
+def test_deployed_scoring_surfaces_are_stdlib_only_and_daydream_free() -> None:
+    """Both deployed scoring surfaces — the rendered metric and the colocated
+    canonical copy — must stay stdlib-only and free of any ``daydream`` import."""
+    from daydream.benchmark.harbor import build
+
+    metric_text = build.render_metric().decode("utf-8")
+    canonical = (REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_text()
+    for surface_name, text in (("metric", metric_text), ("canonical", canonical)):
+        assert "import daydream" not in text, surface_name
+        assert "from daydream" not in text, surface_name
+        assert "pydantic" not in text, surface_name
+
+
+def test_deployed_canonical_copy_exposes_score_review_surface(tmp_path: Path) -> None:
+    """``score_review.py`` consumes (``VerifierError``, ``Verdict``, ``validate_exact_keys``,
+    ``validate_candidate_artifact``, ``score_review``, ``derive_candidate_id``) from the
+    deployed canonical file; the copy emitted by ``_copy_assets`` must define each."""
+    from daydream.benchmark.harbor.build import _copy_assets
+
+    out = dict(_copy_assets(tmp_path))
+    deployed = tmp_path / "tests" / "verifier_core.py"
+    assert deployed.exists()
+    assert out["tests/verifier_core.py"] == _sha256(
+        REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
+    )
+
+    import sys
+    import types
+
+    # dataclasses resolves cls.__module__ via sys.modules at decoration time,
+    # so register the namespace as a module before exec (P1 spike pitfall).
+    mod = types.ModuleType("deployed_verifier_core")
+    ns = mod.__dict__
+    sys.modules[mod.__name__] = mod
+    try:
+        exec(compile(deployed.read_text(), "verifier_core.py", "exec"), ns)  # noqa: S102
+    finally:
+        del sys.modules[mod.__name__]
+    for name in (
+        "VerifierError",
+        "Verdict",
+        "validate_exact_keys",
+        "validate_candidate_artifact",
+        "score_review",
+        "derive_candidate_id",
+    ):
+        assert name in ns and ns[name] is not None, name
+

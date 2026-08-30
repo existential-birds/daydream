@@ -255,6 +255,17 @@ def _inject_body(ws: Path, case_id: str, body: str) -> None:
     storage.atomic_write_yaml(path, raw)
 
 
+def _compile(ws: Path) -> Any:
+    from daydream.benchmark.harbor import build
+    return build.compile_workspace(ws)
+
+
+def _harbor_file_sha(ws: Path, rel: str) -> str:
+    import hashlib as _hashlib
+    data = (ws / "harbor" / rel).read_bytes()
+    return _hashlib.sha256(data).hexdigest()
+
+
 def _harbor_tree_bytes(ws: Path) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     base = ws / "harbor"
@@ -556,8 +567,9 @@ def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp
         "tests/test.sh", "tests/Dockerfile", "solution/solve.sh",
     }
     assert {str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file()} == expected
-    src_core = build._TEMPLATE_DIR / "tests" / "verifier_core.py"
+    src_core = Path(REPO) / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
     assert (dst / "tests" / "verifier_core.py").read_bytes() == src_core.read_bytes()
+    assert not (build._TEMPLATE_DIR / "tests" / "verifier_core.py").exists()
     assert (dst / "tests" / "verifier_core.py").read_bytes() == (
         Path(REPO) / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_bytes()
     assert (dst / "tests" / "score_review.py").read_bytes() == (
@@ -1027,7 +1039,8 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: 
     assert not any(any(f in r for f in forbidden_substrs) for r in rels)
     # every compiled path lives under a case dir, root control files, or the metric
     root_files = {
-        "README.md", "benchmark.lock.json", "metric.py", "harbor-job.yaml", "harbor-oracle.yaml"
+        "README.md", "benchmark.lock.json", "metric.py", "verifier_core.py",
+        "harbor-job.yaml", "harbor-oracle.yaml"
     }
     assert all(r.startswith("case-") or r in root_files for r in rels)
 
@@ -1550,3 +1563,41 @@ def test_harbor_build_null_gold_severity_labeled_not_silent() -> None:
 
     assert build._gold_severity_label(None) == "unknown"
     assert build._gold_severity_label("HIGH") == "high"
+
+
+def test_compiled_stage_carries_canonical_module_and_metric_loads_it(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+) -> None:
+    """Compiled stage root carries the canonical verifier_core.py and the rendered
+    metric loads it end-to-end (reuses this module's `_seed_ready_workspace` +
+    `_compile` compiled-build fixture pattern)."""
+    import json
+
+    ws, _case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
+    _compile(ws)
+    stage = ws / "harbor"
+    metric = (stage / "metric.py").read_text()
+    canonical = (stage / "verifier_core.py").read_text()
+    source = (REPO / "daydream/benchmark/harbor/verifier_core.py").read_text()
+    assert canonical == source
+    assert "import daydream" not in metric and "getsource" not in metric
+    lock = json.loads((stage / "benchmark.lock.json").read_text())
+    assert "metric.py" in lock["files"] and "verifier_core.py" in lock["files"]
+    # lock hash agrees with the deployed bytes
+    assert lock["files"]["verifier_core.py"] == hashlib.sha256(
+        (stage / "verifier_core.py").read_bytes()
+    ).hexdigest()
+    # rendered metric runs end-to-end via uv against the colocated module
+    rows = stage / "rewards.jsonl"
+    rows.write_text(
+        json.dumps({"reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+                    "verifier_error": 0, "clean_task": 1, "clean_pass": 1}) + "\n"
+    )
+    out = tmp_path / "m.json"
+    proc = subprocess.run(
+        ["uv", "run", "--script", str(stage / "metric.py"),
+         "-i", str(rows), "-o", str(out)],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(out.read_text())["total_tp"] == 1
