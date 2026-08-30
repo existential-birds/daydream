@@ -171,6 +171,7 @@ daydream corpus build --out /path/to/out.jsonl       # project labeled runs to J
 daydream corpus build --out out.jsonl --min-reward 0.5 --include-all-labels
 daydream corpus build --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
 daydream corpus label <session-id> --outcome accepted  # manual outcome override
+daydream corpus calibrate-reward ...                   # deterministic reward-calibration artifact (see docs/calibration.md)
 ```
 
 The pipeline has three stages:
@@ -178,6 +179,8 @@ The pipeline has three stages:
 1. **Harvest.** Walk the archive. Write one bitemporal annotation per run. Each annotation contains a label, an intrinsic reward, and a valid-at timestamp.
 2. **Label.** Override the automated outcome for a run. The manual label beats the automated label.
 3. **Build.** Project the annotations into a JSONL training corpus. Add a lineage manifest.
+
+`calibrate-reward` validates a corpus-v2 bundle and emits a deterministic, versioned reward-calibration artifact. See [docs/calibration.md](docs/calibration.md).
 
 The build stage applies a temporal-leakage guard. It prevents future data from leaking into the past. It applies C5, C8, and C9 filters. It stratifies the corpus by stack.
 
