@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from daydream.archive.hydrate import HydrationError
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.observations import (
@@ -114,6 +115,21 @@ def _write_queue(state_dir: Path, items: list[dict[str, Any]]) -> Path:
     return path
 
 
+def _positive_int(raw: str) -> int:
+    """argparse type converter: reject values < 1 with a usage error (exit 2).
+
+    Replaces a bare ``assert`` (stripped under ``python -O``) so ``--batch 0``
+    or a negative batch is a malformed invocation, never a silent no-op.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--batch must be a positive integer") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("--batch must be a positive integer")
+    return value
+
+
 def _add_state_dir(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
                         help="Adjudication state directory (queue.json + observations.jsonl)")
@@ -139,7 +155,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     target = p_label.add_mutually_exclusive_group(required=True)
     target.add_argument("--record-id", type=str, default=None, metavar="HEX",
                         help="Record id (64-hex digest) of a single queue item")
-    target.add_argument("--batch", type=int, default=None, metavar="N",
+    target.add_argument("--batch", type=_positive_int, default=None, metavar="N",
                         help="Label the next N unresolved items in deterministic order")
     p_label.add_argument("--disposition", type=str, required=True,
                          choices=sorted({"accepted", "rejected", "ambiguous", "unknown"}),
@@ -192,8 +208,10 @@ def handle_build(argv: list[str]) -> int:
     observations = load_observations(args.state_dir / _OBSERVATIONS_FILENAME)
     prior: dict[str, Mapping[str, Any]] = {}
     for obs in observations:
-        if obs.get("role") in _HUMAN_ROLES:
-            prior[str(obs["record_id"])] = obs
+        # Include model-suggested observations so build_queue can propagate
+        # their stored review-required flag onto the rebuilt item (show then
+        # renders the item as needing review).
+        prior[str(obs["record_id"])] = obs
     try:
         items = build_queue(raw, prior_observations=prior)
     except ValueError as exc:
@@ -261,8 +279,9 @@ def handle_label(argv: list[str]) -> int:
         open_ids = {str(item["record_id"]) for item in open_items}
         targets = [item for item in matches if str(item["record_id"]) in open_ids] or matches
     else:
-        assert args.batch is not None and args.batch >= 1, "--batch must be a positive integer"
-        targets = open_items[: args.batch]
+        batch = args.batch
+        assert batch is not None  # mutually exclusive group guarantees --record-id xor --batch
+        targets = open_items[:batch]
 
     if not targets:
         print_success(create_console(), "Nothing to label: queue drained.")
@@ -325,7 +344,7 @@ def handle_export(argv: list[str]) -> int:
             observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
         )
         validate_export_rows(rows)
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError, HydrationError) as exc:
         print_error(create_console(), "adjudicate export failed", str(exc))
         return 1
     if args.dry_run:

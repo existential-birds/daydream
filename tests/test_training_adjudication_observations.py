@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from daydream.training.adjudication.observations import append_observation, load_observations
+from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
 
 R1 = "a" * 64  # record_id-shaped
 
@@ -15,7 +16,8 @@ def _obs(record_id: str, labeler: str, disposition: str = "accepted",
         "evidence_digest": digest, "labeler": labeler, "role": "rater",
         "rationale": "matches reply meaning", "valid_at": "2026-08-30T12:00:00+00:00",
         "observed_at": "2026-08-30T12:00:01+00:00",
-        "rubric_version": "984-adjudicate-r1", "review_required": False,
+        "rubric_version": ADJUDICATION_LABELER_VERSION, "review_required": False,
+        "evidence": [{"reply_id": "r1"}],
     }
     return {**base, **kw}
 
@@ -39,14 +41,21 @@ def test_observation_missing_required_field_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="evidence_digest"):
         append_observation(tmp_path / "o.jsonl", o)
 
+def test_observation_missing_evidence_raises(tmp_path: Path) -> None:
+    # The resolver hard-requires evidence, so the store must reject
+    # evidence-less rows up front (fail-closed, not a late harvest crash).
+    o = _obs(R1, "alice")
+    del o["evidence"]
+    with pytest.raises(ValueError, match="evidence"):
+        append_observation(tmp_path / "o.jsonl", o)
+
+
 def test_invalid_disposition_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bogus"):
         append_observation(tmp_path / "o.jsonl", _obs(R1, "alice", disposition="bogus"))
 
 def test_model_suggested_label_is_review_required_and_rejected_as_human(tmp_path: Path) -> None:
-    from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
-
-    assert ADJUDICATION_LABELER_VERSION.startswith("984-")
+    assert ADJUDICATION_LABELER_VERSION == "984-adjudicate-r1"  # era-pinned equality
     store = tmp_path / "o.jsonl"
     # Caller omits review_required entirely; the writer must force it on.
     model_obs = _obs(R1, "claude-classifier", role="model-suggested")
@@ -55,6 +64,8 @@ def test_model_suggested_label_is_review_required_and_rejected_as_human(tmp_path
     obs = load_observations(store)
     assert obs[0]["role"] == "model-suggested"
     assert obs[0]["review_required"] is True
+    # Stored rubric_version stays pinned to the canonical version axis.
+    assert obs[0]["rubric_version"] == ADJUDICATION_LABELER_VERSION
 
 def test_role_adjudicator_with_model_labeler_raises(tmp_path: Path) -> None:
     # An unreviewed LLM classifier is never a human labeler: an observation

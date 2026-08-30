@@ -14,8 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-ADJUDICATION_RUBRIC_VERSION = "984-adjudicate-r1"
-
 # Labeler names that identify a model/LLM classifier rather than a human
 # (mirrors the versioned classifier identity convention, e.g.
 # ``REPLY_CLASSIFIER_VERSION`` consumers stamping ``claude-classifier``).
@@ -45,6 +43,11 @@ def _validate(obs: Mapping[str, Any]) -> None:
             raise ValueError(f"observation missing required field: {field}")
         if not isinstance(obs[field], str) or not obs[field]:
             raise ValueError(f"observation field must be a non-empty string: {field}")
+    if obs.get("evidence") is None:
+        # The resolver (precedence.effective_adjudication) hard-requires
+        # evidence, so the store must reject evidence-less rows up front
+        # instead of accepting rows the resolver later crashes on.
+        raise ValueError("observation missing required field: evidence")
     record_id = obs["record_id"]
     if len(record_id) != 64 or any(c not in "0123456789abcdefABCDEF" for c in record_id):
         raise ValueError(f"record_id must be a 64-hex digest, got: {record_id!r}")

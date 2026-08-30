@@ -84,14 +84,31 @@ def test_preview_detects_evidence_drift(tmp_path: Path) -> None:
     root = _hydrated_index(tmp_path)
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
+    # Capture the pre-drift ledger BEFORE the re-preview overwrites it: the
+    # pinned digests there are the ground truth drift detection must compare
+    # against (re-reading the file after the second run_preview would return
+    # the fresh post-drift ledger, proving nothing).
+    prior_digests = {
+        str(item["record_id"]): str(item["evidence_digest"])
+        for item in json.loads(ledger.read_text(encoding="utf-8"))["items"]
+    }
     drifted = _mutate_one_digest(root, tmp_path / "root2")  # copy + bump a digest
     result = run_preview(drifted, ledger)  # same ledger path: compares against prior preview
     assert result["drifted_record_ids"]  # drift surfaced, not merged silently
-    prior = json.loads(ledger.read_text())
-    assert [i["record_id"] for i in prior["items"] if i["evidence_digest"] == "ff" * 32] == \
-        result["drifted_record_ids"]
-    # unchanged finding is not flagged
+    # Drift names exactly the mutated finding (fp-a in session s2).
+    from daydream.training.corpus_v2.identity import record_id as rid
+    assert result["drifted_record_ids"] == [rid("s2", "s2-traj", "s2-seg", "fp-a")]
+    fresh_digests = {
+        str(item["record_id"]): str(item["evidence_digest"])
+        for item in json.loads(ledger.read_text(encoding="utf-8"))["items"]
+    }
+    # The drifted record's pinned digest changed; the unchanged finding is not
+    # flagged and its digest is pinned identically.
+    for record in result["drifted_record_ids"]:
+        assert prior_digests[record] != fresh_digests[record]
     assert len(result["drifted_record_ids"]) == 1
+    unchanged = next(r for r in prior_digests if r not in result["drifted_record_ids"])
+    assert prior_digests[unchanged] == fresh_digests[unchanged]
 
 
 def test_preview_missing_sessions_file_raises_hydration_error(tmp_path: Path) -> None:
@@ -180,7 +197,32 @@ def test_posterior_feed_is_pr_review_only(tmp_path: Path) -> None:
     root = _hydrated_index(tmp_path, profiles=["pr_review", "task"])
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
-    summary = run_harvest(root, ledger, tmp_path / "out")
-    assert all(e["posterior_eligible"] is False
-               for e in summary["exported"] if e["profile"] != "pr_review")
-    assert all(e["posterior_eligible"] is False for e in summary["exported"])  # no human judgment yet
+
+    # A decisive human verdict on every item makes both rows gold-eligible; the
+    # pr_review-only posterior gate must then decide the posterior feed.
+    from daydream.training.adjudication.observations import append_observation
+    from daydream.training.adjudication.preview import _load_sessions
+    from daydream.training.adjudication.queue import build_queue
+    from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
+
+    obs_path = tmp_path / "observations.jsonl"
+    for item in build_queue(_load_sessions(root)[0]):
+        append_observation(obs_path, {
+            "record_id": str(item["record_id"]),
+            "disposition": "accepted",
+            "evidence_digest": str(item["evidence_digest"]),
+            "evidence": item["evidence"],
+            "labeler": "human-1",
+            "role": "rater",
+            "rationale": "confirmed by hand",
+            "valid_at": "2026-08-30T10:00:00+00:00",
+            "observed_at": "2026-08-30T10:00:01+00:00",
+            "rubric_version": ADJUDICATION_LABELER_VERSION,
+        })
+    summary = run_harvest(root, ledger, tmp_path / "out", observations_path=obs_path)
+    gold = [e for e in summary["exported"] if e["tier"] == "gold"]
+    assert len(gold) == 2  # decisive human verdicts promote both rows to gold
+    # The task-profile gold row must never enter the posterior feed...
+    assert all(e["posterior_eligible"] is False for e in gold if e["profile"] != "pr_review")
+    # ...while the pr_review gold row is the posterior feed.
+    assert all(e["posterior_eligible"] for e in gold if e["profile"] == "pr_review")

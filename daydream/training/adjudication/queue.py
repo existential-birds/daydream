@@ -12,6 +12,7 @@ from typing import Any
 from daydream.training.adjudication.precedence import reopen_on_digest_change
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.projector import project_findings
+from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
 
 __all__ = ["build_queue"]
@@ -19,6 +20,23 @@ __all__ = ["build_queue"]
 _NON_DECISIVE_DISPOSITIONS = frozenset({"ambiguous", "unanswered", "missing"})
 
 _HUMAN_ROLES = frozenset({"rater", "adjudicator"})
+
+
+def _profile_label(
+    resolution: Mapping[str, object], provenance: Mapping[str, Any]
+) -> str | None:
+    """Resolve the string profile label queue/export consumers compare against.
+
+    Uses the same authority as the projector: ``extract_provenance`` derives
+    the profile from the canonical ``profile_*`` fields, and the label is the
+    canonical ``profile_name`` when present, else the legacy flat ``profile``
+    string a resolution may carry. Never ``str(None)``-coerced in the export.
+    """
+    profile_name = provenance["profile"].get("profile_name")
+    if profile_name is not None:
+        return str(profile_name)
+    flat = resolution.get("profile")
+    return str(flat) if flat is not None else None
 
 _ITEM_KEYS = (
     "record_id",
@@ -91,6 +109,7 @@ def build_queue(
                     f"build_queue: adjudication entry fingerprint {fingerprint!r} not found "
                     f"in session {session_id!r} resolutions"
                 )
+            provenance = extract_provenance(resolution)
             fresh_digest = resolution.get("evidence_digest")
             if not isinstance(fresh_digest, str) or not fresh_digest:
                 raise ValueError(
@@ -106,8 +125,8 @@ def build_queue(
                 "session_id": session_id,
                 "trajectory_id": trajectory_id,
                 "segment_id": segment_id,
-                "profile": resolution.get("profile"),
-                "stack": resolution.get("stack"),
+                "profile": _profile_label(resolution, provenance),
+                "stack": provenance["stack"],
                 "status": "open",
                 "rubric_version": rubric_version,
                 "prior_disposition": None,

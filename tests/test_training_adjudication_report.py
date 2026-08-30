@@ -30,7 +30,7 @@ def test_silver_task_only_never_counts_toward_outcome_coverage() -> None:
     assert report["unresolved"] == 0
 
 
-def test_inter_rater_agreement_counts_only_multi_rater_items() -> None:
+def test_inter_rater_counts_only_disputed_multi_rater_items() -> None:
     items = [
         _item("a" * 64, "accepted", raters=(("rater", "accepted"), ("rater2", "accepted"))),
         _item("b" * 64, "task-only", raters=(("rater", "accepted"), ("rater2", "rejected"))),
@@ -38,6 +38,17 @@ def test_inter_rater_agreement_counts_only_multi_rater_items() -> None:
     ]
     report = build_report(items)
     assert report["inter_rater"] == {"items": 1, "agreeing": 0}  # the disputed pair counted
+
+
+def test_model_suggested_observations_never_count_as_human_raters() -> None:
+    items = [
+        _item("a" * 64, "accepted", raters=(("model-suggested", "accepted"),)),
+        _item("b" * 64, "accepted", raters=(("model-suggested", "accepted"), ("rater", "rejected"))),
+    ]
+    report = build_report(items)
+    assert report["outcome_coverage"] == {"adjudicated": 1, "total": 2}  # model-suggested-only item unresolved
+    assert report["unresolved"] == 1
+    assert report["inter_rater"] == {"items": 0, "agreeing": 0}  # no second human in the dispute
 
 
 def test_report_is_deterministic_and_stratified() -> None:

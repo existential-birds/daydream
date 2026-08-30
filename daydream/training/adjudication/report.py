@@ -29,7 +29,7 @@ def _human_dispositions(observations: Sequence[Mapping[str, object]]) -> list[st
     return [
         str(_required(obs, "disposition"))
         for obs in observations
-        if str(obs.get("role", "automatic")) != "automatic"
+        if str(obs.get("role", "automatic")) not in {"automatic", "model-suggested"}
     ]
 
 

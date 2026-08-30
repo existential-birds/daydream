@@ -1,5 +1,6 @@
 """Precedence: explicit adjudicator > latest human rater > automatic; conflicts stay non-gold."""
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from daydream.training.adjudication.precedence import effective_adjudication, has_rater_conflict
@@ -21,15 +22,18 @@ def _obs(
         "labeler": labeler,
         "role": role,
         "evidence": [{"reply_id": "r1"}],
-        "observed_at": "2026-08-30T10:00:00+00:00" if observed == "auto" else observed,
+        "observed_at": observed,
     }
 
 
 def test_latest_human_rater_wins_over_automatic() -> None:
-    auto = _obs("ambiguous", "classifier-r1", observed="auto")
+    auto = _obs("ambiguous", "classifier-r1", role="automatic",
+                observed="2026-08-30T09:00:00+00:00")
     human = _obs("accepted", "alice", observed="2026-08-30T11:00:00+00:00")
     assert effective_adjudication([auto, human])["disposition"] == "accepted"
     assert effective_adjudication([auto, human])["labeler"] == "alice"
+    # The automatic tier is reached when no human judgment exists.
+    assert effective_adjudication([auto])["role"] == "automatic"
 
 
 def test_explicit_adjudicator_resolution_beats_later_rater() -> None:
@@ -77,15 +81,20 @@ def test_digest_change_requeues_prior_judgment() -> None:
     assert reopen_on_digest_change(human, current_digest="e" * 64) is True
 
 
-def test_model_suggested_queue_item_never_gold_eligible_unreviewed() -> None:
-    from daydream.training.adjudication.observations import append_observation  # noqa: F401
-    # Model suggested 'accepted' on a queue item: stored with review_required=True.
+def test_model_suggested_queue_item_never_gold_eligible_unreviewed(tmp_path: Path) -> None:
+    from daydream.training.adjudication.observations import append_observation, load_observations
+
+    # Model suggested 'accepted' on a queue item: stored via the store API,
+    # which must force review_required=True on the record.
     obs = {"record_id": "c" * 64, "disposition": "accepted", "evidence_digest": "d" * 64,
            "labeler": "reply-classifier-980-r1", "role": "model-suggested",
            "rationale": "classifier says accept", "valid_at": "2026-08-30T10:00:00+00:00",
            "observed_at": "2026-08-30T10:00:00+00:00", "rubric_version": "984-adjudicate-r1",
-           "evidence": [{"reply_id": "r1"}],
-           "review_required": True}
-    result = effective_adjudication([obs])
+           "evidence": [{"reply_id": "r1"}]}  # no review_required: the writer must force it
+    store = tmp_path / "observations.jsonl"
+    append_observation(store, obs)
+    stored = load_observations(store)[0]
+    assert stored["review_required"] is True  # writer forced the flag
+    result = effective_adjudication([stored])
     assert result["gold_eligible"] is False  # review-required ⇒ not gold, whatever the disposition
     assert result["review_required"] is True

@@ -42,17 +42,6 @@ EXPORT_KEYS = (
     "rubric_version",
 )
 
-# Keys the projector consumer needs beyond the adjudication entry shape.
-_MINIMAL_CONSUMER_KEYS = (
-    "record_id",
-    "fingerprint",
-    "disposition",
-    "evidence",
-    "evidence_digest",
-    "exclusion_reason",
-)
-
-
 def _canonical(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
