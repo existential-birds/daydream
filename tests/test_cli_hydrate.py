@@ -1,6 +1,9 @@
 """CLI wiring tests for `daydream corpus hydrate-hub` (#982 M1/M2/M17)."""
 from __future__ import annotations
 
+import pathlib
+from typing import Any
+
 import pytest
 
 from daydream import cli
@@ -34,8 +37,10 @@ def test_help_lists_hydrate_hub(capsys: pytest.CaptureFixture[str]) -> None:
     assert "hydrate-hub" in capsys.readouterr().out
 
 
-def test_success_path_drives_orchestrator(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    calls: list[object] = []
+def test_success_path_drives_orchestrator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    calls: list[Any] = []
 
     class FakeSummary:
         curation_id = "cur-" + "0" * 16
@@ -44,7 +49,7 @@ def test_success_path_drives_orchestrator(monkeypatch: pytest.MonkeyPatch, tmp_p
         dry_run_admitted = 1
         verify_admitted = 1
 
-    def fake_run(config):
+    def fake_run(config: Any) -> FakeSummary:
         calls.append(config)
         return FakeSummary()
 
