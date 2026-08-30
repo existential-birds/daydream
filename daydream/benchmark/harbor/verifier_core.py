@@ -512,8 +512,7 @@ _RANGE_DISTANCE_DOC = """Distance from ``line`` to the inclusive ``[start, end]`
 boundary (``start`` when ``line`` is below it, ``end`` when above).
 
 Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
-(the source of truth); policed against drift by
-``tests/test_benchmark_verifier_assets.py`` (issue #971 R8).
+(the source of truth).
 """
 
 

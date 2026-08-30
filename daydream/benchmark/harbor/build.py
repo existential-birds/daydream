@@ -51,6 +51,18 @@ def render_metric() -> bytes:
     return template_text("metric.py").encode("utf-8")
 
 
+def _canonical_verifier_bytes() -> bytes:
+    """Return the canonical ``verifier_core`` module's exact source bytes.
+
+    The host module *is* the canonical scorer. Fails closed with
+    :class:`CompileError` if the canonical source cannot be read.
+    """
+    src = Path(vc.__file__ if vc.__file__ is not None else "")
+    if not src.is_file():
+        raise CompileError(f"canonical verifier_core module not found at {src}")
+    return src.read_bytes()
+
+
 def render_metric_stage(stage: Path) -> tuple[bytes, bytes]:
     """Write the compiled metric stage files into *stage* and return their bytes.
 
@@ -60,10 +72,7 @@ def render_metric_stage(stage: Path) -> tuple[bytes, bytes]:
     canonical source cannot be read.
     """
     metric_bytes = render_metric()
-    src = Path(vc.__file__ if vc.__file__ is not None else "")
-    if not src.is_file():
-        raise CompileError(f"canonical verifier_core module not found at {src}")
-    verifier_bytes = src.read_bytes()
+    verifier_bytes = _canonical_verifier_bytes()
     (stage / "metric.py").write_bytes(metric_bytes)
     (stage / "verifier_core.py").write_bytes(verifier_bytes)
     return metric_bytes, verifier_bytes
@@ -472,10 +481,7 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
         elif rel == "tests/verifier_core.py":
             # The host verifier_core module *is* the canonical scorer; deploy
             # its exact source bytes rather than a template twin.
-            src = Path(vc.__file__ if vc.__file__ is not None else "")
-            if not src.is_file():
-                raise CompileError(f"canonical verifier_core module not found at {src}")
-            data = src.read_bytes()
+            data = _canonical_verifier_bytes()
         else:
             data = template_text(rel).encode("utf-8")
         dst = case_stage / rel
