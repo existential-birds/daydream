@@ -12,7 +12,7 @@ def test_readme_documents_git_token() -> None:
     readme = (REPO / "README.md").read_text()
     assert "`DAYDREAM_GIT_TOKEN`" in readme
     assert "never embedded in the remote URL" in readme
-    assert "never" in readme and "command line" in readme
+    assert "never on the command line" in readme
 
 
 def test_claude_md_git_token_row() -> None:
