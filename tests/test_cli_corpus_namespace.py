@@ -65,8 +65,10 @@ def test_corpus_build_and_label_route(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert label_called["argv"] == ["sess-0001", "--outcome", "accepted"]
 
 
-def test_bare_corpus_prints_help_exits_2() -> None:
+def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert _run_main(["corpus"]) == 2
+    out = capsys.readouterr().out
+    assert "calibrate-reward" in out
 
 
 def test_bare_harvest_is_unknown_verb_treated_as_review_target() -> None:

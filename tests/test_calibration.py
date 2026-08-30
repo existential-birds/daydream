@@ -391,14 +391,16 @@ def test_build_fixture_replays_byte_identical(committed_fixture: Path, tmp_path:
         assert (replay / rel).read_bytes() == (committed_fixture / rel).read_bytes(), rel
 
 
-def test_output_collision_with_different_run_identity_is_refused(fixture_corpus, tmp_path):
+def test_output_collision_with_different_run_identity_is_refused(
+    fixture_corpus: Path, tmp_path: Path
+) -> None:
     out = tmp_path / "out"
     run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-1"))
     with pytest.raises(CalibrationError, match="run identity"):
         run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-2"))
 
 
-def test_same_run_identity_rerun_is_allowed(fixture_corpus, tmp_path):
+def test_same_run_identity_rerun_is_allowed(fixture_corpus: Path, tmp_path: Path) -> None:
     out = tmp_path / "out"
     run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-1"))
     run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-1"))  # resume/overwrite ok
