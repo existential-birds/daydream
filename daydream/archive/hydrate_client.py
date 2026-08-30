@@ -90,6 +90,19 @@ class FakeHub:
         self.downloaded_log.append(path_in_repo)
         return tree[path_in_repo]
 
+    def mutate_bundle(self, revision: str, session_id: str, content: bytes) -> None:
+        """Re-commit one bundle file at ``revision`` with new content (test setup seam).
+
+        Used to stage an identity collision: same session identity, different
+        bytes. The pinned revision's tree is updated in place, so a client
+        downloading that revision observes the mutation while older pinned
+        revisions remain untouched.
+        """
+        path = f"bundles/{session_id}/manifest.json"
+        self.files[path] = content
+        if revision in self._revisions:
+            self._revisions[revision][path] = content
+
     def upload_files(self, mapping: dict[str | Path, Path], commit_message: str) -> None:
         if self.fail_uploads:
             raise HydrationError(f"upload failed for {self.repo_id}: simulated Hub outage")

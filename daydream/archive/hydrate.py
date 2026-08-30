@@ -654,6 +654,30 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     return result
 
 
+def _latest_admitted_digests(path: Path) -> dict[str, str | None]:
+    """Latest *admitted* dedupe entry per session id (collision entries never win).
+
+    The admitted derivative is never overwritten (M7), so a later collision
+    entry must not replace the admitted content digest in the import ledger —
+    the published batch content is still the baseline.
+    """
+    latest: dict[str, str | None] = {}
+    if not path.is_file():
+        return latest
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            if isinstance(entry, dict) and entry.get("session_id") \
+                    and entry.get("status") == "admitted":
+                latest[str(entry["session_id"])] = entry.get("content_digest")
+    except (OSError, ValueError):
+        return {}
+    return latest
+
+
 def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> dict[str, Any]:
     """Build and persist the value-free admission ledger (issue #982 M11).
 
@@ -668,6 +692,7 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
     source_commit = str(source_commit)
     curated = _curated_dir(stage, source_commit)
     recorded = _load_dedupe_ledger(curated / "dedupe.jsonl")
+    admitted_digests = _latest_admitted_digests(curated / "dedupe.jsonl")
 
     ingest_results: list[dict[str, Any]] = []
     ingest_path = stage / "downloads" / revision / "_ingest_results.json"
@@ -691,7 +716,7 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
         imported.append(
             {
                 "session_id": sid,
-                "content_digest": entry.get("content_digest") if entry else None,
+                "content_digest": admitted_digests.get(sid, entry.get("content_digest") if entry else None),
             }
         )
 
@@ -1192,8 +1217,26 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
     manifest_path = curated / "curation-manifest.json"
     _atomic_write_json(manifest_path, doc)
     prefix = f"curated/{curation_id}/"
-    _retry_upload(client, {f"{prefix}curation-manifest.json": manifest_path},
-                  f"daydream hydrate {curation_id}: curation manifest")
+    # SHA256SUMS must cover the *final* published file set — including the
+    # curation manifest rendered just above, which can change between runs
+    # (e.g. a newly recorded identity collision). Refresh it here so the
+    # checksums always match the bytes the verify cycle will pin.
+    final_relpaths = sorted(
+        p.relative_to(curated).as_posix() for p in curated.rglob("*") if p.is_file()
+    )
+    checksums = "".join(
+        f"{hashlib.sha256((curated / p).read_bytes()).hexdigest()}  {prefix}{p}\n"
+        for p in final_relpaths if p != "SHA256SUMS"
+    )
+    (curated / "SHA256SUMS").write_text(checksums, encoding="utf-8")
+    _retry_upload(
+        client,
+        {
+            f"{prefix}curation-manifest.json": manifest_path,
+            f"{prefix}SHA256SUMS": curated / "SHA256SUMS",
+        },
+        f"daydream hydrate {curation_id}: curation manifest + checksums",
+    )
     success_path = curated / "_SUCCESS"
     success_path.write_text(
         json.dumps({"curation_id": curation_id, "source_hub_commit": str(source_commit), "status": "complete"}) + "\n",
