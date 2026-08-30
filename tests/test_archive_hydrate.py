@@ -220,6 +220,54 @@ class TestDownloadSnapshot:
         assert not (tmp_path / "stage" / "outside.txt").exists()
 
 
+def _staged_with(tmp_path: Path, remote_urls: dict[str, str | None]) -> Path:
+    """Stage a tree: ingest + index admitted bundles carrying the given remote URLs."""
+    files: dict[str, bytes] = {}
+    for sid, url in remote_urls.items():
+        manifest: dict[str, str] = {"session_id": sid}
+        if url is not None:
+            manifest["remote_url"] = url
+        files[f"bundles/{sid}/manifest.json"] = json.dumps(manifest).encode()
+        files[f"bundles/{sid}/trajectory.json"] = b"{}"
+    hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
+    hub.commit_revision("a" * 40)
+    stage = tmp_path / "stage"
+    hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+    hydrate.ingest_bundles(stage, revision="a" * 40)
+    hydrate.rebuild_index(stage)
+    return stage
+
+
+class TestResolutionMap:
+    def test_map_records_slug_and_pinned_sha_no_raw_urls(self, tmp_path: Path) -> None:
+        stage = _staged_with(tmp_path, remote_urls={
+            "sess-a": "https://github.com/octo/repo",
+            "sess-b": None,
+        })
+        cmap = hydrate.build_resolution_map(stage, source_commit="a" * 40)
+        entry = cmap["octo/repo"]
+        assert entry["pinned_sha"].startswith("a" * 8) or entry["pinned_sha"] == "a" * 40
+        assert "raw_url" not in entry and "source_path" not in entry
+        assert "https://github.com/octo/repo" not in json.dumps(cmap)  # raw URL is data, not output
+
+    def test_non_allowlisted_host_reported_not_cloned(self, tmp_path: Path) -> None:
+        stage = _staged_with(tmp_path, remote_urls={"sess-c": "https://gitlab.com/x/y"})
+        cmap = hydrate.build_resolution_map(stage, source_commit="a" * 40)
+        assert cmap["unavailable"] == ["sess-c"]     # reported, no fallback, no clone attempted
+        assert "gitlab.com" not in json.dumps(cmap)  # redacted from published metadata
+
+    def test_no_clone_during_hydration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import daydream.git_ops as git_ops
+
+        def boom(*a: object, **k: object) -> None:
+            raise AssertionError("hydration must not clone")
+
+        monkeypatch.setattr(git_ops, "clone_with_token", boom)
+        monkeypatch.setattr(git_ops, "fetch", boom)
+        stage = _staged_with(tmp_path, remote_urls={"sess-a": "https://github.com/octo/repo"})
+        hydrate.build_resolution_map(stage, source_commit="a" * 40)  # must not raise
+
+
 class TestIngestAndIndex:
     def _staged(self, tmp_path: Path, revision: str = "a" * 40) -> Path:
         hub = make_fake_hub(tmp_path)

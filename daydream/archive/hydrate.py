@@ -403,6 +403,55 @@ def rebuild_index(stage: Path) -> None:
         upsert_run(stage, Manifest(**kwargs))
 
 
+def build_resolution_map(stage: Path, *, source_commit: str) -> dict[str, Any]:
+    """Build the deferred-clone repository resolution map (issue #982 M5).
+
+    From the admitted index rows under ``stage/runs/``, group sessions by the
+    ``normalize_remote_url`` slug. Each entry carries ``repo_slug``,
+    ``pinned_sha`` (the source commit the snapshot was hydrated from —
+    deferred-clone consumers fetch exactly this revision), and the contributing
+    ``session_ids``. Rows with no resolvable slug (no remote, or a
+    non-allowlisted host) land under ``map["unavailable"]`` as a list of
+    session ids — a reported outcome, never a raw-URL fallback and never a
+    clone.
+
+    No I/O beyond reading the staging index: this never shells out to git, so
+    hydration never clones or fetches (M5). Raw URLs are consumed as data only
+    and never appear in the map. Unexpected IO errors propagate.
+    """
+    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle at module load
+
+    cmap: dict[str, Any] = {}
+    unavailable: list[str] = []
+    indexed: set[str] = set()
+    for row in query_runs(stage):
+        indexed.add(str(row["session_id"]))
+        slug = row.get("repo_slug")
+        if not slug:
+            unavailable.append(str(row["session_id"]))
+            continue
+        entry = cmap.setdefault(
+            str(slug), {"repo_slug": str(slug), "pinned_sha": source_commit, "session_ids": []}
+        )
+        entry["session_ids"].append(str(row["session_id"]))
+    # Bundles rejected at admission for a non-allowlisted host never reached the
+    # index; they are still reported under "unavailable" (no raw-URL fallback).
+    for manifest_path in sorted(stage.glob("downloads/*/bundles/*/manifest.json")):
+        data = _read_manifest_dict(manifest_path.parent)
+        if data is None:
+            continue
+        session_id = str(data.get("session_id") or manifest_path.parent.name)
+        if session_id in indexed:
+            continue
+        raw_url = data.get("remote_url")
+        slug = normalize_remote_url(raw_url)[0] if isinstance(raw_url, str) and raw_url.strip() else None
+        if slug is None and session_id not in unavailable:
+            unavailable.append(session_id)
+    if unavailable:
+        cmap["unavailable"] = sorted(unavailable)
+    return cmap
+
+
 def _import_hf_hub() -> Any:
     """Return the ``huggingface_hub`` module, or ``None`` when not installed.
 
