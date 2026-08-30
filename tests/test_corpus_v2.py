@@ -376,3 +376,58 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     adj_report = tmp_path / "out" / "adjudication-report.json"
     assert adj_report.is_file()
     assert "missing" in adj_report.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Task 10: additive v2 loader surface (stacks.py) + v1 untouched gate
+# ---------------------------------------------------------------------------
+
+from daydream.training.stacks import load_dataset, load_dataset_v2  # noqa: E402
+
+# sha256 of daydream/training/corpus.py pinned at task-10 start; proves v1
+# module bytes were never touched by the v2 work (Req 16).
+_V1_CORPUS_SHA_AT_PLAN_TIME = (
+    "09a523efbb42aefe52a042df9155a126f3fe4c0ba7b92305ef31b49181223040"
+)
+
+
+def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    summary = run_build_corpus_v2(_cfg(tmp_path / "proj", bundle_dir, snap))
+    assert summary["emitted"] >= 1
+    records = load_dataset_v2(tmp_path / "proj")
+    assert records
+    assert all(r["schema_version"] == "2" for r in records)
+    assert all(r["tier"] in {"gold", "silver", "task-only"} for r in records)
+
+
+def test_v2_loader_refuses_non_v2_record_naming_record_id(tmp_path: Path) -> None:
+    out = tmp_path / "proj"
+    out.mkdir()
+    bad = {"schema_version": "1", "record_id": "deadbeef", "tier": "gold"}
+    (out / "train.jsonl").write_text(json.dumps(bad) + "\n")
+    with pytest.raises(ValueError, match="deadbeef"):
+        load_dataset_v2(out)
+
+
+def test_v2_loader_refuses_malformed_line_verbatim(tmp_path: Path) -> None:
+    out = tmp_path / "proj"
+    out.mkdir()
+    (out / "train.jsonl").write_text("{not json\n")
+    with pytest.raises(json.JSONDecodeError):
+        load_dataset_v2(out)
+
+
+def test_v1_loader_and_v1_artifacts_unaffected(tmp_path: Path) -> None:
+    # v1 loader still loads a v1 record unchanged; v1 schema file untouched
+    v1_record = {"schema_version": "1", "session_id": "s", "repo_slug": "o/r",
+                 "pr_number": 1, "outcome_label": "accepted", "labeler_policy_version": "1"}
+    p = tmp_path / "v1.jsonl"
+    p.write_text(json.dumps(v1_record) + "\n")
+    assert load_dataset(p)[0]["schema_version"] == "1"
+    from daydream.training.schema import TRAINING_SCHEMA_VERSION
+    assert TRAINING_SCHEMA_VERSION == "1"  # never bumped in-place
+    import daydream.training.corpus  # v1 module importable, unmodified
+    v1_src = (Path(daydream.training.corpus.__file__)).read_bytes()
+    assert hashlib.sha256(v1_src).hexdigest() == _V1_CORPUS_SHA_AT_PLAN_TIME

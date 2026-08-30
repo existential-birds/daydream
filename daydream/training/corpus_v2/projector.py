@@ -303,6 +303,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                         salt=config.salt,
                     )
                     rec["lineage"] = {"split": split}
+                    # v2 schema stamp: every projected record carries the
+                    # training-record schema version it was emitted under.
+                    rec["schema_version"] = "2"
                 records.extend(seg_records)
                 adjudication.extend(seg_adjudication)
                 included_sessions.append(seg.session_id)
