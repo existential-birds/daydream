@@ -1,0 +1,86 @@
+{
+  "rec-0000": {
+    "correctness": 0.4,
+    "fidelity": 0.2,
+    "grounding": 0.7,
+    "specificity": 0.8,
+    "w_fp": 0.55
+  },
+  "rec-0001": {
+    "correctness": 0.43,
+    "fidelity": 0.25,
+    "grounding": 0.68,
+    "specificity": 0.76,
+    "w_fp": 0.5
+  },
+  "rec-0002": {
+    "correctness": 0.46,
+    "fidelity": 0.3,
+    "grounding": 0.66,
+    "specificity": 0.72,
+    "w_fp": 0.65
+  },
+  "rec-0003": {
+    "correctness": 0.49,
+    "fidelity": 0.35,
+    "grounding": 0.64,
+    "specificity": 0.68,
+    "w_fp": 0.58
+  },
+  "rec-0004": {
+    "correctness": 0.52,
+    "fidelity": 0.4,
+    "grounding": 0.62,
+    "specificity": 0.64,
+    "w_fp": 0.52
+  },
+  "rec-0005": {
+    "correctness": 0.55,
+    "fidelity": 0.45,
+    "grounding": 0.6,
+    "specificity": 0.6,
+    "w_fp": 0.61
+  },
+  "rec-0006": {
+    "correctness": 0.58,
+    "fidelity": 0.5,
+    "grounding": 0.58,
+    "specificity": 0.56,
+    "w_fp": 0.48
+  },
+  "rec-0007": {
+    "correctness": 0.61,
+    "fidelity": 0.55,
+    "grounding": 0.56,
+    "specificity": 0.52,
+    "w_fp": 0.57
+  },
+  "rec-0008": {
+    "correctness": 0.64,
+    "fidelity": 0.6,
+    "grounding": 0.54,
+    "specificity": 0.48,
+    "w_fp": 0.63
+  },
+  "rec-0009": {
+    "correctness": 0.67,
+    "fidelity": 0.65,
+    "grounding": 0.52,
+    "specificity": 0.44,
+    "w_fp": 0.51
+  },
+  "rec-0010": {
+    "correctness": 0.7,
+    "fidelity": 0.7,
+    "grounding": 0.5,
+    "specificity": 0.4,
+    "w_fp": 0.59
+  },
+  "rec-0011": {
+    "correctness": 0.73,
+    "fidelity": 0.75,
+    "grounding": 0.48,
+    "specificity": 0.36,
+    "w_fp": 0.47
+  }
+}

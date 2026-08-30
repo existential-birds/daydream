@@ -1,0 +1,11 @@
+{
+  "accepted_count": 6,
+  "constraints": {
+    "C5_exclusion": "contains excluded repo slug(s): getsentry/sentry",
+    "C8_copyleft": "clean corpus repo slugs are absent from the copyleft list",
+    "gpu_free": true
+  },
+  "description": "Synthetic corpus-v2 bundle for calibrate-reward fixtures (issue #999)",
+  "record_count": 12,
+  "rejected_count": 6
+}

@@ -1349,6 +1349,223 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_calibrate_reward_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream corpus calibrate-reward``.
+
+    Drives :func:`daydream.training.calibration.run_calibration`: validate a
+    pinned calibration bundle (wire format in ``docs/calibration.md``)
+    fail-closed, compute deterministic calibration statistics with bootstrap
+    CIs, and emit a byte-reproducible calibration artifact — without touching
+    any reward default (issue #999).
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream corpus calibrate-reward",
+        description=(
+            "Validate a pinned calibration bundle fail-closed and emit a deterministic, "
+            "versioned reward-calibration artifact with Stage-0 marginal "
+            "analysis (issue #999). Never mutates reward defaults."
+        ),
+    )
+    parser.add_argument(
+        "--corpus-dir",
+        type=Path,
+        required=True,
+        dest="corpus_dir",
+        metavar="PATH",
+        help="Calibration bundle directory holding corpus.jsonl + lineage.json + SHA256SUMS.",
+    )
+    parser.add_argument(
+        "--gold-labels",
+        type=Path,
+        required=True,
+        dest="gold_labels",
+        metavar="PATH",
+        help='Gold labels JSON keyed by record_id: {"<record_id>": {"accepted": bool}}.',
+    )
+    parser.add_argument(
+        "--breakdowns",
+        type=Path,
+        required=True,
+        dest="breakdowns",
+        metavar="PATH",
+        help="Intrinsic per-axis breakdowns JSON keyed by record_id (composite excluded).",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        dest="out_dir",
+        metavar="PATH",
+        help="Output directory for the calibration artifact and report.",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        required=True,
+        dest="run_id",
+        metavar="ID",
+        help="Unique run identifier recorded in the artifact (collision-guarded).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        required=True,
+        dest="seed",
+        metavar="N",
+        help="Resampling seed; the artifact is byte-reproducible given this seed.",
+    )
+    parser.add_argument(
+        "--candidate",
+        type=str,
+        action="append",
+        required=True,
+        dest="candidates",
+        metavar="AXIS=V1,V2,...",
+        help=(
+            "Candidate grid for one breakdown axis, e.g. w_fp=0.1,0.2,0.3. "
+            "Repeatable; every value comes from the flag — never from defaults."
+        ),
+    )
+    parser.add_argument(
+        "--stage0-scores",
+        type=Path,
+        dest="stage0_scores",
+        metavar="PATH",
+        help=(
+            'Optional Stage-0 score JSON keyed by record_id: '
+            '{"<record_id>": {"score": float, "model_digest": str}}.'
+        ),
+    )
+    parser.add_argument(
+        "--model-digest",
+        type=str,
+        dest="model_digest",
+        metavar="DIGEST",
+        help="Digest of the Stage-0 model, required when --stage0-scores is given.",
+    )
+    parser.add_argument(
+        "--grid-points",
+        type=int,
+        default=9,
+        dest="grid_points",
+        metavar="N",
+        help="Grid resolution per candidate axis (default: 9).",
+    )
+    parser.add_argument(
+        "--bootstrap-resamples",
+        type=int,
+        default=1000,
+        dest="bootstrap_resamples",
+        metavar="N",
+        help="Bootstrap resample count for AUC CIs (default: 1000).",
+    )
+    return parser
+
+
+def _parse_candidates(raw: list[str]) -> dict[str, list[float]]:
+    """Parse ``AXIS=V1,V2,...`` candidate flags into a grid mapping.
+
+    Raises:
+        ValueError: on a flag missing ``=``, holding non-float points, or
+            repeating an axis already given in an earlier flag.
+    """
+    candidates: dict[str, list[float]] = {}
+    for spec in raw:
+        axis, sep, points = spec.partition("=")
+        if not sep or not axis.strip() or not points.strip():
+            raise ValueError(
+                f"--candidate {spec!r} must be AXIS=V1,V2,... (comma-separated floats)"
+            )
+        try:
+            values = [float(p) for p in points.split(",")]
+        except ValueError as exc:
+            raise ValueError(f"--candidate {spec!r} has non-float grid points") from exc
+        axis = axis.strip()
+        if axis in candidates:
+            raise ValueError(
+                f"--candidate {spec!r} repeats axis {axis!r} (already given as "
+                f"{candidates[axis]}); pass all points for one axis in a single flag"
+            )
+        candidates[axis] = values
+    return candidates
+
+
+def _run_calibration(config: Any) -> Any:
+    """Thin module-attribute wrapper around the calibration orchestrator.
+
+    Lives at module level so tests can monkeypatch ``cli._run_calibration``
+    (the same seam discipline as harvest's ``run_harvest`` lookup).
+    """
+    from daydream.training.calibration import run_calibration
+
+    return run_calibration(config)
+
+
+def _handle_calibrate_reward_command(argv: list[str]) -> int:
+    """Handle ``daydream corpus calibrate-reward [...]``.
+
+    Fail-closed: every validation gate in
+    :mod:`daydream.training.calibration` surfaces as a ``CalibrationError``
+    printed to stderr with exit 1, before any artifact is written. Success
+    prints the artifact path plus headline metrics and exits 0.
+
+    Returns:
+        ``0`` on a validated, artifact-emitting run; ``1`` on any
+        validation or gate failure.
+    """
+    from daydream.training import calibration as _calibration
+    from daydream.ui import create_console, print_error, print_info
+
+    parser = _build_calibrate_reward_parser()
+    console = create_console()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        if exc.code == 0:
+            raise
+        print_error(
+            console,
+            "Invalid arguments",
+            "corpus calibrate-reward requires --corpus-dir, --gold-labels, "
+            "--breakdowns, --out, --run-id, --seed, and at least one --candidate.",
+        )
+        return 1
+
+    try:
+        candidates = _parse_candidates(args.candidates)
+    except ValueError as exc:
+        print_error(console, "Invalid --candidate", str(exc))
+        return 1
+
+    config = _calibration.CalibrationConfig(
+        corpus_dir=args.corpus_dir,
+        gold_labels=args.gold_labels,
+        breakdowns=args.breakdowns,
+        out_dir=args.out_dir,
+        run_id=args.run_id,
+        seed=args.seed,
+        candidates=candidates,
+        stage0_scores=args.stage0_scores,
+        model_digest=args.model_digest,
+        grid_points=args.grid_points,
+        bootstrap_resamples=args.bootstrap_resamples,
+    )
+    try:
+        summary = _run_calibration(config)
+    except _calibration.CalibrationError as exc:
+        print_error(console, "Calibration failed", str(exc))
+        return 1
+
+    print_info(
+        console,
+        f"calibration artifact: {config.out_dir / 'calibration.json'} "
+        f"(run {summary.get('run_id', config.run_id)}, "
+        f"{summary.get('record_count', '?')} records, "
+        f"schema {summary.get('schema_version', '?')})",
+    )
+    return 0
+
+
 def _run_hydrate_hub(config: Any) -> Any:
     """Thin module-attribute wrapper around the hydrate orchestrator.
 
@@ -1752,18 +1969,20 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
     "build-v2": _handle_build_corpus_v2_command,
     "label": _handle_label_command,
     "hydrate-hub": _handle_hydrate_hub_command,
+    "calibrate-reward": _handle_calibrate_reward_command,
 }
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub} ...\n"
+    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub,calibrate-reward} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
     "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
     "  build-v2  project curated-bundle per-finding resolutions into corpus-v2 records\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
-    "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive"
+    "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
+    "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact"
 )
 
 _EXT_USAGE = (

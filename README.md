@@ -171,6 +171,7 @@ daydream corpus build --out /path/to/out.jsonl       # project labeled runs to J
 daydream corpus build --out out.jsonl --min-reward 0.5 --include-all-labels
 daydream corpus build --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
 daydream corpus label <session-id> --outcome accepted  # manual outcome override
+daydream corpus calibrate-reward ...                   # deterministic reward-calibration artifact (see docs/calibration.md)
 ```
 
 The pipeline has three stages:
@@ -178,6 +179,8 @@ The pipeline has three stages:
 1. **Harvest.** Walk the archive. Write one bitemporal annotation per run. Each annotation contains a label, an intrinsic reward, and a valid-at timestamp.
 2. **Label.** Override the automated outcome for a run. The manual label beats the automated label.
 3. **Build.** Project the annotations into a JSONL training corpus. Add a lineage manifest.
+
+`calibrate-reward` validates a pinned calibration bundle and emits a deterministic, versioned reward-calibration artifact (input wire format: [docs/calibration.md](docs/calibration.md)).
 
 The harvest stage clones the target repository into a local cache before scoring. Setting `DAYDREAM_GIT_TOKEN` (for example, a GitHub PAT with read access) authenticates clones of private repos. The token is injected out-of-band via git config environment variables (`http.extraHeader`). It is never embedded in the remote URL and never on the command line. Without the token, the harvest stage performs a plain clone via the ambient credential helper. A failed clone emits a warning and never blocks the harvest run. The token is only needed for private repos. See docs/runbooks/credential-remediation.md for operational guidance.
 
