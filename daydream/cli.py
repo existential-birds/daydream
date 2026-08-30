@@ -1974,7 +1974,7 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub,calibrate-reward} ...\n
+    "usage: daydream corpus {harvest,build,build-v2,label,hydrate-hub,calibrate-reward} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
