@@ -28,7 +28,7 @@
       "description": "sha256 hex digest over the canonical (session_id, trajectory_id, segment_id, fingerprint) join."
     },
     "record_type": {
-      "enum": ["outcome-finding", "process-trace", "task-only"]
+      "enum": ["outcome-finding"]
     },
     "tier": {
       "enum": ["gold", "silver", "task-only"]
@@ -46,7 +46,7 @@
       "type": ["string", "null"]
     },
     "disposition": {
-      "enum": ["accepted", "rejected", "ambiguous", "unanswered", "missing", null]
+      "enum": ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
     },
     "evidence": {
       "type": "array",
@@ -130,7 +130,7 @@
           "type": ["string", "null"]
         },
         "split": {
-          "enum": ["train", "val", "validation", "holdout", "excluded", null]
+          "enum": ["train", "validation", "holdout"]
         },
         "exclusion_reason": {
           "type": ["string", "null"]

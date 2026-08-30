@@ -642,8 +642,9 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         return 1
 
     # --out names the corpus JSONL; the projector writes its canonical file set
-    # (corpus.jsonl, split manifests, lineage.json) into that directory, and
-    # corpus-v2.jsonl is published beside them as the versioned corpus.
+    # (corpus.jsonl, corpus-v2.jsonl, split manifests, lineage.json) into that
+    # directory, finishing with _SUCCESS — so the whole set, twin included, is
+    # covered by the fail-closed completeness gate.
     out_dir = args.out.parent
     try:
         # BuildCorpusV2Config is the single validation boundary for --as-of
@@ -664,7 +665,6 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
                 summary = run_build_corpus_v2(replace(config, out_dir=Path(td)))
         else:
             summary = run_build_corpus_v2(config)
-            (out_dir / "corpus-v2.jsonl").write_bytes((out_dir / "corpus.jsonl").read_bytes())
     except (OSError, ValueError, TypeError) as exc:
         print_error(create_console(), "Corpus v2 build refused", str(exc))
         return 1

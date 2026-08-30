@@ -58,20 +58,24 @@ def _gate(condition: bool, message: str) -> None:
         raise BundleError(message)
 
 
-def _verify_sha256sums(root: Path) -> None:
+def _verify_sha256sums(root: Path, prefix: str) -> None:
     sums_path = root / _SUMS_NAME
     _gate(sums_path.is_file(), f"bundle {root}: missing {_SUMS_NAME}")
     # daydream.archive.hydrate writes SHA256SUMS relpaths relative to the
-    # hub-checkout root under the ``curated/<curation-id>/`` prefix; the bundle
-    # root is that curated directory, so strip the prefix before resolving
-    # under the root.
-    prefix = f"curated/{root.name}/" if root.parent.name == "curated" else ""
+    # hub-checkout root under the manifest's canonical ``publication_prefix``
+    # (``curated/<curation-id>/``); the bundle root is that curated directory,
+    # so strip the prefix before resolving under the root.
     for line in sums_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         digest, sep, relpath = line.partition("  ")
         _gate(bool(sep), f"bundle {root}: malformed {_SUMS_NAME} line {line!r}")
-        resolved = relpath[len(prefix):] if prefix and relpath.startswith(prefix) else relpath
+        p = Path(relpath)
+        _gate(
+            not p.is_absolute() and ".." not in p.parts,
+            f"bundle {root}: {_SUMS_NAME} relpath {relpath!r} is not relative to the bundle root",
+        )
+        resolved = relpath[len(prefix):] if relpath.startswith(prefix) else relpath
         target = root / resolved
         if not target.is_file():
             raise BundleError(f"bundle {root}: missing artifact {relpath!r} listed in {_SUMS_NAME}")
@@ -80,23 +84,30 @@ def _verify_sha256sums(root: Path) -> None:
 
 
 def _validate_relpath(root: Path, relpath: str, what: str) -> Path:
+    """Gate ``relpath`` under ``root`` and require the target to exist.
+
+    Targets may be files or directories: the producer writes each batch as a
+    directory (``batches/<session_id>/``) whose contents SHA256SUMS covers
+    file-by-file. Existence (not ``is_file``) is the gate so both shapes
+    resolve.
+    """
     p = Path(relpath)
     _gate(not p.is_absolute(), f"bundle {root}: {what} {relpath!r} is not relative")
     _gate(".." not in p.parts, f"bundle {root}: {what} {relpath!r} contains '..' segment")
     resolved = root / p
-    _gate(resolved.is_file(), f"bundle {root}: missing artifact {relpath!r} ({what})")
+    _gate(resolved.exists(), f"bundle {root}: missing artifact {relpath!r} ({what})")
     return resolved
 
 
 def load_curated_bundle(root: Path) -> CuratedBundle:
-    """Load a curated bundle from a local checkout, gating in order:
-    ``_SUCCESS``, SHA256SUMS verification, manifest schema validation, and
+    """Load a curated bundle from a local checkout, gating in order: the
+    ``_SUCCESS`` marker, curation-manifest schema validation (which yields the
+    canonical ``publication_prefix``), SHA256SUMS verification, and
     relative-path existence for every batch's artifacts. Raises
     :class:`BundleError` naming the offending path/field on any gate failure.
     """
     root = Path(root)
     _gate((root / _SUCCESS_NAME).is_file(), f"bundle {root}: missing {_SUCCESS_NAME} marker")
-    _verify_sha256sums(root)
 
     manifest_path = root / _MANIFEST_NAME
     _gate(manifest_path.is_file(), f"bundle {root}: missing {_MANIFEST_NAME}")
@@ -109,6 +120,11 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
     if errors:
         first = errors[0]
         raise BundleError(f"bundle {root}: curation manifest invalid at {first.json_path}: {first.message}")
+
+    # The manifest is the untrusted input; its canonical ``publication_prefix``
+    # (schema-pinned ``curated/<curation-id>/``) is what SHA256SUMS relpaths
+    # are written relative to, so checksum resolution must see it.
+    _verify_sha256sums(root, str(doc["publication_prefix"]))
 
     batches = tuple(BundleBatch(**b) for b in doc["batches"])
     for batch in batches:

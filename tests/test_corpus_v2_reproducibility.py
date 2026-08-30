@@ -14,19 +14,18 @@ from daydream.training import corpus_v2 as corpus_v2_pkg
 from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
 from daydream.training.corpus_v2.projector import BuildCorpusV2Config, run_build_corpus_v2
 from daydream.training.corpus_v2.splits import assign_split
-from tests.test_corpus_v2 import _write_annotations_snapshot, _write_bundle
+from tests.test_corpus_v2 import _cfg, _write_annotations_snapshot, _write_bundle
 from tests.test_training_corpus import _seed_run_with_annotation
-
-
-def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> BuildCorpusV2Config:
-    return BuildCorpusV2Config(out_dir=out_dir, bundle_dir=bundle_dir, annotations_snapshot=snapshot, **kw)
 
 
 def _read_split_memberships(out_dir: Path) -> tuple[list[str], list[str], list[str]]:
     def ids(name: str) -> list[str]:
         path = out_dir / name
+        # Fail-closed: a missing split manifest must not read as an empty
+        # membership — vacuous intersection/disjointness checks would mask a
+        # projector regression that skipped a split write.
         if not path.is_file():
-            return []
+            raise FileNotFoundError(f"missing split manifest {path}")
         return [json.loads(line)["record_id"] for line in path.read_text().splitlines() if line]
 
     return ids("train.jsonl"), ids("validation.jsonl"), ids("holdout.jsonl")
@@ -109,6 +108,7 @@ def test_v1_and_v2_projection_paths_are_independent(tmp_path: Path, archive_dir:
         return out_dir / "out" / "corpus.jsonl"
 
     v1_before = _run_v1_build(tmp_path / "v1a" / "corpus.jsonl").read_bytes()
+    assert v1_before  # non-empty checkpoint: a regression that empties v1 must fail here
     _run_v2_build(tmp_path / "v2")
     v1_after = _run_v1_build(tmp_path / "v1b" / "corpus.jsonl").read_bytes()
     assert v1_before == v1_after           # v1 untouched by v2 runs
@@ -128,6 +128,11 @@ def test_late_outcome_evidence_is_refused(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path / "late", bundle_dir, snap, as_of="2026-06-01T00:00:00+00:00")
     with pytest.raises(ValueError, match="valid_at"):
         run_build_corpus_v2(cfg)
-    # refusal, not drop: nothing was written
-    assert not (tmp_path / "late" / "corpus.jsonl").exists()
-    assert not (tmp_path / "late" / "lineage.json").exists()
+    # refusal, not drop: the full fail-closed file set was never written
+    # (every artifact the projector emits, plus the _SUCCESS completeness
+    # marker — a regression that wrote any of them before raising fails)
+    late_dir = tmp_path / "late"
+    for name in ("corpus.jsonl", "corpus-v2.jsonl", "train.jsonl", "validation.jsonl",
+                 "holdout.jsonl", "adjudication-report.json", "schema.json",
+                 "lineage.json", "_SUCCESS"):
+        assert not (late_dir / name).exists(), name

@@ -18,6 +18,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast, overload
 
@@ -150,15 +151,86 @@ def _provenance_for(
 
 
 def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
-    """Max ``valid_at`` over evidence items (lexicographic ISO-8601 compare),
-    never lower than the ``as_of`` pin."""
+    """Max ``valid_at`` over evidence items (chronological ISO-8601 compare,
+    mirroring ``_is_posterior_leak``'s parse), never lower than the ``as_of``
+    pin. Parsing both sides with :func:`datetime.fromisoformat` means spelling
+    differences — ``Z`` vs ``+00:00`` — can never mis-order the max."""
     result = base
     for item in evidence:
         if isinstance(item, Mapping) and item.get("valid_at"):
             candidate = str(item["valid_at"])
-            if result is None or candidate > result:
+            if result is None or datetime.fromisoformat(candidate) > datetime.fromisoformat(result):
                 result = candidate
     return result
+
+
+def _verify_snapshot_pinned(bundle_dir: Path, snapshot: Path) -> None:
+    """Fail-closed: the annotations snapshot must be digest-pinned by the
+    bundle's SHA256SUMS (the "digest-pinned alongside the bundle" contract) —
+    a snapshot whose bytes no bundle checksum names is refused rather than
+    hashed self-referentially."""
+    sums_path = bundle_dir / "SHA256SUMS"
+    if not sums_path.is_file():
+        raise ValueError(
+            f"bundle {bundle_dir}: missing SHA256SUMS — cannot verify the annotations snapshot pin"
+        )
+    pinned: dict[str, str] = {}
+    for line in sums_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, sep, relpath = line.partition("  ")
+        if sep:
+            pinned[Path(relpath).name] = digest
+    expected = pinned.get(snapshot.name)
+    if expected is None:
+        raise ValueError(
+            f"annotations snapshot {snapshot.name!r} is not listed in bundle "
+            f"{bundle_dir} SHA256SUMS — it must be digest-pinned alongside the bundle"
+        )
+    actual = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    if actual != expected:
+        raise ValueError(
+            f"annotations snapshot {snapshot} digest mismatch vs bundle {bundle_dir} "
+            "SHA256SUMS pin"
+        )
+
+
+def _read_trajectory_documents(bundle_dir: Path, artifact_relpath: str) -> list[dict[str, Any]]:
+    """Read a batch's ATIF trajectory document(s).
+
+    The producer writes each batch as a directory (``batches/<sid>/``) whose
+    root trajectory lives at ``trajectory.json`` inside it; a single-object
+    JSON read yields that one trajectory. A file artifact keeps the JSONL
+    shape — one trajectory object per line.
+    """
+    artifact = bundle_dir / artifact_relpath
+    if artifact.is_dir():
+        artifact = artifact / "trajectory.json"
+        if not artifact.is_file():
+            raise ValueError(
+                f"bundle {bundle_dir}: {artifact_relpath} contains no trajectory.json"
+            )
+    raw = artifact.read_text(encoding="utf-8")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        documents: list[dict[str, Any]] = []
+        for line_no, line in enumerate(raw.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                documents.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"bundle {bundle_dir}: {artifact_relpath} line {line_no} "
+                    f"is not valid JSON: {exc}"
+                ) from exc
+        return documents
+    if isinstance(parsed, dict):
+        return [parsed]
+    if isinstance(parsed, list):
+        return [doc for doc in parsed if isinstance(doc, dict)]
+    raise ValueError(f"bundle {bundle_dir}: {artifact_relpath} is not a trajectory object")
 
 
 @overload
@@ -291,15 +363,18 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     ``exclusions_by_reason`` — all derived from the final population in
     deterministic order. Non-decisive findings land in the human
     ``adjudication-report.json`` with their evidence (D8: report output, not
-    a pipeline stage).
+    a pipeline stage). ``corpus.jsonl`` is also published as the versioned
+    twin ``corpus-v2.jsonl`` from the same in-memory bytes via the same
+    atomic write, before ``_SUCCESS`` — covered by the identical fail-closed
+    completeness gate, so the twin can never diverge from the canonical file.
     """
     bundle = load_curated_bundle(config.bundle_dir)
     snapshot_rows = _load_snapshot(config.annotations_snapshot)
     snapshot_digest = hashlib.sha256(config.annotations_snapshot.read_bytes()).hexdigest()
+    _verify_snapshot_pinned(config.bundle_dir, config.annotations_snapshot)
 
     records: list[Record] = []
     adjudication: list[Record] = []
-    included_sessions: list[str] = []
     # The annotation resolutions are session-scoped (keyed by session_id +
     # fingerprint, not by trajectory/segment), so each finding is projected
     # exactly once — sibling segments never fabricate per-segment copies that
@@ -323,17 +398,8 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         else:
             batch_manifest_row = {}
         digest_parts = [d for d in (batch.content_digest, snapshot_digest) if d]
-        artifact = config.bundle_dir / batch.artifact_relpath
-        for line_no, line in enumerate(artifact.read_text(encoding="utf-8").splitlines(), start=1):
-            if not line.strip():
-                continue
-            try:
-                trajectory = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"bundle {config.bundle_dir}: {batch.artifact_relpath} line {line_no} "
-                    f"is not valid JSON: {exc}"
-                ) from exc
+        trajectory_documents = _read_trajectory_documents(config.bundle_dir, batch.artifact_relpath)
+        for trajectory in trajectory_documents:
             segs = segment(trajectory)
             for seg in segs:
                 resolutions = [
@@ -385,7 +451,10 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                     rec_valid_at = _max_valid_at(
                         cast(list[Record], rec["evidence"]), config.as_of
                     )
-                    if rec_valid_at is not None and (valid_at is None or rec_valid_at > valid_at):
+                    if rec_valid_at is not None and (
+                        valid_at is None
+                        or datetime.fromisoformat(rec_valid_at) > datetime.fromisoformat(valid_at)
+                    ):
                         valid_at = rec_valid_at
                     rec["profile"] = prov["profile"]
                     rec["stack"] = prov["stack"]
@@ -411,7 +480,6 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                     if key not in adjudicated_findings:
                         adjudicated_findings.add(key)
                         adjudication.append(entry)
-                included_sessions.append(seg.session_id)
 
     records.sort(key=lambda r: str(r["record_id"]))
     adjudication.sort(key=lambda r: str(r["fingerprint"]))
@@ -438,6 +506,8 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
 
     canonical = _dump_jsonl(records)
     _atomic_write(config.out_dir / "corpus.jsonl", canonical)
+    # Versioned twin of the canonical corpus (same bytes, atomic, pre-_SUCCESS).
+    _atomic_write(config.out_dir / "corpus-v2.jsonl", canonical)
     for split_name, filename in _SPLIT_FILENAMES.items():
         split_records = [r for r in records if cast(dict[str, Any], r["lineage"])["split"] == split_name]
         _atomic_write(config.out_dir / filename, _dump_jsonl(split_records))
@@ -476,7 +546,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "salt": config.salt,
         "holdout_rate": config.holdout_rate,
         "val_rate": config.val_rate,
-        "trajectory_set_hash": _trajectory_set_hash(sorted(set(included_sessions))),
+        "trajectory_set_hash": _trajectory_set_hash(
+            sorted({str(r["session_id"]) for r in records})
+        ),
         "split_assignment": split_counts,
         "split_counts": split_counts,
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),

@@ -25,7 +25,7 @@ _MANIFEST = {
             "content_digest": "1111111111111111111111111111111111111111111111111111111111111111",
             "status": "admitted",
             "reason_code": None,
-            "artifact_relpath": "batches/sess-a/trajectory.jsonl",
+            "artifact_relpath": "batches/sess-a",
             "artifact_digest": None,
             "manifest_relpath": "batches/sess-a/manifest.json",
         },
@@ -34,7 +34,7 @@ _MANIFEST = {
             "content_digest": "3333333333333333333333333333333333333333333333333333333333333333",
             "status": "quarantined",
             "reason_code": "secrets_scan_dirty",
-            "artifact_relpath": "batches/sess-b/trajectory.jsonl",
+            "artifact_relpath": "batches/sess-b",
             "artifact_digest": None,
             "manifest_relpath": None,
         },
@@ -61,7 +61,10 @@ def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -
 
 def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: bool = False) -> Path:
     bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
-    for rel in ("batches/sess-a/trajectory.jsonl", "batches/sess-a/manifest.json", "batches/sess-b/trajectory.jsonl"):
+    # Producer-realistic batch shape: artifact_relpath names the batch
+    # DIRECTORY (``batches/<session_id>/``) containing the ATIF
+    # ``trajectory.json`` plus the batch ``manifest.json``.
+    for rel in ("batches/sess-a/trajectory.json", "batches/sess-a/manifest.json", "batches/sess-b/trajectory.json"):
         target = bundle_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}\n")
@@ -70,7 +73,7 @@ def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: 
     if with_success:
         (bundle_dir / "_SUCCESS").write_text("ok\n")
     if corrupt_digest:
-        (bundle_dir / "batches" / "sess-a" / "trajectory.jsonl").write_bytes(b"tampered\n")
+        (bundle_dir / "batches" / "sess-a" / "trajectory.json").write_bytes(b"tampered\n")
     return bundle_dir
 
 
@@ -103,7 +106,9 @@ def _write_annotations_snapshot(
             for i in range(n_siblings)
         ],
     }
-    (bundle_dir / "batches" / session_id / "trajectory.jsonl").write_text(
+    # Producer-realistic batch shape: the ATIF trajectory lives at
+    # ``batches/<session_id>/trajectory.json`` (single JSON object).
+    (bundle_dir / "batches" / session_id / "trajectory.json").write_text(
         json.dumps(trajectory) + "\n"
     )
     snapshot_path = bundle_dir / "annotations-snapshot.jsonl"
@@ -162,7 +167,7 @@ def test_load_bundle_uses_relative_paths_only(tmp_path: Path) -> None:
 
 def test_load_bundle_rejects_missing_batches_file(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
-    (bundle_dir / "batches" / "sess-a" / "trajectory.jsonl").unlink()
+    (bundle_dir / "batches" / "sess-a" / "trajectory.json").unlink()
     with pytest.raises(BundleError, match="missing artifact"):
         load_curated_bundle(bundle_dir)
 
@@ -294,10 +299,15 @@ def test_native_profile_run_without_legacy_skill_validates() -> None:
     v2_record = {"profile": {"profile_schema_version": 2, "profile_name": "n",
                              "profile_source_kind": "builtin", "profile_digest": None},
                  "skill": None, "stack": "python"}
-    assert extract_provenance(v2_record)["stack"] == "python"
+    prov = extract_provenance(v2_record)
+    assert prov["stack"] == "python"
     # Schema validity is Task 1's validator's job; here we pin that no
-    # required-ness is smuggled back in for skill.
-    assert "skill" in {f for f in v2_record if v2_record[f] is None and f == "skill"}
+    # required-ness is smuggled back in for skill: the extractor carries
+    # skill only when a value exists, never for an explicit null (and honors
+    # the record's own stack override).
+    assert "skill" not in prov
+    assert prov["profile"] == {"profile_schema_version": None, "profile_name": None,
+                               "profile_source_kind": None, "profile_digest": None}
 
 
 def test_legacy_skill_carried_as_provenance_never_required() -> None:
