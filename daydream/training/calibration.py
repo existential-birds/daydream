@@ -10,8 +10,8 @@ corpus-v2 projector contract; the derived train/val/holdout sets must stay
 pairwise disjoint (a duplicated record id means the corpus was hand-edited).
 
 Reward weights, thresholds, and grid ranges come exclusively from
-``CalibrationConfig.candidates`` — this module never imports
-``reward.DEFAULT_WEIGHTS`` nor mutates any reward default (M10).
+``CalibrationConfig.candidates`` — this module never imports any reward
+weights default nor mutates any reward default (M10).
 """
 
 from __future__ import annotations
