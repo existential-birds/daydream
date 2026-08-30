@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import random
+import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -232,6 +235,187 @@ def _check_splits(
     return derived
 
 
+# ---------------------------------------------------------------------------
+# Deterministic statistics core (M3) — stdlib only, every float rounded to 4dp.
+# ---------------------------------------------------------------------------
+
+
+def _round4(value: Any) -> Any:
+    """Recursively round every float to 4 decimal places for byte-stable output."""
+    if isinstance(value, float):
+        return round(value, 4)
+    if isinstance(value, dict):
+        return {k: _round4(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_round4(v) for v in value]
+    return value
+
+
+def _load_inputs(
+    config: CalibrationConfig, record_ids: list[str]
+) -> tuple[dict[str, bool], dict[str, dict[str, float]]]:
+    """Join gold labels and intrinsic breakdowns onto the corpus by record_id."""
+    gold_raw = json.loads(config.gold_labels.read_text())
+    _gate(isinstance(gold_raw, dict), f"{config.gold_labels}: gold labels must be an object keyed by record_id")
+    gold: dict[str, bool] = {}
+    for rid, value in gold_raw.items():
+        _gate(rid in set(record_ids), f"{config.gold_labels}: gold label for unknown record_id {rid!r}")
+        _gate(
+            isinstance(value, dict) and isinstance(value.get("accepted"), bool),
+            f'{config.gold_labels}: gold label for {rid!r} must be {{"accepted": bool}}',
+        )
+        gold[rid] = value["accepted"]
+    breakdown_raw = json.loads(config.breakdowns.read_text())
+    _gate(isinstance(breakdown_raw, dict), f"{config.breakdowns}: breakdowns must be an object keyed by record_id")
+    breakdowns: dict[str, dict[str, float]] = {}
+    for rid, axes in breakdown_raw.items():
+        _gate(rid in set(record_ids), f"{config.breakdowns}: breakdown for unknown record_id {rid!r}")
+        _gate(isinstance(axes, dict), f"{config.breakdowns}: breakdown for {rid!r} must be an object")
+        for axis, value in axes.items():
+            _gate(isinstance(value, (int, float)) and not isinstance(value, bool),
+                  f"{config.breakdowns}: axis {axis!r} for {rid!r} must be numeric")
+        breakdowns[rid] = {k: float(v) for k, v in axes.items()}
+    for rid in record_ids:
+        _gate(rid in gold, f"{config.gold_labels}: missing gold label for corpus record {rid!r}")
+        _gate(rid in breakdowns, f"{config.breakdowns}: missing breakdown for corpus record {rid!r}")
+    return gold, breakdowns
+
+
+def _midrank_auc(scores: list[float], labels: list[bool]) -> float:
+    """AUC via midrank Mann-Whitney U; 0.5 when one class is absent."""
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if positives == 0 or negatives == 0:
+        return 0.5
+    order = sorted(range(len(scores)), key=lambda i: scores[i])
+    ranks = [0.0] * len(scores)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and scores[order[j + 1]] == scores[order[i]]:
+            j += 1
+        mid = (i + j) / 2 + 1  # 1-based midrank
+        for k in range(i, j + 1):
+            ranks[order[k]] = mid
+        i = j + 1
+    rank_sum = sum(r for r, lab in zip(ranks, labels) if lab)
+    return (rank_sum - positives * (positives + 1) / 2) / (positives * negatives)
+
+
+def _bootstrap_auc_ci(
+    scores: list[float], labels: list[bool], seed: int, resamples: int
+) -> tuple[float, float]:
+    """Seeded percentile bootstrap CI over paired (score, label) resamples."""
+    rng = random.Random(seed)
+    n = len(scores)
+    aucs = []
+    for _ in range(resamples):
+        idx = [rng.randrange(n) for _ in range(n)]
+        aucs.append(_midrank_auc([scores[i] for i in idx], [labels[i] for i in idx]))
+    aucs.sort()
+    lo = aucs[min(int(0.025 * resamples), resamples - 1)]
+    hi = aucs[min(int(0.975 * resamples), resamples - 1)]
+    return lo, hi
+
+
+def _point_biserial(values: list[float], labels: list[bool]) -> float:
+    """Pearson correlation between a numeric axis and the binary label; 0.0 if degenerate."""
+    binary = [1.0 if lab else 0.0 for lab in labels]
+    if len(set(values)) < 2 or len(set(binary)) < 2:
+        return 0.0
+    mx = statistics.fmean(values)
+    mb = statistics.fmean(binary)
+    num = sum((v - mx) * (b - mb) for v, b in zip(values, binary))
+    den = math.sqrt(sum((v - mx) ** 2 for v in values) * sum((b - mb) ** 2 for b in binary))
+    if den == 0:
+        return 0.0
+    return num / den
+
+
+def _grid(axis: str, values: list[float] | None, grid_points: int) -> list[float]:
+    """Resolve a candidate axis's configured range to ``grid_points`` grid values.
+
+    A candidate axis with no supplied range is an error naming the axis — there
+    are no built-in reward defaults to fall back on.
+    """
+    if not values:
+        raise CalibrationError(
+            f"candidate axis {axis!r} has no supplied grid range; calibration never invents reward defaults"
+        )
+    if len(values) == 1 or grid_points <= 1:
+        return sorted(round(float(v), 4) for v in values)
+    lo, hi = min(values), max(values)
+    step = (hi - lo) / (grid_points - 1)
+    return sorted({round(lo + i * step, 4) for i in range(grid_points)})
+
+
+def _compute_metrics(
+    records: list[dict[str, Any]],
+    gold: dict[str, bool],
+    breakdowns: dict[str, dict[str, float]],
+    config: CalibrationConfig,
+) -> dict[str, Any]:
+    record_ids = [str(r["record_id"]) for r in records]
+    labels = [gold[rid] for rid in record_ids]
+
+    lengths = [len(json.dumps(r, sort_keys=True)) for r in records]
+    if len(lengths) >= 4:
+        q1, q3 = statistics.quantiles(lengths, n=4, method="inclusive")[::2]
+    else:
+        q1, q3 = min(lengths), max(lengths)
+    length_distribution = {
+        "median": statistics.median(lengths),
+        "mean": statistics.fmean(lengths),
+        "iqr": q3 - q1,
+        "min": float(min(lengths)),
+        "max": float(max(lengths)),
+    }
+
+    class_balance = {
+        "accepted": sum(1 for lab in labels if lab),
+        "rejected": sum(1 for lab in labels if not lab),
+    }
+
+    axes = sorted({axis for axes_map in breakdowns.values() for axis in axes_map})
+    per_axis_correlations = {
+        f"{axis}_axis": _point_biserial([breakdowns[rid][axis] for rid in record_ids], labels)
+        for axis in axes
+    }
+
+    auc_bootstrap_ci: dict[str, list[float]] = {}
+    for axis, values in config.candidates.items():
+        _gate(
+            all(axis in breakdowns[rid] for rid in record_ids),
+            f"candidate axis {axis!r} is absent from breakdowns for at least one corpus record",
+        )
+        scores = [breakdowns[rid][axis] for rid in record_ids]
+        for point in _grid(axis, values, config.grid_points):
+            lo, hi = _bootstrap_auc_ci(scores, labels, config.seed, config.bootstrap_resamples)
+            auc_bootstrap_ci[f"{axis}={point}"] = [lo, hi]
+
+    return {
+        "length_distribution": length_distribution,
+        "class_balance": class_balance,
+        "per_axis_correlations": per_axis_correlations,
+        "auc_bootstrap_ci": auc_bootstrap_ci,
+    }
+
+
+def _write_artifact(config: CalibrationConfig, record_count: int, metrics: dict[str, Any]) -> None:
+    config.out_dir.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "run_id": config.run_id,
+        "seed": config.seed,
+        "grid_points": config.grid_points,
+        "bootstrap_resamples": config.bootstrap_resamples,
+        "record_count": record_count,
+        "metrics": metrics,
+    }
+    payload = json.dumps(_round4(artifact), sort_keys=True, indent=2) + "\n"
+    (config.out_dir / "calibration.json").write_text(payload)
+
+
 def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     """Validate the corpus bundle fail-closed; return a summary on success.
 
@@ -283,4 +467,15 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     val_rate = float(bundle["val_rate"])
     _check_splits(records, str(bundle["salt"]), holdout_rate, val_rate)
 
-    return {"run_id": config.run_id, "record_count": len(records), "schema_version": ARTIFACT_SCHEMA_VERSION}
+    record_ids = [str(r["record_id"]) for r in records]
+    gold, breakdowns = _load_inputs(config, record_ids)
+    metrics = _compute_metrics(records, gold, breakdowns, config)
+    _write_artifact(config, len(records), metrics)
+
+    return {
+        "run_id": config.run_id,
+        "record_count": len(records),
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "seed": config.seed,
+        "metrics": metrics,
+    }

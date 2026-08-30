@@ -85,7 +85,12 @@ def _build_fixture(tmp_path: Path) -> Path:
     )
     gold = {f"rec-{i:04d}": {"accepted": i % 2 == 0} for i in range(4)}
     (tmp_path / "gold.json").write_text(json.dumps(gold, sort_keys=True) + "\n")
-    breakdowns = {f"rec-{i:04d}": {"fidelity": 0.5, "specificity": 0.5} for i in range(4)}
+    # w_fp is partially but not perfectly separable so bootstrap CIs are non-degenerate.
+    w_fp = [0.55, 0.5, 0.65, 0.58]
+    breakdowns = {
+        f"rec-{i:04d}": {"fidelity": 0.2 + 0.1 * i, "specificity": 0.8 - 0.1 * i, "w_fp": w_fp[i]}
+        for i in range(4)
+    }
     (tmp_path / "breakdowns.json").write_text(json.dumps(breakdowns, sort_keys=True) + "\n")
     return tmp_path
 
@@ -107,6 +112,7 @@ def _config(fixture_dir: Path, tmp_path: Path, **overrides: object) -> Calibrati
         candidates={"w_fp": [0.1, 0.3]},
         corruptions=corrupt,
     )
+    base.update({k: v for k, v in overrides.items() if k not in CORRUPTION_FLAGS})
     return CalibrationConfig(**base)
 
 
@@ -134,7 +140,34 @@ def test_clean_corpus_passes_gates(tmp_path: Path, fixture_corpus: Path) -> None
     result = run_calibration(_config(fixture_corpus, tmp_path))
     assert result["run_id"] == "cal-test-1"
     assert result["record_count"] == 4
-    assert not (tmp_path / "out" / "calibration.json").exists()  # artifact lands in a later task
+    artifact = tmp_path / "out" / "calibration.json"
+    assert artifact.exists()
+    assert json.loads(artifact.read_text())["schema_version"] == "calibration-artifact-v1"
+
+
+def test_statistics_are_exact_and_deterministic(fixture_corpus: Path, tmp_path: Path) -> None:
+    result = run_calibration(_config(fixture_corpus, tmp_path, seed=42))
+    m = result["metrics"]
+    assert m["length_distribution"]["median"] == round(m["length_distribution"]["median"], 4)
+    assert {"median", "iqr"} <= set(m["length_distribution"])
+    assert set(m["class_balance"]) == {"accepted", "rejected"}
+    assert m["per_axis_correlations"]["w_fp_axis"] <= 1.0
+    lo, hi = m["auc_bootstrap_ci"]["w_fp=0.3"]
+    assert lo < hi
+    # same seed ⇒ identical bytes
+    run_calibration(_config(fixture_corpus, tmp_path / "r2", out_dir=tmp_path / "r2", seed=42))
+    assert (tmp_path / "out" / "calibration.json").read_bytes() == \
+        (tmp_path / "r2" / "calibration.json").read_bytes()
+
+
+def test_candidate_without_range_fails_closed(tmp_path: Path, fixture_corpus: Path) -> None:
+    with pytest.raises(CalibrationError, match="w_fp"):
+        run_calibration(_config(fixture_corpus, tmp_path, candidates={"w_fp": []}))
+
+
+def test_unknown_candidate_axis_fails_closed(tmp_path: Path, fixture_corpus: Path) -> None:
+    with pytest.raises(CalibrationError, match="w_ghost"):
+        run_calibration(_config(fixture_corpus, tmp_path, candidates={"w_ghost": [0.1, 0.2]}))
 
 
 def test_missing_required_field_fails_closed(tmp_path: Path, fixture_corpus: Path) -> None:
