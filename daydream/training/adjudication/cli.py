@@ -522,11 +522,21 @@ def handle_report(argv: list[str]) -> int:
     coverage = report["outcome_coverage"]
     balance = report["class_balance"]
     inter_rater = report["inter_rater"]
+    gate = report["admission_gate"]
     print(f"outcome-bearing coverage: adjudicated {coverage['adjudicated']} / {coverage['total']}")
     print(f"silver/task-only: {report['silver_task_only_count']}")
     print(f"class balance: accepted={balance['accepted']} rejected={balance['rejected']}")
     print(f"unresolved: {report['unresolved']}")
     print(f"inter-rater: {inter_rater['items']} item(s), {inter_rater['agreeing']} agreeing")
+    print(
+        f"evidence after as_of: {len(report['evidence_after_as_of'])} "
+        f"record(s){': ' + ', '.join(report['evidence_after_as_of']) if report['evidence_after_as_of'] else ''}"
+    )
+    print(
+        f"admission gate: {gate['outcome_bearing_total']}/{gate['total']} outcome-bearing "
+        f"(80% gate {'PASS' if gate['passes_80pct'] else 'FAIL'}, "
+        f"class balance {'ok' if gate['class_balance_ok'] else 'unbalanced'})"
+    )
     print("strata:")
     for (stack, profile), count in report["strata"].items():
         print(f"  ({stack}, {profile}): {count}")

@@ -4,6 +4,43 @@ from typing import Any
 from daydream.training.adjudication.report import build_report
 
 
+def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> None:
+    items = [
+        {"record_id": "r1", "disposition": "accepted", "profile": "pr_review",
+         "stack": "python", "tier": "gold", "posterior_eligible": True,
+         "observations": [], "evidence_after_as_of": False},
+        {"record_id": "r2", "disposition": "rejected", "profile": "local_branch",
+         "stack": "rust", "tier": "task-only", "posterior_eligible": False,
+         "observations": [], "evidence_after_as_of": False},
+        {"record_id": "r3", "disposition": "accepted", "profile": "pr_review",
+         "stack": "python", "tier": "gold", "posterior_eligible": False,
+         "observations": [], "evidence_after_as_of": True},
+    ]
+    report = build_report(items)
+    cov = report["outcome_coverage"]
+    # outcome-bearing only counts pr_review gold (C5): r1 counts; r2 is
+    # task-only and never counts; r3 is flagged evidence-after-as_of and excluded
+    assert cov["adjudicated"] == 1
+    assert report["evidence_after_as_of"] == ["r3"]
+    gate = report["admission_gate"]
+    assert gate["outcome_bearing_total"] == 1
+    assert gate["passes_80pct"] is False  # 1 of 3 items
+    assert gate["class_balance_ok"] is True
+
+
+def test_report_task_only_never_counts_toward_gate() -> None:
+    items = [
+        {"record_id": f"r{i}", "disposition": "unanswered", "profile": "pr_review",
+         "stack": "python", "tier": "task-only", "posterior_eligible": False,
+         "observations": [], "evidence_after_as_of": False}
+        for i in range(5)
+    ]
+    report = build_report(items)
+    assert report["outcome_coverage"]["adjudicated"] == 0
+    assert report["admission_gate"]["passes_80pct"] is False
+    assert report["silver_task_only_count"] == 5
+
+
 def _item(
     rid: str,
     disposition: str,
@@ -13,6 +50,7 @@ def _item(
 ) -> dict[str, Any]:
     return {"record_id": rid, "disposition": disposition, "profile": profile, "stack": stack,
             "tier": "gold" if disposition in {"accepted", "rejected"} else "task-only",
+            "posterior_eligible": disposition in {"accepted", "rejected"},
             "observations": [{"role": r, "disposition": d}
                              for (r, d) in raters]}
 
@@ -46,7 +84,11 @@ def test_model_suggested_observations_never_count_as_human_raters() -> None:
         _item("b" * 64, "accepted", raters=(("model-suggested", "accepted"), ("rater", "rejected"))),
     ]
     report = build_report(items)
-    assert report["outcome_coverage"] == {"adjudicated": 1, "total": 2}  # model-suggested-only item unresolved
+    # C5/M9 outcome-bearing counting is tier/eligibility-based, not
+    # human-decision-based: both decisive gold pr_review records count toward
+    # the numerator; the model-suggested-only one is still *unresolved*.
+    assert report["outcome_coverage"] == {"adjudicated": 2, "total": 2}
+    assert report["unresolved"] == 1
     assert report["unresolved"] == 1
     assert report["inter_rater"] == {"items": 0, "agreeing": 0}  # no second human in the dispute
 

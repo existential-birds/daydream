@@ -169,3 +169,54 @@ def test_canonical_harvest_emits_annotations_jsonl_from_merged_records(tmp_path:
     for line in lines:
         assert line == json.dumps(json.loads(line), sort_keys=True,
                                   separators=(",", ":"), ensure_ascii=False)
+
+
+def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
+    """Recorded-and-flagged as_of edge policy: evidence observed after the pin's
+    ``as_of`` keeps its evidence but is stamped ``evidence_after_as_of=True``
+    (never gold-eligible downstream); evidence before the pin stays False."""
+    root = _index(tmp_path)
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    conn = _get_connection(archive)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        "VALUES ('s2', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s2')"
+    )
+    conn.commit()
+    conn.close()
+    run_materialize(root, tmp_path / "mat", pin=_PIN)
+    run_canonical_harvest(
+        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
+        observations_path=None,
+    )
+    # Second index whose evidence carries a created_at after the pin
+    # (2026-02-01T00:00:00+00:00).
+    sessions = [{
+        "session_id": "s2", "trajectory_id": "s2-t", "segment_id": "s2-seg",
+        "resolutions": [{
+            "fingerprint": "fp-1", "disposition": "unanswered",
+            "evidence": [{"reply_id": 1, "body_sha256": "abc",
+                          "created_at": "2026-03-01T00:00:00+00:00"}],
+            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
+            "comment_id": 7,
+        }],
+    }]
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+    run_materialize(root, tmp_path / "mat2", pin=_PIN)
+    out = run_canonical_harvest(
+        index_root=root, materialize_dir=tmp_path / "mat2", archive_dir=archive,
+        observations_path=None,
+    )
+    assert out["evidence_after_as_of"] == [json.loads(
+        (tmp_path / "mat2" / "annotations.jsonl").read_text().splitlines()[0]
+    )["record_id"]]
+    records = [json.loads(line) for line in
+               (tmp_path / "mat2" / "annotations.jsonl").read_text().splitlines()]
+    assert records[0]["evidence_after_as_of"] is True
+    # The first (pre-pin) harvest stays unflagged.
+    first = [json.loads(line) for line in
+             (tmp_path / "mat" / "annotations.jsonl").read_text().splitlines()]
+    assert first[0]["evidence_after_as_of"] is False

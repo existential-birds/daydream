@@ -15,6 +15,9 @@ from typing import Any
 
 __all__ = ["build_report"]
 
+_DECISIVE_DISPOSITIONS = frozenset({"accepted", "rejected"})
+_ADMISSION_GATE_VERSION = 1
+
 
 def _required(item: Mapping[str, object], field: str) -> object:
     value = item.get(field)
@@ -44,6 +47,14 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     - ``unresolved``: records with no effective human decision.
     - ``inter_rater``: agreement over records with >=2 human rater observations.
     - ``strata``: counts keyed by ``(stack, profile)``.
+    - ``evidence_after_as_of``: sorted record ids flagged by the canonical
+      harvest as having evidence observed after the ``as_of`` pin — recorded
+      and flagged, never gold-eligible (C5/M9).
+    - ``admission_gate``: the #94 admission gate over **outcome-bearing**
+      records only. ``outcome_coverage.adjudicated`` counts gold-tier,
+      ``posterior_eligible``, ``pr_review`` records and excludes
+      ``evidence_after_as_of`` records; task-only items are reported but never
+      feed the 80% denominator.
     """
     adjudicated = 0
     decisive_total = 0
@@ -54,9 +65,10 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
     inter_rater_items = 0
     inter_rater_agreeing = 0
     strata: dict[tuple[str, str], int] = {}
+    evidence_after_as_of: list[str] = []
 
     for item in items:
-        str(_required(item, "record_id"))  # fail-closed validation; id not needed for aggregation
+        record_id = str(_required(item, "record_id"))
         disposition = str(_required(item, "disposition"))
         stack = str(item.get("stack", ""))
         profile = str(item.get("profile", ""))
@@ -67,16 +79,31 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         human = _human_dispositions(observations)
         has_human_decision = bool(human)
 
-        if disposition in {"accepted", "rejected"}:
-            decisive_total += 1
-            if has_human_decision:
-                adjudicated += 1
-            else:
+        # Recorded-and-flagged as_of edge policy: the record keeps its evidence
+        # but is never gold-eligible, so it is excluded from the outcome-bearing
+        # numerator regardless of disposition.
+        if bool(item.get("evidence_after_as_of", False)):
+            evidence_after_as_of.append(record_id)
+
+        tier = str(item.get("tier", ""))
+        posterior_eligible = bool(item.get("posterior_eligible", False))
+        decisive = disposition in _DECISIVE_DISPOSITIONS
+        if decisive:
+            if tier != "task-only":
+                decisive_total += 1
+            if not has_human_decision:
                 unresolved += 1
             if disposition == "accepted":
                 accepted += 1
             else:
                 rejected += 1
+            # Outcome-bearing numerator (C5/M9): gold-tier, posterior-eligible
+            # pr_review records only — task-only never counts, and neither do
+            # evidence-after-as_of records.
+            if tier == "gold" and posterior_eligible and profile == "pr_review" and not bool(
+                item.get("evidence_after_as_of", False)
+            ):
+                adjudicated += 1
         else:
             silver_task_only += 1
 
@@ -91,6 +118,7 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
             ):
                 inter_rater_agreeing += 1
 
+    gate_passes = decisive_total > 0 and adjudicated * 5 >= decisive_total * 4
     return {
         "outcome_coverage": {"adjudicated": adjudicated, "total": decisive_total},
         "silver_task_only_count": silver_task_only,
@@ -98,4 +126,12 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         "unresolved": unresolved,
         "inter_rater": {"items": inter_rater_items, "agreeing": inter_rater_agreeing},
         "strata": {k: strata[k] for k in sorted(strata)},
+        "evidence_after_as_of": sorted(evidence_after_as_of),
+        "admission_gate": {
+            "outcome_bearing_total": adjudicated,
+            "total": decisive_total,
+            "passes_80pct": gate_passes,
+            "class_balance_ok": accepted > 0 and rejected > 0,
+            "gate_version": _ADMISSION_GATE_VERSION,
+        },
     }

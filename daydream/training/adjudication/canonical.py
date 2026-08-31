@@ -18,6 +18,8 @@ only re-verifies it against the preview pin.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +45,24 @@ _HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
 def _canonical(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _evidence_after_as_of(record: Mapping[str, Any], as_of: str | None) -> bool:
+    """Recorded-and-flagged ``as_of`` edge policy: True when any evidence entry's
+    ``created_at`` is after the pin's ``as_of`` (both parsed with
+    :func:`datetime.fromisoformat`, mirroring ``projector.py:_max_valid_at`` so
+    ``Z`` vs ``+00:00`` spelling can never mis-order the comparison). Such
+    records keep their evidence but are never gold-eligible."""
+    if not as_of:
+        return False
+    pin_dt = datetime.fromisoformat(as_of)
+    for entry in record.get("evidence") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        created_at = entry.get("created_at")
+        if created_at and datetime.fromisoformat(str(created_at)) > pin_dt:
+            return True
+    return False
 
 
 class AnnotationDriftError(ValueError):
@@ -162,6 +182,7 @@ def run_canonical_harvest(
             grouped.setdefault(record_id, []).append(obs)
 
     human_adjudicated = 0
+    flagged_after_as_of: list[str] = []
     merged_records: list[dict[str, Any]] = []
     for record in materialized:
         record = dict(record)
@@ -177,6 +198,9 @@ def run_canonical_harvest(
                 record["human_labeler"] = resolved["labeler"]
                 record["human_role"] = resolved["role"]
                 human_adjudicated += 1
+        record["evidence_after_as_of"] = _evidence_after_as_of(record, pin.get("as_of"))
+        if record["evidence_after_as_of"]:
+            flagged_after_as_of.append(record_id)
         merged_records.append(record)
     merged_records.sort(key=lambda r: str(r["record_id"]))
 
@@ -232,4 +256,5 @@ def run_canonical_harvest(
         "skipped_sessions": skipped_sessions,
         "human_adjudicated": human_adjudicated,
         "record_count": len(merged_records),
+        "evidence_after_as_of": sorted(flagged_after_as_of),
     }
