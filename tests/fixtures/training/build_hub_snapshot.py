@@ -64,20 +64,16 @@ def build_snapshot(*, hostile: bool = False) -> FakeHub:
     """Materialize the pinned three-session snapshot as an in-memory FakeHub."""
     files: dict[str, bytes] = {}
     for session_id, session in zip(_SNAPSHOT_SESSION_IDS, FIXTURE_SESSIONS, strict=False):
-        manifest = _snapshot_manifest(
-            session_id, session.repo_slug, session.skill, session.outcome_labels
-        )
-        files[f"bundles/{session_id}/manifest.json"] = json.dumps(
-            manifest.to_dict(), indent=2
-        ).encode()
-        files[f"bundles/{session_id}/trajectory.json"] = json.dumps(
-            _MINIMAL_TRAJECTORY, indent=2
-        ).encode()
+        manifest = _snapshot_manifest(session_id, session.repo_slug, session.skill, session.outcome_labels)
+        files[f"bundles/{session_id}/manifest.json"] = json.dumps(manifest.to_dict(), indent=2).encode()
+        files[f"bundles/{session_id}/trajectory.json"] = json.dumps(_MINIMAL_TRAJECTORY, indent=2).encode()
     # Bronze companion content: hydration must never touch it (M10).
     files["bronze/manifest.json"] = b'{"bronze": true}\n'
     # Remote resume ledger, seeded empty: the Hub is the canonical resume state.
     curation_id = derive_curation_id(
-        SNAPSHOT_REVISION, SANITIZER_VERSION, HYDRATION_INDEX_SCHEMA_VERSION,
+        SNAPSHOT_REVISION,
+        SANITIZER_VERSION,
+        HYDRATION_INDEX_SCHEMA_VERSION,
         ADMISSION_POLICY_VERSION,
     )
     files[f"curated/{curation_id}/resume/ledger.jsonl"] = b""
@@ -89,3 +85,37 @@ def build_snapshot(*, hostile: bool = False) -> FakeHub:
     hub = FakeHub(repo_id=REPO_ID, private=True, files=files)
     hub.commit_revision(SNAPSHOT_REVISION)
     return hub
+
+
+class AnnotationsHub(FakeHub):
+    """Annotations-capable fake Hub: public ``files`` dict + ``mutate_bundle`` seam.
+
+    Extends :class:`FakeHub` for the per-finding annotation-snapshot pipeline
+    (#1055): the ``annotations/<curation-id>/<snapshot-id>/`` prefix is
+    pre-seeded and :meth:`mutate_annotation_file` lets tests tamper with (or
+    add to) the published bundle in place. Private by default, like the real
+    target repo. (``mutate_bundle`` keeps FakeHub's bundle-collision signature;
+    annotation mutations go through the renamed seam.)
+    """
+
+    def __init__(
+        self,
+        *,
+        curation_id: str,
+        snapshot_id: str,
+        private: bool = True,
+        files: dict[str, bytes] | None = None,
+    ) -> None:
+        self.prefix = f"annotations/{curation_id}/{snapshot_id}/"
+        seeded = {f"{self.prefix}preview-manifest.json": b"{}\n"}
+        seeded.update(files or {})
+        super().__init__(repo_id=REPO_ID, private=private, files=seeded)
+
+    def mutate_annotation_file(self, relpath: str, data: bytes) -> None:
+        """Overwrite (or add) one file under the annotations prefix."""
+        self.files[f"{self.prefix}{relpath}"] = data
+
+
+def build_annotations_hub(curation_id: str, snapshot_id: str, *, private: bool = True) -> AnnotationsHub:
+    """Materialize an empty annotations bundle hub for one snapshot pin."""
+    return AnnotationsHub(curation_id=curation_id, snapshot_id=snapshot_id, private=private)
