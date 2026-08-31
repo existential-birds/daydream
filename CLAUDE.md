@@ -208,7 +208,7 @@ Full contract: `docs/extensions.md`.
 - **`make check`** = root `uv lock --check` + vulture dead-code scan over `daydream tests` and the RL package + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest + standalone RL lockcheck/ruff/mypy/pytest (`cd rl/daydream_review_v1`); `scripts/hooks/pre-push` verifies signatures then delegates to it.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - Root `.editorconfig` declares editor-side defaults (UTF-8/LF/final newline,
-  4-space Python, 2-space YAML/TOML, Makefile tabs, `*.md` trailing-whitespace
+  4-space Python, 2-space YAML, 4-space TOML, Makefile tabs, `*.md` trailing-whitespace
   preserved); the `daydream/atif/**` carve-out declares no indent/trim keys
   (a section can add or override inherited keys but never unset them, so
   `[*.py]` 4-space rules still apply to vendored `.py` files) — pinned by
