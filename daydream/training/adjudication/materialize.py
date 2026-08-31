@@ -5,8 +5,9 @@ shared serializer (``snapshot.build_canonical_record``) and emits a
 deterministic ``sessions.jsonl`` plus a pin-pinned ``preview-manifest.json``.
 
 Preview mode guarantees (AC 4 / M2): never appends ``label_observations``,
-never writes any resume-cache or harvest-complete marker, never touches the
-archive SQLite index — this module does not even import ``archive.index``.
+never writes any resume-cache or harvest-complete marker. When the input is a
+hydrated staging archive the SQLite index is only ever **read** (via
+``archive.index.query_runs``) — never written.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import os
 from pathlib import Path
 from typing import Any, cast, get_args
 
+from daydream.archive.hydrate import HubUnavailableError
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
@@ -38,6 +40,68 @@ def _write_atomic(out_path: Path, payload: str) -> None:
     tmp_path = out_path.with_name(out_path.name + ".tmp")
     tmp_path.write_text(payload, encoding="utf-8")
     os.replace(tmp_path, out_path)
+
+
+def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]], str]:
+    """Build queue-consumable session records from a hydrated staging archive.
+
+    A hydrated staging archive (``archive.hydrate.run_hydrate_hub``) has no
+    ``sessions.jsonl``: its sessions live in the SQLite index plus one
+    sanitized ``trajectory.json`` per run under ``runs/<session_id>/``, whose
+    ``resolutions`` carry the #980 semantic dispositions. This adapter joins
+    the two into the same session shape ``_load_sessions`` returns — read-only
+    over the index, fail-closed on any missing or adjudication-empty run.
+
+    The index revision is the pinned source commit (the single revision
+    directory under ``downloads/``) — a full 40-hex SHA, exactly what the
+    publication machinery's pinned-revision resolver accepts.
+    """
+    if not (index_root / "index.db").is_file():
+        raise HubUnavailableError(
+            f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
+        )
+    from daydream.archive.index import query_runs
+
+    sessions: list[dict[str, Any]] = []
+    for row in query_runs(index_root):
+        session_id = str(row["session_id"])
+        trajectory_path = index_root / "runs" / session_id / "trajectory.json"
+        if not trajectory_path.is_file():
+            raise HubUnavailableError(
+                f"hydrated index run {session_id!r} has no trajectory at {trajectory_path}"
+            )
+        try:
+            trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HubUnavailableError(
+                f"unreadable hydrated trajectory at {trajectory_path}: {exc}"
+            ) from exc
+        resolutions = trajectory.get("resolutions") if isinstance(trajectory, dict) else None
+        if not isinstance(resolutions, list) or not resolutions:
+            raise HubUnavailableError(
+                f"hydrated trajectory for session {session_id!r} carries no "
+                "per-finding resolutions to materialize"
+            )
+        sessions.append(
+            {
+                "session_id": session_id,
+                "trajectory_id": session_id,
+                "segment_id": session_id,
+                "resolutions": resolutions,
+            }
+        )
+    if not sessions:
+        raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
+    downloads = index_root / "downloads"
+    if not downloads.is_dir():
+        raise HubUnavailableError(f"hydrated index at {index_root} has no downloads/ revision pin")
+    revisions = sorted(p.name for p in downloads.iterdir() if p.is_dir())
+    if len(revisions) != 1:
+        raise HubUnavailableError(
+            f"hydrated index at {index_root} has {len(revisions)} downloaded revisions; "
+            "expected exactly one pinned source commit"
+        )
+    return sessions, revisions[0]
 
 
 def _resolution_from_row(row: dict[str, Any]) -> PerFindingResolution:
@@ -102,7 +166,12 @@ def run_materialize(
     ``dry_run=True`` validates everything and returns the summary without
     writing any file.
     """
-    sessions, index_revision = _load_sessions(index_root)
+    if (index_root / _SESSIONS_OUT_FILENAME).is_file():
+        sessions, index_revision = _load_sessions(index_root)
+    else:
+        # Hydrated staging archive: derive the sessions from the SQLite index
+        # plus the sanitized per-run trajectories (read-only).
+        sessions, index_revision = _sessions_from_hydrated_stage(index_root)
 
     records: list[dict[str, Any]] = []
     for session in sessions:

@@ -36,6 +36,37 @@ SNAPSHOT_REVISION = hashlib.sha256(b"fixture-hub-snapshot-v1").hexdigest()[:40]
 _SNAPSHOT_SESSION_IDS = ("sess-a", "sess-b", "sess-c")
 
 
+def _snapshot_trajectory(session_id: str) -> dict[str, object]:
+    """The minimal trajectory plus one unanswered per-finding resolution.
+
+    Additive keys only: the #981/hydrate consumers keep parsing the same
+    fields, while the #1055 annotation pipeline gets the adjudication-shaped
+    finding it needs to build a non-empty queue. The evidence digest is
+    recomputed from the evidence list so the fixture satisfies the shared
+    serializer's digest contract by construction.
+    """
+    evidence = [
+        {
+            "reply_id": "r1",
+            "body_sha256": hashlib.sha256(f"reply-1-{session_id}".encode()).hexdigest(),
+        }
+    ]
+    trajectory: dict[str, object] = dict(_MINIMAL_TRAJECTORY)
+    trajectory["resolutions"] = [
+        {
+            "fingerprint": f"fp-{session_id}",
+            "disposition": "unanswered",
+            "evidence": evidence,
+            "evidence_digest": hashlib.sha256(
+                json.dumps(evidence, sort_keys=True).encode()
+            ).hexdigest(),
+            "profile": "pr_review",
+            "stack": "python",
+        }
+    ]
+    return trajectory
+
+
 def _snapshot_manifest(session_id: str, repo_slug: str, skill: str, outcome_labels: tuple[str, ...]) -> Manifest:
     """Build a Manifest from §9 session data with staging-safe path fields.
 
@@ -66,7 +97,9 @@ def build_snapshot(*, hostile: bool = False) -> FakeHub:
     for session_id, session in zip(_SNAPSHOT_SESSION_IDS, FIXTURE_SESSIONS, strict=False):
         manifest = _snapshot_manifest(session_id, session.repo_slug, session.skill, session.outcome_labels)
         files[f"bundles/{session_id}/manifest.json"] = json.dumps(manifest.to_dict(), indent=2).encode()
-        files[f"bundles/{session_id}/trajectory.json"] = json.dumps(_MINIMAL_TRAJECTORY, indent=2).encode()
+        files[f"bundles/{session_id}/trajectory.json"] = json.dumps(
+            _snapshot_trajectory(session_id), indent=2
+        ).encode()
     # Bronze companion content: hydration must never touch it (M10).
     files["bronze/manifest.json"] = b'{"bronze": true}\n'
     # Remote resume ledger, seeded empty: the Hub is the canonical resume state.

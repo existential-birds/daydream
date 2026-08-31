@@ -107,6 +107,11 @@ def build_canonical_record(
         "labeler_version": HUMAN_LABELER_VERSION,
         "schema_version": f"annotation-snapshot/{ANNOTATION_SNAPSHOT_SCHEMA_VERSION}",
         "evidence_observed_at": evidence_observed_at,
+        # Self-contained session view: consumers that rebuild the queue or the
+        # projection from canonical records (``project_findings``/``build_queue``)
+        # consume the session shape (``resolutions`` list), and the materialized
+        # per-finding record must be directly consumable without a second shape.
+        "resolutions": [dict(rows[0])],
     }
     if as_of is not None:
         record["as_of"] = as_of
