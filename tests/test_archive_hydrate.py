@@ -175,6 +175,133 @@ class TestResolveRevision:
 
 
 class TestDownloadSnapshot:
+    def test_canonical_root_sessions_are_normalized_and_derived_outputs_ignored(
+        self, tmp_path: Path
+    ) -> None:
+        hub = FakeHub(
+            repo_id="org/private-ds",
+            private=True,
+            files={
+                "sess-root/manifest.json": b'{"session_id": "sess-root"}',
+                "sess-root/trajectory.json": b"{}",
+                "sess-root/deep/merged-items.json": b"{}",
+                "README.md": b"archive metadata",
+                "bundle/manifest.json": b'{"session_id": "sess-root"}',
+                "bundle/trajectory.json": b"{}",
+                "curated/cur-ignored/batches/old/manifest.json": b"{}",
+                "annotations/latest/sessions.jsonl": b"{}\n",
+            },
+        )
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage" / "downloads"
+
+        result = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+
+        assert result.discovered == 1
+        assert result.run_shaped_manifests == 1
+        normalized = stage / ("a" * 40) / "bundles" / "sess-root"
+        assert (normalized / "manifest.json").read_bytes() == b'{"session_id": "sess-root"}'
+        assert (normalized / "trajectory.json").read_bytes() == b"{}"
+        assert (normalized / "deep" / "merged-items.json").read_bytes() == b"{}"
+        assert not (stage / ("a" * 40) / "sess-root").exists()
+        assert not (stage / ("a" * 40) / "README.md").exists()
+        assert not (stage / ("a" * 40) / "curated").exists()
+        assert not (stage / ("a" * 40) / "annotations").exists()
+
+    def test_run_shaped_manifest_without_required_artifacts_fails_closed(self, tmp_path: Path) -> None:
+        hub = FakeHub(
+            repo_id="org/private-ds",
+            private=True,
+            files={"sess-incomplete/manifest.json": b'{"session_id": "sess-incomplete"}'},
+        )
+        hub.commit_revision("a" * 40)
+
+        with pytest.raises(hydrate.HydrationError, match="zero candidates|trajectory.json"):
+            hydrate.download_snapshot(
+                hub, revision="a" * 40, stage_dir=tmp_path / "stage" / "downloads"
+            )
+
+    def test_bronze_tree_is_never_discovered(self, tmp_path: Path) -> None:
+        hub = FakeHub(
+            repo_id="org/private-ds",
+            private=True,
+            files={
+                "sess-a/manifest.json": b'{"session_id": "sess-a"}',
+                "sess-a/trajectory.json": b"{}",
+                "bronze/manifest.json": b'{"bronze": true}',
+                "bronze/trajectory.json": b"{}",
+            },
+        )
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage" / "downloads"
+
+        result = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+
+        # M10: bronze raw-ingest content is immutable companion data, never
+        # a canonical session candidate.
+        assert result.discovered == 1
+        assert result.run_shaped_manifests == 1
+        assert not (stage / ("a" * 40) / "bundles" / "bronze").exists()
+
+    def test_legacy_reserved_root_is_never_discovered(self, tmp_path: Path) -> None:
+        hub = FakeHub(
+            repo_id="org/private-ds",
+            private=True,
+            files={
+                "bundles/sess-a/manifest.json": b'{"session_id": "sess-a"}',
+                "bundles/sess-a/trajectory.json": b"{}",
+                # Same shape as a complete legacy session under a reserved
+                # root: excluded, exactly like its top-level sibling.
+                "bundles/curated/manifest.json": b'{"session_id": "curated"}',
+                "bundles/curated/trajectory.json": b"{}",
+                "bundles/curated/batches/old/items.jsonl": b"{}\n",
+            },
+        )
+        hub.commit_revision("a" * 40)
+        stage = tmp_path / "stage" / "downloads"
+
+        result = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
+
+        assert result.discovered == 1
+        assert result.run_shaped_manifests == 1
+        assert not (stage / ("a" * 40) / "bundles" / "curated").exists()
+        assert (stage / ("a" * 40) / "bundles" / "sess-a" / "manifest.json").exists()
+
+    def test_revision_without_any_manifest_fails_closed(self, tmp_path: Path) -> None:
+        hub = FakeHub(
+            repo_id="org/private-ds",
+            private=True,
+            files={"README.md": b"not an archive revision\n"},
+        )
+        hub.commit_revision("a" * 40)
+
+        with pytest.raises(
+            hydrate.NoSessionCandidatesError, match="zero candidates"
+        ):
+            hydrate.download_snapshot(
+                hub, revision="a" * 40, stage_dir=tmp_path / "stage" / "downloads"
+            )
+
+    def test_duplicate_session_id_across_layouts_fails_closed(self, tmp_path: Path) -> None:
+        hub = FakeHub(
+            repo_id="org/private-ds",
+            private=True,
+            files={
+                "sess-dup/manifest.json": b'{"session_id": "sess-dup"}',
+                "sess-dup/trajectory.json": b"{}",
+                "bundles/sess-dup/manifest.json": b'{"session_id": "sess-dup"}',
+                "bundles/sess-dup/trajectory.json": b"{}",
+            },
+        )
+        hub.commit_revision("a" * 40)
+
+        with pytest.raises(
+            hydrate.StageError, match="multiple source layouts normalize to the same session"
+        ):
+            hydrate.download_snapshot(
+                hub, revision="a" * 40, stage_dir=tmp_path / "stage" / "downloads"
+            )
+
     def test_clean_download_layout_and_digests(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
         hub.commit_revision("a" * 40)
@@ -182,6 +309,7 @@ class TestDownloadSnapshot:
         hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
         manifest = json.loads((stage / ("a" * 40) / "_download_manifest.json").read_text())
         assert len(manifest["artifacts"]) == len(SNAPSHOT)
+        assert manifest["candidate_sessions"] == ["sess-a"]
         art = manifest["artifacts"][0]
         assert art["relpath"].startswith("bundles/")  # paths relative to snapshot root
         expected = hashlib.sha256(SNAPSHOT[art["relpath"]]).hexdigest()
@@ -365,6 +493,7 @@ class TestIngestAndIndex:
         hub = make_fake_hub(tmp_path)
         hub.files["bundles/sess-bad/manifest.json"] = \
             b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
+        hub.files["bundles/sess-bad/trajectory.json"] = b"{}"
         hub.commit_revision("a" * 40)
         stage = tmp_path / "stage"
         hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
@@ -384,6 +513,7 @@ class TestIngestAndIndex:
             b'{"session_id": "sess-evil", "archive_path": "/etc", "source_path": "/usr",'
             b' "remote_url": "file:///etc/passwd"}'
         )
+        hub.files["bundles/sess-evil/trajectory.json"] = b"{}"
         hub.commit_revision("a" * 40)
         stage = tmp_path / "stage"
         hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
@@ -583,6 +713,7 @@ class TestDedupeAndLedger:
         hub.files["bundles/sess-fixture/manifest.json"] = (
             b'{"session_id": "sess-fixture", "source_path": "/tmp/pytest-of-user/test_x"}'
         )
+        hub.files["bundles/sess-fixture/trajectory.json"] = b"{}"
         hub.commit_revision("a" * 40)
         stage = tmp_path / "stage"
         hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
@@ -596,6 +727,7 @@ class TestDedupeAndLedger:
         hub.files["bundles/sess-bad/manifest.json"] = (
             b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
         )
+        hub.files["bundles/sess-bad/trajectory.json"] = b"{}"
         hub.commit_revision("a" * 40)
         stage = tmp_path / "stage"
         hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")

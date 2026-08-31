@@ -3,9 +3,10 @@
 Serializes three session bundles from ``build_archive.FIXTURE_SESSIONS`` (the
 §9 fixture matrix is reused, not re-invented) into a
 :class:`~daydream.archive.hydrate_client.FakeHub` file tree: ``manifest.json`` +
-``trajectory.json`` per session under ``bundles/<session_id>/``, a bronze
-companion file (to assert M10 immutability), an empty remote resume ledger, and
-everything pinned under a deterministic 40-hex ``SNAPSHOT_REVISION``.
+``trajectory.json`` per session under the producer's canonical
+``<session_id>/`` layout, non-run metadata, derived ``curated/**`` and
+``annotations/**`` outputs, and everything pinned under a deterministic
+40-hex ``SNAPSHOT_REVISION``.
 
 ``hostile=True`` injects traversal-style relpaths (``../../escape.txt`` and an
 absolute ``/etc/...`` path) so the trust boundary can be exercised end-to-end.
@@ -105,11 +106,20 @@ def build_snapshot(*, hostile: bool = False) -> FakeHub:
     """Materialize the pinned three-session snapshot as an in-memory FakeHub."""
     files: dict[str, bytes] = {}
     for session_id, session in zip(_SNAPSHOT_SESSION_IDS, FIXTURE_SESSIONS, strict=False):
-        manifest = _snapshot_manifest(session_id, session.repo_slug, session.skill, session.outcome_labels)
-        files[f"bundles/{session_id}/manifest.json"] = json.dumps(manifest.to_dict(), indent=2).encode()
-        files[f"bundles/{session_id}/trajectory.json"] = json.dumps(
+        manifest = _snapshot_manifest(
+            session_id, session.repo_slug, session.skill, session.outcome_labels
+        )
+        files[f"{session_id}/manifest.json"] = json.dumps(
+            manifest.to_dict(), indent=2
+        ).encode()
+        files[f"{session_id}/trajectory.json"] = json.dumps(
             _snapshot_trajectory(session_id), indent=2
         ).encode()
+    # Non-run metadata and derived outputs: hydration must ignore them.
+    files["README.md"] = b"production trajectory archive\n"
+    files["dataset_info.json"] = b'{"dataset": "daydream-trajectories"}\n'
+    files["curated/cur-old/batches/old/manifest.json"] = b'{"derived": true}\n'
+    files["annotations/latest/sessions.jsonl"] = b'{"derived": true}\n'
     # Bronze companion content: hydration must never touch it (M10).
     files["bronze/manifest.json"] = b'{"bronze": true}\n'
     # Remote resume ledger, seeded empty: the Hub is the canonical resume state.

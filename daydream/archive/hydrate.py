@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path, PurePosixPath
@@ -61,6 +62,10 @@ class HubDownloadError(HydrationError):
 
 class StageError(HydrationError):
     """Staging the pinned snapshot failed (download, digest, or path violation)."""
+
+
+class NoSessionCandidatesError(HydrationError):
+    """The snapshot looks like a run archive but contains no complete sessions."""
 
 
 class MovingBranchError(HydrationError):
@@ -167,6 +172,158 @@ class DownloadResult:
     downloaded: int = 0
     skipped: int = 0
     digests: dict[str, str] = field(default_factory=dict)  # relpath -> sha256
+    discovered: int = 0
+    run_shaped_manifests: int = 0
+    incomplete_manifests: tuple[str, ...] = ()
+
+
+_REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", "trajectory.json"))
+_DERIVED_ARCHIVE_ROOTS = frozenset(("annotations", "curated"))
+# Root names that are never valid session ids at depth 1, in either layout.
+# ``bronze`` is the immutable raw-ingest tree (M10): hydration must never
+# discover or stage anything under it.
+_RESERVED_CANONICAL_ROOTS = frozenset(("annotations", "bronze", "bundle", "bundles", "curated"))
+
+
+@dataclass(frozen=True)
+class _DiscoveredSession:
+    """One source-layout session identified by its manifest path."""
+
+    session_id: str
+    source_root: str
+    layout: str
+
+
+@dataclass(frozen=True)
+class _Discovery:
+    """Validated snapshot discovery and its normalized staging file map."""
+
+    sessions: tuple[_DiscoveredSession, ...]
+    normalized_paths: tuple[tuple[str, str], ...]  # (normalized, source)
+    run_shaped_manifests: int
+    canonical_manifests: int
+    legacy_manifests: int
+    incomplete_manifests: tuple[str, ...]
+
+
+def _source_root_for_path(relpath: str) -> str | None:
+    """Return the possible session root for an archive path, if any.
+
+    The returned value is only a discovery hint. A path becomes a candidate
+    source file only after a matching root-level or legacy manifest has been
+    found and the required artifact set has been validated.
+    """
+    parts = PurePosixPath(relpath).parts
+    if not parts or parts[0] in _DERIVED_ARCHIVE_ROOTS:
+        return None
+    if parts[0] == "bundles":
+        if (
+            len(parts) >= 3
+            and _is_bare_segment(parts[1])
+            and parts[1] not in _RESERVED_CANONICAL_ROOTS
+        ):
+            return f"bundles/{parts[1]}"
+        return None
+    if len(parts) >= 2 and _is_bare_segment(parts[0]) and parts[0] not in _RESERVED_CANONICAL_ROOTS:
+        return parts[0]
+    return None
+
+
+def _manifest_source_session(relpath: str) -> _DiscoveredSession | None:
+    """Recognize the two supported manifest layouts without reading content."""
+    parts = PurePosixPath(relpath).parts
+    if len(parts) == 2 and parts[1] == "manifest.json":
+        session_id = parts[0]
+        if _is_bare_segment(session_id) and session_id not in _RESERVED_CANONICAL_ROOTS:
+            return _DiscoveredSession(session_id, session_id, "canonical")
+    if (
+        len(parts) == 3
+        and parts[0] == "bundles"
+        and parts[2] == "manifest.json"
+        and _is_bare_segment(parts[1])
+        and parts[1] not in _RESERVED_CANONICAL_ROOTS
+    ):
+        return _DiscoveredSession(parts[1], f"bundles/{parts[1]}", "legacy")
+    return None
+
+
+def _discover_snapshot(relpaths: list[str]) -> _Discovery:
+    """Discover complete source sessions and map them to ``bundles/<id>/``.
+
+    Discovery is based on manifest shape plus the required trajectory artifact,
+    not on a broad directory prefix. Both source layouts normalize to the same
+    internal staging tree; duplicate normalized paths are fatal rather than
+    silently overwritten.
+    """
+    manifest_sessions: dict[str, _DiscoveredSession] = {}
+    paths_by_root: dict[str, set[str]] = {}
+    canonical_manifests = 0
+    legacy_manifests = 0
+    for relpath in relpaths:
+        session = _manifest_source_session(relpath)
+        if session is not None:
+            if session.source_root in manifest_sessions:
+                raise StageError(
+                    redact_text(f"duplicate run-shaped manifest path for {session.source_root!r}")
+                )
+            manifest_sessions[session.source_root] = session
+            if session.layout == "canonical":
+                canonical_manifests += 1
+            else:
+                legacy_manifests += 1
+        source_root = _source_root_for_path(relpath)
+        if source_root is not None:
+            paths_by_root.setdefault(source_root, set()).add(relpath)
+
+    complete: list[_DiscoveredSession] = []
+    incomplete: list[str] = []
+    for source_root, session in sorted(manifest_sessions.items()):
+        available = {
+            PurePosixPath(path).relative_to(PurePosixPath(source_root)).as_posix()
+            for path in paths_by_root.get(source_root, set())
+        }
+        missing = sorted(_REQUIRED_SESSION_ARTIFACTS - available)
+        if missing:
+            incomplete.append(f"{source_root} (missing {', '.join(missing)})")
+        else:
+            complete.append(session)
+
+    session_id_counts = Counter(session.session_id for session in complete)
+    duplicates = sorted(
+        session_id for session_id, count in session_id_counts.items() if count > 1
+    )
+    if duplicates:
+        raise StageError(
+            redact_text(
+                "multiple source layouts normalize to the same session id(s): "
+                + ", ".join(repr(value) for value in duplicates)
+            )
+        )
+
+    normalized_paths: dict[str, str] = {}
+    for session in complete:
+        source_root = session.source_root
+        for source_path in sorted(paths_by_root[source_root]):
+            suffix = PurePosixPath(source_path).relative_to(PurePosixPath(source_root)).as_posix()
+            normalized = f"bundles/{session.session_id}/{suffix}"
+            prior = normalized_paths.get(normalized)
+            if prior is not None and prior != source_path:
+                raise StageError(
+                    redact_text(
+                        f"source paths {prior!r} and {source_path!r} collide after normalization "
+                        f"at {normalized!r}"
+                    )
+                )
+            normalized_paths[normalized] = source_path
+
+    return _Discovery(
+        sessions=tuple(sorted(complete, key=lambda item: item.session_id)),
+        normalized_paths=tuple(sorted(normalized_paths.items())),
+        run_shaped_manifests=canonical_manifests + legacy_manifests,
+        canonical_manifests=canonical_manifests,
+        legacy_manifests=legacy_manifests,
+        incomplete_manifests=tuple(incomplete),
+    )
 
 
 def _validate_relpath(relpath: str, root: Path) -> Path:
@@ -213,14 +370,19 @@ def download_snapshot(
 ) -> DownloadResult:
     """Resumable, content-addressed download of a pinned snapshot revision (issue #982 M3).
 
-    Lists the repo's bundle content (paths under ``bundles/``), writes each
-    artifact to ``stage_dir/<revision>/<relpath>``, and records a per-artifact
-    ledger (relpath, sha256, size, fetched_at) in
+    Discovers complete sessions in the producer's canonical
+    ``<session-id>/manifest.json`` + ``trajectory.json`` layout and the tested
+    legacy ``bundles/<session-id>/...`` layout. Both are normalized to
+    ``stage_dir/<revision>/bundles/<session-id>/...``. Derived ``curated/`` and
+    ``annotations/`` trees and unrelated top-level files are excluded. Each
+    staged artifact is recorded in a per-artifact ledger (normalized relpath,
+    source relpath, sha256, size, fetched_at) in
     ``stage_dir/<revision>/_download_manifest.json``.
 
     Resume: an on-disk artifact whose sha256 matches the existing ledger record
     is skipped, not re-downloaded; missing or mismatched artifacts are fetched,
-    re-hashed, and their records updated. ``expect`` — ``{relpath: sha256}``
+    re-hashed, and their records updated. ``expect`` —
+    ``{source-or-normalized-relpath: sha256}``
     from a pinned manifest — makes any disagreement a hard :class:`StageError`
     naming "digest". Every relpath is validated against the staging root before
     any write (see :func:`_validate_relpath`); download failures delete the
@@ -238,32 +400,54 @@ def download_snapshot(
             records = {}  # corrupt ledger: rebuild from disk state
 
     relpaths = list(client.list_repo_files(revision=revision))
+    for relpath in relpaths:
+        # Validate every Hub path, including ignored metadata and derived
+        # output, before applying discovery filters. A malicious ignored path
+        # must not become an escape hatch around the staging trust boundary.
+        _validate_relpath(relpath, root)
+    discovery = _discover_snapshot(relpaths)
+    if not discovery.sessions:
+        details = "; ".join(discovery.incomplete_manifests) or "required artifacts were not found"
+        raise NoSessionCandidatesError(
+            redact_text(
+                f"source revision {revision!r} contains {discovery.run_shaped_manifests} "
+                "run-shaped manifest(s) but discovery produced zero candidates "
+                f"(canonical={discovery.canonical_manifests}, legacy={discovery.legacy_manifests}); "
+                "expected <session-id>/manifest.json plus trajectory.json or "
+                f"bundles/<session-id>/...; {details}"
+            )
+        )
     downloaded = 0
     skipped = 0
     digests: dict[str, str] = {}
     artifacts: list[dict[str, Any]] = []
 
-    for relpath in relpaths:
-        target = _validate_relpath(relpath, root)
-        if not relpath.startswith("bundles/"):
-            continue  # non-bundle paths (top-level manifests, etc.) are not staged here
-        expected_sha = (expect or {}).get(relpath)
+    for normalized, source_relpath in discovery.normalized_paths:
+        target = _validate_relpath(normalized, root)
+        expected_sha = (expect or {}).get(source_relpath) or (expect or {}).get(normalized)
         try:
             if target.exists():
                 existing = hashlib.sha256(target.read_bytes()).hexdigest()
-                record_sha = records.get(relpath, {}).get("sha256")
+                record_sha = records.get(normalized, {}).get("sha256")
                 if expected_sha in (None, existing) and record_sha in (None, existing):
-                    digests[relpath] = existing
+                    digests[normalized] = existing
                     skipped += 1
-                    artifacts.append({**records.get(relpath, {}), "relpath": relpath, "sha256": existing})
+                    artifacts.append(
+                        {
+                            **records.get(normalized, {}),
+                            "relpath": normalized,
+                            "source_relpath": source_relpath,
+                            "sha256": existing,
+                        }
+                    )
                     continue
-            data = client.download_file(relpath, revision=revision)
+            data = client.download_file(source_relpath, revision=revision)
         except HydrationError as exc:
             raise StageError(redact_text(str(exc))) from exc
         sha = hashlib.sha256(data).hexdigest()
         if expected_sha is not None and sha != expected_sha:
             raise StageError(
-                redact_text(f"digest mismatch for {relpath!r}: expected {expected_sha}, got {sha}")
+                redact_text(f"digest mismatch for {source_relpath!r}: expected {expected_sha}, got {sha}")
             )
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".partial")
@@ -272,12 +456,13 @@ def download_snapshot(
             tmp.replace(target)
         except OSError as exc:
             tmp.unlink(missing_ok=True)
-            raise StageError(redact_text(f"write failed for {relpath!r}: {exc}")) from exc
+            raise StageError(redact_text(f"write failed for {normalized!r}: {exc}")) from exc
         downloaded += 1
-        digests[relpath] = sha
+        digests[normalized] = sha
         artifacts.append(
             {
-                "relpath": relpath,
+                "relpath": normalized,
+                "source_relpath": source_relpath,
                 "sha256": sha,
                 "size": len(data),
                 "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -285,8 +470,30 @@ def download_snapshot(
         )
 
     root.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps({"revision": revision, "artifacts": artifacts}, indent=2))
-    return DownloadResult(downloaded=downloaded, skipped=skipped, digests=digests)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "revision": revision,
+                "artifacts": artifacts,
+                "candidate_sessions": [session.session_id for session in discovery.sessions],
+                "discovery": {
+                    "run_shaped_manifests": discovery.run_shaped_manifests,
+                    "canonical_manifests": discovery.canonical_manifests,
+                    "legacy_manifests": discovery.legacy_manifests,
+                    "incomplete_manifests": list(discovery.incomplete_manifests),
+                },
+            },
+            indent=2,
+        )
+    )
+    return DownloadResult(
+        downloaded=downloaded,
+        skipped=skipped,
+        digests=digests,
+        discovered=len(discovery.sessions),
+        run_shaped_manifests=discovery.run_shaped_manifests,
+        incomplete_manifests=discovery.incomplete_manifests,
+    )
 
 
 def _read_manifest_dict(bundle_dir: Path) -> dict[str, Any] | None:
@@ -338,10 +545,60 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
+    """Read the discovery diagnostics block from the download manifest.
+
+    Returns an empty dict when the manifest predates the discovery ledger
+    (a manually staged legacy tree). Invalid JSON raises ``HydrationError``
+    fail-closed, matching :func:`_discovered_session_ids`.
+    """
+    path = stage / "downloads" / str(revision) / "_download_manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("discovery", {}), dict):
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
+    discovery: dict[str, Any] = payload["discovery"]
+    return discovery
+
+
+def _discovered_session_ids(stage: Path, revision: str) -> list[str] | None:
+    """Read the normalized candidate list written by :func:`download_snapshot`.
+
+    ``None`` preserves compatibility with a manually staged legacy tree that
+    predates the discovery ledger. A present list is authoritative, including
+    an empty list, so stale normalized directories cannot become candidates on
+    a later run.
+    """
+    path = stage / "downloads" / str(revision) / "_download_manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
+    if not isinstance(payload, dict):
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
+    if "candidate_sessions" not in payload:
+        return None
+    candidates = payload["candidate_sessions"]
+    if not isinstance(candidates, list) or not all(
+        isinstance(session_id, str) and _is_bare_segment(session_id) for session_id in candidates
+    ):
+        raise HydrationError(redact_text(f"invalid candidate session ids in {path}"))
+    if len(set(candidates)) != len(candidates):
+        raise HydrationError(redact_text(f"duplicate candidate session ids in {path}"))
+    return list(candidates)
+
+
 def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
     """Run every staged bundle through the #981 ingest gate (issue #982 M4/M6).
 
-    For each session bundle under ``stage/downloads/<revision>/bundles/``:
+    For each discovered session normalized under
+    ``stage/downloads/<revision>/bundles/``:
 
     1. The manifest must parse and carry a trusted remote host
        (:func:`daydream.archive.git_safe.normalize_remote_url` identity); an
@@ -360,11 +617,17 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
     derivative per staged bundle or a quarantine result.
     """
     bundles_root = stage / "downloads" / str(revision) / "bundles"
-    if not bundles_root.is_dir():
-        return []
+    discovered_ids = _discovered_session_ids(stage, revision)
+    if discovered_ids is None:
+        bundle_items = (
+            [(bundle_dir.name, bundle_dir) for bundle_dir in sorted(bundles_root.iterdir()) if bundle_dir.is_dir()]
+            if bundles_root.is_dir()
+            else []
+        )
+    else:
+        bundle_items = [(session_id, bundles_root / session_id) for session_id in discovered_ids]
     results: list[IngestResult] = []
-    for bundle_dir in sorted(p for p in bundles_root.iterdir() if p.is_dir()):
-        name = bundle_dir.name
+    for name, bundle_dir in bundle_items:
         data = _read_manifest_dict(bundle_dir)
         if data is None:
             results.append(IngestResult(name, "quarantined", REASON_CODE_BUNDLE_UNREADABLE))
@@ -796,54 +1059,69 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
         except (OSError, ValueError, AttributeError):
             ingest_results = []
 
-    from daydream.archive.index import query_runs  # noqa: PLC0415  # local: avoid import cycle
-
-    indexed_ids = {str(row["session_id"]) for row in query_runs(stage)}
-    admitted_ids = {
-        str(e["session_id"]) for e in ingest_results if e.get("status") == "admitted"
-    } | indexed_ids
-    # Sessions whose latest dedupe decision is a rejection (identity collision
-    # / fixture exclusion) are recorded once, under that status: the manifest
-    # must never list them as admitted again (M7/frozen schema).
-    rejected_latest = {
-        sid for sid, entry in recorded.items()
-        if entry.get("status") in ("collision", "excluded")
-    }
-    admitted_ids -= rejected_latest
-
-    imported: list[dict[str, Any]] = []
-    for sid in sorted(admitted_ids):
-        entry = recorded.get(sid)
-        imported.append(
-            {
-                "session_id": sid,
-                "content_digest": admitted_digests.get(sid, entry.get("content_digest") if entry else None),
-            }
+    candidate_ids = _discovered_session_ids(stage, revision)
+    if candidate_ids is None:
+        candidate_ids = [str(e["session_id"]) for e in ingest_results]
+    if len(ingest_results) != len(candidate_ids):
+        raise HydrationError(
+            redact_text(
+                f"discovery accounting mismatch for revision {revision!r}: "
+                f"discovered {len(candidate_ids)} candidate(s), "
+                f"ingest produced {len(ingest_results)} result(s)"
+            )
         )
 
+    imported: list[dict[str, Any]] = []
     quarantined: list[dict[str, Any]] = []
-    for e in ingest_results:
-        if e.get("status") == "quarantined":
-            quarantined.append(
-                {"session_id": str(e["session_id"]), "reason_code": e.get("reason_code")}
-            )
     excluded: list[dict[str, Any]] = []
-    for sid, entry in sorted(recorded.items()):
-        if entry.get("status") == "collision":
-            quarantined.append(
-                {"session_id": sid, "reason_code": entry.get("reason_code")}
-            )
-        elif entry.get("status") == "excluded":
-            excluded.append({"session_id": sid, "reason_code": entry.get("reason_code")})
+    seen_session_ids: set[str] = set()
+    for raw_result in ingest_results:
+        sid = str(raw_result["session_id"])
+        if sid in seen_session_ids:
+            raise HydrationError(redact_text(f"duplicate ingest result for candidate session {sid!r}"))
+        seen_session_ids.add(sid)
+        entry = recorded.get(sid) or {}
+        reason_code = raw_result.get("reason_code")
+        if raw_result.get("status") == "admitted":
+            # A current ingest admission can be turned into an exclusion or
+            # collision by the dedupe pass; that decision is the authoritative
+            # current outcome and must not be listed as imported as well.
+            if entry.get("status") == "excluded":
+                excluded.append({"session_id": sid, "reason_code": entry.get("reason_code")})
+            elif entry.get("status") == "collision":
+                quarantined.append({"session_id": sid, "reason_code": entry.get("reason_code")})
+            else:
+                imported.append(
+                    {
+                        "session_id": sid,
+                        "content_digest": admitted_digests.get(
+                            sid, entry.get("content_digest")
+                        ),
+                    }
+                )
+        elif raw_result.get("status") == "quarantined":
+            quarantined.append({"session_id": sid, "reason_code": reason_code})
+        else:
+            raise HydrationError(redact_text(f"unknown ingest status for candidate {sid!r}"))
 
     rejections = [
         {
-            "session_id": e["session_id"],
-            "reason_code": e.get("reason_code"),
-            "content_digest": (recorded.get(e["session_id"], {}) or {}).get("content_digest"),
+            "session_id": str(entry["session_id"]),
+            "reason_code": entry.get("reason_code"),
+            "content_digest": (recorded.get(str(entry["session_id"]), {}) or {}).get("content_digest"),
         }
-        for e in sorted(quarantined + excluded, key=lambda x: x["session_id"])
+        for entry in sorted(quarantined + excluded, key=lambda item: str(item["session_id"]))
     ]
+    discovery_block = _download_discovery_block(stage, revision)
+    accounted = len(imported) + len(rejections)
+    if accounted != len(candidate_ids):
+        raise HydrationError(
+            redact_text(
+                f"discovery accounting mismatch for revision {revision!r}: "
+                f"discovered {len(candidate_ids)} candidate(s), admitted {len(imported)}, "
+                f"rejected {len(rejections)}"
+            )
+        )
 
     ledger: dict[str, Any] = {
         "schema_version": hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
@@ -856,10 +1134,18 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
         "excluded": sorted(excluded, key=lambda x: x["session_id"]),
         "rejections": rejections,
         "tallies": {
+            "discovered": len(candidate_ids),
+            "run_shaped_manifests": int(
+                discovery_block.get("run_shaped_manifests", len(candidate_ids))
+            ),
+            "incomplete_manifests": [
+                str(item) for item in discovery_block.get("incomplete_manifests", [])
+            ],
             "imported": len(imported),
             "quarantined": len(quarantined),
             "excluded": len(excluded),
             "rejections": len(rejections),
+            "accounted": accounted,
         },
     }
     _atomic_write_json(curated / "import-ledger.json", ledger)
@@ -1245,7 +1531,10 @@ class HydrateSummary:
     source_commit: str
     curation_id: str
     output_commit_sha: str | None = None
+    dry_run_discovered: int = 0
     dry_run_admitted: int = 0
+    dry_run_rejected: int = 0
+    dry_run_incomplete_manifests: tuple[str, ...] = ()
     verify_admitted: int = 0
     verified: bool = False
 
@@ -1537,7 +1826,10 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
         source_commit=source_commit,
         curation_id=curation_id,
         output_commit_sha=output_commit_sha,
+        dry_run_discovered=int(ledger["tallies"]["discovered"]),
         dry_run_admitted=int(ledger["tallies"]["imported"]),
+        dry_run_rejected=int(ledger["tallies"]["rejections"]),
+        dry_run_incomplete_manifests=tuple(ledger["tallies"]["incomplete_manifests"]),
     )
     summary.verify_admitted = verify_publication(
         dest_client,
