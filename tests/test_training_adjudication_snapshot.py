@@ -78,7 +78,7 @@ def test_record_evidence_digest_matches_harvest_row_digest() -> None:
     assert record_evidence_digest([]) is None
 
     class _EmptyRubric:  # duck-typed twin of harvest.Rubric with no evidence
-        per_finding_resolutions = []
+        per_finding_resolutions: list[object] = []
 
     assert _reply_evidence_digest(_EmptyRubric()) is None  # type: ignore[arg-type]
 
@@ -115,7 +115,7 @@ def test_build_canonical_record_rejects_missing_digest() -> None:
 
 
 @pytest.mark.parametrize("rows", [[], [{"fingerprint": "fp-1"}] * 2])
-def test_build_canonical_record_rejects_wrong_resolution_row_count(rows: list[dict]) -> None:
+def test_build_canonical_record_rejects_wrong_resolution_row_count(rows: list[dict[str, object]]) -> None:
     # the exactly-1-resolution-row guard (0 and 2 rows) fires independently of
     # the evidence_digest check: a valid digest is supplied so this check is what raises
     session = {
