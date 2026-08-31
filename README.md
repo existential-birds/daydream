@@ -451,6 +451,10 @@ container); when no daemon is available that target is skipped with a note and
 exits 0, so `make check` still succeeds without a daemon (CI always runs
 actionlint).
 
+Editors that support [EditorConfig](https://editorconfig.org) pick up the root
+`.editorconfig` automatically (UTF-8, LF, final newline; 4-space Python, 2-space
+YAML, 4-space TOML, tabs in Makefiles, preserved Markdown hard breaks).
+
 See [docs/coverage.md](docs/coverage.md) for the coverage gate and ratchet procedure.
 
 ## License

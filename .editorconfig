@@ -1,0 +1,41 @@
+# EditorConfig — https://editorconfig.org
+# Contract test: tests/contract/test_editorconfig_contract.py
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.toml]
+indent_style = space
+indent_size = 4
+
+# make syntax requires hard tabs in recipes
+[Makefile]
+indent_style = tab
+[*.mk]
+indent_style = tab
+
+# preserve intentional Markdown hard breaks (trailing two spaces)
+[*.md]
+trim_trailing_whitespace = false
+
+# Vendored Harbor code (mechanical-only policy D-03): the section declares no
+# indent or trailing-whitespace keys, so it imposes no carve-out-specific
+# formatting. EditorConfig merges per key across matching sections and a
+# section can only add or override inherited keys, never unset them, so
+# `[*.py]` 4-space rules still apply to vendored .py files; keep vendored
+# files byte-identical when re-vendoring.
+[daydream/atif/**]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
