@@ -207,6 +207,10 @@ Full contract: `docs/extensions.md`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
 - **`make check`** = root `uv lock --check` + vulture dead-code scan over `daydream tests` and the RL package + ruff/mypy over `daydream tests` + actionlint (Docker) + pytest + standalone RL lockcheck/ruff/mypy/pytest (`cd rl/daydream_review_v1`); `scripts/hooks/pre-push` verifies signatures then delegates to it.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
+- Root `.editorconfig` declares editor-side defaults (UTF-8/LF/final newline,
+  4-space Python, 2-space YAML/TOML, Makefile tabs, `*.md` trailing-whitespace
+  preserved); `daydream/atif/**` is a whitespace-neutral carve-out — pinned by
+  `tests/contract/test_editorconfig_contract.py`.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
 - Own your own bugs in plain language. Never describe your defect as the tool being buggy.
