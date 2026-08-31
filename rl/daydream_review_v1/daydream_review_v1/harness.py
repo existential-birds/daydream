@@ -125,8 +125,8 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         runtime: vf.Runtime,
         endpoint: str,
         secret: str,
-        mcp_urls: dict[str, str],
-        task_data: vf.TaskData,  # new trailing param in verifiers 0.3.1
+        mcp_urls: dict[str, str],  # noqa: F841 — tool-server wiring lands in 0.3.2
+        task_data: vf.TaskData,  # noqa: F841 — reserved by verifiers 0.3.1's launch contract
     ) -> vf.ProgramResult:
         data: DaydreamReviewData = trace.task.data
         strategy = self.strategy
