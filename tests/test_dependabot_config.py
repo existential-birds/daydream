@@ -64,6 +64,19 @@ def test_commit_message_prefix_everywhere() -> None:
         assert u["commit-message"]["prefix"] == "chore(deps)"
 
 
+def test_readme_documents_dependabot_volume_and_gates() -> None:
+    text = WORKFLOWS_README.read_text(encoding="utf-8")
+    for needle in (
+        "## Dependabot dependency updates",
+        ".github/dependabot.yml",
+        "Australia/Brisbane",
+        "open-pull-requests-limit",
+        "`make check`",
+        "CODEOWNERS",
+    ):
+        assert needle in text, f"README missing: {needle}"
+
+
 def test_config_documents_ownership_and_gates() -> None:
     header = DEPENDABOT_PATH.read_text(encoding="utf-8").split("updates:", 1)[0]
     assert "CODEOWNERS" in header, "config comment must point at reviewer ownership"
