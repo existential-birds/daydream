@@ -64,10 +64,10 @@ def test_record_evidence_digest_matches_harvest_row_digest() -> None:
         disposition = "rejected"
         evidence = ev_b
 
-    class _Rubric:
+    class _Rubric:  # duck-typed twin of harvest.Rubric
         per_finding_resolutions = [_R(), _R2()]
 
-    assert shared == _reply_evidence_digest(_Rubric())
+    assert shared == _reply_evidence_digest(_Rubric())  # type: ignore[arg-type]
     assert shared == reply_evidence_digest(ev_a + ev_b)
     # order of the per-finding list must not matter (digest normalizes by reply_id)
     assert shared == record_evidence_digest([ev_b, ev_a])

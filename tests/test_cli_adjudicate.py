@@ -268,7 +268,7 @@ def _cli_index(tmp_path: Path) -> Path:
     return root
 
 
-def test_cli_materialize_writes_sessions_and_manifest(tmp_path: Path, capsys) -> None:
+def test_cli_materialize_writes_sessions_and_manifest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "out"
     code = handle_adjudicate([
         "materialize", "--index-root", str(_cli_index(tmp_path)),
