@@ -10,6 +10,7 @@ config's volume bounds discoverable.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -52,13 +53,39 @@ def test_weekly_monday_one_timezone_limit_five_everywhere() -> None:
 
 
 def test_grouping_on_multi_dependency_blocks_only() -> None:
-    by_eco = {u["package-ecosystem"]: u for u in updates(load_dependabot())}
-    for eco in ("uv", "github-actions"):
-        group = by_eco[eco]["groups"]
-        assert list(group) == ["dependencies"], f"{eco} needs a single group"
+    # Key on (ecosystem, directory): the two uv blocks must each be asserted,
+    # not collapsed by ecosystem alone (the root uv block's grouping would
+    # otherwise never be inspected).
+    by_block = {(u["package-ecosystem"], u["directory"]): u for u in updates(load_dependabot())}
+    for key in (("uv", "/"), ("uv", "/rl/daydream_review_v1"), ("github-actions", "/")):
+        group = by_block[key]["groups"]
+        assert list(group) == ["dependencies"], f"{key} needs a single group"
         pattern = group["dependencies"]["patterns"]
-        assert "*" in pattern, f"{eco} group must cover all deps (minor+patch together)"
-    assert "groups" not in by_eco["npm"], "npm tracks a single dep — no group"
+        assert "*" in pattern, f"{key} group must cover all deps (minor+patch together)"
+    assert "groups" not in by_block[("npm", "/.github/workflows")], "npm tracks a single dep — no group"
+
+
+def test_codex_pin_matches_tracked_package_json() -> None:
+    """CI installs codex from a hardcoded string in daydream-review.yml, not
+    from the tracked package.json served to the npm Dependabot block. Merging a
+    Dependabot bump PR changes nothing in CI unless the workflow string moves
+    too — assert the two stay in lockstep so silent divergence fails here."""
+    package_json = _REPO_ROOT / ".github" / "workflows" / "package.json"
+    manifest = yaml.safe_load(package_json.read_text(encoding="utf-8"))
+    manifest_version = manifest["dependencies"]["@openai/codex"]
+
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "daydream-review.yml").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"npm install -g @openai/codex@([^\s]+)", workflow)
+    assert match is not None, (
+        "daydream-review.yml must install codex via `npm install -g "
+        "@openai/codex@<version>` so the pin stays reconcilable"
+    )
+    assert match.group(1) == manifest_version, (
+        f"codex pin {match.group(1)!r} in daydream-review.yml diverged from "
+        f"package.json version {manifest_version!r} — bump them in lockstep"
+    )
 
 
 def test_commit_message_prefix_everywhere() -> None:
