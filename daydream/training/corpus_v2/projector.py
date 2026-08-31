@@ -23,8 +23,13 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, cast, overload
 
 from daydream.archive.index import normalize_as_of
+from daydream.archive.sanitize import _derivative_digest
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
-from daydream.training.corpus_v2.bundle import load_curated_bundle
+from daydream.training.corpus_v2.bundle import (
+    CuratedBundle,
+    _verify_sha256sums,
+    load_curated_bundle,
+)
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.corpus_v2.segments import segment
@@ -70,7 +75,11 @@ class BuildCorpusV2Config:
 
     out_dir: Path
     bundle_dir: Path
-    annotations_snapshot: Path
+    # Required: a build without a pinned annotation bundle is a config error
+    # (raised as ValueError naming the field, not a TypeError from the
+    # dataclass) — declared optional so that misconfiguration, not a missing
+    # kwarg, is what callers see.
+    annotation_bundle_dir: Path | None = None
     as_of: str | None = None
     holdout_rate: float = 0.1
     val_rate: float = 0.1
@@ -82,15 +91,24 @@ class BuildCorpusV2Config:
     license: str | None = None
 
     def __post_init__(self) -> None:
+        if self.annotation_bundle_dir is None:
+            raise ValueError(
+                "annotation_bundle_dir is required: a corpus v2 build without a "
+                "pinned annotation bundle is a configuration error"
+            )
+        object.__setattr__(self, "annotation_bundle_dir", Path(self.annotation_bundle_dir))
         if self.as_of is not None:
             object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
 
 
 def _load_snapshot(path: Path) -> dict[str, dict[str, Any]]:
-    """Parse the side-car annotations snapshot (Task 0A shape): one JSON
-    object per line, keyed by ``fingerprint``. Fail-closed on malformed
-    lines or duplicate fingerprints."""
+    """Parse the annotation bundle's ``annotations.jsonl`` (canonical
+    per-finding record shape): one JSON object per line, keyed by
+    ``record_id``. ``fingerprint`` is required on every row and duplicates
+    of either key fail closed — the canonical record is identified by
+    ``record_id`` and located by ``fingerprint``, so neither may be ambiguous."""
     rows: dict[str, dict[str, Any]] = {}
+    seen_fingerprints: dict[str, int] = {}
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -100,15 +118,29 @@ def _load_snapshot(path: Path) -> dict[str, dict[str, Any]]:
             raise ValueError(
                 f"annotations snapshot {path}: line {line_no} is not valid JSON: {exc}"
             ) from exc
+        record_id_value = row.get("record_id")
+        if not record_id_value:
+            raise ValueError(
+                f"annotations snapshot {path}: line {line_no} missing 'record_id'"
+            )
         fingerprint = row.get("fingerprint")
         if not fingerprint:
             raise ValueError(f"annotations snapshot {path}: line {line_no} missing 'fingerprint'")
-        if fingerprint in rows:
+        record_id_value = str(record_id_value)
+        if record_id_value in rows:
             raise ValueError(
-                f"annotations snapshot {path}: duplicate fingerprint {fingerprint!r} "
-                f"(lines {line_no} and earlier) — snapshot must be keyed by fingerprint"
+                f"annotations snapshot {path}: duplicate record_id {record_id_value!r} "
+                f"(lines {line_no} and earlier) — snapshot must be keyed by record_id"
             )
-        rows[str(fingerprint)] = row
+        fp = str(fingerprint)
+        if fp in seen_fingerprints:
+            raise ValueError(
+                f"annotations snapshot {path}: duplicate fingerprint {fp!r} "
+                f"(lines {seen_fingerprints[fp]} and {line_no}) — snapshot must be "
+                "keyed by fingerprint"
+            )
+        seen_fingerprints[fp] = line_no
+        rows[record_id_value] = row
     return rows
 
 
@@ -131,6 +163,25 @@ def _refuse_posterior_evidence(
             )
 
 
+def _merge_nested_profile(prov: dict[str, Any], row: Mapping[str, Any]) -> None:
+    """Surface the canonical record's nested ``profile`` block (Req 8).
+
+    ``adjudication.snapshot.build_canonical_record`` emits the four
+    review-profile fields nested under top-level ``profile`` (with ``stack``
+    — not ``profile_*`` — at top level), so a top-level read comes back
+    empty and the nested block must supply the values instead — they are
+    never dropped at the projection boundary.
+    """
+    if any(prov["profile"].values()):
+        return
+    nested = row.get("profile")
+    if isinstance(nested, Mapping):
+        for field in prov["profile"]:
+            value = nested.get(field)
+            if value is not None:
+                prov["profile"][field] = value
+
+
 def _provenance_for(
     resolution_row: Mapping[str, Any], manifest_row: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -138,9 +189,11 @@ def _provenance_for(
 
     The resolution row's native review-profile fields win when present;
     otherwise the batch manifest row supplies them — the values carried by
-    either row type must not be dropped at the projection boundary.
+    either row type must not be dropped at the projection boundary. Canonical
+    annotation records nest the profile block, so both shapes are read.
     """
     prov = extract_provenance(resolution_row)
+    _merge_nested_profile(prov, resolution_row)
     if (
         not any(prov["profile"].values())
         and prov.get("skill") is None
@@ -164,35 +217,99 @@ def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
     return result
 
 
-def _verify_snapshot_pinned(bundle_dir: Path, snapshot: Path) -> None:
-    """Fail-closed: the annotations snapshot must be digest-pinned by the
-    bundle's SHA256SUMS (the "digest-pinned alongside the bundle" contract) —
-    a snapshot whose bytes no bundle checksum names is refused rather than
-    hashed self-referentially."""
-    sums_path = bundle_dir / "SHA256SUMS"
-    if not sums_path.is_file():
-        raise ValueError(
-            f"bundle {bundle_dir}: missing SHA256SUMS — cannot verify the annotations snapshot pin"
+_ANNOTATION_SCHEMA_PREFIX = "annotation-snapshot/"
+
+
+def _verify_annotation_bundle(
+    annotation_bundle_dir: Path, bundle: CuratedBundle, bundle_dir: Path
+) -> dict[str, Any]:
+    """Two-bundle contract: the annotation bundle is verified as its own
+    published artifact and then linked to the curation bundle exactly.
+
+    Gates, fail-closed in order:
+
+    1. ``_SUCCESS`` completeness marker (a mid-write bundle is refused).
+    2. Every file against the bundle's own ``SHA256SUMS`` (self-verification
+       via ``bundle._verify_sha256sums`` — raises ``BundleError``, a
+       ``ValueError``).
+    3. Cross-bundle linkage against the curation bundle: ``curation_id``
+       equal to ``bundle.curation_id``, ``sanitized_hub_commit`` equal to
+       ``bundle.source_hub_commit``, a recorded ``batch_fileset_digest`` that
+       matches the curation bundle's actual batch/file-set digest
+       (``_derivative_digest`` of the bundle root — the same canonical
+       file-set vocabulary each batch's ``content_digest`` uses, so a stale
+       annotation bundle harvested against an older file set is refused
+       rather than passing on curation_id + commit alone), a compatible
+       annotation-snapshot schema version, and labeler/rubric/classifier
+       versions plus ``as_of`` present. An empty ``as_of`` is allowed (the
+       unpinned edge) and reported through the build lineage, not refused.
+
+    Any mismatch raises ``ValueError`` naming both sides of the mismatch.
+    """
+    root = Path(annotation_bundle_dir)
+    if not (root / "_SUCCESS").is_file():
+        raise ValueError(f"annotation bundle {root}: missing _SUCCESS marker")
+    _verify_sha256sums(root, "")
+    lineage_path = root / "lineage.json"
+    if not lineage_path.is_file():
+        raise ValueError(f"annotation bundle {root}: missing lineage.json")
+    try:
+        lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"annotation bundle {root}: lineage.json is not valid JSON: {exc}") from exc
+    if not isinstance(lineage, dict):
+        raise ValueError(f"annotation bundle {root}: lineage.json is not a JSON object")
+
+    def _gate(condition: bool, message: str) -> None:
+        if not condition:
+            raise ValueError(f"annotation bundle {root}: {message}")
+
+    recorded_curation = lineage.get("curation_id")
+    _gate(
+        recorded_curation == bundle.curation_id,
+        f"curation_id mismatch: annotation bundle records {recorded_curation!r} "
+        f"but the curation bundle is {bundle.curation_id!r}",
+    )
+    recorded_commit = lineage.get("sanitized_hub_commit")
+    _gate(
+        recorded_commit == bundle.source_hub_commit,
+        f"sanitized_hub_commit mismatch: annotation bundle records {recorded_commit!r} "
+        f"but the curation bundle is {bundle.source_hub_commit!r}",
+    )
+    schema_version = lineage.get("schema_version")
+    _gate(
+        isinstance(schema_version, str)
+        and schema_version.startswith(_ANNOTATION_SCHEMA_PREFIX),
+        f"incompatible schema_version {schema_version!r} — expected an "
+        f"{_ANNOTATION_SCHEMA_PREFIX!r}* annotation snapshot",
+    )
+    batch_fileset_digest = lineage.get("batch_fileset_digest")
+    _gate(
+        isinstance(batch_fileset_digest, str) and bool(batch_fileset_digest),
+        "missing 'batch_fileset_digest' — the annotation bundle must record "
+        "the curation bundle's batch/file-set digest it was harvested against",
+    )
+    actual_fileset_digest = _derivative_digest(bundle_dir)
+    _gate(
+        batch_fileset_digest == actual_fileset_digest,
+        f"stale batch fileset: the annotation bundle records "
+        f"batch_fileset_digest {batch_fileset_digest} but the curation bundle "
+        f"now hashes to {actual_fileset_digest} — re-harvest the annotation "
+        "snapshot against this curation bundle before building",
+    )
+    for version_field in ("labeler_version", "rubric_version", "classifier_version"):
+        value = lineage.get(version_field)
+        _gate(
+            isinstance(value, str) and bool(value),
+            f"missing or empty {version_field!r} — labeler/rubric/classifier "
+            "versions must be recorded",
         )
-    pinned: dict[str, str] = {}
-    for line in sums_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        digest, sep, relpath = line.partition("  ")
-        if sep:
-            pinned[Path(relpath).name] = digest
-    expected = pinned.get(snapshot.name)
-    if expected is None:
-        raise ValueError(
-            f"annotations snapshot {snapshot.name!r} is not listed in bundle "
-            f"{bundle_dir} SHA256SUMS — it must be digest-pinned alongside the bundle"
-        )
-    actual = hashlib.sha256(snapshot.read_bytes()).hexdigest()
-    if actual != expected:
-        raise ValueError(
-            f"annotations snapshot {snapshot} digest mismatch vs bundle {bundle_dir} "
-            "SHA256SUMS pin"
-        )
+    _gate(
+        "as_of" in lineage,
+        "missing 'as_of' — the evidence pin must be recorded (empty/null "
+        "allowed for the unpinned edge)",
+    )
+    return lineage
 
 
 def _read_trajectory_documents(bundle_dir: Path, artifact_relpath: str) -> list[dict[str, Any]]:
@@ -288,6 +405,7 @@ def project_findings(
         disposition = resolution.get("disposition")
         evidence = list(resolution.get("evidence") or [])
         provenance = extract_provenance(resolution)
+        _merge_nested_profile(provenance, resolution)
         record = {
             "record_id": record_id(
                 str(session_id), str(trajectory_id), str(segment_id), str(fingerprint)
@@ -348,12 +466,12 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     naming the session and both timestamps — refusal, not drop) → write
     ``corpus.jsonl`` plus ``train.jsonl``/``validation.jsonl``/``holdout.jsonl``
     atomically, copy ``schema/v2.json`` alongside, and write ``lineage.json``
-    pinning the snapshot's provenance (no wall-clock timestamps — every
+    pinning the annotation bundle's provenance (no wall-clock timestamps — every
     manifest byte is a function of the immutable inputs, so re-runs are
     byte-for-byte identical), finishing with a ``_SUCCESS`` completeness
     marker.
 
-    Each finding is projected exactly once (the snapshot resolutions are
+    Each finding is projected exactly once (the annotation resolutions are
     session-scoped, so sibling segments never fabricate per-segment copies);
     non-decisive findings are excluded here and routed to the adjudication
     report only.
@@ -369,9 +487,13 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     completeness gate, so the twin can never diverge from the canonical file.
     """
     bundle = load_curated_bundle(config.bundle_dir)
-    snapshot_rows = _load_snapshot(config.annotations_snapshot)
-    snapshot_digest = hashlib.sha256(config.annotations_snapshot.read_bytes()).hexdigest()
-    _verify_snapshot_pinned(config.bundle_dir, config.annotations_snapshot)
+    assert config.annotation_bundle_dir is not None  # __post_init__ guarantees
+    annotation_lineage = _verify_annotation_bundle(
+        config.annotation_bundle_dir, bundle, config.bundle_dir
+    )
+    snapshot_path = Path(config.annotation_bundle_dir) / "annotations.jsonl"
+    snapshot_rows = _load_snapshot(snapshot_path)
+    snapshot_digest = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
 
     records: list[Record] = []
     adjudication: list[Record] = []
@@ -382,7 +504,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     seen_findings: set[tuple[str, str]] = set()
     adjudicated_findings: set[tuple[str, str]] = set()
     # lineage valid_at is pinned over the emitted records' evidence only —
-    # snapshot rows for sessions never admitted/emitted must not drift it.
+    # annotation rows for sessions never admitted/emitted must not drift it.
     valid_at = config.as_of
     for batch in bundle.admitted:
         if batch.manifest_relpath is not None:
@@ -529,14 +651,26 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     content_digests: dict[str, str] = {
         batch.session_id: batch.content_digest for batch in bundle.admitted if batch.content_digest
     }
-    content_digests[config.annotations_snapshot.name] = snapshot_digest
+    content_digests["annotations.jsonl"] = snapshot_digest
+    annotation_as_of = annotation_lineage.get("as_of")
     lineage = {
         "schema_version": "corpus-v2",
         "curation_id": bundle.curation_id,
         "hub_commit": bundle.source_hub_commit,
         "source_hub_commit": bundle.source_hub_commit,
         "content_digests": content_digests,
-        "annotations_snapshot": config.annotations_snapshot.name,
+        # Two-bundle contract (K3): the annotation bundle's snapshot_id/commit
+        # are pinned into the projection lineage; the finalized curation
+        # bundle itself is never touched.
+        "annotation_bundle": {
+            "snapshot_id": annotation_lineage.get("snapshot_id")
+            or config.annotation_bundle_dir.name,
+            "curation_id": annotation_lineage.get("curation_id"),
+            "sanitized_hub_commit": annotation_lineage.get("sanitized_hub_commit"),
+            "annotations_digest": snapshot_digest,
+            "as_of": annotation_as_of,
+            "unpinned_as_of": annotation_as_of in (None, ""),
+        },
         "labeler_policy_version": config.labeler_policy_version,
         "reply_classifier_version": config.reply_classifier_version,
         "rubric_schema_version": config.rubric_schema_version,

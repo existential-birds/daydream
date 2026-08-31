@@ -198,6 +198,10 @@ def test_report_subverb_prints_coverage_and_strata(tmp_path: Path, capsys: pytes
     out = capsys.readouterr().out
     assert "outcome-bearing" in out and "silver/task-only" in out
     assert "inter-rater" in out.lower()
+    # The admission gate reads real adjudication state on the CLI path: one
+    # human-accepted gold pr_review item in the seeded queue is outcome-bearing.
+    assert "adjudicated 1 / 1" in out
+    assert "80% gate PASS" in out
 
 
 def test_conflict_review_lists_disagreeing_raters_oldest_first(
@@ -230,3 +234,144 @@ def test_adjudicate_build_preserves_observations_and_is_idempotent(tmp_path: Pat
         assert rc == 0
     queue = json.loads((tmp_path / "adj" / "queue.json").read_text())
     assert len(queue) == 2
+
+
+# ---- snapshot pipeline verbs (issue #1055, task 6) ----
+
+from daydream.training.adjudication.cli import handle_adjudicate  # noqa: E402
+from daydream.training.adjudication.materialize import run_materialize  # noqa: E402
+from daydream.training.labeler_versions import (  # noqa: E402
+    ADJUDICATION_LABELER_VERSION,
+    REPLY_CLASSIFIER_VERSION,
+    RUBRIC_SCHEMA_VERSION,
+)
+
+_PIN_ARGS = [
+    "--curation-id", "cur-1",
+    "--sanitized-hub-commit", "a" * 40,
+    "--source-hub-commit", "b" * 40,
+    "--evidence-observed-at", "2026-01-01T00:00:00+00:00",
+    "--as-of", "2026-02-01T00:00:00+00:00",
+]
+
+
+def _cli_index(tmp_path: Path) -> Path:
+    root = tmp_path / "index"
+    root.mkdir(parents=True, exist_ok=True)
+    sessions = [{
+        "session_id": "s1", "trajectory_id": "t", "segment_id": "g",
+        "resolutions": [{
+            "fingerprint": "fp", "disposition": "unanswered",
+            "evidence": [{"reply_id": 1, "body_sha256": "x"}],
+            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
+        }],
+    }]
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+    return root
+
+
+def test_cli_materialize_writes_sessions_and_manifest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    out = tmp_path / "out"
+    code = handle_adjudicate([
+        "materialize", "--index-root", str(_cli_index(tmp_path)),
+        "--out-dir", str(out), "--archive-index-digest", "c" * 64, *_PIN_ARGS,
+    ])
+    assert code == 0
+    assert (out / "sessions.jsonl").is_file()
+    manifest = json.loads((out / "preview-manifest.json").read_text())
+    assert manifest["curation_id"] == "cur-1"
+    printed = capsys.readouterr().out
+    assert "snapshot" in printed and "record" in printed  # S2 operator summary
+
+
+def test_cli_materialize_matches_run_materialize_output(tmp_path: Path) -> None:
+    out_cli = tmp_path / "out-cli"
+    code = handle_adjudicate([
+        "materialize", "--index-root", str(_cli_index(tmp_path)),
+        "--out-dir", str(out_cli), "--archive-index-digest", "c" * 64, *_PIN_ARGS,
+    ])
+    assert code == 0
+    out_direct = tmp_path / "out-direct"
+    run_materialize(_cli_index(tmp_path / "direct"), out_direct, pin={
+        "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
+        "source_hub_commit": "b" * 40, "archive_index_digest": "c" * 64,
+        "evidence_observed_at": "2026-01-01T00:00:00+00:00",
+        "as_of": "2026-02-01T00:00:00+00:00",
+        "labeler_version": ADJUDICATION_LABELER_VERSION,
+        "rubric_version": RUBRIC_SCHEMA_VERSION,
+        "classifier_version": REPLY_CLASSIFIER_VERSION,
+    })
+    assert (out_cli / "sessions.jsonl").read_bytes() == (out_direct / "sessions.jsonl").read_bytes()
+    assert (out_cli / "preview-manifest.json").read_bytes() == (out_direct / "preview-manifest.json").read_bytes()
+
+
+def test_cli_materialize_missing_index_exits_1(tmp_path: Path) -> None:
+    assert handle_adjudicate([
+        "materialize", "--index-root", str(tmp_path / "nope"),
+        "--out-dir", str(tmp_path / "out"), "--archive-index-digest", "c" * 64, *_PIN_ARGS,
+    ]) == 1
+
+
+def test_cli_materialize_missing_pin_component_exits_1(tmp_path: Path) -> None:
+    assert handle_adjudicate([
+        "materialize", "--index-root", str(_cli_index(tmp_path)),
+        "--out-dir", str(tmp_path / "out"), "--archive-index-digest", "c" * 64,
+        "--curation-id", "cur-1",  # missing the other pin flags
+    ]) == 1
+
+
+def test_cli_materialize_without_as_of_is_unpinned_edge(tmp_path: Path) -> None:
+    """Empty/absent as_of is the supported unpinned edge: materializing without
+    --as-of succeeds, and the manifest + records carry the empty pin (C5/M9)."""
+    out = tmp_path / "out"
+    code = handle_adjudicate([
+        "materialize", "--index-root", str(_cli_index(tmp_path)),
+        "--out-dir", str(out), "--archive-index-digest", "c" * 64,
+        "--curation-id", "cur-1",
+        "--sanitized-hub-commit", "a" * 40,
+        "--source-hub-commit", "b" * 40,
+        "--evidence-observed-at", "2026-01-01T00:00:00+00:00",
+    ])
+    assert code == 0
+    manifest = json.loads((out / "preview-manifest.json").read_text())
+    assert manifest["as_of"] == ""
+    records = [json.loads(line) for line in
+               (out / "sessions.jsonl").read_text().splitlines()]
+    assert records and all(str(r.get("as_of", "missing")) == "" for r in records)
+
+
+def test_cli_materialize_malformed_invocation_exits_2() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        handle_adjudicate(["materialize", "--index-root", "/tmp"])  # missing required pin flags
+    assert excinfo.value.code == 2
+
+
+def test_cli_publish_state_missing_state_file_exits_1(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing state files fail closed with exit 1, naming the offender (cli.py:31-44)."""
+    from daydream.training.adjudication import cli as adjudication_cli
+
+    class _FakeHub:
+        @property
+        def repo_private(self) -> bool:
+            return True
+
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: _FakeHub())
+    manifest = tmp_path / "preview-manifest.json"
+    manifest.write_text(
+        json.dumps({"curation_id": "cur-1", "snapshot_id": "e" * 64}), encoding="utf-8"
+    )
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()  # queue.json / observations.jsonl / preview-ledger.json absent
+
+    assert handle_adjudicate([
+        "publish-state", "--state-dir", str(state_dir), "--manifest", str(manifest),
+    ]) == 1
+    captured = capsys.readouterr()
+    assert "publish-state failed" in captured.out + captured.err
+    assert "No such file or directory" in captured.out + captured.err  # FileNotFoundError rendered, not a traceback

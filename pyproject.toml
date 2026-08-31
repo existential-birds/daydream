@@ -32,7 +32,7 @@ dev = [
     "pytest-xdist>=3.6",
     "ruff>=0.9",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
-    "types-pyyaml>=6.0",
+    "types-pyyaml>=6.0.12.20260815",
     "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
     "vulture>=2.13",
 ]
