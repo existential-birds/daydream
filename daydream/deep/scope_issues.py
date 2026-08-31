@@ -69,26 +69,24 @@ def _scope_finding_marker(fingerprint: str) -> str:
     return f"<!-- daydream-scope-finding: {fingerprint} -->"
 
 
-def _scope_finding_already_filed(repo: Path, marker: str) -> bool:
-    """Best-effort: has an open issue already filed this out-of-scope finding?
+def _scope_already_filed(repo: Path, marker: str) -> bool:
+    """Best-effort: has an open issue already filed this scope marker?
 
-    Issue #336 — out-of-scope findings are never fixed, so a re-run/resume
-    re-derives them and would re-file a duplicate issue every time. GitHub is
-    the store: scan open issues for the finding's fingerprint marker and skip
-    filing when present. Best-effort — a failed ``gh issue list`` returns
-    ``False`` so the call degrades to filing (the prior behavior) rather than
-    silently dropping the finding.
+    Shared by the out-of-scope *finding* router (pre-fix gate, issue #336) and
+    the reverted *edit* filer (post-fix residual net, issue #1051). GitHub is
+    the store: scan open issues for the item's fingerprint marker and skip
+    filing when present, so a re-run/resume re-deriving the same item does not
+    re-file a duplicate issue. Best-effort by construction: ``gh_issue_list``
+    itself returns an empty list on any failure (no auth, offline, cross-org),
+    so a failed lookup degrades to filing (the prior behavior), never to
+    silently dropping the item.
 
-    The marker is computed once by the caller (``_file_out_of_scope_issue``)
-    and threaded in, so the finding's fingerprint is not recomputed for both
-    the dedup lookup and the issue body.
+    The marker is computed once by the caller and threaded in, so the item's
+    fingerprint is not recomputed for both the dedup lookup and the issue body.
     """
     from daydream import git_ops
 
-    try:
-        issues = git_ops.gh_issue_list(repo, search="out-of-scope")
-    except Exception:  # noqa: BLE001 -- best-effort dedup lookup
-        return False
+    issues = git_ops.gh_issue_list(repo, search="out-of-scope")
     return any(marker in (issue.get("body") or "") for issue in issues)
 
 
@@ -111,7 +109,7 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
     # Compute the fingerprint marker once and thread it into both the dedup
     # lookup and the issue body, rather than recomputing it for each.
     marker = _scope_finding_marker(_scope_finding_fingerprint(item))
-    if _scope_finding_already_filed(ctx.work.repo, marker):
+    if _scope_already_filed(ctx.work.repo, marker):
         return
     title = f"[daydream] out-of-scope finding: {file}"
     body = (
@@ -128,15 +126,15 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
 def _scope_edit_fingerprint(path: str, patch: str) -> str:
     """Stable cross-run identity for a reverted out-of-scope edit (issue #1051).
 
-    Keyed on the file path plus the edit's diff head (the spec's "file path
-    plus diff content" option): a re-run that reproduces the same residual
-    edit on the same file maps to the same fingerprint and is recognized as
-    already-filed. Distinct from the finding-path fingerprint so the two
-    stores never collide.
+    Keyed on the file path plus the edit's full diff content (the spec's
+    "file path plus diff content" option): a re-run that reproduces the same
+    residual edit on the same file maps to the same fingerprint and is
+    recognized as already-filed. Distinct from the finding-path fingerprint so
+    the two stores never collide.
     """
     from daydream.pr_review import compute_fingerprint
 
-    return compute_fingerprint(path, patch[:2000], "")
+    return compute_fingerprint(path, patch, "")
 
 
 def _scope_edit_marker(fingerprint: str) -> str:
@@ -147,24 +145,6 @@ def _scope_edit_marker(fingerprint: str) -> str:
     ``_scope_finding_marker`` and ``pr_review.finding_marker``.
     """
     return f"<!-- daydream-scope-edit: {fingerprint} -->"
-
-
-def _scope_edit_already_filed(repo: Path, marker: str) -> bool:
-    """Best-effort: has an open issue already filed this reverted edit?
-
-    Issue #1051 — the residual net re-derives the same reverted edit on every
-    re-run/resume and would re-file a duplicate issue each time. GitHub is the
-    store: scan open issues for the edit's fingerprint marker and skip filing
-    when present. Best-effort — a failed ``gh issue list`` returns ``False``
-    so the call degrades to filing (never to suppression).
-    """
-    from daydream import git_ops
-
-    try:
-        issues = git_ops.gh_issue_list(repo, search="out-of-scope")
-    except Exception:  # noqa: BLE001 -- best-effort dedup lookup
-        return False
-    return any(marker in (issue.get("body") or "") for issue in issues)
 
 
 def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
@@ -181,7 +161,7 @@ def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
     # Compute the fingerprint marker once and thread it into both the dedup
     # lookup and the issue body, rather than recomputing it for each.
     marker = _scope_edit_marker(_scope_edit_fingerprint(path, patch))
-    if _scope_edit_already_filed(repo, marker):
+    if _scope_already_filed(repo, marker):
         return
     title = f"[daydream] out-of-scope edit reverted: {path}"
     body = (

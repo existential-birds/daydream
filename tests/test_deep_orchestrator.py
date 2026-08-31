@@ -3599,7 +3599,11 @@ async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_create)
 
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
+        )
+    )
     assert exit_code == 0
 
     # Deduped: the already-filed finding is NOT re-filed.

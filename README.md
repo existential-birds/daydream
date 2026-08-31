@@ -284,7 +284,7 @@ The dotfile uses bare top-level keys. It wins on scalar conflicts.
 [tool.daydream]
 model = "claude-opus-5"     # global default across phases
 backend = "claude"          # global default backend
-scope_issue_filing = false  # opt in to filing out-of-scope work as GitHub issues
+scope_issue_filing = false  # default; set true to file out-of-scope work as GitHub issues
 
 [tool.daydream.phases.fix]  # per-phase override
 backend = "codex"
