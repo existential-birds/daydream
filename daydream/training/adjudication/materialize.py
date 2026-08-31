@@ -19,9 +19,6 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 from daydream.archive.hydrate import HubUnavailableError
-from daydream.training.adjudication.dispositions import (
-    NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
-)
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.labeler_signals import PerFindingDisposition, PerFindingResolution
@@ -152,7 +149,8 @@ def run_materialize(
     Loads the hydrated index's sessions (via ``preview._load_sessions`` —
     raises the ``HydrationError`` family on a missing/unreadable index and
     ``MovingBranchError`` on a symbolic index revision), builds one canonical
-    record per non-decisive finding, and emits:
+    record per finding (every disposition — automatic decisive, human-decisive,
+    and non-decisive), and emits:
 
     - ``out_dir/sessions.jsonl``: canonical-JSON records sorted by
       ``record_id``, written atomically. Identical index + pin ⇒
@@ -189,8 +187,6 @@ def run_materialize(
             if not isinstance(row, dict):
                 raise ValueError(f"materialize: non-object resolution row in session data: {row!r}")
             resolution = _resolution_from_row(row)
-            if resolution.disposition not in _NON_DECISIVE_DISPOSITIONS:
-                continue
             records.append(
                 build_canonical_record(
                     session,

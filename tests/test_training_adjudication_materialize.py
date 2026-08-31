@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -93,3 +94,39 @@ def test_materialize_drift_yields_new_snapshot_id(tmp_path: Path) -> None:
     sessions_path.write_text(json.dumps(s, sort_keys=True) + "\n", encoding="utf-8")
     r2 = run_materialize(root, tmp_path / "o2", pin=_PIN)
     assert r2["snapshot_id"] != r1["snapshot_id"]
+
+
+def _index_all_dispositions(tmp_path: Path) -> Path:
+    root = tmp_path / "index"
+    root.mkdir()
+    evidence = [{"reply_id": 1, "body_sha256": "abc"}]
+    digest = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
+    dispositions = ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
+    resolutions = [
+        {
+            "fingerprint": f"fp-{i}", "disposition": d,
+            "evidence": evidence, "evidence_digest": digest,
+            "profile": "pr_review", "stack": "python", "comment_id": 7,
+        }
+        for i, d in enumerate(dispositions, start=1)
+    ]
+    sessions = [{
+        "session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg",
+        "resolutions": resolutions,
+    }]
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+    (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
+    return root
+
+
+def test_materialize_emits_every_disposition(tmp_path: Path) -> None:
+    root = _index_all_dispositions(tmp_path)  # one session, five dispositions
+    result = run_materialize(root, tmp_path / "out", pin=_PIN)
+    assert result["record_count"] == 5
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "out" / "sessions.jsonl").read_text().splitlines() if ln]
+    assert {r["disposition"] for r in rows} == {
+        "accepted", "rejected", "ambiguous", "unanswered", "missing"}
+    assert len({r["record_id"] for r in rows}) == 5  # no silent dedup across classes
