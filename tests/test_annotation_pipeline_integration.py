@@ -86,7 +86,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
     # 5. canonical harvest: drift-checked, appends label_observations exactly
     #    once per session into the hydrated stage's SQLite index
     harvest = run_canonical_harvest(
-        index_root=mat, materialize_dir=mat, archive_dir=stage,
+        index_root=stage, materialize_dir=mat, archive_dir=stage,
         observations_path=fresh / "observations.jsonl")
     assert harvest["appended_sessions"] == 3
     assert harvest["human_adjudicated"] == 1

@@ -46,7 +46,7 @@ If you are resuming on a fresh VM (or doubt the local state), restore the
 published adjudication state — digest-verified — from the Hub checkpoint:
 
 ```bash
-daydream corpus adjudicate resume-state --manifest /tmp/state/preview-manifest.json --stage-dir /tmp/state
+daydream corpus adjudicate resume-state --manifest /tmp/state/preview-manifest.json --stage-dir /tmp/state --hub-repo org/annotation-snapshot
 ```
 
 The manifest is the `preview-manifest.json` written by the last
@@ -60,8 +60,18 @@ Materialize one record per finding — automatic decisive, human-decisive, and
 non-decisive alike — into the snapshot directory:
 
 ```bash
-daydream corpus adjudicate materialize --index-root /tmp/daydream-hydrate --out-dir /tmp/snapshot
+daydream corpus adjudicate materialize --index-root /tmp/daydream-hydrate --out-dir /tmp/snapshot --curation-id <curation-id> --sanitized-hub-commit <commit-sha> --source-hub-commit <commit-sha> --archive-index-digest <archive-index-digest> --evidence-observed-at <evidence-observed-at>
 ```
+
+All five pin components are mandatory — a missing one is an exit-1 data
+problem, not a usage error, and nothing is written. `--curation-id` is the
+single `cur-*` directory hydration wrote under
+`/tmp/daydream-hydrate/curated/` (recorded as `curation_id` in that
+directory's `curation-manifest.json`); `--source-hub-commit` is the pinned
+`<commit-sha>` from step 1 (recorded as `source_hub_commit` in the same
+curation manifest), and `--sanitized-hub-commit` is the same pinned revision.
+`--archive-index-digest` is the 64-hex sha256 of the hydrated archive index;
+`--evidence-observed-at` is the ISO-8601 observation timestamp.
 
 `/tmp/snapshot` receives `sessions.jsonl` and the `preview-manifest.json` that
 pins it. This snapshot is the input to both the canonical harvest (step 5) and
@@ -81,7 +91,7 @@ daydream corpus adjudicate label --state-dir /tmp/state --batch 10 --disposition
 ```
 
 ```bash
-daydream corpus adjudicate publish-state --state-dir /tmp/state --manifest /tmp/snapshot/preview-manifest.json
+daydream corpus adjudicate publish-state --state-dir /tmp/state --manifest /tmp/snapshot/preview-manifest.json --hub-repo org/annotation-snapshot
 ```
 
 `build` consumes the materialized snapshot (the hydrated stage root has no
@@ -116,8 +126,12 @@ daydream corpus adjudicate publish-final --index-root /tmp/daydream-hydrate --ma
 ```
 
 The dry run validates the staging bundle's construction, coverage, and lineage
-only; the private-repo gate, secret scan, and SHA256SUMS construction run at
-real publish time (step 7). Only proceed when the dry run is green.
+only, and prints the 80% human-adjudication admission-gate verdict (PASS/FAIL
+over the outcome-bearing numerator/denominator). The private-repo gate, the
+admission-gate refusal, the secret scan, and SHA256SUMS construction run at
+real publish time (step 7). Only proceed when the dry run is green — a red
+gate means more outcome-bearing records must be adjudicated and the bundle
+rebuilt before the Hub can ever see it.
 
 `--curation-bundle-dir` is the hydration-produced curated bundle root — the
 single `cur-*` directory under `/tmp/daydream-hydrate/curated/` (the curation
@@ -127,7 +141,10 @@ as `curation_id` in `/tmp/snapshot/preview-manifest.json`).
 ## 7. Publish the final bundle
 
 Repeat the same command without `--dry-run` to upload the bundle additively to
-the Hub (the `_SUCCESS` marker is written last):
+the Hub (the `_SUCCESS` marker is written last). A bundle whose coverage
+report fails the 80% human-adjudication admission gate is refused (the
+handler exits 1) before any byte is uploaded: adjudicate more outcome-bearing
+records and rebuild before re-publishing.
 
 ```bash
 daydream corpus adjudicate publish-final --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir /tmp/daydream-hydrate --curation-bundle-dir /tmp/daydream-hydrate/curated/<curation-id> --hub-repo org/annotation-snapshot --state-dir /tmp/state

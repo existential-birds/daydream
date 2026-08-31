@@ -512,12 +512,17 @@ def _report_items(
     dispositions, and the outcome-bearing fields ``tier``/``posterior_eligible``/
     ``evidence_after_as_of``, computed with the same authority as the export
     rows (``classify_tier`` + ``effective_adjudication`` gold-eligibility) so
-    the 80% gate sees real adjudication state on the CLI path. Shares one
-    implementation with the final bundle's coverage report
-    (``final_bundle._enrich_report_items``) so both gates agree."""
+    the 80% gate sees real adjudication state on the CLI path. The queue is
+    the **complete** set (``include_decisive=True``), matching the final
+    bundle's coverage report, so a human observation on an automatically
+    adjudicated decisive record lands in the queue instead of raising, and
+    the CLI's ``outcome_coverage`` cannot be structurally ~0 while the
+    published gate passes. Shares one implementation with the final bundle's
+    coverage report (``final_bundle._enrich_report_items``) so both gates
+    agree."""
     from daydream.training.adjudication.final_bundle import _enrich_report_items
 
-    items = build_queue(_load_sessions_for_index(index_root))
+    items = build_queue(_load_sessions_for_index(index_root), include_decisive=True)
     observations = load_observations(state_dir / _OBSERVATIONS_FILENAME)
     return _enrich_report_items(items, observations, as_of=as_of)
 
@@ -655,10 +660,12 @@ def handle_publish_final(argv: list[str]) -> int:
     Both paths share ``build_final_bundle`` entirely: the staging bundle is
     constructed into ``<materialize-dir>/final-bundle`` and fully validated
     before any Hub interaction. With ``--dry-run`` the handler prints the
-    per-file record counts + per-disposition summary and returns 0 without
-    ever constructing a client; otherwise the bundle is published via
-    :func:`publish_final_annotation_bundle` (private-repo gate, secret scan,
-    SHA256SUMS, additive upload, clean-download verify, ``_SUCCESS`` last).
+    per-file record counts + per-disposition summary, the 80%
+    human-adjudication admission-gate verdict from the written coverage
+    report, and returns 0 without ever constructing a client; otherwise the
+    bundle is published via :func:`publish_final_annotation_bundle`
+    (private-repo gate, 80% admission-gate refusal, secret scan, SHA256SUMS,
+    additive upload, clean-download verify, ``_SUCCESS`` last).
     """
     from daydream.training.adjudication.final_bundle import build_final_bundle
     from daydream.training.adjudication.publish import publish_final_annotation_bundle
@@ -682,11 +689,23 @@ def handle_publish_final(argv: list[str]) -> int:
         counts = " ".join(
             f"{disposition}={count}" for disposition, count in summary["disposition_counts"].items()
         )
+        try:
+            report = json.loads(
+                (bundle_dir / "coverage-report.json").read_text(encoding="utf-8")
+            )
+            gate = report["admission_gate"]
+            coverage = report["outcome_coverage"]
+        except (OSError, ValueError, KeyError) as exc:
+            print_error(create_console(), "adjudicate publish-final failed", str(exc))
+            return 1
         print_success(
             create_console(),
             f"Dry-run: final bundle validated at {bundle_dir} — "
             f"{summary['record_count']} record(s) across "
-            f"{', '.join(summary['files'])} ({counts}); nothing published",
+            f"{', '.join(summary['files'])} ({counts}); "
+            f"80% admission gate {'PASS' if gate['passes_80pct'] else 'FAIL'} "
+            f"({coverage['adjudicated']}/{coverage['total']} outcome-bearing "
+            f"adjudicated); nothing published",
         )
         return 0
     try:
@@ -695,11 +714,17 @@ def handle_publish_final(argv: list[str]) -> int:
             client, bundle_dir, manifest=args.materialize_dir / "preview-manifest.json",
             verify_download=True,
         )
+        # The snapshot-id label for the success message is read here, inside
+        # the publish try/except, so a missing/corrupt manifest can never
+        # escape the handler as an uncaught exception after a successful
+        # publish — every handler must return an int exit code.
+        manifest = json.loads(
+            (args.materialize_dir / "preview-manifest.json").read_text(encoding="utf-8")
+        )
+        snapshot_id = manifest.get("snapshot_id", "")
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-final failed", str(exc))
         return 1
-    manifest = json.loads((args.materialize_dir / "preview-manifest.json").read_text(encoding="utf-8"))
-    snapshot_id = manifest.get("snapshot_id", "")
     print_success(
         create_console(),
         f"Published final annotation bundle ({summary['record_count']} record(s)) "
