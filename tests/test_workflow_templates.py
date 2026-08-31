@@ -10,7 +10,7 @@ cannot verify and that a careless edit could silently break:
   resolves to a full commit SHA (never a mutable tag/branch/expression).
 - The daydream install stays pinned to the current release tag (cross-file
   drift against ``pyproject.toml``), in every live and shipped workflow.
-- Every App-token action in the live and packaged posting workflows stays pinned to the approved v2.2.2 commit.
+- Every App-token action in the live and packaged posting workflows stays pinned to the approved v3.2.0 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
 - The repo's own Codex dogfood workflow persists ``codex login`` before the
@@ -106,7 +106,7 @@ _PINNED_ACTION_VERSIONS = {
     "astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a": "v4.2.0",
     "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": "v4.6.2",
     "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093": "v4.3.0",
-    "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349": "v2.2.2",
+    "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1": "v3.2.0",
 }
 
 _USES_LINE_RE = re.compile(r"^\s*uses:\s*(?P<ref>\S+)(?:\s*#\s*(?P<comment>\S+))?$")
@@ -545,10 +545,10 @@ def test_split_setup_preserves_privilege_split(post_path: Path) -> None:
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
 
 
-_APP_TOKEN_ACTION = "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+_APP_TOKEN_ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
 
 # Every token-minting workflow, shipped or live, pins every App-token action to
-# the approved v2.2.2 commit. Lists the concrete (job, action) pairs so a renamed
+# the approved v3.2.0 commit. Lists the concrete (job, action) pairs so a renamed
 # job, a refloated pin, or a newly added unpinned token action fails loudly rather
 # than being silently absorbed by a wildcard.
 _APP_TOKEN_PIN_CASES = [

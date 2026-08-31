@@ -48,6 +48,10 @@ class DaydreamFileConfig:
             ``None`` falls through to the RunConfig field / orchestrator default;
             ``True`` posts ``event: "APPROVE"`` when a deep review has zero
             high/medium findings. Explicit opt-in: never coerced from a non-bool.
+        scope_issue_filing: Opt-in for out-of-scope issue filing (issue #1056).
+            ``None`` falls through to the RunConfig field / orchestrator default;
+            ``True`` re-enables filing GitHub issues for findings and edits
+            outside the reviewed diff. Never coerced from a non-bool.
         review_profile: Repo-committed review-profile path (R9). A lenient path
             read only — the strict profile parse + validation stays in
             ``review_profile.py``. ``None`` (absent or non-str) means the key is
@@ -130,6 +134,7 @@ class DaydreamFileConfig:
     shallow_fanout_threshold: int | None = None
     precision_mode: bool | None = None
     approve_on_clean: bool | None = None
+    scope_issue_filing: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
     uncovered_sweep: bool | None = None
@@ -378,6 +383,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # an accidental ``approve_on_clean = 1`` is treated as unset, not enabled.
     raw_approve = merged.get("approve_on_clean")
     approve_on_clean: bool | None = raw_approve if isinstance(raw_approve, bool) else None
+    # scope_issue_filing: bool only, same degrade-to-None rule so an accidental
+    # ``scope_issue_filing = 1`` is treated as unset, not enabled.
+    raw_scope = merged.get("scope_issue_filing")
+    scope_issue_filing: bool | None = raw_scope if isinstance(raw_scope, bool) else None
     # uncovered_sweep: bool only, same degrade-to-None rule as precision_mode so
     # an accidental ``uncovered_sweep = 1`` is treated as unset, not enabled.
     raw_uncovered_sweep = merged.get("uncovered_sweep")
@@ -422,6 +431,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         shallow_fanout_threshold=threshold,
         precision_mode=precision,
         approve_on_clean=approve_on_clean,
+        scope_issue_filing=scope_issue_filing,
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),

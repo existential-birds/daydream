@@ -83,6 +83,20 @@ def test_run_config_flow_name_settable() -> None:
     assert RunConfig(target="/tmp/p", flow_name="ro-audit").flow_name == "ro-audit"
 
 
+def test_file_scope_issues_flag_reaches_runconfig(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(monkeypatch, ["--file-scope-issues", "/tmp/project"])
+    assert cfg.scope_issue_filing is True
+
+
+def test_file_scope_issues_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(monkeypatch, ["/tmp/project"])
+    assert cfg.scope_issue_filing is False
+
+
+def test_runconfig_scope_issue_filing_defaults_false() -> None:
+    assert RunConfig(target="/t").scope_issue_filing is False
+
+
 def test_flow_flag_sets_flow_name(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _cfg(monkeypatch, ["--flow", "ro-audit", "/tmp/project"])
     assert cfg.flow_name == "ro-audit"
