@@ -108,7 +108,10 @@ def test_full_annotation_pipeline_survives_vm_loss(
     final_prefix = f"annotations/{curation_id}/{snapshot_id}/final/"
     assert hub.files[f"{final_prefix}_SUCCESS"] == b""
 
-    # 7. clean download into a fresh dir verifies checksums
+    # 7. clean download into a fresh dir verifies checksums. Copying the
+    # published files off the (fake) Hub is fixture transport — the bundle
+    # itself was constructed and uploaded exclusively by the CLI above; this
+    # loop only materializes the download side of the runbook's verify step.
     clean = tmp_path / "clean-download"
     clean.mkdir()
     for key, data in hub.files.items():

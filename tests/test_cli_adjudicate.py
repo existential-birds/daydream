@@ -384,7 +384,8 @@ from tests.fixtures.training.build_hub_snapshot import build_snapshot  # noqa: E
 from tests.test_training_adjudication_final_bundle import seed_final_bundle_state  # noqa: E402
 
 
-def test_publish_final_dry_run_validates_and_publishes_nothing(tmp_path, capsys):
+def test_publish_final_dry_run_validates_and_publishes_nothing(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     hub = build_snapshot()
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
@@ -400,7 +401,8 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(tmp_path, capsys)
     assert not any(k.startswith("annotations/") and "/final/" in k
                    for k in getattr(hub, "files", {}))
 
-def test_publish_final_missing_artifact_exits_nonzero(tmp_path, capsys):
+def test_publish_final_missing_artifact_exits_nonzero(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     ann = mat / "annotations.jsonl"
     if ann.exists():
@@ -421,6 +423,7 @@ def test_publish_final_missing_artifact_exits_nonzero(tmp_path, capsys):
 
 def test_runbook_commands_parse_against_real_parser() -> None:
     import re
+
     from daydream.training.adjudication.cli import _build_adjudicate_parser
     text = (Path(__file__).parents[1] / "docs" / "runbooks" /
             "annotation-final-publish.md").read_text()
