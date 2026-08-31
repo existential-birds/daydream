@@ -448,12 +448,12 @@ Python files, and the pre-push gate (the hook verifies commit signatures first,
 then delegates to `make check` — the quality-gate portion of that hook). A running Docker daemon
 is required for `make actionlint` (the workflow YAML checks run the pinned
 container); when no daemon is available that target is skipped with a note and
+exits 0, so `make check` still succeeds without a daemon (CI always runs
+actionlint).
 
 Editors that support [EditorConfig](https://editorconfig.org) pick up the root
 `.editorconfig` automatically (UTF-8, LF, final newline; 4-space Python, 2-space
 YAML/TOML, tabs in Makefiles, preserved Markdown hard breaks).
-exits 0, so `make check` still succeeds without a daemon (CI always runs
-actionlint).
 
 See [docs/coverage.md](docs/coverage.md) for the coverage gate and ratchet procedure.
 

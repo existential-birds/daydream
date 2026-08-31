@@ -62,11 +62,9 @@ def test_python_indent() -> None:
 
 
 def test_yaml_and_toml_indent() -> None:
-    cp = _load()
-    for name in ("*.{yml,yaml,toml}",):
-        section = cp[name]
-        assert section["indent_style"] == "space"
-        assert section["indent_size"] == "2"
+    section = _load()["*.{yml,yaml,toml}"]
+    assert section["indent_style"] == "space"
+    assert section["indent_size"] == "2"
 
 
 def test_makefile_uses_tabs() -> None:
