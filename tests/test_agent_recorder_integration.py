@@ -331,7 +331,7 @@ async def test_calling_run_agent_with_positional_phase_raises_typeerror(
     """The required ``phase`` argument remains keyword-only."""
     backend = MockBackend([])
     with pytest.raises(TypeError):
-        await run_agent(backend, tmp_path, "hi", DaydreamPhase.REVIEW)  # type: ignore[misc]
+        await run_agent(backend, tmp_path, "hi", DaydreamPhase.REVIEW)  # type: ignore[call-arg]
 
 
 async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
