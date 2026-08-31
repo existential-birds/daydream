@@ -174,6 +174,7 @@ class DownloadResult:
     digests: dict[str, str] = field(default_factory=dict)  # relpath -> sha256
     discovered: int = 0
     run_shaped_manifests: int = 0
+    incomplete_manifests: tuple[str, ...] = ()
 
 
 _REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", "trajectory.json"))
@@ -491,6 +492,7 @@ def download_snapshot(
         digests=digests,
         discovered=len(discovery.sessions),
         run_shaped_manifests=discovery.run_shaped_manifests,
+        incomplete_manifests=discovery.incomplete_manifests,
     )
 
 
@@ -541,6 +543,26 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
+    """Read the discovery diagnostics block from the download manifest.
+
+    Returns an empty dict when the manifest predates the discovery ledger
+    (a manually staged legacy tree). Invalid JSON raises ``HydrationError``
+    fail-closed, matching :func:`_discovered_session_ids`.
+    """
+    path = stage / "downloads" / str(revision) / "_download_manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("discovery", {}), dict):
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
+    discovery: dict[str, Any] = payload["discovery"]
+    return discovery
 
 
 def _discovered_session_ids(stage: Path, revision: str) -> list[str] | None:
@@ -1090,6 +1112,7 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
         }
         for entry in sorted(quarantined + excluded, key=lambda item: str(item["session_id"]))
     ]
+    discovery_block = _download_discovery_block(stage, revision)
     accounted = len(imported) + len(rejections)
     if accounted != len(candidate_ids):
         raise HydrationError(
@@ -1112,6 +1135,12 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
         "rejections": rejections,
         "tallies": {
             "discovered": len(candidate_ids),
+            "run_shaped_manifests": int(
+                discovery_block.get("run_shaped_manifests", len(candidate_ids))
+            ),
+            "incomplete_manifests": [
+                str(item) for item in discovery_block.get("incomplete_manifests", [])
+            ],
             "imported": len(imported),
             "quarantined": len(quarantined),
             "excluded": len(excluded),
@@ -1505,6 +1534,7 @@ class HydrateSummary:
     dry_run_discovered: int = 0
     dry_run_admitted: int = 0
     dry_run_rejected: int = 0
+    dry_run_incomplete_manifests: tuple[str, ...] = ()
     verify_admitted: int = 0
     verified: bool = False
 
@@ -1799,6 +1829,7 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
         dry_run_discovered=int(ledger["tallies"]["discovered"]),
         dry_run_admitted=int(ledger["tallies"]["imported"]),
         dry_run_rejected=int(ledger["tallies"]["rejections"]),
+        dry_run_incomplete_manifests=tuple(ledger["tallies"]["incomplete_manifests"]),
     )
     summary.verify_admitted = verify_publication(
         dest_client,

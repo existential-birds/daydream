@@ -1639,7 +1639,7 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
-    from daydream.ui import create_console
+    from daydream.ui import create_console, print_warning
 
     parser = _build_hydrate_hub_parser()
     console = create_console()
@@ -1717,11 +1717,17 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     )
     print_info(
         console,
-        f"dry-run discovered {getattr(summary, 'dry_run_discovered', summary.dry_run_admitted)} "
+        f"dry-run discovered {summary.dry_run_discovered} "
         f"candidate(s); admitted {summary.dry_run_admitted} batch(es); "
-        f"rejected {getattr(summary, 'dry_run_rejected', 0)} batch(es); "
+        f"rejected {summary.dry_run_rejected} batch(es); "
         f"verify admitted {summary.verify_admitted} batch(es)",
     )
+    if summary.dry_run_incomplete_manifests:
+        print_warning(
+            console,
+            "hydration yield reduced: incomplete manifest(s) discovered and "
+            "dropped: " + redact_text("; ".join(summary.dry_run_incomplete_manifests)),
+        )
     return 0
 
 
@@ -1729,6 +1735,7 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     """Plan-only hydrate pass: pin, download, ingest, tally — no publication."""
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
+    from daydream.ui import print_warning
 
     try:
         client = _hydrate._make_client(config.source_repo)
@@ -1753,12 +1760,20 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     print_info(
         console,
         f"dry-run plan for curation {ledger.get('curation_id')}: pinned {source_commit}; "
-        f"discovered {tallies.get('discovered', 0)} candidate(s); "
+        f"discovered {tallies.get('discovered', 0)} candidate(s) of "
+        f"{tallies.get('run_shaped_manifests', 0)} run-shaped manifest(s); "
         f"admitted {tallies.get('imported', 0)} batch(es); "
         f"rejected {len(rejections)} batch(es); "
         f"accounted {tallies.get('accounted', 0)} candidate(s); "
         f"reason codes: {reason_tally or 'none'}; no publication performed",
     )
+    incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
+    if incomplete:
+        print_warning(
+            console,
+            "dry-run yield reduced: incomplete manifest(s) discovered and "
+            "dropped: " + redact_text("; ".join(incomplete)),
+        )
     return 0
 
 

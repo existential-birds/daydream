@@ -49,7 +49,10 @@ def test_success_path_drives_orchestrator(
         curation_id = "cur-" + "0" * 16
         output_commit_sha = "b" * 40
         verified = True
+        dry_run_discovered = 1
         dry_run_admitted = 1
+        dry_run_rejected = 0
+        dry_run_incomplete_manifests: tuple[str, ...] = ()
         verify_admitted = 1
 
     def fake_run(config: Any) -> FakeSummary:
@@ -63,6 +66,30 @@ def test_success_path_drives_orchestrator(
          "--destination-repo", "org/ds", "--stage-dir", str(tmp_path)])
     assert rc == 0
     assert calls and calls[0].source_revision == "a" * 40
+
+
+def test_success_path_surfaces_incomplete_manifests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class FakeSummary:
+        curation_id = "cur-" + "0" * 16
+        output_commit_sha = "b" * 40
+        verified = True
+        dry_run_discovered = 2
+        dry_run_admitted = 1
+        dry_run_rejected = 0
+        dry_run_incomplete_manifests = ("sess-a (missing trajectory.json)",)
+        verify_admitted = 1
+
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setattr(cli, "_run_hydrate_hub", lambda _config: FakeSummary())
+    rc = cli._handle_hydrate_hub_command(
+        ["--source-repo", "org/ds", "--source-revision", "a" * 40,
+         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path)])
+    assert rc == 0
+    output = " ".join(capsys.readouterr().out.split())
+    assert "hydration yield reduced" in output
+    assert "sess-a (missing trajectory.json)" in output
 
 
 def test_dry_run_reports_discovery_accounting_without_publication(
@@ -87,11 +114,56 @@ def test_dry_run_reports_discovery_accounting_without_publication(
     )
 
     assert rc == 0
-    output = capsys.readouterr().out
-    assert "discovered 3 candidate(s)" in output
+    output = " ".join(capsys.readouterr().out.split())
+    assert "discovered 3 candidate(s) of 3 run-shaped manifest(s)" in output
     assert "admitted 3" in output
     assert "rejected 0 batch(es)" in output
     assert "accounted 3 candidate(s)" in output
+    assert "yield reduced" not in output
+    assert hub.uploaded_paths == []
+
+
+def test_dry_run_surfaces_incomplete_manifests_with_reduced_yield(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    complete = {
+        "manifest.json": b'{"session_id": "complete"}',
+        "trajectory.json": b'{"messages": []}',
+    }
+    incomplete = {"manifest.json": b'{"session_id": "incomplete"}'}
+    hub = FakeHub(
+        repo_id="org/private-ds",
+        private=True,
+        files={
+            "sess-complete/manifest.json": complete["manifest.json"],
+            "sess-complete/trajectory.json": complete["trajectory.json"],
+            "sess-incomplete/manifest.json": incomplete["manifest.json"],
+        },
+    )
+    hub.commit_revision(SNAPSHOT_REVISION)
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
+
+    rc = cli._handle_hydrate_hub_command(
+        [
+            "--source-repo",
+            "org/private-ds",
+            "--source-revision",
+            SNAPSHOT_REVISION,
+            "--destination-repo",
+            "org/private-ds",
+            "--stage-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+
+    assert rc == 0
+    output = " ".join(capsys.readouterr().out.split())
+    assert "discovered 1 candidate(s) of 2 run-shaped manifest(s)" in output
+    assert "accounted 1 candidate(s)" in output
+    assert "dry-run yield reduced" in output
+    assert "sess-incomplete (missing trajectory.json)" in output
     assert hub.uploaded_paths == []
 
 
