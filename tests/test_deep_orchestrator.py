@@ -2454,6 +2454,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
+    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
+    # opt-in explicitly.
     exit_code = await run(
         make_config(
             target,
@@ -2461,6 +2463,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
             output_mode="loop",
             non_interactive=False,
             archive=False,
+            scope_issue_filing=True,
         )
     )
     assert exit_code == 0
@@ -2489,7 +2492,10 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
 
 
 async def test_fix_reverts_but_files_no_issue_by_default(
-    tmp_path, monkeypatch, make_config, mute_side_effects
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#1056 default-off: the residual edit is still reverted (safety invariant)
     but no GitHub issue is filed."""
@@ -2505,12 +2511,13 @@ async def test_fix_reverts_but_files_no_issue_by_default(
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
-    issues: list[tuple] = []
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_create",
-        lambda repo, *, title, body, **kw: issues.append((title, body))
-        or "https://github.com/owner/repo/issues/9",
-    )
+    issues: list[tuple[str, str]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
     exit_code = await run(
         make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False)
     )
@@ -2524,7 +2531,10 @@ async def test_fix_reverts_but_files_no_issue_by_default(
 
 
 async def test_fix_reverts_and_files_when_opted_in(
-    tmp_path, monkeypatch, make_config, mute_side_effects
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#1056 opt-in: the reverted edit is filed exactly as #336 built it."""
     from daydream.runner import run
@@ -2537,12 +2547,13 @@ async def test_fix_reverts_and_files_when_opted_in(
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
-    issues: list[tuple] = []
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_create",
-        lambda repo, *, title, body, **kw: issues.append((title, body))
-        or "https://github.com/owner/repo/issues/9",
-    )
+    issues: list[tuple[str, str]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
     exit_code = await run(
         make_config(
             target, assume="yes", output_mode="loop", non_interactive=False,
@@ -2554,7 +2565,10 @@ async def test_fix_reverts_and_files_when_opted_in(
 
 
 async def test_reverted_edit_dedups_across_runs(
-    tmp_path, monkeypatch, make_config, mute_side_effects
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#1051 regression: an opted-in run does not re-file an issue for a
     reverted edit whose fingerprint marker already sits on an open issue."""
@@ -2568,9 +2582,9 @@ async def test_reverted_edit_dedups_across_runs(
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
-    created: list[tuple] = []
+    created: list[tuple[str, str]] = []
 
-    def _record_and_list_create(repo, *, title, body, **kw):
+    def _record_and_list_create(repo: Any, *, title: str, body: str, **kw: Any) -> str:
         created.append((title, body))
         return "https://github.com/owner/repo/issues/9"
 
@@ -2585,7 +2599,7 @@ async def test_reverted_edit_dedups_across_runs(
     recorded: list[str] = []
     _real_diff = _git_ops.diff_worktree_against
 
-    def _spy_diff(repo, ref, paths, **kw):
+    def _spy_diff(repo: Any, ref: str, paths: Any, **kw: Any) -> str:
         patch = _real_diff(repo, ref, paths, **kw)
         if list(paths) == ["unrelated.py"]:
             recorded.append(patch)
@@ -2593,7 +2607,7 @@ async def test_reverted_edit_dedups_across_runs(
 
     monkeypatch.setattr("daydream.git_ops.diff_worktree_against", _spy_diff)
 
-    def _list_with_prior_marker(repo, **kw):
+    def _list_with_prior_marker(repo: Any, **kw: Any) -> list[dict[str, Any]]:
         marker = _scope_edit_marker(_scope_edit_fingerprint("unrelated.py", recorded[-1]))
         return [
             {"number": 11, "title": "[daydream] out-of-scope edit reverted: unrelated.py",
@@ -3366,7 +3380,13 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
+    # opt-in explicitly.
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
+        )
+    )
     assert exit_code == 0
 
     fix_prompts = [
@@ -3408,11 +3428,12 @@ async def test_fix_gate_files_no_issue_by_default(
     ]
     mute_side_effects()
     created: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_create",
-        lambda repo, *, title, body, **kw: created.append((title, body))
-        or "https://github.com/owner/repo/issues/9",
-    )
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        created.append((title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
     assert exit_code == 0
     assert created == [], f"no issue may be filed by default, got {created!r}"
@@ -3438,11 +3459,12 @@ async def test_fix_gate_files_issue_when_opted_in(
     ]
     mute_side_effects()
     created: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_create",
-        lambda repo, *, title, body, **kw: created.append((title, body))
-        or "https://github.com/owner/repo/issues/9",
-    )
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        created.append((title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
@@ -3488,7 +3510,13 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
+    # opt-in explicitly.
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
+        )
+    )
     assert exit_code == 0
 
     fix_prompts = [
@@ -3631,7 +3659,13 @@ async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
+    # opt-in explicitly.
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
+        )
+    )
     assert exit_code == 0
 
     # Every finding filed as an issue, all on out-of-scope files.
