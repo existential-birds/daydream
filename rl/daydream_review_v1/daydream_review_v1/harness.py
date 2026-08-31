@@ -84,6 +84,9 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
     APPENDS_SYSTEM_PROMPT = False
     SUPPORTS_MCP = False
     SUPPORTS_MESSAGE_PROMPT = False
+    # The smoke path (configs/eval-stub.toml) runs on the subprocess runtime; the
+    # harness itself stages daydream into whatever runtime it is given.
+    NEEDS_CONTAINER = False
 
     @property
     def strategy(self) -> BackendStrategy:
@@ -122,7 +125,8 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         runtime: vf.Runtime,
         endpoint: str,
         secret: str,
-        mcp_urls: dict[str, str],  # noqa: override param name pinned by verifiers 0.2.1 vf.Harness.launch
+        mcp_urls: dict[str, str],
+        task_data: vf.TaskData,  # new trailing param in verifiers 0.3.1
     ) -> vf.ProgramResult:
         data: DaydreamReviewData = trace.task.data
         strategy = self.strategy
