@@ -3430,6 +3430,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_untracked=pre_fix_untracked,
         changed_files=changed_files,
         finding_files={item["file"] for item in ctx.data["items"] if item.get("file")},
+        # Issue #1056 — reverted-edit filing is opt-in; the revert itself is not.
+        file_scope_issues=_scope_issue_filing(ctx.config),
     )
     if residual_guard_result is None:
         # Fail-close to match the generated-file guard: an unreverted
