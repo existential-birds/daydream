@@ -129,7 +129,7 @@ jobs:
       # Version comes from the tracked .github/workflows/package.json (the
       # npm Dependabot block's target) so a bump PR reaches CI end-to-end.
       - name: Install Codex CLI
-        run: npm install -g @openai/codex@$(node -p "require('./.github/workflows/package.json').dependencies['@openai/codex']")
+        run: npm install -g "@openai/codex@$(node -p "require('./.github/workflows/package.json').dependencies['@openai/codex']")"
 
       # `codex exec` does NOT read OPENAI_API_KEY from the environment for its
       # own model-API auth (verified against CLI 0.139.0): with the key set but
