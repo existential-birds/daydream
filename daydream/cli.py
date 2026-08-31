@@ -569,13 +569,22 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         "curation-manifest.json)",
     )
     parser.add_argument(
+        "--annotation-bundle-root",
+        type=Path,
+        default=None,
+        dest="annotation_bundle_dir",
+        metavar="DIR",
+        help="Annotation-bundle root (must contain _SUCCESS, SHA256SUMS, "
+        "lineage.json, annotations.jsonl); self-verified and linked to "
+        "--bundle-root before the projection runs",
+    )
+    parser.add_argument(
         "--annotations-snapshot",
         type=Path,
-        required=True,
+        default=None,
         dest="annotations_snapshot",
         metavar="PATH",
-        help="Side-car JSONL of per-finding resolutions keyed by fingerprint, "
-        "digest-pinned alongside the bundle",
+        help=argparse.SUPPRESS,  # deprecated: refused in the handler
     )
     parser.add_argument(
         "--out",
@@ -620,7 +629,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
 
     Drives :func:`daydream.training.corpus_v2.run_build_corpus_v2` synchronously
     (no agent work, no network — a pure projection over the curated bundle plus
-    the annotations snapshot). Mirrors :func:`_handle_build_corpus_command`'s
+    the annotation bundle). Mirrors :func:`_handle_build_corpus_command`'s
     structure: returns an exit code; ``main()`` translates it into a process
     exit. Errors are fail-closed: a refused build exits non-zero with the
     exception message and writes nothing.
@@ -646,6 +655,23 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         )
         return 1
 
+    if args.annotations_snapshot is not None:
+        print_error(
+            create_console(),
+            "Unsupported --annotations-snapshot",
+            "The side-car snapshot was replaced by the two-bundle contract; "
+            "pass the self-verified annotation bundle via --annotation-bundle-root.",
+        )
+        return 1
+    if args.annotation_bundle_dir is None:
+        print_error(
+            create_console(),
+            "Missing --annotation-bundle-root",
+            "A corpus v2 build requires a pinned annotation bundle "
+            "(_SUCCESS + SHA256SUMS + lineage.json + annotations.jsonl).",
+        )
+        return 1
+
     # --out names the corpus JSONL; the projector writes its canonical file set
     # (corpus.jsonl, corpus-v2.jsonl, split manifests, lineage.json) into that
     # directory, finishing with _SUCCESS — so the whole set, twin included, is
@@ -658,7 +684,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         config = BuildCorpusV2Config(
             out_dir=out_dir,
             bundle_dir=args.bundle_root,
-            annotations_snapshot=args.annotations_snapshot,
+            annotation_bundle_dir=args.annotation_bundle_dir,
             as_of=args.as_of,
         )
     except ValueError as exc:
@@ -932,6 +958,16 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--file-scope-issues",
+        action="store_true",
+        default=False,
+        dest="file_scope_issues",
+        help="Opt in to filing out-of-scope findings and reverted edits as GitHub "
+             "issues (issue #1056; default off). Also settable via [tool.daydream] "
+             "scope_issue_filing in a config file."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--copy",
         action="append",
         default=[],
@@ -1163,6 +1199,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         flow_name=args.flow_name,
         precision_mode=args.precision,
         approve_on_clean=args.approve_on_clean,
+        scope_issue_filing=args.file_scope_issues,
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
         assume=args.assume,

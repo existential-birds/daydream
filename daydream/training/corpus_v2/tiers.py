@@ -59,6 +59,11 @@ def classify_tier(resolution: Mapping[str, object], *, record_type: str = "outco
                 f"{resolution.get('fingerprint')!r} has empty evidence; "
                 "gold requires human/developer reply evidence"
             )
+        # C5/M9 temporal gate: evidence observed after the record's as_of
+        # pin cannot establish gold eligibility — keep the evidence but
+        # classify silver, never gold.
+        if resolution.get("evidence_after_as_of") is True:
+            return "silver"
         return "gold"
 
     raise TypeError(f"unknown disposition {disposition!r}")

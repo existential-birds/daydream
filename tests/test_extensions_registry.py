@@ -14,6 +14,7 @@ from daydream.extensions import (
     ToolSupervisor,
     UnresolvedExtensionError,
 )
+from daydream.trajectory import DaydreamPhase
 
 
 async def _noop(ctx: Any) -> None:
@@ -78,14 +79,14 @@ def test_remove_loop_internal_step_raises_descriptive_error() -> None:
 def test_tool_supervisor_registration_is_exclusive() -> None:
     reg = Registry()
 
-    def supervisor(name: str, tool_input: Any, *, phase: Any) -> Any:
+    def supervisor(name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
         return ToolDecision(veto=name == "Write", reason="protected path")
 
     reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
     assert reg.tool_supervisor_if_registered() is supervisor
-    assert supervisor("Write", {}, phase="fix").veto is True
+    assert supervisor("Write", {}, phase=DaydreamPhase.FIX).veto is True
     with pytest.raises(ExtensionError, match="tool supervisor.*already registered"):
-        reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
+        reg.register_tool_supervisor(supervisor)
     with pytest.raises(ValueError, match="veto.*reason"):
         ToolDecision(veto=True, reason="")
 

@@ -196,6 +196,10 @@ installed workflows still satisfy the approval-gate contract of the packaged
 versions (contract-intact customizations, such as a different model backend,
 pass with a warning; only drift that breaks the gate is a hard failure).
 
+### Out-of-scope issue filing
+
+By default daydream makes **no** GitHub issue writes for out-of-scope work: findings outside the reviewed diff are excluded from the fix pass, and out-of-scope post-fix edits are reverted — nothing is filed. If the bot runs unattended on repositories you don't own, leave `scope_issue_filing` off (the default) so the bot never opens issues on someone else's tracker. Opting in (`[tool.daydream] scope_issue_filing = true` in the target repo's config, or `daydream --file-scope-issues` per run) re-enables both filing paths — pre-fix out-of-scope findings and reverted post-fix edits — with the reverted-edit path cross-run deduplicated via a hidden fingerprint marker so repeat runs don't file duplicates.
+
 ---
 
 ## Accepted honest limits

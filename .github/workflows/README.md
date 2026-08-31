@@ -79,21 +79,26 @@ triggers and posting identity, not a new output format.
 ## Dependabot dependency updates
 
 `.github/dependabot.yml` keeps dependency updates arriving as small, grouped,
-reviewer-friendly PRs across four managed ecosystems:
+reviewer-friendly PRs across three managed ecosystems:
 
 | Ecosystem | Directory | Notes |
 |---|---|---|
 | `uv` | `/` | Root workspace dependencies (`pyproject.toml` / `uv.lock`) |
 | `uv` | `/rl/daydream_review_v1` | The standalone RL package's own dependencies |
-| `github-actions` | `/` | Action version bumps across `.github/workflows` |
 | `npm` | `/.github/workflows` | Deliberately points at this folder's `package.json`, which tracks the single `@openai/codex` dependency used by CI — do not "fix" the directory to `/` |
 
-**Volume bounds.** All four ecosystems run weekly on Mondays (06:00,
+**Volume bounds.** All three ecosystems run weekly on Mondays (06:00,
 `Australia/Brisbane`) with `open-pull-requests-limit: 5` per ecosystem. The
-three multi-dependency ecosystems (both `uv` blocks and `github-actions`) use
-one minor+patch group each, so at most one grouped PR per uv project and one
-for all action bumps; the npm block is ungrouped since it tracks a single
-dependency. Commit messages carry the `chore(deps)` prefix.
+two multi-dependency `uv` blocks each use one minor+patch group, so at most
+one grouped PR per uv project; the npm block is ungrouped since it tracks a
+single dependency. Commit messages carry the `chore(deps)` prefix.
+
+**Action bumps are manual.** The `github-actions` ecosystem was removed on
+purpose: every third-party action is pinned to a full commit SHA registered in
+`tests/test_workflow_templates.py::_PINNED_ACTION_VERSIONS`, which Dependabot
+cannot update — its action-bump PRs failed CI structurally. Bump actions by
+hand: update the SHA + `# vX.Y.Z` comment in the workflows (live and packaged
+templates) AND the map entry, then run `make check`.
 
 **Validation gate.** Every dependency PR must pass `make check` before merge —
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`

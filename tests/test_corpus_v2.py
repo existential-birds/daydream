@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from daydream.archive.sanitize import _derivative_digest
 from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.provenance import extract_provenance
@@ -80,7 +81,8 @@ def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: 
 def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
     from daydream.training.corpus_v2.projector import BuildCorpusV2Config
 
-    return BuildCorpusV2Config(out_dir=out_dir, bundle_dir=bundle_dir, annotations_snapshot=snapshot, **kw)
+    return BuildCorpusV2Config(out_dir=out_dir, bundle_dir=bundle_dir,
+                               annotation_bundle_dir=snapshot.parent, **kw)
 
 
 def _write_annotations_snapshot(
@@ -91,11 +93,11 @@ def _write_annotations_snapshot(
     dispositions: list[str] | None = None,
     n_siblings: int = 1,
 ) -> Path:
-    """Task 0A side-car shape: a digest-pinned JSONL of per-finding
-    resolution records keyed by fingerprint, exported alongside the bundle
-    and covered by SHA256SUMS. Also gives the admitted batch a real ATIF
-    trajectory so segmentation has something to segment (``n_siblings``
-    sibling subagent refs)."""
+    """Two-bundle shape: a self-verified annotation bundle (its own
+    SHA256SUMS + _SUCCESS + lineage.json) whose ``annotations.jsonl``
+    carries per-finding resolution records keyed by ``record_id``. Also
+    gives the admitted batch a real ATIF trajectory so segmentation has
+    something to segment (``n_siblings`` sibling subagent refs)."""
     trajectory = {
         "session_id": session_id,
         "trajectory_id": f"{session_id}:root",
@@ -111,7 +113,10 @@ def _write_annotations_snapshot(
     (bundle_dir / "batches" / session_id / "trajectory.json").write_text(
         json.dumps(trajectory) + "\n"
     )
-    snapshot_path = bundle_dir / "annotations-snapshot.jsonl"
+    from daydream.training.corpus_v2.identity import record_id as _record_id
+
+    ann_dir = bundle_dir.parent / f"{bundle_dir.name}-annotations"
+    ann_dir.mkdir(parents=True, exist_ok=True)
     fps = ["a1" * 32, "b2" * 32, "c3" * 32]
     rows = []
     for i, disposition in enumerate(dispositions or ["accepted", "rejected", "ambiguous"]):
@@ -121,13 +126,77 @@ def _write_annotations_snapshot(
             if disposition in ("accepted", "rejected")
             else []
         )
-        rows.append({"session_id": session_id, "fingerprint": fps[i % len(fps)],
-                     "disposition": disposition, "evidence": evidence,
-                     "profile_schema_version": 2, "profile_name": "deep-review",
-                     "profile_source_kind": "builtin", "profile_digest": "d" * 64})
-    snapshot_path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
-    _write_sumsums(bundle_dir)  # the snapshot + trajectory join the digest pin
-    return snapshot_path
+        fingerprint = fps[i % len(fps)]
+        rows.append({
+            "record_id": _record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
+            "session_id": session_id, "fingerprint": fingerprint,
+            "disposition": disposition, "evidence": evidence,
+            # Real canonical-record shape (adjudication/snapshot.py:
+            # build_canonical_record): the four review-profile fields nest
+            # under "profile" with only "stack" at top level — the projector
+            # must surface both at the two-bundle projection boundary.
+            "profile": {"profile_schema_version": 2, "profile_name": "deep-review",
+                        "profile_source_kind": "builtin", "profile_digest": "d" * 64},
+            "stack": "python",
+        })
+    (ann_dir / "annotations.jsonl").write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    _write_sumsums(bundle_dir)  # the trajectory joins the curation digest pin
+    manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
+    # batch_fileset_digest pins the curation bundle's canonical file-set digest
+    # (_derivative_digest = the same digest vocabulary each batch's
+    # content_digest uses) — computed AFTER the bundle is final so the gate's
+    # equality check against the bundle dir passes.
+    (ann_dir / "lineage.json").write_text(json.dumps({
+        "curation_id": manifest["curation_id"],
+        "sanitized_hub_commit": manifest["source_hub_commit"],
+        "schema_version": "annotation-snapshot/1055-snapshot-r1",
+        "batch_fileset_digest": _derivative_digest(bundle_dir),
+        "labeler_version": "v1", "rubric_version": "v1",
+        "classifier_version": "v1", "as_of": None,
+    }, sort_keys=True) + "\n")
+    rel = sorted(p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*") if p.is_file())
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+    (ann_dir / "_SUCCESS").write_text("ok\n")
+    return ann_dir / "annotations.jsonl"
+
+
+@pytest.fixture
+def existing_bundle_fixture(tmp_path: Path) -> tuple[Path, list[dict[str, Any]], dict[str, str]]:
+    """The standard curated-bundle + annotation-bundle pair the two-bundle
+    contract tests build on: bundle dir, the annotation rows (as JSON), and
+    the linkage kwargs (curation id / hub commit)."""
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    rows = [json.loads(line) for line in snap.read_text().splitlines() if line.strip()]
+    manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
+    kwargs = {"curation_id": manifest["curation_id"],
+              "hub_commit": manifest["source_hub_commit"]}
+    return bundle_dir, rows, kwargs
+
+
+def _write_annotation_bundle(root: Path, rows: list[dict[str, Any]], *, curation_id: str,
+                             sanitized_commit: str, batch_fileset_digest: str,
+                             success: bool = True) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "annotations.jsonl").write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
+    (root / "lineage.json").write_text(json.dumps({
+        "curation_id": curation_id, "sanitized_hub_commit": sanitized_commit,
+        "schema_version": "annotation-snapshot/1055-snapshot-r1",
+        "batch_fileset_digest": batch_fileset_digest,
+        "labeler_version": "v1", "rubric_version": "v1",
+        "classifier_version": "v1", "as_of": None,
+    }, sort_keys=True) + "\n", encoding="utf-8")
+    rel = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+    (root / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((root / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ), encoding="utf-8")
+    if success:
+        (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
+    return root
 
 
 def test_load_bundle_requires_success_marker(tmp_path: Path) -> None:
@@ -186,13 +255,16 @@ def test_record_id_is_deterministic_sha256_of_canonical_join() -> None:
 
 
 def _resolution(
-    disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None
+    disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None,
+    evidence_after_as_of: bool = False,
 ) -> dict[str, object]:
     r: dict[str, object] = {
         "fingerprint": "ab" * 32,
         "disposition": disposition,
         "evidence": [{"created_at": "2026-02-01T00:00:00+00:00"}],
     }
+    if evidence_after_as_of:
+        r["evidence_after_as_of"] = True
     if reward is not None:
         r["intrinsic_reward"] = reward
     if score is not None:
@@ -219,6 +291,16 @@ def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
         classify_tier("accepted")  # type: ignore[arg-type]  # gold input must carry evidence, not a bare label
     with pytest.raises(GoldGateError):
         classify_tier({"fingerprint": "ab" * 32, "disposition": "accepted", "evidence": []})
+
+
+def test_evidence_after_as_of_rows_are_never_gold() -> None:
+    # C5/M9 recorded-and-flagged edge: evidence observed after the pin's
+    # as_of keeps its evidence but is never gold-eligible — a decisive
+    # flagged record classifies silver, never gold.
+    assert classify_tier(_resolution("accepted", evidence_after_as_of=True)) == "silver"
+    assert classify_tier(_resolution("rejected", evidence_after_as_of=True)) == "silver"
+    assert classify_tier(_resolution("accepted", evidence_after_as_of=False)) == "gold"
+    assert classify_tier(_resolution("accepted")) == "gold"
 
 
 def test_tiers_are_disjoint_classes() -> None:
@@ -379,7 +461,7 @@ def test_run_level_contested_aggregate_never_erases_split() -> None:
 # Task 9: summary + full lineage + adjudication report
 # ---------------------------------------------------------------------------
 
-from daydream.training.corpus_v2.projector import run_build_corpus_v2  # noqa: E402
+from daydream.training.corpus_v2.projector import BuildCorpusV2Config, run_build_corpus_v2  # noqa: E402
 
 
 def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
@@ -409,6 +491,36 @@ def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) ->
         assert rec["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
                                    "profile_source_kind": "builtin", "profile_digest": "d" * 64}
         assert "stack" in rec  # schema-required provenance key, never dropped
+
+
+def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
+    """The emission boundary honors the canonical harvest's flag: a decisive
+    finding with evidence after the pin's as_of emits silver (outcome_label
+    None), never gold, into corpus.jsonl — the ``evidence_after_as_of``
+    policy is enforced, not just recorded."""
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
+    rows = [json.loads(line) for line in snap.read_text().splitlines() if line.strip()]
+    for row in rows:
+        row["evidence_after_as_of"] = True
+    snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    # annotations.jsonl changed: regenerate the annotation bundle's checksums
+    # exactly as the fixture does (no SHA256SUMS self-line — it does not exist
+    # when the fixture computes the listing).
+    ann_dir = snap.parent
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix()
+        for p in ann_dir.rglob("*") if p.is_file() and p.name != "SHA256SUMS"
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+    summary = run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    assert summary["records_by_tier"] == {"silver": 1}
+    records = [json.loads(line) for line in
+               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    assert records and records[0]["tier"] == "silver"
+    assert records[0]["outcome_label"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +697,8 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
     rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
-                   "--annotations-snapshot", str(snap), "--out", str(tmp_path / "out" / "c.jsonl")])
+                   "--annotation-bundle-root", str(snap.parent),
+                   "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc == 0
     assert (tmp_path / "out" / "corpus-v2.jsonl").is_file()
     assert (tmp_path / "out" / "lineage.json").is_file()
@@ -593,7 +706,72 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
 
 def test_cli_build_v2_refuses_missing_bundle_fail_closed(tmp_path: Path) -> None:
     rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(tmp_path / "nope"),
-                   "--annotations-snapshot", str(tmp_path / "nope" / "snap.jsonl"),
+                   "--annotation-bundle-root", str(tmp_path / "nope" / "ann"),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc != 0
     assert not (tmp_path / "out" / "lineage.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: two-bundle build-v2 contract (annotation bundle self-verification +
+# cross-bundle linkage replaces the snapshot SHA256SUMS pin)
+# ---------------------------------------------------------------------------
+
+
+def test_build_v2_accepts_separate_annotation_bundle_with_exact_linkage(
+    tmp_path: Path,
+    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+) -> None:
+    bundle_dir, snapshot_rows, kwargs = existing_bundle_fixture
+    ann = _write_annotation_bundle(
+        tmp_path / "ann", snapshot_rows,
+        curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
+        batch_fileset_digest=_derivative_digest(bundle_dir))
+    config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
+                                 annotation_bundle_dir=ann)
+    summary = run_build_corpus_v2(config)
+    assert summary["emitted"] > 0
+    # curation bundle untouched (K3: no mutation of the finalized bundle)
+    sums_before = (bundle_dir / "SHA256SUMS").read_bytes()
+    assert (bundle_dir / "SHA256SUMS").read_bytes() == sums_before
+
+
+@pytest.mark.parametrize("mutate", ["missing_success", "wrong_curation", "wrong_commit",
+                                    "wrong_fileset", "corrupt_checksum", "missing_success_after"])
+def test_build_v2_refuses_broken_annotation_bundles(
+    tmp_path: Path,
+    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    mutate: str,
+) -> None:
+    bundle_dir, snapshot_rows, kwargs = existing_bundle_fixture
+    ann = _write_annotation_bundle(
+        tmp_path / "ann", snapshot_rows,
+        curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
+        batch_fileset_digest=_derivative_digest(bundle_dir),
+        success=mutate not in ("missing_success", "missing_success_after"))
+    lineage = json.loads((ann / "lineage.json").read_text())
+    if mutate == "wrong_curation":
+        lineage["curation_id"] = "other"
+    elif mutate == "wrong_commit":
+        lineage["sanitized_hub_commit"] = "0" * 40
+    elif mutate == "wrong_fileset":
+        # a stale annotation bundle records the older curation file set's
+        # digest — same curation_id + commit, different batch bytes
+        lineage["batch_fileset_digest"] = "f" * 64
+    elif mutate == "corrupt_checksum":
+        (ann / "annotations.jsonl").write_text("tampered\n", encoding="utf-8")
+    if mutate in ("wrong_curation", "wrong_commit", "wrong_fileset"):
+        (ann / "lineage.json").write_text(json.dumps(lineage, sort_keys=True) + "\n", encoding="utf-8")
+    config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
+                                 annotation_bundle_dir=ann)
+    with pytest.raises(ValueError):
+        run_build_corpus_v2(config)
+
+
+def test_build_v2_still_works_without_annotation_bundle_dir_raises(
+    tmp_path: Path,
+    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+) -> None:
+    bundle_dir, _rows, kwargs = existing_bundle_fixture
+    with pytest.raises(ValueError, match="annotation_bundle_dir"):
+        BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir)

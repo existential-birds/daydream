@@ -5,7 +5,7 @@ digest-pinned, canonical-JSON ledger so an operator can inspect exactly what a
 subsequent canonical harvest would adjudicate *before* running it. The ledger
 pins per-finding evidence digests (delta on
 ``corpus_v2.bundle``'s bundle-digest SHA256SUMS verification and
-``corpus_v2.projector._verify_snapshot_pinned``), and a re-preview against an
+the projector's two-bundle verification), and a re-preview against an
 existing ledger reports any ``record_id`` whose evidence digest changed —
 drift is surfaced, never silently merged.
 """

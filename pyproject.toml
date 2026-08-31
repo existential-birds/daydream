@@ -4,15 +4,15 @@ version = "0.28.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.12.13"
 dependencies = [
-    "claude-agent-sdk==0.2.147",
-    "anyio>=4.14.2",
-    "rich>=13.0",
+    "claude-agent-sdk==0.2.116",
+    "anyio>=4.0",
+    "rich>=15.0.0",
     "pyfiglet>=1.0",
-    "pydantic>=2.13.4",
+    "pydantic>=2.11.7",
     "httpx>=0.28",
     "PyJWT>=2.0",
     "jsonschema>=4.0",
-    "tree-sitter==0.26.0",
+    "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "tree-sitter-typescript==0.23.2",
     "tree-sitter-go==0.25.0",
@@ -22,7 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 benchmark = ["harbor>=0.22,<0.23"]
-hub = ["huggingface_hub>=1.29.0"]
+hub = ["huggingface_hub>=0.26"]
 
 [dependency-groups]
 dev = [

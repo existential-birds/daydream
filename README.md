@@ -284,6 +284,7 @@ The dotfile uses bare top-level keys. It wins on scalar conflicts.
 [tool.daydream]
 model = "claude-opus-5"     # global default across phases
 backend = "claude"          # global default backend
+scope_issue_filing = false  # default; set true to file out-of-scope work as GitHub issues
 
 [tool.daydream.phases.fix]  # per-phase override
 backend = "codex"
@@ -302,6 +303,10 @@ backend = "codex"
 The resolution order, highest first, is:
 
 **CLI > config file (phase, then global) > built-in per-backend default.**
+
+### Out-of-scope issue filing
+
+`scope_issue_filing` (default `false`) opts a repository into filing out-of-scope findings and reverted out-of-scope edits as GitHub issues. By default daydream makes no GitHub writes for out-of-scope work — findings are excluded from the fix pass and out-of-scope edits are reverted regardless; only the issue filing is gated. Enable it in the target repo's config: `[tool.daydream] scope_issue_filing = true`, or per-run with `daydream --file-scope-issues /path/to/project`.
 
 ### Per-phase settings
 

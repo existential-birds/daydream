@@ -1,6 +1,6 @@
 # Daydream Harbor runtime requirements (generated; do not edit)
 # daydream_version: 0.28.0
-# source_uv_lock_sha256: 3957137d32bbe72b82f774acbd3d616bf565774a5b9ec1b64d11672ec0e31c80
+# source_uv_lock_sha256: c6c5c5a11fd34c4db6060c417c6e1b68f2c1d5672f31b71aa0581103758ff7e0
 # generation_command: uv export --frozen --no-dev --no-emit-project --format requirements-txt
 # template_version: 4
 
@@ -343,9 +343,9 @@ referencing==0.37.0 \
     # via
     #   jsonschema
     #   jsonschema-specifications
-rich==14.3.1 \
-    --hash=sha256:b8c5f568a3a749f9290ec6bddedf835cec33696bfc1e48bcfecb276c7386e4b8 \
-    --hash=sha256:da750b1aebbff0b372557426fb3f35ba56de8ef954b3190315eb64076d6fb54e
+rich==15.0.0 \
+    --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb \
+    --hash=sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36
     # via daydream
 rpds-py==0.30.0 \
     --hash=sha256:0a59119fc6e3f460315fe9d08149f8102aa322299deaa5cab5b40092345c2136 \
