@@ -172,18 +172,26 @@ def build_final_bundle(
       ``_derivative_digest`` over ``curation_bundle_dir`` (default: the index
       root when it *is* the curation bundle root), validated to exist.
 
-    ``out_dir`` must not already exist or must be empty; a non-empty directory
-    raises ``ValueError`` naming it (a stale staging dir must never be
-    silently mixed with fresh content).
+    ``out_dir`` must not exist, must be empty, or may contain only the
+    five contract files from a prior (deterministic) construction — e.g. a
+    ``--dry-run`` validation immediately followed by a real publish over the
+    same state. Construction is deterministic, so re-writing those files is
+    byte-identical; any foreign file (a previous run's ``_SUCCESS``, editor
+    droppings, a partial publish) raises ``ValueError`` naming the directory,
+    because a stale or published staging dir must never be silently mixed
+    with fresh content.
 
     Returns a summary dict with ``disposition_counts`` covering all five
     dispositions (``accepted``/``rejected``/``ambiguous``/``unanswered``/
     ``missing``) plus ``record_count`` and the written file names.
     """
-    if out_dir.exists() and any(out_dir.iterdir()):
-        raise ValueError(
-            f"final-bundle staging dir {out_dir} is not empty; remove it or pass a fresh path"
-        )
+    if out_dir.exists():
+        foreign = sorted(p.name for p in out_dir.iterdir() if p.name not in _BUNDLE_FILES)
+        if foreign:
+            raise ValueError(
+                f"final-bundle staging dir {out_dir} contains foreign content "
+                f"({', '.join(foreign)}); remove it or pass a fresh path"
+            )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     records = _load_materialized_records(materialize_dir)
