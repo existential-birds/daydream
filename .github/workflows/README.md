@@ -75,3 +75,32 @@ fingerprint markers in each comment body:
 
 Comment format is unchanged from `daydream --comment` — these workflows add
 triggers and posting identity, not a new output format.
+
+## Dependabot dependency updates
+
+`.github/dependabot.yml` keeps dependency updates arriving as small, grouped,
+reviewer-friendly PRs across four managed ecosystems:
+
+| Ecosystem | Directory | Notes |
+|---|---|---|
+| `uv` | `/` | Root workspace dependencies (`pyproject.toml` / `uv.lock`) |
+| `uv` | `/rl/daydream_review_v1` | The standalone RL package's own dependencies |
+| `github-actions` | `/` | Action version bumps across `.github/workflows` |
+| `npm` | `/.github/workflows` | Deliberately points at this folder's `package.json`, which tracks the single `@openai/codex` dependency used by CI — do not "fix" the directory to `/` |
+
+**Volume bounds.** All four ecosystems run weekly on Mondays (06:00,
+`Australia/Brisbane`) with `open-pull-requests-limit: 5` per ecosystem. The
+three multi-dependency ecosystems (both `uv` blocks and `github-actions`) use
+one minor+patch group each, so at most one grouped PR per uv project and one
+for all action bumps; the npm block is ungrouped since it tracks a single
+dependency. Commit messages carry the `chore(deps)` prefix.
+
+**Validation gate.** Every dependency PR must pass `make check` before merge —
+its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`
+drift. CI installs codex at the version read from the tracked
+`.github/workflows/package.json`, so an npm block bump PR updates CI end-to-end
+with no parallel edit; `tests/test_dependabot_config.py` fails if the workflow
+reintroduces a hardcoded pin instead of reading the manifest.
+
+**Ownership.** Reviewers are auto-requested via the single-rule `CODEOWNERS`
+(`* @existential-birds @anderskev`); no per-path entries were added.

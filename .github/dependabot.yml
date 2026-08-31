@@ -1,0 +1,88 @@
+# Dependabot dependency updates (issue #936).
+#
+# Four bounded ecosystems, each opening at most 5 pull requests at a time:
+#   - uv @ "/"                  — root workspace dependencies (pyproject.toml / uv.lock)
+#   - uv @ "/rl/daydream_review_v1" — the standalone RL package's own dependencies
+#   - github-actions @ "/"      — action version bumps across .github/workflows
+#   - npm @ "/.github/workflows" — the tracking package.json in the workflows folder
+#     (that is where the manifest lives — do not "fix" this directory to "/");
+#     it tracks the single @openai/codex dependency used by CI.
+#
+# All four run weekly on Mondays (Australia/Brisbane) with grouped minor+patch
+# updates on the three multi-dependency ecosystems, so dependency updates arrive
+# as small, predictable, reviewer-friendly PRs.
+#
+# Reviewers come from the single-rule CODEOWNERS (`* @existential-birds @anderskev`).
+# Every Dependabot PR must pass `make check` before merge — the lockcheck-first
+# ordering there is what catches uv.lock / pyproject.toml drift.
+version: 2
+updates:
+  # Root workspace uv dependencies.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Brisbane
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)
+
+  # Standalone RL package uv dependencies.
+  - package-ecosystem: uv
+    directory: /rl/daydream_review_v1
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Brisbane
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)
+
+  # GitHub Actions version bumps across .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Brisbane
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)
+
+  # npm tracks the workflows-folder package.json (the @openai/codex pin).
+  # The directory is the workflows folder on purpose — see header comment.
+  - package-ecosystem: npm
+    directory: /.github/workflows
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Australia/Brisbane
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
