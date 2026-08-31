@@ -1,4 +1,6 @@
 """Adjudication queue build: deterministic ordering over projector adjudication entries."""
+from pathlib import Path
+
 import pytest
 
 from daydream.training.adjudication.queue import build_queue
@@ -16,6 +18,24 @@ def _session(
             "evidence_digest": digest, "profile": "pr_review", "stack": "python",
         }],
     }
+
+def _sessions_with_accepted_and_unanswered() -> list[dict[str, object]]:  # existing-shape helper
+    return [
+        _session("s1", "fp-a", "accepted", "d-gold"),
+        _session("s2", "fp-b", "unanswered", "d2"),
+    ]
+
+
+def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> None:
+    sessions = _sessions_with_accepted_and_unanswered()
+    open_only = build_queue(sessions)
+    assert [i["disposition"] for i in open_only] == ["unanswered"]
+
+    complete = build_queue(sessions, include_decisive=True)
+    assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "unanswered"]
+    # decisive entries carry the same record_id derivation as materialize
+    assert {str(i["status"]) for i in complete} <= {"open", "reopened"}
+
 
 def test_queue_is_deterministic_and_covers_all_non_decisive_states() -> None:
     # NOTE: 'accepted' disposition with evidence would be gold — the queue must EXCLUDE it.
