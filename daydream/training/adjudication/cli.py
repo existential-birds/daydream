@@ -520,6 +520,13 @@ def _report_items(
                 and resolved["disposition"] in DECISIVE_DISPOSITIONS
             ):
                 enriched_item["disposition"] = resolved["disposition"]
+        # Stamp the temporal axis FIRST so classify_tier sees it, matching the
+        # canonical serializer and the corpus projection (tiers.py C5/M9): an
+        # evidence-after-as_of record must classify "silver" here exactly as it
+        # does on the canonical record — never gold/posterior_eligible.
+        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(
+            enriched_item, as_of
+        )
         # Outcome-bearing fields mirroring build_export_entries: the gold gate
         # has one implementation (classify_tier), and gold-eligibility comes
         # from the human-observation resolution (conflict/review-required
@@ -531,9 +538,6 @@ def _report_items(
         enriched_item["posterior_eligible"] = tier == "gold" and str(
             enriched_item["profile"]
         ) == "pr_review"
-        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(
-            enriched_item, as_of
-        )
         enriched.append(enriched_item)
     return enriched
 
@@ -677,7 +681,7 @@ def handle_harvest_snapshot(argv: list[str]) -> int:
             args.archive_dir,
             observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
         )
-    except (ValueError, HubUnavailableError, HydrationError) as exc:
+    except (ValueError, HubUnavailableError, HydrationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate harvest-snapshot failed", str(exc))
         return 1
     print_success(

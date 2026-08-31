@@ -21,11 +21,15 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
     # outcome-bearing only counts pr_review gold (C5): r1 counts; r2 is
     # task-only and never counts; r3 is flagged evidence-after-as_of and excluded
     assert cov["adjudicated"] == 1
+    assert cov["total"] == 1  # r3 can never adjudicate, so it never feeds the denominator
     assert report["evidence_after_as_of"] == ["r3"]
     gate = report["admission_gate"]
     assert gate["outcome_bearing_total"] == 1
-    assert gate["passes_80pct"] is False  # 1 of 3 items
-    assert gate["class_balance_ok"] is True
+    # 100% of the outcome-bearing subset (just r1) is adjudicated: the gate is
+    # not blocked forever by those records that can never count (gold
+    # non-posterior_eligible / evidence-after-as_of).
+    assert gate["passes_80pct"] is True
+    assert gate["class_balance_ok"] is False  # sole outcome-bearing record is accepted-only
 
 
 def test_report_task_only_never_counts_toward_gate() -> None:

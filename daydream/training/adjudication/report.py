@@ -88,22 +88,29 @@ def build_report(items: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         tier = str(item.get("tier", ""))
         posterior_eligible = bool(item.get("posterior_eligible", False))
         decisive = disposition in _DECISIVE_DISPOSITIONS
+        # Outcome-bearing records (C5/M9): gold-tier, posterior-eligible
+        # pr_review records only — task-only and silver never count, and
+        # neither do evidence-after-as_of records. Only these can ever be
+        # adjudicated, so the 80% denominator, the numerator, unresolved and
+        # class balance share one scope and a record that can never count
+        # cannot permanently block the gate.
+        outcome_bearing = (
+            decisive
+            and tier == "gold"
+            and posterior_eligible
+            and profile == "pr_review"
+            and not bool(item.get("evidence_after_as_of", False))
+        )
         if decisive:
-            if tier != "task-only":
+            if outcome_bearing:
                 decisive_total += 1
-            if not has_human_decision:
-                unresolved += 1
-            if disposition == "accepted":
-                accepted += 1
-            else:
-                rejected += 1
-            # Outcome-bearing numerator (C5/M9): gold-tier, posterior-eligible
-            # pr_review records only — task-only never counts, and neither do
-            # evidence-after-as_of records.
-            if tier == "gold" and posterior_eligible and profile == "pr_review" and not bool(
-                item.get("evidence_after_as_of", False)
-            ):
                 adjudicated += 1
+                if not has_human_decision:
+                    unresolved += 1
+                if disposition == "accepted":
+                    accepted += 1
+                else:
+                    rejected += 1
         else:
             silver_task_only += 1
 

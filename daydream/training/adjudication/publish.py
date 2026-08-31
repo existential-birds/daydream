@@ -247,9 +247,17 @@ def publish_annotation_state(
 
 
 def _bundle_payloads(bundle_dir: Path) -> dict[str, bytes]:
-    """Read every file in ``bundle_dir`` (sorted, deterministic order)."""
+    """Read every file in ``bundle_dir`` (sorted, deterministic order).
+
+    ``_SUCCESS`` and ``SHA256SUMS`` are generated fresh below and must never
+    leak in from a prior publication: a stale local marker in the payload set
+    would skew the pinned checksums and break clean-download verification
+    (the marker actually uploaded is the freshly staged one).
+    """
     payloads = {
-        p.name: p.read_bytes() for p in sorted(bundle_dir.iterdir()) if p.is_file()
+        p.name: p.read_bytes()
+        for p in sorted(bundle_dir.iterdir())
+        if p.is_file() and p.name not in {_SUCCESS_FILENAME, _SUMS_FILENAME}
     }
     if not payloads:
         raise ValueError(f"publish final bundle: {bundle_dir} contains no files")

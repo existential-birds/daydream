@@ -4,6 +4,7 @@ Drift gate fail-closed pre-write, three-tier precedence merge, and the
 exactly-once ``label_observations`` append (M5/M8).
 """
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -351,9 +352,14 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
     history = label_observation_history(archive, "s1")
     assert len(history) == 2
     latest = history[-1]
-    # The archived row names the exact snapshot it was harvested under.
+    # The archived row names the exact generation it was harvested under: a
+    # digest over the content-addressed snapshot_id plus the archived
+    # rubric_json (the dedup tuple omits rubric_json, M14), so the digest
+    # also proves the archive and the emitted bundle agree on the pin/flags.
     manifest = json.loads((tmp_path / "mat-b" / "preview-manifest.json").read_text())
-    assert latest["evidence_sha"] == manifest["snapshot_id"]
+    assert latest["evidence_sha"] == hashlib.sha256(
+        (manifest["snapshot_id"] + ":" + latest["rubric_json"]).encode("utf-8")
+    ).hexdigest()
     rubric = json.loads(latest["rubric_json"])
     stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
     assert rubric["rubric_version"] == "v2"
@@ -369,4 +375,65 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
         observations_path=None,
     )
     assert out_c["appended_sessions"] == 0
+    assert len(label_observation_history(archive, "s1")) == 2
+
+
+def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
+    tmp_path: Path,
+) -> None:
+    """Unchanged pin + a label-preserving observation-overlay edit (the
+    disposition set stays put) still appends a fresh generation: the dedup
+    tuple omits ``rubric_json``, so the rubric-content digest riding on
+    ``evidence_sha`` is what prevents the archived rubric from going stale
+    while ``annotations.jsonl`` is re-emitted from the new overlay (M14)."""
+    root = _index(tmp_path)
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    run_materialize(root, tmp_path / "mat", pin=_PIN)
+    from daydream.training.corpus_v2.identity import record_id
+
+    rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
+    obs = tmp_path / "observations.jsonl"
+    obs.write_text(json.dumps({
+        "record_id": rid, "disposition": "accepted", "evidence_digest": "d" * 32,
+        "evidence": [], "labeler": "alice", "role": "rater", "rationale": "first pass",
+        "valid_at": "2026-01-02T00:00:00+00:00",
+        "observed_at": "2026-01-02T01:00:00+00:00", "rubric_version": "v1",
+    }) + "\n", encoding="utf-8")
+    out1 = run_canonical_harvest(
+        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
+        observations_path=obs,
+    )
+    assert out1["appended_sessions"] == 1
+    # Same pin, same materialized snapshot, but a different human labeler
+    # re-affirms the same decisive disposition: the archived labels set is
+    # unchanged, so only the rubric-content digest can tell the generations
+    # apart.
+    obs.write_text(json.dumps({
+        "record_id": rid, "disposition": "accepted", "evidence_digest": "d" * 32,
+        "evidence": [], "labeler": "bob", "role": "adjudicator", "rationale": "second pass",
+        "valid_at": "2026-01-02T00:00:00+00:00",
+        "observed_at": "2026-01-02T02:00:00+00:00", "rubric_version": "v1",
+    }) + "\n", encoding="utf-8")
+    out2 = run_canonical_harvest(
+        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
+        observations_path=obs,
+    )
+    assert out2["appended_sessions"] == 1  # fresh generation, never a silent skip
+    history = label_observation_history(archive, "s1")
+    assert len(history) == 2
+    rubric = json.loads(history[-1]["rubric_json"])
+    stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    assert stored[0]["human_labeler"] == "bob"
+    # The archived rubric matches the emitted bundle's overlay.
+    emitted = [json.loads(line) for line in
+               (tmp_path / "mat" / "annotations.jsonl").read_text().splitlines()
+               if line.strip()]
+    assert emitted[0]["human_labeler"] == "bob"
+    # Unchanged everything (pin + rubric) stays exactly-once.
+    out3 = run_canonical_harvest(
+        index_root=root, materialize_dir=tmp_path / "mat", archive_dir=archive,
+        observations_path=obs,
+    )
+    assert out3["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 2

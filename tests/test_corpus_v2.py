@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from daydream.archive.sanitize import _derivative_digest
 from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.provenance import extract_provenance
@@ -140,12 +141,17 @@ def _write_annotations_snapshot(
         })
     (ann_dir / "annotations.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    _write_sumsums(bundle_dir)  # the trajectory joins the curation digest pin
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
+    # batch_fileset_digest pins the curation bundle's canonical file-set digest
+    # (_derivative_digest = the same digest vocabulary each batch's
+    # content_digest uses) — computed AFTER the bundle is final so the gate's
+    # equality check against the bundle dir passes.
     (ann_dir / "lineage.json").write_text(json.dumps({
         "curation_id": manifest["curation_id"],
         "sanitized_hub_commit": manifest["source_hub_commit"],
         "schema_version": "annotation-snapshot/1055-snapshot-r1",
-        "batch_fileset_digest": "b" * 64,
+        "batch_fileset_digest": _derivative_digest(bundle_dir),
         "labeler_version": "v1", "rubric_version": "v1",
         "classifier_version": "v1", "as_of": None,
     }, sort_keys=True) + "\n")
@@ -154,7 +160,6 @@ def _write_annotations_snapshot(
         f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
     ))
     (ann_dir / "_SUCCESS").write_text("ok\n")
-    _write_sumsums(bundle_dir)  # the trajectory joins the curation digest pin
     return ann_dir / "annotations.jsonl"
 
 
@@ -173,14 +178,15 @@ def existing_bundle_fixture(tmp_path: Path) -> tuple[Path, list[dict[str, Any]],
 
 
 def _write_annotation_bundle(root: Path, rows: list[dict[str, Any]], *, curation_id: str,
-                             sanitized_commit: str, success: bool = True) -> Path:
+                             sanitized_commit: str, batch_fileset_digest: str,
+                             success: bool = True) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "annotations.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
     (root / "lineage.json").write_text(json.dumps({
         "curation_id": curation_id, "sanitized_hub_commit": sanitized_commit,
         "schema_version": "annotation-snapshot/1055-snapshot-r1",
-        "batch_fileset_digest": "b" * 64,
+        "batch_fileset_digest": batch_fileset_digest,
         "labeler_version": "v1", "rubric_version": "v1",
         "classifier_version": "v1", "as_of": None,
     }, sort_keys=True) + "\n", encoding="utf-8")
@@ -719,7 +725,8 @@ def test_build_v2_accepts_separate_annotation_bundle_with_exact_linkage(
     bundle_dir, snapshot_rows, kwargs = existing_bundle_fixture
     ann = _write_annotation_bundle(
         tmp_path / "ann", snapshot_rows,
-        curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"])
+        curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
+        batch_fileset_digest=_derivative_digest(bundle_dir))
     config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
                                  annotation_bundle_dir=ann)
     summary = run_build_corpus_v2(config)
@@ -730,7 +737,7 @@ def test_build_v2_accepts_separate_annotation_bundle_with_exact_linkage(
 
 
 @pytest.mark.parametrize("mutate", ["missing_success", "wrong_curation", "wrong_commit",
-                                    "corrupt_checksum", "missing_success_after"])
+                                    "wrong_fileset", "corrupt_checksum", "missing_success_after"])
 def test_build_v2_refuses_broken_annotation_bundles(
     tmp_path: Path,
     existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
@@ -740,15 +747,20 @@ def test_build_v2_refuses_broken_annotation_bundles(
     ann = _write_annotation_bundle(
         tmp_path / "ann", snapshot_rows,
         curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
+        batch_fileset_digest=_derivative_digest(bundle_dir),
         success=mutate not in ("missing_success", "missing_success_after"))
     lineage = json.loads((ann / "lineage.json").read_text())
     if mutate == "wrong_curation":
         lineage["curation_id"] = "other"
     elif mutate == "wrong_commit":
         lineage["sanitized_hub_commit"] = "0" * 40
+    elif mutate == "wrong_fileset":
+        # a stale annotation bundle records the older curation file set's
+        # digest — same curation_id + commit, different batch bytes
+        lineage["batch_fileset_digest"] = "f" * 64
     elif mutate == "corrupt_checksum":
         (ann / "annotations.jsonl").write_text("tampered\n", encoding="utf-8")
-    if mutate in ("wrong_curation", "wrong_commit"):
+    if mutate in ("wrong_curation", "wrong_commit", "wrong_fileset"):
         (ann / "lineage.json").write_text(json.dumps(lineage, sort_keys=True) + "\n", encoding="utf-8")
     config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
                                  annotation_bundle_dir=ann)

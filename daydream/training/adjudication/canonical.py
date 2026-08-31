@@ -4,9 +4,10 @@ Re-verifies the materialized preview snapshot against a freshly built queue
 over the hydrated index, merges human observations under three-tier
 precedence, appends exactly one ``label_observations`` row per session via
 ``archive.index.append_label_observation`` (the auto dedup key keys on the
-pin's ``snapshot_id`` — fed through ``evidence_sha`` — so unchanged-pin
-re-runs are no-ops ⇒ exactly-once while a changed pin appends a fresh
-generation, M8), and emits ``annotations.jsonl`` from the
+pin's ``snapshot_id`` plus the archived ``rubric_json`` — fed through
+``evidence_sha`` — so unchanged-pin/unchanged-rubric re-runs are no-ops ⇒
+exactly-once while a changed pin or a label-preserving observation-overlay
+change appends a fresh generation, M8), and emits ``annotations.jsonl`` from the
 *same* in-memory merged records used for the append — no second serialization
 (M5). Digest drift raises :class:`AnnotationDriftError` **before any write**
 (fail-closed-then-requeue, M5).
@@ -19,6 +20,7 @@ only re-verifies it against the preview pin.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime
@@ -26,7 +28,10 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.index import append_label_observation
-from daydream.training.adjudication.materialize import _SESSIONS_OUT_FILENAME
+from daydream.training.adjudication.materialize import (
+    _SESSIONS_OUT_FILENAME,
+    _sessions_from_hydrated_stage,
+)
 from daydream.training.adjudication.observations import load_observations
 from daydream.training.adjudication.precedence import (
     DECISIVE_DISPOSITIONS,
@@ -111,6 +116,12 @@ def _load_pin(materialize_dir: Path) -> dict[str, Any]:
     labeler_version = pin.get("labeler_version")
     if not isinstance(labeler_version, str) or not labeler_version:
         raise ValueError(f"preview manifest at {manifest_path} is missing 'labeler_version'")
+    # Dereferenced with ``pin["rubric_version"]`` in the session loop, so it must
+    # be validated here (like ``labeler_version``) to raise the documented
+    # ValueError naming the missing component, never an uncaught KeyError.
+    rubric_version = pin.get("rubric_version")
+    if not isinstance(rubric_version, str) or not rubric_version:
+        raise ValueError(f"preview manifest at {manifest_path} is missing 'rubric_version'")
     return pin
 
 
@@ -136,11 +147,13 @@ def run_canonical_harvest(
        row per session (``rubric_json`` carries the merged per-finding records,
        ``reply_evidence_digest`` is the shared serializer's session digest,
        ``labeler_version`` is the pin's, ``reply_classifier_version`` is
-       ``REPLY_CLASSIFIER_VERSION``). ``evidence_sha`` carries the pin's
-       ``snapshot_id`` so the dedup key changes with the pin: unchanged-pin
-       re-runs are no-ops — exactly-once — while a changed pin (new
-       snapshot id) appends a fresh generation carrying the new pin's
-       flags/rubric.
+       ``REPLY_CLASSIFIER_VERSION``). ``evidence_sha`` is a digest over the
+       pin's content-addressed ``snapshot_id`` *plus* the archived
+       ``rubric_json``, so the dedup key changes with the pin or with any
+       rubric-content (observation-overlay) change: unchanged-pin re-runs are
+       no-ops — exactly-once — while a changed pin (new snapshot id) or a
+       label-preserving overlay edit under an unchanged pin appends a fresh
+       generation carrying the new pin's flags/rubric.
     4. Emits ``materialize_dir/annotations.jsonl`` (one canonical-JSON record
        per finding, sorted by ``record_id``) from the same merged records.
 
@@ -149,7 +162,16 @@ def run_canonical_harvest(
     """
     pin = _load_pin(materialize_dir)
     materialized = _load_materialized_records(materialize_dir)
-    sessions, _index_revision = _load_sessions(index_root)
+    if (index_root / _SESSIONS_OUT_FILENAME).is_file():
+        sessions, _index_revision = _load_sessions(index_root)
+    else:
+        # Hydrated staging archive (materialize's primary flow): no
+        # sessions.jsonl — derive the sessions from the SQLite index plus the
+        # sanitized per-run trajectories, so the drift gate re-derives the
+        # fresh queue over the same hydrated index the materialized preview
+        # was built from instead of feeding the materialize dir back and
+        # comparing each digest against itself (tautological).
+        sessions, _index_revision = _sessions_from_hydrated_stage(index_root)
     fresh_by_record_id = {str(item["record_id"]): item for item in build_queue(sessions)}
 
     # Fail-closed drift gate: verify BEFORE any write.
@@ -221,6 +243,7 @@ def run_canonical_harvest(
             "per_finding_resolutions": session_records,
             "rubric_version": pin["rubric_version"],
         }
+        rubric_json = _canonical(rubric)
         labels = sorted(
             {
                 f"finding-{record['disposition']}"
@@ -228,20 +251,31 @@ def run_canonical_harvest(
                 if record["disposition"] in DECISIVE_DISPOSITIONS
             }
         )
+        # Pin member of the auto dedup key. The dedup tuple (M14) omits
+        # rubric_json, so the digest fed through evidence_sha must cover the
+        # rubric content itself: the content-addressed snapshot_id changes
+        # with any pin change (AC 8), and the rubric_json digest turns on any
+        # label-preserving observation-overlay change under an unchanged pin,
+        # so a fresh generation carrying the updated rubric_json is appended
+        # and the archived rubric always matches the emitted bundle's
+        # pin/flags. Unchanged pin + unchanged rubric stays a deduped no-op
+        # (exactly-once). Absent snapshot_id (legacy manifest) falls back to
+        # None, the pre-change dedup behavior.
+        snapshot_id = pin.get("snapshot_id")
+        if snapshot_id is not None:
+            generation_sha = hashlib.sha256(
+                (str(snapshot_id) + ":" + rubric_json).encode("utf-8")
+            ).hexdigest()
+        else:
+            generation_sha = None
         inserted = append_label_observation(
             archive_dir,
             session_id,
             labels=labels,
             pr_state=None,
             labeler_version=str(pin["labeler_version"]),
-            # Pin member of the auto dedup key: the content-addressed
-            # snapshot_id changes with any pin change (AC 8), so a changed
-            # pin appends a fresh generation instead of dedup-skipping and
-            # the archived rubric_json always matches the emitted bundle's
-            # pin/flags. Absent (legacy manifest) falls back to None, the
-            # pre-change dedup behavior.
-            evidence_sha=pin.get("snapshot_id"),
-            rubric_json=_canonical(rubric),
+            evidence_sha=generation_sha,
+            rubric_json=rubric_json,
             valid_at=None,
             has_posterior=False,
             reply_classifier_version=REPLY_CLASSIFIER_VERSION,

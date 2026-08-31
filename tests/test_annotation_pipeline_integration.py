@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from daydream.archive import hydrate
+from daydream.archive.sanitize import _derivative_digest
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.materialize import run_materialize
@@ -92,7 +93,10 @@ def test_full_annotation_pipeline_survives_vm_loss(tmp_path: Path) -> None:
         "curation_id": curation_id, "sanitized_hub_commit": SNAPSHOT_REVISION,
         "snapshot_id": snapshot_id,
         "schema_version": f"annotation-snapshot/{ANNOTATION_SNAPSHOT_SCHEMA_VERSION}",
-        "batch_fileset_digest": "b" * 64,
+        # the curation bundle is finalized by hydrate and never mutated
+        # afterward (K3), so its canonical file-set digest is stable at
+        # publication time and matches what the build-v2 gate recomputes
+        "batch_fileset_digest": _derivative_digest(stage / "curated" / curation_id),
         "labeler_version": pin["labeler_version"],
         "rubric_version": pin["rubric_version"],
         "classifier_version": pin["classifier_version"],

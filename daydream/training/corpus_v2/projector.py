@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, cast, overload
 
 from daydream.archive.index import normalize_as_of
+from daydream.archive.sanitize import _derivative_digest
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
 from daydream.training.corpus_v2.bundle import (
     CuratedBundle,
@@ -220,7 +221,7 @@ _ANNOTATION_SCHEMA_PREFIX = "annotation-snapshot/"
 
 
 def _verify_annotation_bundle(
-    annotation_bundle_dir: Path, bundle: CuratedBundle
+    annotation_bundle_dir: Path, bundle: CuratedBundle, bundle_dir: Path
 ) -> dict[str, Any]:
     """Two-bundle contract: the annotation bundle is verified as its own
     published artifact and then linked to the curation bundle exactly.
@@ -233,11 +234,15 @@ def _verify_annotation_bundle(
        ``ValueError``).
     3. Cross-bundle linkage against the curation bundle: ``curation_id``
        equal to ``bundle.curation_id``, ``sanitized_hub_commit`` equal to
-       ``bundle.source_hub_commit``, a recorded batch/file-set digest, a
-       compatible annotation-snapshot schema version, and
-       labeler/rubric/classifier versions plus ``as_of`` present. An empty
-       ``as_of`` is allowed (the unpinned edge) and reported through the
-       build lineage, not refused.
+       ``bundle.source_hub_commit``, a recorded ``batch_fileset_digest`` that
+       matches the curation bundle's actual batch/file-set digest
+       (``_derivative_digest`` of the bundle root — the same canonical
+       file-set vocabulary each batch's ``content_digest`` uses, so a stale
+       annotation bundle harvested against an older file set is refused
+       rather than passing on curation_id + commit alone), a compatible
+       annotation-snapshot schema version, and labeler/rubric/classifier
+       versions plus ``as_of`` present. An empty ``as_of`` is allowed (the
+       unpinned edge) and reported through the build lineage, not refused.
 
     Any mismatch raises ``ValueError`` naming both sides of the mismatch.
     """
@@ -283,6 +288,14 @@ def _verify_annotation_bundle(
         isinstance(batch_fileset_digest, str) and bool(batch_fileset_digest),
         "missing 'batch_fileset_digest' — the annotation bundle must record "
         "the curation bundle's batch/file-set digest it was harvested against",
+    )
+    actual_fileset_digest = _derivative_digest(bundle_dir)
+    _gate(
+        batch_fileset_digest == actual_fileset_digest,
+        f"stale batch fileset: the annotation bundle records "
+        f"batch_fileset_digest {batch_fileset_digest} but the curation bundle "
+        f"now hashes to {actual_fileset_digest} — re-harvest the annotation "
+        "snapshot against this curation bundle before building",
     )
     for version_field in ("labeler_version", "rubric_version", "classifier_version"):
         value = lineage.get(version_field)
@@ -475,7 +488,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     """
     bundle = load_curated_bundle(config.bundle_dir)
     assert config.annotation_bundle_dir is not None  # __post_init__ guarantees
-    annotation_lineage = _verify_annotation_bundle(config.annotation_bundle_dir, bundle)
+    annotation_lineage = _verify_annotation_bundle(
+        config.annotation_bundle_dir, bundle, config.bundle_dir
+    )
     snapshot_path = Path(config.annotation_bundle_dir) / "annotations.jsonl"
     snapshot_rows = _load_snapshot(snapshot_path)
     snapshot_digest = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
