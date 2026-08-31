@@ -95,6 +95,7 @@ from daydream.deep.scope_issues import (
     _file_out_of_scope_issue,
     _resolve_changed_files,
     _revert_out_of_scope_edits,
+    _scope_filing_note,
 )
 from daydream.deep.sharding import shard_stacks
 from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
@@ -313,6 +314,22 @@ def _approve_on_clean(config: RunConfig) -> bool:
         return True
     file_config = config.file_config
     if file_config is not None and file_config.approve_on_clean:
+        return True
+    return False
+
+
+def _scope_issue_filing(config: RunConfig) -> bool:
+    """Resolve the out-of-scope issue-filing opt-in (issue #1056).
+
+    Precedence mirrors ``_approve_on_clean``: 1) ``RunConfig.scope_issue_filing``
+    (CLI tier), 2) ``DaydreamFileConfig.scope_issue_filing`` (file-config
+    scalar), 3) built-in default ``False`` (no out-of-scope GitHub issues are
+    filed unless a repo explicitly opts in).
+    """
+    if config.scope_issue_filing:
+        return True
+    file_config = config.file_config
+    if file_config is not None and file_config.scope_issue_filing:
         return True
     return False
 
@@ -2338,8 +2355,8 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         return Stop(0)
 
     # Issue #336 — pre-fix scope partition. Findings on files OUTSIDE the
-    # reviewed diff are filed as GitHub issues (best-effort) and excluded from
-    # auto-fix: the loop must not expand the PR's scope. The reviewed-diff file
+    # reviewed diff are excluded from auto-fix; issue filing is gated by
+    # ``scope_issue_filing`` (#1056). The loop must not expand the PR's scope. The reviewed-diff file
     # set is resolved via _resolve_changed_files (shared with _step_fix) so the
     # gate and the post-fix residual net agree on the allowed set (a divergence
     # left the residual net strictly weaker than the gate on the resume path).
@@ -2349,26 +2366,31 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         out_of_scope: list[dict[str, Any]] = []
         for item in items:
             (in_scope if (item.get("file") or "") in changed_files else out_of_scope).append(item)
+        file_scope_issues = _scope_issue_filing(ctx.config)
         for item in out_of_scope:
-            _file_out_of_scope_issue(ctx, item)
+            if file_scope_issues:
+                _file_out_of_scope_issue(ctx, item)
         if out_of_scope:
             print_warning(
                 console,
-                f"{len(out_of_scope)} finding(s) outside the reviewed diff filed as "
-                "issue(s), not fixed.",
+                f"{len(out_of_scope)} finding(s) outside the reviewed diff "
+                f"{_scope_filing_note(file_scope_issues)}, not fixed.",
             )
         items = in_scope
-        # Issue #336 — every finding routed to issues leaves nothing to
-        # auto-fix, so short-circuit before a no-op fix pass, a full target
+        # Issue #336 — every finding routed out of the fix list leaves nothing
+        # to auto-fix, so short-circuit before a no-op fix pass, a full target
         # test-suite run, and a commit-agent turn. Matches the pre-partition
         # "no actionable items" Stop(0) above. Keying on identity (``is not
         # None``) distinguishes an empty reviewed diff — every file is out of
-        # scope, so all findings are filed and the run ends — from ``None``,
-        # which skips the partition entirely because scope cannot be judged.
+        # scope, so every finding is excluded from auto-fix (filed as an issue
+        # only under the ``scope_issue_filing`` opt-in, issue #1056) and the
+        # run ends — from ``None``, which skips the partition entirely because
+        # scope cannot be judged.
         if not items:
             print_success(
                 console,
-                "All findings outside the reviewed diff -- filed as issues, nothing to fix.",
+                f"All findings outside the reviewed diff -- {_scope_filing_note(file_scope_issues)}, "
+                "nothing to fix.",
             )
             return Stop(0)
 
@@ -3399,6 +3421,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_untracked=pre_fix_untracked,
         changed_files=changed_files,
         finding_files={item["file"] for item in ctx.data["items"] if item.get("file")},
+        # Issue #1056 — reverted-edit filing is opt-in; the revert itself is not.
+        file_scope_issues=_scope_issue_filing(ctx.config),
     )
     if residual_guard_result is None:
         # Fail-close to match the generated-file guard: an unreverted
