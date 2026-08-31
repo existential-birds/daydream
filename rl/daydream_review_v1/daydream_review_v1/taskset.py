@@ -504,7 +504,7 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
 #: Wall-clock ceilings per rollout stage, in seconds. ``harness`` bounds the whole
 #: deep loop (daydream's own per-phase wall budget is 1800s); ``scoring`` must fit a
 #: full re-run of the repository's test suite.
-DEFAULT_TIMEOUT = vf.TaskTimeout(setup=900, harness=5400, scoring=1800)
+DEFAULT_TIMEOUT = vf.TaskTimeout(setup=900, agent=5400, scoring=1800)
 
 
 class GoldenComment(BaseModel):

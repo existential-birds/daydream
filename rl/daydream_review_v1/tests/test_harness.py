@@ -59,7 +59,10 @@ def _trace(task: DaydreamReviewTask, *, turns: int = 1) -> vf.Trace:
     helper works under prime-rl's vendored verifiers too, which has no per-call
     list.
     """
-    trace: vf.Trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    trace: vf.Trace = vf.Trace(
+        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        agent=vf.AgentInfo(config=vf.AgentConfig()),
+    )
     for index in range(turns):
         parent = None if index == 0 else len(trace.nodes) - 1
         trace.nodes.append(MessageNode(parent=parent, message={"role": "user", "content": "go"}, sampled=False))
@@ -101,7 +104,7 @@ async def test_launch_passes_the_selected_backend_to_the_cli(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig(backend=backend, fanout_concurrency=3))
     runtime = FakeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     (argv, env), = runtime.programs
     assert "daydream" in argv
@@ -128,7 +131,7 @@ async def test_launch_carries_extra_args_before_the_target(
     )
     runtime = FakeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     (argv, _), = runtime.programs
     assert argv[argv.index("--reasoning-effort") + 1] == "high"
@@ -142,7 +145,7 @@ async def test_launch_unsets_ambient_github_credentials(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = FakeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     (argv, _), = runtime.programs
     assert argv[:10] == [
@@ -172,7 +175,7 @@ async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(
         files=_archive_with_trajectory("/rollout/archive", final_metrics={"cost_usd": 1.0}),
     )
 
-    result = await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
+    result = await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     assert result.exit_code == 1
     assert trace.stop_condition == "daydream_completed_nonzero"
@@ -187,7 +190,7 @@ async def test_launch_leaves_a_crash_to_raise(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _ArchiveRuntime(exit_code=1, sessions=[])
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     assert trace.stop_condition is None
 
@@ -205,7 +208,7 @@ async def test_launch_does_not_stop_on_a_half_written_archive(
         files=_archive_with_trajectory("/rollout/archive", final_metrics=None),
     )
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     assert trace.stop_condition is None
 
@@ -239,7 +242,7 @@ async def test_launch_refuses_a_rollout_that_captured_no_model_calls(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
 
     with pytest.raises(RuntimeError) as excinfo:
-        await harness.launch(_ctx(), trace, FakeRuntime(exit_code=0), ENDPOINT, SECRET, {})
+        await harness.launch(_ctx(), trace, FakeRuntime(exit_code=0), ENDPOINT, SECRET, {}, vf.TaskData())
     assert "no model calls" in str(excinfo.value)
     assert ENDPOINT in str(excinfo.value)
 
@@ -300,7 +303,7 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _DockerLikeRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     (argv, _), = runtime.programs
     assert argv[0] == "run-as-agent"
@@ -339,7 +342,7 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _OrderingDockerRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     handoff = ["chown", "-R", "agent:agent", harness.config.repo_path, "/srv/mirror.git"]
     assert handoff in runtime.commands, (
@@ -434,7 +437,7 @@ async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _ArchivingDockerRuntime(exit_code=0)
 
-    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     hardened = [cmd for cmd in runtime.commands if "chown -R root:root" in " ".join(cmd)]
     assert hardened, "seal_archived_run must re-chown the sealed run dir root-owned"
@@ -466,7 +469,7 @@ async def test_seal_failure_is_fail_closed_and_recorded(
     runtime = ExplodingGit(exit_code=0)
     trace = _trace(task)
 
-    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
+    await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {}, vf.TaskData())
 
     assert trace.info["daydream_seal_ok"] is False
     marker = runtime.writes.get("/rollout/archive/runs/session-1/seal.json")
