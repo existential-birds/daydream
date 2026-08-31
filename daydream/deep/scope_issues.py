@@ -2,9 +2,12 @@
 
 The fix loop auto-fixes only findings inside the reviewed diff. Findings on files
 outside the diff, and post-fix edits outside the diff, are routed to tracked
-GitHub issues (best-effort) and excluded from auto-fix. This module owns that
+GitHub issues (best-effort, gated by the ``scope_issue_filing`` opt-in, default
+off — issue #1056) and excluded from auto-fix. This module owns that
 machinery: scope-finding fingerprint -> marker -> cross-run dedup -> filing, plus
-the post-fix residual revert net. Extracted from ``deep/orchestrator.py``.
+the post-fix residual revert net (whose filing path carries the same
+fingerprint -> marker -> dedup -> file chain, issue #1051). Extracted from
+``deep/orchestrator.py``.
 """
 
 from __future__ import annotations
@@ -66,26 +69,24 @@ def _scope_finding_marker(fingerprint: str) -> str:
     return f"<!-- daydream-scope-finding: {fingerprint} -->"
 
 
-def _scope_finding_already_filed(repo: Path, marker: str) -> bool:
-    """Best-effort: has an open issue already filed this out-of-scope finding?
+def _scope_already_filed(repo: Path, marker: str) -> bool:
+    """Best-effort: has an open issue already filed this scope marker?
 
-    Issue #336 — out-of-scope findings are never fixed, so a re-run/resume
-    re-derives them and would re-file a duplicate issue every time. GitHub is
-    the store: scan open issues for the finding's fingerprint marker and skip
-    filing when present. Best-effort — a failed ``gh issue list`` returns
-    ``False`` so the call degrades to filing (the prior behavior) rather than
-    silently dropping the finding.
+    Shared by the out-of-scope *finding* router (pre-fix gate, issue #336) and
+    the reverted *edit* filer (post-fix residual net, issue #1051). GitHub is
+    the store: scan open issues for the item's fingerprint marker and skip
+    filing when present, so a re-run/resume re-deriving the same item does not
+    re-file a duplicate issue. Best-effort by construction: ``gh_issue_list``
+    itself returns an empty list on any failure (no auth, offline, cross-org),
+    so a failed lookup degrades to filing (the prior behavior), never to
+    silently dropping the item.
 
-    The marker is computed once by the caller (``_file_out_of_scope_issue``)
-    and threaded in, so the finding's fingerprint is not recomputed for both
-    the dedup lookup and the issue body.
+    The marker is computed once by the caller and threaded in, so the item's
+    fingerprint is not recomputed for both the dedup lookup and the issue body.
     """
     from daydream import git_ops
 
-    try:
-        issues = git_ops.gh_issue_list(repo, search="out-of-scope")
-    except Exception:  # noqa: BLE001 -- best-effort dedup lookup
-        return False
+    issues = git_ops.gh_issue_list(repo, search="out-of-scope")
     return any(marker in (issue.get("body") or "") for issue in issues)
 
 
@@ -108,7 +109,7 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
     # Compute the fingerprint marker once and thread it into both the dedup
     # lookup and the issue body, rather than recomputing it for each.
     marker = _scope_finding_marker(_scope_finding_fingerprint(item))
-    if _scope_finding_already_filed(ctx.work.repo, marker):
+    if _scope_already_filed(ctx.work.repo, marker):
         return
     title = f"[daydream] out-of-scope finding: {file}"
     body = (
@@ -122,23 +123,80 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
     _file_scope_issue(ctx.work.repo, title=title, body=body, noun="finding", ident=file)
 
 
+def _scope_edit_fingerprint(path: str, patch: str) -> str:
+    """Stable cross-run identity for a reverted out-of-scope edit (issue #1051).
+
+    Keyed on the file path plus the edit's changed content lines (the spec's
+    "file path plus diff content" option): a re-run that reproduces the same
+    residual edit on the same file maps to the same fingerprint and is
+    recognized as already-filed. The raw ``git diff`` evidence embeds volatile
+    hunk offsets (``@@ -x,y +z,w @@``) and context lines, so fingerprinting the
+    raw patch would re-file a duplicate whenever a re-run reproduces the edit
+    at shifted offsets — the duplicate-issue regression #1051 set out to close.
+    Stripping the hunk headers and context lines (keeping only the ``+``/``-``
+    content lines) mirrors how :func:`daydream.pr_review.compute_fingerprint`
+    excludes line numbers so code shifts do not change a finding's identity.
+    Distinct from the finding-path fingerprint so the two stores never collide.
+    """
+    from daydream.pr_review import compute_fingerprint
+
+    changed_lines = [
+        line
+        for line in patch.splitlines()
+        if (line.startswith("+") or line.startswith("-")) and not line.startswith(("+++", "---"))
+    ]
+    return compute_fingerprint(path, "\n".join(changed_lines), "")
+
+
+def _scope_edit_marker(fingerprint: str) -> str:
+    """Hidden HTML comment embedding an edit fingerprint in an issue body.
+
+    Distinct prefix from ``_scope_finding_marker`` so the finding store and
+    the edit store never collide, mirroring the split between
+    ``_scope_finding_marker`` and ``pr_review.finding_marker``.
+    """
+    return f"<!-- daydream-scope-edit: {fingerprint} -->"
+
+
 def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
     """Best-effort: file one reverted out-of-scope edit as a tracked GitHub issue.
 
     Issue #336 — the post-fix residual check reverts edits the fix pass made
     outside the reviewed diff. The reverted edit is still *valid* work, so it
     is filed as an issue (with the diff as evidence) instead of being lost.
-    Filing is best-effort: a failed ``gh issue create`` logs a warning and the
-    revert stands regardless.
+    Cross-run dedup (issue #1051): the edit's fingerprint is embedded as a
+    hidden marker in the body, and a re-run/resume skips filing when an open
+    issue already carries it. Filing is best-effort: a failed ``gh issue
+    create`` logs a warning and the revert stands regardless.
     """
+    # Compute the fingerprint marker once and thread it into both the dedup
+    # lookup and the issue body, rather than recomputing it for each.
+    marker = _scope_edit_marker(_scope_edit_fingerprint(path, patch))
+    if _scope_already_filed(repo, marker):
+        return
     title = f"[daydream] out-of-scope edit reverted: {path}"
     body = (
         f"The fix pass edited `{path}`, which is outside the reviewed diff. "
         f"The edit was reverted and is filed here for review.\n\n"
         f"```diff\n{patch}\n```\n\n"
-        "Filed by daydream fix loop: out of scope for PR."
+        "Filed by daydream fix loop: out of scope for PR.\n"
+        f"{marker}"
     )
     _file_scope_issue(repo, title=title, body=body, noun="edit", ident=path)
+
+
+def _scope_filing_note(file_scope_issues: bool) -> str:
+    """Filing-status note shared by the gate and residual-net messages.
+
+    Issue #1056 — the pre-fix gate (``_step_fix_gate``) and the post-fix
+    residual net (``_revert_out_of_scope_edits``) both branch on the same
+    ``scope_issue_filing`` opt-in to report whether out-of-scope items were
+    filed as GitHub issues or just excluded/reverted. Only the trailing note
+    differs between the two branches at every message site, so the pair is
+    rendered through this single helper instead of per-module if/else ladders
+    that could drift on future edits.
+    """
+    return "filed as issue(s)" if file_scope_issues else "(issue filing disabled)"
 
 
 def _revert_out_of_scope_edits(
@@ -149,17 +207,24 @@ def _revert_out_of_scope_edits(
     pre_fix_untracked: set[str],
     changed_files: set[str] | None,
     finding_files: set[str],
+    file_scope_issues: bool = False,
 ) -> list[str] | None:
-    """Revert post-fix edits outside the reviewed diff; file an issue per residual.
+    """Revert post-fix edits outside the reviewed diff; conditionally file issues.
 
     Issue #336 (Task 4): after ``phase_fix_parallel`` returns, enumerate the
     files the fix pass actually edited (vs the pre-fix snapshot) and subtract
     the allowed set — the finding files, the reviewed-diff file set, and
     newly-created generated files. Every residual is reverted unconditionally to
     its pre-fix content (``git checkout <ref> -- <file>``, the same mechanism
-    the generated-file guard uses) and filed as a best-effort GitHub issue
-    carrying the edit's diff as evidence, so the commit step can never land an
+    the generated-file guard uses) so the commit step can never land an
     edit outside the reviewed diff.
+
+    Filing is OPT-IN (issue #1056): when *file_scope_issues* is true each
+    reverted residual is additionally filed as a best-effort GitHub issue
+    carrying the edit's diff as evidence (with cross-run dedup, issue #1051);
+    when false (the default) the revert alone happens and a warning notes that
+    issue filing is disabled. The revert and the fail-close never depend on
+    filing.
 
     Only TRACKED edits are considered: a path present at *pre_fix_ref*. Newly
     created untracked files (e.g. the test harness's ``.fixed-*`` sentinels)
@@ -229,12 +294,17 @@ def _revert_out_of_scope_edits(
 
     restoration_failed = False
     for path in residual:
-        # Capture the diff as evidence BEFORE reverting (the revert destroys it).
-        try:
-            patch = git_ops.diff_worktree_against(repo, pre_fix_ref, [path])
-        except GitError as exc:
-            patch = ""
-            print_warning(console, f"Could not diff out-of-scope edit '{path}': {exc}")
+        patch = ""
+        # Capture the diff as evidence BEFORE reverting (the revert destroys
+        # it) — but only when filing is opted in: with filing disabled the
+        # patch has no consumer, so skip the per-residual ``git diff``
+        # subprocess entirely (issue #1056). The revert and fail-close below
+        # never depend on the capture.
+        if file_scope_issues:
+            try:
+                patch = git_ops.diff_worktree_against(repo, pre_fix_ref, [path])
+            except GitError as exc:
+                print_warning(console, f"Could not diff out-of-scope edit '{path}': {exc}")
         # Revert unconditionally — same mechanism as the generated-file guard.
         try:
             git_ops.restore_paths_from_ref(repo, pre_fix_ref, [path])
@@ -247,12 +317,13 @@ def _revert_out_of_scope_edits(
             # still best-effort reverted before the abort is signalled.
             restoration_failed = True
             continue
-        _file_reverted_edit_issue(repo, path, patch)
+        if file_scope_issues:
+            _file_reverted_edit_issue(repo, path, patch)
     if residual:
         print_warning(
             console,
-            f"Reverted {len(residual)} post-fix edit(s) outside the reviewed diff and "
-            f"filed issue(s): {residual}.",
+            f"Reverted {len(residual)} post-fix edit(s) outside the reviewed diff "
+            f"{_scope_filing_note(file_scope_issues)}: {residual}.",
         )
     return None if restoration_failed else residual
 

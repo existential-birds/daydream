@@ -177,6 +177,13 @@ class RunConfig:
             ``False`` (precedence CLI > file > default, mirroring
             ``precision_mode``; resolved by ``_approve_on_clean``), so the posted
             event stays COMMENT unless a repo explicitly opts in.
+        scope_issue_filing: Opt-in filing of out-of-scope GitHub issues (issue
+            #1056). When True, out-of-scope findings and reverted post-fix edits
+            are filed as GitHub issues. ``False`` falls through to
+            ``file_config.scope_issue_filing`` then the built-in default
+            ``False`` (precedence CLI > file > default, mirroring
+            ``approve_on_clean``; resolved by ``_scope_issue_filing``), so no
+            out-of-scope issue is filed unless a repo explicitly opts in.
         flow_name: Name of a registered flow to dispatch (``--flow``); built-in
             names route to their dedicated helper, other registered names to the
             generic custom-flow runner.
@@ -300,6 +307,13 @@ class RunConfig:
     # byte-identical behavior; the posted event stays COMMENT unless a repo
     # explicitly opts in.
     approve_on_clean: bool = False
+    # Issue #1056: opt-in filing of out-of-scope GitHub issues. When True, both
+    # filing paths (pre-fix findings and post-fix reverted edits) are enabled.
+    # Default False => byte-identical behavior; no out-of-scope issue is filed
+    # unless a repo explicitly opts in. Precedence: CLI --file-scope-issues >
+    # [tool.daydream] scope_issue_filing > default False (resolved by
+    # _scope_issue_filing).
+    scope_issue_filing: bool = False
     flow_name: str | None = None
     improve_effort: str = "standard"
     improve_focus: str | None = None

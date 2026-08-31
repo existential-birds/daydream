@@ -932,6 +932,16 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--file-scope-issues",
+        action="store_true",
+        default=False,
+        dest="file_scope_issues",
+        help="Opt in to filing out-of-scope findings and reverted edits as GitHub "
+             "issues (issue #1056; default off). Also settable via [tool.daydream] "
+             "scope_issue_filing in a config file."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--copy",
         action="append",
         default=[],
@@ -1163,6 +1173,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         flow_name=args.flow_name,
         precision_mode=args.precision,
         approve_on_clean=args.approve_on_clean,
+        scope_issue_filing=args.file_scope_issues,
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
         assume=args.assume,

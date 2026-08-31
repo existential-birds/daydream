@@ -1,9 +1,8 @@
 # Dependabot dependency updates (issue #936).
 #
-# Four bounded ecosystems, each opening at most 5 pull requests at a time:
+# Three bounded ecosystems, each opening at most 5 pull requests at a time:
 #   - uv @ "/"                  — root workspace dependencies (pyproject.toml / uv.lock)
 #   - uv @ "/rl/daydream_review_v1" — the standalone RL package's own dependencies
-#   - github-actions @ "/"      — action version bumps across .github/workflows
 #   - npm @ "/.github/workflows" — the tracking package.json in the workflows folder
 #     (that is where the manifest lives — do not "fix" this directory to "/");
 #     it tracks the single @openai/codex dependency used by CI.
@@ -55,25 +54,12 @@ updates:
     commit-message:
       prefix: chore(deps)
 
-  # GitHub Actions version bumps across .github/workflows.
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: Australia/Brisbane
-    open-pull-requests-limit: 5
-    groups:
-      dependencies:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-    commit-message:
-      prefix: chore(deps)
-
+  # NOTE: the github-actions ecosystem was removed on purpose (PR 1065
+  # follow-up). The repo pins every third-party action to a full commit SHA
+  # registered in tests/test_workflow_templates.py::_PINNED_ACTION_VERSIONS,
+  # which Dependabot cannot update — every actions bump was structurally
+  # unmergeable. Bump actions manually: update the SHA + `# vX.Y.Z` comment in
+  # the workflows AND the map entry, then `make check`.
   # npm tracks the workflows-folder package.json (the @openai/codex pin).
   # The directory is the workflows folder on purpose — see header comment.
   - package-ecosystem: npm

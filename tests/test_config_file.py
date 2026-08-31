@@ -176,6 +176,20 @@ def test_approve_on_clean_non_bool_degrades_to_none(tmp_path: Path) -> None:
     assert cfg.approve_on_clean is None
 
 
+def test_scope_issue_filing_true_parses_as_bool(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text("scope_issue_filing = true\n")
+    cfg = load_file_config(tmp_path)
+    assert cfg.scope_issue_filing is True
+
+
+def test_scope_issue_filing_non_bool_degrades_to_none(tmp_path: Path) -> None:
+    # Mirrors approve_on_clean: an accidental ``scope_issue_filing = 1`` is
+    # unset, not enabled — an int must never silently opt a repo into filing.
+    (tmp_path / ".daydream.toml").write_text("scope_issue_filing = 1\n")
+    cfg = load_file_config(tmp_path)
+    assert cfg.scope_issue_filing is None
+
+
 def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
     """A target file setting trajectory_hub_repo loads cleanly and contributes
     nothing — the field is removed from the model entirely."""
