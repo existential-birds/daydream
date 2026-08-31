@@ -95,6 +95,7 @@ from daydream.deep.scope_issues import (
     _file_out_of_scope_issue,
     _resolve_changed_files,
     _revert_out_of_scope_edits,
+    _scope_filing_note,
 )
 from daydream.deep.sharding import shard_stacks
 from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
@@ -2370,37 +2371,27 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
             if file_scope_issues:
                 _file_out_of_scope_issue(ctx, item)
         if out_of_scope:
-            if file_scope_issues:
-                print_warning(
-                    console,
-                    f"{len(out_of_scope)} finding(s) outside the reviewed diff filed as "
-                    "issue(s), not fixed.",
-                )
-            else:
-                print_warning(
-                    console,
-                    f"{len(out_of_scope)} finding(s) outside the reviewed diff excluded "
-                    "from fix (issue filing disabled).",
-                )
+            print_warning(
+                console,
+                f"{len(out_of_scope)} finding(s) outside the reviewed diff "
+                f"{_scope_filing_note(file_scope_issues)}, not fixed.",
+            )
         items = in_scope
         # Issue #336 — every finding routed out of the fix list leaves nothing
         # to auto-fix, so short-circuit before a no-op fix pass, a full target
         # test-suite run, and a commit-agent turn. Matches the pre-partition
         # "no actionable items" Stop(0) above. Keying on identity (``is not
         # None``) distinguishes an empty reviewed diff — every file is out of
-        # scope, so all findings are filed and the run ends — from ``None``,
-        # which skips the partition entirely because scope cannot be judged.
+        # scope, so every finding is excluded from auto-fix (filed as an issue
+        # only under the ``scope_issue_filing`` opt-in, issue #1056) and the
+        # run ends — from ``None``, which skips the partition entirely because
+        # scope cannot be judged.
         if not items:
-            if file_scope_issues:
-                print_success(
-                    console,
-                    "All findings outside the reviewed diff -- filed as issues, nothing to fix.",
-                )
-            else:
-                print_success(
-                    console,
-                    "All findings outside the reviewed diff -- nothing to fix (issue filing disabled).",
-                )
+            print_success(
+                console,
+                f"All findings outside the reviewed diff -- {_scope_filing_note(file_scope_issues)}, "
+                "nothing to fix.",
+            )
             return Stop(0)
 
     # Severity-ordered (high before medium before low), stable within a

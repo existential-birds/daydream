@@ -126,15 +126,26 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
 def _scope_edit_fingerprint(path: str, patch: str) -> str:
     """Stable cross-run identity for a reverted out-of-scope edit (issue #1051).
 
-    Keyed on the file path plus the edit's full diff content (the spec's
+    Keyed on the file path plus the edit's changed content lines (the spec's
     "file path plus diff content" option): a re-run that reproduces the same
     residual edit on the same file maps to the same fingerprint and is
-    recognized as already-filed. Distinct from the finding-path fingerprint so
-    the two stores never collide.
+    recognized as already-filed. The raw ``git diff`` evidence embeds volatile
+    hunk offsets (``@@ -x,y +z,w @@``) and context lines, so fingerprinting the
+    raw patch would re-file a duplicate whenever a re-run reproduces the edit
+    at shifted offsets — the duplicate-issue regression #1051 set out to close.
+    Stripping the hunk headers and context lines (keeping only the ``+``/``-``
+    content lines) mirrors how :func:`daydream.pr_review.compute_fingerprint`
+    excludes line numbers so code shifts do not change a finding's identity.
+    Distinct from the finding-path fingerprint so the two stores never collide.
     """
     from daydream.pr_review import compute_fingerprint
 
-    return compute_fingerprint(path, patch, "")
+    changed_lines = [
+        line
+        for line in patch.splitlines()
+        if (line.startswith("+") or line.startswith("-")) and not line.startswith(("+++", "---"))
+    ]
+    return compute_fingerprint(path, "\n".join(changed_lines), "")
 
 
 def _scope_edit_marker(fingerprint: str) -> str:
@@ -172,6 +183,20 @@ def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
         f"{marker}"
     )
     _file_scope_issue(repo, title=title, body=body, noun="edit", ident=path)
+
+
+def _scope_filing_note(file_scope_issues: bool) -> str:
+    """Filing-status note shared by the gate and residual-net messages.
+
+    Issue #1056 — the pre-fix gate (``_step_fix_gate``) and the post-fix
+    residual net (``_revert_out_of_scope_edits``) both branch on the same
+    ``scope_issue_filing`` opt-in to report whether out-of-scope items were
+    filed as GitHub issues or just excluded/reverted. Only the trailing note
+    differs between the two branches at every message site, so the pair is
+    rendered through this single helper instead of per-module if/else ladders
+    that could drift on future edits.
+    """
+    return "filed as issue(s)" if file_scope_issues else "(issue filing disabled)"
 
 
 def _revert_out_of_scope_edits(
@@ -269,12 +294,17 @@ def _revert_out_of_scope_edits(
 
     restoration_failed = False
     for path in residual:
-        # Capture the diff as evidence BEFORE reverting (the revert destroys it).
-        try:
-            patch = git_ops.diff_worktree_against(repo, pre_fix_ref, [path])
-        except GitError as exc:
-            patch = ""
-            print_warning(console, f"Could not diff out-of-scope edit '{path}': {exc}")
+        patch = ""
+        # Capture the diff as evidence BEFORE reverting (the revert destroys
+        # it) — but only when filing is opted in: with filing disabled the
+        # patch has no consumer, so skip the per-residual ``git diff``
+        # subprocess entirely (issue #1056). The revert and fail-close below
+        # never depend on the capture.
+        if file_scope_issues:
+            try:
+                patch = git_ops.diff_worktree_against(repo, pre_fix_ref, [path])
+            except GitError as exc:
+                print_warning(console, f"Could not diff out-of-scope edit '{path}': {exc}")
         # Revert unconditionally — same mechanism as the generated-file guard.
         try:
             git_ops.restore_paths_from_ref(repo, pre_fix_ref, [path])
@@ -290,18 +320,11 @@ def _revert_out_of_scope_edits(
         if file_scope_issues:
             _file_reverted_edit_issue(repo, path, patch)
     if residual:
-        if file_scope_issues:
-            print_warning(
-                console,
-                f"Reverted {len(residual)} post-fix edit(s) outside the reviewed diff and "
-                f"filed issue(s): {residual}.",
-            )
-        else:
-            print_warning(
-                console,
-                f"Reverted {len(residual)} post-fix edit(s) outside the reviewed diff "
-                f"(issue filing disabled): {residual}.",
-            )
+        print_warning(
+            console,
+            f"Reverted {len(residual)} post-fix edit(s) outside the reviewed diff "
+            f"{_scope_filing_note(file_scope_issues)}: {residual}.",
+        )
     return None if restoration_failed else residual
 
 
