@@ -3264,6 +3264,68 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
     assert "out of scope for PR" in body
 
 
+async def test_fix_gate_files_no_issue_by_default(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#1056 default-off: out-of-scope findings are excluded and short-circuited
+    but NO GitHub issue is filed."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high", desc="in-scope finding"),
+        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
+    ]
+    mute_side_effects()
+    created: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_create",
+        lambda repo, *, title, body, **kw: created.append((title, body))
+        or "https://github.com/owner/repo/issues/9",
+    )
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+    assert created == [], f"no issue may be filed by default, got {created!r}"
+    # Exclusion still happened: the fix pass never touched notes.txt and the
+    # short-circuit fired before phase_fix.
+    assert not any("notes.txt" in (b or "") for b in _fix_prompts(stub))
+
+
+async def test_fix_gate_files_issue_when_opted_in(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#1056 opt-in: scope_issue_filing=True restores the #336 filing behavior."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high", desc="in-scope finding"),
+        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
+    ]
+    mute_side_effects()
+    created: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_create",
+        lambda repo, *, title, body, **kw: created.append((title, body))
+        or "https://github.com/owner/repo/issues/9",
+    )
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
+        )
+    )
+    assert exit_code == 0
+    assert len(created) == 1 and "notes.txt" in created[0][1]
+
+
 async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
