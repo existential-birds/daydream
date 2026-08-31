@@ -1,7 +1,10 @@
 """Canonical harvest of per-finding annotations into the archive (issue #1055).
 
-Re-verifies the materialized preview snapshot against a freshly built queue
-over the hydrated index, merges human observations under three-tier
+Re-verifies the materialized preview snapshot (every disposition — automatic
+decisive, human-decisive, and non-decisive) against a freshly built
+*complete* queue — ``build_queue(..., include_decisive=True)`` — over the
+hydrated index, so the automatic decisive records drift-check too. It merges
+human observations under three-tier
 precedence, appends exactly one ``label_observations`` row per session via
 ``archive.index.append_label_observation`` (the auto dedup key keys on the
 pin's ``snapshot_id`` plus the archived ``rubric_json`` — fed through
@@ -134,7 +137,8 @@ def run_canonical_harvest(
 ) -> dict[str, Any]:
     """Harvest the materialized preview snapshot into canonical annotation storage.
 
-    1. Re-derives the fresh queue over the hydrated index and verifies every
+    1. Re-derives the fresh complete queue over the hydrated index
+       (``build_queue(..., include_decisive=True)``) and verifies every
        materialized record's ``evidence_digest`` against the fresh queue
        **before any write**; drift raises :class:`AnnotationDriftError`
        listing the drifted ``record_id``s.
@@ -172,7 +176,16 @@ def run_canonical_harvest(
         # was built from instead of feeding the materialize dir back and
         # comparing each digest against itself (tautological).
         sessions, _index_revision = _sessions_from_hydrated_stage(index_root)
-    fresh_by_record_id = {str(item["record_id"]): item for item in build_queue(sessions)}
+    # The complete set is the drift authority: widened materialization emits a
+    # record for every disposition, so the fresh queue must include the
+    # automatic decisive records too — an unresolved-only queue would
+    # fail-closed on every decisive finding. Unchanged automatic decisive
+    # records are preserved verbatim by the merge loop below: no observation
+    # group ⇒ disposition untouched; ``human_labeler``/``human_role`` are only
+    # set by the three-tier precedence branch.
+    fresh_by_record_id = {
+        str(item["record_id"]): item for item in build_queue(sessions, include_decisive=True)
+    }
 
     # Fail-closed drift gate: verify BEFORE any write.
     drifted: list[str] = []
