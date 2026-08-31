@@ -104,7 +104,7 @@ def test_v1_and_v2_projection_paths_are_independent(tmp_path: Path, archive_dir:
         bundle_dir = _write_bundle(out_dir)
         snap = _write_annotations_snapshot(bundle_dir)
         run_build_corpus_v2(BuildCorpusV2Config(out_dir=out_dir / "out", bundle_dir=bundle_dir,
-                                                annotations_snapshot=snap))
+                                                annotation_bundle_dir=snap.parent))
         return out_dir / "out" / "corpus.jsonl"
 
     v1_before = _run_v1_build(tmp_path / "v1a" / "corpus.jsonl").read_bytes()
