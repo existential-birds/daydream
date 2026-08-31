@@ -81,3 +81,21 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(queue_module, "project_findings", _forge_decisive)
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
+
+
+def test_disposition_sets_are_single_sourced() -> None:
+    from daydream.training.adjudication.dispositions import (
+        NON_DECISIVE_DISPOSITIONS,
+        is_decisive,
+    )
+    from daydream.training.adjudication.queue import (
+        _NON_DECISIVE_DISPOSITIONS as queue_set,
+    )
+    from daydream.training.corpus_v2.tiers import (
+        _NON_DECISIVE_DISPOSITIONS as tiers_set,
+    )
+
+    assert queue_set is NON_DECISIVE_DISPOSITIONS
+    assert tiers_set is NON_DECISIVE_DISPOSITIONS
+    assert is_decisive("accepted") and is_decisive("rejected")
+    assert not is_decisive("ambiguous")

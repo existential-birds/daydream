@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 from daydream.archive.hydrate import HubUnavailableError
+from daydream.training.adjudication.dispositions import (
+    NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
+)
 from daydream.training.adjudication.preview import _load_sessions
-from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.labeler_signals import PerFindingDisposition, PerFindingResolution
 
