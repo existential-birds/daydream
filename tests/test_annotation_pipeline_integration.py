@@ -95,15 +95,18 @@ def test_full_annotation_pipeline_survives_vm_loss(
     for session_id in ("sess-a", "sess-b", "sess-c"):
         assert len(label_observation_history(stage, session_id)) == 1
 
-    # 6-7. final bundle: CLI only — build + dry-run + publish
+    # 6-7. final bundle: CLI only — build + dry-run + publish (the resumed
+    # state dir is the observations source the coverage report's gate reads).
     assert handle_adjudicate([
         "publish-final", "--index-root", str(stage), "--materialize-dir", str(mat),
         "--archive-dir", str(stage), "--curation-bundle-dir", str(stage / "curated" / curation_id),
+        "--state-dir", str(fresh),
         "--hub-repo", "org/private-ds", "--dry-run"]) == 0
     assert handle_adjudicate([
         "publish-final", "--index-root", str(stage), "--materialize-dir", str(mat),
         "--archive-dir", str(stage),
         "--curation-bundle-dir", str(stage / "curated" / curation_id),
+        "--state-dir", str(fresh),
         "--hub-repo", "org/private-ds"]) == 0
     final_prefix = f"annotations/{curation_id}/{snapshot_id}/final/"
     assert hub.files[f"{final_prefix}_SUCCESS"] == b""

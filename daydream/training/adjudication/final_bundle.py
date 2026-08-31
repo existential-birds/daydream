@@ -19,24 +19,27 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
-from daydream.training.adjudication.dispositions import (
-    DECISIVE_DISPOSITIONS,
-    NON_DECISIVE_DISPOSITIONS,
-)
+from daydream.training.adjudication.canonical import _evidence_after_as_of
 from daydream.training.adjudication.materialize import (
     _SESSIONS_OUT_FILENAME,
     _sessions_from_hydrated_stage,
 )
+from daydream.training.adjudication.observations import load_observations
+from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
 from daydream.training.corpus_v2.tiers import classify_tier
+from daydream.training.dispositions import (
+    DECISIVE_DISPOSITIONS,
+    NON_DECISIVE_DISPOSITIONS,
+)
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 
 __all__ = ["build_final_bundle"]
@@ -54,6 +57,12 @@ _BUNDLE_FILES = (
     _REPORT_FILENAME,
     _LINEAGE_FILENAME,
 )
+
+# publish.py stages upload payloads into ``<bundle-dir>/.publish-stage`` and
+# leaves the scratch dir behind after a real publish; it is publish-internal,
+# never bundle content, so a re-construction over the same out_dir tolerates it
+# (re-publish idempotence).
+_PUBLISH_STAGE_DIRNAME = ".publish-stage"
 
 # The lineage fields that must be present and non-empty in the pin/manifest —
 # a missing field is a hard error naming the field, never a fallback default.
@@ -76,7 +85,7 @@ def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
     if not annotations_path.is_file():
         raise FileNotFoundError(
             f"materialized annotations not found (run `corpus adjudicate materialize` and "
-            f"`corpus adjudicate harvest` first): {annotations_path}"
+            f"`corpus adjudicate harvest-snapshot` first): {annotations_path}"
         )
     try:
         return [
@@ -140,6 +149,77 @@ def _lineage_field(manifest: Mapping[str, Any], field: str, manifest_path: Path)
     return value
 
 
+def _enrich_report_items(
+    items: Sequence[Mapping[str, Any]],
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    as_of: str | None = None,
+) -> list[dict[str, Any]]:
+    """Enrich queue items into report items — the single shared implementation
+    behind both the CLI report path (``cli._report_items``) and the final
+    bundle's coverage report, so the published 80% admission gate sees exactly
+    the same human-decision state as ``corpus adjudicate report``.
+
+    Attaches each record's observations, applies three-tier effective
+    adjudication (a human decisive judgment whose evidence digest matches the
+    fresh item overrides the disposition), stamps the temporal axis first, and
+    classifies ``tier``/``posterior_eligible`` with the corpus-v2 authority.
+    Gold eligibility requires a human decision, so automatic decisive records
+    without one are demoted to task-only and never count as adjudicated. An
+    observation referencing a record_id absent from ``items`` raises
+    ``ValueError`` naming it (fail-closed, mirroring the CLI twin).
+    """
+    queue_ids = {str(item["record_id"]) for item in items}
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for obs in observations:
+        record_id = str(obs["record_id"])
+        if record_id not in queue_ids:
+            raise ValueError(
+                f"observation references record_id {record_id!r} which is not in the "
+                f"adjudication queue over the hydrated index"
+            )
+        grouped.setdefault(record_id, []).append(obs)
+
+    enriched: list[dict[str, Any]] = []
+    for item in items:
+        enriched_item = dict(item)
+        record_obs = grouped.get(str(item["record_id"]), [])
+        enriched_item["observations"] = record_obs
+        gold_eligible = False
+        if record_obs:
+            resolved = effective_adjudication(record_obs)
+            gold_eligible = resolved["gold_eligible"]
+            if (
+                resolved["role"] in ("rater", "adjudicator")
+                and resolved["evidence_digest"] == str(item["evidence_digest"])
+                and resolved["disposition"] in DECISIVE_DISPOSITIONS
+            ):
+                enriched_item["disposition"] = resolved["disposition"]
+        # Stamp the temporal axis FIRST so classify_tier sees it, matching the
+        # canonical serializer and the corpus projection (tiers.py C5/M9): an
+        # evidence-after-as_of record must classify "silver" here exactly as it
+        # does on the canonical record — never gold/posterior_eligible.
+        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(enriched_item, as_of)
+        # The gold gate has one implementation (classify_tier); gold-eligibility
+        # comes from the human-observation resolution (conflict/review-required
+        # decisive judgments stay out of the gold tier). A classifier failure
+        # fail-closes naming the record, never a silent skip.
+        try:
+            tier = classify_tier(enriched_item)
+        except Exception as exc:
+            raise ValueError(
+                f"cannot classify tier for record_id {str(item['record_id'])!r}: {exc}"
+            ) from exc
+        if tier == "gold" and not gold_eligible:
+            tier = "task-only"
+        enriched_item["tier"] = tier
+        enriched_item["posterior_eligible"] = tier == "gold" and str(
+            enriched_item["profile"]
+        ) == "pr_review"
+        enriched.append(enriched_item)
+    return enriched
+
+
 def build_final_bundle(
     *,
     index_root: Path,
@@ -147,6 +227,7 @@ def build_final_bundle(
     archive_dir: Path,
     out_dir: Path,
     curation_bundle_dir: Path | None = None,
+    observations_path: Path | None = None,
 ) -> dict[str, Any]:
     """Construct the final annotation staging bundle into a fresh ``out_dir``.
 
@@ -163,10 +244,14 @@ def build_final_bundle(
       bundle files as part of the SHA256SUMS file set, so this extra file is
       additive-safe.
     - ``coverage-report.json``: ``report.build_report`` over a fresh complete
-      queue (``build_queue(..., include_decisive=True)``) whose dispositions
-      and as-of flags are reconciled against the materialized (merge-applied)
-      records, with ``tier``/``posterior_eligible`` classified via the shared
-      ``corpus_v2.tiers.classify_tier``.
+      queue (``build_queue(..., include_decisive=True)``) enriched by the
+      shared :func:`_enrich_report_items` — the same observations/
+      effective-adjudication/gold-eligibility enrichment the CLI report twin
+      (``cli._report_items``) applies — so the published 80% admission gate
+      counts human-adjudicated outcome-bearing records only, never every
+      automatic decisive record. ``observations_path`` (the ``--state-dir``
+      observations store; a missing file is an empty store) supplies the
+      human observations; empty when not given.
     - ``lineage.json``: generated from the preview manifest's pin fields —
       never hand-authored, never defaulted. ``batch_fileset_digest`` is
       ``_derivative_digest`` over ``curation_bundle_dir`` (default: the index
@@ -179,14 +264,19 @@ def build_final_bundle(
     byte-identical; any foreign file (a previous run's ``_SUCCESS``, editor
     droppings, a partial publish) raises ``ValueError`` naming the directory,
     because a stale or published staging dir must never be silently mixed
-    with fresh content.
+    with fresh content. The ``.publish-stage`` scratch dir a real publish
+    leaves behind is publish-internal, not foreign content, so a re-publish
+    over the same dir is tolerated.
 
     Returns a summary dict with ``disposition_counts`` covering all five
     dispositions (``accepted``/``rejected``/``ambiguous``/``unanswered``/
     ``missing``) plus ``record_count`` and the written file names.
     """
     if out_dir.exists():
-        foreign = sorted(p.name for p in out_dir.iterdir() if p.name not in _BUNDLE_FILES)
+        foreign = sorted(
+            p.name for p in out_dir.iterdir()
+            if p.name not in _BUNDLE_FILES and p.name != _PUBLISH_STAGE_DIRNAME
+        )
         if foreign:
             raise ValueError(
                 f"final-bundle staging dir {out_dir} contains foreign content "
@@ -223,27 +313,20 @@ def build_final_bundle(
         "".join(_canonical(row) + "\n" for row in history_rows), encoding="utf-8"
     )
 
-    # 3. coverage-report.json over the fresh complete queue, reconciled with
-    #    the merge-applied materialized records so the report reflects the
-    #    dispositions that will actually publish.
-    merged_by_record_id = {str(r["record_id"]): r for r in records}
-    report_items: list[dict[str, Any]] = []
-    for item in build_queue(_index_sessions(index_root), include_decisive=True):
-        record_id = str(item["record_id"])
-        merged = merged_by_record_id.get(record_id)
-        enriched = dict(item)
-        if merged is not None:
-            enriched["disposition"] = merged["disposition"]
-            enriched["evidence_after_as_of"] = bool(merged.get("evidence_after_as_of"))
-        try:
-            tier = classify_tier(enriched)
-        except Exception as exc:  # GoldGateError / TypeError: fail closed naming the record
-            raise ValueError(
-                f"final bundle: cannot classify tier for record_id {record_id!r}: {exc}"
-            ) from exc
-        enriched["tier"] = tier
-        enriched["posterior_eligible"] = tier == "gold"
-        report_items.append(enriched)
+    # 3. coverage-report.json over the fresh complete queue, enriched exactly
+    #    like the CLI report twin (``cli._report_items`` -> shared
+    #    ``_enrich_report_items``): observations attached per record, three-tier
+    #    effective adjudication applied, and gold records without a human
+    #    decision demoted to task-only, so the published 80% admission gate
+    #    sees real human adjudication state instead of counting every automatic
+    #    decisive record as adjudicated. ``as_of`` comes from the preview
+    #    manifest (empty when unpinned).
+    observations = load_observations(observations_path) if observations_path is not None else []
+    report_items = _enrich_report_items(
+        build_queue(_index_sessions(index_root), include_decisive=True),
+        observations,
+        as_of=manifest.get("as_of"),
+    )
     report = build_report(report_items)
     # ``strata`` keys are (stack, profile) tuples in memory; the on-disk report
     # is JSON, so flatten them to ``"stack/profile"`` (deterministic order).
@@ -264,15 +347,17 @@ def build_final_bundle(
         )
     lineage["batch_fileset_digest"] = _derivative_digest(bundle_root)
     # ``as_of`` is pin-required but legitimately empty when unpinned (mirroring
-    # ``snapshot.snapshot_id``'s as-of edge) — a *missing* key is an error.
+    # ``snapshot.snapshot_id``'s as-of edge) — a *missing* key is an error, and
+    # a null/empty value is the unpinned edge, never the fabricated "None".
     if "as_of" not in manifest:
         raise ValueError(
             f"preview manifest at {manifest_path} is missing required lineage field 'as_of'"
         )
-    lineage["as_of"] = str(manifest["as_of"])
+    as_of = manifest["as_of"]
+    lineage["as_of"] = "" if as_of is None else str(as_of)
     (out_dir / _LINEAGE_FILENAME).write_text(_canonical(lineage) + "\n", encoding="utf-8")
 
-    written = sorted(path.name for path in out_dir.iterdir())
+    written = sorted(path.name for path in out_dir.iterdir() if path.is_file())
     missing = [name for name in _BUNDLE_FILES if name not in written]
     if missing:
         raise ValueError(f"final bundle at {out_dir} is missing contract files: {missing}")

@@ -393,6 +393,7 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
         "publish-final", "--index-root", str(index_root),
         "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
         "--curation-bundle-dir", str(index_root),
+        "--state-dir", str(tmp_path / "state"),
         "--hub-repo", "org/private-ds", "--dry-run"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -410,8 +411,9 @@ def test_publish_final_missing_artifact_exits_nonzero(
     rc = handle_adjudicate([
         "publish-final", "--index-root", str(index_root),
         "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
-        "--curation-bundle-dir", str(index_root), "--hub-repo", "org/private-ds",
-        "--dry-run"])
+        "--curation-bundle-dir", str(index_root),
+        "--state-dir", str(tmp_path / "state"),
+        "--hub-repo", "org/private-ds", "--dry-run"])
     assert rc == 1
     captured = capsys.readouterr()
     # the panel hard-folds long messages mid-word (with the right border

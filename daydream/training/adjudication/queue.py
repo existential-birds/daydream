@@ -9,16 +9,16 @@ non-decisive set, so the queue builder adds no second filtering pass.
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from daydream.training.adjudication.dispositions import (
-    NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
-)
-from daydream.training.adjudication.dispositions import (
-    is_decisive,
-)
 from daydream.training.adjudication.precedence import reopen_on_digest_change
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.projector import project_findings
 from daydream.training.corpus_v2.provenance import extract_provenance
+from daydream.training.dispositions import (
+    NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
+)
+from daydream.training.dispositions import (
+    is_decisive,
+)
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
 
 __all__ = ["build_queue", "_NON_DECISIVE_DISPOSITIONS"]

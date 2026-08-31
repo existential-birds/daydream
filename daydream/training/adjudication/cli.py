@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError, HydrationError, PublicDestinationError, _make_client
-from daydream.training.adjudication.canonical import _evidence_after_as_of, run_canonical_harvest
+from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.materialize import run_materialize
@@ -57,7 +57,7 @@ from daydream.training.adjudication.observations import (
     append_observation,
     load_observations,
 )
-from daydream.training.adjudication.precedence import DECISIVE_DISPOSITIONS, effective_adjudication, has_rater_conflict
+from daydream.training.adjudication.precedence import has_rater_conflict
 from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.publish import (
     publish_annotation_state,
@@ -65,7 +65,6 @@ from daydream.training.adjudication.publish import (
 )
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
-from daydream.training.corpus_v2.tiers import classify_tier
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     REPLY_CLASSIFIER_VERSION,
@@ -321,6 +320,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                                  help="Hydrated index root containing sessions.jsonl")
     p_publish_final.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
                                  help="Directory produced by `materialize` (manifest + sessions.jsonl)")
+    _add_state_dir(p_publish_final)
     p_publish_final.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
                                  help="Archive directory holding the SQLite label-observations index")
     p_publish_final.add_argument("--curation-bundle-dir", type=Path, required=True, metavar="PATH",
@@ -512,55 +512,14 @@ def _report_items(
     dispositions, and the outcome-bearing fields ``tier``/``posterior_eligible``/
     ``evidence_after_as_of``, computed with the same authority as the export
     rows (``classify_tier`` + ``effective_adjudication`` gold-eligibility) so
-    the 80% gate sees real adjudication state on the CLI path."""
+    the 80% gate sees real adjudication state on the CLI path. Shares one
+    implementation with the final bundle's coverage report
+    (``final_bundle._enrich_report_items``) so both gates agree."""
+    from daydream.training.adjudication.final_bundle import _enrich_report_items
+
     items = build_queue(_load_sessions_for_index(index_root))
     observations = load_observations(state_dir / _OBSERVATIONS_FILENAME)
-    queue_ids = {str(item["record_id"]) for item in items}
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for obs in observations:
-        record_id = str(obs["record_id"])
-        if record_id not in queue_ids:
-            raise ValueError(
-                f"observation references record_id {record_id!r} which is not in the "
-                f"adjudication queue over the hydrated index"
-            )
-        grouped.setdefault(record_id, []).append(obs)
-
-    enriched: list[dict[str, Any]] = []
-    for item in items:
-        enriched_item = dict(item)
-        record_obs = grouped.get(str(item["record_id"]), [])
-        enriched_item["observations"] = record_obs
-        gold_eligible = False
-        if record_obs:
-            resolved = effective_adjudication(record_obs)
-            gold_eligible = resolved["gold_eligible"]
-            if (
-                resolved["role"] in ("rater", "adjudicator")
-                and resolved["evidence_digest"] == str(item["evidence_digest"])
-                and resolved["disposition"] in DECISIVE_DISPOSITIONS
-            ):
-                enriched_item["disposition"] = resolved["disposition"]
-        # Stamp the temporal axis FIRST so classify_tier sees it, matching the
-        # canonical serializer and the corpus projection (tiers.py C5/M9): an
-        # evidence-after-as_of record must classify "silver" here exactly as it
-        # does on the canonical record — never gold/posterior_eligible.
-        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(
-            enriched_item, as_of
-        )
-        # Outcome-bearing fields mirroring build_export_entries: the gold gate
-        # has one implementation (classify_tier), and gold-eligibility comes
-        # from the human-observation resolution (conflict/review-required
-        # decisive judgments stay out of the gold tier).
-        tier = classify_tier(enriched_item)
-        if tier == "gold" and not gold_eligible:
-            tier = "task-only"
-        enriched_item["tier"] = tier
-        enriched_item["posterior_eligible"] = tier == "gold" and str(
-            enriched_item["profile"]
-        ) == "pr_review"
-        enriched.append(enriched_item)
-    return enriched
+    return _enrich_report_items(items, observations, as_of=as_of)
 
 
 def handle_report(argv: list[str]) -> int:
@@ -714,6 +673,7 @@ def handle_publish_final(argv: list[str]) -> int:
             archive_dir=args.archive_dir,
             out_dir=bundle_dir,
             curation_bundle_dir=args.curation_bundle_dir,
+            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
         )
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-final failed", str(exc))
