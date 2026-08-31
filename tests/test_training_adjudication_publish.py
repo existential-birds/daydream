@@ -255,3 +255,21 @@ def test_resume_on_empty_disk_restores_byte_identical_state(tmp_path: Path) -> N
     hub.files[f"annotations/cur-1/{'e' * 64}/observations.jsonl"] += b"tampered\n"
     with pytest.raises(ValueError, match="digest"):
         resume_annotation_state(hub, manifest=_manifest(tmp_path), stage_dir=tmp_path / "fresh-2")
+
+
+def test_final_publish_verifier_failure_leaves_no_success_marker(tmp_path: Path) -> None:
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+
+    hub = _FakeHub()
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "annotations.jsonl").write_text('{"record_id": "r1"}\n', encoding="utf-8")
+    (root / "sessions.jsonl").write_text('{"session_id": "s1"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="download verification failed"):
+        publish_final_annotation_bundle(
+            hub, root, manifest={"curation_id": "c", "snapshot_id": "s"},
+            verify_download=True, _download_verifier=lambda _prefix: False,
+        )
+    prefix = "annotations/c/s/final/"
+    assert f"{prefix}_SUCCESS" not in hub.files
+    assert f"{prefix}SHA256SUMS" in hub.files  # uploaded, but not committed
