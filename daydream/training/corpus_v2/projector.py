@@ -162,6 +162,25 @@ def _refuse_posterior_evidence(
             )
 
 
+def _merge_nested_profile(prov: dict[str, Any], row: Mapping[str, Any]) -> None:
+    """Surface the canonical record's nested ``profile`` block (Req 8).
+
+    ``adjudication.snapshot.build_canonical_record`` emits the four
+    review-profile fields nested under top-level ``profile`` (with ``stack``
+    — not ``profile_*`` — at top level), so a top-level read comes back
+    empty and the nested block must supply the values instead — they are
+    never dropped at the projection boundary.
+    """
+    if any(prov["profile"].values()):
+        return
+    nested = row.get("profile")
+    if isinstance(nested, Mapping):
+        for field in prov["profile"]:
+            value = nested.get(field)
+            if value is not None:
+                prov["profile"][field] = value
+
+
 def _provenance_for(
     resolution_row: Mapping[str, Any], manifest_row: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -169,9 +188,11 @@ def _provenance_for(
 
     The resolution row's native review-profile fields win when present;
     otherwise the batch manifest row supplies them — the values carried by
-    either row type must not be dropped at the projection boundary.
+    either row type must not be dropped at the projection boundary. Canonical
+    annotation records nest the profile block, so both shapes are read.
     """
     prov = extract_provenance(resolution_row)
+    _merge_nested_profile(prov, resolution_row)
     if (
         not any(prov["profile"].values())
         and prov.get("skill") is None
@@ -371,6 +392,7 @@ def project_findings(
         disposition = resolution.get("disposition")
         evidence = list(resolution.get("evidence") or [])
         provenance = extract_provenance(resolution)
+        _merge_nested_profile(provenance, resolution)
         record = {
             "record_id": record_id(
                 str(session_id), str(trajectory_id), str(segment_id), str(fingerprint)

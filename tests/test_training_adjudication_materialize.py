@@ -63,6 +63,20 @@ def test_materialize_never_writes_canonical_state(tmp_path: Path) -> None:
     assert not (root / "daydream.sqlite").exists()
 
 
+def test_materialize_dry_run_validates_and_writes_nothing(tmp_path: Path) -> None:
+    root = _index(tmp_path)
+    out = tmp_path / "out"
+    summary = run_materialize(root, out, pin=_PIN, dry_run=True)
+    # dry-run validates everything: same summary a real run would produce
+    full = run_materialize(root, tmp_path / "real", pin=_PIN)
+    assert summary["snapshot_id"] == full["snapshot_id"]
+    assert summary["index_revision"] == "a" * 40
+    assert summary["record_count"] == full["record_count"]
+    # ... and writes nothing: no out dir, no state side effects (AC 4)
+    assert not out.exists()
+    assert not (root / "daydream.sqlite").exists()
+
+
 def test_materialize_missing_sessions_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(HubUnavailableError):
         run_materialize(tmp_path, tmp_path / "out", pin=_PIN)

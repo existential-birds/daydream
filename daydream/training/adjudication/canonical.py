@@ -3,8 +3,10 @@
 Re-verifies the materialized preview snapshot against a freshly built queue
 over the hydrated index, merges human observations under three-tier
 precedence, appends exactly one ``label_observations`` row per session via
-``archive.index.append_label_observation`` (the existing auto dedup key makes
-re-runs no-ops ⇒ exactly-once, M8), and emits ``annotations.jsonl`` from the
+``archive.index.append_label_observation`` (the auto dedup key keys on the
+pin's ``snapshot_id`` — fed through ``evidence_sha`` — so unchanged-pin
+re-runs are no-ops ⇒ exactly-once while a changed pin appends a fresh
+generation, M8), and emits ``annotations.jsonl`` from the
 *same* in-memory merged records used for the append — no second serialization
 (M5). Digest drift raises :class:`AnnotationDriftError` **before any write**
 (fail-closed-then-requeue, M5).
@@ -134,8 +136,11 @@ def run_canonical_harvest(
        row per session (``rubric_json`` carries the merged per-finding records,
        ``reply_evidence_digest`` is the shared serializer's session digest,
        ``labeler_version`` is the pin's, ``reply_classifier_version`` is
-       ``REPLY_CLASSIFIER_VERSION``). The existing auto dedup key makes
-       unchanged re-runs no-ops — exactly-once.
+       ``REPLY_CLASSIFIER_VERSION``). ``evidence_sha`` carries the pin's
+       ``snapshot_id`` so the dedup key changes with the pin: unchanged-pin
+       re-runs are no-ops — exactly-once — while a changed pin (new
+       snapshot id) appends a fresh generation carrying the new pin's
+       flags/rubric.
     4. Emits ``materialize_dir/annotations.jsonl`` (one canonical-JSON record
        per finding, sorted by ``record_id``) from the same merged records.
 
@@ -229,7 +234,13 @@ def run_canonical_harvest(
             labels=labels,
             pr_state=None,
             labeler_version=str(pin["labeler_version"]),
-            evidence_sha=None,
+            # Pin member of the auto dedup key: the content-addressed
+            # snapshot_id changes with any pin change (AC 8), so a changed
+            # pin appends a fresh generation instead of dedup-skipping and
+            # the archived rubric_json always matches the emitted bundle's
+            # pin/flags. Absent (legacy manifest) falls back to None, the
+            # pre-change dedup behavior.
+            evidence_sha=pin.get("snapshot_id"),
             rubric_json=_canonical(rubric),
             valid_at=None,
             has_posterior=False,

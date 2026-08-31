@@ -4,12 +4,17 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.hydrate import PublicDestinationError
+from daydream.archive.hydrate import HydrationError, PublicDestinationError
 from daydream.training.adjudication.publish import (
     annotation_prefix,
     publish_annotation_state,
     resume_annotation_state,
 )
+
+# M6: production manifests always pin index_revision (materialize writes it),
+# so the Hub-verified 40-hex branch — not the synthetic digest fallback — is
+# the path that must be exercised.
+INDEX_REVISION = "a" * 40
 
 
 class _FakeHub:
@@ -17,6 +22,7 @@ class _FakeHub:
         self.files: dict[str, bytes] = {}
         self.private = private
         self.uploads: list[dict[str, Path]] = []
+        self.revisions: set[str] = set()
 
     @property
     def repo_private(self) -> bool:
@@ -35,7 +41,10 @@ class _FakeHub:
         for remote, local in mapping.items():
             self.files[str(remote)] = Path(local).read_bytes()
 
-    def repo_info(self, revision: str | None = None) -> Any: ...
+    def repo_info(self, revision: str | None = None) -> Any:
+        # Mirror the real Hub: an unknown revision is a HydrationError (M6).
+        if revision is None or revision not in self.revisions:
+            raise HydrationError(f"unknown revision {revision!r}")
     def list_revisions(self) -> list[str]:
         return []
 
@@ -45,7 +54,17 @@ def _state(tmp_path: Path) -> Path:
     state.mkdir()
     (state / "queue.json").write_text(json.dumps([{"record_id": "r1"}]), encoding="utf-8")
     (state / "observations.jsonl").write_text(
-        json.dumps({"record_id": "r1", "disposition": "accepted", "role": "rater"}) + "\n",
+        # production shape: observations always carry observed_at (the primary
+        # M4 dedup key is record_id + observed_at, not the line digest)
+        json.dumps(
+            {
+                "record_id": "r1",
+                "disposition": "accepted",
+                "role": "rater",
+                "observed_at": "2025-01-01T00:00:00Z",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     (state / "preview-ledger.json").write_text("{}", encoding="utf-8")
@@ -59,6 +78,7 @@ def _manifest(tmp_path: Path) -> Path:
             {
                 "curation_id": "cur-1",
                 "snapshot_id": "e" * 64,
+                "index_revision": INDEX_REVISION,
             }
         ),
         encoding="utf-8",
@@ -87,13 +107,51 @@ def test_publish_second_batch_appends_observations_never_overwrites(tmp_path: Pa
     hub = _FakeHub()
     state = _state(tmp_path)
     publish_annotation_state(hub, state, manifest=_manifest(tmp_path), batch_complete=True)
-    # second batch appends a new observation
+    # second batch: a key-duplicate edit of r1 (same record_id + observed_at,
+    # different bytes) must be dropped by the primary dedup key; a genuinely
+    # new observation is appended (M4)
     with (state / "observations.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"record_id": "r2", "disposition": "rejected", "role": "rater"}) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "record_id": "r1",
+                    "disposition": "rejected",
+                    "role": "rater",
+                    "observed_at": "2025-01-01T00:00:00Z",
+                }
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "record_id": "r2",
+                    "disposition": "rejected",
+                    "role": "rater",
+                    "observed_at": "2025-01-01T00:01:00Z",
+                }
+            )
+            + "\n"
+        )
     publish_annotation_state(hub, state, manifest=_manifest(tmp_path), batch_complete=True)
     stored = hub.files[f"annotations/cur-1/{'e' * 64}/observations.jsonl"].decode()
     lines = [json.loads(line) for line in stored.splitlines() if line.strip()]
+    # r1's key-duplicate edit was dropped (dedup by record_id + observed_at,
+    # not by line bytes); r2 was appended
     assert [o["record_id"] for o in lines] == ["r1", "r2"]  # append-only (M4)
+
+
+def test_publish_without_batch_complete_skips_checkpoint(tmp_path: Path) -> None:
+    hub = _FakeHub()
+    state = _state(tmp_path)
+    manifest = _manifest(tmp_path)
+    # CLI default (no --batch-complete flag): no checkpoint is written
+    summary = publish_annotation_state(hub, state, manifest=manifest)
+    prefix = f"annotations/cur-1/{'e' * 64}/"
+    assert any(k == f"{prefix}queue.json" for k in hub.files)
+    assert any(k == f"{prefix}observations.jsonl" for k in hub.files)
+    assert f"{prefix}checkpoints/batch-latest.json" not in hub.files
+    assert "observation_count" not in summary
 
 
 def test_publish_refuses_public_destination(tmp_path: Path) -> None:
@@ -107,6 +165,7 @@ def test_publish_final_bundle_success_last_and_verified_commit_required(tmp_path
     from daydream.training.adjudication.publish import publish_final_annotation_bundle
 
     hub = _FakeHub()
+    hub.revisions.add(INDEX_REVISION)
     root = tmp_path / "bundle"
     root.mkdir()
     (root / "annotations.jsonl").write_text('{"record_id": "r1"}\n', encoding="utf-8")
@@ -125,8 +184,23 @@ def test_publish_final_bundle_success_last_and_verified_commit_required(tmp_path
     sums = hub.files[f"{prefix}SHA256SUMS"].decode()
     expected = hashlib.sha256((root / "annotations.jsonl").read_bytes()).hexdigest()
     assert f"{expected}  annotations.jsonl" in sums
-    assert result["hub_commit_sha"]  # verified commit recorded (M6)
+    # the index_revision was verified to exist on the Hub and recorded (M6) —
+    # not the synthetic digest fallback
+    assert result["hub_commit_sha"] == INDEX_REVISION
     assert result["prefix"] == prefix
+
+
+def test_final_bundle_unknown_index_revision_fails_closed(tmp_path: Path) -> None:
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+
+    hub = _FakeHub()  # index_revision is not a known Hub revision
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "annotations.jsonl").write_text('{"record_id": "r1"}\n', encoding="utf-8")
+    with pytest.raises(HydrationError):
+        publish_final_annotation_bundle(hub, root, manifest=_manifest(tmp_path))
+    # fail-closed: an unverifiable commit means _SUCCESS is never uploaded
+    assert not any(k.endswith("/final/_SUCCESS") for k in hub.files)
 
 
 def test_final_bundle_clean_download_verifies_or_refuses(tmp_path: Path) -> None:
@@ -152,9 +226,20 @@ def test_final_bundle_refuses_secret_in_payload(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     root.mkdir()
     (root / "annotations.jsonl").write_text('{"hf_token": "hf_abc123secret"}\n', encoding="utf-8")
-    with pytest.raises(Exception):  # PublicDestinationError from the S1 secret scan
+    prefix = f"annotations/cur-1/{'e' * 64}/final/"
+    with pytest.raises(PublicDestinationError, match="credential-shaped"):  # S1 secret scan
         publish_final_annotation_bundle(hub, root, manifest=_manifest(tmp_path))
-    assert not any(k.endswith("/final/_SUCCESS") for k in hub.files)
+    # fail-closed before any upload: not even the credential payload reached the
+    # Hub (the scan runs before the first upload, so nothing sits under prefix)
+    assert not any(k.startswith(prefix) for k in hub.files)
+
+
+def test_resume_without_checkpoint_returns_empty_state(tmp_path: Path) -> None:
+    hub = _FakeHub()  # nothing ever published: no checkpoint can exist
+    fresh = tmp_path / "fresh-vm"
+    restored = resume_annotation_state(hub, manifest=_manifest(tmp_path), stage_dir=fresh)
+    assert restored == {"observation_count": 0, "restored": []}
+    assert not fresh.exists()
 
 
 def test_resume_on_empty_disk_restores_byte_identical_state(tmp_path: Path) -> None:

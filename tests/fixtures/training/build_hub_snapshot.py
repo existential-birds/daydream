@@ -52,6 +52,8 @@ def _snapshot_trajectory(session_id: str) -> dict[str, object]:
         }
     ]
     trajectory: dict[str, object] = dict(_MINIMAL_TRAJECTORY)
+    trajectory["session_id"] = session_id
+    trajectory["trajectory_id"] = f"{session_id}:root"
     trajectory["resolutions"] = [
         {
             "fingerprint": f"fp-{session_id}",
@@ -60,6 +62,14 @@ def _snapshot_trajectory(session_id: str) -> dict[str, object]:
             "evidence_digest": hashlib.sha256(
                 json.dumps(evidence, sort_keys=True).encode()
             ).hexdigest(),
+            # Native review-profile fields (issue #885, R12) — the shared
+            # serializer nests these under ``profile`` in the canonical
+            # record, so the projection must surface them at the two-bundle
+            # boundary rather than dropping them.
+            "profile_schema_version": 2,
+            "profile_name": "pr_review",
+            "profile_source_kind": "builtin",
+            "profile_digest": "d" * 64,
             "profile": "pr_review",
             "stack": "python",
         }

@@ -173,6 +173,11 @@ def run_materialize(
         # plus the sanitized per-run trajectories (read-only).
         sessions, index_revision = _sessions_from_hydrated_stage(index_root)
 
+    # Validate the pin before touching its components in the loop body:
+    # ``snapshot_id`` raises the documented ValueError naming the missing
+    # component, never a KeyError from ``pin["evidence_observed_at"]``.
+    pin_id = snapshot_id(pin)
+
     records: list[dict[str, Any]] = []
     for session in sessions:
         resolutions = session.get("resolutions")
@@ -196,7 +201,7 @@ def run_materialize(
 
     id_digest = hashlib.sha256(
         (
-            snapshot_id(pin)
+            pin_id
             + ":"
             + hashlib.sha256(
                 "".join(str(r["evidence_digest"]) for r in records).encode("utf-8")

@@ -130,8 +130,13 @@ def _write_annotations_snapshot(
             "record_id": _record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
             "session_id": session_id, "fingerprint": fingerprint,
             "disposition": disposition, "evidence": evidence,
-            "profile_schema_version": 2, "profile_name": "deep-review",
-            "profile_source_kind": "builtin", "profile_digest": "d" * 64,
+            # Real canonical-record shape (adjudication/snapshot.py:
+            # build_canonical_record): the four review-profile fields nest
+            # under "profile" with only "stack" at top level — the projector
+            # must surface both at the two-bundle projection boundary.
+            "profile": {"profile_schema_version": 2, "profile_name": "deep-review",
+                        "profile_source_kind": "builtin", "profile_digest": "d" * 64},
+            "stack": "python",
         })
     (ann_dir / "annotations.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
@@ -244,13 +249,16 @@ def test_record_id_is_deterministic_sha256_of_canonical_join() -> None:
 
 
 def _resolution(
-    disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None
+    disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None,
+    evidence_after_as_of: bool = False,
 ) -> dict[str, object]:
     r: dict[str, object] = {
         "fingerprint": "ab" * 32,
         "disposition": disposition,
         "evidence": [{"created_at": "2026-02-01T00:00:00+00:00"}],
     }
+    if evidence_after_as_of:
+        r["evidence_after_as_of"] = True
     if reward is not None:
         r["intrinsic_reward"] = reward
     if score is not None:
@@ -277,6 +285,16 @@ def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
         classify_tier("accepted")  # type: ignore[arg-type]  # gold input must carry evidence, not a bare label
     with pytest.raises(GoldGateError):
         classify_tier({"fingerprint": "ab" * 32, "disposition": "accepted", "evidence": []})
+
+
+def test_evidence_after_as_of_rows_are_never_gold() -> None:
+    # C5/M9 recorded-and-flagged edge: evidence observed after the pin's
+    # as_of keeps its evidence but is never gold-eligible — a decisive
+    # flagged record classifies silver, never gold.
+    assert classify_tier(_resolution("accepted", evidence_after_as_of=True)) == "silver"
+    assert classify_tier(_resolution("rejected", evidence_after_as_of=True)) == "silver"
+    assert classify_tier(_resolution("accepted", evidence_after_as_of=False)) == "gold"
+    assert classify_tier(_resolution("accepted")) == "gold"
 
 
 def test_tiers_are_disjoint_classes() -> None:
@@ -467,6 +485,36 @@ def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) ->
         assert rec["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
                                    "profile_source_kind": "builtin", "profile_digest": "d" * 64}
         assert "stack" in rec  # schema-required provenance key, never dropped
+
+
+def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
+    """The emission boundary honors the canonical harvest's flag: a decisive
+    finding with evidence after the pin's as_of emits silver (outcome_label
+    None), never gold, into corpus.jsonl — the ``evidence_after_as_of``
+    policy is enforced, not just recorded."""
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
+    rows = [json.loads(line) for line in snap.read_text().splitlines() if line.strip()]
+    for row in rows:
+        row["evidence_after_as_of"] = True
+    snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    # annotations.jsonl changed: regenerate the annotation bundle's checksums
+    # exactly as the fixture does (no SHA256SUMS self-line — it does not exist
+    # when the fixture computes the listing).
+    ann_dir = snap.parent
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix()
+        for p in ann_dir.rglob("*") if p.is_file() and p.name != "SHA256SUMS"
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+    summary = run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    assert summary["records_by_tier"] == {"silver": 1}
+    records = [json.loads(line) for line in
+               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    assert records and records[0]["tier"] == "silver"
+    assert records[0]["outcome_label"] is None
 
 
 # ---------------------------------------------------------------------------

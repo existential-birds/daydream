@@ -15,7 +15,8 @@ deterministic adjudication queue:
   rows only with ``--dry-run``).
 - ``report`` — print outcome-bearing vs silver/task-only coverage, class
   balance, unresolved count, inter-rater agreement, and strata; with
-  ``--conflicts``, list disagreeing-rater findings oldest-first.
+  ``--as-of``, flag evidence observed after the pin; with ``--conflicts``,
+  list disagreeing-rater findings oldest-first.
 - ``materialize`` — materialize the preview annotation snapshot
   (``sessions.jsonl`` + ``preview-manifest.json``) for one curation pin.
 - ``publish-state`` — publish adjudication state additively to the private
@@ -44,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError, HydrationError, PublicDestinationError, _make_client
-from daydream.training.adjudication.canonical import run_canonical_harvest
+from daydream.training.adjudication.canonical import _evidence_after_as_of, run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.materialize import run_materialize
@@ -60,6 +61,7 @@ from daydream.training.adjudication.publish import (
 )
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
+from daydream.training.corpus_v2.tiers import classify_tier
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     REPLY_CLASSIFIER_VERSION,
@@ -174,7 +176,12 @@ def _add_pin_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def _pin_from_args(args: argparse.Namespace) -> dict[str, str]:
-    """Assemble the full K2 pin; versions come from ``labeler_versions``."""
+    """Assemble the full K2 pin; versions come from ``labeler_versions``.
+
+    ``as_of`` is the one component that may be empty or absent — the unpinned
+    edge (``snapshot.snapshot_id`` hashes it as the empty string), so omitting
+    ``--as-of`` materializes an unpinned snapshot instead of failing.
+    """
     pin = {
         "curation_id": args.curation_id or "",
         "sanitized_hub_commit": args.sanitized_hub_commit or "",
@@ -186,7 +193,9 @@ def _pin_from_args(args: argparse.Namespace) -> dict[str, str]:
         "rubric_version": RUBRIC_SCHEMA_VERSION,
         "classifier_version": REPLY_CLASSIFIER_VERSION,
     }
-    missing = sorted(field for field, value in pin.items() if not value)
+    missing = sorted(
+        field for field, value in pin.items() if not value and field != "as_of"
+    )
     if missing:
         raise ValueError(f"pin is missing required component(s): {missing}")
     return pin
@@ -250,6 +259,9 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     _add_state_dir(p_report)
     p_report.add_argument("--conflicts", action="store_true",
                           help="List disagreeing-rater findings oldest-first instead of the report")
+    p_report.add_argument("--as-of", type=str, default=None, metavar="ISO_TS",
+                          help="ISO-8601 transaction-time pin; flag evidence observed "
+                               "after this instant (default: no as_of comparison)")
 
     p_materialize = sub.add_parser(
         "materialize",
@@ -473,8 +485,13 @@ def handle_export(argv: list[str]) -> int:
 def _report_items(
     index_root: Path,
     state_dir: Path,
+    as_of: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Queue items enriched with their observation lists + effective dispositions."""
+    """Queue items enriched for the report: observation lists, effective
+    dispositions, and the outcome-bearing fields ``tier``/``posterior_eligible``/
+    ``evidence_after_as_of``, computed with the same authority as the export
+    rows (``classify_tier`` + ``effective_adjudication`` gold-eligibility) so
+    the 80% gate sees real adjudication state on the CLI path."""
     items = build_queue(_load_sessions_for_index(index_root))
     observations = load_observations(state_dir / _OBSERVATIONS_FILENAME)
     queue_ids = {str(item["record_id"]) for item in items}
@@ -493,14 +510,30 @@ def _report_items(
         enriched_item = dict(item)
         record_obs = grouped.get(str(item["record_id"]), [])
         enriched_item["observations"] = record_obs
+        gold_eligible = False
         if record_obs:
             resolved = effective_adjudication(record_obs)
+            gold_eligible = resolved["gold_eligible"]
             if (
                 resolved["role"] in ("rater", "adjudicator")
                 and resolved["evidence_digest"] == str(item["evidence_digest"])
                 and resolved["disposition"] in DECISIVE_DISPOSITIONS
             ):
                 enriched_item["disposition"] = resolved["disposition"]
+        # Outcome-bearing fields mirroring build_export_entries: the gold gate
+        # has one implementation (classify_tier), and gold-eligibility comes
+        # from the human-observation resolution (conflict/review-required
+        # decisive judgments stay out of the gold tier).
+        tier = classify_tier(enriched_item)
+        if tier == "gold" and not gold_eligible:
+            tier = "task-only"
+        enriched_item["tier"] = tier
+        enriched_item["posterior_eligible"] = tier == "gold" and str(
+            enriched_item["profile"]
+        ) == "pr_review"
+        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(
+            enriched_item, as_of
+        )
         enriched.append(enriched_item)
     return enriched
 
@@ -511,7 +544,7 @@ def handle_report(argv: list[str]) -> int:
 
     args = _build_adjudicate_parser().parse_args(["report", *argv])
     try:
-        enriched = _report_items(args.index_root, args.state_dir)
+        enriched = _report_items(args.index_root, args.state_dir, as_of=args.as_of)
     except ValueError as exc:
         print_error(create_console(), "adjudicate report failed", str(exc))
         return 1
@@ -600,7 +633,7 @@ def handle_publish_state(argv: list[str]) -> int:
         summary = publish_annotation_state(
             client, args.state_dir, manifest=args.manifest, batch_complete=args.batch_complete,
         )
-    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-state failed", str(exc))
         return 1
     message = f"Published {len(summary['uploaded'])} file(s) under {summary['prefix']}"

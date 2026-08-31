@@ -27,10 +27,10 @@ def test_full_annotation_pipeline_survives_vm_loss(tmp_path: Path) -> None:
 
     # 1. hydrate: VM-local SQLite index over the fake Hub snapshot
     stage = tmp_path / "stage"
-    hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
+    hydrated = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
         source_repo="org/private-ds", source_revision=SNAPSHOT_REVISION,
         destination_repo="org/private-ds", stage_dir=stage), client=hub)
-    curation_id = next((stage / "curated").iterdir()).name
+    curation_id = hydrated.curation_id
 
     # 2. semantic preview -> sessions.jsonl + preview manifest (snapshot id),
     #    read directly off the hydrated staging archive (no sessions.jsonl there)
@@ -128,4 +128,18 @@ def test_full_annotation_pipeline_survives_vm_loss(tmp_path: Path) -> None:
         annotation_bundle_dir=clean,
     ))
     assert (tmp_path / "corpus-out" / "_SUCCESS").is_file()
-    assert summary["total"] >= 0
+    # exactly one decisive record: one of the three fixture findings was
+    # human-adjudicated to `accepted`, the other two remain unanswered
+    assert summary["total"] == 1
+    # The gold record must carry the canonical record's nested profile block
+    # verbatim (Req 8: profile values never dropped at the projection
+    # boundary) — annotation rows are build_canonical_record output with the
+    # profile nested under "profile", not flat profile_* keys.
+    records = [json.loads(line) for line in
+               (tmp_path / "corpus-out" / "corpus.jsonl").read_text().splitlines() if line]
+    assert len(records) == 1
+    assert records[0]["profile"] == {
+        "profile_schema_version": 2, "profile_name": "pr_review",
+        "profile_source_kind": "builtin", "profile_digest": "d" * 64,
+    }
+    assert records[0]["stack"] == "python"

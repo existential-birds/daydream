@@ -98,10 +98,10 @@ discipline alone. Proceed to Task 1.
 ## Issue-1055 Task 0 spike (2026-08-30, branch eb/daydream/issue-1055 @ HEAD)
 
 - Baseline: `pytest tests/test_corpus_v2.py tests/test_training_adjudication_preview_harvest.py -x -q` → **48 passed**.
-- Wiring import check: `run_build_corpus_v2`, `_verify_snapshot_pinned`, `append_label_observation`, `build_export_entries` all import cleanly → `wiring OK`.
-- Failure-mode capture: **no tests reference `_verify_snapshot_pinned`** (`grep -rn verify_snapshot_pinned tests/` → no hits; `-k snapshot_pinned --collect-only` → 0 collected). There is therefore no existing digest-membership contract coverage to replace — Task 9 writes the two-bundle contract tests fresh.
-- Consumer scan: sole call site of `_verify_snapshot_pinned` is `daydream/training/corpus_v2/projector.py:374` inside `run_build_corpus_v2`. `adjudication/preview.py:8` mentions it in a docstring only (not a consumer, docstring update in Task 9 is cosmetic). No other consumers exist.
+- Wiring import check: `run_build_corpus_v2`, `append_label_observation`, `build_export_entries` all import cleanly → `wiring OK`. (`_verify_snapshot_pinned` was in the spike-time import list but is gone at HEAD — the merged branch deleted the function.)
+- Failure-mode capture: **no tests reference `_verify_snapshot_pinned`** — moot at HEAD since the function no longer exists; there is no existing digest-membership contract coverage to replace — Task 9 writes the two-bundle contract tests fresh.
+- Consumer scan: stale at HEAD — `_verify_snapshot_pinned` was previously anchored at `daydream/training/corpus_v2/projector.py:374` (sole call site, inside `run_build_corpus_v2`), with a docstring mention in `adjudication/preview.py:8`, but the merged branch deleted the function and both anchors are gone. No consumers remain.
 
-## Verdict
+## Verdict (issue-1055 spike)
 
-Baseline green, wiring intact, `projector.py:374` is the only consumer. Spike passes; proceed to Task 1.
+Baseline green, wiring intact. Spike passes; proceed to Task 1.
