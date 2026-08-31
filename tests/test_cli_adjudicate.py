@@ -417,3 +417,22 @@ def test_publish_final_missing_artifact_exits_nonzero(tmp_path, capsys):
     # the unsplittable path token
     flattened = "".join(captured.out.split()).replace("║", "")
     assert "annotations.jsonl" in flattened + captured.err
+
+
+def test_runbook_commands_parse_against_real_parser() -> None:
+    import re
+    from daydream.training.adjudication.cli import _build_adjudicate_parser
+    text = (Path(__file__).parents[1] / "docs" / "runbooks" /
+            "annotation-final-publish.md").read_text()
+    cmds = re.findall(r"daydream corpus adjudicate [^\s`].*", text)
+    assert cmds, "runbook must contain literal CLI commands"
+    for cmd in cmds:
+        argv = cmd.split()[3:]
+        if "--help" in argv:
+            continue
+        parser = _build_adjudicate_parser()
+        # parse-check only; unknown flags/sub-verbs raise SystemExit(2)
+        try:
+            parser.parse_args(argv)
+        except SystemExit as exc:
+            raise AssertionError(f"runbook command not parseable: {cmd}") from exc
