@@ -62,29 +62,42 @@ def test_grouping_on_multi_dependency_blocks_only() -> None:
         assert list(group) == ["dependencies"], f"{key} needs a single group"
         pattern = group["dependencies"]["patterns"]
         assert "*" in pattern, f"{key} group must cover all deps (minor+patch together)"
+        update_types = group["dependencies"]["update-types"]
+        assert set(update_types) == {"minor", "patch"}, (
+            f"{key} group must scope update-types to minor+patch (found {update_types})"
+        )
     assert "groups" not in by_block[("npm", "/.github/workflows")], "npm tracks a single dep — no group"
 
 
-def test_codex_pin_matches_tracked_package_json() -> None:
-    """CI installs codex from a hardcoded string in daydream-review.yml, not
-    from the tracked package.json served to the npm Dependabot block. Merging a
-    Dependabot bump PR changes nothing in CI unless the workflow string moves
-    too — assert the two stay in lockstep so silent divergence fails here."""
+def test_codex_install_tracks_package_json() -> None:
+    """CI installs codex at the version pinned in the tracked workflows
+    package.json — the file the npm Dependabot block updates. A hardcoded
+    version string in daydream-review.yml would silently leave CI on the
+    stale pin after a bump PR; assert the install reads the manifest so a
+    Dependabot bump reaches CI end-to-end."""
     package_json = _REPO_ROOT / ".github" / "workflows" / "package.json"
     manifest = yaml.safe_load(package_json.read_text(encoding="utf-8"))
-    manifest_version = manifest["dependencies"]["@openai/codex"]
+    assert "@openai/codex" in manifest["dependencies"], (
+        "package.json must track @openai/codex so Dependabot can bump it"
+    )
 
     workflow = (_REPO_ROOT / ".github" / "workflows" / "daydream-review.yml").read_text(
         encoding="utf-8"
     )
-    match = re.search(r"npm install -g @openai/codex@([^\s]+)", workflow)
-    assert match is not None, (
-        "daydream-review.yml must install codex via `npm install -g "
-        "@openai/codex@<version>` so the pin stays reconcilable"
+    # No literal pin may exist anywhere in the workflow — the version must
+    # come from the tracked manifest, so Dependabot bumps flow through to CI.
+    assert not re.search(r"@openai/codex@\d+\.\d+\.\d+", workflow), (
+        "daydream-review.yml hardcodes a codex version — CI would stay on the "
+        "stale pin after a Dependabot bump of package.json; install from the "
+        "tracked manifest instead"
     )
-    assert match.group(1) == manifest_version, (
-        f"codex pin {match.group(1)!r} in daydream-review.yml diverged from "
-        f"package.json version {manifest_version!r} — bump them in lockstep"
+    install = re.search(
+        r"npm install -g .*@openai/codex@\$\(.*package\.json.*\)", workflow
+    )
+    assert install is not None, (
+        "daydream-review.yml must install codex at the version read from the "
+        "tracked .github/workflows/package.json (the npm Dependabot block's "
+        "target) so bump PRs reach CI end-to-end"
     )
 
 
@@ -102,6 +115,7 @@ def test_readme_documents_dependabot_volume_and_gates() -> None:
         "open-pull-requests-limit",
         "`make check`",
         "CODEOWNERS",
+        "end-to-end",
     ):
         assert needle in text, f"README missing: {needle}"
 

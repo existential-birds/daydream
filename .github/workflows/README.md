@@ -97,7 +97,10 @@ dependency. Commit messages carry the `chore(deps)` prefix.
 
 **Validation gate.** Every dependency PR must pass `make check` before merge —
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`
-drift.
+drift. CI installs codex at the version read from the tracked
+`.github/workflows/package.json`, so an npm block bump PR updates CI end-to-end
+with no parallel edit; `tests/test_dependabot_config.py` fails if the workflow
+reintroduces a hardcoded pin instead of reading the manifest.
 
 **Ownership.** Reviewers are auto-requested via the single-rule `CODEOWNERS`
 (`* @existential-birds @anderskev`); no per-path entries were added.
