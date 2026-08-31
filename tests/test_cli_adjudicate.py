@@ -230,3 +230,95 @@ def test_adjudicate_build_preserves_observations_and_is_idempotent(tmp_path: Pat
         assert rc == 0
     queue = json.loads((tmp_path / "adj" / "queue.json").read_text())
     assert len(queue) == 2
+
+
+# ---- snapshot pipeline verbs (issue #1055, task 6) ----
+
+from daydream.training.adjudication.cli import handle_adjudicate  # noqa: E402
+from daydream.training.adjudication.materialize import run_materialize  # noqa: E402
+from daydream.training.labeler_versions import (  # noqa: E402
+    ADJUDICATION_LABELER_VERSION,
+    REPLY_CLASSIFIER_VERSION,
+    RUBRIC_SCHEMA_VERSION,
+)
+
+_PIN_ARGS = [
+    "--curation-id", "cur-1",
+    "--sanitized-hub-commit", "a" * 40,
+    "--source-hub-commit", "b" * 40,
+    "--evidence-observed-at", "2026-01-01T00:00:00+00:00",
+    "--as-of", "2026-02-01T00:00:00+00:00",
+]
+
+
+def _cli_index(tmp_path: Path) -> Path:
+    root = tmp_path / "index"
+    root.mkdir(parents=True, exist_ok=True)
+    sessions = [{
+        "session_id": "s1", "trajectory_id": "t", "segment_id": "g",
+        "resolutions": [{
+            "fingerprint": "fp", "disposition": "unanswered",
+            "evidence": [{"reply_id": 1, "body_sha256": "x"}],
+            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
+        }],
+    }]
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+    return root
+
+
+def test_cli_materialize_writes_sessions_and_manifest(tmp_path: Path, capsys) -> None:
+    out = tmp_path / "out"
+    code = handle_adjudicate([
+        "materialize", "--index-root", str(_cli_index(tmp_path)),
+        "--out-dir", str(out), "--archive-index-digest", "c" * 64, *_PIN_ARGS,
+    ])
+    assert code == 0
+    assert (out / "sessions.jsonl").is_file()
+    manifest = json.loads((out / "preview-manifest.json").read_text())
+    assert manifest["curation_id"] == "cur-1"
+    printed = capsys.readouterr().out
+    assert "snapshot" in printed and "record" in printed  # S2 operator summary
+
+
+def test_cli_materialize_matches_run_materialize_output(tmp_path: Path) -> None:
+    out_cli = tmp_path / "out-cli"
+    code = handle_adjudicate([
+        "materialize", "--index-root", str(_cli_index(tmp_path)),
+        "--out-dir", str(out_cli), "--archive-index-digest", "c" * 64, *_PIN_ARGS,
+    ])
+    assert code == 0
+    out_direct = tmp_path / "out-direct"
+    run_materialize(_cli_index(tmp_path / "direct"), out_direct, pin={
+        "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
+        "source_hub_commit": "b" * 40, "archive_index_digest": "c" * 64,
+        "evidence_observed_at": "2026-01-01T00:00:00+00:00",
+        "as_of": "2026-02-01T00:00:00+00:00",
+        "labeler_version": ADJUDICATION_LABELER_VERSION,
+        "rubric_version": RUBRIC_SCHEMA_VERSION,
+        "classifier_version": REPLY_CLASSIFIER_VERSION,
+    })
+    assert (out_cli / "sessions.jsonl").read_bytes() == (out_direct / "sessions.jsonl").read_bytes()
+    assert (out_cli / "preview-manifest.json").read_bytes() == (out_direct / "preview-manifest.json").read_bytes()
+
+
+def test_cli_materialize_missing_index_exits_1(tmp_path: Path) -> None:
+    assert handle_adjudicate([
+        "materialize", "--index-root", str(tmp_path / "nope"),
+        "--out-dir", str(tmp_path / "out"), "--archive-index-digest", "c" * 64, *_PIN_ARGS,
+    ]) == 1
+
+
+def test_cli_materialize_missing_pin_component_exits_1(tmp_path: Path) -> None:
+    assert handle_adjudicate([
+        "materialize", "--index-root", str(_cli_index(tmp_path)),
+        "--out-dir", str(tmp_path / "out"), "--archive-index-digest", "c" * 64,
+        "--curation-id", "cur-1",  # missing the other pin flags
+    ]) == 1
+
+
+def test_cli_materialize_malformed_invocation_exits_2() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        handle_adjudicate(["materialize", "--index-root", "/tmp"])  # missing required pin flags
+    assert excinfo.value.code == 2

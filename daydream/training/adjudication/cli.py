@@ -16,6 +16,16 @@ deterministic adjudication queue:
 - ``report`` — print outcome-bearing vs silver/task-only coverage, class
   balance, unresolved count, inter-rater agreement, and strata; with
   ``--conflicts``, list disagreeing-rater findings oldest-first.
+- ``materialize`` — materialize the preview annotation snapshot
+  (``sessions.jsonl`` + ``preview-manifest.json``) for one curation pin.
+- ``publish-state`` — publish adjudication state additively to the private
+  Hub under ``annotations/<curation-id>/<snapshot-id>/`` with an optional
+  batch checkpoint (``--batch-complete``).
+- ``resume-state`` — restore published adjudication state onto a fresh VM
+  from the Hub-side checkpoint, digest-verified.
+- ``harvest-snapshot`` — canonical harvest of the materialized preview
+  snapshot: drift gate, precedence merge, exactly-once
+  ``label_observations`` append, and ``annotations.jsonl`` emission.
 
 Every handler returns an int exit code (never calls ``sys.exit`` itself);
 argparse converts malformed invocations into ``SystemExit(2)``. Unknown
@@ -33,26 +43,43 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.hydrate import HydrationError
+from daydream.archive.hydrate import HubUnavailableError, HydrationError, PublicDestinationError, _make_client
+from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
+from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.observations import (
     append_observation,
     load_observations,
 )
 from daydream.training.adjudication.precedence import DECISIVE_DISPOSITIONS, effective_adjudication, has_rater_conflict
 from daydream.training.adjudication.preview import run_preview
+from daydream.training.adjudication.publish import (
+    publish_annotation_state,
+    resume_annotation_state,
+)
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
+from daydream.training.labeler_versions import (
+    ADJUDICATION_LABELER_VERSION,
+    REPLY_CLASSIFIER_VERSION,
+    RUBRIC_SCHEMA_VERSION,
+)
 
 __all__ = [
     "handle_adjudicate",
     "handle_build",
     "handle_export",
+    "handle_harvest_snapshot",
     "handle_label",
+    "handle_materialize",
+    "handle_publish_state",
     "handle_report",
+    "handle_resume_state",
     "handle_show",
 ]
+
+_ANNOTATION_HUB_REPO = "existentialbirds/daydream-trajectories"
 
 _HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
@@ -130,6 +157,41 @@ def _positive_int(raw: str) -> int:
     return value
 
 
+def _add_pin_flags(parser: argparse.ArgumentParser) -> None:
+    """Add the K2 preview-pin flags (shared by the snapshot-pipeline verbs).
+
+    Versions come from ``labeler_versions`` constants, not flags. Missing
+    components surface as exit 1 from the handler with the field named
+    (``snapshot_id`` validates the assembled pin), never exit 2 — a missing
+    pin component is a data problem, not a malformed invocation.
+    """
+    parser.add_argument("--curation-id", type=str, default=None, metavar="ID")
+    parser.add_argument("--sanitized-hub-commit", type=str, default=None, metavar="SHA")
+    parser.add_argument("--source-hub-commit", type=str, default=None, metavar="SHA")
+    parser.add_argument("--archive-index-digest", type=str, default=None, metavar="HEX")
+    parser.add_argument("--evidence-observed-at", type=str, default=None, metavar="ISO_TS")
+    parser.add_argument("--as-of", type=str, default=None, metavar="ISO_TS")
+
+
+def _pin_from_args(args: argparse.Namespace) -> dict[str, str]:
+    """Assemble the full K2 pin; versions come from ``labeler_versions``."""
+    pin = {
+        "curation_id": args.curation_id or "",
+        "sanitized_hub_commit": args.sanitized_hub_commit or "",
+        "source_hub_commit": args.source_hub_commit or "",
+        "archive_index_digest": args.archive_index_digest or "",
+        "evidence_observed_at": args.evidence_observed_at or "",
+        "as_of": args.as_of or "",
+        "labeler_version": ADJUDICATION_LABELER_VERSION,
+        "rubric_version": RUBRIC_SCHEMA_VERSION,
+        "classifier_version": REPLY_CLASSIFIER_VERSION,
+    }
+    missing = sorted(field for field, value in pin.items() if not value)
+    if missing:
+        raise ValueError(f"pin is missing required component(s): {missing}")
+    return pin
+
+
 def _add_state_dir(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
                         help="Adjudication state directory (queue.json + observations.jsonl)")
@@ -188,6 +250,52 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     _add_state_dir(p_report)
     p_report.add_argument("--conflicts", action="store_true",
                           help="List disagreeing-rater findings oldest-first instead of the report")
+
+    p_materialize = sub.add_parser(
+        "materialize",
+        help="Materialize the preview annotation snapshot (sessions.jsonl + manifest).",
+    )
+    p_materialize.add_argument("--index-root", type=Path, required=True, metavar="PATH",
+                               help="Hydrated index root containing sessions.jsonl")
+    p_materialize.add_argument("--out-dir", type=Path, required=True, metavar="PATH",
+                               help="Directory for sessions.jsonl + preview-manifest.json")
+    _add_pin_flags(p_materialize)
+
+    p_publish = sub.add_parser(
+        "publish-state",
+        help="Publish adjudication state additively to the private Hub.",
+    )
+    _add_state_dir(p_publish)
+    p_publish.add_argument("--manifest", type=Path, required=True, metavar="PATH",
+                           help="Preview manifest pinning the snapshot")
+    p_publish.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
+                           help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+    p_publish.add_argument("--batch-complete", action="store_true",
+                           help="Write the checkpoints/batch-latest.json checkpoint")
+
+    p_resume = sub.add_parser(
+        "resume-state",
+        help="Restore published adjudication state onto a fresh VM (digest-verified).",
+    )
+    p_resume.add_argument("--manifest", type=Path, required=True, metavar="PATH",
+                          help="Preview manifest pinning the snapshot")
+    p_resume.add_argument("--stage-dir", type=Path, required=True, metavar="PATH",
+                          help="Directory to restore the published state files into")
+    p_resume.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
+                          help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+
+    p_harvest = sub.add_parser(
+        "harvest-snapshot",
+        help="Canonical harvest: drift gate, precedence merge, label_observations append.",
+    )
+    p_harvest.add_argument("--index-root", type=Path, required=True, metavar="PATH",
+                           help="Hydrated index root containing sessions.jsonl")
+    p_harvest.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
+                           help="Directory produced by `materialize` (manifest + sessions.jsonl)")
+    p_harvest.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
+                           help="Archive directory holding the SQLite label-observations index")
+    p_harvest.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
+                           help="Adjudication state directory (observations.jsonl source)")
 
     return parser
 
@@ -451,12 +559,104 @@ def _print_conflicts(enriched: list[dict[str, Any]]) -> None:
             )
 
 
+def handle_materialize(argv: list[str]) -> int:
+    """Handle ``corpus adjudicate materialize --index-root <path> --out-dir <path> ...``."""
+    from daydream.ui import create_console, print_error, print_success
+
+    parser = _build_adjudicate_parser()
+    args = parser.parse_args(["materialize", *argv])
+    try:
+        pin = _pin_from_args(args)
+        summary = run_materialize(args.index_root, args.out_dir, pin=pin)
+    except (ValueError, HubUnavailableError, HydrationError) as exc:
+        print_error(create_console(), "adjudicate materialize failed", str(exc))
+        return 1
+    print_success(
+        create_console(),
+        f"Materialized snapshot {summary['snapshot_id'][:12]}: "
+        f"{summary['record_count']} record(s) from index revision "
+        f"{summary['index_revision'][:12]} -> {args.out_dir}",
+    )
+    return 0
+
+
+def handle_publish_state(argv: list[str]) -> int:
+    """Handle ``corpus adjudicate publish-state --state-dir <path> --manifest <path>``."""
+    from daydream.ui import create_console, print_error, print_success
+
+    args = _build_adjudicate_parser().parse_args(["publish-state", *argv])
+    try:
+        client = _make_client(args.hub_repo)
+        summary = publish_annotation_state(
+            client, args.state_dir, manifest=args.manifest, batch_complete=args.batch_complete,
+        )
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
+        print_error(create_console(), "adjudicate publish-state failed", str(exc))
+        return 1
+    message = f"Published {len(summary['uploaded'])} file(s) under {summary['prefix']}"
+    if "observation_count" in summary:
+        message += f" (checkpoint: {summary['observation_count']} observation(s))"
+    print_success(create_console(), message)
+    return 0
+
+
+def handle_resume_state(argv: list[str]) -> int:
+    """Handle ``corpus adjudicate resume-state --manifest <path> --stage-dir <path>``."""
+    from daydream.ui import create_console, print_error, print_success
+
+    args = _build_adjudicate_parser().parse_args(["resume-state", *argv])
+    try:
+        client = _make_client(args.hub_repo)
+        summary = resume_annotation_state(client, manifest=args.manifest, stage_dir=args.stage_dir)
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
+        print_error(create_console(), "adjudicate resume-state failed", str(exc))
+        return 1
+    if summary["restored"]:
+        print_success(
+            create_console(),
+            f"Restored {len(summary['restored'])} file(s) "
+            f"({summary['observation_count']} observation(s)) -> {args.stage_dir}",
+        )
+    else:
+        print_success(create_console(), "Nothing published yet; empty state restored.")
+    return 0
+
+
+def handle_harvest_snapshot(argv: list[str]) -> int:
+    """Handle ``corpus adjudicate harvest-snapshot --index-root --materialize-dir ...``."""
+    from daydream.ui import create_console, print_error, print_success
+
+    args = _build_adjudicate_parser().parse_args(["harvest-snapshot", *argv])
+    try:
+        summary = run_canonical_harvest(
+            args.index_root,
+            args.materialize_dir,
+            args.archive_dir,
+            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
+        )
+    except (ValueError, HubUnavailableError, HydrationError) as exc:
+        print_error(create_console(), "adjudicate harvest-snapshot failed", str(exc))
+        return 1
+    print_success(
+        create_console(),
+        f"Harvested {summary['record_count']} record(s): "
+        f"{summary['appended_sessions']} session(s) appended, "
+        f"{summary['skipped_sessions']} skipped (already harvested), "
+        f"{summary['human_adjudicated']} human-adjudicated",
+    )
+    return 0
+
+
 _HANDLERS = {
     "build": handle_build,
     "show": handle_show,
     "label": handle_label,
     "export": handle_export,
     "report": handle_report,
+    "materialize": handle_materialize,
+    "publish-state": handle_publish_state,
+    "resume-state": handle_resume_state,
+    "harvest-snapshot": handle_harvest_snapshot,
 }
 
 
