@@ -5481,6 +5481,22 @@ def test_approve_on_clean_resolves_from_file_config() -> None:
     assert _approve_on_clean(unset) is False
 
 
+def test_scope_issue_filing_resolves_precedence() -> None:
+    """#1056 precedence: CLI tier over file config over built-in default False."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import _scope_issue_filing
+    from daydream.runner import RunConfig
+
+    cli = RunConfig(target="/t", scope_issue_filing=True)
+    assert _scope_issue_filing(cli) is True
+
+    file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(scope_issue_filing=True))
+    assert _scope_issue_filing(file_only) is True
+
+    unset = RunConfig(target="/t")
+    assert _scope_issue_filing(unset) is False
+
+
 def _prime_merge_resume_records(target: Path, *, python_severity: str | None) -> Path:
     """Write the per-stack records a `--start-at merge` resume needs on disk.
 

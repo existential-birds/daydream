@@ -317,6 +317,22 @@ def _approve_on_clean(config: RunConfig) -> bool:
     return False
 
 
+def _scope_issue_filing(config: RunConfig) -> bool:
+    """Resolve the out-of-scope issue-filing opt-in (issue #1056).
+
+    Precedence mirrors ``_approve_on_clean``: 1) ``RunConfig.scope_issue_filing``
+    (CLI tier), 2) ``DaydreamFileConfig.scope_issue_filing`` (file-config
+    scalar), 3) built-in default ``False`` (no out-of-scope GitHub issues are
+    filed unless a repo explicitly opts in).
+    """
+    if config.scope_issue_filing:
+        return True
+    file_config = config.file_config
+    if file_config is not None and file_config.scope_issue_filing:
+        return True
+    return False
+
+
 def _supervisor_mode(config: RunConfig) -> str:
     """Resolve the file-config-only findings supervisor mode."""
     file_config = config.file_config
