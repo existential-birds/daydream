@@ -27,7 +27,9 @@ def load_dependabot() -> dict[str, Any]:
 
 
 def updates(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    return doc["updates"]
+    found = doc["updates"]
+    assert isinstance(found, list), "updates must be a list"
+    return found
 
 
 def test_four_ecosystems_at_exact_directories() -> None:
