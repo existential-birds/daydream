@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path, PurePosixPath
@@ -177,7 +178,10 @@ class DownloadResult:
 
 _REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", "trajectory.json"))
 _DERIVED_ARCHIVE_ROOTS = frozenset(("annotations", "curated"))
-_RESERVED_CANONICAL_ROOTS = frozenset(("annotations", "bundle", "bundles", "curated"))
+# Root names that are never valid session ids at depth 1, in either layout.
+# ``bronze`` is the immutable raw-ingest tree (M10): hydration must never
+# discover or stage anything under it.
+_RESERVED_CANONICAL_ROOTS = frozenset(("annotations", "bronze", "bundle", "bundles", "curated"))
 
 
 @dataclass(frozen=True)
@@ -212,7 +216,11 @@ def _source_root_for_path(relpath: str) -> str | None:
     if not parts or parts[0] in _DERIVED_ARCHIVE_ROOTS:
         return None
     if parts[0] == "bundles":
-        if len(parts) >= 3 and _is_bare_segment(parts[1]):
+        if (
+            len(parts) >= 3
+            and _is_bare_segment(parts[1])
+            and parts[1] not in _RESERVED_CANONICAL_ROOTS
+        ):
             return f"bundles/{parts[1]}"
         return None
     if len(parts) >= 2 and _is_bare_segment(parts[0]) and parts[0] not in _RESERVED_CANONICAL_ROOTS:
@@ -232,6 +240,7 @@ def _manifest_source_session(relpath: str) -> _DiscoveredSession | None:
         and parts[0] == "bundles"
         and parts[2] == "manifest.json"
         and _is_bare_segment(parts[1])
+        and parts[1] not in _RESERVED_CANONICAL_ROOTS
     ):
         return _DiscoveredSession(parts[1], f"bundles/{parts[1]}", "legacy")
     return None
@@ -278,12 +287,11 @@ def _discover_snapshot(relpaths: list[str]) -> _Discovery:
         else:
             complete.append(session)
 
-    if len({session.session_id for session in complete}) != len(complete):
-        duplicates = sorted(
-            session_id
-            for session_id in {session.session_id for session in complete}
-            if sum(session.session_id == session_id for session in complete) > 1
-        )
+    session_id_counts = Counter(session.session_id for session in complete)
+    duplicates = sorted(
+        session_id for session_id, count in session_id_counts.items() if count > 1
+    )
+    if duplicates:
         raise StageError(
             redact_text(
                 "multiple source layouts normalize to the same session id(s): "
@@ -397,7 +405,7 @@ def download_snapshot(
         # must not become an escape hatch around the staging trust boundary.
         _validate_relpath(relpath, root)
     discovery = _discover_snapshot(relpaths)
-    if discovery.run_shaped_manifests and not discovery.sessions:
+    if not discovery.sessions:
         details = "; ".join(discovery.incomplete_manifests) or "required artifacts were not found"
         raise NoSessionCandidatesError(
             redact_text(
