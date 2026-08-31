@@ -101,6 +101,62 @@ def test_publish_refuses_public_destination(tmp_path: Path) -> None:
         publish_annotation_state(_FakeHub(private=False), _state(tmp_path), manifest=_manifest(tmp_path))
 
 
+def test_publish_final_bundle_success_last_and_verified_commit_required(tmp_path: Path) -> None:
+    import hashlib
+
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+
+    hub = _FakeHub()
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "annotations.jsonl").write_text('{"record_id": "r1"}\n', encoding="utf-8")
+    (root / "sessions.jsonl").write_text('{"session_id": "s1"}\n', encoding="utf-8")
+    (root / "lineage.json").write_text("{}", encoding="utf-8")
+    result = publish_final_annotation_bundle(
+        hub, root, manifest=_manifest(tmp_path), verify_download=True,
+    )
+    prefix = f"annotations/cur-1/{'e' * 64}/final/"
+    files = sorted(k[len(prefix):] for k in hub.files if k.startswith(prefix))
+    assert "SHA256SUMS" in files and "_SUCCESS" in files
+    # _SUCCESS is uploaded last (C3): pinned via hub.uploads insertion order
+    # (a sorted() listing cannot express upload order — '_' sorts before letters).
+    upload_order = [k for m in hub.uploads for k in m]
+    assert upload_order[-1] == f"{prefix}_SUCCESS"
+    sums = hub.files[f"{prefix}SHA256SUMS"].decode()
+    expected = hashlib.sha256((root / "annotations.jsonl").read_bytes()).hexdigest()
+    assert f"{expected}  annotations.jsonl" in sums
+    assert result["hub_commit_sha"]  # verified commit recorded (M6)
+    assert result["prefix"] == prefix
+
+
+def test_final_bundle_clean_download_verifies_or_refuses(tmp_path: Path) -> None:
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+
+    hub = _FakeHub()
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "annotations.jsonl").write_text('{"record_id": "r1"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="download"):
+        publish_final_annotation_bundle(
+            hub, root, manifest=_manifest(tmp_path),
+            verify_download=True, _download_verifier=lambda _p: False,
+        )
+    # nothing published: no _SUCCESS on the Hub
+    assert not any(k.endswith("/final/_SUCCESS") for k in hub.files)
+
+
+def test_final_bundle_refuses_secret_in_payload(tmp_path: Path) -> None:
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+
+    hub = _FakeHub()
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "annotations.jsonl").write_text('{"hf_token": "hf_abc123secret"}\n', encoding="utf-8")
+    with pytest.raises(Exception):  # PublicDestinationError from the S1 secret scan
+        publish_final_annotation_bundle(hub, root, manifest=_manifest(tmp_path))
+    assert not any(k.endswith("/final/_SUCCESS") for k in hub.files)
+
+
 def test_resume_on_empty_disk_restores_byte_identical_state(tmp_path: Path) -> None:
     hub = _FakeHub()
     state = _state(tmp_path)

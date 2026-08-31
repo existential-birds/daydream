@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,12 +27,14 @@ from daydream.archive.hydrate import (
     HydrationError,
     PublicDestinationError,
     _retry_upload,
+    resolve_source_revision,
 )
 from daydream.trajectory import redact_text
 
 __all__ = [
     "annotation_prefix",
     "publish_annotation_state",
+    "publish_final_annotation_bundle",
     "resume_annotation_state",
 ]
 
@@ -39,10 +42,15 @@ __all__ = [
 _STATE_FILES = ("queue.json", "observations.jsonl", "preview-ledger.json")
 _MANIFEST_FILENAME = "preview-manifest.json"
 _CHECKPOINT_RELPATH = "checkpoints/batch-latest.json"
+_FINAL_SEGMENT = "final"
+_SUCCESS_FILENAME = "_SUCCESS"
+_SUMS_FILENAME = "SHA256SUMS"
 
 # HF_TOKEN-shaped values (fail-closed secret scan, S1). A hit means a live
 # credential leaked into a payload; publication is refused, never scrubbed.
-_SECRET_SHAPES = re.compile(r"(?:hf_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|ghp_[0-9A-Za-z]{20,})")
+# The threshold is deliberately low ({8,}) — a false positive merely blocks
+# publication, while a miss would leak a live token to a remote dataset repo.
+_SECRET_SHAPES = re.compile(r"(?:hf_[0-9A-Za-z]{8,}|github_pat_[0-9A-Za-z_]{8,}|ghp_[0-9A-Za-z]{8,})")
 
 
 def _read_manifest_data(manifest: Path | Mapping[str, Any]) -> dict[str, Any]:
@@ -236,6 +244,132 @@ def publish_annotation_state(
     if checkpoint is not None:
         summary["observation_count"] = checkpoint["observation_count"]
     return summary
+
+
+def _bundle_payloads(bundle_dir: Path) -> dict[str, bytes]:
+    """Read every file in ``bundle_dir`` (sorted, deterministic order)."""
+    payloads = {
+        p.name: p.read_bytes() for p in sorted(bundle_dir.iterdir()) if p.is_file()
+    }
+    if not payloads:
+        raise ValueError(f"publish final bundle: {bundle_dir} contains no files")
+    return payloads
+
+
+def _resolve_hub_commit(client: HubClient, manifest_data: Mapping[str, Any], sums_bytes: bytes) -> str:
+    """Resolve the Hub commit SHA under the pinned-revision policy (M6).
+
+    The manifest's ``index_revision`` is used when present; otherwise the
+    publication revision is derived from the published ``SHA256SUMS`` content
+    (stable across idempotent re-publication of identical bytes, C2).
+    ``resolve_source_revision(..., exploratory=False)`` fail-closes on symbolic
+    refs: a run without a verified Hub commit is a failure, never a best effort.
+    """
+    revision = manifest_data.get("index_revision")
+    if not isinstance(revision, str) or not revision:
+        revision = _digest(sums_bytes)[:40]
+    return resolve_source_revision(client, revision, exploratory=False)
+
+
+def publish_final_annotation_bundle(
+    client: HubClient,
+    bundle_dir: Path,
+    *,
+    manifest: Path | Mapping[str, Any],
+    verify_download: bool = True,
+    _download_verifier: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    """Publish the final immutable annotation bundle under ``<prefix>final/`` (M6/C3).
+
+    Strict order, each step fail-closed before anything is uploaded:
+
+    1. :class:`PublicDestinationError` when the Hub repo is not private.
+    2. S1 secret scan over every bundle file (a hit raises naming the file).
+    3. ``SHA256SUMS`` over the file set, self-excluded (mirror
+       ``hydrate.publish_batches``).
+    4. Additive upload of the bundle + manifest + sums.
+    5. Clean-download verification: every uploaded file is read back, re-hashed
+       and compared (``_download_verifier`` replaces this step when injected;
+       returning ``False`` raises ``ValueError``).
+    6. Hub commit SHA resolved via :func:`hydrate.resolve_source_revision`
+       (pinned-revision policy) — a resolution failure propagates and
+       ``_SUCCESS`` is never uploaded.
+    7. ``_SUCCESS`` uploaded **last** — its presence is the commitment that the
+       bundle is complete and verified.
+
+    Immutability (C2): publication is additive; re-publishing identical bytes
+    re-uploads the same content and the module never deletes or rewrites prior
+    snapshot prefixes.
+    """
+    if not client.repo_private:
+        raise PublicDestinationError(
+            "refusing to publish: the Hub repo is not private; annotation bundles "
+            "publish only to private repos (M17)"
+        )
+    prefix = f"{annotation_prefix(manifest)}{_FINAL_SEGMENT}/"
+    bundle_dir = Path(bundle_dir)
+    manifest_data = _read_manifest_data(manifest)
+
+    payloads = _bundle_payloads(bundle_dir)
+    for name, data in payloads.items():
+        _scan_for_secrets(name, data)
+    manifest_bytes = (
+        Path(manifest).read_bytes()
+        if isinstance(manifest, (str, Path))
+        else json.dumps(manifest_data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    _scan_for_secrets(_MANIFEST_FILENAME, manifest_bytes)
+    payloads[_MANIFEST_FILENAME] = manifest_bytes
+
+    # SHA256SUMS covers every published file except itself (self-inclusion would
+    # make the checksum file unstable across idempotent re-publishes).
+    sums_bytes = "".join(
+        f"{_digest(data)}  {name}\n" for name, data in sorted(payloads.items())
+    ).encode("utf-8")
+
+    stage_dir = bundle_dir / ".publish-stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str | Path, Path] = {}
+    for name, data in payloads.items():
+        staged = stage_dir / name
+        staged.write_bytes(data)
+        mapping[f"{prefix}{name}"] = staged
+    staged_sums = stage_dir / _SUMS_FILENAME
+    staged_sums.write_bytes(sums_bytes)
+    mapping[f"{prefix}{_SUMS_FILENAME}"] = staged_sums
+    _upload(client, mapping, f"daydream adjudication: final annotation bundle {prefix}")
+
+    if verify_download:
+        expected: dict[str, bytes] = {**payloads, _SUMS_FILENAME: sums_bytes}
+        if _download_verifier is not None:
+            if not _download_verifier(prefix):
+                raise ValueError(
+                    f"final bundle download verification failed for {prefix}: "
+                    "the verifier refused the freshly uploaded bundle"
+                )
+        else:
+            for name, data in sorted(expected.items()):
+                remote = client.download_file(f"{prefix}{name}")
+                if _digest(remote) != _digest(data):
+                    raise ValueError(
+                        f"final bundle download verification failed for {prefix}: "
+                        f"re-downloaded {name!r} does not match the uploaded bytes"
+                    )
+
+    hub_commit_sha = _resolve_hub_commit(client, manifest_data, sums_bytes)
+
+    staged_success = stage_dir / _SUCCESS_FILENAME
+    staged_success.write_bytes(b"")
+    _upload(
+        client,
+        {f"{prefix}{_SUCCESS_FILENAME}": staged_success},
+        f"daydream adjudication: final annotation bundle committed {prefix}",
+    )
+    return {
+        "hub_commit_sha": hub_commit_sha,
+        "prefix": prefix,
+        "files": sorted([*payloads, _SUMS_FILENAME, _SUCCESS_FILENAME]),
+    }
 
 
 def resume_annotation_state(
