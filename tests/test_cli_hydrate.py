@@ -7,6 +7,9 @@ from typing import Any
 import pytest
 
 from daydream import cli
+from daydream.archive import hydrate
+from daydream.archive.hydrate_client import FakeHub
+from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
 
 
 def test_hydrate_hub_requires_explicit_args(capsys: pytest.CaptureFixture[str]) -> None:
@@ -60,3 +63,66 @@ def test_success_path_drives_orchestrator(
          "--destination-repo", "org/ds", "--stage-dir", str(tmp_path)])
     assert rc == 0
     assert calls and calls[0].source_revision == "a" * 40
+
+
+def test_dry_run_reports_discovery_accounting_without_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hub = build_snapshot()
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
+
+    rc = cli._handle_hydrate_hub_command(
+        [
+            "--source-repo",
+            "org/private-ds",
+            "--source-revision",
+            SNAPSHOT_REVISION,
+            "--destination-repo",
+            "org/private-ds",
+            "--stage-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "discovered 3 candidate(s)" in output
+    assert "admitted 3" in output
+    assert "rejected 0 batch(es)" in output
+    assert "accounted 3 candidate(s)" in output
+    assert hub.uploaded_paths == []
+
+
+def test_dry_run_fails_closed_on_run_shaped_zero_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hub = FakeHub(
+        repo_id="org/private-ds",
+        private=True,
+        files={"incomplete/manifest.json": b'{"session_id": "incomplete"}'},
+    )
+    hub.commit_revision(SNAPSHOT_REVISION)
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
+
+    rc = cli._handle_hydrate_hub_command(
+        [
+            "--source-repo",
+            "org/private-ds",
+            "--source-revision",
+            SNAPSHOT_REVISION,
+            "--destination-repo",
+            "org/private-ds",
+            "--stage-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "zero candidates" in output
+    assert "trajectory.json" in output
+    assert hub.uploaded_paths == []

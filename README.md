@@ -172,7 +172,19 @@ daydream corpus build --out out.jsonl --min-reward 0.5 --include-all-labels
 daydream corpus build --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
 daydream corpus label <session-id> --outcome accepted  # manual outcome override
 daydream corpus calibrate-reward ...                   # deterministic reward-calibration artifact (see docs/calibration.md)
+daydream corpus hydrate-hub --source-repo org/ds --source-revision <commit-sha> \
+  --destination-repo org/ds --stage-dir /tmp/daydream-hydrate --dry-run
 ```
+
+`corpus hydrate-hub` discovers the producer's canonical Hub layout,
+`<session-id>/manifest.json` plus `trajectory.json`, and also accepts the
+tested legacy `bundles/<session-id>/...` layout. Accepted sessions are
+normalized into `downloads/<revision>/bundles/<session-id>/`; unrelated
+top-level metadata and derived `curated/**` or `annotations/**` files are
+ignored. The dry-run summary reports discovered, admitted, rejected, and
+accounted candidate counts. If a pinned revision contains run-shaped
+manifests but no complete candidates, hydration fails with layout diagnostics
+instead of reporting a successful zero/zero plan.
 
 The pipeline has three stages:
 

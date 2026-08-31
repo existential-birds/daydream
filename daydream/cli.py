@@ -1349,7 +1349,10 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         dest="dry_run",
-        help="Plan only: pin, download, ingest, and tally — no Hub publication.",
+        help=(
+            "Plan only: discover and normalize sessions, download, ingest, and tally "
+            "discovered/admitted/rejected candidates — no Hub publication."
+        ),
     )
     return parser
 
@@ -1677,7 +1680,9 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     )
     print_info(
         console,
-        f"dry-run admitted {summary.dry_run_admitted} batch(es); "
+        f"dry-run discovered {getattr(summary, 'dry_run_discovered', summary.dry_run_admitted)} "
+        f"candidate(s); admitted {summary.dry_run_admitted} batch(es); "
+        f"rejected {getattr(summary, 'dry_run_rejected', 0)} batch(es); "
         f"verify admitted {summary.verify_admitted} batch(es)",
     )
     return 0
@@ -1711,8 +1716,10 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     print_info(
         console,
         f"dry-run plan for curation {ledger.get('curation_id')}: pinned {source_commit}; "
+        f"discovered {tallies.get('discovered', 0)} candidate(s); "
         f"admitted {tallies.get('imported', 0)} batch(es); "
         f"rejected {len(rejections)} batch(es); "
+        f"accounted {tallies.get('accounted', 0)} candidate(s); "
         f"reason codes: {reason_tally or 'none'}; no publication performed",
     )
     return 0

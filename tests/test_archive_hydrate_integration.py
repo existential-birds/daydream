@@ -55,6 +55,15 @@ class TestCleanImport:
         from daydream.archive.index import count_runs
 
         assert count_runs(stage) == 3
+        assert summary.dry_run_discovered == 3
+        assert summary.dry_run_admitted + summary.dry_run_rejected == 3
+
+        snapshot_dir = stage / "downloads" / REVISION
+        assert (snapshot_dir / "bundles" / "sess-a" / "manifest.json").is_file()
+        assert not (snapshot_dir / "sess-a").exists()
+        assert not (snapshot_dir / "README.md").exists()
+        assert not (snapshot_dir / "curated").exists()
+        assert not (snapshot_dir / "annotations").exists()
 
     def test_bronze_never_mutated(self, hub: FakeHub, tmp_path: Path) -> None:
         before = dict(hub.files)
