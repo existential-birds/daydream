@@ -375,3 +375,45 @@ def test_cli_publish_state_missing_state_file_exits_1(
     captured = capsys.readouterr()
     assert "publish-state failed" in captured.out + captured.err
     assert "No such file or directory" in captured.out + captured.err  # FileNotFoundError rendered, not a traceback
+
+
+# ---- final publish verb (issue #1078, task 6 / M4-M6) ----
+
+from daydream.training.adjudication.canonical import run_canonical_harvest  # noqa: E402
+from tests.fixtures.training.build_hub_snapshot import build_snapshot  # noqa: E402
+from tests.test_training_adjudication_final_bundle import seed_final_bundle_state  # noqa: E402
+
+
+def test_publish_final_dry_run_validates_and_publishes_nothing(tmp_path, capsys):
+    hub = build_snapshot()
+    index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
+    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+    rc = handle_adjudicate([
+        "publish-final", "--index-root", str(index_root),
+        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
+        "--curation-bundle-dir", str(index_root),
+        "--hub-repo", "org/private-ds", "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "annotations.jsonl" in out and "record" in out.lower()
+    # nothing was published: the hub object carries no final/ prefix
+    assert not any(k.startswith("annotations/") and "/final/" in k
+                   for k in getattr(hub, "files", {}))
+
+def test_publish_final_missing_artifact_exits_nonzero(tmp_path, capsys):
+    index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
+    ann = mat / "annotations.jsonl"
+    if ann.exists():
+        ann.unlink()  # the canonical-harvest output when present; either way the artifact is missing
+    rc = handle_adjudicate([
+        "publish-final", "--index-root", str(index_root),
+        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
+        "--curation-bundle-dir", str(index_root), "--hub-repo", "org/private-ds",
+        "--dry-run"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    # the panel hard-folds long messages mid-word (with the right border
+    # character interleaved); stripping borders and whitespace reconstitutes
+    # the unsplittable path token
+    flattened = "".join(captured.out.split()).replace("║", "")
+    assert "annotations.jsonl" in flattened + captured.err

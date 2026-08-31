@@ -27,6 +27,10 @@ deterministic adjudication queue:
 - ``harvest-snapshot`` — canonical harvest of the materialized preview
   snapshot: drift gate, precedence merge, exactly-once
   ``label_observations`` append, and ``annotations.jsonl`` emission.
+- ``publish-final`` — construct the final annotation staging bundle from
+  pipeline state (no hand-authored files) and publish it additively to the
+  private Hub under ``annotations/<curation-id>/<snapshot-id>/final/``;
+  ``--dry-run`` builds and validates the bundle without constructing a client.
 
 Every handler returns an int exit code (never calls ``sys.exit`` itself);
 argparse converts malformed invocations into ``SystemExit(2)``. Unknown
@@ -308,6 +312,23 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                            help="Archive directory holding the SQLite label-observations index")
     p_harvest.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
                            help="Adjudication state directory (observations.jsonl source)")
+
+    p_publish_final = sub.add_parser(
+        "publish-final",
+        help="Construct and publish the final annotation bundle (immutable snapshot).",
+    )
+    p_publish_final.add_argument("--index-root", type=Path, required=True, metavar="PATH",
+                                 help="Hydrated index root containing sessions.jsonl")
+    p_publish_final.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
+                                 help="Directory produced by `materialize` (manifest + sessions.jsonl)")
+    p_publish_final.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
+                                 help="Archive directory holding the SQLite label-observations index")
+    p_publish_final.add_argument("--curation-bundle-dir", type=Path, required=True, metavar="PATH",
+                                 help="Curation bundle root digested into lineage.json's batch_fileset_digest")
+    p_publish_final.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
+                                 help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+    p_publish_final.add_argument("--dry-run", action="store_true",
+                                 help="Build and validate the staging bundle without publishing to the Hub")
 
     return parser
 
@@ -669,6 +690,65 @@ def handle_resume_state(argv: list[str]) -> int:
     return 0
 
 
+def handle_publish_final(argv: list[str]) -> int:
+    """Handle ``corpus adjudicate publish-final`` (issue #1078, M4-M6).
+
+    Both paths share ``build_final_bundle`` entirely: the staging bundle is
+    constructed into ``<materialize-dir>/final-bundle`` and fully validated
+    before any Hub interaction. With ``--dry-run`` the handler prints the
+    per-file record counts + per-disposition summary and returns 0 without
+    ever constructing a client; otherwise the bundle is published via
+    :func:`publish_final_annotation_bundle` (private-repo gate, secret scan,
+    SHA256SUMS, additive upload, clean-download verify, ``_SUCCESS`` last).
+    """
+    from daydream.training.adjudication.final_bundle import build_final_bundle
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+    from daydream.ui import create_console, print_error, print_success
+
+    args = _build_adjudicate_parser().parse_args(["publish-final", *argv])
+    bundle_dir = args.materialize_dir / "final-bundle"
+    try:
+        summary = build_final_bundle(
+            index_root=args.index_root,
+            materialize_dir=args.materialize_dir,
+            archive_dir=args.archive_dir,
+            out_dir=bundle_dir,
+            curation_bundle_dir=args.curation_bundle_dir,
+        )
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
+        print_error(create_console(), "adjudicate publish-final failed", str(exc))
+        return 1
+    if args.dry_run:
+        counts = " ".join(
+            f"{disposition}={count}" for disposition, count in summary["disposition_counts"].items()
+        )
+        print_success(
+            create_console(),
+            f"Dry-run: final bundle validated at {bundle_dir} — "
+            f"{summary['record_count']} record(s) across "
+            f"{', '.join(summary['files'])} ({counts}); nothing published",
+        )
+        return 0
+    try:
+        client = _make_client(args.hub_repo)
+        result = publish_final_annotation_bundle(
+            client, bundle_dir, manifest=args.materialize_dir / "preview-manifest.json",
+            verify_download=True,
+        )
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
+        print_error(create_console(), "adjudicate publish-final failed", str(exc))
+        return 1
+    manifest = json.loads((args.materialize_dir / "preview-manifest.json").read_text(encoding="utf-8"))
+    snapshot_id = manifest.get("snapshot_id", "")
+    print_success(
+        create_console(),
+        f"Published final annotation bundle ({summary['record_count']} record(s)) "
+        f"under {result['prefix']} (hub commit {result['hub_commit_sha']}, "
+        f"snapshot {snapshot_id})",
+    )
+    return 0
+
+
 def handle_harvest_snapshot(argv: list[str]) -> int:
     """Handle ``corpus adjudicate harvest-snapshot --index-root --materialize-dir ...``."""
     from daydream.ui import create_console, print_error, print_success
@@ -704,6 +784,7 @@ _HANDLERS = {
     "publish-state": handle_publish_state,
     "resume-state": handle_resume_state,
     "harvest-snapshot": handle_harvest_snapshot,
+    "publish-final": handle_publish_final,
 }
 
 
