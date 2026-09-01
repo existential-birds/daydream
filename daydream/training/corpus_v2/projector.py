@@ -627,14 +627,6 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                             "found at projection; refusing to project"
                         )
                     record_decision: dict[str, Any] = decision
-                    # A batch the license gate rejected at projection is never
-                    # emitted: every one of its deduped records lands in the
-                    # exclusions accounting under the decision's reason code
-                    # (same accumulation shape as the tier-cap block below).
-                    if record_decision["status"] == "rejected":
-                        code = str(record_decision["reason_code"])
-                        exclusions_by_reason[code] = exclusions_by_reason.get(code, 0) + 1
-                        continue
                     # Non-decisive findings are report output only (D8): they
                     # never become training records, so corpus.jsonl and the
                     # split manifests exclude them by construction while

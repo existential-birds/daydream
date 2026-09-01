@@ -1438,6 +1438,25 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         help="Opt in to a moving branch/tag source revision (output is non-canonical).",
     )
     parser.add_argument(
+        "--license-policy",
+        type=Path,
+        default=None,
+        dest="license_policy",
+        metavar="PATH",
+        help="Digest-pinned license policy JSON; when set, the per-repo license "
+        "admission gate runs at hydration and rejected sessions are excluded "
+        "before publication (issue #1080)",
+    )
+    parser.add_argument(
+        "--allow-copyleft",
+        action="append",
+        default=[],
+        dest="allow_copyleft",
+        metavar="OWNER/REPO",
+        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        "owner/repo slug (case-insensitive); only meaningful with --license-policy",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         dest="dry_run",
@@ -1748,6 +1767,10 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         destination_repo=args.destination_repo,
         stage_dir=stage_dir,
         exploratory=args.exploratory,
+        license_policy_path=(
+            str(args.license_policy) if args.license_policy is not None else None
+        ),
+        allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft),
     )
     if args.dry_run:
         return _hydrate_hub_dry_run(config, console)

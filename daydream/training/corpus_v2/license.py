@@ -80,6 +80,29 @@ def load_license_policy(path: str | Path) -> tuple[LicensePolicy, str]:
     return policy, hashlib.sha256(raw).hexdigest()
 
 
+def normalize_repo_slug(raw: str) -> str:
+    """Normalize a producer-authored repo slug to canonical ``owner/repo``.
+
+    Manifest ``repo_slug`` fields are producer-authored data; the C5 exclusion
+    and C8 copyleft lists are canonical ``owner/repo``. A stamped clone URL
+    ('https://github.com/owner/repo'), a '.git'-suffixed slug, or padded
+    whitespace must reduce to the canonical spelling so the fail-closed gates
+    cannot be bypassed by spelling. Returns ``''`` when the input does not
+    reduce to an ``owner/repo`` shape (never a false C5/C8 match, and treated
+    as missing identity by the caller).
+    """
+    slug = raw.strip()
+    if "://" in slug:
+        remainder = slug.split("://", 1)[1]
+        slug = remainder.split("/", 1)[1] if "/" in remainder else ""
+    if slug.endswith(".git"):
+        slug = slug[: -len(".git")]
+    owner, sep, repo = slug.strip().partition("/")
+    if not sep or not owner.strip() or not repo.strip() or "/" in repo:
+        return ""
+    return f"{owner.strip()}/{repo.strip()}"
+
+
 def resolve_repo_decision(
     repo_slug: str,
     evidence: dict[str, Any] | None,
@@ -90,19 +113,25 @@ def resolve_repo_decision(
     its inputs (determinism constraint) — the only I/O is the C5 exclusion
     list, which is static repo data.
 
+    The decision identity is the canonical ``owner/repo`` spelling of the
+    producer-authored slug (see :func:`normalize_repo_slug`), so a manifest
+    that stamps the clone URL, a '.git' suffix, or padded whitespace cannot
+    bypass C5/C8 by spelling, and the stamped identity is never a raw URL.
+
     Precedence:
     1. C5 exclusion list -> ``c5_excluded_repo`` unconditionally (no override).
-    2. Missing/blank repo slug -> ``repo_identity_missing``.
+    2. Missing/blank/non-canonical repo slug -> ``repo_identity_missing``.
     3. Missing/unknown evidence -> ``license_evidence_missing``.
     4. SPDX rejected and slug not opted in -> ``c8_copyleft_unopted``.
     5. Otherwise admitted.
     """
     evidence_ref = str(evidence.get("source", "")) if isinstance(evidence, dict) else ""
 
-    folded_slug = repo_slug.casefold()
+    canonical_slug = normalize_repo_slug(repo_slug)
+    folded_slug = canonical_slug.casefold()
     if folded_slug in {slug.casefold() for slug in load_exclusion_list()}:
         return RepoDecision(
-            repo_slug=repo_slug,
+            repo_slug=canonical_slug,
             status="rejected",
             reason_code=REASON_CODE_C5_EXCLUDED_REPO,
             spdx_id=None,
@@ -110,9 +139,9 @@ def resolve_repo_decision(
             evidence_ref=evidence_ref,
         )
 
-    if not isinstance(repo_slug, str) or not repo_slug.strip():
+    if not isinstance(repo_slug, str) or not canonical_slug:
         return RepoDecision(
-            repo_slug=repo_slug,
+            repo_slug=canonical_slug,
             status="rejected",
             reason_code=REASON_CODE_REPO_IDENTITY_MISSING,
             spdx_id=None,
@@ -127,7 +156,7 @@ def resolve_repo_decision(
             spdx_id = raw_spdx.strip()
     if spdx_id is None or spdx_id not in policy.spdx_decisions:
         return RepoDecision(
-            repo_slug=repo_slug,
+            repo_slug=canonical_slug,
             status="rejected",
             reason_code=REASON_CODE_LICENSE_EVIDENCE_MISSING,
             spdx_id=spdx_id,
@@ -139,7 +168,7 @@ def resolve_repo_decision(
     allowed = {slug.casefold() for slug in allow_copyleft}
     if decision == "rejected" and folded_slug not in allowed:
         return RepoDecision(
-            repo_slug=repo_slug,
+            repo_slug=canonical_slug,
             status="rejected",
             reason_code=REASON_CODE_C8_COPYLEFT_UNOPTED,
             spdx_id=spdx_id,
@@ -148,7 +177,7 @@ def resolve_repo_decision(
         )
 
     return RepoDecision(
-        repo_slug=repo_slug,
+        repo_slug=canonical_slug,
         status="admitted",
         reason_code=None,
         spdx_id=spdx_id,

@@ -820,6 +820,35 @@ class TestLicenseAdmissionGate:
         admitted = [b for b in manifest["batches"] if b["status"] == "admitted"]
         assert [b["session_id"] for b in admitted] == ["sess-a"]
 
+    def test_hydration_c5_gate_catches_non_canonical_slug_spelling(self, tmp_path: Path) -> None:
+        # The license gate compares the canonical owner/repo identity: a
+        # manifest that stamps the clone URL as repo_slug cannot bypass C5
+        # (issue #1080, fail-closed).
+        c5_manifest = {
+            "session_id": "sess-c5",
+            "git": {
+                "remote_url": "https://github.com/getsentry/sentry",
+                "repo_slug": "https://github.com/getsentry/sentry",
+            },
+            "license_evidence": {"spdx_id": "MIT", "source": "manifest"},
+        }
+        stage = self._seed_stage(tmp_path, {
+            "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+            "sess-c5": json.dumps(c5_manifest).encode(),
+        })
+        hydrate.apply_license_gate(
+            stage, revision=self.REV,
+            license_policy_path=self._write_policy(tmp_path), allow_copyleft=frozenset())
+        manifest = self._built_manifest(stage)
+        c5 = next(
+            b for b in manifest["batches"]
+            if b["status"] == "excluded"
+            and b["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
+        )
+        assert c5["session_id"] == "sess-c5"
+        assert not (stage / "runs" / "sess-c5").exists()
+        assert (stage / "excluded" / "sess-c5").exists()
+
     def test_hydration_excludes_unopted_copyleft_and_missing_evidence(self, tmp_path: Path) -> None:
         stage = self._seed_stage(tmp_path, {
             "sess-gpl": self._session_manifest("sess-gpl", "owner/gpl-repo", spdx="GPL-3.0-only"),

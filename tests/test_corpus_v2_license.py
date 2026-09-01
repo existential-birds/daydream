@@ -61,6 +61,51 @@ def test_resolve_repo_decision_c5_is_hard() -> None:
     assert decision.reason_code == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
 
 
+def test_resolve_repo_decision_c5_catches_non_canonical_spellings() -> None:
+    # A manifest may stamp the clone URL, a '.git'-suffixed slug, or padded
+    # whitespace; the C5 gate compares the canonical owner/repo identity, so
+    # no producer spelling bypasses the exclusion (spec M3, fail-closed).
+    for slug in (
+        "https://github.com/getsentry/sentry",
+        "getsentry/sentry.git",
+        "  getsentry/sentry  ",
+        "https://github.com/getsentry/sentry.git",
+    ):
+        decision = resolve_repo_decision(
+            repo_slug=slug,
+            evidence={"spdx_id": "MIT", "source": "manifest"},
+            policy=_policy(),
+            allow_copyleft=frozenset(),
+        )
+        assert decision.status == "rejected"
+        assert decision.reason_code == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
+        assert decision.repo_slug == "getsentry/sentry"
+
+
+def test_resolve_repo_decision_stamps_canonical_identity() -> None:
+    decision = resolve_repo_decision(
+        repo_slug=" https://github.com/OWNER/Repo.git ",
+        evidence={"spdx_id": "MIT", "source": "manifest"},
+        policy=_policy(),
+        allow_copyleft=frozenset(),
+    )
+    assert decision.status == "admitted"
+    assert decision.repo_slug == "OWNER/Repo"  # never the raw URL spelling
+
+
+def test_resolve_repo_decision_non_canonical_shape_is_identity_missing() -> None:
+    # A slug that does not reduce to owner/repo is not a repo identity;
+    # fail-closed as repo_identity_missing, never admitted under the raw shape.
+    decision = resolve_repo_decision(
+        repo_slug="owner/repo/extra",
+        evidence={"spdx_id": "MIT", "source": "manifest"},
+        policy=_policy(),
+        allow_copyleft=frozenset(),
+    )
+    assert decision.status == "rejected"
+    assert decision.reason_code == hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING
+
+
 def test_resolve_repo_decision_c8_exact_slug_opt_in_only() -> None:
     opted = resolve_repo_decision(
         repo_slug="owner/gpl-repo",
