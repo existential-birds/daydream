@@ -65,12 +65,15 @@ def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -
     (bundle_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
+_SEED_REPO_SLUGS = {"sess-a": "owner/repo-a"}
+
+
 def _write_bundle(
     tmp_path: Path,
     *,
     with_success: bool = True,
     corrupt_digest: bool = False,
-    repo_slugs: dict[str, str] | None = None,
+    repo_slugs: dict[str, str] | None = _SEED_REPO_SLUGS,
 ) -> Path:
     bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
     # Producer-realistic batch shape: artifact_relpath names the batch
@@ -178,6 +181,46 @@ def _write_annotations_snapshot(
     ))
     (ann_dir / "_SUCCESS").write_text("ok\n")
     return ann_dir / "annotations.jsonl"
+
+
+def test_load_bundle_refuses_batches_missing_repo_identity(tmp_path: Path) -> None:
+    # Strip repo_slug + license_evidence from the admitted batch to produce
+    # the legacy (pre-gate) bundle shape; recompute SHA256SUMS so the error
+    # names identity, not digests.
+    bundle_dir = _write_bundle(tmp_path, repo_slugs=None)
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        batch.pop("repo_slug", None)
+        batch.pop("license_evidence", None)
+    manifest_path.write_text(json.dumps(manifest))
+    _write_sumsums(bundle_dir)
+    from daydream.archive.hydrate_rules import REASON_CODE_REPO_IDENTITY_MISSING
+
+    with pytest.raises(BundleError, match=REASON_CODE_REPO_IDENTITY_MISSING):
+        load_curated_bundle(bundle_dir)
+
+
+def test_load_bundle_refuses_missing_license_evidence(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
+    # Strip license_evidence from sess-a's row only, keeping repo_slug.
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        if batch["session_id"] == "sess-a":
+            batch.pop("license_evidence", None)
+    manifest_path.write_text(json.dumps(manifest))
+    _write_sumsums(bundle_dir)
+    from daydream.archive.hydrate_rules import REASON_CODE_LICENSE_EVIDENCE_MISSING
+
+    with pytest.raises(BundleError, match=REASON_CODE_LICENSE_EVIDENCE_MISSING):
+        load_curated_bundle(bundle_dir)
+
+
+def test_load_bundle_admission_gate_passes_wellformed_bundle(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
+    loaded = load_curated_bundle(bundle_dir)  # no raise
+    assert all(b.repo_slug for b in loaded.admitted)
 
 
 @pytest.fixture
