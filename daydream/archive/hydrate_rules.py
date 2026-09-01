@@ -14,7 +14,8 @@ SANITIZER_VERSION = "1"
 HYDRATION_INDEX_SCHEMA_VERSION = "1"
 ADMISSION_POLICY_VERSION = "1"
 
-# Stable quarantine/exclusion reason codes (fixed registry at v1).
+# Stable quarantine/exclusion reason codes (v1 registry; extended for
+# license/repo gates by issue #1080).
 REASON_CODE_FIXTURE_PYTEST_PATH = "fixture_pytest_path"
 REASON_CODE_FIXTURE_TMP_ARTIFACT = "fixture_tmp_artifact"
 REASON_CODE_NON_PRODUCTION_BUNDLE = "non_production_bundle"
@@ -25,6 +26,13 @@ REASON_CODE_UNTRUSTED_REMOTE_HOST = "untrusted_remote_host"
 REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
 REASON_CODE_IDENTITY_COLLISION = "identity_collision"
 REASON_CODE_PATH_TRAVERSAL = "path_traversal"
+
+# License/repo-identity reason codes (issue #1080 corpus-v2 gates). Stable
+# strings (KD5); the registry extends for license/repo gates.
+REASON_CODE_C5_EXCLUDED_REPO = "c5_excluded_repo"
+REASON_CODE_C8_COPYLEFT_UNOPTED = "c8_copyleft_unopted"
+REASON_CODE_LICENSE_EVIDENCE_MISSING = "license_evidence_missing"
+REASON_CODE_REPO_IDENTITY_MISSING = "repo_identity_missing"
 
 # Import-specific reason codes (issue #1082 local-observation importer, fixed
 # registry). Every surviving observation row maps to exactly one of these six
