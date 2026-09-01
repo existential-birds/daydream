@@ -527,6 +527,10 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # build outright before any file write (C5-excluded, unopted copyleft,
     # missing identity/evidence alike — always-enforced, fail-closed), so no
     # benchmark or unopted-copyleft repo content can reach training data.
+    # mypy narrowing: __post_init__ guarantees a non-None policy path
+    # (ValueError otherwise), but mypy can't see through object.__setattr__,
+    # so assert it at the use site.
+    assert config.license_policy_path is not None
     policy, policy_digest = load_license_policy(config.license_policy_path)
     decisions: dict[str, dict[str, Any]] = {}
     license_refusals: list[tuple[str, str]] = []
