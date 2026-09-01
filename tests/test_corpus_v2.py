@@ -1111,3 +1111,120 @@ def test_license_report_written_before_success_marker(
     assert (tmp_path / "out" / "license-report.json").is_file()
     assert summary["license_distribution"] == {"admitted": 1}
 
+
+# ---------------------------------------------------------------------------
+# Task 10: publication gate end-to-end (AC6) + real-path verification
+# ---------------------------------------------------------------------------
+
+
+def _run_build_v2_cli(
+    bundle_dir: Path, tmp_path: Path, policy: Path, capsys: pytest.CaptureFixture[str],
+    *, out_name: str = "pub",
+) -> tuple[int, str]:
+    """Drive ``daydream corpus build-v2`` (the production entrypoint) over the
+    fixture's bundle + annotation bundle, returning (exit code, combined
+    terminal output). The projection publishes into ``tmp_path/<out_name>/``."""
+    out = tmp_path / out_name / "corpus-v2.jsonl"
+    ann = bundle_dir.parent / (bundle_dir.name + "-annotations")
+    rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
+                   "--annotation-bundle-root", str(ann),
+                   "--license-policy", str(policy),
+                   "--out", str(out)])
+    captured = capsys.readouterr()
+    return rc, captured.out + captured.err
+
+
+def _admit_second_batch(bundle_dir: Path, slug: str, *, spdx_id: str = "Apache-2.0") -> None:
+    """Flip the quarantined ``sess-b`` batch to admitted with its own repo
+    identity + license evidence, give it a real ATIF trajectory, and refresh
+    the bundle SHA256SUMS plus the annotation bundle's linkage pin (same
+    mechanics as ``_inject_admitted_repo_slug``) — producing a genuinely
+    mixed-repo clean bundle (two admitted slugs, both license-clean)."""
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        if batch["session_id"] == "sess-b":
+            batch["status"] = "admitted"
+            batch["reason_code"] = None
+            batch["repo_slug"] = slug
+            batch["license_evidence"] = {"spdx_id": spdx_id, "source": "manifest"}
+            batch["manifest_relpath"] = "batches/sess-b/manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    batch_dir = bundle_dir / "batches" / "sess-b"
+    (batch_dir / "manifest.json").write_text(json.dumps({"session_id": "sess-b"}) + "\n")
+    (batch_dir / "trajectory.json").write_text(json.dumps({
+        "session_id": "sess-b",
+        "trajectory_id": "sess-b:root",
+        "subagent_trajectory_ref": [
+            {"trajectory_id": "sess-b:fix-0", "session_id": "sess-b", "steps": [
+                {"step_id": 1, "source": "agent", "message": "fix"},
+            ]},
+        ],
+    }) + "\n")
+    _write_sumsums(bundle_dir)
+    ann_dir = bundle_dir.parent / (bundle_dir.name + "-annotations")
+    ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
+    ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
+    (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix()
+        for p in ann_dir.rglob("*")
+        if p.is_file() and p.name not in ("SHA256SUMS", "_SUCCESS")
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+
+
+def test_end_to_end_mixed_repo_publication_gated(
+    tmp_path: Path,
+    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Real-path: entering from the CLI (``daydream corpus build-v2``, the
+    production entrypoint), a hydrate-shaped bundle whose admitted batch
+    carries a C5-excluded repo slug must exit 1, publish no ``_SUCCESS``,
+    and name the stable reason code; the mirror case — an unopted copyleft
+    repo under a policy that rejects it — fails the same way. The clean
+    mixed-repo counterpart publishes with every record's lineage carrying
+    its batch's ``repo_slug`` + per-repo ``license_decision``."""
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    _inject_admitted_repo_slug(bundle_dir, "discourse/discourse")  # C5
+    rc, out = _run_build_v2_cli(bundle_dir, tmp_path, _policy_file(tmp_path), capsys)
+    assert rc == 1
+    assert not (tmp_path / "pub" / "_SUCCESS").exists()
+    assert "c5_excluded_repo" in out
+
+    # Mirror: an unopted GPL repo fails the same way (C8), still from the CLI.
+    _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
+    rc, out = _run_build_v2_cli(bundle_dir, tmp_path, policy, capsys, out_name="pub-gpl")
+    assert rc == 1
+    assert not (tmp_path / "pub-gpl" / "_SUCCESS").exists()
+    assert "c8_copyleft_unopted" in out
+
+
+def test_end_to_end_clean_mixed_repo_publishes(
+    tmp_path: Path,
+    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Real-path happy path: a clean mixed-repo bundle (two admitted slugs,
+    MIT + Apache-2.0, both accepted by the pinned policy) exits 0 from the
+    CLI, publishes ``_SUCCESS``, and every record's lineage carries its
+    batch's ``repo_slug`` + ``license_decision``."""
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    _admit_second_batch(bundle_dir, "owner/apache-repo")
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "Apache-2.0": "accepted"})
+    rc, out = _run_build_v2_cli(bundle_dir, tmp_path, policy, capsys)
+    assert rc == 0, out
+    assert (tmp_path / "pub" / "_SUCCESS").is_file()
+    records = [json.loads(line) for line in
+               (tmp_path / "pub" / "corpus-v2.jsonl").read_text().splitlines() if line]
+    assert records
+    for rec in records:
+        lineage = rec["lineage"]
+        assert lineage["repo_slug"] == "owner/repo-a"
+        assert lineage["license_decision"]["status"] == "admitted"
+        assert lineage["license_decision"]["repo_slug"] == "owner/repo-a"
+        assert lineage["license_decision"]["policy_version"] == "1"
