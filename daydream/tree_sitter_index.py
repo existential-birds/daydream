@@ -21,6 +21,7 @@ from typing import Callable
 from tree_sitter import Language, Parser, Query, QueryCursor
 
 from daydream import git_ops
+from daydream._tree_sitter_safety import assert_tree_sitter_safe
 from daydream.exploration import FileInfo
 from daydream.git_ops import GitError
 
@@ -568,7 +569,16 @@ def detect_affected_files(
 
     Raises:
         NotImplementedError: If ``depth != 1``.
+        TreeSitterBadVersionError: If the installed tree-sitter version is in
+            the known-bad set (issue #1087): the index consumer refuses to
+            construct a parser that could SIGSEGV the process.
     """
+    # Single shared choke point for every native-analysis entry point: a
+    # known-bad installed tree-sitter raises before any ``Language``/``Parser``
+    # construction, so no native parsing happens on a bad install. No-op on
+    # good installs; errors propagate to the caller unwrapped.
+    assert_tree_sitter_safe()
+
     if depth != 1:
         raise NotImplementedError("depth > 1 reserved for future use")
 

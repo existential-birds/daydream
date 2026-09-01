@@ -432,3 +432,22 @@ def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> Non
     _commit(tmp_path, "init")
     results = detect_affected_files(diff, tmp_path, depth=1)
     assert any(r.path == "app.py" and r.role == "imported_by" for r in results)
+
+
+# --- Shared version guard (issue #1087, M6) --------------------------------
+
+
+def test_detect_affected_files_refuses_known_bad_tree_sitter(monkeypatch, tmp_path):
+    """#1087 (M6): the shared guard covers every native-analysis entry point,
+    not just the quality analyzer — index consumers refuse bad installs too."""
+    from daydream import _tree_sitter_safety as safety
+
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    with pytest.raises(safety.TreeSitterBadVersionError):
+        detect_affected_files(
+            repo_root=tmp_path,
+            diff_text=(
+                "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+                "@@ -1 +1 @@\n-x\n+y\n"
+            ),
+        )
