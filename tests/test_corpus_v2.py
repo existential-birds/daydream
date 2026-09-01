@@ -569,11 +569,13 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
 _UNSET = object()
 
 
-def _policy_file(tmp_path: Path) -> Path:
+def _policy_file(tmp_path: Path, *, spdx_decisions: dict[str, str] | None = None) -> Path:
     """Minimal deterministic license policy: MIT accepted under version 1."""
+    if spdx_decisions is None:
+        spdx_decisions = {"MIT": "accepted"}
     policy_path = tmp_path / "license-policy.json"
     policy_path.write_text(
-        json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}) + "\n"
+        json.dumps({"policy_version": "1", "spdx_decisions": spdx_decisions}) + "\n"
     )
     return policy_path
 
@@ -940,3 +942,136 @@ def test_build_v2_still_works_without_annotation_bundle_dir_raises(
     bundle_dir, _rows, kwargs = existing_bundle_fixture
     with pytest.raises(ValueError, match="annotation_bundle_dir"):
         BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir)
+
+
+# ---------------------------------------------------------------------------
+# Task 6: projection re-enforces C5/C8, accounts rejections, gates _SUCCESS
+# ---------------------------------------------------------------------------
+
+import daydream.archive.hydrate_rules as hydrate_rules  # noqa: E402
+
+_LICENSE_CODES = frozenset({
+    hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO,
+    hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED,
+    hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING,
+    hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING,
+})
+
+
+def _inject_admitted_repo_slug(
+    bundle_dir: Path, slug: str, *, spdx_id: str = "MIT"
+) -> None:
+    """Rewrite every admitted batch's repo identity + license evidence in the
+    curation manifest (defence-in-depth probe: admission should have caught
+    the bad slug — the projector must not trust that) and recompute the
+    bundle's SHA256SUMS so only the manifest content changed."""
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        if batch["status"] == "admitted":
+            batch["repo_slug"] = slug
+            batch["license_evidence"] = {"spdx_id": spdx_id, "source": "manifest"}
+    manifest_path.write_text(json.dumps(manifest))
+    _write_sumsums(bundle_dir)
+    # The manifest edit changes the bundle's file-set digest, so re-harvest
+    # the annotation bundle's linkage pin against the new bundle bytes
+    # (otherwise the two-bundle gate would refuse on staleness, not license).
+    ann_dir = bundle_dir.parent / (bundle_dir.name + "-annotations")
+    ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
+    ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
+    (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix()
+        for p in ann_dir.rglob("*")
+        if p.is_file() and p.name not in ("SHA256SUMS", "_SUCCESS")
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+
+
+def _record_count_of_admitted_batches(bundle_dir: Path) -> int:
+    """Total per-finding record count of the admitted batches: the annotation
+    rows whose session_id belongs to an admitted manifest batch."""
+    manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
+    admitted_ids = {b["session_id"] for b in manifest["batches"] if b["status"] == "admitted"}
+    snap = bundle_dir.parent / (bundle_dir.name + "-annotations") / "annotations.jsonl"
+    return sum(
+        1
+        for line in snap.read_text().splitlines() if line.strip()
+        if json.loads(line).get("session_id") in admitted_ids
+    )
+
+
+def test_projection_rejects_c5_repo_and_refuses_success(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    # Defence in depth: admission should have caught a C5 slug — the
+    # projector must too (boundary 2), refusing before any file write.
+    _inject_admitted_repo_slug(bundle_dir, "getsentry/sentry")
+    with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO):
+        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    assert not (tmp_path / "out" / "_SUCCESS").exists()
+    assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
+
+
+def test_exclusions_by_reason_counts_license_rejections(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    # Copyleft evidence the policy rejects, with no opt-in: the batch is
+    # excluded (never emitted) and counted under its reason code.
+    _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
+    summary = run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+    assert summary["exclusions_by_reason"][hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED] >= 1
+    assert summary["emitted"] == 0
+
+
+def test_mixed_repo_admitted_plus_rejected_counts_balance(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    # M8 invariant at projection: admitted records + every license rejection
+    # bucket equals the total admitted-batch record count.
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
+    total_admitted = _record_count_of_admitted_batches(bundle_dir)
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
+    summary = run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+    rejections = sum(
+        v for k, v in summary["exclusions_by_reason"].items() if k in _LICENSE_CODES
+    )
+    assert summary["emitted"] + rejections == total_admitted
+
+
+def test_build_lineage_pins_license_policy_and_decisions(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    import hashlib as _hashlib  # noqa: PLC0415
+
+    from daydream.training.exclusion import EXCLUSION_PATH  # noqa: PLC0415
+
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    out = tmp_path / "out"
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    lineage = json.loads((out / "lineage.json").read_text())
+    assert lineage["license_policy"]["policy_version"] == "1"
+    assert lineage["license_policy"]["path_digest"] == _hashlib.sha256(
+        _policy_file(tmp_path).read_bytes()
+    ).hexdigest()
+    assert lineage["exclusion_list_digest"] == _hashlib.sha256(
+        EXCLUSION_PATH.read_bytes()
+    ).hexdigest()
+    assert lineage["copyleft_opt_ins"] == []
+    assert lineage["license_decisions"] == {
+        "owner/repo-a": {
+            "status": "admitted",
+            "reason_code": None,
+            "spdx_id": "MIT",
+            "policy_version": "1",
+            "evidence_ref": "manifest",
+            "repo_slug": "owner/repo-a",
+        }
+    }
+    assert lineage["license_decision_distribution"] == {"admitted": 1}
