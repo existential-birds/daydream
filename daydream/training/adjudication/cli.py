@@ -1081,11 +1081,14 @@ def _write_import_merge(
     """Redaction-gated merge of the linked rows into the state-dir archive.
 
     Fail-closed gates first, before any state write (M9/AC6): the redaction +
-    secret scan and the merge's drift / malformed-row gate both run before the
-    seed/merge, so a blocked or drifted import cannot leave partially seeded
-    runs or unredacted observation rows committed in the state archive (and
-    every later run re-blocking on the same dirty payload). ``dry_run=True``
-    never touches the archive, so the gate can run unconditionally.
+    secret scan and the merge's drift / malformed-row / timestamp gate both
+    run before the seed/merge, so a blocked or drifted import cannot leave
+    partially seeded runs or unredacted observation rows committed in the
+    state archive (and every later run re-blocking on the same dirty payload).
+    The merge commits the scan's **redacted** payload — never the unredacted
+    originals — so credential-bearing metadata cannot reach the archive.
+    ``dry_run=True`` never touches the archive, so the gate can run
+    unconditionally.
 
     Returns:
         ``{"planned", "appended", "deduped", "scan"}`` — the merge outcome
@@ -1098,16 +1101,33 @@ def _write_import_merge(
             merge failures — the caller's fail-closed surface.
     """
     scan = redact_imported_metadata(linked_rows, scan_dir=state_dir / "import-scan")
+    # Pre-write gates over the raw linked rows: drift, malformed-row, and
+    # timestamp validation all run before the seed/merge commits anything.
     merge_imported_observations(state_dir, linked_rows, dry_run=True)
     if scan["blocked"]:
+        # Never leave the dirty scan artifact behind: a later ``scan_run_dir``
+        # pass over the state dir would flag the persisted payload as a
+        # foreign dirty artifact (M9/AC6).
+        (state_dir / "import-scan" / "payload.json").unlink(missing_ok=True)
         message = "; ".join(scan["blocked_reasons"]) + f" ({scan['scan_summary']})"
         raise _ImportBlockedError(message)
+    # The merge commits the scan's *redacted* payload — never the unredacted
+    # originals — so credential-bearing metadata cannot reach the state
+    # archive (M9). Redaction is deterministic over the same in-memory rows
+    # the write-path drift gate re-validates; recompute the payload digests
+    # over the redacted content so that gate stays consistent.
+    redacted_rows = scan["payload"]
+    for row in redacted_rows:
+        row["payload_digest"] = canonical_payload_digest(
+            {k: v for k, v in row.items() if k != "payload_digest"},
+            include_observed_at=row["source"] != "auto",
+        )
     _seed_target_runs(
         state_dir,
-        {str(row["session_id"]) for row in linked_rows},
+        {str(row["session_id"]) for row in redacted_rows},
         runs_by_session,
     )
-    merged = merge_imported_observations(state_dir, linked_rows, dry_run=False)
+    merged = merge_imported_observations(state_dir, redacted_rows, dry_run=False)
     return {
         "planned": merged["planned"],
         "appended": merged["appended"],
@@ -1154,14 +1174,17 @@ def _publish_import_state(state_dir: Path, hub_repo: str, manifest: Path) -> dic
     """Publish the imported adjudication state additively to the private Hub.
 
     The publish composition requires the adjudication-state payload
-    (queue.json / observations.jsonl / preview-ledger.json) to exist; the
-    import itself only writes ``index.db``, so fail closed with a prerequisite
-    hint on a fresh state-dir instead of a bare ``FileNotFoundError``. Reuses
-    the existing publication: the private repo hard-fail and the S1 secret
-    scan are ``publish_annotation_state``'s own fail-closed gates, so a public
-    destination or a credential-shaped payload is refused before any byte
-    reaches the Hub. The checkpoint is always written: it is the fresh-VM
-    resume anchor (AC5).
+    (queue.json / observations.jsonl / preview-ledger.json) and the state
+    archive index (index.db — where the import's appended rows live) to
+    exist; the import itself only writes ``index.db``, so fail closed with a
+    prerequisite hint on a fresh state-dir instead of a bare
+    ``FileNotFoundError``. Reuses the existing publication: the private repo
+    hard-fail and the S1 secret scan are ``publish_annotation_state``'s own
+    fail-closed gates, so a public destination or a credential-shaped payload
+    is refused before any byte reaches the Hub. The published bundle carries
+    ``index.db`` and the checkpoint always records its digest, so a fresh-VM
+    resume restores the imported rows themselves, not just the queue/report
+    (AC5: the VM-local ``--state-dir`` is scratch only).
 
     Returns:
         ``{"prefix": ..., "uploaded": ...}``.
@@ -1174,7 +1197,7 @@ def _publish_import_state(state_dir: Path, hub_repo: str, manifest: Path) -> dic
     """
     missing = [
         name
-        for name in ("queue.json", "observations.jsonl", "preview-ledger.json")
+        for name in ("queue.json", "observations.jsonl", "preview-ledger.json", "index.db")
         if not (state_dir / name).is_file()
     ]
     if missing:
@@ -1272,7 +1295,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
         print_success(
             console,
             f"Import {'planned' if args.dry_run else 'complete'}: "
-            f"{sum(report['accounting'].values())} source row(s) across "
+            f"{sum(report['accounting'].values()) + report['deduped_count']} source row(s) across "
             f"{len(inventory['sources'])} root(s), {report['deduped_count']} deduped; "
             + (
                 f"{report['merge']['planned']} merge(s) planned; nothing written"

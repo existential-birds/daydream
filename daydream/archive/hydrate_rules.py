@@ -27,9 +27,10 @@ REASON_CODE_IDENTITY_COLLISION = "identity_collision"
 REASON_CODE_PATH_TRAVERSAL = "path_traversal"
 
 # Import-specific reason codes (issue #1082 local-observation importer, fixed
-# registry). Every imported observation row maps to exactly one of these six
-# buckets; the sum over the buckets always equals the source row inventory
-# count (M7) and the codes are stable strings (KD5).
+# registry). Every surviving observation row maps to exactly one of these six
+# buckets; byte-identical duplicates dropped by the dedupe are never bucket-
+# accounted, so ``sum(accounting) + deduped_count`` equals the source row
+# inventory count (M7) and the codes are stable strings (KD5).
 REASON_CODE_IMPORT_UNMATCHED_SESSION = "import_unmatched_session"
 REASON_CODE_IMPORT_IDENTITY_CONFLICT = "import_identity_conflict"
 REASON_CODE_IMPORT_STALE_EVIDENCE = "import_stale_evidence"

@@ -317,12 +317,15 @@ def test_publish_then_resume_reproduces_queue_and_report(
 
     prefix = f"annotations/cur-import/{'e' * 64}/"
     # The checkpoint is always written on --publish: it is the fresh-VM
-    # resume anchor (AC5).
+    # resume anchor (AC5). The archive index (where the import's rows live)
+    # is byte-published with the adjudication payload, so a fresh-VM resume
+    # restores the import itself, not just the queue/report.
     for name in (
         "queue.json",
         "observations.jsonl",
         "preview-ledger.json",
         "preview-manifest.json",
+        "index.db",
         "checkpoints/batch-latest.json",
     ):
         assert prefix + name in hub.files
@@ -335,8 +338,9 @@ def test_publish_then_resume_reproduces_queue_and_report(
         "observations.jsonl",
         "preview-ledger.json",
         "preview-manifest.json",
+        "index.db",
     }
-    for name in ("queue.json", "observations.jsonl", "preview-ledger.json"):
+    for name in ("queue.json", "observations.jsonl", "preview-ledger.json", "index.db"):
         assert (resumed_dir / name).read_bytes() == (state / name).read_bytes()
 
     # Identical queue + report (AC5): the report verb over the resumed state
@@ -416,6 +420,123 @@ def test_publish_rejects_dry_run_and_missing_manifest() -> None:
     assert exc.value.code == 2
 
 
+def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The merge commits the redaction scan's payload, never the unredacted
+    originals: a credential-bearing rubric_json (absolute local path) reaches
+    the state archive only in its redacted form (M9)."""
+    from daydream.archive.importer import REDACTED_PATH
+
+    src = tmp_path / "src"
+    head = hashlib.sha256("sess-1".encode()).hexdigest()
+    base = hashlib.sha256(("base-" + "sess-1").encode()).hexdigest()
+    upsert_run(
+        src,
+        make_manifest(
+            session_id="sess-1",
+            repo_slug="org/repo",
+            head_sha=head,
+            base_sha=base,
+        ),
+    )
+    append_label_observation(
+        src,
+        "sess-1",
+        labels=["accepted"],
+        pr_state=None,
+        labeler_version="980-rubric-r2",
+        evidence_sha="e" * 64,
+        rubric_json=json.dumps({"workdir": "/Users/k/proj/build", "note": "ok"}),
+        valid_at=_VALID_AT,
+        source="auto",
+        observed_at=_OBSERVED,
+    )
+
+    state = tmp_path / "state"
+    rc = cli._handle_corpus_command(
+        ["adjudicate", *_import_args(src, state_dir=state, extra=[])]
+    )
+    assert rc == 0
+    capsys.readouterr()
+    conn = sqlite3.connect(f"file:{state / 'index.db'}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT rubric_json FROM label_observations").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] is not None
+    assert "/Users/k" not in rows[0][0]
+    rubric = json.loads(rows[0][0])
+    assert rubric["workdir"] == REDACTED_PATH
+    assert rubric["note"] == "ok"
+
+
+def test_cli_import_reports_full_source_inventory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The success message reports the full source row inventory (bucketed +
+    deduped), not just the bucket sum (M7)."""
+    root_a = tmp_path / "backup-a"
+    root_b = tmp_path / "backup-b"
+    _seed_session(root_a, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
+    _seed_session(root_b, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
+    state = tmp_path / "state"
+    rc = cli._handle_corpus_command(
+        ["adjudicate", *_import_args(root_a, root_b, state_dir=state, extra=[])]
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    report = json.loads((state / "import-report.json").read_text(encoding="utf-8"))
+    total = sum(report["accounting"].values()) + report["deduped_count"]
+    # Collapse Rich's word-wrapping so the message assertion is width-safe.
+    assert f"{total} source row(s)" in " ".join(captured.out.split())
+
+
+def test_cli_import_non_iso_stamp_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A hand-edited non-ISO observed_at aborts at the pre-write gate: exit 1
+    and no state archive at all (no seeded runs, no partial appends)."""
+    src = tmp_path / "src"
+    head = hashlib.sha256("sess-1".encode()).hexdigest()
+    base = hashlib.sha256(("base-" + "sess-1").encode()).hexdigest()
+    upsert_run(
+        src,
+        make_manifest(
+            session_id="sess-1",
+            repo_slug="org/repo",
+            head_sha=head,
+            base_sha=base,
+        ),
+    )
+    append_label_observation(
+        src,
+        "sess-1",
+        labels=["accepted"],
+        pr_state=None,
+        labeler_version="980-rubric-r2",
+        evidence_sha="e" * 64,
+        valid_at=_VALID_AT,
+        source="auto",
+        observed_at=_OBSERVED,
+    )
+    # Corrupt the stamp in place (the trigger requires a hand-edited/corrupt
+    # source db; writer-produced values are always ISO-8601).
+    write = sqlite3.connect(src / "index.db")
+    write.execute(
+        "UPDATE label_observations SET observed_at = ? WHERE session_id = 'sess-1'",
+        ("2026-04-30 00:00:00",),
+    )
+    write.commit()
+    write.close()
+
+    state = tmp_path / "state"
+    rc = cli._handle_corpus_command(
+        ["adjudicate", *_import_args(src, state_dir=state, extra=[])]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "observed_at" in captured.out + captured.err
+    # Fail-closed before any state write: no archive, no seeded runs, no
+    # partial appends, no placeholder success report.
+    assert (state / "index.db").exists() is False
+
+
 def test_cli_missing_archive_root_exits_2() -> None:
     from daydream.training.adjudication.cli import handle_adjudicate
 
@@ -443,5 +564,7 @@ def test_cli_inventory_failure_exits_1(tmp_path: Path, capsys: pytest.CaptureFix
     captured = capsys.readouterr()
     # The rich panel may elide the long tmp path, but the fail-closed reason
     # (naming the missing index.db) is always present; no placeholder success.
-    assert "no index.db" in captured.out + captured.err
+    # Assert the single token so Rich's fold (word-boundary wrapping) cannot
+    # split the reason on an 80-col non-TTY console.
+    assert "index.db" in captured.out + captured.err
     assert not state.exists()  # no placeholder success

@@ -877,6 +877,196 @@ def test_human_source_appended_verbatim(tmp_path: Path) -> None:
     assert hist[0]["observed_at"] == _OBSERVED_B
     assert hist[0]["labels"] == json.dumps(["rejected"])
 
+
+def test_non_iso_observed_at_fails_closed_before_any_write(tmp_path: Path) -> None:
+    """A hand-edited non-ISO observed_at must abort the merge at the pre-write
+    gate, not mid-append: ValueError naming the row and zero rows written
+    (S2/M9)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    row: dict[str, Any] = {
+        "session_id": SID,
+        "source": "auto",
+        "observed_at": "not-an-iso-stamp",
+        "labels": ["accepted"],
+        "pr_state": None,
+        "labeler_version": "980-rubric-r2",
+        "evidence_sha": "e" * 64,
+        "rubric_json": None,
+        "valid_at": None,
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "labeler_policy_version": "980-policy-r1",
+        "reply_classifier_version": None,
+        "reply_evidence_digest": None,
+    }
+    with pytest.raises(ValueError, match=SID):
+        merge_imported_observations(target, [_row_with_digest(row)])
+    assert label_observation_history(target, SID) == []
+
+
+def test_naive_observed_at_fails_closed_before_any_write(tmp_path: Path) -> None:
+    """A naive observed_at (no UTC offset) is rejected at the pre-write gate
+    exactly like the writer rejects it per row (S2/M9)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    row: dict[str, Any] = {
+        "session_id": SID,
+        "source": "auto",
+        "observed_at": "2026-05-01T00:00:00",
+        "labels": ["accepted"],
+        "pr_state": None,
+        "labeler_version": "980-rubric-r2",
+        "evidence_sha": "e" * 64,
+        "rubric_json": None,
+        "valid_at": None,
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "labeler_policy_version": "980-policy-r1",
+        "reply_classifier_version": None,
+        "reply_evidence_digest": None,
+    }
+    with pytest.raises(ValueError, match=SID):
+        merge_imported_observations(target, [_row_with_digest(row)])
+    assert label_observation_history(target, SID) == []
+
+
+def test_non_iso_valid_at_fails_closed_before_any_write(tmp_path: Path) -> None:
+    """A non-ISO valid_at is also caught by the pre-write gate, not inside
+    the writer's per-row canonical_utc_iso call (S2/M9)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    row: dict[str, Any] = {
+        "session_id": SID,
+        "source": "auto",
+        "observed_at": _OBSERVED_A,
+        "labels": ["accepted"],
+        "pr_state": None,
+        "labeler_version": "980-rubric-r2",
+        "evidence_sha": "e" * 64,
+        "rubric_json": None,
+        "valid_at": "not-a-valid-time",
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "labeler_policy_version": "980-policy-r1",
+        "reply_classifier_version": None,
+        "reply_evidence_digest": None,
+    }
+    with pytest.raises(ValueError, match=SID):
+        merge_imported_observations(target, [_row_with_digest(row)])
+    assert label_observation_history(target, SID) == []
+
+
+def test_idempotent_reimport_dedupes_human_rows(tmp_path: Path) -> None:
+    """Human-sourced rows are byte-identical on a re-import, so the PK
+    collision no-op must dedupe them — never a 1-microsecond-shifted
+    duplicate generation (M4)."""
+    source_root = tmp_path / "backup"
+    source_root.mkdir()
+    _seed_run(source_root)
+    append_label_observation(
+        source_root,
+        SID,
+        labels=["rejected"],
+        pr_state=None,
+        labeler_version=HUMAN_LABELER_VERSION,
+        evidence_sha=None,
+        valid_at=_OBSERVED_B,
+        source="human",
+        observed_at=_OBSERVED_B,
+    )
+    imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    merge_imported_observations(target, imported)
+    before = label_observation_history(target, SID)
+
+    merged_again = merge_imported_observations(target, imported)
+    assert merged_again["appended"] == 0
+    assert merged_again["deduped"] == 1
+    assert label_observation_history(target, SID) == before
+
+
+def test_policy_axis_generations_survive_merge(tmp_path: Path) -> None:
+    """A generation pair differing only in labeler_policy_version survives the
+    importer dedupe AND the writer's auto-dedup: distinct policy axes are
+    distinct generations, never collapsed (M3/M14)."""
+    source_root = tmp_path / "backup"
+    source_root.mkdir()
+    _seed_run(source_root)
+    for at, policy in ((_OBSERVED_A, "980-policy-r1"), (_OBSERVED_B, "9999-policy-r2")):
+        append_label_observation(
+            source_root,
+            SID,
+            labels=["accepted"],
+            pr_state=None,
+            labeler_version="980-rubric-r2",
+            evidence_sha="c" * 64,
+            valid_at="2026-04-30T00:00:00+00:00",
+            source="auto",
+            observed_at=at,
+            labeler_policy_version=policy,
+        )
+    imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    merged = merge_imported_observations(target, imported)
+    assert merged["appended"] == 2
+    hist = label_observation_history(target, SID)
+    assert len(hist) == 2
+    assert {r["labeler_policy_version"] for r in hist} == {"980-policy-r1", "9999-policy-r2"}
+
+
+def test_legacy_sentinel_merge_stores_null_policy_and_legacy(tmp_path: Path) -> None:
+    """A legacy-schema source row (labeler_policy_version == STALE_LEGACY)
+    merges as the canonical legacy representation — NULL policy + legacy='legacy'
+    — so the corpus gold gate (labeler_policy_version IS NOT NULL) can never
+    admit a row the importer's version gate excluded (M6)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    row: dict[str, Any] = {
+        "session_id": SID,
+        "source": "auto",
+        "observed_at": _OBSERVED_A,
+        "labels": ["accepted"],
+        "pr_state": None,
+        "labeler_version": "980-rubric-r2",
+        "evidence_sha": "e" * 64,
+        "rubric_json": None,
+        "valid_at": None,
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "labeler_policy_version": STALE_LEGACY,
+        "reply_classifier_version": None,
+        "reply_evidence_digest": None,
+    }
+    merged = merge_imported_observations(target, [_row_with_digest(row)])
+    assert merged["appended"] == 1
+    hist = label_observation_history(target, SID)
+    assert len(hist) == 1
+    assert hist[0]["labeler_policy_version"] is None
+    assert hist[0]["legacy"] == "legacy"
+
 # ---------------------------------------------------------------------------
 # Task 8: fail-closed secret scan + redaction before publication (M9, AC6)
 # ---------------------------------------------------------------------------

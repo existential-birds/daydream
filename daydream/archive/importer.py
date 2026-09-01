@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
 from daydream.archive.index import append_label_observation
-from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS
+from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 from daydream.archive.sanitize import _sanitize_json_value
 from daydream.archive.scan import scan_run_dir
 from daydream.trajectory import redact_value
@@ -49,8 +50,10 @@ __all__ = [
     "run_pure_import",
 ]
 
-# The fixed six-bucket import accounting registry (M7): every imported
-# observation row lands in exactly one of these stable reason codes.
+# The fixed six-bucket import accounting registry (M7): every surviving
+# imported observation row lands in exactly one of these stable reason codes;
+# byte-identical duplicates dropped by the dedupe are not bucket-accounted, so
+# ``sum(accounting) + deduped_count`` equals the full source row inventory count.
 IMPORT_REASON_CODES = (
     REASON_CODE_IMPORT_UNMATCHED_SESSION,
     REASON_CODE_IMPORT_IDENTITY_CONFLICT,
@@ -71,8 +74,11 @@ REDACTED_PATH = "[REDACTED_PATH]"
 # startswith("/") check in :func:`_redact_path_string`.
 _EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![:/\w])(/[\w.-]+(?:/[\w.-]+)+)")
 
-# Writer columns consumed by append_label_observation; every other key on an
-# import row (legacy, payload_digest, ...) is importer metadata, not payload.
+# Writer columns consumed by append_label_observation (the
+# labeler_policy_version axis is carried verbatim so a policy bump or the
+# legacy sentinel survives the merge); every other key on an import row
+# (payload_digest, remote_url, ...) is importer metadata, not payload.
+# ``legacy`` is derived separately in ``_planned_append``.
 _WRITER_FIELDS = (
     "labels",
     "pr_state",
@@ -88,6 +94,7 @@ _WRITER_FIELDS = (
     "source",
     "reply_classifier_version",
     "reply_evidence_digest",
+    "labeler_policy_version",
 )
 
 _REASON_UNMATCHED = "no_hub_entry"
@@ -264,6 +271,14 @@ def _planned_append(row: dict[str, Any]) -> dict[str, Any]:
                 ) from exc
         plan[field] = value
     plan["has_posterior"] = bool(plan["has_posterior"])
+    # Legacy marker: carried verbatim when the source row has one; rows from a
+    # legacy schema (missing the column) stamp "legacy" exactly when the policy
+    # axis is the "legacy" sentinel, so the writer persists the canonical
+    # NULL-policy + legacy representation the corpus gold gate excludes.
+    legacy = row.get("legacy")
+    if legacy is None:
+        legacy = "legacy" if row.get("labeler_policy_version") == STALE_LEGACY else "auto"
+    plan["legacy"] = legacy
     return plan
 
 
@@ -304,8 +319,10 @@ def merge_imported_observations(
         ValueError: Fail-closed, before any write, when a row's recomputed
             canonical payload digest disagrees with its inventory-time
             ``payload_digest`` (evidence drifted between inventory and merge),
-            when a row's JSON list columns are malformed, or when the writer
-            rejects the row (unknown session, non-ISO-8601 ``observed_at``) —
+            when a row's JSON list columns are malformed, when a row's
+            ``observed_at``/``valid_at`` is not a parseable aware ISO-8601
+            timestamp (checked by the pre-write gate, not per-row mid-merge),
+            or when the writer rejects the row (unknown session) —
             each error names the offending row. Never silently defaulted.
     """
     imports = list(linked_imports)
@@ -336,6 +353,30 @@ def merge_imported_observations(
                 f"(expected {row['payload_digest']}, recomputed {fresh}); "
                 f"re-inventory the source before merging"
             )
+
+    # Fail-closed timestamp gate before any write (S2/M9): ``observed_at`` and
+    # ``valid_at`` must be parseable aware ISO-8601, exactly as the writer
+    # enforces per row — hoisted here so a malformed stamp aborts the whole
+    # merge up front instead of surfacing mid-append after run seeds or a
+    # prefix of rows were already committed.
+    for row in imports:
+        for field in ("observed_at", "valid_at"):
+            value = row.get(field)
+            if value is None:
+                continue
+            try:
+                parsed = datetime.fromisoformat(str(value))
+            except ValueError:
+                raise ValueError(
+                    f"imported observation for session {row['session_id']!r} at "
+                    f"{row['observed_at']!r} has a non-ISO-8601 {field}: {value!r}"
+                ) from None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(
+                    f"imported observation for session {row['session_id']!r} at "
+                    f"{row['observed_at']!r} has a naive {field} ({value!r}): "
+                    "an explicit UTC offset is required"
+                )
 
     planned = [_planned_append(row) for row in imports]
     if dry_run:
@@ -713,8 +754,10 @@ def run_pure_import(
     Returns:
         ``{"rows", "deduped_count", "content_conflict", "link",
         "run_level", "accounting", "ledger"}`` — the deterministic pipeline
-        result, where ``accounting`` sums to the full source row inventory
-        count (deduped rows + dedupe conflicts) and ``ledger`` is the
+        result, where ``accounting`` sums to the surviving rows (``rows`` +
+        ``content_conflict``) and ``sum(accounting) + deduped_count`` equals
+        the full source row inventory count (deduped rows are dropped as
+        byte-identical duplicates, never bucket-accounted); ``ledger`` is the
         :func:`build_import_ledger` shape.
     """
     merged = dedupe_observations(inventories)

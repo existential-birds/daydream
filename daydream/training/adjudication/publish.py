@@ -40,6 +40,10 @@ __all__ = [
 
 # State files published under the snapshot prefix (stable order for digests).
 _STATE_FILES = ("queue.json", "observations.jsonl", "preview-ledger.json")
+# The archive index (imported label_observations rows) is published alongside
+# the state files whenever it exists in the state dir: a fresh-VM resume must
+# restore the import itself, not just the adjudication state.
+_ARCHIVE_INDEX_FILE = "index.db"
 _MANIFEST_FILENAME = "preview-manifest.json"
 _CHECKPOINT_RELPATH = "checkpoints/batch-latest.json"
 _FINAL_SEGMENT = "final"
@@ -79,10 +83,21 @@ def annotation_prefix(manifest: Path | Mapping[str, Any]) -> str:
     return f"annotations/{curation_id}/{snapshot_id}/"
 
 
+# SQLite archives (index.db) are binary, not UTF-8; scan them as latin-1
+# (lossless byte->char mapping, so regex hits still fire on ASCII credentials
+# embedded in the file) instead of rejecting the payload outright.
+_BINARY_STATE_FILES = frozenset({"index.db"})
+
+
 def _scan_for_secrets(name: str, data: bytes) -> None:
     """Fail-closed secret scan (S1): refuse to upload credential-shaped payloads."""
     try:
-        text = data.decode("utf-8")
+        if name in _BINARY_STATE_FILES:
+            # latin-1 maps every byte to a code point losslessly; the ASCII
+            # secret shapes the regex targets are still detectable in SQLite pages.
+            text = data.decode("latin-1")
+        else:
+            text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise PublicDestinationError(f"{name}: payload is not valid UTF-8: {exc}") from exc
     hit = _SECRET_SHAPES.search(text)
@@ -186,6 +201,8 @@ def publish_annotation_state(
         "preview-ledger.json": _read_state_file(state_dir, "preview-ledger.json"),
         _MANIFEST_FILENAME: manifest_bytes,
     }
+    if (state_dir / _ARCHIVE_INDEX_FILE).exists():
+        payloads[_ARCHIVE_INDEX_FILE] = _read_state_file(state_dir, _ARCHIVE_INDEX_FILE)
     for name, data in payloads.items():
         _scan_for_secrets(name, data)
 
@@ -459,7 +476,9 @@ def resume_annotation_state(
 
     stage_dir.mkdir(parents=True, exist_ok=True)
     restored: list[str] = []
-    for name in [*_STATE_FILES, _MANIFEST_FILENAME]:
+    for name in [*_STATE_FILES, _MANIFEST_FILENAME, _ARCHIVE_INDEX_FILE]:
+        if name == _ARCHIVE_INDEX_FILE and name not in digests:
+            continue  # no archive index was published with this checkpoint
         expected = digests.get(name)
         if not isinstance(expected, str):
             raise ValueError(f"{_CHECKPOINT_RELPATH}: checkpoint has no digest for {name!r}")
