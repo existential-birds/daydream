@@ -453,3 +453,22 @@ def test_detect_affected_files_refuses_known_bad_tree_sitter(
                 "@@ -1 +1 @@\n-x\n+y\n"
             ),
         )
+
+
+def test_get_parser_refuses_known_bad_tree_sitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1087 (M6): get_parser is the true Parser construction site, so the
+    shared guard must fire there too — otherwise deep-sharding's
+    build_import_graph can still construct a native parser on a bad install."""
+    from daydream import _tree_sitter_safety as safety
+    from daydream.tree_sitter_index import _PARSER_CACHE, get_parser
+
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    _PARSER_CACHE.clear()
+    try:
+        with pytest.raises(safety.TreeSitterBadVersionError):
+            get_parser("python")
+        assert "python" not in _PARSER_CACHE
+    finally:
+        _PARSER_CACHE.clear()

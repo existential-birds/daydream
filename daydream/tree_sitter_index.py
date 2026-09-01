@@ -84,6 +84,11 @@ def get_parser(language_id: str) -> Parser | None:
             break
     if factory is None:
         return None
+    # Single shared choke point for every native-analysis entry point: a
+    # known-bad installed tree-sitter raises before any ``Language``/``Parser``
+    # construction, so no native parsing happens on a bad install. No-op on
+    # good installs; errors propagate to the caller unwrapped.
+    assert_tree_sitter_safe()
     try:
         parser = Parser(factory())
     except Exception:

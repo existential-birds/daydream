@@ -69,7 +69,9 @@ def assert_tree_sitter_safe() -> None:
     """
     reason = tree_sitter_unavailable_reason()
     if reason is not None:
-        version = installed_tree_sitter_version()
+        # The reason already names the offending version, so there is no need
+        # to re-read the installed version here (and no way for that unguarded
+        # second read to escape this guard).
         raise TreeSitterBadVersionError(
-            f"tree-sitter {version} is in the known-bad set ({sorted(KNOWN_BAD_TREE_SITTER_VERSIONS)}): {reason}"
+            f"tree-sitter is in the known-bad set ({sorted(KNOWN_BAD_TREE_SITTER_VERSIONS)}): {reason}"
         )
