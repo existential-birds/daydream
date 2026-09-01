@@ -95,6 +95,14 @@ def normalize_repo_slug(raw: str) -> str:
     if "://" in slug:
         remainder = slug.split("://", 1)[1]
         slug = remainder.split("/", 1)[1] if "/" in remainder else ""
+    elif "@" in slug and ":" in slug:
+        # SCP spelling 'git@host:owner/repo(.git)' has no scheme. Strip the
+        # user@host prefix so the remainder reduces to 'owner/repo' below.
+        userhost, __, scp_path = slug.rpartition(":")
+        if "@" not in userhost:
+            slug = ""
+        else:
+            slug = scp_path
     if slug.endswith(".git"):
         slug = slug[: -len(".git")]
     owner, sep, repo = slug.strip().partition("/")

@@ -1048,7 +1048,7 @@ def test_build_lineage_pins_license_policy_and_decisions(
     ).hexdigest()
     assert lineage["copyleft_opt_ins"] == []
     assert lineage["license_decisions"] == {
-        "owner/repo-a": {
+        "sess-a": {
             "status": "admitted",
             "reason_code": None,
             "spdx_id": "MIT",
@@ -1058,6 +1058,35 @@ def test_build_lineage_pins_license_policy_and_decisions(
         }
     }
     assert lineage["license_decision_distribution"] == {"admitted": 1}
+
+
+def test_multi_session_repo_license_decisions_all_recorded(
+    tmp_path: Path,
+) -> None:
+    # Two admitted batches sharing one repo_slug must both appear in the
+    # lineage's license_decisions and the license report: the decisions dict
+    # is session-scoped (keyed by session_id), so a repo_slug-keyed collapse
+    # would silently drop one decision while the distribution counts both.
+    bundle_dir = _write_bundle(tmp_path)
+    manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
+    for batch in manifest["batches"]:
+        batch["status"] = "admitted"
+        batch["reason_code"] = None
+        batch["repo_slug"] = "owner/repo-a"
+        batch["license_evidence"] = {"spdx_id": "MIT", "source": "manifest"}
+    (bundle_dir / "curation-manifest.json").write_text(json.dumps(manifest))
+    ann_snapshot = _write_annotations_snapshot(bundle_dir, session_id="sess-a")
+    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, ann_snapshot))
+    lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
+    assert set(lineage["license_decisions"]) == {"sess-a", "sess-b"}
+    assert all(
+        decision["repo_slug"] == "owner/repo-a"
+        for decision in lineage["license_decisions"].values()
+    )
+    assert lineage["license_decision_distribution"] == {"admitted": 2}
+    report = json.loads((tmp_path / "out" / "license-report.json").read_text())
+    assert set(report["decisions"]) == {"sess-a", "sess-b"}
+    assert report["distribution"] == {"admitted": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -1088,7 +1117,8 @@ def test_license_report_artifact_is_deterministic(
     ).hexdigest()
     assert report["exclusion_list_digest"] == _sha256_of_exclusion_txt()
     assert report["copyleft_opt_ins"] == []
-    assert report["decisions"]["owner/repo-a"]["status"] == "admitted"
+    assert report["decisions"]["sess-a"]["status"] == "admitted"
+    assert report["decisions"]["sess-a"]["repo_slug"] == "owner/repo-a"
     assert set(report["distribution"]) >= {"admitted"}
     # Byte-identical replay of the report alone (pure function of the
     # bundle + policy + exclusion.txt bytes):

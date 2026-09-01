@@ -47,6 +47,8 @@ def _record(**overrides: object) -> dict[str, object]:
         lineage["repo_slug"] = overrides["repo_slug"]
         decision = cast(dict[str, object], lineage["license_decision"])
         decision["repo_slug"] = overrides["repo_slug"]
+        # The override must not remain as a foreign top-level key.
+        record.pop("repo_slug")
     return record
 
 

@@ -1760,6 +1760,19 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         )
         return 1
 
+    # Pre-validate the license policy up front so a malformed or missing
+    # --license-policy is named by this handler (and redaction-processed) instead
+    # of escaping as an unredacted generic "Fatal Error" from main(). Mirrors the
+    # build-v2 handler's fail-closed validation.
+    if args.license_policy is not None:
+        from daydream.training.corpus_v2.license import load_license_policy
+
+        try:
+            load_license_policy(args.license_policy)
+        except (OSError, ValueError, TypeError) as exc:
+            print_error(console, "Invalid --license-policy", str(exc))
+            return 1
+
     stage_dir = args.stage_dir.expanduser()
     config = _hydrate.HydrateHubConfig(
         source_repo=args.source_repo,
@@ -1832,8 +1845,20 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         _hydrate.download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
         _hydrate.ingest_bundles(config.stage_dir, revision=source_commit)
         _hydrate.dedupe_admitted(config.stage_dir, revision=source_commit)
+        if config.license_policy_path is not None:
+            _hydrate.apply_license_gate(
+                config.stage_dir,
+                revision=source_commit,
+                license_policy_path=config.license_policy_path,
+                allow_copyleft=config.allow_copyleft,
+            )
         ledger = _hydrate.build_import_ledger(
             config.stage_dir, revision=source_commit, source_commit=source_commit
+        )
+        license_admission = (
+            _hydrate.license_admission_summary(ledger)
+            if config.license_policy_path is not None
+            else {}
         )
     except _hydrate.HydrationError as exc:
         print_error(console, "Hydration dry-run failed", redact_text(str(exc)))
@@ -1854,6 +1879,15 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         f"accounted {tallies.get('accounted', 0)} candidate(s); "
         f"reason codes: {reason_tally or 'none'}; no publication performed",
     )
+    if license_admission:
+        print_info(
+            console,
+            "license admission: "
+            f"admitted {license_admission['admitted']}; "
+            f"c5-excluded {license_admission['c5_excluded']}; "
+            f"copyleft-unopted {license_admission['c8_copyleft_unopted']}; "
+            f"evidence-missing {license_admission['license_evidence_missing']}",
+        )
     incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
     if incomplete:
         print_warning(

@@ -70,6 +70,8 @@ def test_resolve_repo_decision_c5_catches_non_canonical_spellings() -> None:
         "getsentry/sentry.git",
         "  getsentry/sentry  ",
         "https://github.com/getsentry/sentry.git",
+        "git@github.com:getsentry/sentry.git",
+        "git@host:getsentry/sentry",
     ):
         decision = resolve_repo_decision(
             repo_slug=slug,

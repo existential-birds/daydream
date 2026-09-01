@@ -527,9 +527,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # build outright before any file write (C5-excluded, unopted copyleft,
     # missing identity/evidence alike — always-enforced, fail-closed), so no
     # benchmark or unopted-copyleft repo content can reach training data.
-    policy, policy_digest = load_license_policy(
-        config.license_policy_path if config.license_policy_path is not None else ""
-    )
+    policy, policy_digest = load_license_policy(config.license_policy_path)
     decisions: dict[str, dict[str, Any]] = {}
     license_refusals: list[tuple[str, str]] = []
     for batch in bundle.admitted:
@@ -780,7 +778,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "exclusion_list_digest": hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest(),
         "copyleft_opt_ins": sorted(config.allow_copyleft),
         "license_decisions": {
-            str(decision["repo_slug"]): decision for decision in decisions.values()
+            str(session_id): decision for session_id, decision in decisions.items()
         },
         "license_decision_distribution": _license_decision_distribution(decisions),
     }
@@ -800,7 +798,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "exclusion_list_digest": lineage["exclusion_list_digest"],
         "copyleft_opt_ins": sorted(config.allow_copyleft),
         "decisions": dict(sorted(
-            (str(decision["repo_slug"]), decision) for decision in decisions.values()
+            (str(session_id), decision) for session_id, decision in decisions.items()
         )),
         "distribution": _license_decision_distribution(decisions),
     }
