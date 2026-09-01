@@ -596,6 +596,23 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,  # deprecated: refused in the handler
     )
     parser.add_argument(
+        "--repo-slug",
+        type=str,
+        default=None,
+        dest="repo_slug",
+        metavar="SLUG",
+        help=argparse.SUPPRESS,  # URL-identity smuggling: refused in the handler
+    )
+    parser.add_argument(
+        "--allow-copyleft",
+        action="append",
+        default=[],
+        dest="allow_copyleft",
+        metavar="OWNER/REPO",
+        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        "owner/repo slug (case-insensitive)",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         required=True,
@@ -680,6 +697,15 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             "(_SUCCESS + SHA256SUMS + lineage.json + annotations.jsonl).",
         )
         return 1
+    if args.repo_slug is not None:
+        print_error(
+            create_console(),
+            "Unsupported --repo-slug",
+            "A raw remote URL (or any override slug) is never a repo identity; "
+            "per-repo identity comes from the curation manifest, which the "
+            "bundle gate verifies.",
+        )
+        return 1
     if args.license_policy is None:
         print_error(
             create_console(),
@@ -687,6 +713,16 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             "A corpus v2 build requires a pinned license policy file; per-repo "
             "license decisions are resolved from it (fail-closed).",
         )
+        return 1
+
+    # Validate the policy file before any build work (M10): a malformed or
+    # unknown-version policy must refuse without creating the output directory.
+    from daydream.training.corpus_v2.license import load_license_policy
+
+    try:
+        load_license_policy(args.license_policy)
+    except (OSError, ValueError, TypeError) as exc:
+        print_error(create_console(), "Invalid --license-policy", str(exc))
         return 1
 
     # --out names the corpus JSONL; the projector writes its canonical file set
@@ -703,6 +739,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             bundle_dir=args.bundle_root,
             annotation_bundle_dir=args.annotation_bundle_dir,
             license_policy_path=args.license_policy,
+            allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft),
             as_of=args.as_of,
         )
     except ValueError as exc:
@@ -2075,7 +2112,7 @@ _CORPUS_USAGE = (
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
     "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
-    "  build-v2  project curated-bundle per-finding resolutions into corpus-v2 records\n"
+    "  build-v2  project curated-bundle resolutions into corpus-v2 records (pinned --license-policy required)\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
     "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact\n"
