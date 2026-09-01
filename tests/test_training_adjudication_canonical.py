@@ -187,6 +187,49 @@ def test_canonical_harvest_fails_closed_on_unreadable_materialized_outputs(
     assert not (mat / "annotations.jsonl").exists()
 
 
+def _seed_decisive_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Index + archive + materialize-dir fixture whose index carries one
+    ``accepted``, one ``rejected``, and one ``unanswered`` finding — the complete
+    disposition set the widened materialize emits and the drift gate must
+    re-derive via ``build_queue(..., include_decisive=True)``."""
+    root = tmp_path / "index"
+    root.mkdir(exist_ok=True)
+    resolutions = [
+        {
+            "fingerprint": f"fp-{n}", "disposition": disposition,
+            "evidence": [{"reply_id": n, "body_sha256": "abc",
+                          "created_at": "2026-01-01T00:00:00+00:00"}],
+            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
+            "comment_id": 7,
+        }
+        for n, disposition in enumerate(("accepted", "rejected", "unanswered"), start=1)
+    ]
+    sessions = [
+        {
+            "session_id": f"s{n}", "trajectory_id": f"s{n}-t", "segment_id": f"s{n}-seg",
+            "resolutions": [resolution],
+        }
+        for n, resolution in enumerate(resolutions, start=1)
+    ]
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+    (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    conn = _get_connection(archive)
+    for n in (2, 3):
+        conn.execute(
+            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+            f"VALUES ('s{n}', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s{n}')"
+        )
+    conn.commit()
+    conn.close()
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    return root, archive, mat
+
+
 def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Path) -> None:
     root = _index(tmp_path)
     archive = tmp_path / "archive"
@@ -437,3 +480,25 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     )
     assert out3["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 2
+
+
+def test_canonical_harvest_complete_set_is_idempotent_and_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """The drift gate re-derives the *complete* record set (decisive included)
+    via ``build_queue(..., include_decisive=True)``: harvesting a widened
+    materialization succeeds, preserves unchanged automatic decisive
+    dispositions verbatim (no observation group ⇒ untouched), and an identical
+    re-run is byte-identical with no new generation (exactly-once)."""
+    stage, archive, mat = _seed_decisive_fixture(tmp_path)
+    run_canonical_harvest(stage, mat, archive, observations_path=None)
+    first = (mat / "annotations.jsonl").read_bytes()
+    dispositions = [json.loads(ln)["disposition"] for ln in
+                    first.splitlines() if ln]
+    assert sorted(dispositions) == ["accepted", "rejected", "unanswered"]
+
+    # Re-run with identical inputs: identical annotations.jsonl, no new generation
+    summary2 = run_canonical_harvest(stage, mat, archive, observations_path=None)
+    assert (mat / "annotations.jsonl").read_bytes() == first
+    assert summary2["appended_sessions"] == 0
+    assert summary2["skipped_sessions"] == 3

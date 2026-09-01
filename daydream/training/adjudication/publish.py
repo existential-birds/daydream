@@ -264,6 +264,44 @@ def _bundle_payloads(bundle_dir: Path) -> dict[str, bytes]:
     return payloads
 
 
+def _enforce_admission_gate(bundle_dir: Path) -> None:
+    """Refuse to publish a bundle whose own coverage report fails the 80%
+    human-adjudication admission gate (issue #336 finding 2).
+
+    The gate is read from the bundle's ``coverage-report.json`` (written by
+    ``final_bundle.build_final_bundle`` over the same enrichment as
+    ``corpus adjudicate report``): fails closed with
+    :class:`PublicDestinationError` before any byte is uploaded when the
+    report is missing, unreadable, or says ``passes_80pct`` is not true — so
+    publish-final can never upload identically to a fully adjudicated run.
+    """
+    report_path = bundle_dir / "coverage-report.json"
+    if not report_path.is_file():
+        raise PublicDestinationError(
+            f"refusing to publish: final bundle has no coverage report at {report_path} "
+            "(run `daydream corpus adjudicate publish-final --dry-run` to build and "
+            "inspect the bundle first)"
+        )
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PublicDestinationError(
+            f"refusing to publish: unreadable coverage report at {report_path}: {exc}"
+        ) from exc
+    if not isinstance(report, dict):
+        raise PublicDestinationError(
+            f"refusing to publish: coverage report at {report_path} is not a JSON object"
+        )
+    gate = report.get("admission_gate")
+    passes_80pct = gate.get("passes_80pct") if isinstance(gate, dict) else None
+    if passes_80pct is not True:
+        raise PublicDestinationError(
+            "refusing to publish: final bundle fails the 80% human-adjudication "
+            f"admission gate (coverage report at {report_path}); complete the "
+            "outcome-bearing adjudication backlog or re-materialize before publishing"
+        )
+
+
 def _resolve_hub_commit(client: HubClient, manifest_data: Mapping[str, Any], sums_bytes: bytes) -> str:
     """Resolve the Hub commit SHA under the pinned-revision policy (M6).
 
@@ -292,17 +330,21 @@ def publish_final_annotation_bundle(
     Strict order, each step fail-closed before anything is uploaded:
 
     1. :class:`PublicDestinationError` when the Hub repo is not private.
-    2. S1 secret scan over every bundle file (a hit raises naming the file).
-    3. ``SHA256SUMS`` over the file set, self-excluded (mirror
+    2. 80% human-adjudication admission gate read from the bundle's
+       ``coverage-report.json`` (:func:`_enforce_admission_gate`) — a missing,
+       unreadable, or failing report refuses publication (issue #336 finding 2),
+       before any byte is uploaded.
+    3. S1 secret scan over every bundle file (a hit raises naming the file).
+    4. ``SHA256SUMS`` over the file set, self-excluded (mirror
        ``hydrate.publish_batches``).
-    4. Additive upload of the bundle + manifest + sums.
-    5. Clean-download verification: every uploaded file is read back, re-hashed
+    5. Additive upload of the bundle + manifest + sums.
+    6. Clean-download verification: every uploaded file is read back, re-hashed
        and compared (``_download_verifier`` replaces this step when injected;
        returning ``False`` raises ``ValueError``).
-    6. Hub commit SHA resolved via :func:`hydrate.resolve_source_revision`
+    7. Hub commit SHA resolved via :func:`hydrate.resolve_source_revision`
        (pinned-revision policy) — a resolution failure propagates and
        ``_SUCCESS`` is never uploaded.
-    7. ``_SUCCESS`` uploaded **last** — its presence is the commitment that the
+    8. ``_SUCCESS`` uploaded **last** — its presence is the commitment that the
        bundle is complete and verified.
 
     Immutability (C2): publication is additive; re-publishing identical bytes
@@ -317,6 +359,12 @@ def publish_final_annotation_bundle(
     prefix = f"{annotation_prefix(manifest)}{_FINAL_SEGMENT}/"
     bundle_dir = Path(bundle_dir)
     manifest_data = _read_manifest_data(manifest)
+
+    # 80% admission gate (issue #336 finding 2): refuse before any byte is
+    # uploaded — and before any Hub revision lookup — when the bundle's own
+    # coverage report says the gate fails or is missing, so a half-adjudicated
+    # snapshot can never be committed under the final/ prefix.
+    _enforce_admission_gate(bundle_dir)
 
     payloads = _bundle_payloads(bundle_dir)
     for name, data in payloads.items():

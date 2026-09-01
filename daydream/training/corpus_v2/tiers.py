@@ -8,13 +8,16 @@ imports nothing from ``daydream.training.reward``.
 
 from typing import Literal, Mapping
 
-__all__ = ["GoldGateError", "classify_tier"]
+from daydream.training.dispositions import (
+    DECISIVE_DISPOSITIONS as _DECISIVE_DISPOSITIONS,
+)
+from daydream.training.dispositions import (
+    NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
+)
+
+__all__ = ["GoldGateError", "classify_tier", "_NON_DECISIVE_DISPOSITIONS"]
 
 Tier = Literal["gold", "silver", "task-only"]
-
-_DECISIVE_DISPOSITIONS = frozenset({"accepted", "rejected"})
-_NON_DECISIVE_DISPOSITIONS = frozenset({"ambiguous", "unanswered", "missing"})
-
 
 class GoldGateError(ValueError):
     """Raised when a decisive disposition lacks human/developer evidence.

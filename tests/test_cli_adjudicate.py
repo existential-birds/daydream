@@ -375,3 +375,139 @@ def test_cli_publish_state_missing_state_file_exits_1(
     captured = capsys.readouterr()
     assert "publish-state failed" in captured.out + captured.err
     assert "No such file or directory" in captured.out + captured.err  # FileNotFoundError rendered, not a traceback
+
+
+# ---- final publish verb (issue #1078, task 6 / M4-M6) ----
+
+from daydream.training.adjudication.canonical import run_canonical_harvest  # noqa: E402
+from tests.fixtures.training.build_hub_snapshot import build_snapshot  # noqa: E402
+from tests.test_training_adjudication_final_bundle import seed_final_bundle_state  # noqa: E402
+
+
+def test_publish_final_dry_run_validates_and_publishes_nothing(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from daydream.training.adjudication import cli as adjudication_cli
+    from daydream.training.corpus_v2.identity import record_id
+
+    hub = build_snapshot()
+    # Route the CLI's Hub client factory at this in-memory hub (the documented
+    # _make_client monkeypatch seam), so the "nothing was published" assertion
+    # observes the exact hub the CLI would publish to. The fixture index pins
+    # the ``a*40`` revision, so the hub must know that commit for a real
+    # publish's pinned-revision resolution to succeed (mirrors the integration
+    # fixture, whose hub carries its committed SNAPSHOT_REVISION).
+    hub.commit_revision("a" * 40)
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
+    index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    # The human adjudication state the final bundle's coverage report must see
+    # for the 80% admission gate to pass (the same shape the CLI `label` verb
+    # records): alice decisive on the s1 finding, evidence digest matching the
+    # materialized record.
+    (state / "observations.jsonl").write_text(json.dumps({
+        "record_id": record_id("s1", "s1-t", "s1-seg", "fp-1"),
+        "disposition": "accepted",
+        "evidence_digest": "d" * 32,
+        "evidence": [{"reply_id": 1, "body_sha256": "abc",
+                       "created_at": "2026-01-01T00:00:00+00:00"}],
+        "labeler": "alice", "role": "rater",
+        "rationale": "clear maintainer approval",
+        "valid_at": "2026-02-02T00:00:00+00:00",
+        "observed_at": "2026-02-02T00:00:00+00:00",
+        "rubric_version": "v1",
+    }) + "\n", encoding="utf-8")
+    run_canonical_harvest(index_root, mat, archive_dir,
+                          observations_path=state / "observations.jsonl")
+    rc = handle_adjudicate([
+        "publish-final", "--index-root", str(index_root),
+        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
+        "--curation-bundle-dir", str(index_root),
+        "--state-dir", str(state),
+        "--hub-repo", "org/private-ds", "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "annotations.jsonl" in out and "record" in out.lower()
+    # nothing was published: the dry-run validated the bundle without ever
+    # constructing a client, so the wired hub still carries no final/ keys
+    assert not any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
+
+    # Contrast experiment: the same invocation without --dry-run publishes
+    # through the very same wired hub and the final/ keys appear, proving the
+    # "nothing was published" assertion above is not structurally blind.
+    assert handle_adjudicate([
+        "publish-final", "--index-root", str(index_root),
+        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
+        "--curation-bundle-dir", str(index_root),
+        "--state-dir", str(state),
+        "--hub-repo", "org/private-ds"]) == 0
+    assert any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
+
+
+def test_publish_final_refuses_when_admission_gate_not_met(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real (non-dry-run) publish path must refuse a bundle whose own
+    coverage report fails the 80% human-adjudication admission gate: with no
+    human observations the bundle's report says passes_80pct=false, and the
+    handler must exit 1 without any byte reaching the Hub (issue #336 finding
+    2 — publish-final must not upload identically to a fully adjudicated
+    run)."""
+    from daydream.training.adjudication import cli as adjudication_cli
+
+    hub = build_snapshot()
+    hub.commit_revision("a" * 40)
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
+    index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
+    # canonical harvest with no human observations anywhere: the coverage
+    # report's gate has a 0/0 outcome-bearing numerator/denominator
+    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+    rc = handle_adjudicate([
+        "publish-final", "--index-root", str(index_root),
+        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
+        "--curation-bundle-dir", str(index_root),
+        "--state-dir", str(tmp_path / "state"),
+        "--hub-repo", "org/private-ds"])
+    assert rc == 1
+    assert not any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
+
+
+def test_publish_final_missing_artifact_exits_nonzero(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
+    ann = mat / "annotations.jsonl"
+    if ann.exists():
+        ann.unlink()  # the canonical-harvest output when present; either way the artifact is missing
+    rc = handle_adjudicate([
+        "publish-final", "--index-root", str(index_root),
+        "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
+        "--curation-bundle-dir", str(index_root),
+        "--state-dir", str(tmp_path / "state"),
+        "--hub-repo", "org/private-ds", "--dry-run"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    # the panel hard-folds long messages mid-word (with the right border
+    # character interleaved); stripping borders and whitespace reconstitutes
+    # the unsplittable path token
+    flattened = "".join(captured.out.split()).replace("║", "")
+    assert "annotations.jsonl" in flattened + captured.err
+
+
+def test_runbook_commands_parse_against_real_parser() -> None:
+    import re
+
+    from daydream.training.adjudication.cli import _build_adjudicate_parser
+    text = (Path(__file__).parents[1] / "docs" / "runbooks" /
+            "annotation-final-publish.md").read_text()
+    cmds = re.findall(r"daydream corpus adjudicate [^\s`].*", text)
+    assert cmds, "runbook must contain literal CLI commands"
+    for cmd in cmds:
+        argv = cmd.split()[3:]
+        if "--help" in argv:
+            continue
+        parser = _build_adjudicate_parser()
+        # parse-check only; unknown flags/sub-verbs raise SystemExit(2)
+        try:
+            parser.parse_args(argv)
+        except SystemExit as exc:
+            raise AssertionError(f"runbook command not parseable: {cmd}") from exc

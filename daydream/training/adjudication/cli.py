@@ -27,6 +27,10 @@ deterministic adjudication queue:
 - ``harvest-snapshot`` — canonical harvest of the materialized preview
   snapshot: drift gate, precedence merge, exactly-once
   ``label_observations`` append, and ``annotations.jsonl`` emission.
+- ``publish-final`` — construct the final annotation staging bundle from
+  pipeline state (no hand-authored files) and publish it additively to the
+  private Hub under ``annotations/<curation-id>/<snapshot-id>/final/``;
+  ``--dry-run`` builds and validates the bundle without constructing a client.
 
 Every handler returns an int exit code (never calls ``sys.exit`` itself);
 argparse converts malformed invocations into ``SystemExit(2)``. Unknown
@@ -45,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError, HydrationError, PublicDestinationError, _make_client
-from daydream.training.adjudication.canonical import _evidence_after_as_of, run_canonical_harvest
+from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.materialize import run_materialize
@@ -53,7 +57,7 @@ from daydream.training.adjudication.observations import (
     append_observation,
     load_observations,
 )
-from daydream.training.adjudication.precedence import DECISIVE_DISPOSITIONS, effective_adjudication, has_rater_conflict
+from daydream.training.adjudication.precedence import has_rater_conflict
 from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.publish import (
     publish_annotation_state,
@@ -61,7 +65,6 @@ from daydream.training.adjudication.publish import (
 )
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
-from daydream.training.corpus_v2.tiers import classify_tier
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     REPLY_CLASSIFIER_VERSION,
@@ -309,6 +312,24 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_harvest.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
                            help="Adjudication state directory (observations.jsonl source)")
 
+    p_publish_final = sub.add_parser(
+        "publish-final",
+        help="Construct and publish the final annotation bundle (immutable snapshot).",
+    )
+    p_publish_final.add_argument("--index-root", type=Path, required=True, metavar="PATH",
+                                 help="Hydrated index root containing sessions.jsonl")
+    p_publish_final.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
+                                 help="Directory produced by `materialize` (manifest + sessions.jsonl)")
+    _add_state_dir(p_publish_final)
+    p_publish_final.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
+                                 help="Archive directory holding the SQLite label-observations index")
+    p_publish_final.add_argument("--curation-bundle-dir", type=Path, required=True, metavar="PATH",
+                                 help="Curation bundle root digested into lineage.json's batch_fileset_digest")
+    p_publish_final.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
+                                 help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+    p_publish_final.add_argument("--dry-run", action="store_true",
+                                 help="Build and validate the staging bundle without publishing to the Hub")
+
     return parser
 
 
@@ -491,55 +512,19 @@ def _report_items(
     dispositions, and the outcome-bearing fields ``tier``/``posterior_eligible``/
     ``evidence_after_as_of``, computed with the same authority as the export
     rows (``classify_tier`` + ``effective_adjudication`` gold-eligibility) so
-    the 80% gate sees real adjudication state on the CLI path."""
-    items = build_queue(_load_sessions_for_index(index_root))
-    observations = load_observations(state_dir / _OBSERVATIONS_FILENAME)
-    queue_ids = {str(item["record_id"]) for item in items}
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for obs in observations:
-        record_id = str(obs["record_id"])
-        if record_id not in queue_ids:
-            raise ValueError(
-                f"observation references record_id {record_id!r} which is not in the "
-                f"adjudication queue over the hydrated index"
-            )
-        grouped.setdefault(record_id, []).append(obs)
+    the 80% gate sees real adjudication state on the CLI path. The queue is
+    the **complete** set (``include_decisive=True``), matching the final
+    bundle's coverage report, so a human observation on an automatically
+    adjudicated decisive record lands in the queue instead of raising, and
+    the CLI's ``outcome_coverage`` cannot be structurally ~0 while the
+    published gate passes. Shares one implementation with the final bundle's
+    coverage report (``final_bundle._enrich_report_items``) so both gates
+    agree."""
+    from daydream.training.adjudication.final_bundle import _enrich_report_items
 
-    enriched: list[dict[str, Any]] = []
-    for item in items:
-        enriched_item = dict(item)
-        record_obs = grouped.get(str(item["record_id"]), [])
-        enriched_item["observations"] = record_obs
-        gold_eligible = False
-        if record_obs:
-            resolved = effective_adjudication(record_obs)
-            gold_eligible = resolved["gold_eligible"]
-            if (
-                resolved["role"] in ("rater", "adjudicator")
-                and resolved["evidence_digest"] == str(item["evidence_digest"])
-                and resolved["disposition"] in DECISIVE_DISPOSITIONS
-            ):
-                enriched_item["disposition"] = resolved["disposition"]
-        # Stamp the temporal axis FIRST so classify_tier sees it, matching the
-        # canonical serializer and the corpus projection (tiers.py C5/M9): an
-        # evidence-after-as_of record must classify "silver" here exactly as it
-        # does on the canonical record — never gold/posterior_eligible.
-        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(
-            enriched_item, as_of
-        )
-        # Outcome-bearing fields mirroring build_export_entries: the gold gate
-        # has one implementation (classify_tier), and gold-eligibility comes
-        # from the human-observation resolution (conflict/review-required
-        # decisive judgments stay out of the gold tier).
-        tier = classify_tier(enriched_item)
-        if tier == "gold" and not gold_eligible:
-            tier = "task-only"
-        enriched_item["tier"] = tier
-        enriched_item["posterior_eligible"] = tier == "gold" and str(
-            enriched_item["profile"]
-        ) == "pr_review"
-        enriched.append(enriched_item)
-    return enriched
+    items = build_queue(_load_sessions_for_index(index_root), include_decisive=True)
+    observations = load_observations(state_dir / _OBSERVATIONS_FILENAME)
+    return _enrich_report_items(items, observations, as_of=as_of)
 
 
 def handle_report(argv: list[str]) -> int:
@@ -669,6 +654,86 @@ def handle_resume_state(argv: list[str]) -> int:
     return 0
 
 
+def handle_publish_final(argv: list[str]) -> int:
+    """Handle ``corpus adjudicate publish-final`` (issue #1078, M4-M6).
+
+    Both paths share ``build_final_bundle`` entirely: the staging bundle is
+    constructed into ``<materialize-dir>/final-bundle`` and fully validated
+    before any Hub interaction. With ``--dry-run`` the handler prints the
+    per-file record counts + per-disposition summary, the 80%
+    human-adjudication admission-gate verdict from the written coverage
+    report, and returns 0 without ever constructing a client; otherwise the
+    bundle is published via :func:`publish_final_annotation_bundle`
+    (private-repo gate, 80% admission-gate refusal, secret scan, SHA256SUMS,
+    additive upload, clean-download verify, ``_SUCCESS`` last).
+    """
+    from daydream.training.adjudication.final_bundle import build_final_bundle
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+    from daydream.ui import create_console, print_error, print_success
+
+    args = _build_adjudicate_parser().parse_args(["publish-final", *argv])
+    bundle_dir = args.materialize_dir / "final-bundle"
+    try:
+        summary = build_final_bundle(
+            index_root=args.index_root,
+            materialize_dir=args.materialize_dir,
+            archive_dir=args.archive_dir,
+            out_dir=bundle_dir,
+            curation_bundle_dir=args.curation_bundle_dir,
+            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
+        )
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
+        print_error(create_console(), "adjudicate publish-final failed", str(exc))
+        return 1
+    if args.dry_run:
+        counts = " ".join(
+            f"{disposition}={count}" for disposition, count in summary["disposition_counts"].items()
+        )
+        try:
+            report = json.loads(
+                (bundle_dir / "coverage-report.json").read_text(encoding="utf-8")
+            )
+            gate = report["admission_gate"]
+            coverage = report["outcome_coverage"]
+        except (OSError, ValueError, KeyError) as exc:
+            print_error(create_console(), "adjudicate publish-final failed", str(exc))
+            return 1
+        print_success(
+            create_console(),
+            f"Dry-run: final bundle validated at {bundle_dir} — "
+            f"{summary['record_count']} record(s) across "
+            f"{', '.join(summary['files'])} ({counts}); "
+            f"80% admission gate {'PASS' if gate['passes_80pct'] else 'FAIL'} "
+            f"({coverage['adjudicated']}/{coverage['total']} outcome-bearing "
+            f"adjudicated); nothing published",
+        )
+        return 0
+    try:
+        client = _make_client(args.hub_repo)
+        result = publish_final_annotation_bundle(
+            client, bundle_dir, manifest=args.materialize_dir / "preview-manifest.json",
+            verify_download=True,
+        )
+        # The snapshot-id label for the success message is read here, inside
+        # the publish try/except, so a missing/corrupt manifest can never
+        # escape the handler as an uncaught exception after a successful
+        # publish — every handler must return an int exit code.
+        manifest = json.loads(
+            (args.materialize_dir / "preview-manifest.json").read_text(encoding="utf-8")
+        )
+        snapshot_id = manifest.get("snapshot_id", "")
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
+        print_error(create_console(), "adjudicate publish-final failed", str(exc))
+        return 1
+    print_success(
+        create_console(),
+        f"Published final annotation bundle ({summary['record_count']} record(s)) "
+        f"under {result['prefix']} (hub commit {result['hub_commit_sha']}, "
+        f"snapshot {snapshot_id})",
+    )
+    return 0
+
+
 def handle_harvest_snapshot(argv: list[str]) -> int:
     """Handle ``corpus adjudicate harvest-snapshot --index-root --materialize-dir ...``."""
     from daydream.ui import create_console, print_error, print_success
@@ -704,6 +769,7 @@ _HANDLERS = {
     "publish-state": handle_publish_state,
     "resume-state": handle_resume_state,
     "harvest-snapshot": handle_harvest_snapshot,
+    "publish-final": handle_publish_final,
 }
 
 
