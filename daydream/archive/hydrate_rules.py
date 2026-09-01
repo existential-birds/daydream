@@ -79,6 +79,12 @@ EXCLUSION_CODES = (
     "fixture_pytest_path",
     "fixture_tmp_artifact",
     "non_production_bundle",
+    # License/repo-identity admission codes (issue #1080): a gate rejection is
+    # an exclusion, not a quarantine — the bundle content is fine, the repo is.
+    REASON_CODE_C5_EXCLUDED_REPO,
+    REASON_CODE_C8_COPYLEFT_UNOPTED,
+    REASON_CODE_LICENSE_EVIDENCE_MISSING,
+    REASON_CODE_REPO_IDENTITY_MISSING,
 )
 
 

@@ -686,6 +686,127 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
     return results
 
 
+def _manifest_repo_slug(data: dict[str, Any]) -> str | None:
+    """Repository identity from a session manifest (nested ``git.repo_slug`` or flat).
+
+    A missing/blank slug stays ``None`` in the row — identity refusal is the
+    admission gate's job (fail-closed there), never a substituted fallback.
+    """
+    raw = _read_manifest_field(data, "repo_slug")
+    return raw if isinstance(raw, str) and raw.strip() else None
+
+
+def _manifest_license_evidence(data: dict[str, Any]) -> dict[str, str] | None:
+    """Declared license evidence (``spdx_id`` + ``source``) from a session manifest.
+
+    Schema-shaped: only the two string fields the frozen curation-manifest-v1
+    schema allows are carried; anything else (missing, blank, non-dict) is ``None``.
+    """
+    raw = data.get("license_evidence")
+    if not isinstance(raw, dict):
+        return None
+    spdx_id = raw.get("spdx_id")
+    if not isinstance(spdx_id, str) or not spdx_id.strip():
+        return None
+    evidence = {"spdx_id": spdx_id.strip()}
+    source = raw.get("source")
+    if isinstance(source, str):
+        evidence["source"] = source
+    return evidence
+
+
+def _session_identity(stage: Path, sid: str, revision: str, *, root: str, collision: bool) -> \
+        tuple[str | None, dict[str, str] | None]:
+    """Read ``repo_slug`` + ``license_evidence`` for a session from its manifest.
+
+    Tries the derivative locations in the same precedence the digest derivation
+    uses (runs/, quarantine conflict copy, moved rejected root, raw download
+    bundle); ``(None, None)`` when no manifest is readable anywhere.
+    """
+    segment = sid if _is_bare_segment(sid) else hashlib.sha256(sid.encode()).hexdigest()
+    candidates = [stage / "runs" / sid]
+    if collision:
+        candidates.append(stage / "quarantine" / f"{segment}.conflict")
+    candidates += [stage / root / segment,
+                   stage / "downloads" / str(revision) / "bundles" / segment]
+    for candidate in candidates:
+        data = _read_manifest_dict(candidate)
+        if data is not None:
+            return _manifest_repo_slug(data), _manifest_license_evidence(data)
+    return None, None
+
+
+def apply_license_gate(
+    stage: Path,
+    *,
+    revision: str,
+    license_policy_path: str | Path | None,
+    allow_copyleft: frozenset[str] | set[str],
+) -> list[tuple[str, str]]:
+    """Per-repo license admission gate over the admitted derivatives (issue #1080).
+
+    Runs after the existing gates (ingest -> dedupe -> fixture exclusion): each
+    admitted session's ``repo_slug`` + declared license evidence are resolved
+    into an immutable per-repo decision via
+    :func:`daydream.training.corpus_v2.license.resolve_repo_decision` (C5
+    exclusion list first, then policy + opt-in). A ``rejected`` decision moves
+    the derivative to ``stage/excluded/<sid>/`` exactly like the fixture
+    exclusion path and records a stable-code exclusion in the dedupe ledger, so
+    the import-ledger accounting invariant (admitted + rejected = input) holds
+    by construction — every session still lands in exactly one bucket.
+
+    Fail-closed: a missing ``license_policy_path`` raises ``ValueError`` before
+    any gate work — never downgraded to a warning. Apart from the excluded-
+    directory move the gate is pure w.r.t. its inputs, so decisions are
+    replay-identical. Returns the rejected ``(session_id, reason_code)`` pairs.
+    """
+    if not license_policy_path:
+        raise ValueError(
+            "license admission gate requires license_policy_path (fail-closed): "
+            "no license policy file was provided"
+        )
+    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        load_license_policy,
+        resolve_repo_decision,
+    )
+
+    policy, _digest = load_license_policy(license_policy_path)
+    curated = _curated_dir(stage, str(revision))
+    ledger_path = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
+    rejected: list[tuple[str, str]] = []
+    runs_dir = stage / "runs"
+    if runs_dir.is_dir():
+        for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+            data = _read_manifest_dict(derivative)
+            if data is None:
+                raise HydrationError(
+                    redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
+                )
+            sid = str(data.get("session_id") or derivative.name)
+            if not _is_bare_segment(sid):
+                raise HydrationError(
+                    redact_text(f"admitted derivative {derivative.name} has an unsafe session id {sid!r}")
+                )
+            decision = resolve_repo_decision(
+                _manifest_repo_slug(data) or "",
+                _manifest_license_evidence(data),
+                policy,
+                allow_copyleft,
+            )
+            if decision.status != "rejected" or decision.reason_code is None:
+                continue
+            _move_dir(derivative, stage / "excluded" / sid)
+            _append_dedupe_entry(
+                ledger_path,
+                {"session_id": sid, "status": "excluded", "reason_code": decision.reason_code,
+                 "content_digest": None, "revision": str(revision), "at": _utc_now()},
+            )
+            rejected.append((sid, decision.reason_code))
+    if rejected:
+        rebuild_index(stage)  # excluded derivatives leave the staging index immediately
+    return rejected
+
+
 def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
     """Rewrite an embedded ``source_path`` to a staging-local value or ``None``.
 
@@ -1522,6 +1643,10 @@ class HydrateHubConfig:
     destination_repo: str
     stage_dir: Path
     exploratory: bool = False
+    # License admission gate (issue #1080): the policy file is the digest-pinned
+    # versioned artifact; allow_copyleft is the exact-slug C8 opt-in set.
+    license_policy_path: str | None = None
+    allow_copyleft: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -1546,6 +1671,9 @@ def _curation_manifest_doc(
     batches: list[dict[str, Any]] = []
     for entry in ledger.get("imported", []):
         sid = str(entry["session_id"])
+        repo_slug, license_evidence = _session_identity(
+            stage, sid, str(ledger["pinned_revision"]), root="excluded", collision=False
+        )
         batches.append(
             {
                 "session_id": sid,
@@ -1554,6 +1682,8 @@ def _curation_manifest_doc(
                 "reason_code": None,
                 "artifact_relpath": f"batches/{sid}",
                 "manifest_relpath": f"batches/{sid}/manifest.json",
+                "repo_slug": repo_slug,
+                "license_evidence": license_evidence,
             }
         )
     for rejection in ledger.get("rejections", []):
@@ -1581,6 +1711,9 @@ def _curation_manifest_doc(
             source_dir = next((c for c in candidates if c.is_dir()), None)
             digest = sanitize._derivative_digest(source_dir) if source_dir is not None \
                 else hashlib.sha256(sid.encode()).hexdigest()
+        repo_slug, license_evidence = _session_identity(
+            stage, sid, str(ledger["pinned_revision"]), root=root, collision=collision
+        )
         batches.append(
             {
                 "session_id": sid,
@@ -1589,6 +1722,8 @@ def _curation_manifest_doc(
                 "reason_code": code,
                 "artifact_relpath": relpath,
                 "manifest_relpath": None,
+                "repo_slug": repo_slug,
+                "license_evidence": license_evidence,
             }
         )
     return {
@@ -1811,6 +1946,16 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     download_snapshot(source_client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
     ingest_bundles(config.stage_dir, revision=source_commit)
     dedupe_admitted(config.stage_dir, revision=source_commit)
+    if config.license_policy_path is not None:
+        # Issue #1080: the per-repo license gate runs after the existing gates;
+        # apply_license_gate itself refuses (ValueError, fail-closed) on a
+        # missing policy input.
+        apply_license_gate(
+            config.stage_dir,
+            revision=source_commit,
+            license_policy_path=config.license_policy_path,
+            allow_copyleft=config.allow_copyleft,
+        )
     ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
     curation_id = str(ledger["curation_id"])
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
