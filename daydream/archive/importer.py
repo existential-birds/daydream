@@ -20,6 +20,7 @@ from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 
 __all__ = [
     "canonical_payload_digest",
+    "classify_run_level",
     "dedupe_observations",
     "gold_eligible",
     "link_session_identity",
@@ -27,6 +28,8 @@ __all__ = [
 
 _REASON_UNMATCHED = "no_hub_entry"
 _REASON_CONFLICT = "derivative_digest_conflict"
+_REASON_RUN_LEVEL_ONLY = "no_projected_findings"
+_REASON_AMBIGUOUS = "ambiguous_finding_mapping"
 
 # The writer's versioned auto-dedup tuple (daydream/archive/index.py): the
 # evidence identity key. A policy-version bump, reward-version bump, or
@@ -203,6 +206,100 @@ def link_session_identity(
             }
 
     return {"linked": linked, "unmatched": unmatched, "identity_conflict": identity_conflict}
+
+
+def classify_run_level(
+    records: list[dict[str, Any]],
+    *,
+    projector_findings: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Partition session-scoped rows into run-level vs per-finding evidence (M5, AC2).
+
+    Args:
+        records: Merged inventory rows. A row without a truthy ``record_id``
+            is a run-level (session-scoped) label; a row carrying one is
+            already per-finding evidence.
+        projector_findings: ``{session_id: [finding, ...]}`` mirroring the
+            ``corpus_v2.projector.project_findings`` enumeration — the single
+            authority for the non-decisive set. Each finding dict must carry
+            ``record_id`` and ``evidence_sha``.
+
+    Returns:
+        ``{"per_finding": {sid: [obs, ...]}, "run_level_only":
+        {sid: reason}, "ambiguous_run_mapping": {sid: reason}}`` — a
+        deterministic partition accounting for every input row (M7).
+
+    Behavior:
+        A run-level label is emitted as **run-level evidence only** — never
+        copied onto every finding of the run (AC2). A row with no projected
+        findings for its session is run-level-only. A row whose session has
+        multiple candidate findings with no unique decisive match on identity
+        + evidence digest routes to ``ambiguous_run_mapping`` — feeding the
+        per-finding adjudication queue, not a fan-out. Only a row whose
+        ``evidence_sha`` matches exactly one projected finding lands in
+        ``per_finding`` (the sole path into the ``_is_admitted_outcome_gold``
+        / ``_rubric_decisive_only`` semantics).
+
+    Raises:
+        ValueError: When a row's ``labels`` field is malformed JSON (naming
+            the session_id), or when a referenced ``projector_findings``
+            entry is missing ``record_id``/``evidence_sha`` — never silently
+            substituted.
+    """
+    per_finding: dict[str, list[dict[str, Any]]] = {}
+    run_level_only: dict[str, str] = {}
+    ambiguous: dict[str, str] = {}
+
+    for record in records:
+        session_id = str(record["session_id"])
+        if record.get("record_id"):
+            # Already per-finding evidence: accounted in per_finding, never
+            # routed through the run-level buckets.
+            per_finding.setdefault(session_id, []).append(record)
+            continue
+
+        labels = record.get("labels")
+        if isinstance(labels, str):
+            try:
+                labels = json.loads(labels)
+            except json.JSONDecodeError as exc:
+                msg = f"session {session_id!r} has malformed labels JSON: {exc}"
+                raise ValueError(msg) from exc
+        if not isinstance(labels, list):
+            msg = f"session {session_id!r} has non-list labels field: {labels!r}"
+            raise ValueError(msg)
+
+        findings = projector_findings.get(session_id)
+        if not findings:
+            run_level_only[session_id] = _REASON_RUN_LEVEL_ONLY
+            continue
+
+        evidence_sha = record.get("evidence_sha")
+        matches = []
+        for finding in findings:
+            if "record_id" not in finding or "evidence_sha" not in finding:
+                msg = (
+                    f"session {session_id!r} references a malformed projected "
+                    f"finding (missing 'record_id'/'evidence_sha'): {finding!r}"
+                )
+                raise ValueError(msg)
+            if finding["evidence_sha"] == evidence_sha:
+                matches.append(finding)
+
+        if len(matches) == 1:
+            # Decisive identity+evidence-digest match on exactly one finding.
+            per_finding.setdefault(session_id, []).append(record)
+        else:
+            # No match, or the digest matches more than one finding: the
+            # run<->finding mapping is ambiguous — adjudication queue, not a
+            # fan-out.
+            ambiguous[session_id] = _REASON_AMBIGUOUS
+
+    return {
+        "per_finding": per_finding,
+        "run_level_only": run_level_only,
+        "ambiguous_run_mapping": ambiguous,
+    }
 
 
 def gold_eligible(observation: dict[str, Any]) -> bool:

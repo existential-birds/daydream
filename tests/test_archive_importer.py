@@ -20,7 +20,12 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.importer import dedupe_observations, gold_eligible, link_session_identity
+from daydream.archive.importer import (
+    classify_run_level,
+    dedupe_observations,
+    gold_eligible,
+    link_session_identity,
+)
 from daydream.archive.index import append_label_observation, upsert_run
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.training.labeler_versions import HUMAN_LABELER_VERSION
@@ -393,3 +398,115 @@ def test_gold_eligibility_three_fixtures() -> None:
     stale = make_observation(ver=STALE_LEGACY)  # non-gold
     unknown = make_observation(ver="9999-future-r9")  # non-gold
     assert [obs for obs in (valid, stale, unknown) if gold_eligible(obs)] == [valid]
+
+
+# --- Task 5: run-level labels stay run-level (M5, AC2) ----------------------
+
+
+def make_session_row(
+    *,
+    session_id: str = SID,
+    evidence_sha: str = "c" * 64,
+    labels: str | list[str] | None = None,
+    record_id: str | None = None,
+) -> dict[str, Any]:
+    """A run-level (session-scoped, no record_id) label observation row."""
+    return {
+        "session_id": session_id,
+        "observed_at": _OBSERVED_A,
+        "record_id": record_id,
+        "evidence_sha": evidence_sha,
+        "labels": json.dumps(labels) if isinstance(labels, list) else (labels or '["finding-accepted"]'),
+        "source": "human",
+    }
+
+
+def test_run_level_label_never_fans_out() -> None:
+    # A run-level label with no projected findings in the session: it is
+    # emitted as run-level evidence only — never copied onto every finding
+    # of the run (AC2) — and lands in the run_level_only bucket.
+    rec = make_session_row()
+    out = classify_run_level([rec], projector_findings={})
+    assert out["per_finding"].get(SID) is None
+    assert SID in out["run_level_only"]
+    assert out["ambiguous_run_mapping"] == {}
+
+
+def test_ambiguous_mapping_routes_to_queue() -> None:
+    # Two candidate findings, neither matching the row's evidence digest:
+    # the run<->finding mapping is ambiguous — the row routes to the
+    # ambiguous_run_mapping bucket (the per-finding adjudication queue),
+    # never a fan-out and never a silent per_finding substitution.
+    rec = make_session_row()
+    ambiguous = {
+        SID: [
+            {"record_id": "r1", "evidence_sha": "z" * 64},
+            {"record_id": "r2", "evidence_sha": "y" * 64},
+        ]
+    }
+    out = classify_run_level([rec], projector_findings=ambiguous)
+    assert SID in out["ambiguous_run_mapping"]
+    assert out["per_finding"].get(SID) is None
+    assert SID not in out["run_level_only"]
+
+
+def test_decisive_identity_and_digest_match_lands_per_finding() -> None:
+    # Exactly one candidate finding matching identity + evidence digest:
+    # the row is per-finding eligible (feeds the _is_admitted_outcome_gold
+    # path through the existing decisive-only semantics).
+    rec = make_session_row(evidence_sha="c" * 64)
+    findings = {SID: [{"record_id": "r1", "evidence_sha": "c" * 64}]}
+    out = classify_run_level([rec], projector_findings=findings)
+    assert out["per_finding"][SID] == [rec]
+    assert out["run_level_only"] == {}
+    assert out["ambiguous_run_mapping"] == {}
+
+
+def test_multiple_candidates_one_digest_match_is_decisive() -> None:
+    # Multiple candidates but exactly one matches the evidence digest: the
+    # identity+digest match is decisive, not ambiguous.
+    rec = make_session_row(evidence_sha="c" * 64)
+    findings = {
+        SID: [
+            {"record_id": "r1", "evidence_sha": "z" * 64},
+            {"record_id": "r2", "evidence_sha": "c" * 64},
+        ]
+    }
+    out = classify_run_level([rec], projector_findings=findings)
+    assert out["per_finding"][SID] == [rec]
+
+
+def test_malformed_labels_json_raises_naming_session() -> None:
+    rec = make_session_row(labels="{not-json")
+    with pytest.raises(ValueError, match=SID):
+        classify_run_level([rec], projector_findings={})
+
+
+def test_referenced_finding_missing_fields_raises() -> None:
+    # A projector_findings entry referenced by the run is malformed (missing
+    # record_id/evidence_sha): raise, never silently substitute.
+    rec = make_session_row(evidence_sha="c" * 64)
+    findings = {SID: [{"record_id": "r1"}]}  # no evidence_sha
+    with pytest.raises(ValueError, match="evidence_sha"):
+        classify_run_level([rec], projector_findings=findings)
+
+
+def test_per_finding_row_is_not_run_level() -> None:
+    # A row that already carries a record_id is per-finding evidence; it is
+    # accounted for in per_finding, never routed through the run-level
+    # buckets (M7: bucket sum == source row count).
+    rec = make_session_row(record_id="r1")
+    out = classify_run_level([rec], projector_findings={})
+    assert out["per_finding"][SID] == [rec]
+    assert out["run_level_only"] == {}
+    assert out["ambiguous_run_mapping"] == {}
+
+
+def test_buckets_account_for_every_row() -> None:
+    # Deterministic partition: every input row lands in exactly one bucket.
+    run_level = make_session_row()
+    per_finding = make_session_row(record_id="r1", evidence_sha="c" * 64)
+    out = classify_run_level([run_level, per_finding], projector_findings={})
+    total = sum(len(v) for v in out["per_finding"].values())
+    total += len(out["run_level_only"]) + len(out["ambiguous_run_mapping"])
+    assert total == 2
