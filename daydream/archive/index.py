@@ -313,6 +313,7 @@ def append_label_observation(
     source: str = "auto",
     reply_classifier_version: str | None = None,
     reply_evidence_digest: str | None = None,
+    observed_at: str | None = None,
 ) -> bool:
     """Append a row to the immutable ``label_observations`` history.
 
@@ -393,13 +394,35 @@ def append_label_observation(
         (``source != "auto"``) appends are never deduped and always return
         ``True``.
 
+        An explicit ``observed_at`` (aware ISO-8601) is preserved bitemporally
+        as the row's observation time instead of the wall clock; ``None``
+        keeps the existing now() behavior.
+
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table,
-            or when ``valid_at`` is not a parseable aware ISO-8601 timestamp.
+            when ``valid_at`` is not a parseable aware ISO-8601 timestamp, or
+            when ``observed_at`` is set and is not a parseable aware ISO-8601
+            timestamp.
     """
     if valid_at is not None:
         valid_at = canonical_utc_iso(valid_at)
-    observed_dt = datetime.now(timezone.utc)
+    if observed_at is not None:
+        # Bitemporal preservation: an explicit data timestamp (e.g. imported
+        # from a surviving local archive) is stored in place of the wall clock.
+        # Fails closed on non-ISO-8601 or naive input before any write.
+        try:
+            parsed = datetime.fromisoformat(observed_at)
+        except ValueError:
+            raise ValueError(
+                f"observed_at {observed_at!r} is not a parseable ISO-8601 timestamp"
+            ) from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(
+                f"observed_at {observed_at!r} is naive: an explicit UTC offset is required"
+            )
+        observed_dt = parsed.astimezone(timezone.utc)
+    else:
+        observed_dt = datetime.now(timezone.utc)
     labels_json = json.dumps(labels)
     reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
     has_posterior_int = int(has_posterior)
