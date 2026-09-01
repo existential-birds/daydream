@@ -16,8 +16,8 @@ def _good_install() -> str:
     return "0.25.2"
 
 
-def _not_installed(pkg: str) -> None:
-    raise PackageNotFoundError(pkg)
+def _not_installed() -> None:
+    raise PackageNotFoundError("tree-sitter")
 
 
 def test_guard_raises_on_known_bad_version(monkeypatch: pytest.MonkeyPatch) -> None:
