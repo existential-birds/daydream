@@ -362,6 +362,14 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                           help="Print the digest-stable import report as JSON")
     p_import.add_argument("--dry-run", action="store_true",
                           help="Plan the import without writing any state")
+    p_import.add_argument("--publish", action="store_true",
+                          help="Publish the merged state to the private Hub after the import "
+                               "(checkpoint written for fresh-VM resume)")
+    p_import.add_argument("--manifest", type=Path, metavar="PATH",
+                          help="Preview manifest pinning curation_id + snapshot_id "
+                               "(required with --publish)")
+    p_import.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
+                          help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
 
     return parser
 
@@ -922,7 +930,13 @@ def handle_import_local_observations(argv: list[str]) -> int:
     """
     from daydream.ui import create_console, print_error, print_success
 
-    args = _build_adjudicate_parser().parse_args(["import-local-observations", *argv])
+    parser = _build_adjudicate_parser()
+    args = parser.parse_args(["import-local-observations", *argv])
+    if args.publish:
+        if args.dry_run:
+            parser.error("--publish cannot be combined with --dry-run")
+        if args.manifest is None:
+            parser.error("--publish requires --manifest")
     console = create_console()
     try:
         inventories: list[list[dict[str, Any]]] = []
@@ -1025,6 +1039,22 @@ def handle_import_local_observations(argv: list[str]) -> int:
         }
         report["redaction"] = {"blocked": False, "reasons": []}
 
+    if args.publish:
+        # Compose the existing publication (reuse over rebuild): the private
+        # repo hard-fail and the S1 secret scan are publish_annotation_state's
+        # own fail-closed gates, so a public destination or a credential-shaped
+        # payload is refused before any byte reaches the Hub. The checkpoint is
+        # always written: it is the fresh-VM resume anchor (AC5).
+        try:
+            client = _make_client(args.hub_repo)
+            published = publish_annotation_state(
+                client, args.state_dir, manifest=args.manifest, batch_complete=True,
+            )
+        except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
+            print_error(console, "adjudicate import-local-observations failed", str(exc))
+            return 1
+        report["publish"] = {"prefix": published["prefix"], "uploaded": published["uploaded"]}
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
@@ -1038,7 +1068,8 @@ def handle_import_local_observations(argv: list[str]) -> int:
                 if args.dry_run
                 else f"{report['merge']['appended']} appended, "
                 f"{report['merge']['deduped']} deduped by the writer"
-            ),
+            )
+            + (f"; published to {report['publish']['prefix']}" if args.publish else ""),
         )
 
     if not args.dry_run:

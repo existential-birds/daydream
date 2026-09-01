@@ -183,6 +183,174 @@ def test_cli_overlapping_backups_dedupe_accounting(tmp_path: Path, capsys: pytes
     )
 
 
+def _seed_publishable_state(tmp_path: Path) -> tuple[Path, Path]:
+    """Produce the publishable adjudication state files via the real pipeline.
+
+    ``queue.json`` comes from the real ``build`` verb over an empty hydrated
+    index (empty ``sessions.jsonl`` -> empty queue). ``observations.jsonl``
+    and ``preview-ledger.json`` are the empty-state defaults that publish's
+    fixed payload set requires — their production-by-verb behavior is the
+    publish/label/export verbs' own tested contract, not this test's subject.
+    """
+    index_root = tmp_path / "index-root"
+    index_root.mkdir()
+    (index_root / "sessions.jsonl").write_text("", encoding="utf-8")
+    state = tmp_path / "state"
+    assert cli._handle_corpus_command(
+        ["adjudicate", "build", "--index-root", str(index_root), "--state-dir", str(state)]
+    ) == 0
+    (state / "observations.jsonl").touch()
+    (state / "preview-ledger.json").write_text("{}", encoding="utf-8")
+    return index_root, state
+
+
+def _write_manifest(tmp_path: Path) -> Path:
+    p = tmp_path / "preview-manifest.json"
+    p.write_text(json.dumps({"curation_id": "cur-import", "snapshot_id": "e" * 64}), encoding="utf-8")
+    return p
+
+
+def test_publish_then_resume_reproduces_queue_and_report(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--publish composes publish_annotation_state after the merge + redaction
+    gate (M8), and a fresh-VM resume from the Hub checkpoint reproduces the
+    identical queue + report (AC5). Only the Hub client is faked."""
+    from daydream.training.adjudication.publish import resume_annotation_state
+    from tests.fixtures.training.build_hub_snapshot import build_annotations_hub
+
+    src = tmp_path / "src"
+    _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
+    index_root, state = _seed_publishable_state(tmp_path)
+    manifest = _write_manifest(tmp_path)
+
+    hub = build_annotations_hub(curation_id="cur-import", snapshot_id="e" * 64)
+    from daydream.training.adjudication import cli as adjudication_cli
+
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
+    rc = cli._handle_corpus_command(
+        [
+            "adjudicate",
+            *_import_args(
+                src,
+                state_dir=state,
+                extra=[
+                    "--json",
+                    "--publish",
+                    "--manifest",
+                    str(manifest),
+                    "--hub-repo",
+                    "org/priv-ds",
+                ],
+            ),
+        ]
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    prefix = f"annotations/cur-import/{'e' * 64}/"
+    # The checkpoint is always written on --publish: it is the fresh-VM
+    # resume anchor (AC5).
+    for name in (
+        "queue.json",
+        "observations.jsonl",
+        "preview-ledger.json",
+        "preview-manifest.json",
+        "checkpoints/batch-latest.json",
+    ):
+        assert prefix + name in hub.files
+
+    # Fresh-VM resume: empty stage dir, restore from the Hub checkpoint.
+    resumed_dir = tmp_path / "resumed"
+    resumed = resume_annotation_state(hub, manifest=manifest, stage_dir=resumed_dir)
+    assert set(resumed["restored"]) == {
+        "queue.json",
+        "observations.jsonl",
+        "preview-ledger.json",
+        "preview-manifest.json",
+    }
+    for name in ("queue.json", "observations.jsonl", "preview-ledger.json"):
+        assert (resumed_dir / name).read_bytes() == (state / name).read_bytes()
+
+    # Identical queue + report (AC5): the report verb over the resumed state
+    # reproduces the pre-publish report byte-for-byte.
+    def _report(state_dir: Path) -> str:
+        assert (
+            cli._handle_corpus_command(
+                ["adjudicate", "report", "--index-root", str(index_root), "--state-dir", str(state_dir)]
+            )
+            == 0
+        )
+        return capsys.readouterr().out
+
+    original_report = _report(state)
+    resumed_report = _report(resumed_dir)
+    assert resumed_report == original_report
+
+
+def test_publish_refuses_non_private_before_any_write(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-private destination is refused before any byte is written (M17):
+    exit 1, the refusal named on stderr/stdout, and zero uploads (the hub
+    keeps only its seeded manifest)."""
+    from daydream.archive.hydrate import PublicDestinationError
+    from daydream.training.adjudication.publish import publish_annotation_state
+    from tests.fixtures.training.build_hub_snapshot import build_annotations_hub
+
+    src = tmp_path / "src"
+    _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
+    _seed_publishable_state(tmp_path)
+    state = tmp_path / "state"
+    manifest = _write_manifest(tmp_path)
+
+    hub = build_annotations_hub(curation_id="cur-import", snapshot_id="e" * 64, private=False)
+    from daydream.training.adjudication import cli as adjudication_cli
+
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
+    rc = cli._handle_corpus_command(
+        [
+            "adjudicate",
+            *_import_args(
+                src,
+                state_dir=state,
+                extra=["--publish", "--manifest", str(manifest), "--hub-repo", "org/public-ds"],
+            ),
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "not private" in captured.out + captured.err
+    prefix = f"annotations/cur-import/{'e' * 64}/"
+    assert hub.uploaded_paths == []
+    assert set(hub.files) == {prefix + "preview-manifest.json"}
+
+    # The composition seam itself hard-fails with the typed error, not a
+    # swallowed warning.
+    with pytest.raises(PublicDestinationError):
+        publish_annotation_state(hub, state, manifest=manifest)
+
+
+def test_publish_rejects_dry_run_and_missing_manifest() -> None:
+    from daydream.training.adjudication.cli import handle_adjudicate
+
+    with pytest.raises(SystemExit) as exc:
+        handle_adjudicate(
+            ["import-local-observations", "--archive-root", "/tmp", "--state-dir", "/tmp/s",
+             "--publish", "--dry-run"]
+        )
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        handle_adjudicate(
+            ["import-local-observations", "--archive-root", "/tmp", "--state-dir", "/tmp/s", "--publish"]
+        )
+    assert exc.value.code == 2
+
+
 def test_cli_missing_archive_root_exits_2() -> None:
     from daydream.training.adjudication.cli import handle_adjudicate
 
