@@ -16,7 +16,14 @@ import hashlib
 import json
 from typing import Any
 
-__all__ = ["canonical_payload_digest", "dedupe_observations", "link_session_identity"]
+from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
+
+__all__ = [
+    "canonical_payload_digest",
+    "dedupe_observations",
+    "gold_eligible",
+    "link_session_identity",
+]
 
 _REASON_UNMATCHED = "no_hub_entry"
 _REASON_CONFLICT = "derivative_digest_conflict"
@@ -196,3 +203,21 @@ def link_session_identity(
             }
 
     return {"linked": linked, "unmatched": unmatched, "identity_conflict": identity_conflict}
+
+
+def gold_eligible(observation: dict[str, Any]) -> bool:
+    """Version gate for gold eligibility (M6, KD3).
+
+    Returns True iff every version axis on the observation — labeler
+    (rubric), policy, and classifier versions — is in the known-versions
+    allowlist. A missing/``None`` version field, or the ``"legacy"`` sentinel
+    stamp, makes the row non-gold (safe default: unknown provenance is never
+    decisive). Such rows still import as evidence.
+    """
+    for field in ("labeler_version", "labeler_policy_version", "reply_classifier_version"):
+        value = observation.get(field)
+        if not value or str(value) not in KNOWN_LABELER_VERSIONS:
+            return False
+        if str(value) == STALE_LEGACY:
+            return False
+    return True

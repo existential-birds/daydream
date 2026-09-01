@@ -20,8 +20,10 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.importer import dedupe_observations, link_session_identity
+from daydream.archive.importer import dedupe_observations, gold_eligible, link_session_identity
 from daydream.archive.index import append_label_observation, upsert_run
+from daydream.archive.known_versions import STALE_LEGACY
+from daydream.training.labeler_versions import HUMAN_LABELER_VERSION
 from tests.harness.trajectory import make_manifest
 
 SID = "sess-abc123"
@@ -368,3 +370,26 @@ def _force_insert_rubric_variant(root: Path, *, observed_at: str) -> None:
 def test_empty_inventories(tmp_path: Path) -> None:
     merged = dedupe_observations([[], []])
     assert merged == {"rows": [], "deduped_count": 0, "content_conflict": []}
+
+
+# --- Task 4: version-gated gold eligibility (M6, KD3) -----------------------
+
+
+def make_observation(ver: str) -> dict[str, Any]:
+    """Minimal observation dict with all version axes set to ``ver``."""
+    return {
+        "session_id": SID,
+        "observed_at": _OBSERVED_A,
+        "labels": ["accepted"],
+        "labeler_version": ver,
+        "labeler_policy_version": ver,
+        "reply_classifier_version": ver,
+        "legacy": "legacy" if ver == STALE_LEGACY else "auto",
+    }
+
+
+def test_gold_eligibility_three_fixtures() -> None:
+    valid = make_observation(ver=HUMAN_LABELER_VERSION)  # gold participates
+    stale = make_observation(ver=STALE_LEGACY)  # non-gold
+    unknown = make_observation(ver="9999-future-r9")  # non-gold
+    assert [obs for obs in (valid, stale, unknown) if gold_eligible(obs)] == [valid]
