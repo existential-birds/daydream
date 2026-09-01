@@ -28,7 +28,13 @@ class BundleError(ValueError):
 
 
 class BundleBatch(BaseModel):
-    """One batch row from the curation manifest (v1 shape)."""
+    """One batch row from the curation manifest.
+
+    The optional ``repo_slug`` (the ``normalize_remote_url`` slug, never a raw
+    remote URL) and ``license_evidence`` (``spdx_id`` + ``source``) fields are
+    carried by newer manifests; the admission gate, not this parser, enforces
+    their presence.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -39,6 +45,8 @@ class BundleBatch(BaseModel):
     artifact_relpath: str
     artifact_digest: str | None = None
     manifest_relpath: str | None = None
+    repo_slug: str | None = None
+    license_evidence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

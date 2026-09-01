@@ -81,6 +81,19 @@
           "manifest_relpath": {
             "type": ["string", "null"],
             "pattern": "^(?!/)(?!.*\\.\\.).+$"
+          },
+          "repo_slug": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Repository identity as the normalize_remote_url slug (e.g. owner/repo). Never a raw remote URL."
+          },
+          "license_evidence": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "spdx_id": {"type": "string"},
+              "source": {"type": "string"}
+            }
           }
         }
       }

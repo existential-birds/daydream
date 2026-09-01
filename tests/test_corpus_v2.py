@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 
 from daydream.archive.sanitize import _derivative_digest
-from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
+from daydream.training.corpus_v2.bundle import (
+    BundleBatch,
+    BundleError,
+    CuratedBundle,
+    load_curated_bundle,
+)
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.corpus_v2.segments import segment, segment_agents
@@ -60,7 +65,13 @@ def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -
     (bundle_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
-def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: bool = False) -> Path:
+def _write_bundle(
+    tmp_path: Path,
+    *,
+    with_success: bool = True,
+    corrupt_digest: bool = False,
+    repo_slugs: dict[str, str] | None = None,
+) -> Path:
     bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
     # Producer-realistic batch shape: artifact_relpath names the batch
     # DIRECTORY (``batches/<session_id>/``) containing the ATIF
@@ -69,7 +80,13 @@ def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: 
         target = bundle_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}\n")
-    (bundle_dir / "curation-manifest.json").write_text(json.dumps(_MANIFEST))
+    manifest = json.loads(json.dumps(_MANIFEST))
+    if repo_slugs is not None:
+        for batch in manifest["batches"]:
+            if batch["session_id"] in repo_slugs and batch["status"] == "admitted":
+                batch["repo_slug"] = repo_slugs[batch["session_id"]]
+                batch["license_evidence"] = {"spdx_id": "MIT", "source": "manifest"}
+    (bundle_dir / "curation-manifest.json").write_text(json.dumps(manifest))
     _write_sumsums(bundle_dir)
     if with_success:
         (bundle_dir / "_SUCCESS").write_text("ok\n")
@@ -197,6 +214,26 @@ def _write_annotation_bundle(root: Path, rows: list[dict[str, Any]], *, curation
     if success:
         (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
     return root
+
+
+def test_load_bundle_carries_repo_slug_and_license_evidence(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
+    loaded = load_curated_bundle(bundle_dir)
+    sess_a = next(b for b in loaded.batches if b.session_id == "sess-a")
+    assert sess_a.repo_slug == "owner/repo-a"
+    assert sess_a.license_evidence == {"spdx_id": "MIT", "source": "manifest"}
+
+
+def test_bundle_batch_tolerates_absent_new_fields() -> None:
+    # Legacy manifests (pre-gate bundles) still parse; the *gate* (Task 4)
+    # rejects them, not the schema parser — keep KD7's refusal at the gate
+    # layer so the error names the reason code, not a pydantic traceback.
+    batch = BundleBatch(
+        session_id="s", content_digest="1" * 64, status="admitted",
+        reason_code=None, artifact_relpath="batches/s",
+    )
+    assert batch.repo_slug is None
+    assert batch.license_evidence is None
 
 
 def test_load_bundle_requires_success_marker(tmp_path: Path) -> None:
