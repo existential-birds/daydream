@@ -101,6 +101,8 @@ def _write_bundle(
 def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
     from daydream.training.corpus_v2.projector import BuildCorpusV2Config
 
+    if kw.get("license_policy_path") is None:
+        kw["license_policy_path"] = _policy_file(bundle_dir.parent)
     return BuildCorpusV2Config(out_dir=out_dir, bundle_dir=bundle_dir,
                                annotation_bundle_dir=snapshot.parent, **kw)
 
@@ -560,6 +562,86 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     assert "missing" in adj_report.read_text()
 
 
+# ---------------------------------------------------------------------------
+# Task 5: per-repo license decisions on projected records
+# ---------------------------------------------------------------------------
+
+_UNSET = object()
+
+
+def _policy_file(tmp_path: Path) -> Path:
+    """Minimal deterministic license policy: MIT accepted under version 1."""
+    policy_path = tmp_path / "license-policy.json"
+    policy_path.write_text(
+        json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}) + "\n"
+    )
+    return policy_path
+
+
+def _config_for(
+    bundle_dir: Path,
+    tmp_path: Path,
+    license_policy: Any = _UNSET,
+    **kw: Any,
+) -> Any:
+    """BuildCorpusV2Config over the fixture's bundle + annotation bundle.
+
+    The policy defaults to ``_policy_file(tmp_path)``; passing ``None``
+    explicitly produces the misconfigured (no-policy) config.
+    """
+    if license_policy is _UNSET:
+        license_policy = _policy_file(tmp_path)
+    snap = bundle_dir.parent / (bundle_dir.name + "-annotations") / "annotations.jsonl"
+    return BuildCorpusV2Config(
+        out_dir=tmp_path / "out",
+        bundle_dir=bundle_dir,
+        annotation_bundle_dir=snap.parent,
+        license_policy_path=license_policy,
+        **kw,
+    )
+
+
+def test_projected_records_carry_per_repo_license_decision(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    records = [json.loads(line) for line in
+               (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line]
+    assert records
+    for rec in records:
+        lineage = rec["lineage"]
+        assert lineage["repo_slug"] == "owner/repo-a"
+        decision = lineage["license_decision"]
+        assert isinstance(decision, dict)
+        assert decision["status"] == "admitted"
+        assert decision["policy_version"] == "1"
+        assert decision["repo_slug"] == "owner/repo-a"
+
+
+def test_build_with_only_global_license_and_no_policy_is_refused(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    with pytest.raises(ValueError, match="license_policy"):
+        _config_for(bundle_dir, tmp_path, license_policy=None)
+
+
+def test_schema_validation_accepts_evolved_v2_records(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    # The projected records validate against the edited schema/v2.json
+    # (repo_slug required in lineage; license_decision required as object).
+    import jsonschema  # noqa: PLC0415
+
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    schema = json.loads((tmp_path / "out" / "schema.json").read_text())
+    for rec in (json.loads(line) for line in
+                (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line):
+        jsonschema.validate(rec, schema)  # no raise
+
+
 def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
@@ -778,6 +860,7 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
     snap = _write_annotations_snapshot(bundle_dir)
     rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(snap.parent),
+                   "--license-policy", str(_policy_file(bundle_dir.parent)),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc == 0
     assert (tmp_path / "out" / "corpus-v2.jsonl").is_file()
@@ -808,7 +891,8 @@ def test_build_v2_accepts_separate_annotation_bundle_with_exact_linkage(
         curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
         batch_fileset_digest=_derivative_digest(bundle_dir))
     config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
-                                 annotation_bundle_dir=ann)
+                                 annotation_bundle_dir=ann,
+                                 license_policy_path=_policy_file(tmp_path))
     summary = run_build_corpus_v2(config)
     assert summary["emitted"] > 0
     # curation bundle untouched (K3: no mutation of the finalized bundle)
@@ -843,7 +927,8 @@ def test_build_v2_refuses_broken_annotation_bundles(
     if mutate in ("wrong_curation", "wrong_commit", "wrong_fileset"):
         (ann / "lineage.json").write_text(json.dumps(lineage, sort_keys=True) + "\n", encoding="utf-8")
     config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
-                                 annotation_bundle_dir=ann)
+                                 annotation_bundle_dir=ann,
+                                 license_policy_path=_policy_file(tmp_path))
     with pytest.raises(ValueError):
         run_build_corpus_v2(config)
 

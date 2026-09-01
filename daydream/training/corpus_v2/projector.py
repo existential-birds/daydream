@@ -31,6 +31,7 @@ from daydream.training.corpus_v2.bundle import (
     load_curated_bundle,
 )
 from daydream.training.corpus_v2.identity import record_id
+from daydream.training.corpus_v2.license import load_license_policy, resolve_repo_decision
 from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.corpus_v2.segments import segment
 from daydream.training.corpus_v2.splits import assign_split
@@ -88,7 +89,14 @@ class BuildCorpusV2Config:
     labeler_policy_version: str = "1"
     reply_classifier_version: str = "1"
     rubric_schema_version: str = "per-finding-resolutions-v1"
-    license: str | None = None
+    # Required: a build without a pinned license policy is a config error
+    # (raised as ValueError naming the field, mirroring annotation_bundle_dir)
+    # — declared optional so that misconfiguration, not a missing kwarg, is
+    # what callers see. The per-repo license decision is resolved from this
+    # policy against each batch's recorded identity + evidence; there is no
+    # global license string to stamp (C5/C8, issue #1080).
+    license_policy_path: Path | None = None
+    allow_copyleft: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.annotation_bundle_dir is None:
@@ -97,6 +105,12 @@ class BuildCorpusV2Config:
                 "pinned annotation bundle is a configuration error"
             )
         object.__setattr__(self, "annotation_bundle_dir", Path(self.annotation_bundle_dir))
+        if self.license_policy_path is None:
+            raise ValueError(
+                "license_policy_path is required: a corpus v2 build without a "
+                "pinned license policy is a configuration error"
+            )
+        object.__setattr__(self, "license_policy_path", Path(self.license_policy_path))
         if self.as_of is not None:
             object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
 
@@ -488,6 +502,33 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     """
     bundle = load_curated_bundle(config.bundle_dir)
     assert config.annotation_bundle_dir is not None  # __post_init__ guarantees
+    # Per-repo license decisions (issue #1080): the projector consumes the
+    # decisions recorded at admission — resolved once per admitted batch as
+    # the pure function of its recorded repo identity + evidence under the
+    # pinned policy. An admitted batch whose decision does not resolve to
+    # admission (or is missing) refuses the build, naming the session — never
+    # coerced to a default decision.
+    policy, _policy_digest = load_license_policy(
+        config.license_policy_path if config.license_policy_path is not None else ""
+    )
+    decisions: dict[str, dict[str, Any]] = {}
+    for batch in bundle.admitted:
+        repo_decision = resolve_repo_decision(
+            batch.repo_slug or "", batch.license_evidence, policy, config.allow_copyleft
+        )
+        if repo_decision.status != "admitted":
+            raise ValueError(
+                f"session {batch.session_id}: recorded license decision is not admitted "
+                f"({repo_decision.reason_code}); refusing to project"
+            )
+        decisions[batch.session_id] = {
+            "status": repo_decision.status,
+            "reason_code": repo_decision.reason_code,
+            "spdx_id": repo_decision.spdx_id,
+            "policy_version": repo_decision.policy_version,
+            "evidence_ref": repo_decision.evidence_ref,
+            "repo_slug": repo_decision.repo_slug,
+        }
     annotation_lineage = _verify_annotation_bundle(
         config.annotation_bundle_dir, bundle, config.bundle_dir
     )
@@ -549,6 +590,13 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                     if key in seen_findings:
                         continue
                     seen_findings.add(key)
+                    decision = decisions.get(seg.session_id)
+                    if decision is None:
+                        raise ValueError(
+                            f"session {seg.session_id}: no recorded license decision "
+                            "found at projection; refusing to project"
+                        )
+                    record_decision: dict[str, Any] = decision
                     # Non-decisive findings are report output only (D8): they
                     # never become training records, so corpus.jsonl and the
                     # split manifests exclude them by construction while
@@ -591,7 +639,8 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                         "valid_at": rec_valid_at,
                         "split": split,
                         "exclusion_reason": None,
-                        "license_decision": config.license,
+                        "repo_slug": record_decision["repo_slug"],
+                        "license_decision": record_decision,
                     }
                     # v2 schema stamp: every projected record carries the
                     # training-record schema version it was emitted under.
@@ -647,7 +696,8 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         split_counts[str(lineage_field["split"])] += 1
     # Every Req-11 field: hub commit, curation id, content digests, policy/
     # classifier/rubric versions, as_of + valid_at pins, split assignment,
-    # exclusion reasons, and the C5/license decision. Nothing silently dropped.
+    # exclusion reasons, and each record's per-repo license decision. Nothing
+    # silently dropped.
     content_digests: dict[str, str] = {
         batch.session_id: batch.content_digest for batch in bundle.admitted if batch.content_digest
     }
@@ -676,7 +726,6 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "rubric_schema_version": config.rubric_schema_version,
         "as_of": config.as_of,
         "valid_at": valid_at,
-        "license": config.license,
         "salt": config.salt,
         "holdout_rate": config.holdout_rate,
         "val_rate": config.val_rate,

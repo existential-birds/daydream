@@ -98,6 +98,7 @@
         "valid_at",
         "split",
         "exclusion_reason",
+        "repo_slug",
         "license_decision"
       ],
       "properties": {
@@ -135,8 +136,41 @@
         "exclusion_reason": {
           "type": ["string", "null"]
         },
+        "repo_slug": {
+          "type": "string",
+          "minLength": 1
+        },
         "license_decision": {
-          "type": ["string", "null"]
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason_code",
+            "spdx_id",
+            "policy_version",
+            "evidence_ref",
+            "repo_slug"
+          ],
+          "properties": {
+            "status": {
+              "enum": ["admitted", "rejected"]
+            },
+            "reason_code": {
+              "type": ["string", "null"]
+            },
+            "spdx_id": {
+              "type": ["string", "null"]
+            },
+            "policy_version": {
+              "type": "string"
+            },
+            "evidence_ref": {
+              "type": "string"
+            },
+            "repo_slug": {
+              "type": "string"
+            }
+          }
         }
       }
     }

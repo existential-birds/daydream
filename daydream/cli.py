@@ -579,6 +579,15 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         "--bundle-root before the projection runs",
     )
     parser.add_argument(
+        "--license-policy",
+        type=Path,
+        default=None,
+        dest="license_policy",
+        metavar="PATH",
+        help="Digest-pinned license policy JSON; every record's per-repo license "
+        "decision is resolved from it (required)",
+    )
+    parser.add_argument(
         "--annotations-snapshot",
         type=Path,
         default=None,
@@ -671,6 +680,14 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             "(_SUCCESS + SHA256SUMS + lineage.json + annotations.jsonl).",
         )
         return 1
+    if args.license_policy is None:
+        print_error(
+            create_console(),
+            "Missing --license-policy",
+            "A corpus v2 build requires a pinned license policy file; per-repo "
+            "license decisions are resolved from it (fail-closed).",
+        )
+        return 1
 
     # --out names the corpus JSONL; the projector writes its canonical file set
     # (corpus.jsonl, corpus-v2.jsonl, split manifests, lineage.json) into that
@@ -685,6 +702,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             out_dir=out_dir,
             bundle_dir=args.bundle_root,
             annotation_bundle_dir=args.annotation_bundle_dir,
+            license_policy_path=args.license_policy,
             as_of=args.as_of,
         )
     except ValueError as exc:
