@@ -796,6 +796,26 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
     )
 
+    # Human license report (issue #1080 M7): the digest-pinned policy, the C5
+    # exclusion-list digest, the copyleft opt-ins, every per-repo decision, and
+    # the decision distribution — a pure function of the bundle + policy +
+    # exclusion.txt bytes, so re-runs are byte-identical. Written atomically
+    # before ``_SUCCESS`` so the completeness gate covers it; the C5 refusal
+    # above means this file only ever exists on clean builds.
+    license_report = {
+        "policy": {"policy_version": policy.policy_version, "digest": policy_digest},
+        "exclusion_list_digest": lineage["exclusion_list_digest"],
+        "copyleft_opt_ins": sorted(config.allow_copyleft),
+        "decisions": dict(sorted(
+            (str(decision["repo_slug"]), decision) for decision in decisions.values()
+        )),
+        "distribution": _license_decision_distribution(decisions),
+    }
+    _atomic_write(
+        config.out_dir / "license-report.json",
+        json.dumps(license_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+    )
+
     # Completeness marker (mirrors the bundle's own ``_SUCCESS`` gate): the
     # projection file set is only consumable once every member is in place,
     # so a mid-write failure never leaves a partial projection behind.
@@ -812,4 +832,5 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "caps": {"configured": dict(sorted(config.caps.items())),
                  "applied": _caps_applied(records, config.caps)},
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
+        "license_distribution": _license_decision_distribution(decisions),
     }

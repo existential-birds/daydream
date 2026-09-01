@@ -24,6 +24,7 @@ import re
 import shutil
 import time
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path, PurePosixPath
@@ -33,8 +34,12 @@ from daydream.archive import hydrate_rules, sanitize
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.hydrate_rules import (
     REASON_CODE_BUNDLE_UNREADABLE,
+    REASON_CODE_C5_EXCLUDED_REPO,
+    REASON_CODE_C8_COPYLEFT_UNOPTED,
     REASON_CODE_IDENTITY_COLLISION,
+    REASON_CODE_LICENSE_EVIDENCE_MISSING,
     REASON_CODE_PATH_TRAVERSAL,
+    REASON_CODE_REPO_IDENTITY_MISSING,
     REASON_CODE_SANITIZE_FAILED,
     REASON_CODE_SECRETS_SCAN_DIRTY,
     REASON_CODE_UNTRUSTED_REMOTE_HOST,
@@ -1154,6 +1159,67 @@ def _latest_admitted_digests(path: Path) -> dict[str, str | None]:
     return latest
 
 
+def admission_summary_buckets(
+    entries: Iterable[tuple[str, str | None]],
+) -> dict[str, int]:
+    """Pure four-bucket license summary over ``(session_id, reason_code)``
+    admission decisions (issue #1080 S2).
+
+    ``None`` counts as admitted; the stable Task-1 rejection codes map to the
+    human buckets (``repo_identity_missing`` folds into
+    ``license_evidence_missing`` — missing identity is missing evidence for
+    the license gate). Any other code is not a license-gate decision and
+    raises: the bucket sum equals the license-gate session count by
+    construction (M8).
+    """
+    code_map = {
+        REASON_CODE_C5_EXCLUDED_REPO: "c5_excluded",
+        REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
+        REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
+        REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
+    }
+    buckets: dict[str, int] = {
+        "admitted": 0,
+        "c5_excluded": 0,
+        "c8_copyleft_unopted": 0,
+        "license_evidence_missing": 0,
+    }
+    for _sid, code in entries:
+        if code is None:
+            buckets["admitted"] += 1
+        elif code in code_map:
+            buckets[code_map[code]] += 1
+        else:
+            raise ValueError(
+                f"license admission summary: {code!r} is not a license-gate "
+                "reason code — the summary buckets only partition license decisions"
+            )
+    return buckets
+
+
+def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
+    """Human admission summary derived from the built import ledger.
+
+    Imported sessions count as admitted; rejections count only when they
+    carry a license-gate reason code (ingest/fixture rejections were never
+    adjudicated by the license gate and are skipped).
+    """
+    entries: list[tuple[str, str | None]] = [
+        (str(item["session_id"]), None) for item in ledger.get("imported", [])
+    ]
+    license_codes = {
+        REASON_CODE_C5_EXCLUDED_REPO,
+        REASON_CODE_C8_COPYLEFT_UNOPTED,
+        REASON_CODE_LICENSE_EVIDENCE_MISSING,
+        REASON_CODE_REPO_IDENTITY_MISSING,
+    }
+    for item in ledger.get("rejections", []):
+        code = item.get("reason_code")
+        if code in license_codes:
+            entries.append((str(item["session_id"]), str(code)))
+    return admission_summary_buckets(entries)
+
+
 def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> dict[str, Any]:
     """Build and persist the value-free admission ledger (issue #982 M11).
 
@@ -1662,6 +1728,10 @@ class HydrateSummary:
     dry_run_incomplete_manifests: tuple[str, ...] = ()
     verify_admitted: int = 0
     verified: bool = False
+    # Issue #1080 S2: four-bucket license admission summary (admitted /
+    # c5-excluded / copyleft-unopted / evidence-missing) over the import
+    # ledger; empty when no license policy was configured.
+    license_admission: dict[str, int] = field(default_factory=dict)
 
 
 def _curation_manifest_doc(
@@ -1957,6 +2027,11 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
             allow_copyleft=config.allow_copyleft,
         )
     ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
+    license_admission = (
+        license_admission_summary(ledger)
+        if config.license_policy_path is not None
+        else {}
+    )
     curation_id = str(ledger["curation_id"])
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
     publish_batches(
@@ -1975,6 +2050,7 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
         dry_run_admitted=int(ledger["tallies"]["imported"]),
         dry_run_rejected=int(ledger["tallies"]["rejections"]),
         dry_run_incomplete_manifests=tuple(ledger["tallies"]["incomplete_manifests"]),
+        license_admission=license_admission,
     )
     summary.verify_admitted = verify_publication(
         dest_client,

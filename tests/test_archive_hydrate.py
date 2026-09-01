@@ -883,3 +883,42 @@ class TestLicenseAdmissionGate:
         assert rows["sess-a"]["license_evidence"] == {"spdx_id": "MIT", "source": "manifest"}
         assert rows["sess-c5"]["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
         assert rows["sess-c5"]["status"] == "excluded"
+
+
+class TestAdmissionSummary:
+    """Issue #1080 task 9 (S2): per-repo human summary over the admission ledger."""
+
+    def test_admission_summary_buckets_every_session(self, tmp_path: Path) -> None:
+        gate = TestLicenseAdmissionGate()
+        stage = gate._seed_stage(tmp_path, {
+            "sess-a": gate._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+            "sess-c5": gate._session_manifest("sess-c5", "getsentry/sentry", spdx="MIT"),
+            "sess-gpl": gate._session_manifest("sess-gpl", "owner/gpl-repo", spdx="GPL-3.0-only"),
+            "sess-noev": gate._session_manifest("sess-noev", "owner/noev-repo"),
+        })
+        hydrate.apply_license_gate(
+            stage, revision=gate.REV,
+            license_policy_path=gate._write_policy(tmp_path), allow_copyleft=frozenset())
+        ledger = hydrate.build_import_ledger(stage, revision=gate.REV, source_commit=gate.REV)
+        summary = hydrate.license_admission_summary(ledger)
+        assert summary["admitted"] == 1
+        assert summary["c5_excluded"] == 1
+        assert summary["c8_copyleft_unopted"] == 1
+        assert summary["license_evidence_missing"] == 1
+        # M8: the buckets partition the license-gate sessions by construction.
+        assert sum(summary.values()) == 4
+
+    def test_admission_summary_pure_helper_buckets_seed_entries(self) -> None:
+        entries: list[tuple[str, str | None]] = [
+            ("s1", None),
+            ("s2", hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO),
+            ("s3", hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED),
+            ("s4", hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING),
+            ("s5", hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING),
+        ]
+        summary = hydrate.admission_summary_buckets(entries)
+        assert summary["admitted"] == 1
+        assert summary["c5_excluded"] == 1
+        assert summary["c8_copyleft_unopted"] == 1
+        assert summary["license_evidence_missing"] == 2  # identity-missing folds in
+        assert sum(summary.values()) == 5

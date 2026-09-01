@@ -1075,3 +1075,55 @@ def test_build_lineage_pins_license_policy_and_decisions(
         }
     }
     assert lineage["license_decision_distribution"] == {"admitted": 1}
+
+
+# ---------------------------------------------------------------------------
+# Task 9: digest-pinned license report artifact
+# ---------------------------------------------------------------------------
+
+
+def _sha256_of_exclusion_txt() -> str:
+    import hashlib as _hashlib  # noqa: PLC0415
+
+    from daydream.training.exclusion import EXCLUSION_PATH  # noqa: PLC0415
+
+    return _hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
+
+
+def test_license_report_artifact_is_deterministic(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    config = _config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path))
+    run_build_corpus_v2(config)
+    report_path = tmp_path / "out" / "license-report.json"
+    assert report_path.is_file()
+    report = json.loads(report_path.read_text())
+    assert report["policy"]["policy_version"] == "1"
+    assert report["policy"]["digest"] == hashlib.sha256(
+        _policy_file(tmp_path).read_bytes()
+    ).hexdigest()
+    assert report["exclusion_list_digest"] == _sha256_of_exclusion_txt()
+    assert report["copyleft_opt_ins"] == []
+    assert report["decisions"]["owner/repo-a"]["status"] == "admitted"
+    assert set(report["distribution"]) >= {"admitted"}
+    # Byte-identical replay of the report alone (pure function of the
+    # bundle + policy + exclusion.txt bytes):
+    first = report_path.read_bytes()
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path / "again",
+                                    license_policy=_policy_file(tmp_path)))
+    assert (tmp_path / "again" / "out" / "license-report.json").read_bytes() == first
+
+
+def test_license_report_written_before_success_marker(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    # The completeness gate covers the report: it exists on every clean build
+    # that publishes _SUCCESS, and the summary exposes the distribution.
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    summary = run_build_corpus_v2(
+        _config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path))
+    )
+    assert (tmp_path / "out" / "_SUCCESS").is_file()
+    assert (tmp_path / "out" / "license-report.json").is_file()
+    assert summary["license_distribution"] == {"admitted": 1}

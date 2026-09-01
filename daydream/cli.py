@@ -1777,6 +1777,15 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         f"rejected {summary.dry_run_rejected} batch(es); "
         f"verify admitted {summary.verify_admitted} batch(es)",
     )
+    if summary.license_admission:
+        buckets = summary.license_admission
+        print_info(
+            console,
+            "license admission: "
+            f"admitted {buckets['admitted']}; c5-excluded {buckets['c5_excluded']}; "
+            f"copyleft-unopted {buckets['c8_copyleft_unopted']}; "
+            f"evidence-missing {buckets['license_evidence_missing']}",
+        )
     if summary.dry_run_incomplete_manifests:
         print_warning(
             console,
