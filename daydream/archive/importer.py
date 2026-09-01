@@ -12,12 +12,110 @@ always accounts for every record.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
-__all__ = ["link_session_identity"]
+__all__ = ["canonical_payload_digest", "dedupe_observations", "link_session_identity"]
 
 _REASON_UNMATCHED = "no_hub_entry"
 _REASON_CONFLICT = "derivative_digest_conflict"
+
+# The writer's versioned auto-dedup tuple (daydream/archive/index.py): the
+# evidence identity key. A policy-version bump, reward-version bump, or
+# edited-reply digest change appends a new generation instead of deduping.
+_TUPLE_FIELDS = (
+    "evidence_sha",
+    "labeler_policy_version",
+    "reply_evidence_digest",
+    "labels",
+    "has_posterior",
+    "reward_version",
+)
+
+
+def canonical_payload_digest(row: dict[str, Any], *, include_observed_at: bool) -> str:
+    """Content digest over the canonical-JSON observation payload.
+
+    The bitemporal ``observed_at`` stamp is excluded for auto rows — identical
+    evidence captured by two overlapping backups at different capture times
+    must dedupe regardless of ``observed_at`` (the SQLite PK
+    ``(session_id, observed_at)`` in the target handles identical-timestamp
+    overlap). Human rows include it: they are never auto-deduped by the
+    writer, so only byte-identical human rows collapse.
+    """
+    payload = {k: v for k, v in row.items() if include_observed_at or k != "observed_at"}
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _dedup_tuple(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row["source"],
+        *(row.get(field) for field in _TUPLE_FIELDS),
+    )
+
+
+def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, Any]:
+    """Merge inventory rows across overlapping backups, deduping by content.
+
+    Args:
+        inventories: One list of ``label_observations`` rows per backup root,
+            each row carrying the table's columns (including ``source``).
+
+    Returns:
+        ``{"rows": [...], "deduped_count": int, "content_conflict": [...]}``
+        where ``rows`` is the deterministic merged row set and
+        ``content_conflict`` holds rows whose dedup tuple matched across
+        inventories but whose immutable payload digests disagreed — ambiguous
+        evidence, reported rather than silently resolved. ``deduped_count``
+        counts dropped duplicate rows (the conflict bucket keeps its rows, so
+        bucket rows + surviving rows always account for every input row).
+
+    Dedupe key: the writer's versioned auto-dedup tuple plus the canonical
+    payload digest. Identical evidence with identical payload dedupes
+    regardless of ``observed_at``; the surviving row keeps the earliest
+    ``observed_at``. Distinct evidence generations are never collapsed —
+    every generation survives (M3, never keep-latest).
+
+    Deterministic: the merged rows are sorted by ``session_id`` then
+    ``observed_at`` (then payload digest), so inventory input order cannot
+    affect the output — byte-identical re-import by construction (M4/AC1).
+    """
+    # Group every input row by dedup tuple, carrying its payload digest.
+    groups: dict[tuple[Any, ...], list[tuple[dict[str, Any], str]]] = {}
+    for inventory in inventories:
+        for row in inventory:
+            human = row["source"] != "auto"
+            key = _dedup_tuple(row)
+            if human:
+                # Human rows are never auto-deduped by the writer: only
+                # byte-identical rows (including observed_at) collapse, and
+                # distinct stamps are legitimate generations — never
+                # content conflicts.
+                key = (*key, canonical_payload_digest(row, include_observed_at=True))
+            groups.setdefault(key, []).append(
+                (row, canonical_payload_digest(row, include_observed_at=human))
+            )
+
+    rows: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    deduped_count = 0
+    for group in groups.values():
+        digests = {digest for _, digest in group}
+        if len(digests) > 1:
+            # Same dedup tuple, differing immutable payloads: ambiguous.
+            conflicts.extend(row for row, _ in group)
+            continue
+        # Byte-identical payload: keep one representative with the earliest
+        # observed_at; drop the rest as duplicates.
+        ordered = sorted(group, key=lambda item: (str(item[0]["observed_at"]), item[1]))
+        rows.append(ordered[0][0])
+        deduped_count += len(ordered) - 1
+
+    rows.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r["source"]))
+    conflicts.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r["source"]))
+    return {"rows": rows, "deduped_count": deduped_count, "content_conflict": conflicts}
 
 
 def link_session_identity(
