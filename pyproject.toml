@@ -12,7 +12,7 @@ dependencies = [
     "httpx>=0.28",
     "PyJWT>=2.0",
     "jsonschema>=4.0",
-    "tree-sitter==0.26.0",
+    "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "tree-sitter-typescript==0.23.2",
     "tree-sitter-go==0.25.0",
