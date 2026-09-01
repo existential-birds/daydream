@@ -20,13 +20,26 @@ from typing import Any
 
 import pytest
 
+from daydream.archive.hydrate_rules import (
+    HYDRATION_INDEX_SCHEMA_VERSION,
+    REASON_CODE_IMPORT_DECISIVE_PER_FINDING,
+    REASON_CODE_IMPORT_IDENTITY_CONFLICT,
+    REASON_CODE_IMPORT_INVALID_VERSION,
+    REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
+    REASON_CODE_IMPORT_STALE_EVIDENCE,
+    REASON_CODE_IMPORT_UNMATCHED_SESSION,
+)
 from daydream.archive.importer import (
+    IMPORT_REASON_CODES,
+    accounting,
+    build_import_ledger,
     canonical_payload_digest,
     classify_run_level,
     dedupe_observations,
     gold_eligible,
     link_session_identity,
     merge_imported_observations,
+    run_pure_import,
 )
 from daydream.archive.index import (
     append_label_observation,
@@ -516,6 +529,151 @@ def test_buckets_account_for_every_row() -> None:
     total = sum(len(v) for v in out["per_finding"].values())
     total += len(out["run_level_only"]) + len(out["ambiguous_run_mapping"])
     assert total == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 7: reason-coded accounting (M7, KD5)
+# ---------------------------------------------------------------------------
+
+SIX_BUCKET_CODES = IMPORT_REASON_CODES
+
+
+def _import_row(
+    session_id: str,
+    *,
+    evidence_sha: str,
+    derivative_digest: str = D,
+    versions: str = "gold",
+) -> dict[str, Any]:
+    """One inventory-shaped observation row with distinct evidence per session.
+
+    ``versions="gold"`` stamps the known-versions allowlist axes;
+    anything else stamps an unknown version (non-gold, M6).
+    """
+    if versions == "gold":
+        labeler, policy, classifier = "980-rubric-r2", "980-policy-r1", "980-classifier-r1"
+    else:
+        labeler = policy = classifier = "9999-future-r9"
+    return {
+        "session_id": session_id,
+        "observed_at": _OBSERVED_A,
+        "labels": '["accepted"]',
+        "pr_state": None,
+        "labeler_version": labeler,
+        "evidence_sha": evidence_sha,
+        "rubric_json": None,
+        "valid_at": None,
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "source": "auto",
+        "labeler_policy_version": policy,
+        "reply_classifier_version": classifier,
+        "reply_evidence_digest": None,
+        "derivative_digest": derivative_digest,
+        "repo_slug": "org/repo",
+        "base_sha": "a" * 40,
+        "head_sha": "b" * 40,
+    }
+
+
+def _six_row_fixture() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """One row per bucket, each session distinct (no dedupe overlap).
+
+    Returns (inventory rows, hydrated_index, projector_findings) covering:
+    unmatched, identity conflict, stale evidence (ambiguous run mapping),
+    invalid version, decisive per-finding, and run-level-only.
+    """
+    rows = [
+        _import_row("s-unmatched", evidence_sha="1" * 64),
+        _import_row("s-conflict", evidence_sha="2" * 64),
+        _import_row("s-stale", evidence_sha="3" * 64),
+        _import_row("s-invalid", evidence_sha="4" * 64, versions="unknown"),
+        _import_row("s-perfinding", evidence_sha="5" * 64),
+        _import_row("s-runlevel", evidence_sha="6" * 64),
+    ]
+    hydrated_index = {
+        "s-conflict": {"derivative_digest": "e" * 64, "record_id": "rec-conflict"},
+        "s-stale": {"derivative_digest": D, "record_id": "rec-stale"},
+        "s-invalid": {"derivative_digest": D, "record_id": "rec-invalid"},
+        "s-perfinding": {"derivative_digest": D, "record_id": "rec-pf"},
+        "s-runlevel": {"derivative_digest": D, "record_id": "rec-rl"},
+    }
+    projector_findings = {
+        "s-stale": [{"record_id": "r1", "evidence_sha": "z" * 64}],  # no digest match
+        "s-perfinding": [{"record_id": "r1", "evidence_sha": "5" * 64}],  # decisive
+    }
+    return rows, hydrated_index, projector_findings
+
+
+def test_reason_codes_sum_to_source_row_count() -> None:
+    rows, hydrated_index, projector_findings = _six_row_fixture()
+    result = run_pure_import(
+        [rows],
+        hydrated_index=hydrated_index,
+        repo_slug_sha_lookup={},
+        projector_findings=projector_findings,
+    )
+    counts = [result["accounting"][code] for code in SIX_BUCKET_CODES]
+    assert set(result["accounting"]) == set(SIX_BUCKET_CODES)
+    assert sum(counts) == len(rows)  # M7: bucket sum == source row count
+
+
+def test_each_bucket_reason_stable() -> None:
+    rows, hydrated_index, projector_findings = _six_row_fixture()
+    result = run_pure_import(
+        [rows],
+        hydrated_index=hydrated_index,
+        repo_slug_sha_lookup={},
+        projector_findings=projector_findings,
+    )
+    acc = result["accounting"]
+    assert acc[REASON_CODE_IMPORT_UNMATCHED_SESSION] == 1
+    assert acc[REASON_CODE_IMPORT_IDENTITY_CONFLICT] == 1
+    assert acc[REASON_CODE_IMPORT_STALE_EVIDENCE] == 1
+    assert acc[REASON_CODE_IMPORT_INVALID_VERSION] == 1
+    assert acc[REASON_CODE_IMPORT_DECISIVE_PER_FINDING] == 1
+    assert acc[REASON_CODE_IMPORT_RUN_LEVEL_ONLY] == 1
+
+
+def test_ledger_mirrors_hydrate_import_ledger_shape() -> None:
+    rows, hydrated_index, projector_findings = _six_row_fixture()
+    result = run_pure_import(
+        [rows],
+        hydrated_index=hydrated_index,
+        repo_slug_sha_lookup={},
+        projector_findings=projector_findings,
+    )
+    ledger = build_import_ledger(result)
+    assert ledger["schema_version"] == HYDRATION_INDEX_SCHEMA_VERSION
+    assert set(ledger["accounting"]) == set(SIX_BUCKET_CODES)
+    assert sum(ledger["accounting"].values()) == len(ledger["observations"])
+    assert len(ledger["observations"]) == len(rows)
+    by_sid = {e["session_id"]: e for e in ledger["observations"]}
+    assert by_sid["s-unmatched"]["reason_code"] == REASON_CODE_IMPORT_UNMATCHED_SESSION
+    assert by_sid["s-conflict"]["reason_code"] == REASON_CODE_IMPORT_IDENTITY_CONFLICT
+    assert by_sid["s-stale"]["reason_code"] == REASON_CODE_IMPORT_STALE_EVIDENCE
+    assert by_sid["s-invalid"]["reason_code"] == REASON_CODE_IMPORT_INVALID_VERSION
+    assert by_sid["s-perfinding"]["reason_code"] == REASON_CODE_IMPORT_DECISIVE_PER_FINDING
+    assert by_sid["s-runlevel"]["reason_code"] == REASON_CODE_IMPORT_RUN_LEVEL_ONLY
+    for entry in ledger["observations"]:
+        assert set(entry) == {"session_id", "observed_at", "source", "reason_code"}
+
+
+def test_unclassifiable_row_raises_naming_it() -> None:
+    # A merged row absent from every link/run-level result and carrying no
+    # dedupe conflict: fail closed with a ValueError naming the row — never
+    # an implicit drop (M7).
+    row = _import_row("s-orphan", evidence_sha="7" * 64)
+    with pytest.raises(ValueError, match="s-orphan"):
+        accounting(
+            [row],
+            content_conflict=[],
+            link_result={"linked": {}, "unmatched": {}, "identity_conflict": {}},
+            run_level_result={"per_finding": {}, "run_level_only": {}, "ambiguous_run_mapping": {}},
+        )
 
 
 # ---------------------------------------------------------------------------

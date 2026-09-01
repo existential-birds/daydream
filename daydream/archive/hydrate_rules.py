@@ -26,6 +26,17 @@ REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
 REASON_CODE_IDENTITY_COLLISION = "identity_collision"
 REASON_CODE_PATH_TRAVERSAL = "path_traversal"
 
+# Import-specific reason codes (issue #1082 local-observation importer, fixed
+# registry). Every imported observation row maps to exactly one of these six
+# buckets; the sum over the buckets always equals the source row inventory
+# count (M7) and the codes are stable strings (KD5).
+REASON_CODE_IMPORT_UNMATCHED_SESSION = "import_unmatched_session"
+REASON_CODE_IMPORT_IDENTITY_CONFLICT = "import_identity_conflict"
+REASON_CODE_IMPORT_STALE_EVIDENCE = "import_stale_evidence"
+REASON_CODE_IMPORT_INVALID_VERSION = "import_invalid_version"
+REASON_CODE_IMPORT_DECISIVE_PER_FINDING = "import_decisive_per_finding"
+REASON_CODE_IMPORT_RUN_LEVEL_ONLY = "import_run_level_only"
+
 # ---------------------------------------------------------------------------
 # Curation-id derivation (Task 3)
 # ---------------------------------------------------------------------------

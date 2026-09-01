@@ -17,17 +17,41 @@ import json
 from pathlib import Path
 from typing import Any
 
+from daydream.archive.hydrate_rules import (
+    HYDRATION_INDEX_SCHEMA_VERSION,
+    REASON_CODE_IMPORT_DECISIVE_PER_FINDING,
+    REASON_CODE_IMPORT_IDENTITY_CONFLICT,
+    REASON_CODE_IMPORT_INVALID_VERSION,
+    REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
+    REASON_CODE_IMPORT_STALE_EVIDENCE,
+    REASON_CODE_IMPORT_UNMATCHED_SESSION,
+)
 from daydream.archive.index import append_label_observation
 from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 
 __all__ = [
+    "IMPORT_REASON_CODES",
+    "accounting",
+    "build_import_ledger",
     "canonical_payload_digest",
     "classify_run_level",
     "dedupe_observations",
     "gold_eligible",
     "link_session_identity",
     "merge_imported_observations",
+    "run_pure_import",
 ]
+
+# The fixed six-bucket import accounting registry (M7): every imported
+# observation row lands in exactly one of these stable reason codes.
+IMPORT_REASON_CODES = (
+    REASON_CODE_IMPORT_UNMATCHED_SESSION,
+    REASON_CODE_IMPORT_IDENTITY_CONFLICT,
+    REASON_CODE_IMPORT_STALE_EVIDENCE,
+    REASON_CODE_IMPORT_INVALID_VERSION,
+    REASON_CODE_IMPORT_DECISIVE_PER_FINDING,
+    REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
+)
 
 # Writer columns consumed by append_label_observation; every other key on an
 # import row (legacy, payload_digest, ...) is importer metadata, not payload.
@@ -428,6 +452,187 @@ def classify_run_level(
         "per_finding": per_finding,
         "run_level_only": run_level_only,
         "ambiguous_run_mapping": ambiguous,
+    }
+
+
+def _row_reason_codes(
+    merged_rows: list[dict[str, Any]],
+    *,
+    content_conflict: list[dict[str, Any]],
+    link_result: dict[str, Any],
+    run_level_result: dict[str, Any],
+) -> list[tuple[dict[str, Any], str]]:
+    """Classify every row into exactly one import reason code (M7).
+
+    Precedence: dedupe/identity conflicts first (the row never got a home),
+    then the version gate, then the run-level routing. Raises ``ValueError``
+    naming any row that cannot be classified — never an implicit drop.
+    """
+    conflict_ids = {id(row) for row in content_conflict}
+    per_finding_ids = {
+        id(row)
+        for rows in run_level_result["per_finding"].values()
+        for row in rows
+    }
+    unmatched_sids = set(link_result["unmatched"])
+    link_conflict_sids = set(link_result["identity_conflict"])
+    run_level_only_sids = set(run_level_result["run_level_only"])
+    ambiguous_sids = set(run_level_result["ambiguous_run_mapping"])
+
+    classified: list[tuple[dict[str, Any], str]] = []
+    for row in (*content_conflict, *merged_rows):
+        session_id = str(row["session_id"])
+        if id(row) in conflict_ids or session_id in link_conflict_sids:
+            code = REASON_CODE_IMPORT_IDENTITY_CONFLICT
+        elif session_id in unmatched_sids:
+            code = REASON_CODE_IMPORT_UNMATCHED_SESSION
+        elif not gold_eligible(row):
+            code = REASON_CODE_IMPORT_INVALID_VERSION
+        elif id(row) in per_finding_ids:
+            code = REASON_CODE_IMPORT_DECISIVE_PER_FINDING
+        elif session_id in run_level_only_sids:
+            code = REASON_CODE_IMPORT_RUN_LEVEL_ONLY
+        elif session_id in ambiguous_sids:
+            code = REASON_CODE_IMPORT_STALE_EVIDENCE
+        else:
+            msg = (
+                f"imported observation for session {session_id!r} at "
+                f"{row.get('observed_at')!r} cannot be classified into an "
+                "import bucket; refusing to drop the row silently"
+            )
+            raise ValueError(msg)
+        classified.append((row, code))
+    return classified
+
+
+def accounting(
+    merged_rows: list[dict[str, Any]],
+    *,
+    content_conflict: list[dict[str, Any]],
+    link_result: dict[str, Any],
+    run_level_result: dict[str, Any],
+) -> dict[str, int]:
+    """Map every merged inventory row to exactly one import reason code (M7).
+
+    Args:
+        merged_rows: The surviving deduped rows (from
+            :func:`dedupe_observations`), each carrying ``session_id``.
+        content_conflict: Rows routed to the dedupe content-conflict bucket —
+            their evidence identity is ambiguous, so they account as
+            ``import_identity_conflict``.
+        link_result: The :func:`link_session_identity` result.
+        run_level_result: The :func:`classify_run_level` result.
+
+    Returns:
+        ``{reason_code: row_count}`` over :data:`IMPORT_REASON_CODES` whose
+        values sum to ``len(merged_rows) + len(content_conflict)``.
+
+    Raises:
+        ValueError: When a row cannot be classified into a named bucket —
+            never an implicit drop.
+    """
+    counts = {code: 0 for code in IMPORT_REASON_CODES}
+    for _row, code in _row_reason_codes(
+        merged_rows,
+        content_conflict=content_conflict,
+        link_result=link_result,
+        run_level_result=run_level_result,
+    ):
+        counts[code] += 1
+    return counts
+
+
+def run_pure_import(
+    inventories: list[list[dict[str, Any]]],
+    *,
+    hydrated_index: dict[str, dict[str, Any]],
+    repo_slug_sha_lookup: dict[tuple[str, str, str], Any],
+    projector_findings: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Compose the pure import pipeline: dedupe -> link -> run-level -> accounting.
+
+    Args:
+        inventories: One list of ``label_observations`` rows per backup root.
+        hydrated_index: See :func:`link_session_identity`.
+        repo_slug_sha_lookup: See :func:`link_session_identity`.
+        projector_findings: See :func:`classify_run_level`.
+
+    Returns:
+        ``{"rows", "deduped_count", "content_conflict", "link",
+        "run_level", "accounting", "ledger"}`` — the deterministic pipeline
+        result, where ``accounting`` sums to the full source row inventory
+        count (deduped rows + dedupe conflicts) and ``ledger`` is the
+        :func:`build_import_ledger` shape.
+    """
+    merged = dedupe_observations(inventories)
+    link_result = link_session_identity(
+        merged["rows"],
+        hydrated_index=hydrated_index,
+        repo_slug_sha_lookup=repo_slug_sha_lookup,
+    )
+    run_level_result = classify_run_level(
+        merged["rows"], projector_findings=projector_findings
+    )
+    counts = accounting(
+        merged["rows"],
+        content_conflict=merged["content_conflict"],
+        link_result=link_result,
+        run_level_result=run_level_result,
+    )
+    result: dict[str, Any] = {
+        "rows": merged["rows"],
+        "deduped_count": merged["deduped_count"],
+        "content_conflict": merged["content_conflict"],
+        "link": link_result,
+        "run_level": run_level_result,
+        "accounting": counts,
+    }
+    result["ledger"] = build_import_ledger(result)
+    return result
+
+
+def build_import_ledger(result: dict[str, Any]) -> dict[str, Any]:
+    """Shape the import result into the hydrate import-ledger format (KD5).
+
+    Mirrors ``daydream/archive/hydrate.py``'s ledger shape — a fixed schema
+    version plus ``{session_id, reason_code, ...}`` entries — so existing
+    ledger consumers see one format. Every source row appears exactly once;
+    the accounting sum is re-verified here and any mismatch raises (M7:
+    no silent drops).
+
+    Raises:
+        ValueError: When the bucket sum does not equal the accounted
+            observation count.
+    """
+    accounting = result["accounting"]
+    observations = sorted(
+        (
+            {
+                "session_id": str(row["session_id"]),
+                "observed_at": str(row["observed_at"]),
+                "source": str(row.get("source", "")),
+                "reason_code": code,
+            }
+            for row, code in _row_reason_codes(
+                result["rows"],
+                content_conflict=result["content_conflict"],
+                link_result=result["link"],
+                run_level_result=result["run_level"],
+            )
+        ),
+        key=lambda entry: (entry["session_id"], entry["observed_at"], entry["source"]),
+    )
+    if sum(accounting.values()) != len(observations):
+        msg = (
+            f"import accounting mismatch: buckets account for "
+            f"{sum(accounting.values())} row(s) but the ledger carries "
+            f"{len(observations)} observation(s)"
+        )
+        raise ValueError(msg)
+    return {
+        "schema_version": HYDRATION_INDEX_SCHEMA_VERSION,
+        "accounting": dict(accounting),
+        "observations": observations,
     }
 
 
