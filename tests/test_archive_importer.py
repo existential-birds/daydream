@@ -798,7 +798,7 @@ def test_drift_fails_closed_before_any_write(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     _seed_run(target)
-    good = {"session_id": SID, "source": "auto", "observed_at": _OBSERVED_A}
+    good: dict[str, Any] = {"session_id": SID, "source": "auto", "observed_at": _OBSERVED_A}
     row = dict(good)
     row.update(
         labels=["accepted"],
@@ -876,3 +876,105 @@ def test_human_source_appended_verbatim(tmp_path: Path) -> None:
     assert hist[0]["source"] == "human"
     assert hist[0]["observed_at"] == _OBSERVED_B
     assert hist[0]["labels"] == json.dumps(["rejected"])
+
+# ---------------------------------------------------------------------------
+# Task 8: fail-closed secret scan + redaction before publication (M9, AC6)
+# ---------------------------------------------------------------------------
+
+from daydream.archive.hydrate_rules import (  # noqa: E402
+    REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
+)
+from daydream.archive.importer import REDACTED_PATH, redact_imported_metadata  # noqa: E402
+from daydream.archive.scan import scan_run_dir  # noqa: E402
+
+
+def _metadata_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "session_id": SID,
+        "observed_at": _OBSERVED_A,
+        "source": "human",
+        "remote_url": "https://github.com/acme/widget.git",
+        "source_path": None,
+        "labels": [],
+        "pr_state": None,
+        "labeler_version": HUMAN_LABELER_VERSION,
+        "evidence_sha": None,
+        "rubric_json": None,
+        "valid_at": _OBSERVED_A,
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "labeler_policy_version": STALE_LEGACY,
+        "reply_classifier_version": None,
+        "reply_evidence_digest": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_clean_metadata_passes_scan(tmp_path: Path) -> None:
+    scan_dir = tmp_path / "scan"
+    result = redact_imported_metadata([_metadata_row()], scan_dir=scan_dir)
+    assert result["blocked"] is False
+    assert scan_dir.is_dir()
+    assert scan_run_dir(scan_dir).clean
+    # The payload file scanned is the redacted payload itself.
+    payload = json.loads((scan_dir / "payload.json").read_text(encoding="utf-8"))
+    assert payload == result["payload"]
+
+
+def test_absolute_paths_redacted(tmp_path: Path) -> None:
+    row = _metadata_row(
+        remote_url="/Users/k/proj",
+        source_path="/Users/k/proj/inner",
+        rubric_json=json.dumps({"workdir": "/Users/k/proj/build", "note": "ok"}),
+        reward_json=json.dumps([{"home": "/Users/k/proj/out"}]),
+    )
+    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
+    assert result["blocked"] is False
+    encoded = json.dumps(result["payload"])
+    assert "/Users/k" not in encoded
+    out_row = result["payload"][0]
+    assert REDACTED_PATH in out_row["remote_url"]
+    assert REDACTED_PATH in out_row["source_path"]
+    rubric = json.loads(out_row["rubric_json"])
+    assert rubric["workdir"] == REDACTED_PATH
+    assert rubric["note"] == "ok"
+    reward = json.loads(out_row["reward_json"])
+    assert reward[0]["home"] == REDACTED_PATH
+
+
+def test_credential_url_redacted(tmp_path: Path) -> None:
+    row = _metadata_row(remote_url="https://user:ghp_secret@github.com/acme/widget.git")
+    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
+    assert result["blocked"] is False
+    assert "ghp_secret" not in json.dumps(result["payload"])
+    assert scan_run_dir(tmp_path / "scan").clean
+
+
+def test_dirty_metadata_blocks_publish(tmp_path: Path) -> None:
+    # A credential-shaped string in a free-text field the redaction pass does
+    # not own cannot be made clean: the payload is flagged blocked — never
+    # downgraded to a warning, never dropped silently.
+    dirty = _metadata_row(notes="clone from https://user:secret1@github.com/x/y.git")
+    result = redact_imported_metadata([_metadata_row(), dirty], scan_dir=tmp_path / "scan")
+    assert scan_run_dir(tmp_path / "scan").clean is False
+    assert result["blocked"] is True
+    assert result["blocked_reasons"] == [REASON_CODE_IMPORT_UNREDACTABLE_METADATA]
+
+
+def test_blocked_payload_carries_marker_skipping(tmp_path: Path) -> None:
+    # Already-redacted markers are safe output, not secrets: a payload whose
+    # only "suspicious" text is our own marker scans clean.
+    row = _metadata_row(notes=f"workdir was {REDACTED_PATH}")
+    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
+    assert result["blocked"] is False
+    assert len(result["payload"]) == 1
+
+
+def test_malformed_rubric_json_raises(tmp_path: Path) -> None:
+    row = _metadata_row(rubric_json="{not json")
+    with pytest.raises(ValueError, match="rubric_json"):
+        redact_imported_metadata([row], scan_dir=tmp_path / "scan")

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +26,17 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
     REASON_CODE_IMPORT_STALE_EVIDENCE,
     REASON_CODE_IMPORT_UNMATCHED_SESSION,
+    REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
 from daydream.archive.index import append_label_observation
 from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
+from daydream.archive.sanitize import _sanitize_json_value
+from daydream.archive.scan import scan_run_dir
+from daydream.trajectory import redact_value
 
 __all__ = [
     "IMPORT_REASON_CODES",
+    "REDACTED_PATH",
     "accounting",
     "build_import_ledger",
     "canonical_payload_digest",
@@ -52,6 +58,17 @@ IMPORT_REASON_CODES = (
     REASON_CODE_IMPORT_DECISIVE_PER_FINDING,
     REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
 )
+
+# Marker replacing redacted absolute local paths. Carries the ``[REDACTED_``
+# prefix the scanner treats as already-safe output, so redacted payloads do
+# not flag their own markers.
+REDACTED_PATH = "[REDACTED_PATH]"
+
+# Absolute local path embedded inside a larger string. The lookbehind blocks
+# scheme separators (``https://…``) and UNC double slashes, so canonical git
+# URLs survive untouched; standalone path values are caught by the
+# startswith("/") check in :func:`_redact_path_string`.
+_EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![:/\w])(/[\w.-]+(?:/[\w.-]+)+)")
 
 # Writer columns consumed by append_label_observation; every other key on an
 # import row (legacy, payload_digest, ...) is importer metadata, not payload.
@@ -103,6 +120,109 @@ def canonical_payload_digest(row: dict[str, Any], *, include_observed_at: bool) 
     payload = {k: v for k, v in row.items() if include_observed_at or k != "observed_at"}
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _redact_path_string(value: str) -> str:
+    """Redact absolute local paths in one string value (never raises)."""
+    if value.startswith("/"):
+        return REDACTED_PATH
+    return _EMBEDDED_ABSOLUTE_PATH_RE.sub(REDACTED_PATH, value)
+
+
+def _redact_json_blob(value: Any, *, field: str, session_id: str) -> Any:
+    """Redact one ``rubric_json``/``reward_json`` payload (URL creds, secrets,
+    absolute local paths).
+
+    Raises:
+        ValueError: When a JSON-encoded string blob is malformed — never
+            silently substituted (fail-closed, names the row + field).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        was_string = True
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            msg = (
+                f"imported row for session {session_id!r} has malformed "
+                f"{field} JSON: {exc}"
+            )
+            raise ValueError(msg) from exc
+    else:
+        was_string = False
+    if not isinstance(value, (dict, list)):
+        return redact_value(_redact_path_string(str(value)))
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {key: _walk(child) for key, child in node.items()}
+        if isinstance(node, list):
+            return [_walk(child) for child in node]
+        if isinstance(node, str):
+            return redact_value(_redact_path_string(_sanitize_json_value(node)))
+        return node
+
+    redacted = _walk(value)
+    if was_string and isinstance(redacted, (dict, list)):
+        # Preserve the column's JSON-encoded string representation.
+        return json.dumps(redacted, sort_keys=True, default=str)
+    return redacted
+
+
+def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> dict[str, Any]:
+    """Redact pre-publication metadata and fail closed on uncleanable rows (M9, AC6).
+
+    Every row's ``remote_url`` and ``source_path`` are rewritten through the
+    sanitize module's URL authority plus absolute-path redaction, and the
+    ``rubric_json``/``reward_json`` blobs are walked string-leaf by string-leaf
+    through ``sanitize._sanitize_json_value`` + ``redact_value`` (reuse, not
+    reimplementation). The redacted payload is then serialized to
+    ``scan_dir/payload.json`` and re-scanned with the fail-closed
+    :func:`daydream.archive.scan.scan_run_dir`.
+
+    Returns:
+        ``{"payload": [...], "blocked": bool, "scan_summary": str,
+        "blocked_reasons": [...]}``. ``blocked`` is ``True`` only when the
+        post-redaction scan is dirty — the payload cannot be published; the
+        offending rows are kept in ``payload`` (never dropped silently) and
+        ``blocked_reasons`` carries the stable
+        ``import_unredactable_metadata`` reason code. Redaction runs before
+        ``publish_annotation_state`` (which re-scans and hard-fails on dirty).
+
+    Raises:
+        ValueError: When a ``rubric_json``/``reward_json`` blob is malformed
+            JSON — redaction errors propagate, never placeholder-substituted.
+    """
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        session_id = str(row.get("session_id", ""))
+        redacted = dict(row)
+        for field in ("remote_url", "source_path"):
+            value = redacted.get(field)
+            if isinstance(value, str):
+                redacted[field] = redact_value(_redact_path_string(_sanitize_json_value(value)))
+        redacted["rubric_json"] = _redact_json_blob(
+            redacted.get("rubric_json"), field="rubric_json", session_id=session_id
+        )
+        redacted["reward_json"] = _redact_json_blob(
+            redacted.get("reward_json"), field="reward_json", session_id=session_id
+        )
+        payload.append(redacted)
+
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    payload_path = scan_dir / "payload.json"
+    payload_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
+    )
+    scan = scan_run_dir(scan_dir)
+    blocked = not scan.clean
+    return {
+        "payload": payload,
+        "blocked": blocked,
+        "scan_summary": scan.summary(),
+        "blocked_reasons": [REASON_CODE_IMPORT_UNREDACTABLE_METADATA] if blocked else [],
+    }
 
 
 def _planned_append(row: dict[str, Any]) -> dict[str, Any]:
