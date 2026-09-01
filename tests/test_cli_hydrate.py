@@ -54,6 +54,7 @@ def test_success_path_drives_orchestrator(
         dry_run_rejected = 0
         dry_run_incomplete_manifests: tuple[str, ...] = ()
         verify_admitted = 1
+        license_admission: dict[str, int] = {}
 
     def fake_run(config: Any) -> FakeSummary:
         calls.append(config)
@@ -68,6 +69,47 @@ def test_success_path_drives_orchestrator(
     assert calls and calls[0].source_revision == "a" * 40
 
 
+def test_cli_wires_license_policy_into_hydration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--license-policy/--allow-copyleft reach HydrateHubConfig, and the
+    previously unreachable license admission summary prints (issue #1080)."""
+    calls: list[Any] = []
+
+    class FakeSummary:
+        curation_id = "cur-" + "0" * 16
+        output_commit_sha = "b" * 40
+        verified = True
+        dry_run_discovered = 2
+        dry_run_admitted = 1
+        dry_run_rejected = 1
+        dry_run_incomplete_manifests: tuple[str, ...] = ()
+        verify_admitted = 1
+        license_admission = {
+            "admitted": 1, "c5_excluded": 1,
+            "c8_copyleft_unopted": 0, "license_evidence_missing": 0,
+        }
+
+    def fake_run(config: Any) -> FakeSummary:
+        calls.append(config)
+        return FakeSummary()
+
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
+    policy = tmp_path / "license-policy.json"
+    policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
+    rc = cli._handle_hydrate_hub_command(
+        ["--source-repo", "org/ds", "--source-revision", "a" * 40,
+         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path),
+         "--license-policy", str(policy),
+         "--allow-copyleft", "Owner/Gpl-Repo"])
+    assert rc == 0
+    assert calls and calls[0].license_policy_path == str(policy)
+    assert calls[0].allow_copyleft == frozenset({"owner/gpl-repo"})
+    output = " ".join(capsys.readouterr().out.split())
+    assert "license admission: admitted 1; c5-excluded 1" in output
+
+
 def test_success_path_surfaces_incomplete_manifests(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -80,6 +122,7 @@ def test_success_path_surfaces_incomplete_manifests(
         dry_run_rejected = 0
         dry_run_incomplete_manifests = ("sess-a (missing trajectory.json)",)
         verify_admitted = 1
+        license_admission: dict[str, int] = {}
 
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", lambda _config: FakeSummary())

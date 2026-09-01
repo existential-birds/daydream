@@ -14,6 +14,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from daydream.archive.hydrate_rules import (
+    REASON_CODE_LICENSE_EVIDENCE_MISSING,
+    REASON_CODE_REPO_IDENTITY_MISSING,
+)
+
 _SCHEMA_PATH = Path(__file__).parent.parent / "schema" / "curation-manifest-v1.json"
 # The only producer (daydream.archive.hydrate.finalize) writes the manifest as
 # ``curation-manifest.json`` under ``curated/<curation-id>/``; the bundle root
@@ -28,7 +33,13 @@ class BundleError(ValueError):
 
 
 class BundleBatch(BaseModel):
-    """One batch row from the curation manifest (v1 shape)."""
+    """One batch row from the curation manifest.
+
+    The optional ``repo_slug`` (the ``normalize_remote_url`` slug, never a raw
+    remote URL) and ``license_evidence`` (``spdx_id`` + ``source``) fields are
+    carried by newer manifests; the admission gate, not this parser, enforces
+    their presence.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -39,6 +50,9 @@ class BundleBatch(BaseModel):
     artifact_relpath: str
     artifact_digest: str | None = None
     manifest_relpath: str | None = None
+    repo_slug: str | None = None
+    license_evidence: dict[str, Any] | None = None
+
 
 
 @dataclass(frozen=True)
@@ -102,9 +116,12 @@ def _validate_relpath(root: Path, relpath: str, what: str) -> Path:
 def load_curated_bundle(root: Path) -> CuratedBundle:
     """Load a curated bundle from a local checkout, gating in order: the
     ``_SUCCESS`` marker, curation-manifest schema validation (which yields the
-    canonical ``publication_prefix``), SHA256SUMS verification, and
-    relative-path existence for every batch's artifacts. Raises
-    :class:`BundleError` naming the offending path/field on any gate failure.
+    canonical ``publication_prefix``), SHA256SUMS verification,
+    relative-path existence for every batch's artifacts, and the admission
+    gate (every ``admitted`` batch must carry non-blank ``repo_slug`` and
+    ``license_evidence`` with a non-empty ``spdx_id``; quarantined/excluded
+    rows are exempt). Raises :class:`BundleError` naming the offending
+    path/field on any gate failure.
     """
     root = Path(root)
     _gate((root / _SUCCESS_NAME).is_file(), f"bundle {root}: missing {_SUCCESS_NAME} marker")
@@ -131,6 +148,25 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
         _validate_relpath(root, batch.artifact_relpath, "artifact_relpath")
         if batch.manifest_relpath is not None:
             _validate_relpath(root, batch.manifest_relpath, "manifest_relpath")
+
+    # Admission gate: pure structural check on manifest rows — the admission
+    # decision was made at hydration; this boundary refuses bundles that
+    # predate the gate. Only admitted content is blocked; quarantined and
+    # excluded rows are non-admitted by construction.
+    for batch in batches:
+        if batch.status != "admitted":
+            continue
+        if not batch.repo_slug or not batch.repo_slug.strip():
+            raise BundleError(
+                f"bundle {root}: admitted batch {batch.session_id!r}: "
+                f"{REASON_CODE_REPO_IDENTITY_MISSING}"
+            )
+        evidence = batch.license_evidence
+        if not evidence or not isinstance(evidence.get("spdx_id"), str) or not evidence["spdx_id"].strip():
+            raise BundleError(
+                f"bundle {root}: admitted batch {batch.session_id!r}: "
+                f"{REASON_CODE_LICENSE_EVIDENCE_MISSING}"
+            )
 
     return CuratedBundle(
         curation_id=doc["curation_id"],

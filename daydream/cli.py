@@ -579,12 +579,38 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         "--bundle-root before the projection runs",
     )
     parser.add_argument(
+        "--license-policy",
+        type=Path,
+        default=None,
+        dest="license_policy",
+        metavar="PATH",
+        help="Digest-pinned license policy JSON; every record's per-repo license "
+        "decision is resolved from it (required)",
+    )
+    parser.add_argument(
         "--annotations-snapshot",
         type=Path,
         default=None,
         dest="annotations_snapshot",
         metavar="PATH",
         help=argparse.SUPPRESS,  # deprecated: refused in the handler
+    )
+    parser.add_argument(
+        "--repo-slug",
+        type=str,
+        default=None,
+        dest="repo_slug",
+        metavar="SLUG",
+        help=argparse.SUPPRESS,  # URL-identity smuggling: refused in the handler
+    )
+    parser.add_argument(
+        "--allow-copyleft",
+        action="append",
+        default=[],
+        dest="allow_copyleft",
+        metavar="OWNER/REPO",
+        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        "owner/repo slug (case-insensitive)",
     )
     parser.add_argument(
         "--out",
@@ -671,6 +697,33 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             "(_SUCCESS + SHA256SUMS + lineage.json + annotations.jsonl).",
         )
         return 1
+    if args.repo_slug is not None:
+        print_error(
+            create_console(),
+            "Unsupported --repo-slug",
+            "A raw remote URL (or any override slug) is never a repo identity; "
+            "per-repo identity comes from the curation manifest, which the "
+            "bundle gate verifies.",
+        )
+        return 1
+    if args.license_policy is None:
+        print_error(
+            create_console(),
+            "Missing --license-policy",
+            "A corpus v2 build requires a pinned license policy file; per-repo "
+            "license decisions are resolved from it (fail-closed).",
+        )
+        return 1
+
+    # Validate the policy file before any build work (M10): a malformed or
+    # unknown-version policy must refuse without creating the output directory.
+    from daydream.training.corpus_v2.license import load_license_policy
+
+    try:
+        load_license_policy(args.license_policy)
+    except (OSError, ValueError, TypeError) as exc:
+        print_error(create_console(), "Invalid --license-policy", str(exc))
+        return 1
 
     # --out names the corpus JSONL; the projector writes its canonical file set
     # (corpus.jsonl, corpus-v2.jsonl, split manifests, lineage.json) into that
@@ -685,6 +738,8 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             out_dir=out_dir,
             bundle_dir=args.bundle_root,
             annotation_bundle_dir=args.annotation_bundle_dir,
+            license_policy_path=args.license_policy,
+            allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft),
             as_of=args.as_of,
         )
     except ValueError as exc:
@@ -1383,6 +1438,25 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         help="Opt in to a moving branch/tag source revision (output is non-canonical).",
     )
     parser.add_argument(
+        "--license-policy",
+        type=Path,
+        default=None,
+        dest="license_policy",
+        metavar="PATH",
+        help="Digest-pinned license policy JSON; when set, the per-repo license "
+        "admission gate runs at hydration and rejected sessions are excluded "
+        "before publication (issue #1080)",
+    )
+    parser.add_argument(
+        "--allow-copyleft",
+        action="append",
+        default=[],
+        dest="allow_copyleft",
+        metavar="OWNER/REPO",
+        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        "owner/repo slug (case-insensitive); only meaningful with --license-policy",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         dest="dry_run",
@@ -1686,6 +1760,19 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         )
         return 1
 
+    # Pre-validate the license policy up front so a malformed or missing
+    # --license-policy is named by this handler (and redaction-processed) instead
+    # of escaping as an unredacted generic "Fatal Error" from main(). Mirrors the
+    # build-v2 handler's fail-closed validation.
+    if args.license_policy is not None:
+        from daydream.training.corpus_v2.license import load_license_policy
+
+        try:
+            load_license_policy(args.license_policy)
+        except (OSError, ValueError, TypeError) as exc:
+            print_error(console, "Invalid --license-policy", str(exc))
+            return 1
+
     stage_dir = args.stage_dir.expanduser()
     config = _hydrate.HydrateHubConfig(
         source_repo=args.source_repo,
@@ -1693,6 +1780,10 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         destination_repo=args.destination_repo,
         stage_dir=stage_dir,
         exploratory=args.exploratory,
+        license_policy_path=(
+            str(args.license_policy) if args.license_policy is not None else None
+        ),
+        allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft),
     )
     if args.dry_run:
         return _hydrate_hub_dry_run(config, console)
@@ -1722,6 +1813,15 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         f"rejected {summary.dry_run_rejected} batch(es); "
         f"verify admitted {summary.verify_admitted} batch(es)",
     )
+    if summary.license_admission:
+        buckets = summary.license_admission
+        print_info(
+            console,
+            "license admission: "
+            f"admitted {buckets['admitted']}; c5-excluded {buckets['c5_excluded']}; "
+            f"copyleft-unopted {buckets['c8_copyleft_unopted']}; "
+            f"evidence-missing {buckets['license_evidence_missing']}",
+        )
     if summary.dry_run_incomplete_manifests:
         print_warning(
             console,
@@ -1745,8 +1845,20 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         _hydrate.download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
         _hydrate.ingest_bundles(config.stage_dir, revision=source_commit)
         _hydrate.dedupe_admitted(config.stage_dir, revision=source_commit)
+        if config.license_policy_path is not None:
+            _hydrate.apply_license_gate(
+                config.stage_dir,
+                revision=source_commit,
+                license_policy_path=config.license_policy_path,
+                allow_copyleft=config.allow_copyleft,
+            )
         ledger = _hydrate.build_import_ledger(
             config.stage_dir, revision=source_commit, source_commit=source_commit
+        )
+        license_admission = (
+            _hydrate.license_admission_summary(ledger)
+            if config.license_policy_path is not None
+            else {}
         )
     except _hydrate.HydrationError as exc:
         print_error(console, "Hydration dry-run failed", redact_text(str(exc)))
@@ -1767,6 +1879,15 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         f"accounted {tallies.get('accounted', 0)} candidate(s); "
         f"reason codes: {reason_tally or 'none'}; no publication performed",
     )
+    if license_admission:
+        print_info(
+            console,
+            "license admission: "
+            f"admitted {license_admission['admitted']}; "
+            f"c5-excluded {license_admission['c5_excluded']}; "
+            f"copyleft-unopted {license_admission['c8_copyleft_unopted']}; "
+            f"evidence-missing {license_admission['license_evidence_missing']}",
+        )
     incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
     if incomplete:
         print_warning(
@@ -2057,7 +2178,7 @@ _CORPUS_USAGE = (
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
     "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
-    "  build-v2  project curated-bundle per-finding resolutions into corpus-v2 records\n"
+    "  build-v2  project curated-bundle resolutions into corpus-v2 records (pinned --license-policy required)\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
     "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact\n"

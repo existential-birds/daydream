@@ -31,10 +31,12 @@ from daydream.training.corpus_v2.bundle import (
     load_curated_bundle,
 )
 from daydream.training.corpus_v2.identity import record_id
+from daydream.training.corpus_v2.license import load_license_policy, resolve_repo_decision
 from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.corpus_v2.segments import segment
 from daydream.training.corpus_v2.splits import assign_split
 from daydream.training.corpus_v2.tiers import classify_tier
+from daydream.training.exclusion import EXCLUSION_PATH
 
 __all__ = ["BuildCorpusV2Config", "project_findings", "run_build_corpus_v2"]
 
@@ -88,7 +90,14 @@ class BuildCorpusV2Config:
     labeler_policy_version: str = "1"
     reply_classifier_version: str = "1"
     rubric_schema_version: str = "per-finding-resolutions-v1"
-    license: str | None = None
+    # Required: a build without a pinned license policy is a config error
+    # (raised as ValueError naming the field, mirroring annotation_bundle_dir)
+    # — declared optional so that misconfiguration, not a missing kwarg, is
+    # what callers see. The per-repo license decision is resolved from this
+    # policy against each batch's recorded identity + evidence; there is no
+    # global license string to stamp (C5/C8, issue #1080).
+    license_policy_path: Path | None = None
+    allow_copyleft: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.annotation_bundle_dir is None:
@@ -97,6 +106,12 @@ class BuildCorpusV2Config:
                 "pinned annotation bundle is a configuration error"
             )
         object.__setattr__(self, "annotation_bundle_dir", Path(self.annotation_bundle_dir))
+        if self.license_policy_path is None:
+            raise ValueError(
+                "license_policy_path is required: a corpus v2 build without a "
+                "pinned license policy is a configuration error"
+            )
+        object.__setattr__(self, "license_policy_path", Path(self.license_policy_path))
         if self.as_of is not None:
             object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
 
@@ -449,6 +464,22 @@ def _count_by(records: list[Record], key: Any) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _license_decision_distribution(
+    decisions: dict[str, dict[str, Any]]
+) -> dict[str, int]:
+    """Admitted/rejected decision counts across admitted batches, keyed by
+    ``admitted`` or the rejection reason code — deterministic order."""
+    distribution: dict[str, int] = {}
+    for decision in decisions.values():
+        key = (
+            "admitted"
+            if decision["status"] == "admitted"
+            else str(decision["reason_code"])
+        )
+        distribution[key] = distribution.get(key, 0) + 1
+    return dict(sorted(distribution.items()))
+
+
 def _caps_applied(records: list[Record], caps: dict[str, int]) -> dict[str, int]:
     """Final per-tier population (what the caps resolved to), deterministic."""
     return _count_by(records, lambda r: str(r["tier"])) if caps else {}
@@ -488,6 +519,47 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     """
     bundle = load_curated_bundle(config.bundle_dir)
     assert config.annotation_bundle_dir is not None  # __post_init__ guarantees
+    # Per-repo license decisions (issue #1080): the projector re-runs the C5/C8
+    # gate over every admitted batch (defence in depth — admission should have
+    # caught these) as the pure function of the batch's recorded repo identity
+    # + evidence under the pinned policy, so the re-evaluation is
+    # replay-identical to admission. Any non-admitted decision refuses the
+    # build outright before any file write (C5-excluded, unopted copyleft,
+    # missing identity/evidence alike — always-enforced, fail-closed), so no
+    # benchmark or unopted-copyleft repo content can reach training data.
+    # mypy narrowing: __post_init__ guarantees a non-None policy path
+    # (ValueError otherwise), but mypy can't see through object.__setattr__,
+    # so assert it at the use site.
+    assert config.license_policy_path is not None
+    policy, policy_digest = load_license_policy(config.license_policy_path)
+    decisions: dict[str, dict[str, Any]] = {}
+    license_refusals: list[tuple[str, str]] = []
+    for batch in bundle.admitted:
+        repo_decision = resolve_repo_decision(
+            batch.repo_slug or "", batch.license_evidence, policy, config.allow_copyleft
+        )
+        decisions[batch.session_id] = {
+            "status": repo_decision.status,
+            "reason_code": repo_decision.reason_code,
+            "spdx_id": repo_decision.spdx_id,
+            "policy_version": repo_decision.policy_version,
+            "evidence_ref": repo_decision.evidence_ref,
+            "repo_slug": repo_decision.repo_slug,
+        }
+        # Any license rejection (not just the always-enforced C5 refusal)
+        # refuses the whole projection before any file write: an unopted
+        # copyleft (or identity/evidence-missing) batch's records must never
+        # be emitted, and the fail-closed ordering is compute rejections →
+        # raise if any → else write (M9; AC6; covered end-to-end by
+        # test_end_to_end_mixed_repo_publication_gated).
+        if repo_decision.status != "admitted":
+            license_refusals.append((batch.session_id, repo_decision.reason_code or ""))
+    if license_refusals:
+        raise ValueError(
+            "license gate: refusing to project — non-admitted repo license "
+            "decisions reached the projection boundary as (session_id, "
+            f"reason_code) pairs {sorted(license_refusals)}; no output written"
+        )
     annotation_lineage = _verify_annotation_bundle(
         config.annotation_bundle_dir, bundle, config.bundle_dir
     )
@@ -503,6 +575,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # could hash into different splits (D5 disjointness is per finding).
     seen_findings: set[tuple[str, str]] = set()
     adjudicated_findings: set[tuple[str, str]] = set()
+    exclusions_by_reason: dict[str, int] = {}
     # lineage valid_at is pinned over the emitted records' evidence only —
     # annotation rows for sessions never admitted/emitted must not drift it.
     valid_at = config.as_of
@@ -549,6 +622,13 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                     if key in seen_findings:
                         continue
                     seen_findings.add(key)
+                    decision = decisions.get(seg.session_id)
+                    if decision is None:
+                        raise ValueError(
+                            f"session {seg.session_id}: no recorded license decision "
+                            "found at projection; refusing to project"
+                        )
+                    record_decision: dict[str, Any] = decision
                     # Non-decisive findings are report output only (D8): they
                     # never become training records, so corpus.jsonl and the
                     # split manifests exclude them by construction while
@@ -591,7 +671,8 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                         "valid_at": rec_valid_at,
                         "split": split,
                         "exclusion_reason": None,
-                        "license_decision": config.license,
+                        "repo_slug": record_decision["repo_slug"],
+                        "license_decision": record_decision,
                     }
                     # v2 schema stamp: every projected record carries the
                     # training-record schema version it was emitted under.
@@ -610,7 +691,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # assignment, over the deduplicated final population. Excess records of a
     # capped tier are excluded (never silently dropped) and named in the
     # summary, lineage, and exclusion reasons.
-    exclusions_by_reason: dict[str, int] = {"non-decisive-adjudication": len(adjudication)}
+    exclusions_by_reason["non-decisive-adjudication"] = len(adjudication)
     if config.caps:
         kept: list[Record] = []
         per_tier: dict[str, int] = {}
@@ -647,7 +728,8 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         split_counts[str(lineage_field["split"])] += 1
     # Every Req-11 field: hub commit, curation id, content digests, policy/
     # classifier/rubric versions, as_of + valid_at pins, split assignment,
-    # exclusion reasons, and the C5/license decision. Nothing silently dropped.
+    # exclusion reasons, and each record's per-repo license decision. Nothing
+    # silently dropped.
     content_digests: dict[str, str] = {
         batch.session_id: batch.content_digest for batch in bundle.admitted if batch.content_digest
     }
@@ -676,7 +758,6 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "rubric_schema_version": config.rubric_schema_version,
         "as_of": config.as_of,
         "valid_at": valid_at,
-        "license": config.license,
         "salt": config.salt,
         "holdout_rate": config.holdout_rate,
         "val_rate": config.val_rate,
@@ -689,10 +770,45 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "caps": {"configured": dict(sorted(config.caps.items())),
                  "applied": _caps_applied(records, config.caps)},
         "adjudication_count": len(adjudication),
+        # License identity pin (M7/AC4, issue #1080): the digest-pinned policy
+        # the re-evaluation consumed, the C5 exclusion list the C5 gate
+        # consulted, the copyleft opt-ins, every recorded per-repo decision,
+        # and the admitted/rejected decision distribution — all pure functions
+        # of the bundle + policy, so re-runs stay byte-identical.
+        "license_policy": {
+            "path_digest": policy_digest,
+            "policy_version": policy.policy_version,
+        },
+        "exclusion_list_digest": hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest(),
+        "copyleft_opt_ins": sorted(config.allow_copyleft),
+        "license_decisions": {
+            str(session_id): decision for session_id, decision in decisions.items()
+        },
+        "license_decision_distribution": _license_decision_distribution(decisions),
     }
     _atomic_write(
         config.out_dir / "lineage.json",
         json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+    )
+
+    # Human license report (issue #1080 M7): the digest-pinned policy, the C5
+    # exclusion-list digest, the copyleft opt-ins, every per-repo decision, and
+    # the decision distribution — a pure function of the bundle + policy +
+    # exclusion.txt bytes, so re-runs are byte-identical. Written atomically
+    # before ``_SUCCESS`` so the completeness gate covers it; the license-gate
+    # refusal above means this file only ever exists on clean builds.
+    license_report = {
+        "policy": {"policy_version": policy.policy_version, "digest": policy_digest},
+        "exclusion_list_digest": lineage["exclusion_list_digest"],
+        "copyleft_opt_ins": sorted(config.allow_copyleft),
+        "decisions": dict(sorted(
+            (str(session_id), decision) for session_id, decision in decisions.items()
+        )),
+        "distribution": _license_decision_distribution(decisions),
+    }
+    _atomic_write(
+        config.out_dir / "license-report.json",
+        json.dumps(license_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
     )
 
     # Completeness marker (mirrors the bundle's own ``_SUCCESS`` gate): the
@@ -711,4 +827,5 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "caps": {"configured": dict(sorted(config.caps.items())),
                  "applied": _caps_applied(records, config.caps)},
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
+        "license_distribution": _license_decision_distribution(decisions),
     }

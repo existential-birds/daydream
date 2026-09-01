@@ -5,6 +5,7 @@ import hashlib
 import json
 import pathlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -742,3 +743,215 @@ class TestDedupeAndLedger:
         ledger_path = stage / "curated" / ledger["curation_id"] / "import-ledger.json"
         assert ledger_path.is_file()
         assert json.loads(ledger_path.read_text())["pinned_revision"] == "a" * 40
+
+
+class TestLicenseAdmissionGate:
+    """Issue #1080 task 3: per-repo license decisions at hydration admission."""
+
+    REV = "a" * 40
+
+    @staticmethod
+    def _session_manifest(sid: str, slug: str, spdx: str | None = None) -> bytes:
+        data: dict[str, object] = {
+            "session_id": sid,
+            "git": {"remote_url": f"https://github.com/{slug}", "repo_slug": slug},
+        }
+        if spdx is not None:
+            data["license_evidence"] = {"spdx_id": spdx, "source": "manifest"}
+        return json.dumps(data).encode()
+
+    def _seed_stage(self, tmp_path: Path, sessions: dict[str, bytes]) -> Path:
+        files: dict[str, bytes] = {}
+        for sid, manifest in sessions.items():
+            files[f"bundles/{sid}/manifest.json"] = manifest
+            files[f"bundles/{sid}/trajectory.json"] = b"{}"
+        hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
+        hub.commit_revision(self.REV)
+        stage = tmp_path / "stage"
+        hydrate.download_snapshot(hub, revision=self.REV, stage_dir=stage / "downloads")
+        hydrate.ingest_bundles(stage, revision=self.REV)
+        hydrate.dedupe_admitted(stage, revision=self.REV)
+        return stage
+
+    def _write_policy(self, tmp_path: Path) -> Path:
+        policy_path = tmp_path / "license-policy.json"
+        policy_path.write_text(json.dumps({
+            "policy_version": "1",
+            "spdx_decisions": {"MIT": "accepted", "GPL-3.0-only": "rejected"},
+        }))
+        return policy_path
+
+    def _built_manifest(self, stage: Path) -> dict[str, Any]:
+        ledger = hydrate.build_import_ledger(stage, revision=self.REV, source_commit=self.REV)
+        return hydrate._curation_manifest_doc(
+            stage, curation_id=str(ledger["curation_id"]), source_commit=self.REV, ledger=ledger
+        )
+
+    def test_manifest_batches_carry_repo_slug_and_license_evidence(self, tmp_path: Path) -> None:
+        stage = self._seed_stage(tmp_path, {
+            "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+        })
+        manifest = self._built_manifest(stage)
+        admitted = [b for b in manifest["batches"] if b["status"] == "admitted"]
+        assert admitted, "seed must produce at least one admitted batch"
+        for batch in admitted:
+            assert batch["repo_slug"] == "owner/repo-a"
+            assert batch["license_evidence"] == {"spdx_id": "MIT", "source": "manifest"}
+
+    def test_hydration_excludes_c5_repo_at_admission(self, tmp_path: Path) -> None:
+        stage = self._seed_stage(tmp_path, {
+            "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+            "sess-c5": self._session_manifest("sess-c5", "getsentry/sentry", spdx="MIT"),
+        })
+        hydrate.apply_license_gate(
+            stage, revision=self.REV,
+            license_policy_path=self._write_policy(tmp_path), allow_copyleft=frozenset())
+        manifest = self._built_manifest(stage)
+        c5 = next(
+            (b for b in manifest["batches"]
+             if b["status"] == "excluded"
+             and b["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO),
+            None,
+        )
+        assert c5 is not None, "C5 gate failed to exclude the sentry repo (needs C5 batch)"
+        assert c5["session_id"] == "sess-c5"
+        assert c5["artifact_relpath"].startswith("excluded/")
+        assert not (stage / "runs" / "sess-c5").exists()
+        assert (stage / "excluded" / "sess-c5").exists()
+        # the admitted MIT repo is untouched
+        admitted = [b for b in manifest["batches"] if b["status"] == "admitted"]
+        assert [b["session_id"] for b in admitted] == ["sess-a"]
+
+    def test_hydration_c5_gate_catches_non_canonical_slug_spelling(self, tmp_path: Path) -> None:
+        # The license gate compares the canonical owner/repo identity: a
+        # manifest that stamps the clone URL as repo_slug cannot bypass C5
+        # (issue #1080, fail-closed).
+        c5_manifest = {
+            "session_id": "sess-c5",
+            "git": {
+                "remote_url": "https://github.com/getsentry/sentry",
+                "repo_slug": "https://github.com/getsentry/sentry",
+            },
+            "license_evidence": {"spdx_id": "MIT", "source": "manifest"},
+        }
+        stage = self._seed_stage(tmp_path, {
+            "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+            "sess-c5": json.dumps(c5_manifest).encode(),
+        })
+        hydrate.apply_license_gate(
+            stage, revision=self.REV,
+            license_policy_path=self._write_policy(tmp_path), allow_copyleft=frozenset())
+        manifest = self._built_manifest(stage)
+        c5 = next(
+            (b for b in manifest["batches"]
+             if b["status"] == "excluded"
+             and b["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO),
+            None,
+        )
+        assert c5 is not None, "C5 gate failed to exclude the sentry repo (needs C5 batch)"
+        assert c5["session_id"] == "sess-c5"
+        assert not (stage / "runs" / "sess-c5").exists()
+        assert (stage / "excluded" / "sess-c5").exists()
+
+    def test_hydration_excludes_unopted_copyleft_and_missing_evidence(self, tmp_path: Path) -> None:
+        stage = self._seed_stage(tmp_path, {
+            "sess-gpl": self._session_manifest("sess-gpl", "owner/gpl-repo", spdx="GPL-3.0-only"),
+            "sess-noev": self._session_manifest("sess-noev", "owner/noev-repo"),
+        })
+        hydrate.apply_license_gate(
+            stage, revision=self.REV,
+            license_policy_path=self._write_policy(tmp_path), allow_copyleft=frozenset())
+        manifest = self._built_manifest(stage)
+        rows = {b["session_id"]: (b["status"], b["reason_code"])
+                for b in manifest["batches"]}
+        assert rows["sess-gpl"] == ("excluded", hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED)
+        assert rows["sess-noev"] == ("excluded", hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING)
+
+    def test_allow_copyleft_opt_in_admits_exact_slug_only(self, tmp_path: Path) -> None:
+        stage = self._seed_stage(tmp_path, {
+            "sess-opted": self._session_manifest("sess-opted", "owner/gpl-repo", spdx="GPL-3.0-only"),
+            "sess-similar": self._session_manifest("sess-similar", "owner/similar-gpl-repo", spdx="GPL-3.0-only"),
+        })
+        hydrate.apply_license_gate(
+            stage, revision=self.REV,
+            license_policy_path=self._write_policy(tmp_path), allow_copyleft={"owner/gpl-repo"})
+        manifest = self._built_manifest(stage)
+        rows = {b["session_id"]: (b["status"], b["reason_code"])
+                for b in manifest["batches"]}
+        assert rows["sess-opted"] == ("admitted", None)
+        assert rows["sess-similar"] == ("excluded", hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED)
+
+    def test_license_gate_refuses_missing_policy_fail_closed(self, tmp_path: Path) -> None:
+        stage = self._seed_stage(tmp_path, {
+            "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+        })
+        with pytest.raises(ValueError, match="license_policy_path"):
+            hydrate.apply_license_gate(
+                stage, revision=self.REV, license_policy_path=None, allow_copyleft=frozenset())
+        # refusal is pre-work: nothing moved, nothing recorded
+        assert (stage / "runs" / "sess-a").exists()
+        assert not (stage / "excluded").exists()
+
+    def test_gate_wired_into_run_hydrate_hub_and_manifest_rows(self, tmp_path: Path) -> None:
+        """run_hydrate_hub threads the policy through; the C5 repo never publishes."""
+        hub = FakeHub(repo_id="org/private-ds", private=True, files={
+            "bundles/sess-a/manifest.json": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+            "bundles/sess-a/trajectory.json": b"{}",
+            "bundles/sess-c5/manifest.json": self._session_manifest("sess-c5", "getsentry/sentry", spdx="MIT"),
+            "bundles/sess-c5/trajectory.json": b"{}",
+        })
+        hub.commit_revision(self.REV)
+        stage = tmp_path / "stage"
+        summary = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
+            source_repo="org/private-ds", source_revision=self.REV,
+            destination_repo="org/private-ds", stage_dir=stage,
+            license_policy_path=str(self._write_policy(tmp_path)), allow_copyleft=frozenset(),
+        ), client=hub)
+        assert summary.verified is True
+        assert summary.dry_run_admitted == 1 and summary.dry_run_rejected == 1
+        doc = json.loads(hub.download_file(
+            f"curated/{summary.curation_id}/curation-manifest.json", revision=summary.output_commit_sha))
+        rows = {b["session_id"]: b for b in doc["batches"]}
+        assert rows["sess-a"]["repo_slug"] == "owner/repo-a"
+        assert rows["sess-a"]["license_evidence"] == {"spdx_id": "MIT", "source": "manifest"}
+        assert rows["sess-c5"]["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
+        assert rows["sess-c5"]["status"] == "excluded"
+
+
+class TestAdmissionSummary:
+    """Issue #1080 task 9 (S2): per-repo human summary over the admission ledger."""
+
+    def test_admission_summary_buckets_every_session(self, tmp_path: Path) -> None:
+        gate = TestLicenseAdmissionGate()
+        stage = gate._seed_stage(tmp_path, {
+            "sess-a": gate._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
+            "sess-c5": gate._session_manifest("sess-c5", "getsentry/sentry", spdx="MIT"),
+            "sess-gpl": gate._session_manifest("sess-gpl", "owner/gpl-repo", spdx="GPL-3.0-only"),
+            "sess-noev": gate._session_manifest("sess-noev", "owner/noev-repo"),
+        })
+        hydrate.apply_license_gate(
+            stage, revision=gate.REV,
+            license_policy_path=gate._write_policy(tmp_path), allow_copyleft=frozenset())
+        ledger = hydrate.build_import_ledger(stage, revision=gate.REV, source_commit=gate.REV)
+        summary = hydrate.license_admission_summary(ledger)
+        assert summary["admitted"] == 1
+        assert summary["c5_excluded"] == 1
+        assert summary["c8_copyleft_unopted"] == 1
+        assert summary["license_evidence_missing"] == 1
+        # M8: the buckets partition the license-gate sessions by construction.
+        assert sum(summary.values()) == 4
+
+    def test_admission_summary_pure_helper_buckets_seed_entries(self) -> None:
+        entries: list[tuple[str, str | None]] = [
+            ("s1", None),
+            ("s2", hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO),
+            ("s3", hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED),
+            ("s4", hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING),
+            ("s5", hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING),
+        ]
+        summary = hydrate.admission_summary_buckets(entries)
+        assert summary["admitted"] == 1
+        assert summary["c5_excluded"] == 1
+        assert summary["c8_copyleft_unopted"] == 1
+        assert summary["license_evidence_missing"] == 2  # identity-missing folds in
+        assert sum(summary.values()) == 5

@@ -137,9 +137,12 @@ def test_full_annotation_pipeline_survives_vm_loss(
         run_build_corpus_v2,
     )
 
+    policy_path = tmp_path / "license-policy.json"
+    policy_path.write_text(json.dumps(
+        {"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}) + "\n")
     summary = run_build_corpus_v2(BuildCorpusV2Config(
         out_dir=tmp_path / "corpus-out", bundle_dir=stage / "curated" / curation_id,
-        annotation_bundle_dir=clean))
+        annotation_bundle_dir=clean, license_policy_path=policy_path))
     assert (tmp_path / "corpus-out" / "_SUCCESS").is_file()
     records = [json.loads(line) for line in
                (tmp_path / "corpus-out" / "corpus.jsonl").read_text().splitlines() if line]

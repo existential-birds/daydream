@@ -14,7 +14,7 @@ from daydream.training import corpus_v2 as corpus_v2_pkg
 from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
 from daydream.training.corpus_v2.projector import BuildCorpusV2Config, run_build_corpus_v2
 from daydream.training.corpus_v2.splits import assign_split
-from tests.test_corpus_v2 import _cfg, _write_annotations_snapshot, _write_bundle
+from tests.test_corpus_v2 import _cfg, _policy_file, _write_annotations_snapshot, _write_bundle
 from tests.test_training_corpus import _seed_run_with_annotation
 
 
@@ -104,7 +104,8 @@ def test_v1_and_v2_projection_paths_are_independent(tmp_path: Path, archive_dir:
         bundle_dir = _write_bundle(out_dir)
         snap = _write_annotations_snapshot(bundle_dir)
         run_build_corpus_v2(BuildCorpusV2Config(out_dir=out_dir / "out", bundle_dir=bundle_dir,
-                                                annotation_bundle_dir=snap.parent))
+                                                annotation_bundle_dir=snap.parent,
+                                                license_policy_path=_policy_file(bundle_dir.parent)))
         return out_dir / "out" / "corpus.jsonl"
 
     v1_before = _run_v1_build(tmp_path / "v1a" / "corpus.jsonl").read_bytes()

@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 
 from daydream.archive.sanitize import _derivative_digest
-from daydream.training.corpus_v2.bundle import BundleError, CuratedBundle, load_curated_bundle
+from daydream.training.corpus_v2.bundle import (
+    BundleBatch,
+    BundleError,
+    CuratedBundle,
+    load_curated_bundle,
+)
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.provenance import extract_provenance
 from daydream.training.corpus_v2.segments import segment, segment_agents
@@ -60,7 +65,16 @@ def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -
     (bundle_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
-def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: bool = False) -> Path:
+_SEED_REPO_SLUGS = {"sess-a": "owner/repo-a"}
+
+
+def _write_bundle(
+    tmp_path: Path,
+    *,
+    with_success: bool = True,
+    corrupt_digest: bool = False,
+    repo_slugs: dict[str, str] | None = _SEED_REPO_SLUGS,
+) -> Path:
     bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
     # Producer-realistic batch shape: artifact_relpath names the batch
     # DIRECTORY (``batches/<session_id>/``) containing the ATIF
@@ -69,7 +83,13 @@ def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: 
         target = bundle_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}\n")
-    (bundle_dir / "curation-manifest.json").write_text(json.dumps(_MANIFEST))
+    manifest = json.loads(json.dumps(_MANIFEST))
+    if repo_slugs is not None:
+        for batch in manifest["batches"]:
+            if batch["session_id"] in repo_slugs and batch["status"] == "admitted":
+                batch["repo_slug"] = repo_slugs[batch["session_id"]]
+                batch["license_evidence"] = {"spdx_id": "MIT", "source": "manifest"}
+    (bundle_dir / "curation-manifest.json").write_text(json.dumps(manifest))
     _write_sumsums(bundle_dir)
     if with_success:
         (bundle_dir / "_SUCCESS").write_text("ok\n")
@@ -81,6 +101,8 @@ def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: 
 def _cfg(out_dir: Path, bundle_dir: Path, snapshot: Path, **kw: Any) -> Any:
     from daydream.training.corpus_v2.projector import BuildCorpusV2Config
 
+    if kw.get("license_policy_path") is None:
+        kw["license_policy_path"] = _policy_file(bundle_dir.parent)
     return BuildCorpusV2Config(out_dir=out_dir, bundle_dir=bundle_dir,
                                annotation_bundle_dir=snapshot.parent, **kw)
 
@@ -163,6 +185,46 @@ def _write_annotations_snapshot(
     return ann_dir / "annotations.jsonl"
 
 
+def test_load_bundle_refuses_batches_missing_repo_identity(tmp_path: Path) -> None:
+    # Strip repo_slug + license_evidence from the admitted batch to produce
+    # the legacy (pre-gate) bundle shape; recompute SHA256SUMS so the error
+    # names identity, not digests.
+    bundle_dir = _write_bundle(tmp_path, repo_slugs=None)
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        batch.pop("repo_slug", None)
+        batch.pop("license_evidence", None)
+    manifest_path.write_text(json.dumps(manifest))
+    _write_sumsums(bundle_dir)
+    from daydream.archive.hydrate_rules import REASON_CODE_REPO_IDENTITY_MISSING
+
+    with pytest.raises(BundleError, match=REASON_CODE_REPO_IDENTITY_MISSING):
+        load_curated_bundle(bundle_dir)
+
+
+def test_load_bundle_refuses_missing_license_evidence(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
+    # Strip license_evidence from sess-a's row only, keeping repo_slug.
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        if batch["session_id"] == "sess-a":
+            batch.pop("license_evidence", None)
+    manifest_path.write_text(json.dumps(manifest))
+    _write_sumsums(bundle_dir)
+    from daydream.archive.hydrate_rules import REASON_CODE_LICENSE_EVIDENCE_MISSING
+
+    with pytest.raises(BundleError, match=REASON_CODE_LICENSE_EVIDENCE_MISSING):
+        load_curated_bundle(bundle_dir)
+
+
+def test_load_bundle_admission_gate_passes_wellformed_bundle(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
+    loaded = load_curated_bundle(bundle_dir)  # no raise
+    assert all(b.repo_slug for b in loaded.admitted)
+
+
 @pytest.fixture
 def existing_bundle_fixture(tmp_path: Path) -> tuple[Path, list[dict[str, Any]], dict[str, str]]:
     """The standard curated-bundle + annotation-bundle pair the two-bundle
@@ -197,6 +259,26 @@ def _write_annotation_bundle(root: Path, rows: list[dict[str, Any]], *, curation
     if success:
         (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
     return root
+
+
+def test_load_bundle_carries_repo_slug_and_license_evidence(tmp_path: Path) -> None:
+    bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
+    loaded = load_curated_bundle(bundle_dir)
+    sess_a = next(b for b in loaded.batches if b.session_id == "sess-a")
+    assert sess_a.repo_slug == "owner/repo-a"
+    assert sess_a.license_evidence == {"spdx_id": "MIT", "source": "manifest"}
+
+
+def test_bundle_batch_tolerates_absent_new_fields() -> None:
+    # Legacy manifests (pre-gate bundles) still parse; the *gate* (Task 4)
+    # rejects them, not the schema parser — keep KD7's refusal at the gate
+    # layer so the error names the reason code, not a pydantic traceback.
+    batch = BundleBatch(
+        session_id="s", content_digest="1" * 64, status="admitted",
+        reason_code=None, artifact_relpath="batches/s",
+    )
+    assert batch.repo_slug is None
+    assert batch.license_evidence is None
 
 
 def test_load_bundle_requires_success_marker(tmp_path: Path) -> None:
@@ -480,6 +562,88 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     assert "missing" in adj_report.read_text()
 
 
+# ---------------------------------------------------------------------------
+# Task 5: per-repo license decisions on projected records
+# ---------------------------------------------------------------------------
+
+_UNSET = object()
+
+
+def _policy_file(tmp_path: Path, *, spdx_decisions: dict[str, str] | None = None) -> Path:
+    """Minimal deterministic license policy: MIT accepted under version 1."""
+    if spdx_decisions is None:
+        spdx_decisions = {"MIT": "accepted"}
+    policy_path = tmp_path / "license-policy.json"
+    policy_path.write_text(
+        json.dumps({"policy_version": "1", "spdx_decisions": spdx_decisions}) + "\n"
+    )
+    return policy_path
+
+
+def _config_for(
+    bundle_dir: Path,
+    tmp_path: Path,
+    license_policy: Any = _UNSET,
+    **kw: Any,
+) -> Any:
+    """BuildCorpusV2Config over the fixture's bundle + annotation bundle.
+
+    The policy defaults to ``_policy_file(tmp_path)``; passing ``None``
+    explicitly produces the misconfigured (no-policy) config.
+    """
+    if license_policy is _UNSET:
+        license_policy = _policy_file(tmp_path)
+    snap = bundle_dir.parent / (bundle_dir.name + "-annotations") / "annotations.jsonl"
+    return BuildCorpusV2Config(
+        out_dir=tmp_path / "out",
+        bundle_dir=bundle_dir,
+        annotation_bundle_dir=snap.parent,
+        license_policy_path=license_policy,
+        **kw,
+    )
+
+
+def test_projected_records_carry_per_repo_license_decision(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    records = [json.loads(line) for line in
+               (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line]
+    assert records
+    for rec in records:
+        lineage = rec["lineage"]
+        assert lineage["repo_slug"] == "owner/repo-a"
+        decision = lineage["license_decision"]
+        assert isinstance(decision, dict)
+        assert decision["status"] == "admitted"
+        assert decision["policy_version"] == "1"
+        assert decision["repo_slug"] == "owner/repo-a"
+
+
+def test_build_with_only_global_license_and_no_policy_is_refused(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    with pytest.raises(ValueError, match="license_policy"):
+        _config_for(bundle_dir, tmp_path, license_policy=None)
+
+
+def test_schema_validation_accepts_evolved_v2_records(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    # The projected records validate against the edited schema/v2.json
+    # (repo_slug required in lineage; license_decision required as object).
+    import jsonschema  # noqa: PLC0415
+
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    schema = json.loads((tmp_path / "out" / "schema.json").read_text())
+    for rec in (json.loads(line) for line in
+                (tmp_path / "out" / "corpus-v2.jsonl").read_text().splitlines() if line):
+        jsonschema.validate(rec, schema)  # no raise
+
+
 def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
@@ -698,6 +862,7 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
     snap = _write_annotations_snapshot(bundle_dir)
     rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(snap.parent),
+                   "--license-policy", str(_policy_file(bundle_dir.parent)),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc == 0
     assert (tmp_path / "out" / "corpus-v2.jsonl").is_file()
@@ -728,7 +893,8 @@ def test_build_v2_accepts_separate_annotation_bundle_with_exact_linkage(
         curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
         batch_fileset_digest=_derivative_digest(bundle_dir))
     config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
-                                 annotation_bundle_dir=ann)
+                                 annotation_bundle_dir=ann,
+                                 license_policy_path=_policy_file(tmp_path))
     summary = run_build_corpus_v2(config)
     assert summary["emitted"] > 0
     # curation bundle untouched (K3: no mutation of the finalized bundle)
@@ -763,7 +929,8 @@ def test_build_v2_refuses_broken_annotation_bundles(
     if mutate in ("wrong_curation", "wrong_commit", "wrong_fileset"):
         (ann / "lineage.json").write_text(json.dumps(lineage, sort_keys=True) + "\n", encoding="utf-8")
     config = BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
-                                 annotation_bundle_dir=ann)
+                                 annotation_bundle_dir=ann,
+                                 license_policy_path=_policy_file(tmp_path))
     with pytest.raises(ValueError):
         run_build_corpus_v2(config)
 
@@ -775,3 +942,319 @@ def test_build_v2_still_works_without_annotation_bundle_dir_raises(
     bundle_dir, _rows, kwargs = existing_bundle_fixture
     with pytest.raises(ValueError, match="annotation_bundle_dir"):
         BuildCorpusV2Config(out_dir=tmp_path / "out", bundle_dir=bundle_dir)
+
+
+# ---------------------------------------------------------------------------
+# Task 6: projection re-enforces C5/C8, accounts rejections, gates _SUCCESS
+# ---------------------------------------------------------------------------
+
+import daydream.archive.hydrate_rules as hydrate_rules  # noqa: E402
+
+
+def _inject_admitted_repo_slug(
+    bundle_dir: Path, slug: str, *, spdx_id: str = "MIT"
+) -> None:
+    """Rewrite every admitted batch's repo identity + license evidence in the
+    curation manifest (defence-in-depth probe: admission should have caught
+    the bad slug — the projector must not trust that) and recompute the
+    bundle's SHA256SUMS so only the manifest content changed."""
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        if batch["status"] == "admitted":
+            batch["repo_slug"] = slug
+            batch["license_evidence"] = {"spdx_id": spdx_id, "source": "manifest"}
+    manifest_path.write_text(json.dumps(manifest))
+    _write_sumsums(bundle_dir)
+    # The manifest edit changes the bundle's file-set digest, so re-harvest
+    # the annotation bundle's linkage pin against the new bundle bytes
+    # (otherwise the two-bundle gate would refuse on staleness, not license).
+    ann_dir = bundle_dir.parent / (bundle_dir.name + "-annotations")
+    ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
+    ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
+    (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix()
+        for p in ann_dir.rglob("*")
+        if p.is_file() and p.name not in ("SHA256SUMS", "_SUCCESS")
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+
+
+def test_projection_rejects_c5_repo_and_refuses_success(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    # Defence in depth: admission should have caught a C5 slug — the
+    # projector must too (boundary 2), refusing before any file write.
+    _inject_admitted_repo_slug(bundle_dir, "getsentry/sentry")
+    with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO):
+        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    assert not (tmp_path / "out" / "_SUCCESS").exists()
+    assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
+
+
+def test_unopted_copyleft_repo_refuses_projection(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    # Copyleft evidence the policy rejects, with no opt-in: the projection
+    # refuses outright before any file write (M9/AC6), naming the stable
+    # reason code — defence in depth: admission should have caught this,
+    # the projector must too.
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
+    with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED):
+        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+    assert not (tmp_path / "out" / "_SUCCESS").exists()
+    assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
+
+
+def test_mixed_repo_with_one_unopted_copyleft_batch_refuses_and_names_pairs(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    # M9/AC6 at projection: a mixed-repo bundle where one admitted batch is
+    # unopted copyleft refuses the whole build — even with clean batches
+    # present — and the error names every offending (session_id, reason_code)
+    # pair, sorted.
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    _admit_second_batch(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
+    with pytest.raises(ValueError, match=r"\('sess-b', 'c8_copyleft_unopted'\)") as excinfo:
+        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+    # The clean batch is named nowhere in the refusal — only offenders are.
+    assert "'sess-a'" not in str(excinfo.value)
+
+
+def test_build_lineage_pins_license_policy_and_decisions(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    import hashlib as _hashlib  # noqa: PLC0415
+
+    from daydream.training.exclusion import EXCLUSION_PATH  # noqa: PLC0415
+
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    out = tmp_path / "out"
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
+    lineage = json.loads((out / "lineage.json").read_text())
+    assert lineage["license_policy"]["policy_version"] == "1"
+    assert lineage["license_policy"]["path_digest"] == _hashlib.sha256(
+        _policy_file(tmp_path).read_bytes()
+    ).hexdigest()
+    assert lineage["exclusion_list_digest"] == _hashlib.sha256(
+        EXCLUSION_PATH.read_bytes()
+    ).hexdigest()
+    assert lineage["copyleft_opt_ins"] == []
+    assert lineage["license_decisions"] == {
+        "sess-a": {
+            "status": "admitted",
+            "reason_code": None,
+            "spdx_id": "MIT",
+            "policy_version": "1",
+            "evidence_ref": "manifest",
+            "repo_slug": "owner/repo-a",
+        }
+    }
+    assert lineage["license_decision_distribution"] == {"admitted": 1}
+
+
+def test_multi_session_repo_license_decisions_all_recorded(
+    tmp_path: Path,
+) -> None:
+    # Two admitted batches sharing one repo_slug must both appear in the
+    # lineage's license_decisions and the license report: the decisions dict
+    # is session-scoped (keyed by session_id), so a repo_slug-keyed collapse
+    # would silently drop one decision while the distribution counts both.
+    bundle_dir = _write_bundle(tmp_path)
+    manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
+    for batch in manifest["batches"]:
+        batch["status"] = "admitted"
+        batch["reason_code"] = None
+        batch["repo_slug"] = "owner/repo-a"
+        batch["license_evidence"] = {"spdx_id": "MIT", "source": "manifest"}
+    (bundle_dir / "curation-manifest.json").write_text(json.dumps(manifest))
+    ann_snapshot = _write_annotations_snapshot(bundle_dir, session_id="sess-a")
+    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, ann_snapshot))
+    lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
+    assert set(lineage["license_decisions"]) == {"sess-a", "sess-b"}
+    assert all(
+        decision["repo_slug"] == "owner/repo-a"
+        for decision in lineage["license_decisions"].values()
+    )
+    assert lineage["license_decision_distribution"] == {"admitted": 2}
+    report = json.loads((tmp_path / "out" / "license-report.json").read_text())
+    assert set(report["decisions"]) == {"sess-a", "sess-b"}
+    assert report["distribution"] == {"admitted": 2}
+
+
+# ---------------------------------------------------------------------------
+# Task 9: digest-pinned license report artifact
+# ---------------------------------------------------------------------------
+
+
+def _sha256_of_exclusion_txt() -> str:
+    import hashlib as _hashlib  # noqa: PLC0415
+
+    from daydream.training.exclusion import EXCLUSION_PATH  # noqa: PLC0415
+
+    return _hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
+
+
+def test_license_report_artifact_is_deterministic(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    config = _config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path))
+    run_build_corpus_v2(config)
+    report_path = tmp_path / "out" / "license-report.json"
+    assert report_path.is_file()
+    report = json.loads(report_path.read_text())
+    assert report["policy"]["policy_version"] == "1"
+    assert report["policy"]["digest"] == hashlib.sha256(
+        _policy_file(tmp_path).read_bytes()
+    ).hexdigest()
+    assert report["exclusion_list_digest"] == _sha256_of_exclusion_txt()
+    assert report["copyleft_opt_ins"] == []
+    assert report["decisions"]["sess-a"]["status"] == "admitted"
+    assert report["decisions"]["sess-a"]["repo_slug"] == "owner/repo-a"
+    assert set(report["distribution"]) >= {"admitted"}
+    # Byte-identical replay of the report alone (pure function of the
+    # bundle + policy + exclusion.txt bytes):
+    first = report_path.read_bytes()
+    run_build_corpus_v2(_config_for(bundle_dir, tmp_path / "again",
+                                    license_policy=_policy_file(tmp_path)))
+    assert (tmp_path / "again" / "out" / "license-report.json").read_bytes() == first
+
+
+def test_license_report_written_before_success_marker(
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
+) -> None:
+    # The completeness gate covers the report: it exists on every clean build
+    # that publishes _SUCCESS, and the summary exposes the distribution.
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    summary = run_build_corpus_v2(
+        _config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path))
+    )
+    assert (tmp_path / "out" / "_SUCCESS").is_file()
+    assert (tmp_path / "out" / "license-report.json").is_file()
+    assert summary["license_distribution"] == {"admitted": 1}
+
+
+# ---------------------------------------------------------------------------
+# Task 10: publication gate end-to-end (AC6) + real-path verification
+# ---------------------------------------------------------------------------
+
+
+def _run_build_v2_cli(
+    bundle_dir: Path, tmp_path: Path, policy: Path, capsys: pytest.CaptureFixture[str],
+    *, out_name: str = "pub",
+) -> tuple[int, str]:
+    """Drive ``daydream corpus build-v2`` (the production entrypoint) over the
+    fixture's bundle + annotation bundle, returning (exit code, combined
+    terminal output). The projection publishes into ``tmp_path/<out_name>/``."""
+    out = tmp_path / out_name / "corpus-v2.jsonl"
+    ann = bundle_dir.parent / (bundle_dir.name + "-annotations")
+    rc = _run_cli(["corpus", "build-v2", "--bundle-root", str(bundle_dir),
+                   "--annotation-bundle-root", str(ann),
+                   "--license-policy", str(policy),
+                   "--out", str(out)])
+    captured = capsys.readouterr()
+    return rc, captured.out + captured.err
+
+
+def _admit_second_batch(bundle_dir: Path, slug: str, *, spdx_id: str = "Apache-2.0") -> None:
+    """Flip the quarantined ``sess-b`` batch to admitted with its own repo
+    identity + license evidence, give it a real ATIF trajectory, and refresh
+    the bundle SHA256SUMS plus the annotation bundle's linkage pin (same
+    mechanics as ``_inject_admitted_repo_slug``) — producing a genuinely
+    mixed-repo clean bundle (two admitted slugs, both license-clean)."""
+    manifest_path = bundle_dir / "curation-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for batch in manifest["batches"]:
+        if batch["session_id"] == "sess-b":
+            batch["status"] = "admitted"
+            batch["reason_code"] = None
+            batch["repo_slug"] = slug
+            batch["license_evidence"] = {"spdx_id": spdx_id, "source": "manifest"}
+            batch["manifest_relpath"] = "batches/sess-b/manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    batch_dir = bundle_dir / "batches" / "sess-b"
+    (batch_dir / "manifest.json").write_text(json.dumps({"session_id": "sess-b"}) + "\n")
+    (batch_dir / "trajectory.json").write_text(json.dumps({
+        "session_id": "sess-b",
+        "trajectory_id": "sess-b:root",
+        "subagent_trajectory_ref": [
+            {"trajectory_id": "sess-b:fix-0", "session_id": "sess-b", "steps": [
+                {"step_id": 1, "source": "agent", "message": "fix"},
+            ]},
+        ],
+    }) + "\n")
+    _write_sumsums(bundle_dir)
+    ann_dir = bundle_dir.parent / (bundle_dir.name + "-annotations")
+    ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
+    ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
+    (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix()
+        for p in ann_dir.rglob("*")
+        if p.is_file() and p.name not in ("SHA256SUMS", "_SUCCESS")
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+
+
+def test_end_to_end_mixed_repo_publication_gated(
+    tmp_path: Path,
+    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Real-path: entering from the CLI (``daydream corpus build-v2``, the
+    production entrypoint), a hydrate-shaped bundle whose admitted batch
+    carries a C5-excluded repo slug must exit 1, publish no ``_SUCCESS``,
+    and name the stable reason code; the mirror case — an unopted copyleft
+    repo under a policy that rejects it — fails the same way. The clean
+    mixed-repo counterpart publishes with every record's lineage carrying
+    its batch's ``repo_slug`` + per-repo ``license_decision``."""
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    _inject_admitted_repo_slug(bundle_dir, "discourse/discourse")  # C5
+    rc, out = _run_build_v2_cli(bundle_dir, tmp_path, _policy_file(tmp_path), capsys)
+    assert rc == 1
+    assert not (tmp_path / "pub" / "_SUCCESS").exists()
+    assert "c5_excluded_repo" in out
+
+    # Mirror: an unopted GPL repo fails the same way (C8), still from the CLI.
+    _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
+    rc, out = _run_build_v2_cli(bundle_dir, tmp_path, policy, capsys, out_name="pub-gpl")
+    assert rc == 1
+    assert not (tmp_path / "pub-gpl" / "_SUCCESS").exists()
+    assert "c8_copyleft_unopted" in out
+
+
+def test_end_to_end_clean_mixed_repo_publishes(
+    tmp_path: Path,
+    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Real-path happy path: a clean mixed-repo bundle (two admitted slugs,
+    MIT + Apache-2.0, both accepted by the pinned policy) exits 0 from the
+    CLI, publishes ``_SUCCESS``, and every record's lineage carries its
+    batch's ``repo_slug`` + ``license_decision``."""
+    bundle_dir, _rows, _kwargs = existing_bundle_fixture
+    _admit_second_batch(bundle_dir, "owner/apache-repo")
+    policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "Apache-2.0": "accepted"})
+    rc, out = _run_build_v2_cli(bundle_dir, tmp_path, policy, capsys)
+    assert rc == 0, out
+    assert (tmp_path / "pub" / "_SUCCESS").is_file()
+    records = [json.loads(line) for line in
+               (tmp_path / "pub" / "corpus-v2.jsonl").read_text().splitlines() if line]
+    assert records
+    for rec in records:
+        lineage = rec["lineage"]
+        assert lineage["repo_slug"] == "owner/repo-a"
+        assert lineage["license_decision"]["status"] == "admitted"
+        assert lineage["license_decision"]["repo_slug"] == "owner/repo-a"
+        assert lineage["license_decision"]["policy_version"] == "1"
