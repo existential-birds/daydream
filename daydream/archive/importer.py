@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
+from daydream.archive.index import append_label_observation
 from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 
 __all__ = [
@@ -24,7 +26,27 @@ __all__ = [
     "dedupe_observations",
     "gold_eligible",
     "link_session_identity",
+    "merge_imported_observations",
 ]
+
+# Writer columns consumed by append_label_observation; every other key on an
+# import row (legacy, payload_digest, ...) is importer metadata, not payload.
+_WRITER_FIELDS = (
+    "labels",
+    "pr_state",
+    "labeler_version",
+    "evidence_sha",
+    "rubric_json",
+    "valid_at",
+    "reward_version",
+    "reward_json",
+    "composite_reward",
+    "reviewer_logins",
+    "has_posterior",
+    "source",
+    "reply_classifier_version",
+    "reply_evidence_digest",
+)
 
 _REASON_UNMATCHED = "no_hub_entry"
 _REASON_CONFLICT = "derivative_digest_conflict"
@@ -57,6 +79,113 @@ def canonical_payload_digest(row: dict[str, Any], *, include_observed_at: bool) 
     payload = {k: v for k, v in row.items() if include_observed_at or k != "observed_at"}
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _planned_append(row: dict[str, Any]) -> dict[str, Any]:
+    """Shape one import row into append_label_observation keyword arguments."""
+    plan: dict[str, Any] = {
+        "session_id": row["session_id"],
+        "observed_at": row["observed_at"],
+    }
+    for field in _WRITER_FIELDS:
+        value = row.get(field)
+        # Rows read from SQLite carry JSON-encoded list columns; the writer
+        # expects the decoded Python values.
+        if field in ("labels", "reviewer_logins") and isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"imported row for session {row['session_id']!r} at "
+                    f"{row['observed_at']!r} has malformed {field} JSON: {value!r}"
+                ) from exc
+        plan[field] = value
+    plan["has_posterior"] = bool(plan["has_posterior"])
+    return plan
+
+
+def merge_imported_observations(
+    archive_dir: Path,
+    linked_imports: list[dict[str, Any]],
+    *,
+    observations_path: Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Append deduped, identity-linked import rows through the archive writer.
+
+    Every row goes through :func:`append_label_observation` — the single
+    canonical writer — so the versioned auto-dedup tuple, the human-never-dedup
+    rule, and the precedence projection that refreshes the denormalized
+    ``runs.outcome_labels`` cache all apply unchanged. The importer only ever
+    appends: it never overwrites or deletes a newer existing observation (M3),
+    and winners are decided by the writer's projection, not by the import
+    order.
+
+    Args:
+        archive_dir: Target archive root (the Hub-side index being merged into).
+        linked_imports: Deduped inventory rows with ``session_id`` already
+            remapped to the linked Hub session id. Rows may carry a
+            ``payload_digest`` recorded at inventory time.
+        observations_path: Optional JSON file of additional import rows (same
+            shape), loaded and appended to ``linked_imports``.
+        dry_run: When ``True``, return the planned append set without writing
+            any state (S2).
+
+    Returns:
+        ``{"dry_run": bool, "planned": [...], "appended": int, "deduped": int}``
+        where ``planned`` holds one writer-kwarg dict per import row in
+        deterministic ``(session_id, observed_at, source)`` order and
+        ``appended``/``deduped`` count writer outcomes (both 0 on dry run).
+
+    Raises:
+        ValueError: Fail-closed, before any write, when a row's recomputed
+            canonical payload digest disagrees with its inventory-time
+            ``payload_digest`` (evidence drifted between inventory and merge),
+            when a row's JSON list columns are malformed, or when the writer
+            rejects the row (unknown session, non-ISO-8601 ``observed_at``) —
+            each error names the offending row. Never silently defaulted.
+    """
+    imports = list(linked_imports)
+    if observations_path is not None and observations_path.is_file():
+        loaded = json.loads(observations_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, list):
+            raise ValueError(
+                f"observations file {observations_path} must contain a JSON list of rows"
+            )
+        imports.extend(loaded)
+
+    imports.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), str(r["source"])))
+
+    # Fail-closed drift gate before any write: recompute the same canonical
+    # payload digest the inventory recorded and reject any drifted row
+    # (mirrors run_canonical_harvest's AnnotationDriftError path).
+    for row in imports:
+        if "payload_digest" not in row:
+            continue
+        payload = {k: v for k, v in row.items() if k != "payload_digest"}
+        fresh = canonical_payload_digest(
+            payload, include_observed_at=row["source"] != "auto"
+        )
+        if fresh != row["payload_digest"]:
+            raise ValueError(
+                f"imported observation for session {row['session_id']!r} at "
+                f"{row['observed_at']!r} drifted from its inventory payload digest "
+                f"(expected {row['payload_digest']}, recomputed {fresh}); "
+                f"re-inventory the source before merging"
+            )
+
+    planned = [_planned_append(row) for row in imports]
+    if dry_run:
+        return {"dry_run": True, "planned": planned, "appended": 0, "deduped": 0}
+
+    appended = 0
+    deduped = 0
+    for plan in planned:
+        if append_label_observation(archive_dir, plan.pop("session_id"), **plan):
+            appended += 1
+        else:
+            deduped += 1
+    return {"dry_run": False, "planned": planned, "appended": appended, "deduped": deduped}
 
 
 def _dedup_tuple(row: dict[str, Any]) -> tuple[Any, ...]:

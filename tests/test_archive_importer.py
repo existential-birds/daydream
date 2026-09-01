@@ -21,12 +21,18 @@ from typing import Any
 import pytest
 
 from daydream.archive.importer import (
+    canonical_payload_digest,
     classify_run_level,
     dedupe_observations,
     gold_eligible,
     link_session_identity,
+    merge_imported_observations,
 )
-from daydream.archive.index import append_label_observation, upsert_run
+from daydream.archive.index import (
+    append_label_observation,
+    label_observation_history,
+    upsert_run,
+)
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.training.labeler_versions import HUMAN_LABELER_VERSION
 from tests.harness.trajectory import make_manifest
@@ -510,3 +516,205 @@ def test_buckets_account_for_every_row() -> None:
     total = sum(len(v) for v in out["per_finding"].values())
     total += len(out["run_level_only"]) + len(out["ambiguous_run_mapping"])
     assert total == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 6: merge imported observations via the canonical-harvest seam
+# ---------------------------------------------------------------------------
+
+
+def _row_with_digest(row: dict[str, Any]) -> dict[str, Any]:
+    """Attach the inventory-time payload digest a merge validates against."""
+    row = dict(row)
+    row["payload_digest"] = canonical_payload_digest(
+        row, include_observed_at=row["source"] != "auto"
+    )
+    return row
+
+
+def _seed_generation(root: Path, *, observed_at: str, evidence_sha: str, labels: list[str]) -> None:
+    append_label_observation(
+        root,
+        SID,
+        labels=labels,
+        pr_state=None,
+        labeler_version="980-rubric-r2",
+        evidence_sha=evidence_sha,
+        valid_at="2026-04-30T00:00:00+00:00",
+        reply_evidence_digest=None,
+        reward_version=None,
+        has_posterior=False,
+        source="auto",
+        observed_at=observed_at,
+    )
+
+
+def test_bitemporal_history_preserved(tmp_path: Path) -> None:
+    # Three evidence generations A->B->C captured in a surviving backup are
+    # appended into the target archive in order, verbatim (M3).
+    source_root = tmp_path / "backup"
+    source_root.mkdir()
+    _seed_run(source_root)
+    for at, sha, labels in (
+        (_OBSERVED_A, "e" * 64, ["accepted"]),
+        (_OBSERVED_B, "f" * 64, ["rejected"]),
+        ("2026-05-03T00:00:00+00:00", "0" * 64, ["accepted"]),
+    ):
+        _seed_generation(source_root, observed_at=at, evidence_sha=sha, labels=labels)
+    imported = read_label_rows(source_root)
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    merged = merge_imported_observations(target, [_row_with_digest(r) for r in imported])
+
+    assert merged["appended"] == 3
+    assert merged["deduped"] == 0
+    hist = label_observation_history(target, SID)
+    assert [r["observed_at"] for r in hist] == [
+        _OBSERVED_A,
+        _OBSERVED_B,
+        "2026-05-03T00:00:00+00:00",
+    ]
+    assert hist[0]["labels"] == json.dumps(["accepted"])  # verbatim
+    assert hist[1]["labels"] == json.dumps(["rejected"])
+
+
+def test_newer_existing_observation_never_displaced(tmp_path: Path) -> None:
+    # The target already holds a newer auto observation; importing an older
+    # auto generation appends it but the precedence projection (recency within
+    # source class) keeps the newer row as the winner in the denormalized
+    # runs cache — import must never bypass the projection (M3).
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    newer_at = "2026-06-01T00:00:00+00:00"
+    _seed_generation(target, observed_at=newer_at, evidence_sha="f" * 64, labels=["accepted"])
+
+    source_root = tmp_path / "backup"
+    source_root.mkdir()
+    _seed_run(source_root)
+    _seed_generation(source_root, observed_at=_OBSERVED_A, evidence_sha="e" * 64, labels=["rejected"])
+    imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
+
+    merged = merge_imported_observations(target, imported)
+    assert merged["appended"] == 1
+    hist = label_observation_history(target, SID)
+    assert [r["observed_at"] for r in hist] == [_OBSERVED_A, newer_at]  # append-only
+    # runs.outcome_labels cache still reflects the precedence projection:
+    conn = sqlite3.connect(target / "index.db")
+    try:
+        conn.row_factory = sqlite3.Row
+        run = conn.execute("SELECT outcome_labels, labeled_at FROM runs WHERE session_id = ?", (SID,)).fetchone()
+    finally:
+        conn.close()
+    assert run["labeled_at"] == newer_at
+    assert run["outcome_labels"] == json.dumps(["accepted"])
+
+
+def test_idempotent_reimport_dedupes_auto_rows(tmp_path: Path) -> None:
+    # Byte-identical re-import (M4): auto rows already present dedupe via the
+    # existing writer; no new generations appear.
+    source_root = tmp_path / "backup"
+    source_root.mkdir()
+    _seed_run(source_root)
+    _seed_generation(source_root, observed_at=_OBSERVED_A, evidence_sha="e" * 64, labels=["accepted"])
+    imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    merge_imported_observations(target, imported)
+    before = label_observation_history(target, SID)
+
+    merged_again = merge_imported_observations(target, imported)
+    assert merged_again["appended"] == 0
+    assert merged_again["deduped"] == 1
+    assert label_observation_history(target, SID) == before
+
+
+def test_drift_fails_closed_before_any_write(tmp_path: Path) -> None:
+    # A row whose immutable payload changed between inventory and merge is
+    # rejected with a ValueError naming the row; nothing is written (M9
+    # fail-closed, mirroring the canonical-harvest drift gate).
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    good = {"session_id": SID, "source": "auto", "observed_at": _OBSERVED_A}
+    row = dict(good)
+    row.update(
+        labels=["accepted"],
+        pr_state=None,
+        labeler_version="980-rubric-r2",
+        evidence_sha="e" * 64,
+        rubric_json=None,
+        valid_at=None,
+        reward_version=None,
+        reward_json=None,
+        composite_reward=None,
+        reviewer_logins=None,
+        has_posterior=0,
+        labeler_policy_version="980-policy-r1",
+        reply_classifier_version=None,
+        reply_evidence_digest=None,
+    )
+    tampered = _row_with_digest(row)
+    tampered["labels"] = ["smuggled"]
+    with pytest.raises(ValueError, match=SID):
+        merge_imported_observations(target, [tampered])
+    assert label_observation_history(target, SID) == []
+
+
+def test_dry_run_plans_without_writing(tmp_path: Path) -> None:
+    source_root = tmp_path / "backup"
+    source_root.mkdir()
+    _seed_run(source_root)
+    _seed_generation(source_root, observed_at=_OBSERVED_A, evidence_sha="e" * 64, labels=["accepted"])
+    imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    merged = merge_imported_observations(target, imported, dry_run=True)
+
+    assert merged["dry_run"] is True
+    assert len(merged["planned"]) == 1
+    assert merged["planned"][0]["session_id"] == SID
+    assert merged["planned"][0]["observed_at"] == _OBSERVED_A
+    assert merged["planned"][0]["source"] == "auto"
+    assert label_observation_history(target, SID) == []
+
+
+def test_human_source_appended_verbatim(tmp_path: Path) -> None:
+    # Human evidence keeps its source class and explicit observed_at: the
+    # writer never dedupes human rows (S0-1) and the bitemporal stamp is
+    # preserved exactly.
+    target = tmp_path / "target"
+    target.mkdir()
+    _seed_run(target)
+    row = {
+        "session_id": SID,
+        "source": "human",
+        "observed_at": _OBSERVED_B,
+        "labels": ["rejected"],
+        "pr_state": None,
+        "labeler_version": HUMAN_LABELER_VERSION,
+        "evidence_sha": None,
+        "rubric_json": None,
+        "valid_at": _OBSERVED_B,
+        "reward_version": None,
+        "reward_json": None,
+        "composite_reward": None,
+        "reviewer_logins": None,
+        "has_posterior": 0,
+        "labeler_policy_version": STALE_LEGACY,
+        "reply_classifier_version": None,
+        "reply_evidence_digest": None,
+    }
+    merged = merge_imported_observations(target, [_row_with_digest(row)])
+    assert merged["appended"] == 1
+    hist = label_observation_history(target, SID)
+    assert len(hist) == 1
+    assert hist[0]["source"] == "human"
+    assert hist[0]["observed_at"] == _OBSERVED_B
+    assert hist[0]["labels"] == json.dumps(["rejected"])
