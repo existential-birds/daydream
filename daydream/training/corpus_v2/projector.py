@@ -22,7 +22,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast, overload
 
-from daydream.archive.hydrate_rules import REASON_CODE_C5_EXCLUDED_REPO
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
@@ -524,17 +523,15 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # gate over every admitted batch (defence in depth — admission should have
     # caught these) as the pure function of the batch's recorded repo identity
     # + evidence under the pinned policy, so the re-evaluation is
-    # replay-identical to admission. A C5-excluded repo refuses the build
-    # outright (always-enforced, no override); other license rejections (C8
-    # copyleft unopted, missing identity/evidence) exclude the batch's records
-    # — never emitted — and are accounted under their reason code in
-    # ``exclusions_by_reason``. Either way no unopted-copyleft or benchmark
-    # repo content can reach training data.
+    # replay-identical to admission. Any non-admitted decision refuses the
+    # build outright before any file write (C5-excluded, unopted copyleft,
+    # missing identity/evidence alike — always-enforced, fail-closed), so no
+    # benchmark or unopted-copyleft repo content can reach training data.
     policy, policy_digest = load_license_policy(
         config.license_policy_path if config.license_policy_path is not None else ""
     )
     decisions: dict[str, dict[str, Any]] = {}
-    c5_refusals: list[tuple[str, str]] = []
+    license_refusals: list[tuple[str, str]] = []
     for batch in bundle.admitted:
         repo_decision = resolve_repo_decision(
             batch.repo_slug or "", batch.license_evidence, policy, config.allow_copyleft
@@ -547,15 +544,19 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
             "evidence_ref": repo_decision.evidence_ref,
             "repo_slug": repo_decision.repo_slug,
         }
-        if repo_decision.status != "admitted" and (
-            repo_decision.reason_code == REASON_CODE_C5_EXCLUDED_REPO
-        ):
-            c5_refusals.append((batch.session_id, repo_decision.reason_code or ""))
-    if c5_refusals:
+        # Any license rejection (not just the always-enforced C5 refusal)
+        # refuses the whole projection before any file write: an unopted
+        # copyleft (or identity/evidence-missing) batch's records must never
+        # be emitted, and the fail-closed ordering is compute rejections →
+        # raise if any → else write (M9; AC6; covered end-to-end by
+        # test_end_to_end_mixed_repo_publication_gated).
+        if repo_decision.status != "admitted":
+            license_refusals.append((batch.session_id, repo_decision.reason_code or ""))
+    if license_refusals:
         raise ValueError(
-            "license gate: refusing to project — C5-excluded repo content "
-            f"reached the projection boundary as (session_id, reason_code) "
-            f"pairs {sorted(c5_refusals)}; no output written"
+            "license gate: refusing to project — non-admitted repo license "
+            "decisions reached the projection boundary as (session_id, "
+            f"reason_code) pairs {sorted(license_refusals)}; no output written"
         )
     annotation_lineage = _verify_annotation_bundle(
         config.annotation_bundle_dir, bundle, config.bundle_dir
@@ -800,8 +801,8 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # exclusion-list digest, the copyleft opt-ins, every per-repo decision, and
     # the decision distribution — a pure function of the bundle + policy +
     # exclusion.txt bytes, so re-runs are byte-identical. Written atomically
-    # before ``_SUCCESS`` so the completeness gate covers it; the C5 refusal
-    # above means this file only ever exists on clean builds.
+    # before ``_SUCCESS`` so the completeness gate covers it; the license-gate
+    # refusal above means this file only ever exists on clean builds.
     license_report = {
         "policy": {"policy_version": policy.policy_version, "digest": policy_digest},
         "exclusion_list_digest": lineage["exclusion_list_digest"],

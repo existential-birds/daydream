@@ -950,13 +950,6 @@ def test_build_v2_still_works_without_annotation_bundle_dir_raises(
 
 import daydream.archive.hydrate_rules as hydrate_rules  # noqa: E402
 
-_LICENSE_CODES = frozenset({
-    hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO,
-    hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED,
-    hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING,
-    hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING,
-})
-
 
 def _inject_admitted_repo_slug(
     bundle_dir: Path, slug: str, *, spdx_id: str = "MIT"
@@ -990,19 +983,6 @@ def _inject_admitted_repo_slug(
     ))
 
 
-def _record_count_of_admitted_batches(bundle_dir: Path) -> int:
-    """Total per-finding record count of the admitted batches: the annotation
-    rows whose session_id belongs to an admitted manifest batch."""
-    manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
-    admitted_ids = {b["session_id"] for b in manifest["batches"] if b["status"] == "admitted"}
-    snap = bundle_dir.parent / (bundle_dir.name + "-annotations") / "annotations.jsonl"
-    return sum(
-        1
-        for line in snap.read_text().splitlines() if line.strip()
-        if json.loads(line).get("session_id") in admitted_ids
-    )
-
-
 def test_projection_rejects_c5_repo_and_refuses_success(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
@@ -1016,33 +996,36 @@ def test_projection_rejects_c5_repo_and_refuses_success(
     assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
 
 
-def test_exclusions_by_reason_counts_license_rejections(
+def test_unopted_copyleft_repo_refuses_projection(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
+    # Copyleft evidence the policy rejects, with no opt-in: the projection
+    # refuses outright before any file write (M9/AC6), naming the stable
+    # reason code — defence in depth: admission should have caught this,
+    # the projector must too.
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
-    # Copyleft evidence the policy rejects, with no opt-in: the batch is
-    # excluded (never emitted) and counted under its reason code.
     _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
     policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
-    summary = run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
-    assert summary["exclusions_by_reason"][hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED] >= 1
-    assert summary["emitted"] == 0
+    with pytest.raises(ValueError, match=hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED):
+        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+    assert not (tmp_path / "out" / "_SUCCESS").exists()
+    assert not (tmp_path / "out" / "corpus-v2.jsonl").exists()  # refuse = write nothing
 
 
-def test_mixed_repo_admitted_plus_rejected_counts_balance(
+def test_mixed_repo_with_one_unopted_copyleft_batch_refuses_and_names_pairs(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
-    # M8 invariant at projection: admitted records + every license rejection
-    # bucket equals the total admitted-batch record count.
+    # M9/AC6 at projection: a mixed-repo bundle where one admitted batch is
+    # unopted copyleft refuses the whole build — even with clean batches
+    # present — and the error names every offending (session_id, reason_code)
+    # pair, sorted.
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
-    _inject_admitted_repo_slug(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
-    total_admitted = _record_count_of_admitted_batches(bundle_dir)
+    _admit_second_batch(bundle_dir, "owner/gpl-repo", spdx_id="GPL-3.0-only")
     policy = _policy_file(tmp_path, spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
-    summary = run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
-    rejections = sum(
-        v for k, v in summary["exclusions_by_reason"].items() if k in _LICENSE_CODES
-    )
-    assert summary["emitted"] + rejections == total_admitted
+    with pytest.raises(ValueError, match=r"\('sess-b', 'c8_copyleft_unopted'\)") as excinfo:
+        run_build_corpus_v2(_config_for(bundle_dir, tmp_path, license_policy=policy))
+    # The clean batch is named nowhere in the refusal — only offenders are.
+    assert "'sess-a'" not in str(excinfo.value)
 
 
 def test_build_lineage_pins_license_policy_and_decisions(
@@ -1127,3 +1110,4 @@ def test_license_report_written_before_success_marker(
     assert (tmp_path / "out" / "_SUCCESS").is_file()
     assert (tmp_path / "out" / "license-report.json").is_file()
     assert summary["license_distribution"] == {"admitted": 1}
+
