@@ -54,6 +54,7 @@ def test_success_path_drives_orchestrator(
         dry_run_rejected = 0
         dry_run_incomplete_manifests: tuple[str, ...] = ()
         verify_admitted = 1
+        license_admission: dict[str, int] = {}
 
     def fake_run(config: Any) -> FakeSummary:
         calls.append(config)
@@ -80,6 +81,7 @@ def test_success_path_surfaces_incomplete_manifests(
         dry_run_rejected = 0
         dry_run_incomplete_manifests = ("sess-a (missing trajectory.json)",)
         verify_admitted = 1
+        license_admission: dict[str, int] = {}
 
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", lambda _config: FakeSummary())

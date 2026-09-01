@@ -56,9 +56,12 @@ def build_snapshot_decisive(*, hostile: bool = False) -> FakeHub:
         manifest = _snapshot_manifest(
             session_id, session.repo_slug, session.skill, session.outcome_labels
         )
-        files[f"{session_id}/manifest.json"] = json.dumps(
-            manifest.to_dict(), indent=2
-        ).encode()
+        data = manifest.to_dict()
+        # License evidence the corpus-v2 admission gate and bundle loader
+        # require for every admitted batch (MIT, accepted by the policy the
+        # projector run in the test pins).
+        data["license_evidence"] = {"spdx_id": "MIT", "source": "github-api"}
+        files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()
         files[f"{session_id}/trajectory.json"] = json.dumps(
             _snapshot_trajectory_decisive(session_id), indent=2
         ).encode()
