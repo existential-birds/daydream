@@ -21,6 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
+from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
 from daydream.generated_files import is_generated_file
 from daydream.timeutil import parse_iso_timestamp
 
@@ -1054,13 +1055,21 @@ def _quality_python_parser() -> Any | None:
 
     Lazy factory mirroring ``daydream/tree_sitter_index.py``; returns ``None``
     when tree-sitter-python is unavailable so quality analysis degrades to an
-    empty shape instead of crashing ``analyze_session``.
+    empty shape instead of crashing ``analyze_session``.  Consults the shared
+    version guard first: a known-bad installed tree-sitter (issue #1087) raises
+    :class:`daydream._tree_sitter_safety.TreeSitterBadVersionError` out of the
+    factory instead of constructing a parser that would corrupt memory — the
+    orchestrator's fail-open wrapper then reports the quality gate explicitly
+    unavailable instead of silently skipping it.
     """
     try:
+        assert_tree_sitter_safe()
         import tree_sitter_python
         from tree_sitter import Language, Parser
 
         return Parser(Language(tree_sitter_python.language()))
+    except TreeSitterBadVersionError:
+        raise
     except Exception:
         return None
 

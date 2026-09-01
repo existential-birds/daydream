@@ -18,6 +18,7 @@ import pytest
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.eval.analyzer import (
     _files_read,
+    _quality_python_parser,
     _tokenize_command,
     analyze_costs,
     analyze_coverage,
@@ -1666,3 +1667,41 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert res["findings"]["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
     assert res["findings"]["per_lens"]["wonder"] == 6
     assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
+
+
+# --- tree-sitter version guard (#1087) ---
+
+
+def test_analyze_quality_refuses_known_bad_tree_sitter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#1087: on a known-bad tree-sitter install the analyzer refuses native
+    analysis by raising the typed guard error — the orchestrator's fail-open
+    wrapper converts that into (None, reason); it must not silently skip.
+    """
+    from daydream import _tree_sitter_safety as safety
+
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    # The factory is lru_cached; clear it so the guard inside the cached body
+    # runs against the monkeypatched (bad) install (see impl plan, assumption).
+    _quality_python_parser.cache_clear()
+    ws = _quality_workspace(tmp_path, {"mod.py": "def f():\n    return 1\n"})
+    with pytest.raises(safety.TreeSitterBadVersionError):
+        analyze_quality(ws / ".daydream")
+
+
+def test_analyze_quality_unchanged_on_good_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#1087 (M5): the guard is a no-op on valid installs — behavior identical
+    to pre-regression, including the parser cache being consulted.
+    """
+    from daydream import _tree_sitter_safety as safety
+
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.25.2")
+    ws = _quality_workspace(tmp_path, {"mod.py": "def f():\n    return 1\n"})
+    result = analyze_quality(ws / ".daydream")
+    assert result["scoped_files"] == 1
+    entry = result["per_file"]["mod.py"]
+    assert entry["functions"] == 1
+    assert entry["sloc"] > 0
