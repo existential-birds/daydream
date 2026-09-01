@@ -437,7 +437,9 @@ def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> Non
 # --- Shared version guard (issue #1087, M6) --------------------------------
 
 
-def test_detect_affected_files_refuses_known_bad_tree_sitter(monkeypatch, tmp_path):
+def test_detect_affected_files_refuses_known_bad_tree_sitter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """#1087 (M6): the shared guard covers every native-analysis entry point,
     not just the quality analyzer — index consumers refuse bad installs too."""
     from daydream import _tree_sitter_safety as safety
