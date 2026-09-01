@@ -68,6 +68,14 @@ def _state(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (state / "preview-ledger.json").write_text("{}", encoding="utf-8")
+    # index.db is part of the published state (the import's label_observations
+    # rows live there); a byte-identical SQLite file is enough for the digest
+    # round-trip the resume test asserts.
+    import sqlite3 as _sq
+    conn = _sq.connect(state / "index.db")
+    conn.execute("CREATE TABLE IF NOT EXISTS label_observations (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
     return state
 
 

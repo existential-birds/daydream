@@ -86,6 +86,7 @@ from daydream.archive._schema import (
     _recreate_label_observations_if_stale,
 )
 from daydream.archive.git_safe import normalize_remote_url
+from daydream.archive.known_versions import STALE_LEGACY
 from daydream.archive.manifest import Manifest
 
 # Re-export for callers (including tests) that import these names from this module.
@@ -313,6 +314,9 @@ def append_label_observation(
     source: str = "auto",
     reply_classifier_version: str | None = None,
     reply_evidence_digest: str | None = None,
+    labeler_policy_version: str | None = None,
+    legacy: str = "auto",
+    observed_at: str | None = None,
 ) -> bool:
     """Append a row to the immutable ``label_observations`` history.
 
@@ -370,6 +374,20 @@ def append_label_observation(
         reply_evidence_digest: Stable digest over the combined reply evidence
             (versioned dedup input, M14); persisted and compared in the auto
             dedup key so an edited reply appends a new generation.
+        labeler_policy_version: Versioned policy axis (M13); persisted on the
+            row and part of the auto dedup key so a policy bump appends a new
+            generation. ``None`` (the default, keeping pre-policy callers
+            unchanged) mirrors ``labeler_version`` into the policy column; the
+            ``STALE_LEGACY`` sentinel — the inventory marker for legacy-schema
+            source rows with no policy axis — is stored as SQL ``NULL`` with
+            the ``legacy`` marker stamped, the representation the corpus gold
+            gate (``labeler_policy_version IS NOT NULL``) already treats as
+            non-gold.
+        legacy: Legacy marker for the row — ``"auto"`` (the default) or
+            ``"legacy"`` (a row whose policy axis predates
+            ``label_observations`` versioning; never gold-eligible). Mirrors
+            the schema's legacy stamping so imported legacy rows persist the
+            same representation a migrated in-place row has.
         source: Provenance of this observation — ``"auto"`` (automated rubric
             labeler; the default that keeps existing harvest callers
             unchanged) or ``"human"`` (operator override). Human-sourced rows
@@ -390,16 +408,53 @@ def append_label_observation(
         a fresh generation. A ``None`` digest is not coerced to ``""`` — ``None``
         never equals a present digest, so digest-less legacy callers dedupe on
         the remaining tuple exactly as before (deliberate default). Human
-        (``source != "auto"``) appends are never deduped and always return
-        ``True``.
+        (``source != "auto"``) appends are never deduped by the evidence
+        tuple; only a byte-identical row already occupying the same
+        ``(session_id, observed_at)`` primary key is a no-op re-import (so a
+        re-merged source never grows microsecond-shifted duplicates).
+
+        An explicit ``observed_at`` (aware ISO-8601) is preserved bitemporally
+        as the row's observation time instead of the wall clock; ``None``
+        keeps the existing now() behavior.
 
     Raises:
         ValueError: When ``session_id`` is not present in the ``runs`` table,
-            or when ``valid_at`` is not a parseable aware ISO-8601 timestamp.
+            when ``valid_at`` is not a parseable aware ISO-8601 timestamp, or
+            when ``observed_at`` is set and is not a parseable aware ISO-8601
+            timestamp.
     """
     if valid_at is not None:
         valid_at = canonical_utc_iso(valid_at)
-    observed_dt = datetime.now(timezone.utc)
+    if observed_at is not None:
+        # Bitemporal preservation: an explicit data timestamp (e.g. imported
+        # from a surviving local archive) is stored in place of the wall clock.
+        # Fails closed on non-ISO-8601 or naive input before any write.
+        try:
+            parsed = datetime.fromisoformat(observed_at)
+        except ValueError:
+            raise ValueError(
+                f"observed_at {observed_at!r} is not a parseable ISO-8601 timestamp"
+            ) from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(
+                f"observed_at {observed_at!r} is naive: an explicit UTC offset is required"
+            )
+        observed_dt = parsed.astimezone(timezone.utc)
+    else:
+        observed_dt = datetime.now(timezone.utc)
+    # Policy axis resolution: versioned callers (the import merge) pass the
+    # source's labeler_policy_version verbatim; callers that predate the axis
+    # leave it None and the free-form labeler_version mirrors into the policy
+    # column (inherited behavior). The STALE_LEGACY sentinel — the inventory-
+    # time marker for a legacy-schema row with no policy axis — is stored as
+    # the canonical legacy representation: NULL policy + legacy='legacy', so
+    # the corpus gold gate (which rejects rows by labeler_policy_version IS
+    # NULL) can never admit a row the importer's version gate excluded.
+    if labeler_policy_version == STALE_LEGACY:
+        labeler_policy_version = None
+        legacy = "legacy"
+    elif labeler_policy_version is None:
+        labeler_policy_version = labeler_version
     labels_json = json.dumps(labels)
     reviewer_logins_json = json.dumps(reviewer_logins) if reviewer_logins is not None else None
     has_posterior_int = int(has_posterior)
@@ -436,7 +491,7 @@ def append_label_observation(
             if (
                 latest_auto is not None
                 and latest_auto["evidence_sha"] == evidence_sha
-                and latest_auto["labeler_policy_version"] == labeler_version
+                and latest_auto["labeler_policy_version"] == labeler_policy_version
                 and latest_auto["reply_evidence_digest"] == reply_evidence_digest
                 and latest_auto["reward_version"] == reward_version
                 and latest_auto["labels"] == labels_json
@@ -456,7 +511,7 @@ def append_label_observation(
                     "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha, rubric_json, "
                     "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, has_posterior, source, "
                     "labeler_policy_version, reply_classifier_version, reply_evidence_digest, legacy) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto')",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session_id,
                         observed_at,
@@ -472,13 +527,47 @@ def append_label_observation(
                         reviewer_logins_json,
                         has_posterior_int,
                         source,
-                        labeler_version,
+                        labeler_policy_version,
                         reply_classifier_version,
                         reply_evidence_digest,
+                        legacy,
                     ),
                 )
                 break
             except sqlite3.IntegrityError:
+                # Primary-key collision on (session_id, observed_at): a
+                # byte-identical row already occupying this exact stamp is a
+                # no-op re-import — the microsecond bump must never fabricate
+                # a duplicate generation for it (idempotent re-merge of a
+                # surviving source, human or auto). A genuinely distinct
+                # generation at the same stamp keeps the pre-existing bump.
+                existing = conn.execute(
+                    "SELECT labels, pr_state, labeler_version, evidence_sha, rubric_json, "
+                    "valid_at, reward_version, reward_json, composite_reward, reviewer_logins, "
+                    "has_posterior, source, labeler_policy_version, reply_classifier_version, "
+                    "reply_evidence_digest, legacy "
+                    "FROM label_observations WHERE session_id = ? AND observed_at = ?",
+                    (session_id, observed_at),
+                ).fetchone()
+                if existing is not None and tuple(existing) == (
+                    labels_json,
+                    pr_state,
+                    labeler_version,
+                    evidence_sha,
+                    rubric_json,
+                    valid_at_value,
+                    reward_version,
+                    reward_json,
+                    composite_reward,
+                    reviewer_logins_json,
+                    has_posterior_int,
+                    source,
+                    labeler_policy_version,
+                    reply_classifier_version,
+                    reply_evidence_digest,
+                    legacy,
+                ):
+                    return False
                 observed_dt += timedelta(microseconds=1)
         # Recompute the winning observation (human-first, then recency) so the
         # denormalized runs cache mirrors the precedence projection — not

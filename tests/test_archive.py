@@ -2405,3 +2405,42 @@ def test_migration_marks_legacy_rows(tmp_path: Path) -> None:
     # original labels/observed_at untouched:
     assert rows[0]["observed_at"] == _LEGACY_ROW_OBSERVED_AT_SNAPSHOT
     assert rows[0]["labels"] == '["accepted"]'
+
+
+def test_append_label_observation_preserves_observed_at(tmp_path: Path) -> None:
+    """An explicit ``observed_at`` is preserved bitemporally (M3 of the
+    local-observations import): the stored row carries the original data
+    timestamp verbatim (canonicalized to UTC), not the wall clock."""
+    _seed_one_run(tmp_path, "sess-obs")
+    original = "2025-06-01T12:00:00+00:00"
+    appended = append_label_observation(
+        tmp_path, "sess-obs", labels=["accepted"], pr_state="merged",
+        labeler_version="1055-human-r1", evidence_sha=None, source="human",
+        observed_at=original)
+    assert appended is True
+    row = latest_label_observation(tmp_path, "sess-obs")
+    assert row is not None
+    assert row["observed_at"] == "2025-06-01T12:00:00+00:00"
+
+
+def test_append_label_observation_observed_at_none_uses_wall_clock(tmp_path: Path) -> None:
+    """Default (``observed_at=None``) keeps the existing now() behavior."""
+    _seed_one_run(tmp_path, "sess-now")
+    appended = append_label_observation(
+        tmp_path, "sess-now", labels=["accepted"], pr_state="merged",
+        labeler_version="1055-human-r1", evidence_sha=None, source="human")
+    assert appended is True
+    row = latest_label_observation(tmp_path, "sess-now")
+    assert row is not None
+    assert row["observed_at"].startswith("2")
+
+
+def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) -> None:
+    """A non-ISO-8601 ``observed_at`` fails closed before any write."""
+    _seed_one_run(tmp_path, "sess-bad")
+    with pytest.raises(ValueError, match="observed_at"):
+        append_label_observation(
+            tmp_path, "sess-bad", labels=["accepted"], pr_state="merged",
+            labeler_version="1055-human-r1", evidence_sha=None, source="human",
+            observed_at="not-a-timestamp")
+    assert label_observation_history(tmp_path, "sess-bad") == []
