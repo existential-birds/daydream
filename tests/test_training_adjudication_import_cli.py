@@ -159,6 +159,71 @@ def test_cli_real_path_real_archive(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert (src / "index.db").read_bytes() == before
 
 
+def test_cli_reimport_does_not_displace_newer_target_runs_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An overlapping re-import of an older backup must not displace newer
+    target runs state (status/archived_at/profile_*/cost metrics, plus the
+    writer-owned cache mirrors): the run-row seeding is no-displacement like
+    the observation merge, so append-only holds for both tables (M3)."""
+    src = tmp_path / "src"
+    _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
+    state = tmp_path / "state"
+    assert cli._handle_corpus_command(
+        ["adjudicate", *_import_args(src, state_dir=state, extra=[])]
+    ) == 0
+
+    # Newer target state: a later archive refresh rewrites the same session
+    # with a newer timestamp, evolved profile, and updated cost metrics.
+    head = hashlib.sha256("sess-1".encode()).hexdigest()
+    base = hashlib.sha256(("base-" + "sess-1").encode()).hexdigest()
+    upsert_run(
+        state,
+        make_manifest(
+            session_id="sess-1",
+            repo_slug="org/repo",
+            head_sha=head,
+            base_sha=base,
+            archived_at="2026-05-01T00:00:00+00:00",
+            status="partial",
+            profile_name="profile-v2",
+            total_cost_usd=99.5,
+        ),
+    )
+    conn = sqlite3.connect(f"file:{state / 'index.db'}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        newer = dict(
+            conn.execute(
+                "SELECT archived_at, status, profile_name, total_cost_usd, "
+                "outcome_labels, labeled_at FROM runs WHERE session_id = 'sess-1'"
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+
+    # Re-import the (older) source backup overlapping the same session: every
+    # populated target column must survive untouched (only NULL columns may be
+    # filled from the source snapshot).
+    assert cli._handle_corpus_command(
+        ["adjudicate", *_import_args(src, state_dir=state, extra=["--json"])]
+    ) == 0
+    capsys.readouterr()
+    conn = sqlite3.connect(f"file:{state / 'index.db'}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        after = dict(
+            conn.execute(
+                "SELECT archived_at, status, profile_name, total_cost_usd, "
+                "outcome_labels, labeled_at FROM runs WHERE session_id = 'sess-1'"
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+    populated = {key: value for key, value in newer.items() if value is not None}
+    assert {key: after[key] for key in populated} == populated
+
+
 def test_cli_overlapping_backups_dedupe_accounting(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # Two backups of the same archive: the shared rows dedupe, the accounting
     # still covers every source row across both roots (M4 + M7).

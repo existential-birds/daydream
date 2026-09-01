@@ -29,7 +29,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
 from daydream.archive.index import append_label_observation
-from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
+from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS
 from daydream.archive.sanitize import _sanitize_json_value
 from daydream.archive.scan import scan_run_dir
 from daydream.trajectory import redact_value
@@ -45,6 +45,7 @@ __all__ = [
     "gold_eligible",
     "link_session_identity",
     "merge_imported_observations",
+    "redact_metadata_value",
     "run_pure_import",
 ]
 
@@ -114,10 +115,17 @@ def canonical_payload_digest(row: dict[str, Any], *, include_observed_at: bool) 
     evidence captured by two overlapping backups at different capture times
     must dedupe regardless of ``observed_at`` (the SQLite PK
     ``(session_id, observed_at)`` in the target handles identical-timestamp
-    overlap). Human rows include it: they are never auto-deduped by the
-    writer, so only byte-identical human rows collapse.
+    overlap). The collapsed ``valid_at`` stamp is excluded alongside it: the
+    writer folds ``valid_at=None`` onto ``observed_at`` (index.py), so two
+    captures of identical auto evidence carry byte-different ``valid_at``
+    values that must not split the dedupe into a content conflict. Human rows
+    include both stamps: they are never auto-deduped by the writer, so only
+    byte-identical human rows collapse.
     """
-    payload = {k: v for k, v in row.items() if include_observed_at or k != "observed_at"}
+    excluded = set()
+    if not include_observed_at:
+        excluded |= {"observed_at", "valid_at"}
+    payload = {k: v for k, v in row.items() if k not in excluded}
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -170,6 +178,19 @@ def _redact_json_blob(value: Any, *, field: str, session_id: str) -> Any:
     return redacted
 
 
+def redact_metadata_value(value: Any) -> Any:
+    """Redact one credential-bearing metadata field (URL userinfo, absolute paths).
+
+    Applies the same ``sanitize`` + ``redact_value`` chain
+    :func:`redact_imported_metadata` uses per row field, so a persisted runs
+    row's ``remote_url``/``source_path`` carry the same fail-closed scrubbing
+    the observation rows do. Non-string values pass through unchanged.
+    """
+    if isinstance(value, str):
+        return redact_value(_redact_path_string(_sanitize_json_value(value)))
+    return value
+
+
 def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> dict[str, Any]:
     """Redact pre-publication metadata and fail closed on uncleanable rows (M9, AC6).
 
@@ -199,9 +220,7 @@ def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> d
         session_id = str(row.get("session_id", ""))
         redacted = dict(row)
         for field in ("remote_url", "source_path"):
-            value = redacted.get(field)
-            if isinstance(value, str):
-                redacted[field] = redact_value(_redact_path_string(_sanitize_json_value(value)))
+            redacted[field] = redact_metadata_value(redacted.get(field))
         redacted["rubric_json"] = _redact_json_blob(
             redacted.get("rubric_json"), field="rubric_json", session_id=session_id
         )
@@ -334,7 +353,7 @@ def merge_imported_observations(
 
 def _dedup_tuple(row: dict[str, Any]) -> tuple[Any, ...]:
     return (
-        row["source"],
+        row.get("source", "auto"),
         *(row.get(field) for field in _TUPLE_FIELDS),
     )
 
@@ -369,7 +388,7 @@ def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, An
     groups: dict[tuple[Any, ...], list[tuple[dict[str, Any], str]]] = {}
     for inventory in inventories:
         for row in inventory:
-            human = row["source"] != "auto"
+            human = row.get("source", "auto") != "auto"
             key = _dedup_tuple(row)
             if human:
                 # Human rows are never auto-deduped by the writer: only
@@ -396,8 +415,8 @@ def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, An
         rows.append(ordered[0][0])
         deduped_count += len(ordered) - 1
 
-    rows.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r["source"]))
-    conflicts.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r["source"]))
+    rows.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r.get("source", "auto")))
+    conflicts.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r.get("source", "auto")))
     return {"rows": rows, "deduped_count": deduped_count, "content_conflict": conflicts}
 
 
@@ -406,6 +425,7 @@ def link_session_identity(
     *,
     hydrated_index: dict[str, dict[str, Any]],
     repo_slug_sha_lookup: dict[tuple[str, str, str], Any],
+    unmatched_identity_less: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Resolve each imported record to a Hub session identity.
 
@@ -417,6 +437,12 @@ def link_session_identity(
             — the hydrate import-ledger join shape.
         repo_slug_sha_lookup: ``{(repo_slug, base_sha, head_sha): hub_session_id}``
             (a dict with ``"hub_session_id"`` is also accepted).
+        unmatched_identity_less: When ``True`` (the import CLI's wiring over
+            local-only archive roots with an empty hydrated index), an
+            identity-less record — one absent from ``hydrated_index`` and
+            missing the fallback session fields — routes to ``unmatched``
+            instead of raising, so a single repo-less local run cannot abort
+            a whole-archive import.
 
     Returns:
         ``{"linked": {sid: {"hub_session_id", "matched_by"}},
@@ -433,7 +459,8 @@ def link_session_identity(
     Raises:
         ValueError: When a record is unresolvable via the primary rule and is
             missing the session fields required for the fallback — no
-            placeholder linkage is produced.
+            placeholder linkage is produced. (Suppressed in favor of
+            ``unmatched`` only when ``unmatched_identity_less`` is ``True``.)
     """
     linked: dict[str, dict[str, str]] = {}
     unmatched: dict[str, str] = {}
@@ -463,6 +490,9 @@ def link_session_identity(
         base_sha = record.get("base_sha")
         head_sha = record.get("head_sha")
         if not repo_slug or not base_sha or not head_sha:
+            if unmatched_identity_less:
+                unmatched[session_id] = _REASON_UNMATCHED
+                continue
             msg = (
                 f"session {session_id!r} has no Hub index entry and is missing "
                 "the repo_slug/base_sha/head_sha fields required for the "
@@ -668,6 +698,7 @@ def run_pure_import(
     hydrated_index: dict[str, dict[str, Any]],
     repo_slug_sha_lookup: dict[tuple[str, str, str], Any],
     projector_findings: dict[str, list[dict[str, Any]]],
+    unmatched_identity_less: bool = False,
 ) -> dict[str, Any]:
     """Compose the pure import pipeline: dedupe -> link -> run-level -> accounting.
 
@@ -676,6 +707,8 @@ def run_pure_import(
         hydrated_index: See :func:`link_session_identity`.
         repo_slug_sha_lookup: See :func:`link_session_identity`.
         projector_findings: See :func:`classify_run_level`.
+        unmatched_identity_less: Threaded to :func:`link_session_identity`;
+            see its annotation.
 
     Returns:
         ``{"rows", "deduped_count", "content_conflict", "link",
@@ -689,6 +722,7 @@ def run_pure_import(
         merged["rows"],
         hydrated_index=hydrated_index,
         repo_slug_sha_lookup=repo_slug_sha_lookup,
+        unmatched_identity_less=unmatched_identity_less,
     )
     run_level_result = classify_run_level(
         merged["rows"], projector_findings=projector_findings
@@ -768,7 +802,5 @@ def gold_eligible(observation: dict[str, Any]) -> bool:
     for field in ("labeler_version", "labeler_policy_version", "reply_classifier_version"):
         value = observation.get(field)
         if not value or str(value) not in KNOWN_LABELER_VERSIONS:
-            return False
-        if str(value) == STALE_LEGACY:
             return False
     return True

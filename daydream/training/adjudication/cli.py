@@ -65,6 +65,7 @@ from daydream.archive.importer import (
     canonical_payload_digest,
     merge_imported_observations,
     redact_imported_metadata,
+    redact_metadata_value,
     run_pure_import,
 )
 from daydream.archive.index import _get_connection
@@ -885,9 +886,14 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
         for column in _IMPORT_VERSION_COLUMNS:
             if column not in row:
                 row[column] = STALE_LEGACY
+        if "source" not in row:
+            # A pre-``source`` legacy label_observations table: default the
+            # precedence marker to the writer's own default ("auto") so no
+            # downstream ``row["source"]`` read raises KeyError on a legacy row.
+            row["source"] = "auto"
         run = runs.get(str(row["session_id"]))
         if run is not None:
-            for field in ("repo_slug", "base_sha", "head_sha"):
+            for field in ("repo_slug", "base_sha", "head_sha", "remote_url", "source_path"):
                 row[field] = run.get(field)
     return {"rows": rows, "source_digest": source_digest, "runs": runs}
 
@@ -895,17 +901,59 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
 def _seed_target_runs(
     state_dir: Path, sessions: set[str], runs: dict[str, dict[str, Any]]
 ) -> None:
-    """Copy the source runs rows for *sessions* into the state-dir archive.
+    """Materialize the source runs rows for *sessions* into the state-dir archive.
 
     ``append_label_observation`` requires the session to exist in ``runs``;
     importing into the state archive therefore materializes the source run
-    rows first (deterministic: sessions in sorted order). Idempotent via
-    ``INSERT OR REPLACE`` with the full source column set.
+    rows first (deterministic: sessions in sorted order). A session that does
+    not yet exist is inserted with the source row's full column set.
+
+    A session that already exists is **never displaced**: its populated target
+    columns — ``status``/``archived_at``, the ``profile_*`` fields, the cost
+    metrics, and the writer-owned denormalized cache mirrors
+    (``outcome_labels``/``labeled_at``/``rubric_json``/``composite_reward``/
+    ``has_posterior``) — survive an overlapping re-import of an older backup,
+    and only NULL target columns are filled from the source snapshot. The
+    observation merge is append-only/no-displacement, so the run-row seeding
+    follows the same rule: an older overlapping backup must never overwrite
+    newer target state (a deduped no-op append never refreshes the cache, so
+    the target row remains the projection authority).
+    Credential-bearing ``remote_url``/``source_path`` values are redacted
+    fail-closed before insertion (M9/AC6).
     """
     conn = _get_connection(state_dir)
     try:
+        existing = {
+            str(row["session_id"])
+            for row in conn.execute("SELECT session_id FROM runs").fetchall()
+        }
         for session_id in sorted(sessions):
-            run = runs[session_id]
+            run = dict(runs[session_id])
+            # Fail-closed redaction: never persist a credential-bearing URL /
+            # absolute path from the source runs onto the state archive.
+            for field in ("remote_url", "source_path"):
+                if field in run:
+                    run[field] = redact_metadata_value(run[field])
+            if session_id in existing:
+                # No-displacement materialization: fill only the target
+                # columns the source snapshot can add (currently NULL); every
+                # populated target value — including the writer-owned cache
+                # mirrors — wins over the overlapping backup.
+                target = conn.execute(
+                    "SELECT * FROM runs WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                fill = [
+                    (column, run[column])
+                    for column in run
+                    if target[column] is None and run[column] is not None
+                ]
+                if fill:
+                    assignments = ", ".join(f"{column} = ?" for column, _ in fill)
+                    conn.execute(
+                        f"UPDATE runs SET {assignments} WHERE session_id = ?",
+                        [value for _, value in fill] + [session_id],
+                    )
+                continue
             columns = list(run)
             placeholders = ", ".join("?" for _ in columns)
             conn.execute(
@@ -917,70 +965,98 @@ def _seed_target_runs(
         conn.close()
 
 
-def handle_import_local_observations(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate import-local-observations`` (KD6, S1/S2/S3).
+class _ImportBlockedError(Exception):
+    """Fail-closed redaction gate raised by the import merge phase.
 
-    Composes the pure import pipeline (inventory -> linkage -> dedupe ->
-    version gate -> run-level classify -> accounting) over the given archive
-    roots, then — unless ``--dry-run`` — merges the linked rows append-only
-    into the ``--state-dir`` archive and redacts + secret-scans the payload
-    fail-closed. ``--json`` prints the digest-stable report; a real run also
-    writes it to ``--state-dir/import-report.json`` with the ledger in
-    ``--state-dir/import-ledger.json``. Dry-run writes nothing (S2).
+    Raised (instead of merging) when the post-redaction secret scan is dirty:
+    the payload must not be imported. ``message`` carries the composed blocked
+    reason the handler prints verbatim.
     """
-    from daydream.ui import create_console, print_error, print_success
 
-    parser = _build_adjudicate_parser()
-    args = parser.parse_args(["import-local-observations", *argv])
-    if args.publish:
-        if args.dry_run:
-            parser.error("--publish cannot be combined with --dry-run")
-        if args.manifest is None:
-            parser.error("--publish requires --manifest")
-    console = create_console()
-    try:
-        inventories: list[list[dict[str, Any]]] = []
-        sources: list[dict[str, Any]] = []
-        runs_by_session: dict[str, dict[str, Any]] = {}
-        repo_slug_sha_lookup: dict[tuple[str, str, str], Any] = {}
-        for root in args.archive_root:
-            inventory = _inventory_import_root(root)
-            inventories.append(inventory["rows"])
-            sources.append(
-                {
-                    "archive_root": str(root),
-                    "row_count": len(inventory["rows"]),
-                    "source_digest": inventory["source_digest"],
-                }
-            )
-            for session_id, run in inventory["runs"].items():
-                runs_by_session.setdefault(session_id, run)
-                repo_slug, base_sha, head_sha = (
-                    run.get("repo_slug"),
-                    run.get("base_sha"),
-                    run.get("head_sha"),
-                )
-                if repo_slug and base_sha and head_sha:
-                    repo_slug_sha_lookup.setdefault(
-                        (str(repo_slug), str(base_sha), str(head_sha)), session_id
-                    )
-            if not args.json:  # per-root progress (S3)
-                console.print(
-                    f"import: inventoried {len(inventory['rows'])} label_observations(s) "
-                    f"from {root}"
-                )
-        result = run_pure_import(
-            inventories,
-            hydrated_index={},
-            repo_slug_sha_lookup=repo_slug_sha_lookup,
-            projector_findings={},
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class _ImportPublishError(Exception):
+    """Fail-closed publish-payload gate raised by the import publish phase.
+
+    Raised when the state archive is missing a publishable adjudication-state
+    file: the import itself only writes ``index.db``, so publishing a fresh
+    state-dir would fail with a bare ``FileNotFoundError``. ``message`` carries
+    the composed prerequisite hint the handler prints verbatim.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _inventory_import_roots(
+    roots: Sequence[Path], *, console: Any | None = None
+) -> dict[str, Any]:
+    """Read-only inventory of every archive root for the import pipeline.
+
+    Composes the per-root :func:`_inventory_import_root` reads into the
+    pipeline's merge inputs: the dedupe/merge row lists, the per-root source
+    records, and the source-runs maps the merge phase seeds from. Per-root
+    progress is printed on ``console`` when given (the human-readable run;
+    ``--json`` callers pass ``None`` to keep stdout machine-readable).
+
+    Returns:
+        ``{"inventories", "sources", "runs_by_session",
+        "repo_slug_sha_lookup"}``.
+
+    Raises:
+        ValueError/sqlite3.Error/OSError: Any inventory failure (missing
+            ``index.db``, unreadable root) — the caller's fail-closed surface.
+    """
+    inventories: list[list[dict[str, Any]]] = []
+    sources: list[dict[str, Any]] = []
+    runs_by_session: dict[str, dict[str, Any]] = {}
+    repo_slug_sha_lookup: dict[tuple[str, str, str], Any] = {}
+    for root in roots:
+        inventory = _inventory_import_root(root)
+        inventories.append(inventory["rows"])
+        sources.append(
+            {
+                "archive_root": str(root),
+                "row_count": len(inventory["rows"]),
+                "source_digest": inventory["source_digest"],
+            }
         )
-    except ValueError as exc:
-        print_error(create_console(), "adjudicate import-local-observations failed", str(exc))
-        return 1
+        for session_id, run in inventory["runs"].items():
+            runs_by_session.setdefault(session_id, run)
+            repo_slug, base_sha, head_sha = (
+                run.get("repo_slug"),
+                run.get("base_sha"),
+                run.get("head_sha"),
+            )
+            if repo_slug and base_sha and head_sha:
+                repo_slug_sha_lookup.setdefault(
+                    (str(repo_slug), str(base_sha), str(head_sha)), session_id
+                )
+        if console is not None:  # per-root progress (S3)
+            console.print(
+                f"import: inventoried {len(inventory['rows'])} label_observations(s) "
+                f"from {root}"
+            )
+    return {
+        "inventories": inventories,
+        "sources": sources,
+        "runs_by_session": runs_by_session,
+        "repo_slug_sha_lookup": repo_slug_sha_lookup,
+    }
 
-    # Only identity-linked rows can merge: unmatched/conflict rows stay in the
-    # ledger's reason-coded buckets (never silently dropped, never misfiled).
+
+def _link_imported_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Remap identity-linked import rows onto their Hub session ids.
+
+    Only identity-linked rows can merge: unmatched/conflict rows stay in the
+    ledger's reason-coded buckets (never silently dropped, never misfiled).
+    Each linked row carries an inventory-time payload digest — the merge's
+    fail-closed drift gate recomputes exactly this digest before any write.
+    """
     linked_rows: list[dict[str, Any]] = []
     for row in result["rows"]:
         link = result["link"]["linked"].get(str(row["session_id"]))
@@ -994,66 +1070,201 @@ def handle_import_local_observations(argv: list[str]) -> int:
             merged_row, include_observed_at=merged_row["source"] != "auto"
         )
         linked_rows.append(merged_row)
+    return linked_rows
 
-    if args.dry_run:
-        # Dry-run still exercises the merge's fail-closed drift gate, but the
-        # planned appends are counted, never written (S2).
-        planned_count = len(
-            merge_imported_observations(Path("/nonexistent-import-dry-run"), linked_rows, dry_run=True)[
-                "planned"
-            ]
-        )
-    else:
-        try:
-            _seed_target_runs(
-                args.state_dir,
-                {str(row["session_id"]) for row in linked_rows},
-                runs_by_session,
-            )
-            merged = merge_imported_observations(args.state_dir, linked_rows, dry_run=False)
-            scan = redact_imported_metadata(linked_rows, scan_dir=args.state_dir / "import-scan")
-        except ValueError as exc:
-            print_error(create_console(), "adjudicate import-local-observations failed", str(exc))
-            return 1
-        if scan["blocked"]:
-            print_error(
-                create_console(),
-                "adjudicate import-local-observations blocked by unredactable metadata",
-                "; ".join(scan["blocked_reasons"]) + f" ({scan['scan_summary']})",
-            )
-            return 1
 
+def _write_import_merge(
+    state_dir: Path,
+    linked_rows: list[dict[str, Any]],
+    runs_by_session: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Redaction-gated merge of the linked rows into the state-dir archive.
+
+    Fail-closed gates first, before any state write (M9/AC6): the redaction +
+    secret scan and the merge's drift / malformed-row gate both run before the
+    seed/merge, so a blocked or drifted import cannot leave partially seeded
+    runs or unredacted observation rows committed in the state archive (and
+    every later run re-blocking on the same dirty payload). ``dry_run=True``
+    never touches the archive, so the gate can run unconditionally.
+
+    Returns:
+        ``{"planned", "appended", "deduped", "scan"}`` — the merge outcome
+        plus the redaction result for the report's ``redaction`` block.
+
+    Raises:
+        _ImportBlockedError: When the post-redaction scan is dirty — the
+            payload cannot be imported.
+        ValueError/sqlite3.Error/OSError: Redaction, drift-gate, seed, or
+            merge failures — the caller's fail-closed surface.
+    """
+    scan = redact_imported_metadata(linked_rows, scan_dir=state_dir / "import-scan")
+    merge_imported_observations(state_dir, linked_rows, dry_run=True)
+    if scan["blocked"]:
+        message = "; ".join(scan["blocked_reasons"]) + f" ({scan['scan_summary']})"
+        raise _ImportBlockedError(message)
+    _seed_target_runs(
+        state_dir,
+        {str(row["session_id"]) for row in linked_rows},
+        runs_by_session,
+    )
+    merged = merge_imported_observations(state_dir, linked_rows, dry_run=False)
+    return {
+        "planned": merged["planned"],
+        "appended": merged["appended"],
+        "deduped": merged["deduped"],
+        "scan": scan,
+    }
+
+
+def _build_import_report(
+    sources: list[dict[str, Any]],
+    result: dict[str, Any],
+    *,
+    dry_run: bool,
+    merge_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Compose the digest-stable import report (S1).
+
+    ``merge_state`` is the merge phase result: the ``merge_imported_observations``
+    shape (``planned``/``appended``/``deduped``) for a dry run, or the
+    :func:`_write_import_merge` shape — the same keys plus the fail-closed
+    ``scan`` — for a real run. Only the real run carries the ``redaction``
+    block; dry runs never write it (S2).
+    """
     report: dict[str, Any] = {
-        "dry_run": bool(args.dry_run),
+        "dry_run": dry_run,
         "sources": sources,
         "deduped_count": result["deduped_count"],
         "accounting": dict(result["accounting"]),
+        "merge": {
+            "planned": len(merge_state["planned"]),
+            "appended": merge_state["appended"],
+            "deduped": merge_state["deduped"],
+        },
     }
-    if args.dry_run:
-        report["merge"] = {"planned": planned_count, "appended": 0, "deduped": 0}
-    else:
-        report["merge"] = {
-            "planned": len(merged["planned"]),
-            "appended": merged["appended"],
-            "deduped": merged["deduped"],
+    if not dry_run:
+        report["redaction"] = {
+            "blocked": bool(merge_state["scan"]["blocked"]),
+            "reasons": list(merge_state["scan"]["blocked_reasons"]),
         }
-        report["redaction"] = {"blocked": False, "reasons": []}
+    return report
 
+
+def _publish_import_state(state_dir: Path, hub_repo: str, manifest: Path) -> dict[str, Any]:
+    """Publish the imported adjudication state additively to the private Hub.
+
+    The publish composition requires the adjudication-state payload
+    (queue.json / observations.jsonl / preview-ledger.json) to exist; the
+    import itself only writes ``index.db``, so fail closed with a prerequisite
+    hint on a fresh state-dir instead of a bare ``FileNotFoundError``. Reuses
+    the existing publication: the private repo hard-fail and the S1 secret
+    scan are ``publish_annotation_state``'s own fail-closed gates, so a public
+    destination or a credential-shaped payload is refused before any byte
+    reaches the Hub. The checkpoint is always written: it is the fresh-VM
+    resume anchor (AC5).
+
+    Returns:
+        ``{"prefix": ..., "uploaded": ...}``.
+
+    Raises:
+        _ImportPublishError: When the state archive is missing a publishable
+            adjudication-state file.
+        ValueError/HubUnavailableError/HydrationError/PublicDestinationError/
+        FileNotFoundError: Propagated from the publication steps.
+    """
+    missing = [
+        name
+        for name in ("queue.json", "observations.jsonl", "preview-ledger.json")
+        if not (state_dir / name).is_file()
+    ]
+    if missing:
+        raise _ImportPublishError(
+            "state archive is missing publishable adjudication-state file(s): "
+            + ", ".join(missing)
+            + "; run `corpus adjudicate build`/`label`/`export` to produce the "
+            "publication payload before --publish"
+        )
+    client = _make_client(hub_repo)
+    published = publish_annotation_state(
+        client, state_dir, manifest=manifest, batch_complete=True,
+    )
+    return {"prefix": published["prefix"], "uploaded": published["uploaded"]}
+
+
+def handle_import_local_observations(argv: list[str]) -> int:
+    """Handle ``corpus adjudicate import-local-observations`` (KD6, S1/S2/S3).
+
+    Thin composition over the independently testable pipeline units: read-only
+    inventory (``_inventory_import_roots``), the pure import pipeline
+    (``run_pure_import``), identity linkage (``_link_imported_rows``), then —
+    unless ``--dry-run`` — the redaction-gated append-only merge
+    (``_write_import_merge``), the digest-stable report
+    (``_build_import_report``), and the optional publish
+    (``_publish_import_state``). This handler owns only arg parsing, the
+    fail-closed error surface, and output; ``--json`` prints the report and a
+    real run writes it to ``--state-dir/import-report.json`` with the ledger
+    in ``--state-dir/import-ledger.json``. Dry-run writes nothing (S2).
+    """
+    from daydream.ui import create_console, print_error, print_success
+
+    parser = _build_adjudicate_parser()
+    args = parser.parse_args(["import-local-observations", *argv])
     if args.publish:
-        # Compose the existing publication (reuse over rebuild): the private
-        # repo hard-fail and the S1 secret scan are publish_annotation_state's
-        # own fail-closed gates, so a public destination or a credential-shaped
-        # payload is refused before any byte reaches the Hub. The checkpoint is
-        # always written: it is the fresh-VM resume anchor (AC5).
-        try:
-            client = _make_client(args.hub_repo)
-            published = publish_annotation_state(
-                client, args.state_dir, manifest=args.manifest, batch_complete=True,
+        if args.dry_run:
+            parser.error("--publish cannot be combined with --dry-run")
+        if args.manifest is None:
+            parser.error("--publish requires --manifest")
+    console = create_console()
+    try:
+        inventory = _inventory_import_roots(
+            args.archive_root, console=None if args.json else console
+        )
+        result = run_pure_import(
+            inventory["inventories"],
+            hydrated_index={},
+            repo_slug_sha_lookup=inventory["repo_slug_sha_lookup"],
+            projector_findings={},
+            unmatched_identity_less=True,
+        )
+        linked_rows = _link_imported_rows(result)
+        # Dry-run still exercises the merge's fail-closed drift gate, but the
+        # planned appends are counted, never written (S2). The real path runs
+        # the redaction + secret scan and the drift / malformed-row gate
+        # before any state write (M9/AC6).
+        merge_state = (
+            merge_imported_observations(args.state_dir, linked_rows, dry_run=True)
+            if args.dry_run
+            else _write_import_merge(
+                args.state_dir, linked_rows, inventory["runs_by_session"]
             )
+        )
+    except _ImportBlockedError as exc:
+        print_error(
+            console,
+            "adjudicate import-local-observations blocked by unredactable metadata",
+            exc.message,
+        )
+        return 1
+    except (ValueError, sqlite3.Error, OSError) as exc:
+        print_error(console, "adjudicate import-local-observations failed", str(exc))
+        return 1
+
+    report = _build_import_report(
+        inventory["sources"], result, dry_run=bool(args.dry_run), merge_state=merge_state
+    )
+    if args.publish:
+        try:
+            report["publish"] = _publish_import_state(
+                args.state_dir, args.hub_repo, args.manifest
+            )
+        except _ImportPublishError as exc:
+            print_error(
+                console, "adjudicate import-local-observations publish failed", exc.message
+            )
+            return 1
         except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
             print_error(console, "adjudicate import-local-observations failed", str(exc))
             return 1
-        report["publish"] = {"prefix": published["prefix"], "uploaded": published["uploaded"]}
 
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -1062,7 +1273,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
             console,
             f"Import {'planned' if args.dry_run else 'complete'}: "
             f"{sum(report['accounting'].values())} source row(s) across "
-            f"{len(sources)} root(s), {report['deduped_count']} deduped; "
+            f"{len(inventory['sources'])} root(s), {report['deduped_count']} deduped; "
             + (
                 f"{report['merge']['planned']} merge(s) planned; nothing written"
                 if args.dry_run
