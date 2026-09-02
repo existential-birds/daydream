@@ -15,12 +15,14 @@ atomically with a lineage pin.
 
 import hashlib
 import json
+import math
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast, overload
+from typing import Any, Literal, Mapping, NoReturn, cast, overload
 
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
@@ -87,6 +89,11 @@ class BuildCorpusV2Config:
     val_rate: float = 0.1
     salt: str = "daydream-corpus-v2"
     caps: dict[str, int] = field(default_factory=dict)
+    # Output-share caps (issue #1079): true share of the final emitted
+    # population, enforced per dimension over the post-tier-cap population.
+    max_stack_share: float | None = None
+    max_repo_share: float | None = None
+    max_profile_share: float | None = None
     labeler_policy_version: str = "1"
     reply_classifier_version: str = "1"
     rubric_schema_version: str = "per-finding-resolutions-v1"
@@ -112,6 +119,10 @@ class BuildCorpusV2Config:
                 "pinned license policy is a configuration error"
             )
         object.__setattr__(self, "license_policy_path", Path(self.license_policy_path))
+        for field_name in ("max_stack_share", "max_repo_share", "max_profile_share"):
+            share = getattr(self, field_name)
+            if share is not None and not (0.0 < share <= 1.0):
+                raise ValueError(f"{field_name} must be in (0.0, 1.0], got {share}")
         if self.as_of is not None:
             object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
 
@@ -480,6 +491,254 @@ def _license_decision_distribution(
     return dict(sorted(distribution.items()))
 
 
+_SHARE_DIMENSIONS: tuple[tuple[str, str, Callable[[Record], Any]], ...] = (
+    # One dimension table consumed by both the share-cap selection stage and
+    # the report builder, so the three vocabulary uses (configured keys,
+    # applied keys, exclusion-key prefixes) can never drift apart: every
+    # consumer spells the repository dimension ``repo``, matching the
+    # ``max_repo_share`` flag.
+    ("stack", "max_stack_share", lambda r: r.get("stack")),
+    (
+        "repo",
+        "max_repo_share",
+        lambda r: cast(dict[str, Any], r.get("lineage") or {}).get("repo_slug"),
+    ),
+    (
+        "profile",
+        "max_profile_share",
+        lambda r: cast(dict[str, Any], r.get("profile") or {}).get("profile_name"),
+    ),
+)
+
+
+def _max_keep_count(total: int, limit: float) -> int:
+    """Largest ``allowed`` with ``allowed / total <= limit`` (float-safety
+    guards around the floor; the same arithmetic runs on every pass, so the
+    result is deterministic and order-invariant)."""
+    allowed = math.floor(limit * total)
+    while (allowed + 1) / total <= limit:
+        allowed += 1
+    while allowed > 0 and allowed / total > limit:
+        allowed -= 1
+    return allowed
+
+
+def _raise_share_caps_fail_closed(
+    *,
+    flag: str,
+    limit: float,
+    dimension: str,
+    population: int | None = None,
+    value: Any | None = None,
+    values: list[Any] | None = None,
+) -> NoReturn:
+    """Single home for the fail-closed ``ValueError`` terminal state of the
+    share-cap stage (the contract documented in ``_apply_share_caps``): every
+    total-population-zero path — the entry degeneracy pre-check, a sole
+    remaining value that can no longer be trimmed without emptying the
+    population, and a trim round that would empty the whole population —
+    funnels through this one raise so the message shape cannot drift between
+    sites. ``value`` names the single over-share value (first two paths);
+    ``values`` spells out the over-share value list (third path)."""
+    if values is not None:
+        raise ValueError(
+            f"{flag}={limit} would reduce the total population to zero across "
+            f"{dimension} values {sorted(str(v) for v in values)} — fail-closed"
+        )
+    raise ValueError(
+        f"{flag}={limit} for {dimension}={value!r} would reduce the total population "
+        f"to zero (population {population}) — fail-closed"
+    )
+
+
+def _apply_share_caps(
+    records: list[Record],
+    *,
+    max_stack_share: float | None,
+    max_repo_share: float | None,
+    max_profile_share: float | None,
+) -> tuple[list[Record], dict[str, int]]:
+    """Pure share-cap selection over the post-tier-cap population.
+
+    Within a dimension, iterates until every value's share of the current
+    population is within its configured limit (strict output-share semantics:
+    ``count / total <= limit`` over the final emitted population), keeping the
+    lowest ``record_id`` records of any over-share group. The three dimensions
+    (stack → repo → profile) are applied sequentially and the whole sequence
+    is re-run to a fixed point: a later dimension's exclusions re-shape the
+    population and can push an earlier dimension's value back over its limit
+    (sequential drift on correlated dimensions — e.g. multi-stack repos,
+    per-repo profiles), so every dimension must be re-enforced until a
+    complete pass excludes nothing and every configured share is within its
+    limit of the final population. Returns the kept list (sorted by
+    ``record_id``) and exclusion counts keyed ``"<dimension>:<value>"``
+    (``None`` values form their own bucket spelled ``(none)``).
+
+    Fails closed with ``ValueError`` if enforcing a cap would leave a total
+    population of zero (the cap cannot keep a single record of the population
+    it is asked to cap). An already-empty population (no decisive findings, or
+    tier caps that trimmed everything) is returned unchanged — configured caps
+    exclude nothing from an empty corpus. A dimension value dropping out
+    entirely is fine — only total-population-zero is fatal; a sole remaining
+    value that can no longer be trimmed without emptying the population hits
+    the same fail-closed terminal state as the entry degeneracy pre-check and
+    raises rather than emitting a lone value at 100% share over its cap.
+    Never samples; input order does not affect the result.
+    """
+    limits = {
+        "stack": max_stack_share,
+        "repo": max_repo_share,
+        "profile": max_profile_share,
+    }
+    dimensions: list[tuple[str, str, Callable[[Record], Any], float]] = []
+    for name, flag, getter in _SHARE_DIMENSIONS:
+        limit = limits[name]
+        if limit is not None:
+            dimensions.append((name, flag, getter, limit))
+    exclusions: dict[str, int] = {}
+    population = sorted(records, key=lambda r: str(r["record_id"]))
+    if not population:
+        # Empty population (no decisive findings, or tier caps trimmed
+        # everything): configured caps exclude nothing — a previously
+        # completing zero-record build stays completing.
+        return population, exclusions
+    original = list(population)
+    # Fail-closed degeneracy pre-check against the original input population:
+    # a cap that cannot keep a single record of an over-share group covering
+    # the whole input would collapse it to zero — refuse before doing any work.
+    # (Populations reduced by earlier dimensions or by a fixed-point re-pass
+    # are handled by the fail-closed sole-value check in the trim loop below,
+    # so this check is invariant and runs once per configured dimension on the
+    # entry population.)
+    entry_total = len(original)
+    for dimension, flag, getter, limit in dimensions:
+        entry_counts: dict[Any, int] = {}
+        for rec in original:
+            value = getter(rec)
+            entry_counts[value] = entry_counts.get(value, 0) + 1
+        for value, count in entry_counts.items():
+            if count / entry_total > limit and count == entry_total:
+                if _max_keep_count(entry_total, limit) == 0:
+                    _raise_share_caps_fail_closed(
+                        flag=flag,
+                        limit=limit,
+                        dimension=dimension,
+                        population=entry_total,
+                        value=value,
+                    )
+    # Fixed-point loop (issue #1079, F1): a later dimension's trimming can
+    # remove records of one value and push an earlier dimension's value back
+    # over its limit, so a single sequential pass does not guarantee the M4
+    # contract. Re-run the full dimension sequence until a complete pass
+    # excludes nothing — each pass that excludes reduces the population, so
+    # the loop provably terminates, and every configured dimension is then
+    # within its limit of the final emitted population.
+    while True:
+        pass_exclusions = 0
+        for dimension, flag, getter, limit in dimensions:
+            while True:
+                total = len(population)
+                counts: dict[Any, int] = {}
+                for rec in population:
+                    value = getter(rec)
+                    counts[value] = counts.get(value, 0) + 1
+                over: dict[Any, int] = {}
+                for value, count in counts.items():
+                    if count / total > limit:
+                        # Largest keep-count whose share of the current
+                        # population is still <= limit.
+                        allowed = _max_keep_count(total, limit)
+                        if allowed == 0 and count == total:
+                            # Sole remaining value after earlier reductions or
+                            # exclusions: trimming it further would empty the
+                            # population entirely — the same terminal state as
+                            # the entry degeneracy pre-check above, so fail
+                            # closed (never emit a lone value above its cap).
+                            _raise_share_caps_fail_closed(
+                                flag=flag,
+                                limit=limit,
+                                dimension=dimension,
+                                population=total,
+                                value=value,
+                            )
+                        over[value] = allowed
+                if not over:
+                    break
+                kept: list[Record] = []
+                taken: dict[Any, int] = {}
+                round_exclusions = 0
+                for rec in population:
+                    value = getter(rec)
+                    if value in over and taken.get(value, 0) >= over[value]:
+                        key = f"{dimension}:{str(value) if value is not None else '(none)'}"
+                        exclusions[key] = exclusions.get(key, 0) + 1
+                        round_exclusions += 1
+                        continue
+                    taken[value] = taken.get(value, 0) + 1
+                    kept.append(rec)
+                if not kept:
+                    _raise_share_caps_fail_closed(
+                        flag=flag,
+                        limit=limit,
+                        dimension=dimension,
+                        values=list(over),
+                    )
+                population = kept
+                pass_exclusions += round_exclusions
+        if pass_exclusions == 0:
+            break
+    return population, exclusions
+
+
+def _share_caps_report(
+    records: list[Record],
+    exclusions: dict[str, int],
+    *,
+    max_stack_share: float | None,
+    max_repo_share: float | None,
+    max_profile_share: float | None,
+) -> dict[str, Any]:
+    """Shared summary/lineage ``share_caps`` block (one builder, two consumers
+    — they cannot drift). ``configured`` lists the non-None share limits keyed
+    stack/repo/profile; ``applied`` reports final per-value counts + shares
+    against the final emitted population per dimension; ``exclusions`` lists
+    the merged ``share-cap:<dimension>:<value>`` exclusion counts. Both draw
+    dimension names and value getters from the single ``_SHARE_DIMENSIONS``
+    table, so configured/applied/exclusion vocabulary stays one spelling."""
+    limits = {
+        "stack": max_stack_share,
+        "repo": max_repo_share,
+        "profile": max_profile_share,
+    }
+    configured = {
+        name: limits[name]
+        for name, _flag, _getter in _SHARE_DIMENSIONS
+        if limits[name] is not None
+    }
+    applied: dict[str, dict[str, dict[str, float]]] = {}
+    total = len(records)
+    for name, _flag, getter in _SHARE_DIMENSIONS:
+        counts: dict[Any, int] = {}
+        for rec in records:
+            value = getter(rec)
+            counts[value] = counts.get(value, 0) + 1
+        applied[name] = {
+            str(value) if value is not None else "(none)": {
+                "count": count,
+                "share": (count / total) if total else 0.0,
+            }
+            for value, count in sorted(
+                counts.items(), key=lambda kv: (kv[0] is None, str(kv[0]))
+            )
+        }
+    return {
+        "version": 1,
+        "configured": configured,
+        "applied": applied,
+        "exclusions": dict(sorted(exclusions.items())),
+    }
+
+
 def _caps_applied(records: list[Record], caps: dict[str, int]) -> dict[str, int]:
     """Final per-tier population (what the caps resolved to), deterministic."""
     return _count_by(records, lambda r: str(r["tier"])) if caps else {}
@@ -508,7 +767,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     report only.
 
     Returns a summary dict with ``total``/``emitted``, per-type/per-tier/
-    per-split counts, the ``caps`` block (configured vs applied), and
+    per-split counts, the ``caps`` block (configured vs applied), the
+    ``share_caps`` block (only when at least one output-share cap is
+    configured — shared with lineage.json so the two cannot drift), and
     ``exclusions_by_reason`` — all derived from the final population in
     deterministic order. Non-decisive findings land in the human
     ``adjudication-report.json`` with their evidence (D8: report output, not
@@ -707,6 +968,53 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
             kept.append(rec)
         records = kept
 
+    # Output-share caps (issue #1079): true share of the final emitted
+    # population, enforced per dimension (stack → repo → profile) over
+    # the post-tier-cap population. The dimension sequence is re-run to a
+    # fixed point so a later pass can never leave an earlier dimension back
+    # over its cap (F1: a single sequential pass drifts on correlated
+    # dimensions). Only runs when at least one share is configured, so
+    # tier-cap-only builds stay byte-identical and neither the summary nor
+    # lineage gains a ``share_caps`` block.
+    share_caps_report: dict[str, Any] | None = None
+    if (
+        config.max_stack_share is not None
+        or config.max_repo_share is not None
+        or config.max_profile_share is not None
+    ):
+        records, share_exclusions = _apply_share_caps(
+            records,
+            max_stack_share=config.max_stack_share,
+            max_repo_share=config.max_repo_share,
+            max_profile_share=config.max_profile_share,
+        )
+        for excl_key, excl_count in share_exclusions.items():
+            exclusions_by_reason[f"share-cap:{excl_key}"] = (
+                exclusions_by_reason.get(f"share-cap:{excl_key}", 0) + excl_count
+            )
+        share_caps_report = _share_caps_report(
+            records,
+            share_exclusions,
+            max_stack_share=config.max_stack_share,
+            max_repo_share=config.max_repo_share,
+            max_profile_share=config.max_profile_share,
+        )
+
+    # Re-pin lineage valid_at over the final emitted population (post tier-cap
+    # and share-cap exclusions): the in-loop pin above is computed before
+    # either caps stage drops records, so it could name a cap-excluded record's
+    # evidence — contradicting the "emitted records' evidence only" contract
+    # above. Recomputing over the post-cap records keeps the pin reachable;
+    # uncapped builds re-pin to the identical value (max is order-independent).
+    valid_at = config.as_of
+    for rec in records:
+        rec_valid_at = cast(dict[str, Any], rec["lineage"]).get("valid_at")
+        if rec_valid_at is not None and (
+            valid_at is None
+            or datetime.fromisoformat(str(rec_valid_at)) > datetime.fromisoformat(valid_at)
+        ):
+            valid_at = str(rec_valid_at)
+
     canonical = _dump_jsonl(records)
     _atomic_write(config.out_dir / "corpus.jsonl", canonical)
     # Versioned twin of the canonical corpus (same bytes, atomic, pre-_SUCCESS).
@@ -769,6 +1077,11 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
         "caps": {"configured": dict(sorted(config.caps.items())),
                  "applied": _caps_applied(records, config.caps)},
+        **(
+            {"share_caps": share_caps_report}
+            if share_caps_report is not None
+            else {}
+        ),
         "adjudication_count": len(adjudication),
         # License identity pin (M7/AC4, issue #1080): the digest-pinned policy
         # the re-evaluation consumed, the C5 exclusion list the C5 gate
@@ -826,6 +1139,11 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "records_by_split": dict(split_counts),
         "caps": {"configured": dict(sorted(config.caps.items())),
                  "applied": _caps_applied(records, config.caps)},
+        **(
+            {"share_caps": share_caps_report}
+            if share_caps_report is not None
+            else {}
+        ),
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
         "license_distribution": _license_decision_distribution(decisions),
     }

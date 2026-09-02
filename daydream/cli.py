@@ -626,8 +626,23 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         dest="max_stack_share",
-        help="Not supported by build-v2: the v2 projection applies per-tier caps "
-        "(BuildCorpusV2Config.caps), so passing this flag is refused",
+        help="Maximum projected share of any single detected stack, in (0, 1]",
+    )
+
+    parser.add_argument(
+        "--max-repo-share",
+        type=float,
+        default=None,
+        dest="max_repo_share",
+        help="Maximum projected share of any single repository slug, in (0, 1]",
+    )
+
+    parser.add_argument(
+        "--max-profile-share",
+        type=float,
+        default=None,
+        dest="max_profile_share",
+        help="Maximum projected share of any single native profile, in (0, 1]",
     )
 
     parser.add_argument(
@@ -669,17 +684,14 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     parser = _build_build_corpus_v2_parser()
     args = parser.parse_args(argv)
 
-    if args.max_stack_share is not None:
-        if not (0.0 < args.max_stack_share <= 1.0):
-            print_error(create_console(), "Invalid --max-stack-share", "Must be in (0, 1].")
+    for flag, value in (
+        ("--max-stack-share", args.max_stack_share),
+        ("--max-repo-share", args.max_repo_share),
+        ("--max-profile-share", args.max_profile_share),
+    ):
+        if value is not None and not (0.0 < value <= 1.0):
+            print_error(create_console(), f"Invalid {flag}", "Must be in (0, 1].")
             return 1
-        print_error(
-            create_console(),
-            "Unsupported --max-stack-share",
-            "corpus build-v2 applies per-tier caps (BuildCorpusV2Config.caps); "
-            "per-stack share caps are not part of the v2 projection.",
-        )
-        return 1
 
     if args.annotations_snapshot is not None:
         print_error(
@@ -741,6 +753,9 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
             license_policy_path=args.license_policy,
             allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft),
             as_of=args.as_of,
+            max_stack_share=args.max_stack_share,
+            max_repo_share=args.max_repo_share,
+            max_profile_share=args.max_profile_share,
         )
     except ValueError as exc:
         print_error(create_console(), "Invalid --as-of", str(exc))
