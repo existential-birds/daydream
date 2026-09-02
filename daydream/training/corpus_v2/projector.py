@@ -4,7 +4,9 @@ Each ``PerFindingResolution`` becomes its own record with a per-record
 ``outcome_label`` — a mixed session (some findings accepted, some rejected)
 never collapses into a run-level aggregate like v1's ``contested``
 ``outcome_label``. Non-decisive dispositions route to an adjudication
-report (report output, not a pipeline stage); the projector stays pure and
+report (report output, not a pipeline stage) unless the build opts in via
+``emit_process_traces``, which materializes them as schema-distinct
+``process-trace``/``task-only`` training records; the projector stays pure and
 deterministic.
 
 ``run_build_corpus_v2()`` is the top-level pure projection (no git, no
@@ -40,7 +42,13 @@ from daydream.training.corpus_v2.splits import assign_split
 from daydream.training.corpus_v2.tiers import classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 
-__all__ = ["BuildCorpusV2Config", "project_findings", "run_build_corpus_v2"]
+__all__ = [
+    "BatchArtifacts",
+    "BuildCorpusV2Config",
+    "project_findings",
+    "read_batch_artifacts",
+    "run_build_corpus_v2",
+]
 
 Record = dict[str, object]
 
@@ -49,6 +57,68 @@ _SPLIT_FILENAMES: dict[str, str] = {
     "validation": "validation.jsonl",
     "holdout": "holdout.jsonl",
 }
+
+
+@dataclass(frozen=True)
+class BatchArtifacts:
+    """Per-batch review artifacts read from a curated bundle's batch directory
+    (``batches/<session_id>/``). Producer-realistic shapes (confirmed by the
+    task-0 spike probe, tests/test_corpus_v2_spike_probe.py):
+
+    - ``findings.json`` — ``{"findings": [{"fingerprint": <64-hex>, "body":
+      <str>, ...}]}`` (the same artifact ``daydream/archive/__init__.py``
+      copies into the run bundle; fingerprints join 1:1 with the annotation
+      snapshot resolution rows).
+    - ``diff.patch`` — the run's diff text.
+    - ``manifest.json`` — ``git.head_sha`` plus ``code_context.{base_sha,
+      head_sha}`` (archive/manifest.py serialization).
+    """
+
+    findings_by_fingerprint: dict[str, str]
+    diff: str
+    manifest_git: dict[str, Any]
+    manifest_code_context: dict[str, Any]
+
+
+def read_batch_artifacts(bundle_dir: Path, session_id: str) -> BatchArtifacts:
+    """Read the finding text / diff / git shas from a batch directory.
+
+    Pure filesystem read; every file is optional (an absent artifact yields an
+    empty value — the caller decides what is mandatory). Findings without both
+    a ``fingerprint`` and a ``body`` are skipped.
+    """
+    batch_dir = Path(bundle_dir) / "batches" / session_id
+    findings_by_fingerprint: dict[str, str] = {}
+    try:
+        data = json.loads((batch_dir / "findings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    for finding in (data.get("findings") if isinstance(data, dict) else None) or []:
+        if not isinstance(finding, dict):
+            continue
+        fingerprint, body = finding.get("fingerprint"), finding.get("body")
+        if isinstance(fingerprint, str) and isinstance(body, str):
+            findings_by_fingerprint[fingerprint] = body
+    try:
+        diff = (batch_dir / "diff.patch").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        diff = ""
+    try:
+        manifest = json.loads((batch_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = {}
+    manifest_git = manifest.get("git") if isinstance(manifest, dict) else None
+    manifest_code_context = (
+        manifest.get("code_context") if isinstance(manifest, dict) else None
+    )
+    return BatchArtifacts(
+        findings_by_fingerprint=findings_by_fingerprint,
+        diff=diff,
+        manifest_git=manifest_git if isinstance(manifest_git, dict) else {},
+        manifest_code_context=(
+            manifest_code_context if isinstance(manifest_code_context, dict) else {}
+        ),
+    )
 
 
 def _dump_jsonl(records: list[Record]) -> str:
@@ -105,6 +175,15 @@ class BuildCorpusV2Config:
     # global license string to stamp (C5/C8, issue #1080).
     license_policy_path: Path | None = None
     allow_copyleft: frozenset[str] = frozenset()
+    # D8 opt-in (issue #1081): when False (default), non-decisive findings
+    # are adjudication-report output only — byte-identical to builds before
+    # the flag existed. When True, each finding the projector would route to
+    # adjudication is additionally materialized as two schema-distinct
+    # training records (a silver ``process-trace`` and a ``task-only``
+    # record, both with ``outcome_label=None``) instead of counting as a
+    # ``non-decisive-adjudication`` exclusion; the adjudication report
+    # itself is unchanged.
+    emit_process_traces: bool = False
 
     def __post_init__(self) -> None:
         if self.annotation_bundle_dir is None:
@@ -763,8 +842,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
 
     Each finding is projected exactly once (the annotation resolutions are
     session-scoped, so sibling segments never fabricate per-segment copies);
-    non-decisive findings are excluded here and routed to the adjudication
-    report only.
+    by default non-decisive findings are excluded here and routed to the
+    adjudication report only — with ``emit_process_traces`` they additionally
+    join the emitted population as ``process-trace``/``task-only`` records.
 
     Returns a summary dict with ``total``/``emitted``, per-type/per-tier/
     per-split counts, the ``caps`` block (configured vs applied), the
@@ -773,7 +853,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     ``exclusions_by_reason`` — all derived from the final population in
     deterministic order. Non-decisive findings land in the human
     ``adjudication-report.json`` with their evidence (D8: report output, not
-    a pipeline stage). ``corpus.jsonl`` is also published as the versioned
+    a pipeline stage — unless ``emit_process_traces`` opts them into the
+    record population as schema-distinct ``process-trace``/``task-only``
+    records). ``corpus.jsonl`` is also published as the versioned
     twin ``corpus-v2.jsonl`` from the same in-memory bytes via the same
     atomic write, before ``_SUCCESS`` — covered by the identical fail-closed
     completeness gate, so the twin can never diverge from the canonical file.
@@ -836,6 +918,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # could hash into different splits (D5 disjointness is per finding).
     seen_findings: set[tuple[str, str]] = set()
     adjudicated_findings: set[tuple[str, str]] = set()
+    # Adjudicated findings materialized as process-trace/task-only records
+    # under ``emit_process_traces`` — removed from the exclusion count.
+    materialized_adjudications: set[tuple[str, str]] = set()
     exclusions_by_reason: dict[str, int] = {}
     # lineage valid_at is pinned over the emitted records' evidence only —
     # annotation rows for sessions never admitted/emitted must not drift it.
@@ -854,6 +939,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         else:
             batch_manifest_row = {}
         digest_parts = [d for d in (batch.content_digest, snapshot_digest) if d]
+        batch_artifacts = read_batch_artifacts(config.bundle_dir, batch.session_id)
         trajectory_documents = _read_trajectory_documents(config.bundle_dir, batch.artifact_relpath)
         for trajectory in trajectory_documents:
             segs = segment(trajectory)
@@ -890,55 +976,137 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                             "found at projection; refusing to project"
                         )
                     record_decision: dict[str, Any] = decision
-                    # Non-decisive findings are report output only (D8): they
-                    # never become training records, so corpus.jsonl and the
-                    # split manifests exclude them by construction while
-                    # lineage/summary count them under exclusions_by_reason.
+                    # Non-decisive findings are adjudication-report output
+                    # (D8): by default they never become training records, so
+                    # corpus.jsonl and the split manifests exclude them by
+                    # construction while lineage/summary count them under
+                    # exclusions_by_reason. With ``emit_process_traces`` the
+                    # finding is additionally materialized as a silver
+                    # ``process-trace`` record and a ``task-only`` record —
+                    # schema-distinct, never gold (``outcome_label=None``),
+                    # classified via ``classify_tier`` with the matching
+                    # ``record_type`` — and no longer counted as a
+                    # ``non-decisive-adjudication`` exclusion (the report
+                    # itself still carries it).
                     if str(rec["tier"]) == "task-only":
-                        continue
-                    _refuse_posterior_evidence(
-                        seg.session_id,
-                        fingerprint,
-                        cast(list[Record], rec["evidence"]),
-                        config.as_of,
-                    )
-                    split = assign_split(
-                        str(rec["record_id"]),
-                        holdout_rate=config.holdout_rate,
-                        val_rate=config.val_rate,
-                        salt=config.salt,
-                    )
-                    prov = _provenance_for(
-                        resolution_by_fp.get(fingerprint, {}), batch_manifest_row
-                    )
-                    rec_valid_at = _max_valid_at(
-                        cast(list[Record], rec["evidence"]), config.as_of
-                    )
-                    if rec_valid_at is not None and (
-                        valid_at is None
-                        or datetime.fromisoformat(rec_valid_at) > datetime.fromisoformat(valid_at)
-                    ):
-                        valid_at = rec_valid_at
-                    rec["profile"] = prov["profile"]
-                    rec["stack"] = prov["stack"]
-                    rec["lineage"] = {
-                        "hub_commit": bundle.source_hub_commit,
-                        "curation_id": bundle.curation_id,
-                        "content_digests": digest_parts,
-                        "labeler_policy_version": config.labeler_policy_version,
-                        "reply_classifier_version": config.reply_classifier_version,
-                        "rubric_schema_version": config.rubric_schema_version,
-                        "as_of": config.as_of,
-                        "valid_at": rec_valid_at,
-                        "split": split,
-                        "exclusion_reason": None,
-                        "repo_slug": record_decision["repo_slug"],
-                        "license_decision": record_decision,
-                    }
-                    # v2 schema stamp: every projected record carries the
-                    # training-record schema version it was emitted under.
-                    rec["schema_version"] = "2"
-                    records.append(rec)
+                        if not config.emit_process_traces:
+                            continue
+                        resolution = resolution_by_fp.get(fingerprint, {})
+                        emit_records: list[Record] = []
+                        for derived_type in ("process-trace", "task-only"):
+                            derived = dict(rec)
+                            derived["record_type"] = derived_type
+                            derived["tier"] = classify_tier(
+                                resolution, record_type=derived_type
+                            )
+                            derived["outcome_label"] = None
+                            derived["record_id"] = record_id(
+                                seg.session_id,
+                                seg.trajectory_id,
+                                seg.segment_id,
+                                f"{derived_type}:{fingerprint}",
+                            )
+                            emit_records.append(derived)
+                        materialized_adjudications.add(key)
+                    else:
+                        emit_records = [rec]
+                    for rec in emit_records:
+                        _refuse_posterior_evidence(
+                            seg.session_id,
+                            fingerprint,
+                            cast(list[Record], rec["evidence"]),
+                            config.as_of,
+                        )
+                        split = assign_split(
+                            str(rec["record_id"]),
+                            holdout_rate=config.holdout_rate,
+                            val_rate=config.val_rate,
+                            salt=config.salt,
+                        )
+                        prov = _provenance_for(
+                            resolution_by_fp.get(fingerprint, {}), batch_manifest_row
+                        )
+                        rec_valid_at = _max_valid_at(
+                            cast(list[Record], rec["evidence"]), config.as_of
+                        )
+                        if rec_valid_at is not None and (
+                            valid_at is None
+                            or datetime.fromisoformat(rec_valid_at) > datetime.fromisoformat(valid_at)
+                        ):
+                            valid_at = rec_valid_at
+                        rec["profile"] = prov["profile"]
+                        rec["stack"] = prov["stack"]
+                        rec["lineage"] = {
+                            "hub_commit": bundle.source_hub_commit,
+                            "curation_id": bundle.curation_id,
+                            "content_digests": digest_parts,
+                            "labeler_policy_version": config.labeler_policy_version,
+                            "reply_classifier_version": config.reply_classifier_version,
+                            "rubric_schema_version": config.rubric_schema_version,
+                            "as_of": config.as_of,
+                            "valid_at": rec_valid_at,
+                            "split": split,
+                            "exclusion_reason": None,
+                            "repo_slug": record_decision["repo_slug"],
+                            "license_decision": record_decision,
+                        }
+                        # Additive enrichment from the batch's review artifacts
+                        # (findings.json / diff.patch / manifest.json): localized
+                        # finding text and a task-identity block. Every field is
+                        # opt-in on artifact presence — a missing artifact leaves
+                        # the field absent (the consumer fails closed, not the
+                        # projector), and record_id/tier/outcome_label are never
+                        # touched.
+                        finding_text = batch_artifacts.findings_by_fingerprint.get(fingerprint)
+                        if finding_text is not None:
+                            rec["finding_text"] = finding_text
+                            rec["finding_text_sha256"] = hashlib.sha256(
+                                finding_text.encode("utf-8")
+                            ).hexdigest()
+                        task_identity: dict[str, Any] = {
+                            "repo_slug": record_decision["repo_slug"],
+                        }
+                        manifest_git = batch_artifacts.manifest_git
+                        manifest_code_context = batch_artifacts.manifest_code_context
+                        # Producer-realistic manifest namespaces
+                        # (archive/manifest.py:374-387): ``base_sha`` lives
+                        # under ``code_context`` and only ``head_sha`` under
+                        # ``git`` — mirroring corpus.py's v1 read of the same
+                        # manifest (code_context base, git head).
+                        for sha_name, sha_value in (
+                            ("base_sha", manifest_code_context.get("base_sha")),
+                            (
+                                "head_sha",
+                                manifest_git.get("head_sha")
+                                or manifest_code_context.get("head_sha"),
+                            ),
+                        ):
+                            if isinstance(sha_value, str) and bool(sha_value):
+                                task_identity[sha_name] = sha_value
+                        if batch_artifacts.diff:
+                            diff_digest = hashlib.sha256(
+                                batch_artifacts.diff.encode("utf-8")
+                            ).hexdigest()
+                            diff_ref: dict[str, Any] = {
+                                "batch": batch.content_digest,
+                                "relpath": f"batches/{batch.session_id}/diff.patch",
+                            }
+                            task_identity["diff_digest"] = diff_digest
+                            task_identity["diff_ref"] = diff_ref
+                            # The raw diff body is embedded on the record
+                            # (schema v2.json ``diff``) so Stage-2 RFT inputs
+                            # carry it without an archive-side materialization
+                            # step — the projection is the frozen boundary.
+                            rec["diff"] = batch_artifacts.diff
+                        rec["task_identity"] = task_identity
+                        if "diff_digest" in task_identity:
+                            lineage_fields = cast(dict[str, Any], rec["lineage"])
+                            lineage_fields["diff_digest"] = task_identity["diff_digest"]
+                            lineage_fields["diff_ref"] = task_identity["diff_ref"]
+                        # v2 schema stamp: every projected record carries the
+                        # training-record schema version it was emitted under.
+                        rec["schema_version"] = "2"
+                        records.append(rec)
                 for entry in seg_adjudication:
                     key = (seg.session_id, str(entry["fingerprint"]))
                     if key not in adjudicated_findings:
@@ -952,7 +1120,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     # assignment, over the deduplicated final population. Excess records of a
     # capped tier are excluded (never silently dropped) and named in the
     # summary, lineage, and exclusion reasons.
-    exclusions_by_reason["non-decisive-adjudication"] = len(adjudication)
+    exclusions_by_reason["non-decisive-adjudication"] = len(
+        adjudicated_findings - materialized_adjudications
+    )
     if config.caps:
         kept: list[Record] = []
         per_tier: dict[str, int] = {}

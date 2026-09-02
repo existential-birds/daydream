@@ -11,16 +11,17 @@ repo name and provider credentials in their environment.
 
 Two operator-safety constraints frame every step:
 
-- **Success is defined only by the end of step 8.** A run is finished when a
-  clean-download verification passes and the bundle's `_SUCCESS` marker is
-  present. Anything before that — including a green `--dry-run` — is not
-  success.
+- **Success is defined only by the end of step 10.** A run is finished when a
+  clean-download verification passes, the bundle's `_SUCCESS` marker is
+  present, and a green `daydream train --corpus-v2` dry run consumes the
+  frozen projection. Anything before that — including a green
+  `--dry-run` on an intermediate command — is not success.
 - **The VM is expendable; the Hub checkpoint is not.** Step 2 recovers all
   published adjudication state from the Hub after VM loss. Re-run it any time
   you are unsure the local state is intact.
 
-Every command below is a literal, single-line CLI invocation that parses against the real parser (enforced by
-`tests/test_cli_adjudicate.py::test_runbook_commands_parse_against_real_parser`).
+Every `daydream corpus adjudicate` command below (steps 1–8) is a literal, single-line CLI invocation that parses against the real parser (enforced by
+`tests/test_cli_adjudicate.py::test_runbook_commands_parse_against_real_parser`). The step 9 (`corpus build-v2`) and step 10 (`train --corpus-v2`) commands are not covered by that parser check — `tests/test_training_docs_v2.py` only asserts their presence.
 
 ---
 
@@ -166,7 +167,7 @@ Project the curated bundle and the verified annotation bundle into the frozen
 corpus-v2 training records:
 
 ```bash
-daydream corpus build-v2 --bundle-root /tmp/daydream-hydrate/curated/<curation-id> --annotation-bundle-root /tmp/annotation-bundle --out /tmp/corpus-v2/corpus-v2.jsonl
+daydream corpus build-v2 --bundle-root /tmp/daydream-hydrate/curated/<curation-id> --annotation-bundle-root /tmp/annotation-bundle --license-policy <license-policy.json> --out /tmp/corpus-v2/corpus-v2.jsonl
 ```
 
 `build-v2` self-verifies the annotation bundle (`_SUCCESS`, `SHA256SUMS`,
@@ -174,6 +175,33 @@ daydream corpus build-v2 --bundle-root /tmp/daydream-hydrate/curated/<curation-i
 bundle root before projecting — `--bundle-root` is the hydration-produced
 curated bundle (`/tmp/daydream-hydrate/curated/<curation-id>/`, which carries
 `_SUCCESS`, `SHA256SUMS`, and `curation-manifest.json`), not the raw
-`downloads/<revision>` snapshot tree. It applies per-tier caps and writes the
-split manifests and lineage beside the output. A green run here is the end of
-the pipeline.
+`downloads/<revision>` snapshot tree. `--license-policy` is the digest-pinned
+license-policy JSON every record's per-repo license decision is resolved from
+(it is required — the command refuses to run without it). It applies per-tier
+caps and writes the split manifests and lineage beside the output.
+
+## 10. Train on the frozen corpus-v2 projection
+
+The projection directory written by step 9 is a frozen, immutable training
+input — do not edit, filter, or re-split it. Train the four-stage pipeline
+against it directly:
+
+```bash
+daydream train --corpus-v2 /tmp/corpus-v2 --out /tmp/train-out --dry-run
+```
+
+(Drop `--dry-run` for the real run; `--corpus-v2` is mutually exclusive with
+the v1 `--corpus` flag.) The loader fail-closes before any stage runs unless
+the directory's `_SUCCESS` marker and `lineage.json` are present, and it
+re-applies the C5 exclusion list and the C8 copyleft opt-in gate fail-closed
+on every load — the projector's decisions are never trusted on their own. The split is
+recomputed from each record id under the lineage's pinned salt and rates and
+compared against the recorded `lineage.split`; any drift refuses the entire
+load with the offending record id named, so Stage 0 always consumes exactly
+the projector's frozen split. Stage-2 RFT rebuilds replay tasks from the
+records' task-identity git SHAs (`base_sha`/`head_sha`), which are validated
+as full 40-hex SHAs before any rebuild.
+
+A green `daydream train --corpus-v2` dry run here is the end of the pipeline:
+the successfully frozen corpus-v2 bundle feeds Stage-0, SFT, and RFT directly,
+with no manual conversion to the legacy JSONL schema.

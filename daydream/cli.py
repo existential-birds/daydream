@@ -44,7 +44,7 @@ import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
 from rich.console import Console
@@ -2071,25 +2071,46 @@ def _handle_label_command(argv: list[str]) -> int:
     return 0
 
 
+class _TrainParser(argparse.ArgumentParser):
+    """Train parser that maps usage errors to exit code 1.
+
+    The train verb reports refusals (including conflicting inputs) as a
+    validation failure with exit 1 rather than argparse's default 2, so
+    harnesses see one failure code for "the run was refused".
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 def _build_train_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream train --corpus <path> --out <dir> [...]``.
 
     Dispatched manually from ``main()`` (verb-first) so its flags don't
     collide with the top-level ``TARGET`` positional.
     """
-    parser = argparse.ArgumentParser(
+    parser = _TrainParser(
         prog="daydream train",
         description=(
             "Run the four-stage training pipeline (stage0 gate → stage1 SFT → "
             "stage2 RFT → stage3 adapter) and write a stage manifest."
         ),
     )
-    parser.add_argument(
+    corpus_group = parser.add_mutually_exclusive_group(required=True)
+    corpus_group.add_argument(
         "--corpus",
         type=Path,
-        required=True,
         metavar="PATH",
         help="Input JSONL training corpus (one record per line; C5/C8 fail-closed)",
+    )
+    corpus_group.add_argument(
+        "--corpus-v2",
+        type=Path,
+        dest="corpus_v2",
+        metavar="DIR",
+        help="Frozen corpus-v2 projection directory; verifies _SUCCESS/lineage/"
+             "split digests and re-applies C5/C8",
     )
     parser.add_argument(
         "--out",
@@ -2147,6 +2168,7 @@ def _handle_train_command(argv: list[str]) -> int:
 
     config = PipelineConfig(
         corpus=args.corpus,
+        corpus_v2=args.corpus_v2,
         out_dir=args.out,
         stages=tuple(args.stages) if args.stages else ("stage0", "stage1", "stage2", "stage3"),
         base_model=args.base_model,

@@ -1304,3 +1304,62 @@ def test_end_to_end_clean_mixed_repo_publishes(
         assert lineage["license_decision"]["status"] == "admitted"
         assert lineage["license_decision"]["repo_slug"] == "owner/repo-a"
         assert lineage["license_decision"]["policy_version"] == "1"
+
+
+def test_gold_accepted_record_carries_finding_text_and_task_identity(
+    tmp_path: Path,
+) -> None:
+    """A bundle whose admitted batch carries findings.json / diff.patch /
+    manifest.json (git head_sha / code_context base_sha) enriches the
+    gold-accepted record
+    additively: localized finding text + its sha256, and a task_identity
+    block threading the git shas and the batch's content-addressed diff
+    pointer. The diff body round-trips via diff_ref."""
+    bundle_dir = _write_bundle(tmp_path)
+    batch_dir = bundle_dir / "batches" / "sess-a"
+    # Producer-realistic manifest: head SHA under "git", base SHA under
+    # "code_context" (archive/manifest.py:374-387).
+    (batch_dir / "manifest.json").write_text(json.dumps({
+        "git": {"head_sha": "2" * 40},
+        "code_context": {"base_sha": "1" * 40, "head_sha": "2" * 40},
+    }))
+    (batch_dir / "findings.json").write_text(json.dumps({
+        "findings": [
+            {"fingerprint": "a1" * 32, "body": "exact localized finding body"},
+            {"fingerprint": "c3" * 32, "body": "ambiguous finding body"},
+        ],
+    }))
+    diff_text = "diff --git a/x.py b/x.py\n+print(1)\n"
+    (batch_dir / "diff.patch").write_text(diff_text)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    out = tmp_path / "proj"
+    run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    records = [
+        json.loads(line)
+        for line in (out / "corpus.jsonl").read_text().splitlines() if line.strip()
+    ]
+    accepted = next(r for r in records if r["outcome_label"] == "accepted")
+    assert accepted["finding_fingerprint"] == "a1" * 32
+    assert accepted["finding_text"] == "exact localized finding body"
+    assert accepted["finding_text_sha256"] == hashlib.sha256(
+        b"exact localized finding body"
+    ).hexdigest()
+    task_identity = accepted["task_identity"]
+    assert task_identity["repo_slug"] == "owner/repo-a"
+    assert task_identity["base_sha"] == "1" * 40
+    assert task_identity["head_sha"] == "2" * 40
+    assert task_identity["diff_ref"] == {
+        "batch": "1111111111111111111111111111111111111111111111111111111111111111",
+        "relpath": "batches/sess-a/diff.patch",
+    }
+    assert task_identity["diff_digest"] == hashlib.sha256(diff_text.encode()).hexdigest()
+    # The pointer resolves back to the diff body it was derived from.
+    ref = accepted["task_identity"]["diff_ref"]
+    assert (bundle_dir / ref["relpath"]).read_text() == diff_text
+    # Lineage carries the same diff pointer additively.
+    assert accepted["lineage"]["diff_digest"] == task_identity["diff_digest"]
+    assert accepted["lineage"]["diff_ref"] == task_identity["diff_ref"]
+    # Rejected finding with no matching body in findings.json: no text fields.
+    rejected = next(r for r in records if r["outcome_label"] == "rejected")
+    assert "finding_text" not in rejected
+    assert "finding_text_sha256" not in rejected
