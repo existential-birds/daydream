@@ -52,11 +52,11 @@ produced by the projector, not the v1 JSONL export. The real-corpus command
 sequence is:
 
 ```bash
-daydream corpus build-v2 --bundle-root <dir> --annotation-bundle-root <dir> --license-policy <file> --out <proj_dir>
+daydream corpus build-v2 --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR
 ```
 
 ```bash
-daydream train --corpus-v2 <proj_dir> --out <out_dir> --dry-run
+daydream train --corpus-v2 PROJECTION_DIR --out OUT_DIR --dry-run
 ```
 
 (Drop `--dry-run` for the real run. `--corpus-v2` is mutually exclusive with
