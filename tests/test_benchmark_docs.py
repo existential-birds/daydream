@@ -289,3 +289,25 @@ def test_prioritization_contract_documented() -> None:
         "resolution", "outdated",
     ):
         assert phrase in runbook, f"runbook must describe the prioritization contract ({phrase!r})"
+
+
+# --- Stale "12-key" reward-payload claims (issue #991) ---
+
+def test_no_stale_12_key_reward_payload_claims() -> None:
+    """The Reward.to_dict() payload is 24 keys (EXPECTED_24_KEYS); no prose
+    under daydream/benchmark/ may still claim a 12-key payload (issue #991)."""
+    offenders: list[str] = []
+    for path in (ROOT / "daydream" / "benchmark").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for i, line in enumerate(text.splitlines(), 1):
+            low = line.lower()
+            if ("12-key" in low or "12 key" in low) and "dict" in low:
+                offenders.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()}")
+    assert offenders == [], "stale 12-key reward-payload claims remain:\n" + "\n".join(offenders)
+
+
+def test_emit_reward_docstring_states_24_key_payload() -> None:
+    score_review = ROOT / "daydream" / "benchmark" / "harbor" / "templates" / "tests" / "score_review.py"
+    docstring = score_review.read_text(encoding="utf-8")
+    assert "24-key typed dict" in docstring
+    assert "12-key typed dict" not in docstring
