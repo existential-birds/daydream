@@ -77,6 +77,7 @@ class BatchArtifacts:
     findings_by_fingerprint: dict[str, str]
     diff: str
     manifest_git: dict[str, Any]
+    manifest_code_context: dict[str, Any]
 
 
 def read_batch_artifacts(bundle_dir: Path, session_id: str) -> BatchArtifacts:
@@ -107,10 +108,16 @@ def read_batch_artifacts(bundle_dir: Path, session_id: str) -> BatchArtifacts:
     except (OSError, ValueError):
         manifest = {}
     manifest_git = manifest.get("git") if isinstance(manifest, dict) else None
+    manifest_code_context = (
+        manifest.get("code_context") if isinstance(manifest, dict) else None
+    )
     return BatchArtifacts(
         findings_by_fingerprint=findings_by_fingerprint,
         diff=diff,
         manifest_git=manifest_git if isinstance(manifest_git, dict) else {},
+        manifest_code_context=(
+            manifest_code_context if isinstance(manifest_code_context, dict) else {}
+        ),
     )
 
 
@@ -1060,10 +1067,22 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                             "repo_slug": record_decision["repo_slug"],
                         }
                         manifest_git = batch_artifacts.manifest_git
-                        for sha_key in ("base_sha", "head_sha"):
-                            sha_value = manifest_git.get(sha_key)
+                        manifest_code_context = batch_artifacts.manifest_code_context
+                        # Producer-realistic manifest namespaces
+                        # (archive/manifest.py:374-387): ``base_sha`` lives
+                        # under ``code_context`` and only ``head_sha`` under
+                        # ``git`` — mirroring corpus.py's v1 read of the same
+                        # manifest (code_context base, git head).
+                        for sha_name, sha_value in (
+                            ("base_sha", manifest_code_context.get("base_sha")),
+                            (
+                                "head_sha",
+                                manifest_git.get("head_sha")
+                                or manifest_code_context.get("head_sha"),
+                            ),
+                        ):
                             if isinstance(sha_value, str) and bool(sha_value):
-                                task_identity[sha_key] = sha_value
+                                task_identity[sha_name] = sha_value
                         if batch_artifacts.diff:
                             diff_digest = hashlib.sha256(
                                 batch_artifacts.diff.encode("utf-8")
@@ -1074,6 +1093,11 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                             }
                             task_identity["diff_digest"] = diff_digest
                             task_identity["diff_ref"] = diff_ref
+                            # The raw diff body is embedded on the record
+                            # (schema v2.json ``diff``) so Stage-2 RFT inputs
+                            # carry it without an archive-side materialization
+                            # step — the projection is the frozen boundary.
+                            rec["diff"] = batch_artifacts.diff
                         rec["task_identity"] = task_identity
                         if "diff_digest" in task_identity:
                             lineage_fields = cast(dict[str, Any], rec["lineage"])

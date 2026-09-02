@@ -182,12 +182,18 @@ def load_v2_projection(
         The :class:`V2Projection` for the directory.
 
     Raises:
-        ValueError: On any existing-gate failure, on a missing/malformed
-            ``lineage.json``, or on split drift (the offending record ids and
-            both splits are named).
+        ValueError: On any existing-gate failure, on a missing split file
+            or a missing/malformed ``lineage.json``, or on split drift (the
+            offending record ids and both splits are named).
     """
     projection_dir = Path(path)
-    records = load_dataset_v2(projection_dir, allow_copyleft=allow_copyleft)
+    try:
+        records = load_dataset_v2(projection_dir, allow_copyleft=allow_copyleft)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"corpus v2 projection {projection_dir}: missing split file "
+            f"{exc.filename!r} — refusing an incomplete projection"
+        ) from exc
     lineage = _load_lineage(projection_dir)
     _enforce_split_consistency(records, lineage, projection_dir)
 
@@ -202,10 +208,15 @@ def load_v2_projection(
             )
         by_split[cast(str, split)].append(record)
 
-    split_digests = {
-        filename: _sha256_file(projection_dir / filename)
-        for filename in _SPLIT_FILENAMES.values()
-    }
+    split_digests: dict[str, str] = {}
+    for filename in _SPLIT_FILENAMES.values():
+        split_path = projection_dir / filename
+        if not split_path.is_file():
+            raise ValueError(
+                f"corpus v2 projection {projection_dir}: missing split file "
+                f"{filename!r} — refusing an incomplete projection"
+            )
+        split_digests[filename] = _sha256_file(split_path)
     return V2Projection(
         records=records,
         by_split=by_split,

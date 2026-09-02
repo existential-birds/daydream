@@ -166,6 +166,17 @@ def test_load_v2_projection_missing_success_marker_fails_closed(
         load_v2_projection(out)
 
 
+def test_load_v2_projection_missing_split_file_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A missing split JSONL surfaces the documented ValueError, not a raw
+    FileNotFoundError/OSError."""
+    out = _write_projection(tmp_path, [f"rec-{i:04d}" for i in range(6)])
+    (out / "train.jsonl").unlink()
+    with pytest.raises(ValueError, match="missing split file"):
+        load_v2_projection(out)
+
+
 def test_load_v2_projection_non_v2_schema_version_fails_closed(
     tmp_path: Path,
 ) -> None:

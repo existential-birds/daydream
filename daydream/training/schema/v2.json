@@ -93,6 +93,10 @@
     "completion": {
       "type": "string"
     },
+    "diff": {
+      "type": "string",
+      "description": "Raw diff body of the reviewed change, embedded from the curated bundle's batches/<session_id>/diff.patch so Stage-2 RFT inputs carry it without an archive-side materialization step."
+    },
     "task_identity": {
       "type": "object",
       "additionalProperties": false,

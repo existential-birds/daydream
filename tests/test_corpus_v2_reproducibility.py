@@ -61,8 +61,10 @@ def _enrich_bundle(bundle_dir: Path) -> None:
     findings.json (bodies keyed by fingerprint), diff.patch, and a
     producer-realistic manifest.json carrying the git shas."""
     batch_dir = bundle_dir / "batches" / "sess-a"
-    (batch_dir / "manifest.json").write_text(json.dumps(
-        {"git": {"base_sha": "1" * 40, "head_sha": "2" * 40}}))
+    (batch_dir / "manifest.json").write_text(json.dumps({
+        "git": {"head_sha": "2" * 40},
+        "code_context": {"base_sha": "1" * 40, "head_sha": "2" * 40},
+    }))
     (batch_dir / "findings.json").write_text(json.dumps({"findings": [
         {"fingerprint": "a1" * 32, "body": "exact localized finding body"},
     ]}))
@@ -84,6 +86,7 @@ def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) ->
     accepted = next(r for r in records if r["outcome_label"] == "accepted")
     assert accepted == {
         "disposition": "accepted",
+        "diff": "diff --git a/x.py b/x.py\n+print(1)\n",
         "evidence": [
             {"classifier_label": "accepted", "comment_id": 1,
              "created_at": "2026-02-01T00:00:00+00:00",

@@ -22,6 +22,7 @@ import pytest
 from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.corpus_v2.splits import assign_split
 from daydream.training.gate import _split_digest
+from daydream.training.rft import RftConfig, run_rft
 from daydream.training.stacks_v2 import load_v2_projection
 
 SALT = "issue-1081-coordinator-salt"
@@ -318,10 +319,13 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
 
     The fixture materializes a corpus-v2 projection with the real
     ``run_build_corpus_v2`` over a curated bundle + annotation snapshot
-    (finding text, diff pointers, and git shas present), sized so both gold
-    classes are present plus silver process-trace and task-only records.
-    The full pipeline completes over it and the run's corpus digest is
-    stable across runs.
+    (finding text, git shas, and diff bodies present — the producer-shaped
+    manifest puts base_sha under ``code_context``; the projector embeds each
+    raw diff body directly), sized so both gold classes are present plus
+    silver process-trace and task-only records. The full pipeline completes
+    over it, the run's corpus digest is stable across runs, and the emitted
+    Stage-2 rows are replayable through ``run_rft`` with no fixture
+    post-processing.
     """
     from tests.fixtures.training.build_corpus_v2_50 import build_corpus_v2_50
 
@@ -355,7 +359,22 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     for row in rft_rows:
         assert len(row["base_sha"]) == 40
         assert len(row["head_sha"]) == 40
+        assert row["repo_slug"]
         assert row["diff"]
+
+    # The emitted v2 rows are replayable: run_rft rebuilds each task from
+    # the full frozen identity (repo_slug/base_sha/head_sha/diff) carried by
+    # the projection itself — the real-projector -> Stage-2 journey, with no
+    # fixture-side diff materialization step.
+    replay = run_rft(
+        RftConfig(
+            inputs=tmp_path / "out/stage2/rft-inputs.jsonl",
+            seed=7,
+            rubric_version="2026.08.29-1",
+            output_dir=tmp_path / "out/replay",
+        )
+    )
+    assert replay.winners_path.is_file()
 
     # The run's corpus digest is the projection's directory-level digest and
     # is stable across runs (deterministic fixture bytes).

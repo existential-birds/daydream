@@ -152,6 +152,48 @@ def _split_digest(held_out_ids: list[str], seed: int) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+
+def write_split_sidecar(
+    labels_path: str | Path,
+    *,
+    digest: str,
+    seed: int,
+    held_out_fraction: float,
+    held_out_ids: list[str],
+    train_ids: list[str],
+) -> str:
+    """Write the canonical ``<labels>.gate-split.json`` digest sidecar.
+
+    Shared by every producer of the M18 resume-guard / stage-manifest split
+    contract (:func:`freeze_split` and the corpus-v2 frozen-boundary path in
+    :mod:`daydream.training.coordinator`), so the sidecar shape cannot drift
+    between them. Writes are atomic (tmp + ``os.replace``).
+
+    Args:
+        labels_path: Path of the labels file the sidecar sits beside.
+        digest: Content-addressed split digest (see :func:`_split_digest`).
+        seed: Seed that froze the split.
+        held_out_fraction: Fraction of admitted rows reserved for the gate.
+        held_out_ids: Held-out row ids (unsorted; stored sorted).
+        train_ids: Train row ids (unsorted; stored sorted).
+
+    Returns:
+        The sidecar filename, relative to the labels file's directory.
+    """
+    sidecar_path = Path(labels_path).parent / (Path(labels_path).name + ".gate-split.json")
+    sidecar = {
+        "digest": digest,
+        "seed": seed,
+        "held_out_fraction": held_out_fraction,
+        "held_out_ids": sorted(held_out_ids),
+        "train_ids": sorted(train_ids),
+    }
+    tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
+    tmp.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+    os.replace(tmp, sidecar_path)
+    return sidecar_path.name
+
+
 def freeze_split(
     labels_path: str | Path, *, held_out_fraction: float, seed: int
 ) -> FrozenSplit:
@@ -201,18 +243,14 @@ def freeze_split(
 
     held_out_ids = [str(r["comment_id"]) for r in held_out_rows]
     digest = _split_digest(held_out_ids, seed)
-    digest_path = labels_path.name + ".gate-split.json"
-    sidecar = {
-        "digest": digest,
-        "seed": seed,
-        "held_out_fraction": held_out_fraction,
-        "held_out_ids": sorted(held_out_ids),
-        "train_ids": sorted(str(r["comment_id"]) for r in train_rows),
-    }
-    sidecar_path = labels_path.parent / digest_path
-    tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
-    tmp.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
-    os.replace(tmp, sidecar_path)
+    digest_path = write_split_sidecar(
+        labels_path,
+        digest=digest,
+        seed=seed,
+        held_out_fraction=held_out_fraction,
+        held_out_ids=held_out_ids,
+        train_ids=[str(r["comment_id"]) for r in train_rows],
+    )
 
     return FrozenSplit(
         digest=digest,

@@ -328,7 +328,10 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     must be full-length hex SHAs — validated through the shared
     :func:`daydream.training.rft.validate_full_sha`, so Stage 2 and
     ``run_rft`` enforce the identical full 40-hex contract; a truncated or
-    non-hex SHA is refused like a missing one.
+    non-hex SHA is refused like a missing one. ``repo_slug`` is likewise read
+    v2-first (``task_identity``, then ``lineage``) with the v1 top-level
+    fallback, so a v2 row never carries a null repo_slug that the replay's
+    ``_reconstruct_task`` would refuse.
 
     ``diff`` falls back to :func:`_materialize_diff` when the record carries
     no raw ``diff`` body: production ``run_build_corpus`` exports (schema v1,
@@ -349,6 +352,8 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             code_ctx = raw_ctx
         task_identity = rec.get("task_identity")
         identity = task_identity if isinstance(task_identity, dict) else {}
+        raw_lineage = rec.get("lineage")
+        lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
         rid = str(rec.get("comment_id") or rec.get("session_id") or "")
         base_sha = identity.get("base_sha") or rec.get("base_sha") or code_ctx.get("base_sha")
         head_sha = identity.get("head_sha") or rec.get("head_sha") or code_ctx.get("head_sha")
@@ -379,7 +384,12 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "id": rid,
-                "repo_slug": rec.get("repo_slug"),
+                # repo_slug is read v2-first (task_identity, then lineage) with
+                # the v1 top-level fallback, so a v2 record never emits a null
+                # repo_slug that run_rft's replay would refuse.
+                "repo_slug": identity.get("repo_slug")
+                or lineage_obj.get("repo_slug")
+                or rec.get("repo_slug"),
                 "base_sha": base_sha,
                 "head_sha": head_sha,
                 "diff": diff,
@@ -408,8 +418,11 @@ def _frozen_split_from_projection(
     same recompute comparison the loader enforces.
 
     The split digest is the same content address :func:`freeze_split` emits
-    (SHA-256 over the sorted held-out comment ids plus the seed), so the
-    resume guard and stage manifest consume it unchanged.
+    (SHA-256 over the sorted held-out comment ids plus the seed), and the
+    digest sidecar (``<labels>.gate-split.json``) is written by the shared
+    :func:`daydream.training.gate.write_split_sidecar`, so the resume guard
+    and stage manifest consume the identical contract whichever producer
+    froze the boundary.
 
     Raises:
         RuntimeError: On boundary drift (recorded vs recomputed split) or a
@@ -445,18 +458,14 @@ def _frozen_split_from_projection(
             )
     held_out_ids = [str(r["comment_id"]) for r in held_out]
     digest = gate_mod._split_digest(held_out_ids, seed)
-    digest_path = labels_path.name + ".gate-split.json"
-    sidecar = {
-        "digest": digest,
-        "seed": seed,
-        "held_out_fraction": held_out_fraction,
-        "held_out_ids": sorted(held_out_ids),
-        "train_ids": sorted(str(r["comment_id"]) for r in train),
-    }
-    sidecar_path = labels_path.parent / digest_path
-    tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
-    tmp.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
-    os.replace(tmp, sidecar_path)
+    digest_path = gate_mod.write_split_sidecar(
+        labels_path,
+        digest=digest,
+        seed=seed,
+        held_out_fraction=held_out_fraction,
+        held_out_ids=held_out_ids,
+        train_ids=[str(r["comment_id"]) for r in train],
+    )
     return FrozenSplit(
         digest=digest,
         fingerprint=digest[:8],

@@ -1310,15 +1310,18 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     tmp_path: Path,
 ) -> None:
     """A bundle whose admitted batch carries findings.json / diff.patch /
-    manifest.json (git base_sha/head_sha) enriches the gold-accepted record
+    manifest.json (git head_sha / code_context base_sha) enriches the
+    gold-accepted record
     additively: localized finding text + its sha256, and a task_identity
     block threading the git shas and the batch's content-addressed diff
     pointer. The diff body round-trips via diff_ref."""
     bundle_dir = _write_bundle(tmp_path)
     batch_dir = bundle_dir / "batches" / "sess-a"
-    # Producer-realistic manifest: git shas under "git" (archive/manifest.py).
+    # Producer-realistic manifest: head SHA under "git", base SHA under
+    # "code_context" (archive/manifest.py:374-387).
     (batch_dir / "manifest.json").write_text(json.dumps({
-        "git": {"base_sha": "1" * 40, "head_sha": "2" * 40},
+        "git": {"head_sha": "2" * 40},
+        "code_context": {"base_sha": "1" * 40, "head_sha": "2" * 40},
     }))
     (batch_dir / "findings.json").write_text(json.dumps({
         "findings": [

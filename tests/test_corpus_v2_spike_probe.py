@@ -73,6 +73,7 @@ def test_spike_probe_curated_batch_layout(tmp_path: Path) -> None:
     assert artifacts.findings_by_fingerprint == {accepted_fp: finding_body}
     assert artifacts.diff == diff_body
     assert artifacts.manifest_git == batch_manifest["git"]
+    assert artifacts.manifest_code_context == batch_manifest["code_context"]
 
     # SHA coverage: each of the three artifacts is covered by the curation
     # bundle's SHA256SUMS (content-addressed).

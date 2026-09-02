@@ -20,8 +20,8 @@ Two operator-safety constraints frame every step:
   published adjudication state from the Hub after VM loss. Re-run it any time
   you are unsure the local state is intact.
 
-Every command below is a literal, single-line CLI invocation that parses against the real parser (enforced by
-`tests/test_cli_adjudicate.py::test_runbook_commands_parse_against_real_parser`).
+Every `daydream corpus adjudicate` command below (steps 1–8) is a literal, single-line CLI invocation that parses against the real parser (enforced by
+`tests/test_cli_adjudicate.py::test_runbook_commands_parse_against_real_parser`). The step 9 (`corpus build-v2`) and step 10 (`train --corpus-v2`) commands are not covered by that parser check — `tests/test_training_docs_v2.py` only asserts their presence.
 
 ---
 

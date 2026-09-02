@@ -10,20 +10,19 @@ over a curated bundle + annotation snapshot — the same staging helpers
 - silver ``process-trace`` and ``task-only`` records are present
   (``emit_process_traces=True``),
 - every admitted batch carries ``findings.json`` (localized finding text),
-  ``diff.patch``, and a ``manifest.json`` with git ``base_sha``/``head_sha``,
+  ``diff.patch``, and a ``manifest.json`` with ``git.head_sha`` plus
+  ``code_context.{base_sha, head_sha}`` (the producer-realistic namespaces),
   so the additive v2 enrichment is exercised end-to-end.
 
 The build is fully deterministic: the same inputs produce byte-identical
 projection directories, so the loader's directory-level digest — and the
 pipeline run's ``run_identity.corpus_digest`` — is stable across runs.
 
-Diff-body materialization: the projector emits the content-addressed
-``task_identity.diff_ref`` pointer (never a raw diff body — the v2 schema is
-``additionalProperties: false``). This fixture resolves each record's pointer
-against the bundle and stamps the raw ``diff`` body onto the record, the same
-archive-side materialization ``coordinator._materialize_diff`` performs for
-v1 ``fix_diff_ref`` pointers, so Stage 2's raw-diff contract is exercised
-over a real projection without touching the coordinator.
+The projector embeds the raw diff body on every record (schema v2.json
+``diff``) directly from the bundle's ``batches/<sid>/diff.patch``, so the
+fixture needs no post-processing: the real projector -> Stage-2 journey
+(``coordinator._rft_rows`` over ``run_build_corpus_v2`` output) carries the
+full RFT identity (repo_slug/base_sha/head_sha/diff) on its own.
 """
 
 from __future__ import annotations
@@ -124,8 +123,9 @@ def _add_batch(
     dispositions: list[str],
 ) -> None:
     """One admitted batch directory: producer-realistic ``manifest.json``
-    (git base/head), ``findings.json`` (fingerprint-keyed bodies), and
-    ``diff.patch``, plus its curation-manifest row."""
+    (``git.head_sha`` plus ``code_context.{base_sha, head_sha}``),
+    ``findings.json`` (fingerprint-keyed bodies), and ``diff.patch``, plus
+    its curation-manifest row."""
     batch_dir = bundle_dir / "batches" / session_id
     batch_dir.mkdir(parents=True, exist_ok=True)
     fps = _fingerprints(
@@ -135,13 +135,18 @@ def _add_batch(
         json.dumps(
             {
                 "git": {
+                    "head_sha": hashlib.sha256(
+                        f"{session_id}-head".encode()
+                    ).hexdigest()[:40],
+                },
+                "code_context": {
                     "base_sha": hashlib.sha256(
                         f"{session_id}-base".encode()
                     ).hexdigest()[:40],
                     "head_sha": hashlib.sha256(
                         f"{session_id}-head".encode()
                     ).hexdigest()[:40],
-                }
+                },
             },
             sort_keys=True,
         )
@@ -187,39 +192,6 @@ def _add_batch(
         manifest["batches"].append(batch_row)
 
 
-def _materialize_diff_bodies(proj_dir: Path, bundle_dir: Path) -> None:
-    """Resolve each record's ``task_identity.diff_ref`` against the bundle and
-    stamp the raw ``diff`` body onto the record (see module docstring). The
-    split/corpus files are rewritten with the projector's own canonical JSONL
-    form, keeping the directory byte-deterministic."""
-    for filename in (
-        "corpus.jsonl",
-        "corpus-v2.jsonl",
-        "train.jsonl",
-        "validation.jsonl",
-        "holdout.jsonl",
-    ):
-        path = proj_dir / filename
-        if not path.is_file():
-            continue
-        records = [
-            json.loads(line) for line in path.read_text().splitlines() if line.strip()
-        ]
-        for record in records:
-            identity = record.get("task_identity")
-            ref = identity.get("diff_ref") if isinstance(identity, dict) else None
-            if isinstance(ref, dict) and isinstance(ref.get("relpath"), str):
-                record["diff"] = (bundle_dir / ref["relpath"]).read_text(encoding="utf-8")
-        path.write_text(
-            "".join(
-                json.dumps(r, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-                + "\n"
-                for r in records
-            ),
-            encoding="utf-8",
-        )
-
-
 def build_corpus_v2_50(tmp_path: Path) -> Path:
     """Materialize the 50-record corpus-v2 projection under ``tmp_path``.
 
@@ -259,5 +231,4 @@ def build_corpus_v2_50(tmp_path: Path) -> Path:
             emit_process_traces=True,
         )
     )
-    _materialize_diff_bodies(proj_dir, bundle_dir)
     return proj_dir
