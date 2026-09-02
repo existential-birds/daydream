@@ -40,7 +40,13 @@ from daydream.training.corpus_v2.splits import assign_split
 from daydream.training.corpus_v2.tiers import classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 
-__all__ = ["BuildCorpusV2Config", "project_findings", "run_build_corpus_v2"]
+__all__ = [
+    "BatchArtifacts",
+    "BuildCorpusV2Config",
+    "project_findings",
+    "read_batch_artifacts",
+    "run_build_corpus_v2",
+]
 
 Record = dict[str, object]
 
@@ -49,6 +55,61 @@ _SPLIT_FILENAMES: dict[str, str] = {
     "validation": "validation.jsonl",
     "holdout": "holdout.jsonl",
 }
+
+
+@dataclass(frozen=True)
+class BatchArtifacts:
+    """Per-batch review artifacts read from a curated bundle's batch directory
+    (``batches/<session_id>/``). Producer-realistic shapes (confirmed by the
+    task-0 spike probe, tests/test_corpus_v2_spike_probe.py):
+
+    - ``findings.json`` — ``{"findings": [{"fingerprint": <64-hex>, "body":
+      <str>, ...}]}`` (the same artifact ``daydream/archive/__init__.py``
+      copies into the run bundle; fingerprints join 1:1 with the annotation
+      snapshot resolution rows).
+    - ``diff.patch`` — the run's diff text.
+    - ``manifest.json`` — ``git.head_sha`` plus ``code_context.{base_sha,
+      head_sha}`` (archive/manifest.py serialization).
+    """
+
+    findings_by_fingerprint: dict[str, str]
+    diff: str
+    manifest_git: dict[str, Any]
+
+
+def read_batch_artifacts(bundle_dir: Path, session_id: str) -> BatchArtifacts:
+    """Read the finding text / diff / git shas from a batch directory.
+
+    Pure filesystem read; every file is optional (an absent artifact yields an
+    empty value — the caller decides what is mandatory). Findings without both
+    a ``fingerprint`` and a ``body`` are skipped.
+    """
+    batch_dir = Path(bundle_dir) / "batches" / session_id
+    findings_by_fingerprint: dict[str, str] = {}
+    try:
+        data = json.loads((batch_dir / "findings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    for finding in (data.get("findings") if isinstance(data, dict) else None) or []:
+        if not isinstance(finding, dict):
+            continue
+        fingerprint, body = finding.get("fingerprint"), finding.get("body")
+        if isinstance(fingerprint, str) and isinstance(body, str):
+            findings_by_fingerprint[fingerprint] = body
+    try:
+        diff = (batch_dir / "diff.patch").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        diff = ""
+    try:
+        manifest = json.loads((batch_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = {}
+    manifest_git = manifest.get("git") if isinstance(manifest, dict) else None
+    return BatchArtifacts(
+        findings_by_fingerprint=findings_by_fingerprint,
+        diff=diff,
+        manifest_git=manifest_git if isinstance(manifest_git, dict) else {},
+    )
 
 
 def _dump_jsonl(records: list[Record]) -> str:
