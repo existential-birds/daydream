@@ -295,9 +295,20 @@ def test_prioritization_contract_documented() -> None:
 
 def test_no_stale_12_key_reward_payload_claims() -> None:
     """The Reward.to_dict() payload is 24 keys (EXPECTED_24_KEYS); no prose
-    under daydream/benchmark/ may still claim a 12-key payload (issue #991)."""
+    under daydream/benchmark/, tests/, or docs/benchmark.md may still claim a
+    12-key payload (issue #991)."""
     offenders: list[str] = []
-    for path in (ROOT / "daydream" / "benchmark").rglob("*.py"):
+    # This guard's own source re-states the stale "12-key ... dict" shape in
+    # the heuristic below, so exclude this file from the scan.
+    excluded = {Path(__file__).resolve()}
+    files: list[Path] = [
+        path
+        for root in (ROOT / "daydream" / "benchmark", ROOT / "tests")
+        for path in root.rglob("*.py")
+        if path.resolve() not in excluded
+    ]
+    files.append(ROOT / "docs" / "benchmark.md")
+    for path in files:
         text = path.read_text(encoding="utf-8")
         for i, line in enumerate(text.splitlines(), 1):
             low = line.lower()
