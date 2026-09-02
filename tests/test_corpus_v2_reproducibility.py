@@ -85,6 +85,31 @@ def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
         assert record["lineage"]["split"] in {"train", "validation", "holdout"}
 
 
+def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path) -> None:
+    from tests.test_corpus_v2 import _write_bundle
+
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(
+        bundle_dir, session_id="sess-a", n_siblings=4,
+        dispositions=["accepted", "accepted", "accepted"],
+    )
+    for out in (tmp_path / "a", tmp_path / "b"):
+        run_build_corpus_v2(
+            _cfg(out, bundle_dir, snap, max_stack_share=0.5, max_repo_share=0.6,
+                 max_profile_share=0.7)
+        )
+    for name in ("corpus.jsonl", "corpus-v2.jsonl", "lineage.json",
+                 "train.jsonl", "validation.jsonl", "holdout.jsonl"):
+        assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
+    train, val, hold = _read_split_memberships(tmp_path / "a")
+    assert not (set(train) & set(val))
+    assert not (set(train) & set(hold))
+    assert not (set(val) & set(hold))
+    # share caps present in the lineage of a capped build
+    lineage = json.loads((tmp_path / "a" / "lineage.json").read_text())
+    assert lineage["share_caps"]["version"] == 1
+
+
 def test_v1_and_v2_projection_paths_are_independent(tmp_path: Path, archive_dir: Any) -> None:
     """Run BOTH projectors over the same pinned inputs; assert (a) v1 bytes
     are identical before/after any v2 build, and (b) v2 reprojection is
