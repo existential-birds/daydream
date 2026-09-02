@@ -15,8 +15,10 @@ atomically with a lineage pin.
 
 import hashlib
 import json
+import math
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -487,6 +489,133 @@ def _license_decision_distribution(
         )
         distribution[key] = distribution.get(key, 0) + 1
     return dict(sorted(distribution.items()))
+
+
+def _apply_share_caps(
+    records: list[Record],
+    *,
+    max_stack_share: float | None,
+    max_repo_share: float | None,
+    max_profile_share: float | None,
+) -> tuple[list[Record], dict[str, int]]:
+    """Pure share-cap selection over the post-tier-cap population.
+
+    Applies the three dimensions sequentially (stack → repository → profile).
+    Within a dimension, iterates until every value's share of the current
+    population is within its configured limit (strict output-share semantics:
+    ``count / total <= limit`` over the final emitted population), keeping the
+    lowest ``record_id`` records of any over-share group. Returns the kept list
+    (sorted by ``record_id``) and exclusion counts keyed
+    ``"<dimension>:<value>"`` (``None`` values form their own bucket spelled
+    ``(none)``).
+
+    Fails closed with ``ValueError`` if enforcing a cap would leave a total
+    population of zero (the cap cannot keep a single record of the population
+    it is asked to cap). A dimension value dropping out entirely is fine —
+    only total-population-zero is fatal; once iteration has reduced a
+    dimension's population, a sole remaining value that can no longer be
+    trimmed without emptying the population is left intact rather than
+    destroyed. Never samples; input order does not affect the result.
+    """
+    dimensions: list[tuple[str, str, Callable[[Record], Any], float | None]] = [
+        (
+            "stack",
+            "max_stack_share",
+            lambda r: r.get("stack"),
+            max_stack_share,
+        ),
+        (
+            "repository",
+            "max_repo_share",
+            lambda r: cast(dict[str, Any], r.get("lineage") or {}).get("repo_slug"),
+            max_repo_share,
+        ),
+        (
+            "profile",
+            "max_profile_share",
+            lambda r: cast(dict[str, Any], r.get("profile") or {}).get("profile_name"),
+            max_profile_share,
+        ),
+    ]
+    exclusions: dict[str, int] = {}
+    population = sorted(records, key=lambda r: str(r["record_id"]))
+    original = list(population)
+    for dimension, flag, getter, limit in dimensions:
+        if limit is None:
+            continue
+        if not population:
+            raise ValueError(
+                f"{flag}={limit} configured but the population is already empty "
+                "— fail-closed"
+            )
+        # Fail-closed degeneracy check against the original input population:
+        # a cap that cannot keep a single record of an over-share group
+        # covering the whole input would collapse it to zero — refuse before
+        # doing any work. (Populations reduced by earlier dimensions or by
+        # this dimension's own iteration are handled by the no-progress break
+        # in the loop below instead.)
+        entry_total = len(original)
+        entry_counts: dict[Any, int] = {}
+        for rec in original:
+            value = getter(rec)
+            entry_counts[value] = entry_counts.get(value, 0) + 1
+        for value, count in entry_counts.items():
+            if count / entry_total > limit and count == entry_total:
+                allowed = math.floor(limit * entry_total)
+                while (allowed + 1) / entry_total <= limit:
+                    allowed += 1
+                while allowed > 0 and allowed / entry_total > limit:
+                    allowed -= 1
+                if allowed == 0:
+                    raise ValueError(
+                        f"{flag}={limit} for {dimension}={value!r} would reduce the "
+                        f"total population to zero (population {entry_total}) — fail-closed"
+                    )
+        while True:
+            total = len(population)
+            counts: dict[Any, int] = {}
+            for rec in population:
+                value = getter(rec)
+                counts[value] = counts.get(value, 0) + 1
+            over: dict[Any, int] = {}
+            blocked = False
+            for value, count in counts.items():
+                if count / total > limit:
+                    # Largest keep-count whose share of the current population
+                    # is still <= limit (float-safety guards around the floor;
+                    # the same arithmetic runs on every pass, so the result is
+                    # deterministic and order-invariant).
+                    allowed = math.floor(limit * total)
+                    while (allowed + 1) / total <= limit:
+                        allowed += 1
+                    while allowed > 0 and allowed / total > limit:
+                        allowed -= 1
+                    if allowed == 0 and count == total:
+                        # Sole remaining value after earlier reductions or
+                        # exclusions: trimming it further would empty the
+                        # population entirely.
+                        blocked = True
+                        break
+                    over[value] = allowed
+            if blocked or not over:
+                break
+            kept: list[Record] = []
+            taken: dict[Any, int] = {}
+            for rec in population:
+                value = getter(rec)
+                if value in over and taken.get(value, 0) >= over[value]:
+                    key = f"{dimension}:{str(value) if value is not None else '(none)'}"
+                    exclusions[key] = exclusions.get(key, 0) + 1
+                    continue
+                taken[value] = taken.get(value, 0) + 1
+                kept.append(rec)
+            if not kept:
+                raise ValueError(
+                    f"{flag}={limit} would reduce the total population to zero across "
+                    f"{dimension} values {sorted(str(v) for v in over)} — fail-closed"
+                )
+            population = kept
+    return population, exclusions
 
 
 def _caps_applied(records: list[Record], caps: dict[str, int]) -> dict[str, int]:
