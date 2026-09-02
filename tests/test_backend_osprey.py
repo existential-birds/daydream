@@ -722,6 +722,15 @@ def test_non_negative_int_helpers_reject_below_zero() -> None:
 
 
 @pytest.mark.asyncio
+async def test_negative_session_total_cost_is_rejected() -> None:
+    lines, _ = _stream()
+    lines[-1]["total_cost_usd"] = "-0.125"
+
+    with pytest.raises(OspreyError, match="cost_usd"):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
 async def test_negative_thinking_tokens_are_rejected() -> None:
     lines, _ = _stream(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},

@@ -182,6 +182,8 @@ def _parse_cost(value: Any, *, event_name: str) -> float | None:
         raise OspreyProtocolError(f"event {event_name!r} has invalid cost_usd") from exc
     if not math.isfinite(parsed):
         raise OspreyProtocolError(f"event {event_name!r} has non-finite cost_usd")
+    if parsed < 0:
+        raise OspreyProtocolError(f"event {event_name!r} has negative cost_usd")
     return parsed
 
 
