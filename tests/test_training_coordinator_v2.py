@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -311,6 +311,60 @@ def test_cli_corpus_and_corpus_v2_mutually_exclusive(tmp_path: Path, cli_runner:
         ["train", "--corpus", "x.jsonl", "--corpus-v2", str(proj_dir), "--out", str(tmp_path / "o")]
     )
     assert res.exit_code == 1
+
+
+def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
+    """AC6: the 50-record real-projection fixture feeds the full pipeline.
+
+    The fixture materializes a corpus-v2 projection with the real
+    ``run_build_corpus_v2`` over a curated bundle + annotation snapshot
+    (finding text, diff pointers, and git shas present), sized so both gold
+    classes are present plus silver process-trace and task-only records.
+    The full pipeline completes over it and the run's corpus digest is
+    stable across runs.
+    """
+    from tests.fixtures.training.build_corpus_v2_50 import build_corpus_v2_50
+
+    proj_dir = build_corpus_v2_50(tmp_path)
+    projection = load_v2_projection(proj_dir)
+    assert len(projection.records) == 50
+    gold_labels = {
+        cast(str, r["outcome_label"])
+        for r in projection.records
+        if r.get("tier") == "gold"
+    }
+    assert {"accepted", "rejected"} <= gold_labels
+    record_types = {cast(str, r["record_type"]) for r in projection.records}
+    assert {"process-trace", "task-only"} <= record_types
+
+    manifest = run_pipeline(
+        PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out"), dry_run=False
+    )
+    assert manifest["stages"]["stage0"]["status"] == "complete"
+    sft_rows = [
+        json.loads(line)
+        for line in (tmp_path / "out/stage1/sft-dataset.jsonl").read_text().splitlines()
+        if line
+    ]
+    rft_rows = [
+        json.loads(line)
+        for line in (tmp_path / "out/stage2/rft-inputs.jsonl").read_text().splitlines()
+        if line
+    ]
+    assert sft_rows and rft_rows
+    for row in rft_rows:
+        assert len(row["base_sha"]) == 40
+        assert len(row["head_sha"]) == 40
+        assert row["diff"]
+
+    # The run's corpus digest is the projection's directory-level digest and
+    # is stable across runs (deterministic fixture bytes).
+    first = manifest["run_identity"]["corpus_digest"]
+    assert first == projection.digest
+    manifest2 = run_pipeline(
+        PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out2"), dry_run=False
+    )
+    assert manifest2["run_identity"]["corpus_digest"] == first
 
 
 def test_corpus_and_corpus_v2_are_mutually_exclusive(tmp_path: Path) -> None:
