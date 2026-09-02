@@ -28,7 +28,7 @@
       "description": "sha256 hex digest over the canonical (session_id, trajectory_id, segment_id, fingerprint) join."
     },
     "record_type": {
-      "enum": ["outcome-finding"]
+      "enum": ["outcome-finding", "process-trace", "task-only"]
     },
     "tier": {
       "enum": ["gold", "silver", "task-only"]
@@ -75,6 +75,53 @@
         },
         "profile_digest": {
           "type": ["string", "null"]
+        }
+      }
+    },
+    "finding_text": {
+      "type": "string",
+      "description": "Localized finding/comment text carried from the curated bundle."
+    },
+    "finding_text_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of finding_text."
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "completion": {
+      "type": "string"
+    },
+    "task_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo_slug"],
+      "properties": {
+        "repo_slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string"
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "diff_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "diff_ref": {
+          "type": "object"
+        },
+        "replay_verification": {
+          "type": ["object", "null"]
         }
       }
     },
@@ -135,6 +182,13 @@
         },
         "exclusion_reason": {
           "type": ["string", "null"]
+        },
+        "diff_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "diff_ref": {
+          "type": "object"
         },
         "repo_slug": {
           "type": "string",
