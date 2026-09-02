@@ -258,6 +258,11 @@ def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
         assert len(row["base_sha"]) == 40 and all(c in "0123456789abcdef" for c in row["base_sha"])
         assert len(row["head_sha"]) == 40 and all(c in "0123456789abcdef" for c in row["head_sha"])
         assert row["diff"] == DIFF_BODY
+        # V2 rows carry intrinsic scoring signals: the frozen projection
+        # record is format-valid, and the replay scores its adjudicated
+        # outcome through the shared verdict vocabulary — never a flat 0.0.
+        assert row["format_valid"] is True
+        assert row["verifier_verdicts"]
 
 
 def test_stage0_v2_gold_record_without_finding_text_fails_closed(tmp_path: Path) -> None:
@@ -375,6 +380,13 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
         )
     )
     assert replay.winners_path.is_file()
+    # Winner selection over the real projection is not degenerate: accepted
+    # gold rows score through a real correctness axis (composite > 0), so the
+    # winner filter reads a breakdown that discriminates instead of pinning
+    # every candidate at composite 0.0.
+    winners = json.loads(replay.winners_path.read_text())["winners"]
+    assert winners
+    assert any(float(w["breakdown"]["composite"]) > 0 for w in winners)
 
     # The run's corpus digest is the projection's directory-level digest and
     # is stable across runs (deterministic fixture bytes).

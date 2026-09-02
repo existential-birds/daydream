@@ -52,7 +52,7 @@ produced by the projector, not the v1 JSONL export. The real-corpus command
 sequence is:
 
 ```bash
-daydream corpus build-v2 --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR
+daydream corpus build-v2 --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus-v2.jsonl
 ```
 
 ```bash

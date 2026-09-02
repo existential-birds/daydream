@@ -29,7 +29,7 @@ COORDINATOR = REPO_ROOT / "daydream" / "training" / "coordinator.py"
 # The only functions allowed to read v2-only record fields. Everything else in
 # the coordinator (and any code reached by a v1-shaped corpus) must never
 # touch them.
-V2_FIELD_ALLOWED_BUILDERS = {"_outcome_rows", "_sft_rows", "_rft_rows", "_run_stage0"}
+V2_FIELD_ALLOWED_BUILDERS = {"_outcome_rows", "_sft_rows", "_sft_prompt", "_rft_rows", "_run_stage0"}
 
 # The canonical combined suite (preamble task Step 1).
 COMBINED_SUITE = [

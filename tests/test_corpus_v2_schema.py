@@ -105,3 +105,13 @@ def test_task_identity_with_bad_base_sha_is_rejected() -> None:
     record = _base_record(record_type="task-only", tier="task-only", task_identity=bad_identity)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(record, SCHEMA)
+
+
+def test_task_identity_with_long_content_address_stamp_validates() -> None:
+    """The runtime validator tolerates sha256-style 64-hex content-address
+    stamps (``rft.validate_full_sha`` accepts 40+ hex, and v1 corpus shas are
+    64-hex), so the pinned schema must admit the same values — a record that
+    passes ``load_v2_projection``/``run_rft`` must never fail this schema."""
+    identity = dict(TASK_IDENTITY, base_sha="f" * 64, head_sha="e" * 64)
+    record = _base_record(record_type="task-only", tier="task-only", task_identity=identity)
+    jsonschema.validate(record, SCHEMA)

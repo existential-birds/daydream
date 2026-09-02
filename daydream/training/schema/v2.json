@@ -111,11 +111,13 @@
         },
         "base_sha": {
           "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
+          "pattern": "^[0-9a-f]{40,}$",
+          "description": "Full-length hex sha (40+ chars; sha256-style 64-hex content-address stamps tolerated, matching rft.validate_full_sha)."
         },
         "head_sha": {
           "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
+          "pattern": "^[0-9a-f]{40,}$",
+          "description": "Full-length hex sha (40+ chars; sha256-style 64-hex content-address stamps tolerated, matching rft.validate_full_sha)."
         },
         "diff_digest": {
           "type": "string",

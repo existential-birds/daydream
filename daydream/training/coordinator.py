@@ -261,17 +261,31 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
 
 
 def _sft_prompt(rec: dict[str, Any]) -> str:
-    """Deterministic SFT prompt built from a record's frozen review context."""
+    """Deterministic SFT prompt built from a record's frozen review context.
+
+    On corpus-v2 records the repo slug and task SHAs live under
+    ``task_identity`` (the repo slug also under ``lineage``); they are read
+    v2-first with the v1 top-level / ``code_context`` fallback (Pattern A, the
+    same order :func:`_rft_rows` uses), so a v2 prompt carries the record's
+    real repo slug and frozen task shas instead of degrading to 'unknown'.
+    """
     code_ctx: dict[str, Any] = {}
     raw_ctx = rec.get("code_context")
     if isinstance(raw_ctx, dict):
         code_ctx = raw_ctx
-    parts = [f"repo: {rec.get('repo_slug', 'unknown')}"]
+    task_identity = rec.get("task_identity")
+    identity = task_identity if isinstance(task_identity, dict) else {}
+    raw_lineage = rec.get("lineage")
+    lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
+    repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get(
+        "repo_slug", "unknown"
+    )
+    parts = [f"repo: {repo_slug}"]
     stack = rec.get("stack") or rec.get("detected_stack")
     if stack:
         parts.append(f"stack: {stack}")
     for key in ("base_sha", "head_sha"):
-        value = rec.get(key) or code_ctx.get(key)
+        value = identity.get(key) or rec.get(key) or code_ctx.get(key)
         if value:
             parts.append(f"{key}: {value}")
     changed = code_ctx.get("changed_files") or []
@@ -322,16 +336,29 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rebuilds tasks from (``id``/``base_sha``/``head_sha``/``diff``) plus the
     intrinsic signals ``reward.score_trajectory`` consumes. Identity is
     validated fail-closed, matching ``run_rft``: a record missing
-    base/head/diff raises naming it, so Stage 2 is never recorded complete
-    over unrunnable inputs. base/head are read v2-first from
+    repo_slug/base/head/diff raises naming it — the same missing-gate
+    ``run_rft._reconstruct_task`` enforces — so Stage 2 is never recorded
+    complete over unrunnable inputs. base/head are read v2-first from
     ``task_identity`` with the v1 ``code_context`` fallback (Pattern A), and
     must be full-length hex SHAs — validated through the shared
     :func:`daydream.training.rft.validate_full_sha`, so Stage 2 and
     ``run_rft`` enforce the identical full 40-hex contract; a truncated or
     non-hex SHA is refused like a missing one. ``repo_slug`` is likewise read
     v2-first (``task_identity``, then ``lineage``) with the v1 top-level
-    fallback, so a v2 row never carries a null repo_slug that the replay's
-    ``_reconstruct_task`` would refuse.
+    fallback and is fail-closed like the SHAs, so a v2 row never carries a
+    null repo_slug that the replay's ``_reconstruct_task`` would refuse, and
+    a v1 row without one is refused at Stage 2 exactly where the replay
+    would refuse it.
+
+    On corpus-v2 records the intrinsic scoring signals are derived from the
+    record itself: the frozen projection record is admission/shape/drift-
+    validated, so ``format_valid`` is True (the v1 bronze-parse failure floor
+    cannot apply), and the record's adjudicated outcome is mapped onto the
+    shared verdict vocabulary (``accepted`` → ``consistent``, ``rejected`` →
+    ``contradicts``, ambiguous/unanswered/missing → ``uncertain``) so the
+    replay's winner filter reads a real correctness axis instead of scoring
+    every candidate at a flat 0.0 composite. ``grounding_rate`` stays absent
+    (unknown, never an invented zero).
 
     ``diff`` falls back to :func:`_materialize_diff` when the record carries
     no raw ``diff`` body: production ``run_build_corpus`` exports (schema v1,
@@ -340,9 +367,9 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     stays runnable through Stage 2.
 
     Raises:
-        RuntimeError: When any record lacks ``base_sha``/``head_sha``/``diff``
-            identity or carries a truncated/non-hex SHA (never written, never
-            skipped silently).
+        RuntimeError: When any record lacks ``repo_slug``/``base_sha``/
+            ``head_sha``/``diff`` identity or carries a truncated/non-hex SHA
+            (never written, never skipped silently).
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
@@ -355,6 +382,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raw_lineage = rec.get("lineage")
         lineage_obj = raw_lineage if isinstance(raw_lineage, dict) else {}
         rid = str(rec.get("comment_id") or rec.get("session_id") or "")
+        repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get("repo_slug")
         base_sha = identity.get("base_sha") or rec.get("base_sha") or code_ctx.get("base_sha")
         head_sha = identity.get("head_sha") or rec.get("head_sha") or code_ctx.get("head_sha")
         diff = rec.get("diff")
@@ -362,20 +390,50 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             diff = _materialize_diff(rec)
         missing = [
             name
-            for name, value in (("base_sha", base_sha), ("head_sha", head_sha), ("diff", diff))
+            for name, value in (
+                ("repo_slug", repo_slug),
+                ("base_sha", base_sha),
+                ("head_sha", head_sha),
+                ("diff", diff),
+            )
             if not value
         ]
         if missing:
             raise RuntimeError(
                 f"stage2 refused: record {rid!r} lacks frozen task identity field(s) {missing}; "
-                "RFT rebuilds every task from base/head/diff identity (M16) and never skips a "
-                "record silently"
+                "RFT rebuilds every task from repo/base/head/diff identity (M16) and never skips "
+                "a record silently"
             )
         for name, value in (("base_sha", base_sha), ("head_sha", head_sha)):
             try:
                 validate_full_sha(rid, name, value)
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
+        if identity:
+            # Corpus-v2 records carry no archived verifier-verdicts file; the
+            # record's own adjudicated outcome is its capture-time judgment.
+            # Map it onto the shared verdict vocabulary (the labels
+            # score_trajectory's verdict_map consumes) so the replay reads a
+            # real correctness axis instead of flooring every candidate at a
+            # 0.0 composite. grounding_rate stays absent (unknown, never an
+            # invented zero) and format_valid is True: a frozen v2 record is
+            # admission/shape/drift-validated, so the v1 bronze-parse failure
+            # floor cannot apply here.
+            disposition = rec.get("outcome_label") or rec.get("disposition")
+            verdict = {
+                "accepted": "consistent",
+                "rejected": "contradicts",
+                "ambiguous": "uncertain",
+                "unanswered": "uncertain",
+                "missing": "uncertain",
+            }.get(str(disposition))
+            verifier_verdicts: Any = (
+                [{"verdict": verdict}] if verdict is not None else rec.get("verifier_verdicts")
+            )
+            format_valid = True
+        else:
+            verifier_verdicts = rec.get("verifier_verdicts")
+            format_valid = bool(rec.get("format_valid", False))
         length = rec.get("length")
         if length is None:
             length = len(
@@ -384,19 +442,14 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "id": rid,
-                # repo_slug is read v2-first (task_identity, then lineage) with
-                # the v1 top-level fallback, so a v2 record never emits a null
-                # repo_slug that run_rft's replay would refuse.
-                "repo_slug": identity.get("repo_slug")
-                or lineage_obj.get("repo_slug")
-                or rec.get("repo_slug"),
+                "repo_slug": repo_slug,
                 "base_sha": base_sha,
                 "head_sha": head_sha,
                 "diff": diff,
                 "findings": rec.get("findings", []),
-                "verifier_verdicts": rec.get("verifier_verdicts"),
+                "verifier_verdicts": verifier_verdicts,
                 "grounding_rate": rec.get("grounding_rate", rec.get("grounding_score")),
-                "format_valid": bool(rec.get("format_valid", False)),
+                "format_valid": format_valid,
                 "length": length,
             }
         )
@@ -404,7 +457,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _frozen_split_from_projection(
-    projection: V2Projection, labels_path: Path, *, held_out_fraction: float, seed: int
+    projection: V2Projection, labels_path: Path, *, seed: int
 ) -> FrozenSplit:
     """Build the Stage-0 :class:`FrozenSplit` from the projector's frozen
     boundary instead of re-freezing at runtime.
@@ -422,7 +475,10 @@ def _frozen_split_from_projection(
     digest sidecar (``<labels>.gate-split.json``) is written by the shared
     :func:`daydream.training.gate.write_split_sidecar`, so the resume guard
     and stage manifest consume the identical contract whichever producer
-    froze the boundary.
+    froze the boundary. The reported ``held_out_fraction`` is the
+    projection's own frozen holdout rate (``lineage.holdout_rate``), never
+    the run-config tunable — matching :class:`FrozenSplit.held_out_fraction`'s
+    contract ("the fraction that determined the partition size").
 
     Raises:
         RuntimeError: On boundary drift (recorded vs recomputed split) or a
@@ -462,7 +518,7 @@ def _frozen_split_from_projection(
         labels_path,
         digest=digest,
         seed=seed,
-        held_out_fraction=held_out_fraction,
+        held_out_fraction=holdout_rate,
         held_out_ids=held_out_ids,
         train_ids=[str(r["comment_id"]) for r in train],
     )
@@ -473,7 +529,7 @@ def _frozen_split_from_projection(
         train_rows=train,
         held_out_rows=held_out,
         seed=seed,
-        held_out_fraction=held_out_fraction,
+        held_out_fraction=holdout_rate,
     )
 
 
@@ -505,7 +561,6 @@ def _run_stage0(
         split = _frozen_split_from_projection(
             projection,
             labels_path,
-            held_out_fraction=config.held_out_fraction,
             seed=config.seed,
         )
     else:
