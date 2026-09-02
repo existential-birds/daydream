@@ -42,9 +42,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from daydream.archive import get_archive_dir
 from daydream.training import gate as gate_mod
@@ -53,6 +54,7 @@ from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_s
 from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
+from daydream.training.stacks_v2 import V2Projection, load_v2_projection, recompute_split_from_record_id
 
 __all__ = ["PipelineConfig", "run_pipeline"]
 
@@ -69,7 +71,13 @@ class PipelineConfig:
     changes the run's identity and invalidates a resume (M18).
 
     Attributes:
-        corpus: Path to the JSONL training corpus (one record per line).
+        corpus: Path to the JSONL training corpus (one record per line) — the
+            v1 input. Exactly one of ``corpus`` and ``corpus_v2`` must be set;
+            they are mutually exclusive.
+        corpus_v2: Path to a frozen corpus-v2 projection directory (the
+            ``run_build_corpus_v2`` output). When set, the pipeline loads the
+            projection via :func:`daydream.training.stacks_v2.load_v2_projection`
+            and Stage 0 consumes the projector's frozen split.
         out_dir: Root directory for stage outputs and ``manifest.json``.
         stages: Ordered stage names to run.
         base_model: HuggingFace model id the LoRA adapter trains against.
@@ -87,8 +95,9 @@ class PipelineConfig:
         stack_pins: Exact dependency pins carried in the run identity.
     """
 
-    corpus: Path
     out_dir: Path
+    corpus: Path | None = None
+    corpus_v2: Path | None = None
     stages: tuple[str, ...] = STAGES
     base_model: str = "Qwen/Qwen3-8B"
     tokenizer_renderer: str = "default"
@@ -114,6 +123,13 @@ class PipelineConfig:
             raise ValueError(
                 f"held_out_fraction must be in (0, 1) exclusive (got {self.held_out_fraction!r})"
             )
+        if self.corpus is not None and self.corpus_v2 is not None:
+            raise ValueError(
+                "corpus and corpus_v2 are mutually exclusive: a run consumes either "
+                "the v1 JSONL corpus or a frozen corpus-v2 projection directory, never both"
+            )
+        if self.corpus is None and self.corpus_v2 is None:
+            raise ValueError("exactly one of corpus or corpus_v2 must be set")
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -129,28 +145,52 @@ def _file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract gold outcome rows for the Stage-0 labels file from either shape.
+def _outcome_rows(
+    records: list[dict[str, Any]], *, require_finding_text: bool = False
+) -> list[dict[str, Any]]:
+    """Extract gold outcome rows for the Stage-0 labels file from any shape.
 
-    Accepts both the committed fixture shape (``comment_id``/``text``/``label``)
-    and production ``run_build_corpus`` exports (``session_id``/
-    ``review_output``/``outcome_label``). Gold-gate evidence fields
-    (``has_posterior``, ``labeler_policy_version``, ``decisive_mix``,
+    Accepts the committed fixture shape (``comment_id``/``text``/``label``),
+    production ``run_build_corpus`` exports (``session_id``/
+    ``review_output``/``outcome_label``), and corpus-v2 records
+    (``session_id``/``finding_text``/``outcome_label``). Gold-gate evidence
+    fields (``has_posterior``, ``labeler_policy_version``, ``decisive_mix``,
     ``decisive_only``) are carried through when the record provides them; an
     absent ``labeler_policy_version`` is left absent so the admission guard in
     :mod:`daydream.training.reward_model` refuses the legacy row rather than
-    silently admitting it.
+    silently admitting it. On v2 records the policy version lives under
+    ``lineage`` and is promoted from there when the record carries no
+    top-level value.
+
+    Args:
+        records: Corpus records in any of the accepted shapes.
+        require_finding_text: When True (the corpus-v2 path), a gold-labeled
+            record with no readable text raises instead of being silently
+            skipped — a v2 gold record without its localized finding text is
+            a broken projection, never an empty-row row.
+
+    Raises:
+        RuntimeError: When ``require_finding_text`` is set and a gold-labeled
+            record carries no ``finding_text``/``text``/``review_output``.
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
         comment_id = rec.get("comment_id") or rec.get("session_id")
-        text = rec.get("text") or rec.get("review_output")
+        text = rec.get("finding_text") or rec.get("text") or rec.get("review_output")
         label = rec.get("label") or rec.get("outcome_label")
         # Only the two gold outcome classes feed the Stage-0 model; contested/
         # null-label rows are not gold outcome rows and are excluded here.
         if label not in ("accepted", "rejected"):
             continue
         if not (comment_id and text):
+            if require_finding_text:
+                raise RuntimeError(
+                    f"stage0 refused: corpus-v2 gold record "
+                    f"{rec.get('record_id') or comment_id!r} has outcome_label "
+                    f"{label!r} but no finding_text/text/review_output — a gold "
+                    "record without its localized finding text is a broken "
+                    "projection, not an empty row"
+                )
             continue
         row: dict[str, Any] = {
             "comment_id": comment_id,
@@ -160,6 +200,10 @@ def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for key in ("has_posterior", "labeler_policy_version", "decisive_mix", "decisive_only"):
             if key in rec:
                 row[key] = rec[key]
+        if "labeler_policy_version" not in row:
+            lineage_obj = rec.get("lineage")
+            if isinstance(lineage_obj, dict) and lineage_obj.get("labeler_policy_version") is not None:
+                row["labeler_policy_version"] = lineage_obj["labeler_policy_version"]
         rows.append(row)
     return rows
 
@@ -172,7 +216,10 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     on rejected or silver traces. Rows are prompt/completion JSONL — the shape
     the prime-rl ``sft`` loader accepts (``messages`` column or both
     ``prompt``/``completion``). Gold vs silver counts are reported separately
-    (M9), matching the recipe's tier accounting.
+    (M9), matching the recipe's tier accounting. On corpus-v2 records the
+    completion is the localized ``finding_text`` of the gold-accepted
+    finding; the completion field chain is
+    ``completion`` → ``finding_text`` → ``text`` → ``review_output``.
 
     Current-policy SFT prefers native-profile traces (M23): accepted rows are
     partitioned by the ``legacy_policy`` tag ``stacks.load_dataset`` stamps
@@ -192,7 +239,12 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     legacy: list[dict[str, Any]] = []
     for rec in records:
         label = rec.get("label") or rec.get("outcome_label")
-        completion = rec.get("completion") or rec.get("text") or rec.get("review_output")
+        completion = (
+            rec.get("completion")
+            or rec.get("finding_text")
+            or rec.get("text")
+            or rec.get("review_output")
+        )
         if not isinstance(completion, str) or not completion:
             continue
         if label == "accepted":
@@ -263,6 +315,13 @@ def _materialize_diff(rec: dict[str, Any]) -> str | None:
         return None
 
 
+def _is_full_sha(value: object) -> bool:
+    """Whether a value is a full-length hex SHA — at least a full 40-char git
+    commit SHA (longer sha256-style content-address stamps are tolerated).
+    Truncated or non-hex values are rejected."""
+    return bool(re.fullmatch(r"[0-9a-f]{40,}", str(value)))
+
+
 def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Materialize Stage-2 RFT replay inputs from corpus records (M16).
 
@@ -271,7 +330,10 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     intrinsic signals ``reward.score_trajectory`` consumes. Identity is
     validated fail-closed, matching ``run_rft``: a record missing
     base/head/diff raises naming it, so Stage 2 is never recorded complete
-    over unrunnable inputs.
+    over unrunnable inputs. base/head are read v2-first from
+    ``task_identity`` with the v1 ``code_context`` fallback (Pattern A), and
+    must be full-length hex SHAs — a truncated SHA is refused like a missing
+    one.
 
     ``diff`` falls back to :func:`_materialize_diff` when the record carries
     no raw ``diff`` body: production ``run_build_corpus`` exports (schema v1,
@@ -281,7 +343,8 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Raises:
         RuntimeError: When any record lacks ``base_sha``/``head_sha``/``diff``
-            identity (never written, never skipped silently).
+            identity or carries a truncated/non-hex SHA (never written, never
+            skipped silently).
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
@@ -289,9 +352,11 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raw_ctx = rec.get("code_context")
         if isinstance(raw_ctx, dict):
             code_ctx = raw_ctx
+        task_identity = rec.get("task_identity")
+        identity = task_identity if isinstance(task_identity, dict) else {}
         rid = str(rec.get("comment_id") or rec.get("session_id") or "")
-        base_sha = rec.get("base_sha") or code_ctx.get("base_sha")
-        head_sha = rec.get("head_sha") or code_ctx.get("head_sha")
+        base_sha = identity.get("base_sha") or rec.get("base_sha") or code_ctx.get("base_sha")
+        head_sha = identity.get("head_sha") or rec.get("head_sha") or code_ctx.get("head_sha")
         diff = rec.get("diff")
         if not diff:
             diff = _materialize_diff(rec)
@@ -306,9 +371,19 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "RFT rebuilds every task from base/head/diff identity (M16) and never skips a "
                 "record silently"
             )
+        for name, value in (("base_sha", base_sha), ("head_sha", head_sha)):
+            if not _is_full_sha(value):
+                raise RuntimeError(
+                    f"stage2 refused: record {rid!r} carries a truncated or non-hex "
+                    f"{name} {value!r}; RFT rebuilds every task from full-length "
+                    "commit SHAs and never replays against a shortened identity"
+
+                )
         length = rec.get("length")
         if length is None:
-            length = len(str(rec.get("text") or rec.get("review_output") or ""))
+            length = len(
+                str(rec.get("text") or rec.get("review_output") or rec.get("finding_text") or "")
+            )
         rows.append(
             {
                 "id": rid,
@@ -326,15 +401,96 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _frozen_split_from_projection(
+    projection: V2Projection, labels_path: Path, *, held_out_fraction: float, seed: int
+) -> FrozenSplit:
+    """Build the Stage-0 :class:`FrozenSplit` from the projector's frozen
+    boundary instead of re-freezing at runtime.
+
+    The corpus-v2 projection was split deterministically at build time
+    (``lineage.split`` per record, drift-gated by the loader). Stage 0 maps
+    that three-way boundary onto its two-way partition — train+validation
+    rows train, holdout rows evaluate — and verifies the boundary fail-closed:
+    every gold record's recorded ``lineage.split`` must match the split
+    recomputed from its record id under the lineage's pinned salt/rates, the
+    same recompute comparison the loader enforces.
+
+    The split digest is the same content address :func:`freeze_split` emits
+    (SHA-256 over the sorted held-out comment ids plus the seed), so the
+    resume guard and stage manifest consume it unchanged.
+
+    Raises:
+        RuntimeError: On boundary drift (recorded vs recomputed split) or a
+            holdout side with no gold outcome rows.
+    """
+    train = _outcome_rows(
+        [*projection.by_split["train"], *projection.by_split["validation"]],
+        require_finding_text=True,
+    )
+    held_out = _outcome_rows(projection.by_split["holdout"], require_finding_text=True)
+    if not held_out:
+        raise RuntimeError(
+            "stage0 refused: the corpus-v2 frozen split has no gold outcome rows in "
+            "its holdout split; the gate would evaluate against nothing and refuses closed"
+        )
+    salt = str(projection.lineage["salt"])
+    holdout_rate = float(cast(float, projection.lineage["holdout_rate"]))
+    val_rate = float(cast(float, projection.lineage["val_rate"]))
+    for rec in projection.records:
+        lineage_obj = rec.get("lineage")
+        recorded = lineage_obj.get("split") if isinstance(lineage_obj, dict) else None
+        recomputed = recompute_split_from_record_id(
+            str(rec.get("record_id", "")),
+            salt=salt,
+            holdout_rate=holdout_rate,
+            val_rate=val_rate,
+        )
+        if recorded != recomputed:
+            raise RuntimeError(
+                f"stage0 refused: corpus-v2 record {rec.get('record_id')!r} boundary "
+                f"drift — recorded split {recorded!r} != recomputed {recomputed!r}; "
+                "the frozen split is not trusted over recomputation"
+            )
+    held_out_ids = [str(r["comment_id"]) for r in held_out]
+    digest = gate_mod._split_digest(held_out_ids, seed)
+    digest_path = labels_path.name + ".gate-split.json"
+    sidecar = {
+        "digest": digest,
+        "seed": seed,
+        "held_out_fraction": held_out_fraction,
+        "held_out_ids": sorted(held_out_ids),
+        "train_ids": sorted(str(r["comment_id"]) for r in train),
+    }
+    sidecar_path = labels_path.parent / digest_path
+    tmp = sidecar_path.with_name(sidecar_path.name + ".tmp")
+    tmp.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+    os.replace(tmp, sidecar_path)
+    return FrozenSplit(
+        digest=digest,
+        fingerprint=digest[:8],
+        digest_path=digest_path,
+        train_rows=train,
+        held_out_rows=held_out,
+        seed=seed,
+        held_out_fraction=held_out_fraction,
+    )
+
+
 def _run_stage0(
-    config: PipelineConfig, records: list[dict[str, Any]], stage_dir: Path
+    config: PipelineConfig,
+    records: list[dict[str, Any]],
+    stage_dir: Path,
+    *,
+    projection: V2Projection | None = None,
 ) -> tuple[dict[str, Any], GateReport, FrozenSplit]:
     """Stage 0: freeze split, train the outcome model, evaluate the gate.
 
     All CPU-bound; runs identically on the dry path (the gate evaluates on
     cached model state — the small classifier is trained in-process, no GPU).
+    On corpus-v2 input the split is not re-frozen: the projector's frozen
+    boundary is consumed via :func:`_frozen_split_from_projection`.
     """
-    rows = _outcome_rows(records)
+    rows = _outcome_rows(records, require_finding_text=projection is not None)
     if not rows:
         raise RuntimeError(
             "stage0 gate evidence missing: corpus carries no gold outcome rows "
@@ -344,9 +500,17 @@ def _run_stage0(
     labels_path = stage_dir / "labels.jsonl"
     labels_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in rows))
 
-    split = freeze_split(
-        labels_path, held_out_fraction=config.held_out_fraction, seed=config.seed
-    )
+    if projection is not None:
+        split = _frozen_split_from_projection(
+            projection,
+            labels_path,
+            held_out_fraction=config.held_out_fraction,
+            seed=config.seed,
+        )
+    else:
+        split = freeze_split(
+            labels_path, held_out_fraction=config.held_out_fraction, seed=config.seed
+        )
     model: OutcomeModel = train_outcome_model(
         labels_path,
         split=split,
@@ -462,7 +626,8 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
     """Run the configured stages in order and write the stage manifest.
 
     Args:
-        config: The pipeline configuration (corpus, output root, stages).
+        config: The pipeline configuration (corpus or corpus_v2 input, output
+            root, stages).
         dry_run: When true, execute only what needs no GPU (corpus load,
             Stage-0 gate, validation, manifest) and mark the GPU stages
             ``skipped_dry`` — the CI path.
@@ -477,9 +642,22 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         RuntimeError: When Stage 3 is requested without a passed Stage-0 gate,
             or the corpus carries no gold outcome rows for Stage 0.
     """
-    corpus_path = Path(config.corpus)
-    records = stacks.load_dataset(corpus_path, allow_copyleft=config.allow_copyleft)
-    corpus_digest = _file_digest(corpus_path)
+    projection: V2Projection | None = None
+    if config.corpus_v2 is not None:
+        # Frozen corpus-v2 directory: the v2 loader re-applies the C5/C8 and
+        # split-drift gates, and the directory-level digest replaces the
+        # single-file corpus digest in the run identity.
+        v2_path = config.corpus_v2
+        corpus_path = Path(v2_path)
+        projection = load_v2_projection(v2_path, allow_copyleft=config.allow_copyleft)
+        records = list(projection.records)
+        corpus_digest = projection.digest
+    else:
+        v1_path = config.corpus
+        assert v1_path is not None  # PipelineConfig.__post_init__ enforces exactly-one
+        corpus_path = Path(v1_path)
+        records = stacks.load_dataset(corpus_path, allow_copyleft=config.allow_copyleft)
+        corpus_digest = _file_digest(corpus_path)
 
     out_dir = Path(config.out_dir)
     stage_entries: dict[str, dict[str, Any]] = {}
@@ -507,7 +685,9 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
     for stage in config.stages:
         stage_dir = out_dir / stage
         if stage == "stage0":
-            entry, gate_report, frozen_split = _run_stage0(config, records, stage_dir)
+            entry, gate_report, frozen_split = _run_stage0(
+                config, records, stage_dir, projection=projection
+            )
             stage_entries[stage] = entry
             stage_records[stage] = {"records": records}
             split_digest = frozen_split.digest
