@@ -87,6 +87,11 @@ class BuildCorpusV2Config:
     val_rate: float = 0.1
     salt: str = "daydream-corpus-v2"
     caps: dict[str, int] = field(default_factory=dict)
+    # Output-share caps (issue #1079): true share of the final emitted
+    # population, enforced per dimension over the post-tier-cap population.
+    max_stack_share: float | None = None
+    max_repo_share: float | None = None
+    max_profile_share: float | None = None
     labeler_policy_version: str = "1"
     reply_classifier_version: str = "1"
     rubric_schema_version: str = "per-finding-resolutions-v1"
@@ -112,6 +117,10 @@ class BuildCorpusV2Config:
                 "pinned license policy is a configuration error"
             )
         object.__setattr__(self, "license_policy_path", Path(self.license_policy_path))
+        for field_name in ("max_stack_share", "max_repo_share", "max_profile_share"):
+            share = getattr(self, field_name)
+            if share is not None and not (0.0 < share <= 1.0):
+                raise ValueError(f"{field_name} must be in (0.0, 1.0], got {share}")
         if self.as_of is not None:
             object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
 
