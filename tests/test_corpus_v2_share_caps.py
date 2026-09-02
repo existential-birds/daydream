@@ -3,7 +3,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -105,7 +105,8 @@ class TestApplyShareCaps:
         total = len(kept)
         stack: dict[str, int] = {}
         repo: dict[str, int] = {}
-        for r in kept:
+        for raw in kept:
+            r = cast(dict[str, Any], raw)
             stack[str(r["stack"])] = stack.get(str(r["stack"]), 0) + 1
             repo[str(r["lineage"]["repo_slug"])] = repo.get(str(r["lineage"]["repo_slug"]), 0) + 1
         for value, count in stack.items():
