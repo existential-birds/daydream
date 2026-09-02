@@ -915,6 +915,7 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         else:
             batch_manifest_row = {}
         digest_parts = [d for d in (batch.content_digest, snapshot_digest) if d]
+        batch_artifacts = read_batch_artifacts(config.bundle_dir, batch.session_id)
         trajectory_documents = _read_trajectory_documents(config.bundle_dir, batch.artifact_relpath)
         for trajectory in trajectory_documents:
             segs = segment(trajectory)
@@ -996,6 +997,42 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
                         "repo_slug": record_decision["repo_slug"],
                         "license_decision": record_decision,
                     }
+                    # Additive enrichment from the batch's review artifacts
+                    # (findings.json / diff.patch / manifest.json): localized
+                    # finding text and a task-identity block. Every field is
+                    # opt-in on artifact presence — a missing artifact leaves
+                    # the field absent (the consumer fails closed, not the
+                    # projector), and record_id/tier/outcome_label are never
+                    # touched.
+                    finding_text = batch_artifacts.findings_by_fingerprint.get(fingerprint)
+                    if finding_text is not None:
+                        rec["finding_text"] = finding_text
+                        rec["finding_text_sha256"] = hashlib.sha256(
+                            finding_text.encode("utf-8")
+                        ).hexdigest()
+                    task_identity: dict[str, Any] = {
+                        "repo_slug": record_decision["repo_slug"],
+                    }
+                    manifest_git = batch_artifacts.manifest_git
+                    for sha_key in ("base_sha", "head_sha"):
+                        sha_value = manifest_git.get(sha_key)
+                        if isinstance(sha_value, str) and bool(sha_value):
+                            task_identity[sha_key] = sha_value
+                    if batch_artifacts.diff:
+                        diff_digest = hashlib.sha256(
+                            batch_artifacts.diff.encode("utf-8")
+                        ).hexdigest()
+                        diff_ref: dict[str, Any] = {
+                            "batch": batch.content_digest,
+                            "relpath": f"batches/{batch.session_id}/diff.patch",
+                        }
+                        task_identity["diff_digest"] = diff_digest
+                        task_identity["diff_ref"] = diff_ref
+                    rec["task_identity"] = task_identity
+                    if "diff_digest" in task_identity:
+                        lineage_fields = cast(dict[str, Any], rec["lineage"])
+                        lineage_fields["diff_digest"] = task_identity["diff_digest"]
+                        lineage_fields["diff_ref"] = task_identity["diff_ref"]
                     # v2 schema stamp: every projected record carries the
                     # training-record schema version it was emitted under.
                     rec["schema_version"] = "2"
