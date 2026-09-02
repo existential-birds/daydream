@@ -703,7 +703,7 @@ class OspreyBackend:
                     content = event.get("content")
                     if not isinstance(content, str):
                         raise OspreyProtocolError("tool_result requires string content")
-                    _required_int(event, "duration_ms")
+                    _required_non_negative_int(event, "duration_ms")
                     protocol_state.finish_tool_call(call_id)
                     yield ToolResultEvent(call_id, content, status == "error")
                 elif event_name == "tool_update":
@@ -722,18 +722,14 @@ class OspreyBackend:
                     if not isinstance(usage_reported, bool):
                         raise OspreyProtocolError("turn_end requires boolean usage_reported")
                     if usage_reported:
-                        _required_int(event, "duration_ms")
+                        _required_non_negative_int(event, "duration_ms")
                     else:
-                        _optional_int(event, "duration_ms")
+                        _optional_non_negative_int(event, "duration_ms")
                     if usage_reported:
-                        prompt_tokens = _required_int(event, "prompt_tokens")
-                        completion_tokens = _required_int(event, "completion_tokens")
-                        cached_tokens = _optional_int(event, "cached_tokens")
-                        reasoning_tokens = _optional_int(event, "thinking_tokens")
-                        if reasoning_tokens is not None and reasoning_tokens < 0:
-                            raise OspreyProtocolError(
-                                "turn_end thinking_tokens must be non-negative"
-                            )
+                        prompt_tokens = _required_non_negative_int(event, "prompt_tokens")
+                        completion_tokens = _required_non_negative_int(event, "completion_tokens")
+                        cached_tokens = _optional_non_negative_int(event, "cached_tokens")
+                        reasoning_tokens = _optional_non_negative_int(event, "thinking_tokens")
                         cost = _parse_cost(event.get("cost_usd"), event_name=event_name)
                         turn_model = event.get("model")
                         if turn_model is not None and not isinstance(turn_model, str):

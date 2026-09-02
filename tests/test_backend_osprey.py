@@ -731,21 +731,43 @@ async def test_negative_session_total_cost_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_negative_thinking_tokens_are_rejected() -> None:
-    lines, _ = _stream(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "usage_reported": True,
-            "duration_ms": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "thinking_tokens": -1,
-        },
-    )
+@pytest.mark.parametrize(
+    "events, field",
+    [
+        ([{"event": "tool_result", "tool_call_id": "c-1", "tool_name": "n",
+           "status": "success", "content": "ok", "duration_ms": -1}], "duration_ms"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": -1, "prompt_tokens": 0, "completion_tokens": 0}], "duration_ms"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": False,
+           "duration_ms": -1}], "duration_ms"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": -1, "completion_tokens": 0}], "prompt_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": -1}], "completion_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "cached_tokens": -1}], "cached_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "thinking_tokens": -1}], "thinking_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "cost_usd": "-0.125"}], "cost_usd"),
+    ],
+)
+async def test_negative_osprey_telemetry_is_rejected(
+    events: list[dict[str, object]], field: str
+) -> None:
+    lines, _ = _stream(*events)
 
-    with pytest.raises(OspreyError, match="thinking_tokens"):
+    with pytest.raises(OspreyError, match=field):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 
