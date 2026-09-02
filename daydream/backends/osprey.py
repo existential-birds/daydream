@@ -157,6 +157,20 @@ def _optional_int(event: dict[str, Any], key: str) -> int | None:
     return value
 
 
+def _required_non_negative_int(event: dict[str, Any], key: str) -> int:
+    value = _required_int(event, key)
+    if value < 0:
+        raise OspreyProtocolError(f"event {event.get('event')!r} has negative {key!r}")
+    return value
+
+
+def _optional_non_negative_int(event: dict[str, Any], key: str) -> int | None:
+    value = _optional_int(event, key)
+    if value is not None and value < 0:
+        raise OspreyProtocolError(f"event {event.get('event')!r} has negative {key!r}")
+    return value
+
+
 def _parse_cost(value: Any, *, event_name: str) -> float | None:
     if value is None:
         return None

@@ -28,6 +28,8 @@ from daydream.backends.osprey import (
     OspreyProtocolError,
     OspreyTerminalError,
     OspreyUnsupportedOption,
+    _optional_non_negative_int,
+    _required_non_negative_int,
     _stderr_diagnostic_sink,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -706,6 +708,17 @@ async def test_terminal_exit_code_must_match_process_status() -> None:
 
     with pytest.raises(OspreyError, match="exit_code"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+def test_non_negative_int_helpers_reject_below_zero() -> None:
+    event = {"event": "turn_end", "k": -1}
+    with pytest.raises(OspreyProtocolError, match="has negative 'k'"):
+        _required_non_negative_int(event, "k")
+    with pytest.raises(OspreyProtocolError, match="has negative 'k'"):
+        _optional_non_negative_int(event, "k")
+    assert _optional_non_negative_int({"event": "turn_end", "k": None}, "k") is None
+    assert _required_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
+    assert _optional_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
 
 
 @pytest.mark.asyncio
