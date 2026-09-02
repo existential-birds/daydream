@@ -4,6 +4,7 @@ Mirrors ``tests/test_corpus_reproducibility.py``'s determinism standard and
 ``tests/test_corpus_leakage.py``'s as_of boundary standard.
 """
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,110 @@ def test_assign_split_is_deterministic_and_salted() -> None:
 def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
+    run_build_corpus_v2(_cfg(tmp_path / "a", bundle_dir, snap))
+    run_build_corpus_v2(_cfg(tmp_path / "b", bundle_dir, snap))
+    assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
+    assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
+    for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
+        assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
+
+
+def _enrich_bundle(bundle_dir: Path) -> None:
+    """Give the admitted batch the review artifacts the projector joins on:
+    findings.json (bodies keyed by fingerprint), diff.patch, and a
+    producer-realistic manifest.json carrying the git shas."""
+    batch_dir = bundle_dir / "batches" / "sess-a"
+    (batch_dir / "manifest.json").write_text(json.dumps(
+        {"git": {"base_sha": "1" * 40, "head_sha": "2" * 40}}))
+    (batch_dir / "findings.json").write_text(json.dumps({"findings": [
+        {"fingerprint": "a1" * 32, "body": "exact localized finding body"},
+    ]}))
+    (batch_dir / "diff.patch").write_text("diff --git a/x.py b/x.py\n+print(1)\n")
+
+
+def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) -> None:
+    """The projected gold-accepted record from an enriched bundle is pinned
+    dict-for-dict at the additive v2 shape: finding_text + its sha256, the
+    task_identity block, and the diff pointer mirrored into lineage. The
+    exact equality IS the reproducibility contract — new projector keys must
+    regenerate this dict, never relax it to a subset check."""
+    bundle_dir = _write_bundle(tmp_path)
+    _enrich_bundle(bundle_dir)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    records = [json.loads(line) for line in
+               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    accepted = next(r for r in records if r["outcome_label"] == "accepted")
+    assert accepted == {
+        "disposition": "accepted",
+        "evidence": [
+            {"classifier_label": "accepted", "comment_id": 1,
+             "created_at": "2026-02-01T00:00:00+00:00",
+             "valid_at": "2026-01-01T00:00:00+00:00"},
+        ],
+        "finding_fingerprint": "a1" * 32,
+        "finding_text": "exact localized finding body",
+        "finding_text_sha256": hashlib.sha256(
+            b"exact localized finding body").hexdigest(),
+        "lineage": {
+            "as_of": None,
+            "content_digests": [
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "e12d0a7e8ecda05271e3faa36158292462221f5cf8c5cc530bc825f463e77b6d",
+            ],
+            "curation_id": "cur-0123456789abcdef",
+            "diff_digest": "4b7fad43c00ef2883fec22db7e9132310846cef11e0ec4cbbf936bc69a2c57a9",
+            "diff_ref": {
+                "batch": "1111111111111111111111111111111111111111111111111111111111111111",
+                "relpath": "batches/sess-a/diff.patch",
+            },
+            "exclusion_reason": None,
+            "hub_commit": "0123456789abcdef0123456789abcdef01234567",
+            "labeler_policy_version": "1",
+            "license_decision": {
+                "evidence_ref": "manifest", "policy_version": "1",
+                "reason_code": None, "repo_slug": "owner/repo-a",
+                "spdx_id": "MIT", "status": "admitted",
+            },
+            "reply_classifier_version": "1",
+            "repo_slug": "owner/repo-a",
+            "rubric_schema_version": "per-finding-resolutions-v1",
+            "split": "train",
+            "valid_at": "2026-01-01T00:00:00+00:00",
+        },
+        "outcome_label": "accepted",
+        "profile": {
+            "profile_digest": "d" * 64, "profile_name": "deep-review",
+            "profile_schema_version": 2, "profile_source_kind": "builtin",
+        },
+        "record_id": "6bfc34f5a65f3a68bd0409c7893b22a6d884e4c515a74ebe62b8b42e88e0dfda",
+        "record_type": "outcome-finding",
+        "schema_version": "2",
+        "session_id": "sess-a",
+        "stack": "python",
+        "task_identity": {
+            "base_sha": "1" * 40,
+            "diff_digest": "4b7fad43c00ef2883fec22db7e9132310846cef11e0ec4cbbf936bc69a2c57a9",
+            "diff_ref": {
+                "batch": "1111111111111111111111111111111111111111111111111111111111111111",
+                "relpath": "batches/sess-a/diff.patch",
+            },
+            "head_sha": "2" * 40,
+            "repo_slug": "owner/repo-a",
+        },
+        "task_segment": "seg-0",
+        "tier": "gold",
+        "trajectory_id": "sess-a:fix-0",
+    }
+
+
+def test_enriched_reprojection_is_byte_identical(tmp_path: Path) -> None:
+    """Reproducibility covers the additive enrichment: the same enriched
+    bundle projects byte-identically twice, so the emitted digests deterministically
+    cover finding_text / task_identity / lineage diff pointers."""
+    bundle_dir = _write_bundle(tmp_path)
+    _enrich_bundle(bundle_dir)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     run_build_corpus_v2(_cfg(tmp_path / "a", bundle_dir, snap))
     run_build_corpus_v2(_cfg(tmp_path / "b", bundle_dir, snap))
     assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
