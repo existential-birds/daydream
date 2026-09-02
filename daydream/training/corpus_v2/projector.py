@@ -618,6 +618,57 @@ def _apply_share_caps(
     return population, exclusions
 
 
+def _share_caps_report(
+    records: list[Record],
+    exclusions: dict[str, int],
+    *,
+    max_stack_share: float | None,
+    max_repo_share: float | None,
+    max_profile_share: float | None,
+) -> dict[str, Any]:
+    """Shared summary/lineage ``share_caps`` block (one builder, two consumers
+    — they cannot drift). ``configured`` lists the non-None share limits keyed
+    stack/repo/profile; ``applied`` reports final per-value counts + shares
+    against the final emitted population per dimension; ``exclusions`` lists
+    the merged ``share-cap:<dimension>:<value>`` exclusion counts."""
+    configured = {
+        key: value
+        for key, value in (
+            ("stack", max_stack_share),
+            ("repo", max_repo_share),
+            ("profile", max_profile_share),
+        )
+        if value is not None
+    }
+    getters: dict[str, Callable[[Record], Any]] = {
+        "stack": lambda r: r.get("stack"),
+        "repository": lambda r: cast(dict[str, Any], r.get("lineage") or {}).get("repo_slug"),
+        "profile": lambda r: cast(dict[str, Any], r.get("profile") or {}).get("profile_name"),
+    }
+    applied: dict[str, dict[str, dict[str, float]]] = {}
+    total = len(records)
+    for key, getter in getters.items():
+        counts: dict[Any, int] = {}
+        for rec in records:
+            value = getter(rec)
+            counts[value] = counts.get(value, 0) + 1
+        applied[key] = {
+            str(value) if value is not None else "(none)": {
+                "count": count,
+                "share": (count / total) if total else 0.0,
+            }
+            for value, count in sorted(
+                counts.items(), key=lambda kv: (kv[0] is None, str(kv[0]))
+            )
+        }
+    return {
+        "version": 1,
+        "configured": configured,
+        "applied": applied,
+        "exclusions": dict(sorted(exclusions.items())),
+    }
+
+
 def _caps_applied(records: list[Record], caps: dict[str, int]) -> dict[str, int]:
     """Final per-tier population (what the caps resolved to), deterministic."""
     return _count_by(records, lambda r: str(r["tier"])) if caps else {}
@@ -646,7 +697,9 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
     report only.
 
     Returns a summary dict with ``total``/``emitted``, per-type/per-tier/
-    per-split counts, the ``caps`` block (configured vs applied), and
+    per-split counts, the ``caps`` block (configured vs applied), the
+    ``share_caps`` block (only when at least one output-share cap is
+    configured — shared with lineage.json so the two cannot drift), and
     ``exclusions_by_reason`` — all derived from the final population in
     deterministic order. Non-decisive findings land in the human
     ``adjudication-report.json`` with their evidence (D8: report output, not
@@ -845,6 +898,35 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
             kept.append(rec)
         records = kept
 
+    # Output-share caps (issue #1079): true share of the final emitted
+    # population, enforced per dimension (stack → repository → profile)
+    # sequentially over the post-tier-cap population. Only runs when at least
+    # one share is configured, so tier-cap-only builds stay byte-identical
+    # and neither the summary nor lineage gains a ``share_caps`` block.
+    share_caps_report: dict[str, Any] | None = None
+    if (
+        config.max_stack_share is not None
+        or config.max_repo_share is not None
+        or config.max_profile_share is not None
+    ):
+        records, share_exclusions = _apply_share_caps(
+            records,
+            max_stack_share=config.max_stack_share,
+            max_repo_share=config.max_repo_share,
+            max_profile_share=config.max_profile_share,
+        )
+        for excl_key, excl_count in share_exclusions.items():
+            exclusions_by_reason[f"share-cap:{excl_key}"] = (
+                exclusions_by_reason.get(f"share-cap:{excl_key}", 0) + excl_count
+            )
+        share_caps_report = _share_caps_report(
+            records,
+            share_exclusions,
+            max_stack_share=config.max_stack_share,
+            max_repo_share=config.max_repo_share,
+            max_profile_share=config.max_profile_share,
+        )
+
     canonical = _dump_jsonl(records)
     _atomic_write(config.out_dir / "corpus.jsonl", canonical)
     # Versioned twin of the canonical corpus (same bytes, atomic, pre-_SUCCESS).
@@ -907,6 +989,11 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
         "caps": {"configured": dict(sorted(config.caps.items())),
                  "applied": _caps_applied(records, config.caps)},
+        **(
+            {"share_caps": share_caps_report}
+            if share_caps_report is not None
+            else {}
+        ),
         "adjudication_count": len(adjudication),
         # License identity pin (M7/AC4, issue #1080): the digest-pinned policy
         # the re-evaluation consumed, the C5 exclusion list the C5 gate
@@ -964,6 +1051,11 @@ def run_build_corpus_v2(config: BuildCorpusV2Config) -> dict[str, Any]:
         "records_by_split": dict(split_counts),
         "caps": {"configured": dict(sorted(config.caps.items())),
                  "applied": _caps_applied(records, config.caps)},
+        **(
+            {"share_caps": share_caps_report}
+            if share_caps_report is not None
+            else {}
+        ),
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
         "license_distribution": _license_decision_distribution(decisions),
     }

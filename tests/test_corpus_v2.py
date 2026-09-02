@@ -113,6 +113,7 @@ def _write_annotations_snapshot(
     valid_at: str = "2026-01-01T00:00:00+00:00",
     session_id: str = "sess-a",
     dispositions: list[str] | None = None,
+    stack: str = "python",
     n_siblings: int = 1,
 ) -> Path:
     """Two-bundle shape: a self-verified annotation bundle (its own
@@ -139,8 +140,21 @@ def _write_annotations_snapshot(
 
     ann_dir = bundle_dir.parent / f"{bundle_dir.name}-annotations"
     ann_dir.mkdir(parents=True, exist_ok=True)
-    fps = ["a1" * 32, "b2" * 32, "c3" * 32]
-    rows = []
+    # Merge with any rows a previous call wrote (per-session helper called
+    # multiple times over one bundle): the snapshot is one annotations.jsonl
+    # for all sessions, and a stale SHA256SUMS listing must not be hashed
+    # into itself.
+    prior = [
+        json.loads(line) for line in
+        (ann_dir / "annotations.jsonl").read_text().splitlines() if line
+    ] if (ann_dir / "annotations.jsonl").exists() else []
+    (ann_dir / "SHA256SUMS").unlink(missing_ok=True)
+    # Session-scoped fingerprints when merging (second session's rows must
+    # not collide with the first's, since the snapshot is keyed by
+    # fingerprint globally); a lone call keeps the canonical fingerprints.
+    sess_prefix = hashlib.sha256(session_id.encode()).hexdigest()[:2] if prior else ""
+    fps = [sess_prefix + fp for fp in ("a1" * 32, "b2" * 32, "c3" * 32)]
+    rows = list(prior)
     for i, disposition in enumerate(dispositions or ["accepted", "rejected", "ambiguous"]):
         evidence = (
             [{"comment_id": i + 1, "created_at": "2026-02-01T00:00:00+00:00",
@@ -159,7 +173,7 @@ def _write_annotations_snapshot(
             # must surface both at the two-bundle projection boundary.
             "profile": {"profile_schema_version": 2, "profile_name": "deep-review",
                         "profile_source_kind": "builtin", "profile_digest": "d" * 64},
-            "stack": "python",
+            "stack": stack,
         })
     (ann_dir / "annotations.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
