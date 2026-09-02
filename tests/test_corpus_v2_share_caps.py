@@ -1,4 +1,5 @@
 """Tests for the corpus-v2 share-cap stage and its build wiring."""
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -68,6 +69,53 @@ class TestApplyShareCaps:
             for value, count in counts.items():
                 assert count / total <= limit + 1e-9, f"{key}={value} share {count}/{total}"
 
+    def test_sequential_passes_reconverge_correlated_dimensions(self) -> None:
+        from daydream.training.corpus_v2.projector import _apply_share_caps
+
+        # F1-shaped correlated fixture: python is concentrated in repo-a while
+        # rust is split repo-a x2 + repo-b x3, and python sits exactly at the
+        # 0.5 stack cap on entry (5/10). The repository pass (a later
+        # dimension) then trims repo-a by lowest record_id — removing rust
+        # records and pushing python back over its stack cap (4/7 = 0.571). A
+        # single sequential pass would leave that drift in the output (it
+        # breaks the M4 contract); the cap stage must re-run the dimension
+        # sequence to a fixed point and reconverge every dimension within its
+        # limit of the final population.
+        records = [
+            _mk_record(f"r{i:03d}", "python", "owner/repo-a", "deep") for i in range(5)
+        ]
+        records += [
+            _mk_record("r005", "rust", "owner/repo-a", "deep"),
+            _mk_record("r006", "rust", "owner/repo-a", "deep"),
+            _mk_record("r007", "rust", "owner/repo-b", "quick"),
+            _mk_record("r008", "rust", "owner/repo-b", "quick"),
+            _mk_record("r009", "rust", "owner/repo-b", "quick"),
+        ]
+        kept, exclusions = _apply_share_caps(
+            records, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=None
+        )
+        # The fixed point rebuilds a population where every dimension is back
+        # within its limit — three python + three rust across both repos, all
+        # shares 0.5. The drift (python at 0.571 after the repo pass) is
+        # repaired by re-running the stack pass after the repository pass's
+        # exclusions.
+        assert [r["record_id"] for r in kept] == [
+            "r000", "r001", "r002", "r007", "r008", "r009",
+        ]
+        total = len(kept)
+        stack: dict[str, int] = {}
+        repo: dict[str, int] = {}
+        for r in kept:
+            stack[str(r["stack"])] = stack.get(str(r["stack"]), 0) + 1
+            repo[str(r["lineage"]["repo_slug"])] = repo.get(str(r["lineage"]["repo_slug"]), 0) + 1
+        for value, count in stack.items():
+            assert count / total <= 0.5 + 1e-9, f"stack={value} share {count}/{total}"
+        for value, count in repo.items():
+            assert count / total <= 0.6 + 1e-9, f"repo={value} share {count}/{total}"
+        # The repository pass excluded 3; a later fixed-point pass re-ran the
+        # stack pass (1 further exclusion) to repair the drift.
+        assert exclusions == {"repo:owner/repo-a": 3, "stack:python": 1}
+
     def test_order_invariance_identical_kept_population(self) -> None:
         from daydream.training.corpus_v2.projector import _apply_share_caps
 
@@ -75,7 +123,7 @@ class TestApplyShareCaps:
             _mk_record(
                 f"r{i:03d}",
                 "python" if i % 3 else "rust",
-                "owner/repo-a",
+                "owner/repo-a" if i % 2 else "owner/repo-b",
                 "deep" if i % 2 else "quick",
             )
             for i in range(12)
@@ -113,6 +161,62 @@ class TestApplyShareCaps:
             # 0.2 * 4 = 0.8 → keep 0 → population would collapse to zero.
             _apply_share_caps(
                 records, max_stack_share=0.2, max_repo_share=None, max_profile_share=None
+            )
+
+    def test_sole_remaining_value_above_cap_fails_closed(self) -> None:
+        from daydream.training.corpus_v2.projector import _apply_share_caps
+
+        # Mono-value boundary consistency (issues #5/#7): a cap that floors to
+        # zero on the entry population raises fail-closed, and the identical
+        # terminal state via iteration (one over-share value left, trimming it
+        # would empty the population) must raise too — never emit a single
+        # record at 100% share over its cap with exit 0.
+        for cap in (0.2, 0.4):
+            records = [
+                _mk_record(f"r{i:03d}", "python", "owner/repo-a", "deep") for i in range(4)
+            ]
+            with pytest.raises(ValueError, match="max_stack_share"):
+                # 0.4 * 4 = 1.6 → keep 1 → the sole survivor is then 100%
+                # of a 1-record population and can no longer be trimmed.
+                _apply_share_caps(
+                    records, max_stack_share=cap, max_repo_share=None, max_profile_share=None
+                )
+
+    def test_empty_population_with_configured_caps_stays_empty(self) -> None:
+        from daydream.training.corpus_v2.projector import _apply_share_caps
+
+        # Issue #6: a zero-record build (no decisive findings, or tier caps
+        # that trimmed everything) previously completed with an empty corpus;
+        # configuring a share cap must not turn it into a hard failure.
+        kept, exclusions = _apply_share_caps(
+            [], max_stack_share=0.5, max_repo_share=0.5, max_profile_share=0.5
+        )
+        assert kept == []
+        assert exclusions == {}
+
+    def test_fixed_point_fails_closed_when_caps_conflict(self) -> None:
+        from daydream.training.corpus_v2.projector import _apply_share_caps
+
+        # Finding-1 counterexample: the repo pass re-trims by lowest record_id
+        # and would push stack A to 100% under single sequential passes. The
+        # fixed point re-runs the stack pass, but the greedy lowest-id policy
+        # cannot satisfy both caps here — it must fail closed rather than emit
+        # a population that silently violates an earlier dimension's cap.
+        records = [
+            _mk_record("r001", "A", "owner/r1", "deep"),
+            _mk_record("r002", "A", "owner/r1", "deep"),
+            _mk_record("r003", "A", "owner/r1", "deep"),
+            _mk_record("r004", "B", "owner/r1", "deep"),
+            _mk_record("r005", "B", "owner/r1", "deep"),
+            _mk_record("r006", "B", "owner/r1", "deep"),
+            _mk_record("r007", "B", "owner/r1", "deep"),
+            _mk_record("r008", "B", "owner/r1", "deep"),
+            _mk_record("r009", "A", "owner/r2", "deep"),
+            _mk_record("r010", "A", "owner/r2", "deep"),
+        ]
+        with pytest.raises(ValueError, match="max_stack_share"):
+            _apply_share_caps(
+                records, max_stack_share=0.5, max_repo_share=0.5, max_profile_share=None
             )
 
 
@@ -174,13 +278,17 @@ class TestBuildWiring:
     def test_sequential_passes_converge_all_final_shares_within_limits(
         self, tmp_path: Path
     ) -> None:
-        # Real build over a many-record fixture with ALL THREE caps set tight;
-        # assert every final per-value share in the emitted corpus is <= its
-        # limit — the M4 contract — and that the build did not fail. The
-        # fixture needs variety in all three dimensions (a lone value is 100%
-        # of the population and can never satisfy a <1.0 cap): two admitted
-        # sessions give distinct stacks/repos, and the annotation rows are
-        # re-profiled to give two profile values.
+        # Real build with ALL THREE caps set tight (0.6) over a correlated
+        # 5-record fixture (python/repo-a vs rust/repo-b) that exercises the
+        # exclusion path: re-profiling every python row plus the first rust
+        # row to deep-review puts four of the five records on one profile
+        # value (4/5 = 0.8 > 0.6), so the profile pass must trim at entry — a
+        # fixture landing every dimension exactly on the cap would never run
+        # the trim branch and could not catch drift from a later pass. Assert
+        # every final per-value share in the emitted corpus is <= its limit
+        # (the M4 contract) against the post-trim final population, and that
+        # the cap stage actually excluded records (its report names them
+        # under ``exclusions_by_reason`` as ``share-cap:*``).
         import hashlib
 
         from daydream.training.corpus_v2.projector import run_build_corpus_v2
@@ -200,11 +308,11 @@ class TestBuildWiring:
             bundle, session_id="sess-b", n_siblings=4,
             dispositions=["accepted", "accepted"], stack="rust",
         )
-        # Re-profile three of the five accepted rows so both profile values
-        # sit under the 0.6 cap on the emitted population.
+        # Re-profile only the last accepted row to quick-review so deep-review
+        # holds 4/5 of the emitted population (0.8 > 0.6) and the trim branch
+        # executes.
         rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
-        for row in rows[2:]:
-            row["profile"]["profile_name"] = "quick-review"
+        rows[-1]["profile"]["profile_name"] = "quick-review"
         snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
         ann_dir = snap.parent
         rel = sorted(
@@ -216,7 +324,7 @@ class TestBuildWiring:
         ))
 
         out = tmp_path / "out"
-        run_build_corpus_v2(self._share_cfg(
+        summary = run_build_corpus_v2(self._share_cfg(
             out, bundle, snap,
             max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
         ))
@@ -237,6 +345,11 @@ class TestBuildWiring:
                 counts[getter(r)] = counts.get(getter(r), 0) + 1
             for value, count in counts.items():
                 assert count / total <= limit + 1e-9, f"{key}={value}: {count}/{total} > {limit}"
+        # The exclusion path executed: the over-share profile value was
+        # trimmed at entry and reported as a share-cap exclusion.
+        assert any(
+            key.startswith("share-cap:") for key in summary["exclusions_by_reason"]
+        ), summary["exclusions_by_reason"]
 
     def test_lineage_and_summary_share_caps_cannot_drift(self, tmp_path: Path) -> None:
         import json
@@ -246,6 +359,12 @@ class TestBuildWiring:
         assert lineage["share_caps"] == summary["share_caps"]
         assert lineage["share_caps"]["version"] == 1
         assert lineage["share_caps"]["configured"]["repo"] == 0.5
+        # one shared spelling across configured/applied/exclusion keys
+        assert "repo" in lineage["share_caps"]["applied"]
+        assert "repository" not in lineage["share_caps"]["applied"]
+        assert any(
+            key.startswith("share-cap:repo:") for key in lineage["exclusions_by_reason"]
+        )
         # final per-value counts + shares are reported against the final population
         assert "applied" in lineage["share_caps"] and "exclusions" in lineage["share_caps"]
 
@@ -284,6 +403,7 @@ class TestCliShareFlags:
 
     def _base_argv(self, tmp_path: Path) -> list[str]:
         from tests.test_corpus_v2 import (
+            _admit_second_batch,
             _policy_file,
             _write_annotations_snapshot,
             _write_bundle,
@@ -291,6 +411,29 @@ class TestCliShareFlags:
 
         bundle_dir = _write_bundle(tmp_path)
         snap = _write_annotations_snapshot(bundle_dir)
+        # A second admitted session with a distinct stack/repo so every
+        # configured share cap is satisfiable (a lone value is 100% of the
+        # population and can never satisfy a <1.0 cap); re-profile the tail
+        # rows to a second profile value so the profile dimension has variety
+        # too. The annotation bundle's SHA256SUMS must be refreshed after the
+        # re-profile (same mechanics as the build-wiring fixtures).
+        _admit_second_batch(bundle_dir, "owner/repo-b", spdx_id="MIT")
+        snap = _write_annotations_snapshot(
+            bundle_dir, session_id="sess-b", dispositions=["accepted", "accepted"],
+            stack="rust",
+        )
+        rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
+        for row in rows[2:]:
+            row["profile"]["profile_name"] = "quick-review"
+        snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+        ann_dir = snap.parent
+        rel = sorted(
+            p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*")
+            if p.is_file() and p.name != "SHA256SUMS"
+        )
+        (ann_dir / "SHA256SUMS").write_text("".join(
+            f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+        ))
         return [
             "--bundle-root", str(bundle_dir),
             "--annotation-bundle-root", str(snap.parent),

@@ -86,13 +86,41 @@ def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
 
 
 def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path) -> None:
-    from tests.test_corpus_v2 import _write_bundle
+    import hashlib
+
+    from tests.test_corpus_v2 import (
+        _admit_second_batch,
+        _write_annotations_snapshot,
+        _write_bundle,
+    )
 
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(
         bundle_dir, session_id="sess-a", n_siblings=4,
         dispositions=["accepted", "accepted", "accepted"],
     )
+    # A second admitted session with a distinct stack/repo so every configured
+    # share cap is satisfiable (a lone value is 100% of the population and can
+    # never satisfy a <1.0 cap); re-profile only the last row to a second
+    # profile value so the profile trim branch executes without ever leaving a
+    # lone survivor, then refresh the annotation bundle's SHA256SUMS (same
+    # mechanics as the build-wiring fixtures).
+    _admit_second_batch(bundle_dir, "owner/repo-b", spdx_id="MIT")
+    snap = _write_annotations_snapshot(
+        bundle_dir, session_id="sess-b", n_siblings=2,
+        dispositions=["accepted", "accepted"], stack="rust",
+    )
+    rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
+    rows[-1]["profile"]["profile_name"] = "quick-review"
+    snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    ann_dir = snap.parent
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*")
+        if p.is_file() and p.name != "SHA256SUMS"
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
     for out in (tmp_path / "a", tmp_path / "b"):
         run_build_corpus_v2(
             _cfg(out, bundle_dir, snap, max_stack_share=0.5, max_repo_share=0.6,
