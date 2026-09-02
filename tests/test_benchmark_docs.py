@@ -312,7 +312,10 @@ def test_no_stale_12_key_reward_payload_claims() -> None:
         text = path.read_text(encoding="utf-8")
         for i, line in enumerate(text.splitlines(), 1):
             low = line.lower()
-            if ("12-key" in low or "12 key" in low) and "dict" in low:
+            # Match "12-key"/"12 key" as a whole token (\b) so unrelated text
+            # like "12 keys" or "12 keyboard" cannot trip the paired-substring
+            # heuristic; "dict" must still appear for the stale-payload shape.
+            if re.search(r"\b12[- ]key\b", low) and "dict" in low:
                 offenders.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()}")
     assert offenders == [], "stale 12-key reward-payload claims remain:\n" + "\n".join(offenders)
 
