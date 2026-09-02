@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast, overload
+from typing import Any, Literal, Mapping, NoReturn, cast, overload
 
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
@@ -523,6 +523,34 @@ def _max_keep_count(total: int, limit: float) -> int:
     return allowed
 
 
+def _raise_share_caps_fail_closed(
+    *,
+    flag: str,
+    limit: float,
+    dimension: str,
+    population: int | None = None,
+    value: Any | None = None,
+    values: list[Any] | None = None,
+) -> NoReturn:
+    """Single home for the fail-closed ``ValueError`` terminal state of the
+    share-cap stage (the contract documented in ``_apply_share_caps``): every
+    total-population-zero path — the entry degeneracy pre-check, a sole
+    remaining value that can no longer be trimmed without emptying the
+    population, and a trim round that would empty the whole population —
+    funnels through this one raise so the message shape cannot drift between
+    sites. ``value`` names the single over-share value (first two paths);
+    ``values`` spells out the over-share value list (third path)."""
+    if values is not None:
+        raise ValueError(
+            f"{flag}={limit} would reduce the total population to zero across "
+            f"{dimension} values {sorted(str(v) for v in values)} — fail-closed"
+        )
+    raise ValueError(
+        f"{flag}={limit} for {dimension}={value!r} would reduce the total population "
+        f"to zero (population {population}) — fail-closed"
+    )
+
+
 def _apply_share_caps(
     records: list[Record],
     *,
@@ -591,9 +619,12 @@ def _apply_share_caps(
         for value, count in entry_counts.items():
             if count / entry_total > limit and count == entry_total:
                 if _max_keep_count(entry_total, limit) == 0:
-                    raise ValueError(
-                        f"{flag}={limit} for {dimension}={value!r} would reduce the "
-                        f"total population to zero (population {entry_total}) — fail-closed"
+                    _raise_share_caps_fail_closed(
+                        flag=flag,
+                        limit=limit,
+                        dimension=dimension,
+                        population=entry_total,
+                        value=value,
                     )
     # Fixed-point loop (issue #1079, F1): a later dimension's trimming can
     # remove records of one value and push an earlier dimension's value back
@@ -623,10 +654,12 @@ def _apply_share_caps(
                             # population entirely — the same terminal state as
                             # the entry degeneracy pre-check above, so fail
                             # closed (never emit a lone value above its cap).
-                            raise ValueError(
-                                f"{flag}={limit} for {dimension}={value!r} would reduce "
-                                f"the total population to zero (population {total}) — "
-                                "fail-closed"
+                            _raise_share_caps_fail_closed(
+                                flag=flag,
+                                limit=limit,
+                                dimension=dimension,
+                                population=total,
+                                value=value,
                             )
                         over[value] = allowed
                 if not over:
@@ -644,9 +677,11 @@ def _apply_share_caps(
                     taken[value] = taken.get(value, 0) + 1
                     kept.append(rec)
                 if not kept:
-                    raise ValueError(
-                        f"{flag}={limit} would reduce the total population to zero across "
-                        f"{dimension} values {sorted(str(v) for v in over)} — fail-closed"
+                    _raise_share_caps_fail_closed(
+                        flag=flag,
+                        limit=limit,
+                        dimension=dimension,
+                        values=list(over),
                     )
                 population = kept
                 pass_exclusions += round_exclusions

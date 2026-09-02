@@ -149,32 +149,36 @@ def _write_annotations_snapshot(
         (ann_dir / "annotations.jsonl").read_text().splitlines() if line
     ] if (ann_dir / "annotations.jsonl").exists() else []
     (ann_dir / "SHA256SUMS").unlink(missing_ok=True)
-    # Session-scoped fingerprints when merging (second session's rows must
-    # not collide with the first's, since the snapshot is keyed by
-    # fingerprint globally); a lone call keeps the canonical fingerprints.
-    sess_prefix = hashlib.sha256(session_id.encode()).hexdigest()[:2] if prior else ""
-    fps = [sess_prefix + fp for fp in ("a1" * 32, "b2" * 32, "c3" * 32)]
     rows = list(prior)
-    for i, disposition in enumerate(dispositions or ["accepted", "rejected", "ambiguous"]):
-        evidence = (
-            [{"comment_id": i + 1, "created_at": "2026-02-01T00:00:00+00:00",
-              "classifier_label": disposition, "valid_at": valid_at}]
-            if disposition in ("accepted", "rejected")
-            else []
-        )
-        fingerprint = fps[i % len(fps)]
-        rows.append({
-            "record_id": _record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
-            "session_id": session_id, "fingerprint": fingerprint,
-            "disposition": disposition, "evidence": evidence,
-            # Real canonical-record shape (adjudication/snapshot.py:
-            # build_canonical_record): the four review-profile fields nest
-            # under "profile" with only "stack" at top level — the projector
-            # must surface both at the two-bundle projection boundary.
-            "profile": {"profile_schema_version": 2, "profile_name": "deep-review",
-                        "profile_source_kind": "builtin", "profile_digest": "d" * 64},
-            "stack": stack,
-        })
+    # Session-scoped fingerprints when merging (a second, distinct session's
+    # rows must not collide with the first's, since the snapshot is keyed by
+    # fingerprint globally); a lone call keeps the canonical fingerprints.
+    # A session already in the snapshot is an idempotent no-op: re-appending
+    # with a fresh session prefix would fabricate distinct prefixed
+    # duplicates of the same findings (same session, different fingerprints).
+    if session_id not in {row.get("session_id") for row in rows}:
+        sess_prefix = hashlib.sha256(session_id.encode()).hexdigest()[:2] if prior else ""
+        fps = [sess_prefix + fp for fp in ("a1" * 32, "b2" * 32, "c3" * 32)]
+        for i, disposition in enumerate(dispositions or ["accepted", "rejected", "ambiguous"]):
+            evidence = (
+                [{"comment_id": i + 1, "created_at": "2026-02-01T00:00:00+00:00",
+                  "classifier_label": disposition, "valid_at": valid_at}]
+                if disposition in ("accepted", "rejected")
+                else []
+            )
+            fingerprint = fps[i % len(fps)]
+            rows.append({
+                "record_id": _record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
+                "session_id": session_id, "fingerprint": fingerprint,
+                "disposition": disposition, "evidence": evidence,
+                # Real canonical-record shape (adjudication/snapshot.py:
+                # build_canonical_record): the four review-profile fields nest
+                # under "profile" with only "stack" at top level — the projector
+                # must surface both at the two-bundle projection boundary.
+                "profile": {"profile_schema_version": 2, "profile_name": "deep-review",
+                            "profile_source_kind": "builtin", "profile_digest": "d" * 64},
+                "stack": stack,
+            })
     (ann_dir / "annotations.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
     _write_sumsums(bundle_dir)  # the trajectory joins the curation digest pin
@@ -237,6 +241,34 @@ def test_load_bundle_admission_gate_passes_wellformed_bundle(tmp_path: Path) -> 
     bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
     loaded = load_curated_bundle(bundle_dir)  # no raise
     assert all(b.repo_slug for b in loaded.admitted)
+
+
+def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_path: Path) -> None:
+    # The merge path prefixes a NEW session's fingerprints so distinct
+    # sessions don't collide (the snapshot is keyed by fingerprint globally),
+    # but the prefix used to toggle on file-emptiness — so re-calling the
+    # helper with the SAME session_id re-appended the same findings under a
+    # fresh session prefix: same session, different fingerprint, and
+    # _load_snapshot only rejects duplicates within a single read, so both
+    # rows projected as distinct records. A repeated session must be an
+    # idempotent no-op instead.
+    bundle_dir = _write_bundle(tmp_path)
+    _write_annotations_snapshot(bundle_dir, session_id="sess-a",
+                                dispositions=["accepted", "rejected"])
+    snap = _write_annotations_snapshot(bundle_dir, session_id="sess-a",
+                                       dispositions=["accepted", "rejected"])
+    rows = [json.loads(line) for line in snap.read_text().splitlines() if line.strip()]
+    assert len(rows) == 2  # one per finding, not a prefixed duplicate pair
+    assert [r["session_id"] for r in rows] == ["sess-a", "sess-a"]
+    assert {r["fingerprint"] for r in rows} == {"a1" * 32, "b2" * 32}
+    assert len({r["record_id"] for r in rows}) == 2
+    out = tmp_path / "proj"
+    run_build_corpus_v2(_cfg(out, bundle_dir, snap))
+    records = [
+        json.loads(line)
+        for line in (out / "corpus.jsonl").read_text().splitlines() if line.strip()
+    ]
+    assert len(records) == 2
 
 
 @pytest.fixture
