@@ -8,7 +8,7 @@ cannot verify and that a careless edit could silently break:
 - No untrusted event data is interpolated into a ``run:`` body (injection).
 - Every non-local action ``uses:`` in the live and shipped bot workflows
   resolves to a full commit SHA (never a mutable tag/branch/expression).
-- The daydream install stays pinned to the current release tag (cross-file
+- The daydream install stays pinned to an immutable release commit (cross-file
   drift against ``pyproject.toml``), in every live and shipped workflow.
 - Every App-token action in the live and packaged posting workflows stays pinned to the approved v3.2.0 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
@@ -110,6 +110,19 @@ _PINNED_ACTION_VERSIONS = {
 }
 
 _USES_LINE_RE = re.compile(r"^\s*uses:\s*(?P<ref>\S+)(?:\s*#\s*(?P<comment>\S+))?$")
+
+# Release tag → PEELED commit SHA for every daydream release the workflow pins
+# may reference. Values are the peeled (`^{}` target) commits of annotated tags,
+# NOT tag-object SHAs — `git ls-remote origin 'refs/tags/vX.Y.Z'` on an
+# annotated tag reports the tag object (e.g. `9abbaeb3…` for v0.26.0), which is
+# the classic trap; use `git ls-remote origin 'refs/tags/vX.Y.Z^{}'` instead.
+# History is retained (never prune old entries) for provenance.
+_DAYDREAM_RELEASE_COMMITS: dict[str, str] = {
+    "v0.27.0": "805fd0f105fe803a90a6a8b2c2d9646a4041eccc",
+    "v0.28.0": "e7741f17fc998a675ed2fe3f364d2e646cde5518",
+}
+
+_RELEASE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 _DAYDREAM_INSTALL_WORKFLOW_PATHS = [
     REPO_WORKFLOWS_DIR / "daydream-review.yml",
@@ -503,16 +516,42 @@ def _package_version() -> str:
     _DAYDREAM_INSTALL_WORKFLOW_PATHS,
     ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
 )
-def test_daydream_install_is_pinned_to_current_release_tag(wf_path: Path) -> None:
+def test_daydream_install_is_pinned_to_release_commit(wf_path: Path) -> None:
     text = wf_path.read_text(encoding="utf-8")
     refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
     rel = wf_path.relative_to(_REPO_ROOT).as_posix()
     assert refs, f"{rel} must install daydream via `uv tool install git+…`"
-    expected = f"@v{_package_version()}"
+    version = _package_version()
+    key = f"v{version}"
+    commit = _DAYDREAM_RELEASE_COMMITS.get(key)
+    assert commit is not None, (
+        f"No release→commit map entry for {key}. The release process is manual: "
+        f"(1) bump project.version in pyproject.toml, (2) tag the release, "
+        f"(3) get the PEELED commit: git ls-remote origin 'refs/tags/{key}^{{}}' "
+        f"(annotated tags report a tag-object SHA on the bare ref — use the ^{{}} target), "
+        f"(4) add the entry to _DAYDREAM_RELEASE_COMMITS in tests/test_workflow_templates.py, "
+        f"(5) update all six workflow install refs in lockstep "
+        f"(.github/workflows/daydream-review.yml, .github/workflows/daydream-post.yml, "
+        f"daydream/templates/workflows/daydream-review.yml, "
+        f"daydream/templates/workflows/daydream-post.yml, "
+        f"daydream/templates/workflows/single/daydream.yml ×2)."
+    )
+    expected = f"@{commit}"
     for ref in refs:
         assert ref == expected, (
             f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
-            f"{expected}. Bump the template pin in lockstep with the package version on release."
+            f"the immutable release commit {expected} for {key}. Update all six install refs "
+            f"in lockstep with the _DAYDREAM_RELEASE_COMMITS entry."
+        )
+
+
+def test_release_commit_map_values_are_immutable_full_shas() -> None:
+    for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
+        assert _RELEASE_COMMIT_RE.fullmatch(commit), (
+            f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is not a full lowercase "
+            f"40-char hex commit SHA. Mutable refs (tags, branches), short hashes, "
+            f"uppercase hex, and annotated-tag OBJECT shas are all rejected — record the "
+            f"peeled commit: git ls-remote origin 'refs/tags/{tag}^{{}}'."
         )
 
 
