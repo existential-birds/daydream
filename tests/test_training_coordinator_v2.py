@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -269,6 +271,46 @@ def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
     cfg = PipelineConfig(corpus_v2=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="base_sha"):
         run_pipeline(cfg, dry_run=False)
+
+
+@pytest.fixture
+def cli_runner() -> Any:
+    """Invoke ``daydream`` in-process; SystemExit code becomes exit_code."""
+    class _Runner:
+        def invoke(self, argv: list[str]) -> Any:
+            from daydream import cli
+
+            saved = sys.argv
+            sys.argv = ["daydream", *argv]
+            code = 0
+            try:
+                cli.main()
+            except SystemExit as exc:
+                code = int(exc.code or 0)
+            finally:
+                sys.argv = saved
+            return SimpleNamespace(exit_code=code)
+
+    return _Runner()
+
+
+def test_cli_corpus_v2_wiring(tmp_path: Path, cli_runner: Any) -> None:
+    """``daydream train --corpus-v2 DIR --dry-run`` drives run_pipeline end-to-end."""
+    proj_dir = _build_projection(tmp_path)
+    out = tmp_path / "cli-out"
+    res = cli_runner.invoke(["train", "--corpus-v2", str(proj_dir), "--out", str(out), "--dry-run"])
+    assert res.exit_code == 0, res
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
+
+
+def test_cli_corpus_and_corpus_v2_mutually_exclusive(tmp_path: Path, cli_runner: Any) -> None:
+    """Passing both inputs is refused, not silently preferring one."""
+    proj_dir = _build_projection(tmp_path)
+    res = cli_runner.invoke(
+        ["train", "--corpus", "x.jsonl", "--corpus-v2", str(proj_dir), "--out", str(tmp_path / "o")]
+    )
+    assert res.exit_code == 1
 
 
 def test_corpus_and_corpus_v2_are_mutually_exclusive(tmp_path: Path) -> None:
