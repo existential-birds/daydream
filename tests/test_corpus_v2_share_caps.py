@@ -1,4 +1,5 @@
 """Tests for the corpus-v2 share-cap stage and its build wiring."""
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -202,3 +203,115 @@ class TestBuildWiring:
             )
         # fail-closed: nothing written
         assert not (tmp_path / "out2" / "_SUCCESS").exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 5: CLI wiring — build-v2 accepts share-cap flags (M2, M9)
+# ---------------------------------------------------------------------------
+
+
+class TestCliShareFlags:
+    """CLI-level share-cap wiring: parser acceptance, fail-closed range
+    validation before any build work, and dry-run parity over the real
+    projection path."""
+
+    def _base_argv(self, tmp_path: Path) -> list[str]:
+        from tests.test_corpus_v2 import (
+            _policy_file,
+            _write_annotations_snapshot,
+            _write_bundle,
+        )
+
+        bundle_dir = _write_bundle(tmp_path)
+        snap = _write_annotations_snapshot(bundle_dir)
+        return [
+            "--bundle-root", str(bundle_dir),
+            "--annotation-bundle-root", str(snap.parent),
+            "--license-policy", str(_policy_file(tmp_path)),
+            "--out", str(tmp_path / "out" / "corpus.jsonl"),
+        ]
+
+    def test_share_flags_accepted_by_parser(self) -> None:
+        from daydream.cli import _build_build_corpus_v2_parser
+
+        args = _build_build_corpus_v2_parser().parse_args(
+            ["--bundle-root", "/b", "--annotation-bundle-root", "/a",
+             "--license-policy", "/l", "--out", "/o/corpus.jsonl",
+             "--max-stack-share", "0.5", "--max-repo-share", "0.6",
+             "--max-profile-share", "0.7"]
+        )
+        assert args.max_stack_share == 0.5
+        assert args.max_repo_share == 0.6
+        assert args.max_profile_share == 0.7
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [("--max-stack-share", "1.5"), ("--max-stack-share", "0"),
+         ("--max-repo-share", "1.5"), ("--max-repo-share", "-0.1"),
+         ("--max-profile-share", "1.5"), ("--max-profile-share", "0")],
+    )
+    def test_share_out_of_range_refuses_before_build(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str, value: str
+    ) -> None:
+        from daydream.cli import _handle_build_corpus_v2_command
+
+        rc = _handle_build_corpus_v2_command(self._base_argv(tmp_path) + [flag, value])
+        assert rc == 1
+        assert f"Invalid {flag}" in capsys.readouterr().out
+        # refused before any build work: no output written
+        assert not (tmp_path / "out" / "_SUCCESS").exists()
+
+    def test_dry_run_writes_nothing_but_reports_capped_population(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from daydream.cli import _handle_build_corpus_v2_command
+        from daydream.training.corpus_v2 import BuildCorpusV2Config, run_build_corpus_v2
+        from tests.test_corpus_v2 import _policy_file
+
+        argv = self._base_argv(tmp_path) + [
+            "--dry-run", "--max-stack-share", "0.5", "--max-repo-share", "0.6",
+            "--max-profile-share", "0.7",
+        ]
+        rc = _handle_build_corpus_v2_command(argv)
+        assert rc == 0
+        # dry run writes nothing into the real output directory
+        assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
+        out_text = capsys.readouterr().out
+
+        # the printed count names the projected (share-capped) population:
+        # run the same projection directly and compare the emitted counts.
+        bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
+        snap = bundle_dir.parent / (bundle_dir.name + "-annotations")
+        direct = run_build_corpus_v2(BuildCorpusV2Config(
+            out_dir=tmp_path / "direct",
+            bundle_dir=bundle_dir,
+            annotation_bundle_dir=snap,
+            license_policy_path=_policy_file(tmp_path),
+            max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.7,
+        ))
+        assert str(direct["emitted"]) in out_text
+
+    def test_dry_run_parity_for_capped_build(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from daydream.cli import _handle_build_corpus_v2_command
+        from tests.test_corpus_v2 import _policy_file
+
+        argv = self._base_argv(tmp_path) + ["--dry-run", "--max-stack-share", "0.5"]
+        rc = _handle_build_corpus_v2_command(argv)
+        assert rc == 0
+        capsys.readouterr()
+        # the real build with the same caps succeeds over the same inputs
+        bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
+        snap = bundle_dir.parent / (bundle_dir.name + "-annotations")
+        rc2 = _handle_build_corpus_v2_command([
+            "--bundle-root", str(bundle_dir),
+            "--annotation-bundle-root", str(snap),
+            "--license-policy", str(_policy_file(tmp_path)),
+            "--out", str(tmp_path / "real" / "corpus.jsonl"),
+            "--max-stack-share", "0.5",
+        ])
+        assert rc2 == 0
+        assert (tmp_path / "real" / "_SUCCESS").is_file()
+        lineage = json.loads((tmp_path / "real" / "lineage.json").read_text())
+        assert lineage["share_caps"]["configured"] == {"stack": 0.5}
