@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -54,8 +54,10 @@ def _write_projection(tmp_path: Path, record_ids: list[str]) -> Path:
         "holdout": [],
     }
     for record_id in record_ids:
-        split = assign_split(
-            record_id, salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE
+        split: str = cast(
+            str, assign_split(
+                record_id, salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE
+            )
         )
         by_split[split].append(_make_record(record_id, split))
     for split, records in by_split.items():

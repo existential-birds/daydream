@@ -33,7 +33,7 @@ def _records(out_dir: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _build(tmp_path: Path, **kw: Any) -> tuple[Path, Path, Path]:
+def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any], Path]:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(
         bundle_dir, dispositions=["accepted", "ambiguous"]
