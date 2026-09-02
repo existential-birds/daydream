@@ -42,7 +42,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -54,6 +53,7 @@ from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_s
 from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
+from daydream.training.rft import validate_full_sha
 from daydream.training.stacks_v2 import V2Projection, load_v2_projection, recompute_split_from_record_id
 
 __all__ = ["PipelineConfig", "run_pipeline"]
@@ -315,13 +315,6 @@ def _materialize_diff(rec: dict[str, Any]) -> str | None:
         return None
 
 
-def _is_full_sha(value: object) -> bool:
-    """Whether a value is a full-length hex SHA — at least a full 40-char git
-    commit SHA (longer sha256-style content-address stamps are tolerated).
-    Truncated or non-hex values are rejected."""
-    return bool(re.fullmatch(r"[0-9a-f]{40,}", str(value)))
-
-
 def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Materialize Stage-2 RFT replay inputs from corpus records (M16).
 
@@ -332,8 +325,10 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     base/head/diff raises naming it, so Stage 2 is never recorded complete
     over unrunnable inputs. base/head are read v2-first from
     ``task_identity`` with the v1 ``code_context`` fallback (Pattern A), and
-    must be full-length hex SHAs — a truncated SHA is refused like a missing
-    one.
+    must be full-length hex SHAs — validated through the shared
+    :func:`daydream.training.rft.validate_full_sha`, so Stage 2 and
+    ``run_rft`` enforce the identical full 40-hex contract; a truncated or
+    non-hex SHA is refused like a missing one.
 
     ``diff`` falls back to :func:`_materialize_diff` when the record carries
     no raw ``diff`` body: production ``run_build_corpus`` exports (schema v1,
@@ -372,13 +367,10 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "record silently"
             )
         for name, value in (("base_sha", base_sha), ("head_sha", head_sha)):
-            if not _is_full_sha(value):
-                raise RuntimeError(
-                    f"stage2 refused: record {rid!r} carries a truncated or non-hex "
-                    f"{name} {value!r}; RFT rebuilds every task from full-length "
-                    "commit SHAs and never replays against a shortened identity"
-
-                )
+            try:
+                validate_full_sha(rid, name, value)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
         length = rec.get("length")
         if length is None:
             length = len(
