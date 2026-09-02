@@ -21,6 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
+from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
 from daydream.generated_files import is_generated_file
 from daydream.timeutil import parse_iso_timestamp
 
@@ -1054,13 +1055,21 @@ def _quality_python_parser() -> Any | None:
 
     Lazy factory mirroring ``daydream/tree_sitter_index.py``; returns ``None``
     when tree-sitter-python is unavailable so quality analysis degrades to an
-    empty shape instead of crashing ``analyze_session``.
+    empty shape instead of crashing ``analyze_session``.  Consults the shared
+    version guard first: a known-bad installed tree-sitter (issue #1087) raises
+    :class:`daydream._tree_sitter_safety.TreeSitterBadVersionError` out of the
+    factory instead of constructing a parser that would corrupt memory — the
+    orchestrator's fail-open wrapper then reports the quality gate explicitly
+    unavailable instead of silently skipping it.
     """
     try:
+        assert_tree_sitter_safe()
         import tree_sitter_python
         from tree_sitter import Language, Parser
 
         return Parser(Language(tree_sitter_python.language()))
+    except TreeSitterBadVersionError:
+        raise
     except Exception:
         return None
 
@@ -1769,9 +1778,24 @@ def analyze_quality(
         lines are in scope; per-file entries use ``None`` for a ratio whose
         denominator is zero (no functions / no non-blank lines). ``per_file``
         keys are workspace-relative paths.
+
+    Raises:
+        TreeSitterBadVersionError: If the installed tree-sitter version is in
+            the known-bad set (issue #1087): the analyzer refuses to construct
+            a parser that could SIGSEGV the process. Guarded at entry, before
+            the empty-candidate shortcut, so a known-bad install is reported
+            even when no file would be parsed.
     """
     daydream_dir = Path(daydream_dir)
     workspace = daydream_dir.parent
+
+    # Single shared choke point for every native-analysis entry point (mirrors
+    # ``detect_affected_files``): a known-bad installed tree-sitter raises
+    # before any ``Language``/``Parser`` construction -- and before the
+    # empty-candidate / python-free shortcuts below could skip native work
+    # entirely -- so the failure surfaces instead of a silent clean verdict.
+    # No-op on good installs; errors propagate to the caller unwrapped.
+    assert_tree_sitter_safe()
 
     # An explicitly empty candidate set is a zero-count empty report: never
     # walk (or parse) the workspace (issue #457).
@@ -1857,6 +1881,12 @@ def analyze_quality(
 def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> dict[str, Any]:
     """Run full quantitative analysis on a .daydream directory.
 
+    On a known-bad tree-sitter install (issue #1087) only the ``quality``
+    section degrades: :class:`TreeSitterBadVersionError` raised by the
+    ``analyze_quality`` call is caught and recorded as an explicit unavailable
+    marker instead of escaping to drop the whole evaluation, so the archive's
+    evaluation.json still records the rest of the session analysis.
+
     Args:
         daydream_dir: Path to the ``.daydream`` directory from a completed run.
         session_id: Optional session ID (or prefix) to analyze. Defaults to the
@@ -1887,7 +1917,25 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
     training = analyze_training_signals(
         trajectories, findings_data["findings"], grounding,
     )
-    quality = analyze_quality(daydream_dir)
+    try:
+        quality = analyze_quality(daydream_dir)
+    except TreeSitterBadVersionError as exc:
+        # issue #1087: a known-bad tree-sitter install refuses native analysis
+        # (assert_tree_sitter_safe at analyze_quality entry). Degrade only the
+        # quality section -- the rest of the evaluation is pure Python and
+        # stays valid, so archive/_run_eval still writes evaluation.json
+        # instead of dropping the whole run. The explicit marker records why
+        # the section is empty, mirroring the quality gate's fail-open
+        # "unavailable" contract.
+        quality = {
+            "erosion": None,
+            "verbosity": None,
+            "per_file": {},
+            "calibration": dict(_QUALITY_CALIBRATION),
+            "scoped_files": 0,
+            "error": str(exc),
+            "unavailable": True,
+        }
 
     finding_count = findings_data["total"]
     cost_per_finding = (

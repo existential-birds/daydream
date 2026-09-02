@@ -18,6 +18,7 @@ import pytest
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.eval.analyzer import (
     _files_read,
+    _quality_python_parser,
     _tokenize_command,
     analyze_costs,
     analyze_coverage,
@@ -1666,3 +1667,81 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert res["findings"]["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
     assert res["findings"]["per_lens"]["wonder"] == 6
     assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
+
+
+# --- tree-sitter version guard (#1087) ---
+
+
+def test_analyze_quality_refuses_known_bad_tree_sitter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#1087: on a known-bad tree-sitter install the analyzer refuses native
+    analysis by raising the typed guard error — the orchestrator's fail-open
+    wrapper converts that into (None, reason); it must not silently skip.
+    """
+    from daydream import _tree_sitter_safety as safety
+
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    # The factory is lru_cached; clear it so the guard inside the cached body
+    # runs against the monkeypatched (bad) install (see impl plan, assumption).
+    _quality_python_parser.cache_clear()
+    ws = _quality_workspace(tmp_path, {"mod.py": "def f():\n    return 1\n"})
+    with pytest.raises(safety.TreeSitterBadVersionError):
+        analyze_quality(ws / ".daydream")
+
+
+def test_analyze_quality_unchanged_on_good_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#1087 (M5): the guard is a no-op on valid installs — behavior identical
+    to pre-regression, including the parser cache being consulted.
+    """
+    from daydream import _tree_sitter_safety as safety
+
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.25.2")
+    ws = _quality_workspace(tmp_path, {"mod.py": "def f():\n    return 1\n"})
+    result = analyze_quality(ws / ".daydream")
+    assert result["scoped_files"] == 1
+    entry = result["per_file"]["mod.py"]
+    assert entry["functions"] == 1
+    assert entry["sloc"] > 0
+
+
+def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#1087: a known-bad install degrades only the quality section of
+    analyze_session -- the rest of the evaluation (and evaluation.json)
+    survives instead of the typed escape dropping the whole run.
+    """
+    from daydream import _tree_sitter_safety as safety
+
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
+    )
+    daydream_dir = ws / ".daydream"
+    run_dir = daydream_dir / "runs" / "quality-bad"
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.6",
+                "session_id": "quality-bad",
+                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
+                "steps": [],
+            }
+        )
+    )
+
+    result = analyze_session(daydream_dir, session_id="quality-bad")
+
+    quality = result["quality"]
+    assert quality["unavailable"] is True
+    assert quality["error"]
+    assert quality["per_file"] == {}
+    assert quality["scoped_files"] == 0
+    # Rest of the evaluation is intact -- the run is archived, not dropped.
+    assert result["session_id"] == "quality-bad"
+    assert result["trajectory_count"] == 1
