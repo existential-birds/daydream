@@ -171,6 +171,73 @@ class TestBuildWiring:
         assert summary["share_caps"]["version"] == 1
         assert summary["exclusions_by_reason"]  # tier/np keys present
 
+    def test_sequential_passes_converge_all_final_shares_within_limits(
+        self, tmp_path: Path
+    ) -> None:
+        # Real build over a many-record fixture with ALL THREE caps set tight;
+        # assert every final per-value share in the emitted corpus is <= its
+        # limit — the M4 contract — and that the build did not fail. The
+        # fixture needs variety in all three dimensions (a lone value is 100%
+        # of the population and can never satisfy a <1.0 cap): two admitted
+        # sessions give distinct stacks/repos, and the annotation rows are
+        # re-profiled to give two profile values.
+        import hashlib
+
+        from daydream.training.corpus_v2.projector import run_build_corpus_v2
+        from tests.test_corpus_v2 import (
+            _admit_second_batch,
+            _write_annotations_snapshot,
+            _write_bundle,
+        )
+
+        bundle = _write_bundle(tmp_path)
+        snap = _write_annotations_snapshot(
+            bundle, session_id="sess-a", n_siblings=6,
+            dispositions=["accepted", "accepted", "accepted"], stack="python",
+        )
+        _admit_second_batch(bundle, "owner/repo-b", spdx_id="MIT")
+        _write_annotations_snapshot(
+            bundle, session_id="sess-b", n_siblings=4,
+            dispositions=["accepted", "accepted"], stack="rust",
+        )
+        # Re-profile three of the five accepted rows so both profile values
+        # sit under the 0.6 cap on the emitted population.
+        rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
+        for row in rows[2:]:
+            row["profile"]["profile_name"] = "quick-review"
+        snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+        ann_dir = snap.parent
+        rel = sorted(
+            p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*")
+            if p.is_file() and p.name != "SHA256SUMS"
+        )
+        (ann_dir / "SHA256SUMS").write_text("".join(
+            f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+        ))
+
+        out = tmp_path / "out"
+        run_build_corpus_v2(self._share_cfg(
+            out, bundle, snap,
+            max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
+        ))
+        emitted = [
+            json.loads(line)
+            for line in (out / "corpus.jsonl").read_text().splitlines() if line
+        ]
+        total = len(emitted)
+        assert total > 0
+        dims: list[tuple[str, Callable[[dict[str, Any]], str], float]] = [
+            ("stack", lambda r: str(r["stack"]), 0.6),
+            ("repo", lambda r: str(r["lineage"]["repo_slug"]), 0.6),
+            ("profile", lambda r: str(r["profile"]["profile_name"]), 0.6),
+        ]
+        for key, getter, limit in dims:
+            counts: dict[str, int] = {}
+            for r in emitted:
+                counts[getter(r)] = counts.get(getter(r), 0) + 1
+            for value, count in counts.items():
+                assert count / total <= limit + 1e-9, f"{key}={value}: {count}/{total} > {limit}"
+
     def test_lineage_and_summary_share_caps_cannot_drift(self, tmp_path: Path) -> None:
         import json
 
