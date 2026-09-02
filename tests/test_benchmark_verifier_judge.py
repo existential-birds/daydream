@@ -1453,7 +1453,7 @@ def test_emit_reward_emits_full_reward_dict_and_exit_code(sr_module: Any, capsys
     sr = sr_module
     r = sr.verifier_core.Reward(reward=0.8, tp=2, verifier_error=0)
     assert sr._emit_reward(r) == 0
-    assert json.loads(capsys.readouterr().out) == r.to_dict()   # full 12-key dict, never the 2-key fallback shape
+    assert json.loads(capsys.readouterr().out) == r.to_dict()   # full 24-key dict, never the 2-key fallback shape
     r2 = sr.verifier_core.Reward(reward=0.0, verifier_error=1)
     assert sr._emit_reward(r2) == 1
 
