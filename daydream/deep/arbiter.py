@@ -75,6 +75,7 @@ def select_arbiter_targets(
     sources: list[str],
     min_severity: str = "high",
     contested_location: bool = True,
+    contested_only: Iterable[int] = (),
 ) -> list[int]:
     """Return the indices of records that need arbiter re-review.
 
@@ -89,17 +90,32 @@ def select_arbiter_targets(
             selects (``"high"`` by default; ``"medium"`` also selects medium
             records, ``"low"`` selects everything). The contested branch is
             independent of this knob.
-        contested_location: Whether the contested branch (same ``(file, line)``
+        contested_location: Whether the contested branch (same location
             reported by >=2 distinct stacks with divergent severity) selects
             records (default ``True``; the profile's
             ``Arbitration.contested_location`` governs this in the production
             path).
+        contested_only: Indices the severity branch must skip. They stay fully
+            eligible through the contested branch. The deep pipeline passes the
+            structural meta-stack's records here (issue #1103) so a structural
+            finding is adjudicated against the language-stack finding that
+            restates it, without widening severity-based arbitration to a lens
+            that is high-conviction by construction.
 
     Returns:
         Sorted, de-duplicated list of indices into ``records`` selected for the
-        arbiter: every record at or above ``min_severity``, plus every record at a
-        ``(file, line)`` location contested across >=2 stacks with divergent
-        severity (when ``contested_location`` is enabled).
+        arbiter: every record at or above ``min_severity`` (excluding
+        ``contested_only``), plus every record at a location contested across
+        >=2 stacks with divergent severity (when ``contested_location`` is
+        enabled).
+
+    Contested locations are ``(file, line)`` pairs, with one widening: a record
+    anchored at ``line: 0`` is a whole-file finding (the reserved whole-file
+    anchor), so it co-locates with *every* line reported in that file rather
+    than only with other ``line: 0`` records. Without that, a whole-file
+    structural finding and the line-anchored language finding describing the
+    same defect land in different groups and can never contest each other
+    (issue #1103, case B).
 
     Raises:
         ValueError: If ``records`` and ``sources`` differ in length, or if
@@ -111,21 +127,37 @@ def select_arbiter_targets(
         )
 
     selected: set[int] = set()
+    severity_exempt = set(contested_only)
 
     # Severity branch: everything at or above the ``min_severity`` knob
     # (default "high" — the profile's ``Arbitration.min_severity`` governs this
-    # in the production path).
+    # in the production path). ``contested_only`` records opt out of this
+    # branch and reach the arbiter only by being contested.
     eligible = _at_or_above(min_severity)
     for i, record in enumerate(records):
-        if _severity(record) in eligible:
+        if i not in severity_exempt and _severity(record) in eligible:
             selected.add(i)
 
-    # Contested: same (file, line) reported by >=2 distinct stacks that disagree
+    # Contested: same location reported by >=2 distinct stacks that disagree
     # on severity. Group by location, then test cross-stack severity divergence.
     if contested_location:
         by_location: dict[tuple[Any, Any], list[int]] = defaultdict(list)
+        # ``line: 0`` is the reserved whole-file anchor, not a line number, so a
+        # record carrying it is about the whole file and belongs to every group
+        # in that file (issue #1103). Collect them separately, then fold each
+        # file's whole-file records into that file's line groups.
+        whole_file: dict[Any, list[int]] = defaultdict(list)
         for i, record in enumerate(records):
-            by_location[(record.get("file"), record.get("line"))].append(i)
+            if record.get("line") == 0:
+                whole_file[record.get("file")].append(i)
+            else:
+                by_location[(record.get("file"), record.get("line"))].append(i)
+        for (file, _line), indices in by_location.items():
+            indices.extend(whole_file.get(file, ()))
+        # A file whose only records are whole-file ones still forms one group:
+        # two whole-file findings from different stacks can contest each other.
+        for file, indices in whole_file.items():
+            by_location.setdefault((file, 0), list(indices))
 
         for indices in by_location.values():
             stacks = {sources[i] for i in indices}

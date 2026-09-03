@@ -81,6 +81,27 @@ def jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(union)
 
 
+def descriptions_match(a: str, b: str) -> bool:
+    """Return True when two finding descriptions clear the dedup similarity bar.
+
+    The scalar form of the gate :func:`build_record_dedup_candidates` applies
+    pairwise: normalized bigram Jaccard at or above ``_SIM_THRESHOLD``. Exposed
+    so the host-side structural fold (issue #1103,
+    ``phases._append_structural_and_write_merged``) decides "same defect" with
+    the same threshold the pre-filter uses, instead of a second copy that can
+    drift away from it.
+
+    Degenerate input never matches: either description empty (or reduced to
+    nothing by :func:`normalize_title`) returns ``False`` rather than letting
+    two contentless findings collapse into one.
+    """
+    a_bigrams = bigrams(normalize_title(a))
+    b_bigrams = bigrams(normalize_title(b))
+    if not a_bigrams or not b_bigrams:
+        return False
+    return jaccard(a_bigrams, b_bigrams) >= _SIM_THRESHOLD
+
+
 def _files_overlap(record_file: str, alt_files: Iterable[str]) -> bool:
     """Return True when the record's file appears in the alt-issue files."""
     return bool(record_file) and record_file in set(alt_files)

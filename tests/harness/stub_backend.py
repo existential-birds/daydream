@@ -538,9 +538,20 @@ class StubBackend:
             # Issue #745 (AC4): the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
             # structured output directly (no separate parse-<stack> fork). Build a
             # schema-valid payload with every required issue field.
+            # The structural meta-stack reads the same code through a different
+            # lens, so it words its finding differently. Emitting the language
+            # stacks' byte-identical description here would be a genuine
+            # structural/language duplicate, which the merge host now folds into
+            # a single item (issue #1103) -- erasing the structural item that
+            # every structural-lens test looks for.
+            stack_label = m.group(1)
             issue: dict[str, Any] = {
                 "id": 1,
-                "description": "Sample issue",
+                "description": (
+                    "Structural maintainability concern"
+                    if stack_label == "structure"
+                    else "Sample issue"
+                ),
                 "file": "api.py",
                 "line": 1,
                 "severity": self.parse_severity or "medium",

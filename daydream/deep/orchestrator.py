@@ -1436,18 +1436,29 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     # language stacks and collapsing it into their dedup pool would demote
     # those findings. Filter both record_sources forms (resume=filename,
     # fresh-run=stack_name) together to preserve the index invariant.
+    #
+    # The partition is scoped to the dedup pre-filter and the merge agent's
+    # record pool -- the two places that could collapse a structural finding
+    # into a language bucket. It is NOT a partition out of adjudication: the
+    # records are kept here under their own keys so ``_step_arbiter`` can put
+    # them back in front of the contested-location branch, which is the one
+    # mechanism designed to catch a structural/language twin (issue #1103).
     structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
+    structural_records: list[dict[str, Any]] = []
+    structural_record_sources: list[str] = []
     if structural_path_candidate in per_stack_records_paths:
         structural_records_path: Path | None = structural_path_candidate
         structural_filename = structural_path_candidate.name
         per_stack_records_paths = [
             p for p in per_stack_records_paths if p != structural_path_candidate
         ]
-        kept_pairs = [
-            (rec, src)
-            for rec, src in zip(all_records, record_sources, strict=True)
-            if src != STRUCTURE_STACK_NAME and src != structural_filename
-        ]
+        kept_pairs = []
+        for rec, src in zip(all_records, record_sources, strict=True):
+            if src == STRUCTURE_STACK_NAME or src == structural_filename:
+                structural_records.append(rec)
+                structural_record_sources.append(src)
+            else:
+                kept_pairs.append((rec, src))
         all_records = [rec for rec, _ in kept_pairs]
         record_sources = [src for _, src in kept_pairs]
     else:
@@ -1457,6 +1468,8 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     ctx.data["records"] = all_records
     ctx.data["record_sources"] = record_sources
     ctx.data["structural_records_path"] = structural_records_path
+    ctx.data["structural_records"] = structural_records
+    ctx.data["structural_record_sources"] = structural_record_sources
     return None
 
 
@@ -1746,6 +1759,19 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     dd = ctx.data["dd"]
     all_records: list[dict[str, Any]] = ctx.data["records"]
     record_sources: list[str] = ctx.data["record_sources"]
+    # Issue #1103: adjudicate over language AND structural records together.
+    # The structural meta-stack is partitioned out of the dedup pool and the
+    # merge agent's record pool (`_step_per_stack_parse`) so its lens cannot be
+    # collapsed into a language bucket -- but that partition also made the
+    # contested-location branch unreachable for the one pair it exists to
+    # catch: a structural finding and a language finding reporting the same
+    # defect at the same place. They rejoin here, and split back out below so
+    # the dedup pre-filter and the merge prompt see exactly what they saw
+    # before. `contested_only` keeps the widening to contest detection: the
+    # severity branch still never pulls in an uncontested structural finding.
+    structural_records: list[dict[str, Any]] = ctx.data.get("structural_records", [])
+    structural_sources: list[str] = ctx.data.get("structural_record_sources", [])
+    structural_ids = {id(rec) for rec in structural_records}
 
     # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
     # a single heavyweight arbiter now re-reviews ONLY the
@@ -1767,10 +1793,24 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         ctx.pipeline().arbitration.enabled
         and (config.start_at != "merge" or not adjudication_marker.is_file())
     ):
+        adjudicated = all_records + structural_records
+        adjudicated_sources = record_sources + structural_sources
+        structural_path: Path | None = ctx.data.get("structural_records_path")
+        # `_rewrite_stack_records` drops any record whose source resolves
+        # outside this path list, so the structural file must be in it or an
+        # arbitrated structural verdict would never reach disk -- and merge
+        # re-reads that very file to build the report's structural items.
+        rewrite_paths: list[Path] = list(ctx.data["records_paths"])
+        if structural_path is not None:
+            rewrite_paths.append(structural_path)
+
         arbiter_targets = select_arbiter_targets(
-            all_records, record_sources,
+            adjudicated, adjudicated_sources,
             min_severity=ctx.pipeline().arbitration.min_severity,
             contested_location=ctx.pipeline().arbitration.contested_location,
+            contested_only=[
+                i for i, rec in enumerate(adjudicated) if id(rec) in structural_ids
+            ],
         )
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
@@ -1783,14 +1823,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # LOW sibling from suppression. `_apply_adjudication_verdicts` revises
         # records in place, so kept AND revised arbiter records keep their
         # identity here; only dropped records fall out.
-        arbitrated_ids = {id(all_records[i]) for i in arbiter_targets}
+        arbitrated_ids = {id(adjudicated[i]) for i in arbiter_targets}
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
                 arbiter_backend = ctx.backend_for("arbiter")
                 verdicts, arbiter_continuation = await phase_arbiter_review(
                     arbiter_backend,
                     ctx.work,
-                    selected_records=[all_records[i] for i in arbiter_targets],
+                    selected_records=[adjudicated[i] for i in arbiter_targets],
                     diff_path=ctx.data["diff_path"],
                     intent_path=ctx.data["intent_path"],
                     alternatives_path=ctx.data["alts_path"],
@@ -1803,14 +1843,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 # different backend gets the cold path.
                 if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
                     ctx.data["arbiter_continuation"] = arbiter_continuation
-            all_records, record_sources = _apply_adjudication_verdicts(
-                all_records, record_sources, arbiter_targets, verdicts,
+            adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
+                adjudicated, adjudicated_sources, arbiter_targets, verdicts,
                 pass_name="arbiter",
                 id_field="arb_id",
                 fail_closed=False,
             )
             _rewrite_stack_records(
-                dd, ctx.data["records_paths"], all_records, record_sources
+                dd, rewrite_paths, adjudicated, adjudicated_sources
             )
 
         # Precision-mode suppression pass (#232). OPT-IN: when precision_mode is
@@ -1824,12 +1864,20 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # here. One batched agent call, resolved via the cheaper `suppression`
         # phase key (Sonnet default) -- never per-finding Opus.
         if ctx.pipeline().suppression.enabled or _precision_mode(config):
+            # Structural records join the exclusion set alongside the arbiter's
+            # targets (issue #1103). Suppression is fail-CLOSED and selects on
+            # low severity / LOW confidence; the structural lens is
+            # high-conviction by construction and was never in this pass's pool
+            # before, so letting the union widen it would drop structural
+            # findings as a side effect of fixing the duplicate-post bug.
             suppression_exclude = [
-                i for i, r in enumerate(all_records) if id(r) in arbitrated_ids
+                i
+                for i, r in enumerate(adjudicated)
+                if id(r) in arbitrated_ids or id(r) in structural_ids
             ]
             suppression_targets = select_suppression_targets(
-                all_records,
-                record_sources,
+                adjudicated,
+                adjudicated_sources,
                 suppression_exclude,
                 severity_classes=ctx.pipeline().suppression.severity_classes,
                 confidence_classes=ctx.pipeline().suppression.confidence_classes,
@@ -1839,25 +1887,44 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     sup_verdicts = await phase_suppression_review(
                         ctx.backend_for("suppression"),
                         ctx.work,
-                        selected_records=[all_records[i] for i in suppression_targets],
+                        selected_records=[adjudicated[i] for i in suppression_targets],
                         diff_path=ctx.data["diff_path"],
                         intent_path=ctx.data["intent_path"],
                         alternatives_path=ctx.data["alts_path"],
                         exploration_dir=ctx.data["exploration_dir"],
                         strategy=ctx.strategy("suppression"),
                     )
-                all_records, record_sources = _apply_adjudication_verdicts(
-                    all_records, record_sources, suppression_targets, sup_verdicts,
+                adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
+                    adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
                     pass_name="suppression",
                     id_field="sup_id",
                     fail_closed=True,
                 )
                 _rewrite_stack_records(
-                    dd, ctx.data["records_paths"], all_records, record_sources
+                    dd, rewrite_paths, adjudicated, adjudicated_sources
                 )
         adjudication_marker.write_text("")
+        # Split the structural records back out (issue #1103): everything
+        # downstream of adjudication -- the dedup pre-filter, the merge prompt,
+        # the host-side structural append -- keeps the partitioned view it had
+        # before. `_apply_adjudication_verdicts` revises in place, so surviving
+        # records keep the identity this split keys on; records the arbiter
+        # rejected are simply absent from both sides.
+        all_records = []
+        record_sources = []
+        structural_records = []
+        structural_sources = []
+        for rec, src in zip(adjudicated, adjudicated_sources, strict=True):
+            if id(rec) in structural_ids:
+                structural_records.append(rec)
+                structural_sources.append(src)
+            else:
+                all_records.append(rec)
+                record_sources.append(src)
     ctx.data["records"] = all_records
     ctx.data["record_sources"] = record_sources
+    ctx.data["structural_records"] = structural_records
+    ctx.data["structural_record_sources"] = structural_sources
 
 
 # Structured merge-failure entry reserved in ``per-stack-failures.json`` (issue #361).

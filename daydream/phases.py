@@ -58,7 +58,7 @@ from daydream.repository_paths import (
 from daydream.repository_paths import (
     path_is_confined,
 )
-from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC
+from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, stronger_severity
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -4299,6 +4299,72 @@ async def phase_suppression_review(
     return _rekey_verdicts(result["findings"], "sup_id", "Suppression")
 
 
+def _fold_structural_duplicates(
+    base_items: list[dict[str, Any]],
+    structural_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop structural items that restate a merged finding, keeping the higher severity.
+
+    Issue #1103. The structural meta-stack is partitioned out of the dedup
+    pre-filter and the merge agent's record pool, so no upstream stage ever
+    compares a structural finding against the language-stack finding describing
+    the same defect. Concatenating both lists therefore shipped two inline
+    comments for one defect whenever the two lenses landed on the same code.
+
+    A structural item folds into the FIRST base item that shares its ``file``
+    and whose description clears :func:`daydream.deep.dedup.descriptions_match`
+    -- the same threshold the dedup pre-filter applies, so the host cannot drift
+    away from the pre-filter's notion of "same concern". Line numbers are not
+    part of the match: a structural finding is frequently anchored whole-file
+    (``line: 0``) while its language twin cites the exact line, and those are
+    still one defect.
+
+    Folding never demotes, which is what the partition was protecting: the
+    surviving base item takes the stronger of the two severities, so a ``high``
+    structural twin lifts a ``medium`` language finding rather than being
+    discarded in its favour.
+
+    Matched ``base_items`` entries are revised in place (severity only).
+
+    Args:
+        base_items: The merged, non-structural items the report is built from.
+        structural_items: Structural items already tagged ``lens="structural"``
+            with their confidence/severity defaults applied.
+
+    Returns:
+        The structural items that found no twin, in input order.
+    """
+    from daydream.deep.dedup import descriptions_match
+
+    surviving: list[dict[str, Any]] = []
+    folded = 0
+    for item in structural_items:
+        file_key = str(item.get("file", ""))
+        description = str(item.get("description", ""))
+        twin: dict[str, Any] | None = None
+        if file_key and description:
+            for base in base_items:
+                if str(base.get("file", "")) != file_key:
+                    continue
+                if descriptions_match(description, str(base.get("description", ""))):
+                    twin = base
+                    break
+        if twin is None:
+            surviving.append(item)
+            continue
+        stronger = stronger_severity(twin.get("severity"), item.get("severity"))
+        if stronger is not None:
+            twin["severity"] = stronger
+        folded += 1
+    if folded:
+        print_info(
+            console,
+            f"Folded {folded} structural finding(s) into the language-stack finding "
+            "reporting the same defect",
+        )
+    return surviving
+
+
 def _append_structural_and_write_merged(
     base_items: list[dict[str, Any]],
     structural_records_path: Path | None,
@@ -4323,6 +4389,9 @@ def _append_structural_and_write_merged(
         defaulting to HIGH/high only for unlabeled records -- the structural
         lens remains high-conviction by default and must not be demoted at
         sort time;
+      - fold each structural finding that restates one of ``base_items`` into
+        that item, keeping the stronger severity, so one defect seen through
+        both lenses posts once instead of twice (issue #1103);
       - validate every finding ``file:line`` against the persisted hunk index
         (snap-in-tolerance, demote-with-annotation beyond-tolerance; issue
         #745), THEN normalize the combined list (fresh unique ids) and write
@@ -4400,6 +4469,11 @@ def _append_structural_and_write_merged(
     # reaches the report at full severity while the original judgment stays
     # recoverable. Fail-open: a missing index validates nothing (pre-change
     # behavior); the validator never raises and never rejects.
+    # Issue #1103: fold structural twins into their language-stack counterpart
+    # BEFORE the gate, so the pair is resolved into one finding rather than two
+    # findings that both pass the gate and both post.
+    structural_items = _fold_structural_duplicates(base_items, structural_items)
+
     evidenced = _evidence_gate_then_validate(
         base_items + structural_items, items_path
     )
