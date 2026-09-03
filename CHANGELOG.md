@@ -32,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **pr-review:** make posting-time line resolution diff-aware so it is a genuine no-op on an already-validated citation. `resolve_line` now takes the file's live hunk ranges (`classify` resolves them first): an in-hunk line hint is returned unchanged, and the whole-file anchor search prefers an in-hunk hit over the first hit anywhere in the file. Anchor ranking used for placement puts backtick-quoted identifiers ahead of bare words, so a short identifier such as `` `ttl` `` is no longer crowded out of the 8-token cap by rationale prose (the fingerprint's token selection is deliberately unchanged, so cross-run dedup identities are stable). When the posted line still differs from the cited one, the relocation is recorded on the finding instead of overwriting it silently. Previously a correct in-hunk citation with a prose-heavy rationale was relocated to unrelated code and then dropped off the diff entirely, demoting the comment to file-level or the review body (#1102)
 
-
 ## [0.28.0] - 2026-08-27
 
 ### Added

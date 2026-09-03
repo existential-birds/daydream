@@ -372,6 +372,7 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
             return [(1, 5)]  # 99 is outside
         return []
 
+    monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
     monkeypatch.setattr(pr_review, "resolve_line", fake_resolve)
     monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
 
@@ -415,6 +416,7 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
             return [(80, 98), (106, 120)]  # 105 is 1 before second hunk
         return []
 
+    monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
     monkeypatch.setattr(pr_review, "resolve_line", fake_resolve)
     monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
 
@@ -1196,6 +1198,33 @@ def test_classify_annotates_relocated_line(git_repo: Path) -> None:
     # Re-classifying the same objects must not stack duplicate notes.
     classify(git_repo, _pr_for(base, head), [issue])
     assert issue.body.count("**Placement:**") == 1
+
+
+def test_classify_skips_file_hunks_for_path_missing_at_head(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """A path that doesn't exist at head_sha (deleted/renamed) never calls file_hunks.
+
+    ``resolve_line`` would reject such a path via its own ``git show`` no
+    matter what hunks it was handed, so `classify` should discover the path
+    is unresolvable up front instead of paying for the file_hunks() diff
+    lookup (and its gh-pr-diff network fallback) first (issue #1102 follow-up).
+    """
+    base = _commit_file(git_repo, "gone.py", "x = 1\n", "add gone.py")
+    _git(git_repo, "rm", "gone.py")
+    _git(git_repo, "commit", "-m", "delete gone.py")
+    head = _git(git_repo, "rev-parse", "HEAD")
+    issue = ParsedIssue(path="gone.py", line=1, title="t", body="`x`")
+
+    def fail_if_called(*_a: Any, **_k: Any) -> list[tuple[int, int]]:
+        raise AssertionError("file_hunks should not be called for a path missing at head_sha")
+
+    monkeypatch.setattr(pr_review, "file_hunks", fail_if_called)
+
+    result = classify(git_repo, _pr_for(base, head), [issue])
+
+    assert not result.inline
+    assert [i.path for i in result.file_level] == ["gone.py"]
 
 
 # --- file_hunks git-diff + gh-pr-diff fallback ----------------------------

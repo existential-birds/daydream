@@ -795,6 +795,12 @@ def classify(
     ``/pulls/{n}/comments`` endpoint the labeler reads back, so body-only is
     the placement of last resort — used only when GitHub could not accept a
     comment for that path at all.
+
+    Side effect: for issues placed inline, this mutates the caller-owned
+    ``ParsedIssue.body`` of the objects in ``issues`` in place, via
+    ``_note_relocation``, whenever the posted line differs from the line the
+    issue cited. Callers should not rely on ``issue.body`` remaining
+    unchanged after this call.
     """
     out = _ClassifiedIssues()
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
@@ -808,6 +814,17 @@ def classify(
 
     for issue in issues:
         if issue.is_cross_stack:
+            _unplaced(issue)
+            continue
+        # Skip the file_hunks() diff lookup -- a git-diff subprocess call with
+        # a gh-pr-diff network fallback on GitError -- for a path that cannot
+        # resolve at head_sha at all (e.g. deleted or renamed away in this
+        # PR). resolve_line would reject such a path via this same git show
+        # regardless of what hunks it was handed, so there is nothing for the
+        # hunk lookup to buy here.
+        try:
+            git_ops.show(target_dir, pr.head_sha, issue.path)
+        except GitError:
             _unplaced(issue)
             continue
         # The hunk ranges are resolved BEFORE line resolution, not after: they
@@ -853,8 +870,11 @@ def _note_relocation(issue: ParsedIssue, posted_line: int) -> None:
     ``findings._finding_dict`` serialises ``body``. Fingerprints are computed
     from description/rationale and never the body, so annotating cannot change
     a finding's cross-run identity.
+
+    ``issue.line <= 0`` (including the ``0`` whole-file sentinel used by
+    structural findings) is not a cited line and is never reported as one.
     """
-    if issue.line is None or issue.line == posted_line:
+    if issue.line is None or issue.line <= 0 or issue.line == posted_line:
         return
     if _PLACEMENT_NOTE_PREFIX in issue.body:
         return
