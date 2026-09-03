@@ -1298,6 +1298,30 @@ def test_delete_runs_removes_matching_rows_and_returns_count(tmp_path: Path) -> 
     assert remaining == ["sess-b"]
 
 
+def test_delete_runs_empty_collection_noop(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+
+    assert delete_runs(tmp_path, []) == 0
+    assert len(query_runs(tmp_path)) == 1
+
+
+def test_delete_runs_coerces_non_string_members(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "42")
+
+    assert delete_runs(tmp_path, [42]) == 1
+    assert query_runs(tmp_path) == []
+
+
+def test_delete_runs_matches_exactly_no_like_semantics(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+    _seed_one_run(tmp_path, "sess-a%")  # LIKE wildcard sibling must survive
+    _seed_one_run(tmp_path, "sess-a_x")  # LIKE single-char wildcard sibling
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    remaining = {r["session_id"] for r in query_runs(tmp_path)}
+    assert remaining == {"sess-a%", "sess-a_x"}
+
+
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
     upsert_run(
         archive_dir,
