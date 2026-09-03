@@ -451,6 +451,30 @@ async def test_quiet_mode_bash_panel_redacts_command_secrets(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_quiet_mode_bash_panel_redacts_before_truncating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Secret redaction happens on the complete command before the 200-char slice."""
+    # 'x'*180 + ' token=opaque-test-12345': redaction of the COMPLETE string
+    # lengthens it so the [REDACTED_CREDENTIAL] marker sits at column 194 —
+    # still inside the [:200] slice. A slice-first impl would cut the RAW
+    # string at 200 (mid-secret) and later redaction would print a partial
+    # secret fragment.
+    filler = "x" * 180
+    command = f"{filler} token=opaque-test-12345"
+    tool_use_id = "test-bash-redact-order-1108"
+    events = [
+        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": command}),
+        ToolResultEvent(id=tool_use_id, output="", is_error=False),
+        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
+    assert "opaque-test-12345" not in plain_text, "secret must never reach the panel"
+    assert "opaque" not in plain_text, "a partial secret must not survive truncation"
+    assert 'token="[REDA' in plain_text, "the truncated redaction marker must reach the panel"
+    assert "[REDACTED_CREDENTIAL]" not in plain_text, "the complete command must be redacted before slicing"
+
+
+@pytest.mark.asyncio
 async def test_quiet_mode_empty_result_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that quiet mode shows header only for empty results (no output section)."""
     tool_use_id = "test-empty-result-002"
