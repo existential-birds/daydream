@@ -1345,6 +1345,24 @@ def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path) -> Non
     assert "composite_reward" in runs_cols
 
 
+def test_delete_runs_leaves_label_observations_intact(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+    append_label_observation(
+        tmp_path,
+        "sess-a",
+        labels=["rejected"],
+        pr_state=None,
+        labeler_version="v1",
+        evidence_sha=None,
+    )
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    assert query_runs(tmp_path) == []
+    history = label_observation_history(tmp_path, "sess-a")
+    assert len(history) == 1
+    assert json.loads(history[0]["labels"]) == ["rejected"]
+
+
 _OLD_LABEL_OBSERVATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS label_observations (
     session_id       TEXT NOT NULL,

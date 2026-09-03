@@ -687,12 +687,15 @@ def bulk_latest_label_observations(
         conn.close()
 
 
-def delete_runs(archive_dir: Path, session_ids: Iterable[str]) -> int:
+def delete_runs(archive_dir: Path, session_ids: Iterable[object]) -> int:
     """Destructively prune ``runs`` rows for the given session ids.
 
     Deletes rows from the ``runs`` table only; the append-only
     ``label_observations`` history is never touched, so label provenance
     survives hydration reruns that prune rejected sessions.
+
+    Every member is coerced via ``str()`` during normalization, so ints,
+    UUIDs, and Path-like objects are accepted.
 
     Session ids missing from the index are silent no-ops. The deletion runs as
     a single ``DELETE ... WHERE session_id IN (?, ...)`` statement, which is
