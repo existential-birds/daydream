@@ -430,6 +430,45 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
     assert result.inline[1]["line"] == 106
 
 
+def test_build_payload_reviewed_commit_line_first_in_review_info(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1/M4: the reviewed-commit line is rendered, fully linked (S1),
+    and precedes Model/Cost and Severity/Confidence in the review-info block."""
+    classified = pr_review._ClassifiedIssues(
+        body_only=[
+            ParsedIssue(
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
+                confidence="MEDIUM",
+                severity="low",
+            )
+        ],
+    )
+    # Feed the enriched renderer a real fixture trajectory so run-info
+    # fields (Model/Cost/Tokens) render instead of the fallback stub.
+    fixture = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None))
+    payload = build_payload(pr, classified)
+    body = payload["body"]
+
+    expected = (
+        f"- **Reviewed commit:** [`{pr.head_sha[:7]}`]"
+        f"(https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})"
+    )
+    assert expected in body
+    # Ordering: the commit line precedes the enriched run-info fields
+    # (Model/Cost) and the conditional Severity/Confidence lines inside
+    # the Review info block. Whole-body indices suffice: the commit line
+    # appears exactly once, and all compared markers first appear inside
+    # this block.
+    assert body.index(expected) < body.index("- **Model:**")
+    assert body.index(expected) < body.index("- **Severity:**")
+    assert body.index(expected) < body.index("- **Confidence:**")
+
+
 def test_build_payload_shape(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -472,6 +511,10 @@ def test_build_payload_shape(
     assert payload["comments"] == classified.inline
 
     body = payload["body"]
+    assert (
+        "- **Reviewed commit:** [`head123`]"
+        "(https://github.com/acme/widgets/commit/head123)" in body
+    )
     # Title header.
     assert "**Code Review Summary**" in body
     # Bottom-of-comment wizard footer (DAYDREAM_FOOTER) carries the version.
