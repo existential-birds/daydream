@@ -1322,6 +1322,22 @@ def test_delete_runs_matches_exactly_no_like_semantics(tmp_path: Path) -> None:
     assert remaining == {"sess-a%", "sess-a_x"}
 
 
+def test_delete_runs_hydration_rerun_reflects_only_kept_session(tmp_path: Path) -> None:
+    # Prior hydration run admitted both sessions.
+    _seed_one_run(tmp_path, "sess-kept")
+    _seed_one_run(tmp_path, "sess-rejected")
+    assert len(query_runs(tmp_path)) == 2
+
+    # Rerun admission: prune the rejected session's index row.
+    deleted = delete_runs(tmp_path, ["sess-rejected"])
+
+    assert deleted == 1
+    visible = query_runs(tmp_path)
+    assert [r["session_id"] for r in visible] == ["sess-kept"]
+    # The kept session's harvest-visible row is fully intact.
+    assert visible[0]["status"] == "complete"
+
+
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
     upsert_run(
         archive_dir,
