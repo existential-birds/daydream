@@ -445,3 +445,30 @@ def test_format_callback_progress_bash_shows_command() -> None:
     text = c.export_text()
     assert "git diff --stat" in text
     assert "Show changes" not in text
+
+
+def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
+    """Issue #1108 acceptance oracle: same input renders the command on all three surfaces."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from daydream.agent import _summarize_input
+    from daydream.ui.tools import _build_tool_header, format_callback_progress
+
+    args: dict[str, object] = {"command": "git diff --stat"}
+    header = _build_tool_header("Bash", args, quiet_mode=True)
+    c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c.print(header)
+    header_text = c.export_text()
+
+    line = format_callback_progress("Bash", args, None)
+    c2 = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c2.print(line)
+    line_text = c2.export_text()
+
+    log_summary = _summarize_input(args)
+
+    assert "git diff --stat" in header_text
+    assert "git diff --stat" in line_text
+    assert log_summary == "git diff --stat"
