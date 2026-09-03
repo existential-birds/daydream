@@ -172,6 +172,21 @@ def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
     assert "block" not in out and "timeout" not in out
 
 
+def test_bash_panel_command_truncation_shows_ellipsis() -> None:
+    """A >200-char Bash command is cut with an explicit marker, never silently."""
+    from daydream.ui.tools import _build_tool_header
+
+    header = _build_tool_header("Bash", {"command": "x" * 250}, quiet_mode=False)
+    text = header.plain
+    assert "x" * 200 in text
+    assert "x" * 201 not in text
+    assert text.rstrip().endswith("...")
+
+    # Short commands are never marked.
+    short_header = _build_tool_header("Bash", {"command": "true"}, quiet_mode=False)
+    assert not short_header.plain.rstrip().endswith("...")
+
+
 def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
     from rich.console import Console
 
@@ -432,7 +447,12 @@ def test_primary_tool_value_bash_prefers_command() -> None:
 
 
 def test_format_callback_progress_bash_shows_command() -> None:
-    """Callback single-line path renders the command, not the paraphrase (issue #1108)."""
+    """Callback single-line path renders the command, not the paraphrase (issue #1108).
+
+    The command is redacted before the width slice — the same redact-before-truncate
+    invariant the panel header and --log summary hold, so the callback line cannot
+    print a secret the other surfaces would redact.
+    """
     from io import StringIO
 
     from rich.console import Console
@@ -445,6 +465,13 @@ def test_format_callback_progress_bash_shows_command() -> None:
     text = c.export_text()
     assert "git diff --stat" in text
     assert "Show changes" not in text
+
+    secret_line = format_callback_progress("Bash", {"command": "DB_PASSWORD=hunter2 make db-up"}, None)
+    c3 = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c3.print(secret_line)
+    secret_text = c3.export_text()
+    assert "hunter2" not in secret_text
+    assert "DB_PASSWORD=[REDACTED_ENV_VAR]" in secret_text
 
 
 def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
@@ -472,3 +499,14 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     assert "git diff --stat" in header_text
     assert "git diff --stat" in line_text
     assert log_summary == "git diff --stat"
+
+    # Cap equality: the three surfaces truncate at the shared constant, so the
+    # panel and --log copies can never silently desync (the #1108 oracle pins
+    # key consistency; this pins cap consistency too).
+    from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS
+
+    long_command = "b" * (_BASH_COMMAND_MAX_CHARS + 25)
+    long_header = _build_tool_header("Bash", {"command": long_command}, quiet_mode=True)
+    assert "b" * _BASH_COMMAND_MAX_CHARS in long_header.plain
+    assert long_header.plain.rstrip().endswith("...")
+    assert len(_summarize_input({"command": long_command})) == _BASH_COMMAND_MAX_CHARS

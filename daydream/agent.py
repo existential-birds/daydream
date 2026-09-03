@@ -54,7 +54,7 @@ from daydream.ui import (
 from daydream.ui import (
     prompt_user as prompt_user,
 )
-from daydream.ui.tools import _PRIMARY_TOOL_ARG
+from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG
 
 _logger = logging.getLogger(__name__)
 
@@ -408,12 +408,12 @@ def _summarize_input(input_data: dict[str, Any]) -> str:
     """One-line summary of tool input for log output."""
     if not input_data:
         return ""
-    # The COMPLETE selected string is redacted before any [:200] slice —
-    # redact-after-slice would truncate a credential into an unmatchable fragment.
+    # The COMPLETE selected string is redacted before any [:_BASH_COMMAND_MAX_CHARS]
+    # slice — redact-after-slice would truncate a credential into an unmatchable fragment.
     for key in _PRIMARY_TOOL_ARG["Bash"]:
         value = input_data.get(key)
         if isinstance(value, str) and value:
-            return redact_structured_text(value)[:200]
+            return redact_structured_text(value)[:_BASH_COMMAND_MAX_CHARS]
     if "path" in input_data:
         complete = f"{input_data['path']}" + (
             f" -> {input_data.get('new_path', '')}" if "new_path" in input_data else ""
@@ -422,8 +422,8 @@ def _summarize_input(input_data: dict[str, Any]) -> str:
     # Generic: first value that's a string
     for v in input_data.values():
         if isinstance(v, str):
-            return redact_structured_text(v)[:200]
-    return redact_structured_text(str(input_data))[:200]
+            return redact_structured_text(v)[:_BASH_COMMAND_MAX_CHARS]
+    return redact_structured_text(str(input_data))[:_BASH_COMMAND_MAX_CHARS]
 
 
 def _summarize_output(output: str) -> str:

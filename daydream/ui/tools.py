@@ -58,7 +58,7 @@ _CALLBACK_TOOL_ICONS = {
     "TodoWrite": "🔧",
     **{name: "🎠" for name in (*_BACKGROUND_TASK_TOOLS, *_TODO_TASK_TOOLS)},
 }
-_BASH_COMMAND_MAX_CHARS = 200  # Keep aligned with agent._summarize_input's command cap.
+_BASH_COMMAND_MAX_CHARS = 200  # Shared truncation cap for Bash command display; agent._summarize_input imports it.
 _PRIMARY_TOOL_ARG = {
     "Read": ("file_path",),
     "Write": ("file_path",),
@@ -243,8 +243,15 @@ def format_callback_progress(
 
     value, key = _primary_tool_value(name, args)
     if value:
+        # Import lazily because trajectory initializes the UI facade used to
+        # reach this renderer while the application import graph is loading.
+        from daydream.trajectory import redact_structured_text
+
+        # Redact the complete value before slicing (same invariant the panel
+        # header and agent._summarize_input hold) so a credential crossing the
+        # display boundary cannot be truncated into an unmatchable fragment.
         line.append(" ")
-        line.append(value[:max_len], style=_primary_value_style(key))
+        line.append(redact_structured_text(value)[:max_len], style=_primary_value_style(key))
     return line
 
 
@@ -476,7 +483,10 @@ def _build_tool_header(
 
         # Redact the complete command before slicing so a credential crossing
         # the display boundary cannot be truncated into an unmatchable fragment.
-        command = redact_structured_text(str(args.get("command", "")))[:_BASH_COMMAND_MAX_CHARS]
+        full_command = redact_structured_text(str(args.get("command", "")))
+        command = full_command[:_BASH_COMMAND_MAX_CHARS]
+        if len(full_command) > _BASH_COMMAND_MAX_CHARS:
+            command = f"{command}..."
         if command.strip():
             content.append("\n")
             content.append("$ ", style=STYLE_DIM)
