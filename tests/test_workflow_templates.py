@@ -114,9 +114,11 @@ _USES_LINE_RE = re.compile(r"^\s*uses:\s*(?P<ref>\S+)(?:\s*#\s*(?P<comment>\S+))
 # Release tag → PEELED commit SHA for every daydream release the workflow pins
 # may reference. Values are the peeled (`^{}` target) commits of annotated tags,
 # NOT tag-object SHAs — `git ls-remote origin 'refs/tags/vX.Y.Z'` on an
-# annotated tag reports the tag object (e.g. `9abbaeb3…` for v0.26.0), which is
+# annotated tag reports the tag object (e.g. `9abbaeb3…` for v0.28.0), which is
 # the classic trap; use `git ls-remote origin 'refs/tags/vX.Y.Z^{}'` instead.
-# History is retained (never prune old entries) for provenance.
+# History is retained (never prune old entries) for provenance. A cross-check
+# enforces both sides: every entry is either pinned by a workflow install ref
+# or a strictly older release retained for provenance.
 _DAYDREAM_RELEASE_COMMITS: dict[str, str] = {
     "v0.27.0": "805fd0f105fe803a90a6a8b2c2d9646a4041eccc",
     "v0.28.0": "e7741f17fc998a675ed2fe3f364d2e646cde5518",
@@ -549,9 +551,46 @@ def test_release_commit_map_values_are_immutable_full_shas() -> None:
     for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
         assert _RELEASE_COMMIT_RE.fullmatch(commit), (
             f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is not a full lowercase "
-            f"40-char hex commit SHA. Mutable refs (tags, branches), short hashes, "
-            f"uppercase hex, and annotated-tag OBJECT shas are all rejected — record the "
-            f"peeled commit: git ls-remote origin 'refs/tags/{tag}^{{}}'."
+            f"40-char hex commit SHA. Mutable refs (tags, branches), short hashes, and "
+            f"uppercase hex are rejected; the form gate can't tell an annotated-tag "
+            f"OBJECT sha from a peeled commit, so record the peeled commit: "
+            f"git ls-remote origin 'refs/tags/{tag}^{{}}'."
+        )
+
+
+def _release_version(tag: str) -> tuple[int, int, int] | None:
+    """Parse a vX.Y.Z release tag into a sortable version tuple."""
+    m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    if m is None:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def test_release_commit_map_entries_are_pinned_or_retained_provenance() -> None:
+    """Cross-check _DAYDREAM_RELEASE_COMMITS against the workflow install refs
+    so an entry cannot ship as dead data: every entry's commit must be referenced
+    by at least one install pin, or the entry must be a strictly older release
+    deliberately retained for provenance (the map never prunes history). A
+    malformed tag key, a pin that lost its map entry, or a stale commit that outlived
+    its installs all fail here — the provenance entries are accounted for, not
+    unnoticed.
+    """
+    current_version = _release_version(f"v{_package_version()}")
+    assert current_version is not None
+    pinned_commits = {
+        m.group("ref")[1:]
+        for wf_path in _DAYDREAM_INSTALL_WORKFLOW_PATHS
+        for m in _INSTALL_RE.finditer(wf_path.read_text(encoding="utf-8"))
+    }
+    assert pinned_commits, "no daydream install pins to cross-check the map against"
+    for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
+        if commit in pinned_commits:
+            continue
+        version = _release_version(tag)
+        assert version is not None and version < current_version, (
+            f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is neither pinned by "
+            f"any workflow install nor an older release retained for provenance, so "
+            f"it ships as dead data: reference it with an install pin or remove it."
         )
 
 

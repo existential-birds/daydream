@@ -42,7 +42,7 @@ jobs:
         # Pinned to an immutable release commit (the peeled target of the release
         # tag) so the bot runs exactly the reviewed source: a moved or compromised
         # tag can't change it. Bump in lockstep with the package version on release
-        # (a test enforces this; see _DAYDREAM_RELEASE_COMMITS).
+        # (pin the peeled target: git ls-remote origin 'refs/tags/vX.Y.Z^{}').
         run: uv tool install git+https://github.com/existential-birds/daydream@e7741f17fc998a675ed2fe3f364d2e646cde5518
 
       - name: Mint posting token
