@@ -1298,10 +1298,19 @@ def test_delete_runs_removes_matching_rows_and_returns_count(tmp_path: Path) -> 
     assert remaining == ["sess-b"]
 
 
-def test_delete_runs_empty_collection_noop(tmp_path: Path) -> None:
+def test_delete_runs_empty_collection_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _seed_one_run(tmp_path, "sess-a")
 
+    def _fail_open(archive_dir: Path) -> sqlite3.Connection:
+        raise AssertionError("delete_runs must not open the database for an empty collection")
+
+    monkeypatch.setattr("daydream.archive.index._get_connection", _fail_open)
+
     assert delete_runs(tmp_path, []) == 0
+
+    monkeypatch.undo()
     assert len(query_runs(tmp_path)) == 1
 
 
@@ -1336,6 +1345,36 @@ def test_delete_runs_hydration_rerun_reflects_only_kept_session(tmp_path: Path) 
     assert [r["session_id"] for r in visible] == ["sess-kept"]
     # The kept session's harvest-visible row is fully intact.
     assert visible[0]["status"] == "complete"
+
+
+def test_delete_runs_removes_bundle_directory_under_runs(tmp_path: Path) -> None:
+    # Sibling contract (hydrate/sanitize): the on-disk ``runs/`` tree is the
+    # source of truth for ``rebuild_index``, so a surviving bundle directory
+    # would silently resurrect the pruned row.
+    _seed_one_run(tmp_path, "sess-a")
+    runs_root = tmp_path / "runs"
+    bundle = runs_root / "sess-a"
+    bundle.mkdir(parents=True)
+    (bundle / "manifest.json").write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(
+        "UPDATE runs SET archive_path = ? WHERE session_id = 'sess-a'",
+        (str(bundle),),
+    )
+    conn.commit()
+    conn.close()
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    assert query_runs(tmp_path) == []
+    assert not bundle.exists()
+
+
+def test_delete_runs_leaves_bundle_outside_runs_untouched(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")  # archive_path: archive_dir/sess-a
+    (tmp_path / "sess-a").mkdir()
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    assert (tmp_path / "sess-a").is_dir()
 
 
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
