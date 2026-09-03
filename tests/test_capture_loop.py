@@ -104,6 +104,21 @@ def _review_run_env(
         yield config
 
 
+def _scripted_review_backend(issue: dict[str, Any]) -> PhaseDispatchBackend:
+    """A backend that reports exactly one scripted per-stack issue."""
+    return PhaseDispatchBackend(
+        events=[
+            TextEvent(text="Review complete."),
+            # Issue #742: the deep per-stack parse schema requires a
+            # ``verdicts`` property (Codex strict-mode output).
+            ResultEvent(
+                structured_output={"issues": [issue], "verdicts": []},
+                continuation=None,
+            ),
+        ]
+    )
+
+
 async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     feature_branch_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -117,6 +132,57 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     contains no token present in that file, so anchor resolution yields no
     line. Before the fix this fell through to ``placement="body"``, which no
     posterior signal can ever read back. It must now be ``"file"``.
+
+    The cited line is deliberately past the end of ``main.py`` (2 lines at
+    head) and so outside every hunk: since #1102 an in-hunk citation is
+    authoritative and would be posted inline, which is a *different*
+    invariant (see the sibling test below). Only a citation that no path can
+    place exercises the file-level fallback this test guards.
+    """
+    out = tmp_path / "findings.json"
+    issue = {
+        "id": 1,
+        "title": "Module lacks a rollback barrier",
+        "description": "No `quiescent_rollback_barrier` guards this module",
+        "recommendation": "Introduce a `quiescent_rollback_barrier`",
+        "severity": "medium",
+        "confidence": "HIGH",
+        "files": ["main.py"],
+        "file": "main.py",
+        "line": 9,
+        "rationale": "",
+        "evidence": "main.py:9",
+    }
+    with _review_run_env(
+        feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh
+    ) as config:
+        assert await run(config) == 0
+
+    findings = json.loads(out.read_text())["findings"]
+    assert findings, "scripted issue must survive to the artifact"
+    main_py = [f for f in findings if f["path"] == "main.py"]
+    assert main_py, "the finding must target the changed file"
+    assert all(f["placement"] == "file" for f in main_py), (
+        "a finding on a file in the PR diff with no resolvable line must be "
+        f"placed file-level, not folded into the invisible review body: {main_py}"
+    )
+
+
+async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
+    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_gh: FakeGh,
+) -> None:
+    """Real-path #1102: an in-hunk cited line keeps its inline placement.
+
+    Same harness as the sibling test — ``runner.run`` over a real worktree,
+    only the backend mocked — but the scripted issue cites ``main.py:1``, a
+    line inside the live PR hunk, while its text still shares no token with
+    the file. Posting-time resolution is documented as a no-op on a valid
+    line; before #1102 it had no view of the diff, so it discarded the correct
+    hint and demoted the finding to a file-level comment. It must now post
+    inline on the cited line.
     """
     out = tmp_path / "findings.json"
     issue = {
@@ -132,27 +198,20 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
         "rationale": "",
         "evidence": "main.py:1",
     }
-    backend = PhaseDispatchBackend(
-        events=[
-            TextEvent(text="Review complete."),
-            # Issue #742: the deep per-stack parse schema requires a
-            # ``verdicts`` property (Codex strict-mode output).
-            ResultEvent(
-                structured_output={"issues": [issue], "verdicts": []},
-                continuation=None,
-            ),
-        ]
-    )
-    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, fake_gh) as config:
+    with _review_run_env(
+        feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh
+    ) as config:
         assert await run(config) == 0
 
     findings = json.loads(out.read_text())["findings"]
-    assert findings, "scripted issue must survive to the artifact"
     main_py = [f for f in findings if f["path"] == "main.py"]
     assert main_py, "the finding must target the changed file"
-    assert all(f["placement"] == "file" for f in main_py), (
-        "a finding on a file in the PR diff with no resolvable line must be "
-        f"placed file-level, not folded into the invisible review body: {main_py}"
+    assert all(f["placement"] == "inline" and f["line"] == 1 for f in main_py), (
+        "an in-hunk citation must be posted inline on the line the reviewer "
+        f"cited, not relocated or demoted: {main_py}"
+    )
+    assert all("**Placement:**" not in f["body"] for f in main_py), (
+        "nothing moved, so no relocation note belongs on the finding"
     )
 
 

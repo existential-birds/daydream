@@ -351,7 +351,11 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
         ParsedIssue(path="c.py", line=None, title="t3", body="xstack", is_cross_stack=True),
     ]
 
-    def fake_resolve(_td: Path, _sha: str, issue: ParsedIssue) -> int | None:
+    def fake_resolve(
+        _td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
+    ) -> int | None:
+        # classify must resolve the hunks first and hand them down (issue #1102).
+        assert hunks is not None, "classify called resolve_line without the file's hunks"
         return issue.line
 
     def fake_hunks(
@@ -391,7 +395,10 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
         ParsedIssue(path="scripts/modernize-app.py", line=105, title="t2", body="anchor_two"),
     ]
 
-    def fake_resolve(_td: Path, _sha: str, issue: ParsedIssue) -> int | None:
+    def fake_resolve(
+        _td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
+    ) -> int | None:
+        assert hunks is not None, "classify called resolve_line without the file's hunks"
         return issue.line
 
     def fake_hunks(
@@ -1010,6 +1017,185 @@ def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
     sha = _git(git_repo, "rev-parse", "HEAD")
     issue = ParsedIssue(path="gone.py", line=1, title="t", body="b")
     assert pr_review.resolve_line(git_repo, sha, issue) is None
+
+
+# --- Diff-aware line resolution (issue #1102) -----------------------------
+#
+# `resolve_line` is documented (deep/location_validator.py:1-10) as a
+# no-op-on-valid backstop behind the merge-time location validator. Before
+# #1102 it never saw the diff, so a correct in-hunk line was re-derived from
+# prose tokens and could be relocated to the first anchor hit anywhere in the
+# file -- after which `snap_to_hunk` dropped the finding off the diff.
+
+# The finding from the issue's reproduction: a prose-heavy rationale whose one
+# code identifier (`ttl`) is short enough that longest-first ranking cuts it.
+_PROSE_HEAVY_ISSUE = ParsedIssue(
+    path="cache.yaml",
+    line=12,
+    title="Expiration collapses from an hour to a minute",
+    body=(
+        "The new override sets `ttl` far below every other environment, so cached "
+        "entries become unavailable almost immediately and the downstream service "
+        "absorbs the additional request volume."
+    ),
+)
+
+# `prod:`'s TTL drops from an hour to a minute on line 12; every other block
+# keeps 3600, so the anchor token `ttl` occurs on four lines and the only
+# prose-matching token (`Expiration`) sits on line 1, outside the hunk.
+_CACHE_YAML_BASE = (
+    "# Expiration policy for the shared cache tier.\n"
+    "defaults:\n"
+    "  ttl: 3600\n"
+    "\n"
+    "staging:\n"
+    "  ttl: 3600\n"
+    "\n"
+    "worker:\n"
+    "  ttl: 3600\n"
+    "\n"
+    "prod:\n"
+    "  ttl: 3600\n"
+)
+_CACHE_YAML_HEAD = _CACHE_YAML_BASE.replace("prod:\n  ttl: 3600\n", "prod:\n  ttl: 60\n")
+
+
+def _pr_for(base_sha: str, head_sha: str) -> PRInfo:
+    """A PRInfo pointing at two real commits in a temp repo."""
+    return PRInfo(
+        number=7,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        base_ref="main",
+        owner="acme",
+        repo="widgets",
+        url="https://github.com/acme/widgets/pull/7",
+    )
+
+
+def test_extract_anchors_prefer_quoted_keeps_short_backticked_identifier() -> None:
+    """Quoted-first ranking keeps a 3-char identifier that prose would crowd out."""
+    text = f"{_PROSE_HEAVY_ISSUE.title}\n{_PROSE_HEAVY_ISSUE.body}"
+    assert extract_anchors(text, prefer_quoted=True)[0] == "ttl"
+    # Bare words still rank longest-first behind the quoted tokens.
+    bare = extract_anchors(text, prefer_quoted=True)[1:]
+    assert bare == sorted(bare, key=len, reverse=True)
+
+
+def test_extract_anchors_default_ordering_stays_frozen_for_fingerprints() -> None:
+    """The default (fingerprint-hashed) selection is unchanged by #1102.
+
+    ``compute_fingerprint`` hashes the default token set, so re-ranking it
+    would re-identify every open finding and defeat the reconcile dedup. The
+    prose-heavy rationale must still crowd ``ttl`` out of the default cap --
+    that is exactly the selection the existing fingerprints were built from.
+    """
+    text = f"{_PROSE_HEAVY_ISSUE.title}\n{_PROSE_HEAVY_ISSUE.body}"
+    anchors = extract_anchors(text)
+    assert anchors == [
+        "environment",
+        "unavailable",
+        "immediately",
+        "Expiration",
+        "downstream",
+        "additional",
+        "collapses",
+        "override",
+    ]
+    assert "ttl" not in anchors
+
+
+def test_resolve_line_trusts_in_hunk_hint_without_any_anchor_match(git_repo: Path) -> None:
+    """An in-hunk line hint is returned unchanged even when no anchor matches.
+
+    This is the "no-op-on-valid" contract: the merge-time validator already
+    confirmed the line against the hunk index, so posting must not re-derive it.
+    """
+    text = "\n".join(f"row_{i}" for i in range(1, 21)) + "\n"
+    sha = _commit_file(git_repo, "x.py", text, "add x.py")
+    issue = ParsedIssue(path="x.py", line=10, title="Latency regression", body="prose only")
+    # No anchor from the title/body occurs anywhere in the file.
+    assert pr_review.resolve_line(git_repo, sha, issue) is None
+    assert pr_review.resolve_line(git_repo, sha, issue, [(8, 12)]) == 10
+
+
+def test_resolve_line_prefers_in_hunk_anchor_hit_over_first_file_hit(git_repo: Path) -> None:
+    """With no usable hint, an in-hunk anchor hit beats the first hit in the file."""
+    lines = [f"row_{i}" for i in range(1, 21)]
+    lines[1] = "marker_token  # pre-existing, unchanged"
+    lines[17] = "marker_token  # the changed line"
+    sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
+    issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
+    # Without hunks the first hit (line 2) wins, as before.
+    assert pr_review.resolve_line(git_repo, sha, issue) == 2
+    # With hunks, the in-hunk hit (line 18) wins over the earlier out-of-hunk one.
+    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 18
+
+
+def test_resolve_line_returns_out_of_hunk_hit_when_no_in_hunk_candidate(
+    git_repo: Path,
+) -> None:
+    """An out-of-hunk anchor hit is still returned when no anchor hits a hunk."""
+    lines = [f"row_{i}" for i in range(1, 21)]
+    lines[1] = "marker_token  # pre-existing, unchanged"
+    sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
+    issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
+    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 2
+
+
+def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> None:
+    """Real-path #1102 repro: a correct in-hunk citation stays inline.
+
+    Drives the real :func:`classify` over a real two-commit repo -- real
+    ``git diff`` for both the changed-file set and the hunk ranges, no mocks.
+    The finding cites line 12, the only changed line. Before the fix the eight
+    surviving anchors were all rationale prose, none of them within +/-5 lines
+    of line 12, so the hint was discarded and the full-file search relocated
+    the comment to ``Expiration`` on line 1 -- 8 lines outside the hunk, so
+    ``snap_to_hunk`` returned None and the finding lost its line.
+    """
+    base = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_BASE, "add cache.yaml")
+    head = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_HEAD, "cut prod ttl")
+    issue = replace(_PROSE_HEAVY_ISSUE)
+
+    result = classify(git_repo, _pr_for(base, head), [issue])
+
+    assert [c["line"] for c in result.inline] == [12], (
+        f"in-hunk citation was not posted on its own line; "
+        f"file_level={[i.path for i in result.file_level]} "
+        f"body_only={[i.path for i in result.body_only]}"
+    )
+    assert result.inline[0]["path"] == "cache.yaml"
+    assert not result.file_level
+    assert not result.body_only
+    # Nothing moved, so nothing is annotated.
+    assert "**Placement:**" not in result.inline[0]["body"]
+
+
+def test_classify_annotates_relocated_line(git_repo: Path) -> None:
+    """A snapped line is recorded in the body instead of overwritten silently.
+
+    Real-path: the finding cites line 15, two lines outside the real hunk
+    (17, 23). ``snap_to_hunk`` moves the comment to 17, so the posted line is
+    not the cited one -- and the relocation must be visible on the comment and
+    in the issue body the findings artifact serialises (issue #1102).
+    """
+    lines = [f"row_{i}" for i in range(1, 31)]
+    lines[14] = "settle_window = 5  # cited here"
+    base = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
+    lines[19] = "row_20_changed"
+    head = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "change row 20")
+    issue = ParsedIssue(path="x.py", line=15, title="t", body="`settle_window` is too small")
+
+    result = classify(git_repo, _pr_for(base, head), [issue])
+
+    assert [c["line"] for c in result.inline] == [17]
+    note = "**Placement:** posted on line 17; reviewer cited line 15."
+    assert note in issue.body, "the relocation was not recorded on the finding"
+    assert note in result.inline[0]["body"], "the posted comment does not show the relocation"
+    # Re-classifying the same objects must not stack duplicate notes.
+    classify(git_repo, _pr_for(base, head), [issue])
+    assert issue.body.count("**Placement:**") == 1
 
 
 # --- file_hunks git-diff + gh-pr-diff fallback ----------------------------
