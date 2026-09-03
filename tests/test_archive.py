@@ -20,7 +20,6 @@ from daydream.archive.index import (
     append_label_observation,
     bulk_latest_label_observations,
     canonical_utc_iso,
-    delete_runs,
     label_count_summary,
     label_observation_history,
     latest_label_observation,
@@ -1287,57 +1286,6 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
 # index: label_observations (Task 12)
 
 
-def test_delete_runs_removes_matching_rows_and_returns_count(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-a")
-    _seed_one_run(tmp_path, "sess-b")
-
-    deleted = delete_runs(tmp_path, ["sess-a", "sess-missing"])
-
-    assert deleted == 1
-    remaining = [r["session_id"] for r in query_runs(tmp_path)]
-    assert remaining == ["sess-b"]
-
-
-def test_delete_runs_empty_collection_noop(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-a")
-
-    assert delete_runs(tmp_path, []) == 0
-    assert len(query_runs(tmp_path)) == 1
-
-
-def test_delete_runs_coerces_non_string_members(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "42")
-
-    assert delete_runs(tmp_path, [42]) == 1
-    assert query_runs(tmp_path) == []
-
-
-def test_delete_runs_matches_exactly_no_like_semantics(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-a")
-    _seed_one_run(tmp_path, "sess-a%")  # LIKE wildcard sibling must survive
-    _seed_one_run(tmp_path, "sess-a_x")  # LIKE single-char wildcard sibling
-
-    assert delete_runs(tmp_path, ["sess-a"]) == 1
-    remaining = {r["session_id"] for r in query_runs(tmp_path)}
-    assert remaining == {"sess-a%", "sess-a_x"}
-
-
-def test_delete_runs_hydration_rerun_reflects_only_kept_session(tmp_path: Path) -> None:
-    # Prior hydration run admitted both sessions.
-    _seed_one_run(tmp_path, "sess-kept")
-    _seed_one_run(tmp_path, "sess-rejected")
-    assert len(query_runs(tmp_path)) == 2
-
-    # Rerun admission: prune the rejected session's index row.
-    deleted = delete_runs(tmp_path, ["sess-rejected"])
-
-    assert deleted == 1
-    visible = query_runs(tmp_path)
-    assert [r["session_id"] for r in visible] == ["sess-kept"]
-    # The kept session's harvest-visible row is fully intact.
-    assert visible[0]["status"] == "complete"
-
-
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
     upsert_run(
         archive_dir,
@@ -1359,24 +1307,6 @@ def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path) -> Non
     conn.close()
     assert {"valid_at", "reward_version", "reward_json"} <= lo_cols
     assert "composite_reward" in runs_cols
-
-
-def test_delete_runs_leaves_label_observations_intact(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-a")
-    append_label_observation(
-        tmp_path,
-        "sess-a",
-        labels=["rejected"],
-        pr_state=None,
-        labeler_version="v1",
-        evidence_sha=None,
-    )
-
-    assert delete_runs(tmp_path, ["sess-a"]) == 1
-    assert query_runs(tmp_path) == []
-    history = label_observation_history(tmp_path, "sess-a")
-    assert len(history) == 1
-    assert json.loads(history[0]["labels"]) == ["rejected"]
 
 
 _OLD_LABEL_OBSERVATIONS_DDL = """
@@ -2514,10 +2444,3 @@ def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) ->
             labeler_version="1055-human-r1", evidence_sha=None, source="human",
             observed_at="not-a-timestamp")
     assert label_observation_history(tmp_path, "sess-bad") == []
-
-
-def test_delete_runs_is_exported() -> None:
-    import daydream.archive.index as index_module
-
-    assert "delete_runs" in index_module.__all__
-    assert "delete_runs:" in index_module.__doc__
