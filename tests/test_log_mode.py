@@ -224,6 +224,17 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     assert "[REDACTED" in out
 
 
+def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
+    """`--log` summary and callback line key Bash from the shared _PRIMARY_TOOL_ARG table."""
+    from daydream.agent import _summarize_input
+    from daydream.ui.tools import _primary_tool_value
+
+    args: dict[str, object] = {"command": "git diff --stat", "description": "Show changes"}
+    assert _summarize_input(args) == "git diff --stat"
+    value, key = _primary_tool_value("Bash", args)
+    assert key == "command", "both surfaces must key Bash from command-first _PRIMARY_TOOL_ARG"
+
+
 def test_log_mode_summaries_redact_structured_credentials() -> None:
     """Log-mode summaries must use the structured redactor, not the flat one.
 

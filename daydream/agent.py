@@ -54,6 +54,7 @@ from daydream.ui import (
 from daydream.ui import (
     prompt_user as prompt_user,
 )
+from daydream.ui.tools import _PRIMARY_TOOL_ARG
 
 _logger = logging.getLogger(__name__)
 
@@ -407,11 +408,12 @@ def _summarize_input(input_data: dict[str, Any]) -> str:
     """One-line summary of tool input for log output."""
     if not input_data:
         return ""
-    # For known tools, pick the most informative key. The COMPLETE selected
-    # string is redacted before any [:200] slice — redact-after-slice would
-    # truncate a credential into an unmatchable fragment.
-    if "command" in input_data:
-        return redact_structured_text(input_data["command"])[:200]
+    # The COMPLETE selected string is redacted before any [:200] slice —
+    # redact-after-slice would truncate a credential into an unmatchable fragment.
+    for key in _PRIMARY_TOOL_ARG["Bash"]:
+        value = input_data.get(key)
+        if isinstance(value, str) and value:
+            return redact_structured_text(value)[:200]
     if "path" in input_data:
         complete = f"{input_data['path']}" + (
             f" -> {input_data.get('new_path', '')}" if "new_path" in input_data else ""
