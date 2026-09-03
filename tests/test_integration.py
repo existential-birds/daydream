@@ -405,6 +405,52 @@ async def test_quiet_mode_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_quiet_mode_bash_panel_shows_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Quiet-mode Bash panel shows the command (issue #1108), like Read shows file_path."""
+    tool_use_id = "test-bash-quiet-1108"
+    events = [
+        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "git diff --stat"}),
+        ToolResultEvent(id=tool_use_id, output="", is_error=False),
+        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
+    assert "$ git diff --stat" in plain_text
+
+
+@pytest.mark.asyncio
+async def test_quiet_mode_bash_panel_renders_more_than_bare_name_without_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A description-less Bash call renders more than the bare `🔨 Bash` line."""
+    tool_use_id = "test-bash-quiet-nodesc-1108"
+    events = [
+        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "ls -la /tmp"}),
+        ToolResultEvent(id=tool_use_id, output="", is_error=False),
+        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
+    assert "ls -la /tmp" in plain_text or "ls -la /tm" in plain_text
+    assert "$ ls" in plain_text
+
+
+@pytest.mark.asyncio
+async def test_quiet_mode_bash_panel_redacts_command_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Panel command is redacted via redact_structured_text before display."""
+    tool_use_id = "test-bash-quiet-redact-1108"
+    events = [
+        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "DB_PASSWORD=hunter2 make db-up"}),
+        ToolResultEvent(id=tool_use_id, output="", is_error=False),
+        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
+    assert "hunter2" not in plain_text
+    assert "$ DB_PASSWORD=[REDACTED_ENV_VAR] make db-up" in plain_text
+
+
+@pytest.mark.asyncio
 async def test_quiet_mode_empty_result_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that quiet mode shows header only for empty results (no output section)."""
     tool_use_id = "test-empty-result-002"

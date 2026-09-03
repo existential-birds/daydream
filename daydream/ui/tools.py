@@ -59,6 +59,7 @@ _CALLBACK_TOOL_ICONS = {
     "TodoWrite": "🔧",
     **{name: "🎠" for name in (*_BACKGROUND_TASK_TOOLS, *_TODO_TASK_TOOLS)},
 }
+_BASH_COMMAND_MAX_CHARS = 200  # Keep aligned with agent._summarize_input's command cap.
 _PRIMARY_TOOL_ARG = {
     "Read": ("file_path",),
     "Write": ("file_path",),
@@ -469,12 +470,17 @@ def _build_tool_header(
             content.append("\n")
             content.append(description, style=STYLE_CYAN)
 
-        if not quiet_mode:
-            command = str(args.get("command", ""))
-            if command:
-                content.append("\n")
-                content.append("$ ", style=STYLE_DIM)
-                content.append(command, style=STYLE_DIM)
+        # Import lazily because trajectory initializes the UI facade used to
+        # reach this renderer while the application import graph is loading.
+        from daydream.trajectory import redact_structured_text
+
+        # Redact the complete command before slicing so a credential crossing
+        # the display boundary cannot be truncated into an unmatchable fragment.
+        command = redact_structured_text(str(args.get("command", "")))[:_BASH_COMMAND_MAX_CHARS]
+        if command.strip():
+            content.append("\n")
+            content.append("$ ", style=STYLE_DIM)
+            content.append(command, style=STYLE_DIM)
 
         return content
 
