@@ -34,6 +34,7 @@ PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes i
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any, cast
@@ -118,7 +119,11 @@ _USES_LINE_RE = re.compile(r"^\s*uses:\s*(?P<ref>\S+)(?:\s*#\s*(?P<comment>\S+))
 # the classic trap; use `git ls-remote origin 'refs/tags/vX.Y.Z^{}'` instead.
 # History is retained (never prune old entries) for provenance. A cross-check
 # enforces both sides: every entry is either pinned by a workflow install ref
-# or a strictly older release retained for provenance.
+# or a strictly older release retained for provenance. Values are also
+# verified offline against this repo's own release-tag refs (peeled targets),
+# the only way to tell the annotated-tag OBJECT sha from the peeled commit; a
+# checkout that carries no tags skips that check, so the refs are trusted,
+# never fetched or verified against GitHub (intentionally offline).
 _DAYDREAM_RELEASE_COMMITS: dict[str, str] = {
     "v0.27.0": "805fd0f105fe803a90a6a8b2c2d9646a4041eccc",
     "v0.28.0": "e7741f17fc998a675ed2fe3f364d2e646cde5518",
@@ -558,6 +563,74 @@ def test_release_commit_map_values_are_immutable_full_shas() -> None:
         )
 
 
+def _repo_release_tags() -> list[str]:
+    """Release tag names present in this checkout's local refs. A shallow,
+    tagless checkout (e.g. CI's plain ``actions/checkout``) yields an empty
+    list, which the peel cross-check treats as ``cannot verify offline``,
+    never as ``no releases exist``.
+    """
+    result = subprocess.run(
+        ["git", "tag", "--list", "v*"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return result.stdout.splitlines()
+
+
+def _peeled_commit_for_tag(tag: str) -> str | None:
+    """Resolve ``refs/tags/<tag>`` to its peeled (``^{}``) commit via the repo's
+    own local refs, or None when the tag does not exist in this checkout. On an
+    annotated tag the bare ref resolves to the tag OBJECT; the ``^{}`` target
+    is the commit the release actually points at.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{}}"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def test_release_commit_map_values_are_peeled_release_commits() -> None:
+    """Every map value must be the PEELED commit of its release tag, verified
+    offline against this repo's own refs: the only check that can tell an
+    annotated-tag OBJECT sha (what the bare ref reports) from its peeled
+    commit, and the only check that distinguishes a real released version from
+    a phantom key masquerading as retained history. A checkout that carries no
+    release tags at all (CI's shallow clone) skips: there is no local data to
+    verify against, and the check is intentionally offline (never GitHub).
+    """
+    tags = _repo_release_tags()
+    if not tags:
+        pytest.skip(
+            "this checkout carries no release tags (e.g. a shallow CI clone), "
+            "so the offline peel cross-check cannot run"
+        )
+    tag_set = set(tags)
+    for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
+        assert tag in tag_set, (
+            f"_DAYDREAM_RELEASE_COMMITS key {tag!r} is not a real release tag "
+            f"in this repo (no refs/tags/{tag}), so it cannot be retained "
+            f"provenance: remove the entry or name a version that was actually released."
+        )
+        peeled = _peeled_commit_for_tag(tag)
+        assert peeled is not None  # tag_set membership already proved the ref exists
+        assert peeled == commit, (
+            f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is not the peeled "
+            f"commit of refs/tags/{tag} (got {peeled!r}): on an annotated tag the "
+            f"bare ref reports the tag OBJECT sha, not the commit — record the "
+            f"peeled commit: git ls-remote origin 'refs/tags/{tag}^{{}}'."
+        )
+
+
 def _release_version(tag: str) -> tuple[int, int, int] | None:
     """Parse a vX.Y.Z release tag into a sortable version tuple."""
     m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
@@ -581,6 +654,7 @@ def test_release_commit_map_entries_are_pinned_or_retained_provenance() -> None:
         m.group("ref")[1:]
         for wf_path in _DAYDREAM_INSTALL_WORKFLOW_PATHS
         for m in _INSTALL_RE.finditer(wf_path.read_text(encoding="utf-8"))
+        if m.group("ref") is not None
     }
     assert pinned_commits, "no daydream install pins to cross-check the map against"
     for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
