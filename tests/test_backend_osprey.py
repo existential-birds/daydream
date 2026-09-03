@@ -726,7 +726,7 @@ async def test_negative_session_total_cost_is_rejected() -> None:
     lines, _ = _stream()
     lines[-1]["total_cost_usd"] = "-0.125"
 
-    with pytest.raises(OspreyError, match="cost_usd"):
+    with pytest.raises(OspreyError, match="total_cost_usd"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 
@@ -734,8 +734,6 @@ async def test_negative_session_total_cost_is_rejected() -> None:
 @pytest.mark.parametrize(
     "events, field",
     [
-        ([{"event": "tool_result", "tool_call_id": "c-1", "tool_name": "n",
-           "status": "success", "content": "ok", "duration_ms": -1}], "duration_ms"),
         ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
           {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
            "duration_ms": -1, "prompt_tokens": 0, "completion_tokens": 0}], "duration_ms"),

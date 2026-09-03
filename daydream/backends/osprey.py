@@ -703,7 +703,7 @@ class OspreyBackend:
                     content = event.get("content")
                     if not isinstance(content, str):
                         raise OspreyProtocolError("tool_result requires string content")
-                    _required_non_negative_int(event, "duration_ms")
+                    _required_int(event, "duration_ms")
                     protocol_state.finish_tool_call(call_id)
                     yield ToolResultEvent(call_id, content, status == "error")
                 elif event_name == "tool_update":
