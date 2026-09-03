@@ -23,21 +23,40 @@ The following tools are optional:
 
 ## Quick start
 
-Clone the repository and install the dependencies:
+Clone the repository and install the `daydream` command:
 
 ```bash
 git clone https://github.com/existential-birds/daydream.git
 cd daydream
-uv sync
+uv tool install --editable .
 ```
 
+This command installs a `daydream` executable in the uv tool directory. On Linux and macOS this
+directory is `~/.local/bin`. If your shell shows `daydream: command not found`, the directory is not
+on your `PATH`. Run `uv tool update-shell`, then open a new shell.
 
-To update daydream, run the following commands:
+The `--editable` flag makes the installed command read the source from this clone. A `git pull` is
+sufficient for a code change. Install the command again after a pull that changes the dependencies in
+`pyproject.toml`:
 
 ```bash
 git pull
-uv sync
+uv tool install --editable .    # necessary only for a dependency change
 ```
+
+### Run without an installed command
+
+`uv sync` does **not** make a `daydream` command on your `PATH`. It builds the project virtualenv and
+writes the executable to `.venv/bin/daydream`. Use `uv run` to run daydream from the clone without a
+tool install:
+
+```bash
+uv sync
+uv run daydream /path/to/project
+```
+
+`uv run` is only available in the clone. In the remainder of this README, `daydream ...` and
+`uv run daydream ...` are equivalent.
 
 ## Usage
 
@@ -456,6 +475,9 @@ make actionlint # workflow YAML checks via Docker
 make rl-check   # standalone RL: lockcheck + ruff + mypy + pytest
 make check      # all root + workflow + RL CI checks
 ```
+
+`make install` runs `uv sync --all-extras`. This builds the virtualenv for the targets above. Like
+`uv sync`, it does not make a `daydream` command on your `PATH`. See [Quick start](#quick-start).
 
 `make hooks` installs two gates: a commit-time gate that runs ruff on the staged
 Python files, and the pre-push gate (the hook verifies commit signatures first,

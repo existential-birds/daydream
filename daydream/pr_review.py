@@ -505,20 +505,41 @@ def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
 _ANCHOR_TOKEN = re.compile(r"`([^`\n]{3,80})`|\b([A-Za-z_][A-Za-z0-9_]{4,})\b")
 
 
-def extract_anchors(text: str) -> list[str]:
-    """Pull candidate anchor tokens from issue text (longest first).
+def extract_anchors(text: str, *, prefer_quoted: bool = False) -> list[str]:
+    """Pull candidate anchor tokens from issue text, capped at the first 8.
 
-    Prefers backtick-quoted identifiers (e.g. `foo_bar`) since those are
-    the most specific signals of code the reviewer cited. Falls back to
-    any alphanumeric word of length >=5.
+    Two orderings share one extraction pass:
+
+    ``prefer_quoted=False`` (default) sorts every token longest-first.
+    :func:`compute_fingerprint` hashes this selection, so which 8 tokens
+    survive the cap is part of a finding's cross-run identity -- changing it
+    would re-fingerprint every open finding and defeat the reconcile dedup.
+    This ordering is therefore frozen.
+
+    ``prefer_quoted=True`` puts backtick-quoted tokens first (longest-first
+    within each group), then bare words. Longest-first alone does the opposite
+    of what it claims once a rationale carries ordinary English words: prose
+    like ``environment``/``immediately`` outranks a short backticked
+    identifier such as ``ttl`` and pushes it past the cap, so the one token
+    that actually appears on the cited line never reaches line resolution
+    (issue #1102). :func:`resolve_line` asks for this ordering.
     """
     seen: list[str] = []
+    quoted: set[str] = set()
     for m in _ANCHOR_TOKEN.finditer(text):
         token = m.group(1) or m.group(2)
-        if token and token not in seen:
+        if not token:
+            continue
+        if m.group(1):
+            quoted.add(token)
+        if token not in seen:
             seen.append(token)
-    # Longest-first improves hit quality (generic words lose to identifiers).
-    seen.sort(key=len, reverse=True)
+    if prefer_quoted:
+        # Stable sort, so first-appearance order still breaks length ties.
+        seen.sort(key=lambda t: (t not in quoted, -len(t)))
+    else:
+        # Longest-first improves hit quality (generic words lose to identifiers).
+        seen.sort(key=len, reverse=True)
     return seen[:8]
 
 
@@ -547,13 +568,38 @@ def compute_fingerprint(path: str, description: str, rationale: str) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | None:
+def _in_hunk(line: int, hunks: list[tuple[int, int]]) -> bool:
+    """Whether ``line`` falls inside any head-side ``(start, end)`` hunk range."""
+    return any(start <= line <= end for start, end in hunks)
+
+
+def resolve_line(
+    target_dir: Path,
+    head_sha: str,
+    issue: ParsedIssue,
+    hunks: list[tuple[int, int]] | None = None,
+) -> int | None:
     """Resolve the true line in the head commit for an issue.
 
+    ``hunks`` are the head-side ``(start, end)`` diff ranges for ``issue.path``
+    (see :func:`file_hunks`). They are what makes this path the
+    no-op-on-valid backstop ``daydream.deep.location_validator`` documents it
+    as: without them a correct, already-validated in-hunk line was re-derived
+    from prose tokens and could be relocated to the first anchor hit anywhere
+    in the file, after which :func:`snap_to_hunk` dropped the finding off the
+    diff entirely (issue #1102).
+
     Tries (in order):
-      1. If the issue has a line hint, verify the anchor appears within
-         +/-5 lines; trust it on match.
-      2. Otherwise search the whole file at head for the first anchor hit.
+      1. Line hint inside a hunk: return it unchanged. The merge-time
+         validator already confirmed it against the persisted hunk index, so
+         anchor verification could only move a line that is known good.
+      2. Line hint outside every hunk (or no ``hunks`` supplied): trust it
+         only when an anchor appears within +/-5 lines.
+      3. Whole-file anchor search, preferring the first hit that lands inside
+         a hunk. An out-of-hunk hit is returned only when no anchor hits any
+         hunk, so a comment is never relocated onto unchanged code while a
+         changed-line candidate exists.
+
     Returns None if the file doesn't exist at head or no anchor matches.
     """
     try:
@@ -564,24 +610,36 @@ def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | N
     if not lines:
         return None
 
-    anchors = extract_anchors(f"{issue.title}\n{issue.body}")
+    ranges = hunks or []
 
-    # Step 1: verify hint.
+    # Step 1: an in-hunk hint is authoritative -- pass it straight through.
+    if issue.line is not None and 1 <= issue.line <= len(lines) and _in_hunk(issue.line, ranges):
+        return issue.line
+
+    anchors = extract_anchors(f"{issue.title}\n{issue.body}", prefer_quoted=True)
+
+    # Step 2: verify an out-of-hunk hint against nearby anchors.
     if issue.line is not None and 1 <= issue.line <= len(lines):
+        lo = max(1, issue.line - 5)
+        hi = min(len(lines), issue.line + 5)
         for anchor in anchors:
-            lo = max(1, issue.line - 5)
-            hi = min(len(lines), issue.line + 5)
             if any(anchor in lines[i - 1] for i in range(lo, hi + 1)):
                 return issue.line
         # Hint didn't verify; fall through to full-file search.
 
-    # Step 2: full-file search.
+    # Step 3: full-file search, in-hunk hits first.
+    out_of_hunk: int | None = None
     for anchor in anchors:
         for i, line in enumerate(lines, start=1):
-            if anchor in line:
+            if anchor not in line:
+                continue
+            if _in_hunk(i, ranges):
                 return i
+            if out_of_hunk is None:
+                out_of_hunk = i
 
-    return None
+    return out_of_hunk
+
 
 # Splits a unified diff on each `diff --git` header so we can pick out the
 # block for a single file from a full-PR diff.
@@ -737,6 +795,12 @@ def classify(
     ``/pulls/{n}/comments`` endpoint the labeler reads back, so body-only is
     the placement of last resort — used only when GitHub could not accept a
     comment for that path at all.
+
+    Side effect: for issues placed inline, this mutates the caller-owned
+    ``ParsedIssue.body`` of the objects in ``issues`` in place, via
+    ``_note_relocation``, whenever the posted line differs from the line the
+    issue cited. Callers should not rely on ``issue.body`` remaining
+    unchanged after this call.
     """
     out = _ClassifiedIssues()
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
@@ -752,10 +816,20 @@ def classify(
         if issue.is_cross_stack:
             _unplaced(issue)
             continue
-        line = resolve_line(target_dir, pr.head_sha, issue)
-        if line is None:
+        # Skip the file_hunks() diff lookup -- a git-diff subprocess call with
+        # a gh-pr-diff network fallback on GitError -- for a path that cannot
+        # resolve at head_sha at all (e.g. deleted or renamed away in this
+        # PR). resolve_line would reject such a path via this same git show
+        # regardless of what hunks it was handed, so there is nothing for the
+        # hunk lookup to buy here.
+        try:
+            git_ops.show(target_dir, pr.head_sha, issue.path)
+        except GitError:
             _unplaced(issue)
             continue
+        # The hunk ranges are resolved BEFORE line resolution, not after: they
+        # are what lets `resolve_line` pass an already-valid in-hunk line
+        # through untouched instead of re-deriving it from prose (issue #1102).
         if issue.path not in hunks_cache:
             hunks_cache[issue.path] = file_hunks(
                 target_dir,
@@ -764,13 +838,48 @@ def classify(
                 issue.path,
                 pr_number=pr.number,
             )
-        snapped = snap_to_hunk(line, hunks_cache[issue.path])
+        hunks = hunks_cache[issue.path]
+        line = resolve_line(target_dir, pr.head_sha, issue, hunks)
+        if line is None:
+            _unplaced(issue)
+            continue
+        snapped = snap_to_hunk(line, hunks)
         if snapped is None:
             _unplaced(issue)
             continue
+        _note_relocation(issue, snapped)
         out.inline.append(_inline_comment(issue, snapped))
         out.inline_issues.append(issue)
     return out
+
+
+# Marks the posting-time relocation annotation so it is appended at most once
+# even if a caller classifies the same issue objects twice.
+_PLACEMENT_NOTE_PREFIX = "**Placement:** posted on line "
+
+
+def _note_relocation(issue: ParsedIssue, posted_line: int) -> None:
+    """Annotate ``issue`` when it is posted on a line it did not cite.
+
+    Anchor resolution and hunk snapping can both move a finding off its
+    reported line. Overwriting it silently leaves the run's own artifacts
+    showing a citation the posted comment does not use (issue #1102), so the
+    relocation is recorded in the body -- the same in-place, non-destructive
+    annotation the pre-report ``deep.location_validator`` writes for its
+    demotions. The note reaches the findings artifact too, because
+    ``findings._finding_dict`` serialises ``body``. Fingerprints are computed
+    from description/rationale and never the body, so annotating cannot change
+    a finding's cross-run identity.
+
+    ``issue.line <= 0`` (including the ``0`` whole-file sentinel used by
+    structural findings) is not a cited line and is never reported as one.
+    """
+    if issue.line is None or issue.line <= 0 or issue.line == posted_line:
+        return
+    if _PLACEMENT_NOTE_PREFIX in issue.body:
+        return
+    note = f"{_PLACEMENT_NOTE_PREFIX}{posted_line}; reviewer cited line {issue.line}."
+    issue.body = f"{issue.body}\n\n{note}" if issue.body else note
 
 
 def _inline_comment(issue: ParsedIssue, line: int) -> dict[str, Any]:

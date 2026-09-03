@@ -5,8 +5,11 @@ the report. This module validates a finding against the persisted hunk index
 (the run-time authority for changed file/line ranges) and returns a five-field
 check, then snaps in-tolerance findings to the nearest hunk boundary and
 demotes-with-annotation beyond-tolerance ones. It owns authority; the posting
-time ``resolve_line``/``snap_to_hunk`` backstop in ``pr_review`` is knowingly
-left as a no-op-on-valid fallback.
+time ``resolve_line``/``snap_to_hunk`` backstop in ``pr_review`` re-checks
+placement against the LIVE branch diff and is a no-op on a valid in-hunk line
+-- ``resolve_line`` takes that diff's hunk ranges so it passes an
+already-validated line straight through instead of re-deriving it from the
+finding's prose (issue #1102).
 """
 
 from __future__ import annotations
