@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from daydream import git_ops, pr_review
+from daydream import git_ops, pr_comment_renderer, pr_review
 from daydream.findings import ArtifactFinding
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
@@ -467,6 +467,25 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(
     assert body.index(expected) < body.index("- **Model:**")
     assert body.index(expected) < body.index("- **Severity:**")
     assert body.index(expected) < body.index("- **Confidence:**")
+
+
+def test_build_payload_reviewed_commit_survives_run_info_fallback(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: renderer degradation to 'run details unavailable' must not hide
+    the reviewed-commit line (host-injection, Key Decision 2)."""
+    monkeypatch.setattr(
+        pr_review,
+        "_render_review_info_block",
+        pr_comment_renderer._render_fallback,
+    )
+    payload = build_payload(pr, pr_review._ClassifiedIssues())
+    body = payload["body"]
+    assert "*run details unavailable*" in body  # degraded run-info present
+    assert (
+        f"- **Reviewed commit:** [`{pr.head_sha[:7]}`]"
+        f"(https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})" in body
+    )
 
 
 def test_build_payload_shape(
