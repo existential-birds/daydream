@@ -171,19 +171,19 @@ def _optional_non_negative_int(event: dict[str, Any], key: str) -> int | None:
     return value
 
 
-def _parse_cost(value: Any, *, event_name: str) -> float | None:
+def _parse_cost(value: Any, *, event_name: str, field: str = "cost_usd") -> float | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise OspreyProtocolError(f"event {event_name!r} has non-string cost_usd")
+        raise OspreyProtocolError(f"event {event_name!r} has non-string {field!r}")
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise OspreyProtocolError(f"event {event_name!r} has invalid cost_usd") from exc
+        raise OspreyProtocolError(f"event {event_name!r} has invalid {field!r}") from exc
     if not math.isfinite(parsed):
-        raise OspreyProtocolError(f"event {event_name!r} has non-finite cost_usd")
+        raise OspreyProtocolError(f"event {event_name!r} has non-finite {field!r}")
     if parsed < 0:
-        raise OspreyProtocolError(f"event {event_name!r} has negative cost_usd")
+        raise OspreyProtocolError(f"event {event_name!r} has negative {field!r}")
     return parsed
 
 
@@ -668,7 +668,7 @@ class OspreyBackend:
                     terminal_exit_code = exit_code
                     terminal_structured_output = event.get("structured_output")
                     saw_session_end = True
-                    final_cost = _parse_cost(event.get("total_cost_usd"), event_name=event_name)
+                    final_cost = _parse_cost(event.get("total_cost_usd"), event_name=event_name, field="total_cost_usd")
                     if final_cost is not None and not saw_metric_cost:
                         total_cost = final_cost
                     continue
