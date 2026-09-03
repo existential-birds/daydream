@@ -417,3 +417,31 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     joined = "\n".join(line.plain for line in lines)
     assert "/repo/daydream/git_ops.py" in joined  # the meaningful primary arg
     assert "Edit False" not in joined  # the stray-boolean dump is gone
+
+
+def test_primary_tool_value_bash_prefers_command() -> None:
+    """Bash primary arg is `command` (required, always present) over `description`."""
+    from daydream.ui.tools import _primary_tool_value
+
+    value, key = _primary_tool_value("Bash", {"command": "git diff --stat", "description": "Show changes"})
+    assert (value, key) == ("git diff --stat", "command")
+
+    # description-less call still resolves via the table, not the mechanical fallback.
+    value, key = _primary_tool_value("Bash", {"command": "ls -la /tmp"})
+    assert (value, key) == ("ls -la /tmp", "command")
+
+
+def test_format_callback_progress_bash_shows_command() -> None:
+    """Callback single-line path renders the command, not the paraphrase (issue #1108)."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from daydream.ui.tools import format_callback_progress
+
+    line = format_callback_progress("Bash", {"command": "git diff --stat", "description": "Show changes"}, None)
+    c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c.print(line)
+    text = c.export_text()
+    assert "git diff --stat" in text
+    assert "Show changes" not in text

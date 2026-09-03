@@ -44,9 +44,8 @@ _TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
 
 # Single-line icon + primary-arg spec for the callback/parallel render path,
 # which cannot open Rich panels (concurrent agents would each fight for the
-# shared console's Live context). These mirror the per-tool choices baked into
-# ``_build_tool_header`` so a parallel-fix line names the same icon and primary
-# argument the panel header would lead with.
+# shared console's Live context). ``_PRIMARY_TOOL_ARG`` is the shared source of
+# truth for primary argument selection across single-line render surfaces.
 _CALLBACK_TOOL_ICONS = {
     "Read": "📜",
     "Write": "⛏️",
@@ -67,8 +66,8 @@ _PRIMARY_TOOL_ARG = {
     "NotebookEdit": ("notebook_path", "file_path"),
     "Glob": ("pattern",),
     "Grep": ("pattern",),
-    "Bash": ("description", "command"),
-    "shell": ("description", "command"),
+    "Bash": ("command", "description"),
+    "shell": ("command", "description"),
     "Skill": ("skill",),
 }
 
@@ -76,11 +75,12 @@ _PRIMARY_TOOL_ARG = {
 def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | None]:
     """Return the meaningful primary-argument value for a tool's progress line.
 
-    Mirrors the per-tool choice in ``_build_tool_header`` (Read/Edit/Write →
-    ``file_path``, Grep/Glob → ``pattern``, Bash → ``description``/``command``).
-    Falls back to the first non-mechanical, non-boolean value so an unknown tool
-    still shows something meaningful rather than a stray flag — the old blind
-    ``next(iter(args.values()))`` surfaced ``replace_all=False`` as ``"False"``.
+    ``_PRIMARY_TOOL_ARG`` is the source of truth shared by the callback path
+    and the ``--log`` summary, with Bash preferring required ``command`` over
+    optional ``description``. Falls back to the first non-mechanical,
+    non-boolean value so an unknown tool still shows something meaningful
+    rather than a stray flag — the old blind ``next(iter(args.values()))``
+    surfaced ``replace_all=False`` as ``"False"``.
 
     Returns:
         ``(value, key)`` — the primary value as a string and the arg key it came
