@@ -769,9 +769,11 @@ def build_arbiter_prompt(
         "one of them may be anchored at the whole file (`line: 0`) rather than a "
         "line. When two findings are the same defect, keep exactly one: set "
         "`keep: false` on the redundant entry and give the survivor the higher "
-        "of the two severities. Never drop both, and never reject a finding "
-        "merely for overlapping with another -- only for being the same "
-        "defect.\n\n" + SEVERITY_RUBRIC
+        "of the two severities that the rubric below actually supports for "
+        "that defect -- never demote the survivor below either input, and "
+        "never raise it past what the rubric licenses. Never drop both, and "
+        "never reject a finding merely for overlapping with another -- only "
+        "for being the same defect.\n\n" + SEVERITY_RUBRIC
     )
     return "\n\n".join(parts)
 

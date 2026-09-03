@@ -109,13 +109,16 @@ def select_arbiter_targets(
         >=2 stacks with divergent severity (when ``contested_location`` is
         enabled).
 
-    Contested locations are ``(file, line)`` pairs, with one widening: a record
-    anchored at ``line: 0`` is a whole-file finding (the reserved whole-file
-    anchor), so it co-locates with *every* line reported in that file rather
-    than only with other ``line: 0`` records. Without that, a whole-file
-    structural finding and the line-anchored language finding describing the
-    same defect land in different groups and can never contest each other
-    (issue #1103, case B).
+    Contested locations are ``(file, line)`` pairs, with one widening: a
+    ``contested_only`` record anchored at ``line: 0`` is a whole-file finding
+    (the reserved whole-file anchor), so it co-locates with *every* line
+    reported in that file rather than only with other ``line: 0`` records.
+    Without that, a whole-file structural finding and the line-anchored
+    language finding describing the same defect land in different groups and
+    can never contest each other (issue #1103, case B). The widening is scoped
+    to ``contested_only`` records: an ordinary (non-exempt) record that
+    happens to report ``line: 0`` is just a record at that literal location,
+    not a signal to contest every line in the file.
 
     Raises:
         ValueError: If ``records`` and ``sources`` differ in length, or if
@@ -143,19 +146,42 @@ def select_arbiter_targets(
     if contested_location:
         by_location: dict[tuple[Any, Any], list[int]] = defaultdict(list)
         # ``line: 0`` is the reserved whole-file anchor, not a line number, so a
-        # record carrying it is about the whole file and belongs to every group
-        # in that file (issue #1103). Collect them separately, then fold each
-        # file's whole-file records into that file's line groups.
+        # ``contested_only`` record carrying it is about the whole file and
+        # belongs to every group in that file (issue #1103). The widening is
+        # scoped to ``contested_only`` (``severity_exempt``) records: an
+        # ordinary line-0 record from a non-exempt stack is not the structural
+        # whole-file case this exists for, so it stays a literal ``(file, 0)``
+        # location instead of sweeping every other line in the file into its
+        # contest check. Collect the eligible whole-file records separately,
+        # then fold each file's whole-file records into that file's line
+        # groups.
         whole_file: dict[Any, list[int]] = defaultdict(list)
         for i, record in enumerate(records):
-            if record.get("line") == 0:
+            if record.get("line") == 0 and i in severity_exempt:
                 whole_file[record.get("file")].append(i)
             else:
                 by_location[(record.get("file"), record.get("line"))].append(i)
+        # Widening is further scoped to files with exactly one distinct
+        # non-exempt line: with location alone (no description text) there is
+        # no way to tell which of two-or-more reported lines, if any, restates
+        # the whole-file finding, so folding the whole-file record into every
+        # line group would sweep findings that merely share a file -- not the
+        # defect -- into arbitration and out of the precision-mode suppression
+        # pool.
+        lines_per_file: dict[Any, set[Any]] = defaultdict(set)
+        for file, line in by_location:
+            lines_per_file[file].add(line)
         for (file, _line), indices in by_location.items():
-            indices.extend(whole_file.get(file, ()))
-        # A file whose only records are whole-file ones still forms one group:
-        # two whole-file findings from different stacks can contest each other.
+            if len(lines_per_file[file]) == 1:
+                indices.extend(whole_file.get(file, ()))
+        # Every file with at least one whole-file record also gets its own
+        # group at the reserved (file, 0) key, so two whole-file findings from
+        # different stacks can contest each other -- this runs whether or not
+        # that file also has line-anchored records (already widened above).
+        # ``setdefault`` guards the one collision that can occur here: a
+        # non-exempt record that itself reports line 0 already owns the
+        # ``(file, 0)`` key (already widened above), so this must not
+        # overwrite it and drop that record.
         for file, indices in whole_file.items():
             by_location.setdefault((file, 0), list(indices))
 

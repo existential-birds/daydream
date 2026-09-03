@@ -5183,6 +5183,65 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     )
 
 
+async def test_apply_fixes_gate_interactive_yes_applies_fixes(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path: a typed ``y`` at the apply-fixes gate runs the fix loop.
+
+    The inverse of the two declining gate tests above, which pin the
+    non-interactive and EOF defaults but never prove the ACCEPT branch through
+    the real prompt. ``assume="yes"`` (``test_yes_auto_applies_fix``) skips
+    ``prompt_user`` entirely, so without this test nothing covers the path an
+    interactive operator actually takes: real ``prompt_user`` -> real
+    ``input()`` -> ``resolve_or_prompt`` coercion -> ``phase_fix``.
+
+    ``precision_mode=True`` mirrors ``daydream . --precision``: the extra
+    suppression pass must not consume the gate's stdin answer or drop every
+    finding before the gate. The observable consequence is the sentinel file
+    the stub writes on a fix prompt.
+    """
+    from daydream.agent import reset_state
+    from daydream.runner import run
+
+    _silence_gate_noise(monkeypatch)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    _force_interactive(monkeypatch)
+
+    fix_marker = multi_stack_target / ".daydream-fix-applied"
+    assert not fix_marker.exists()
+
+    reads: list[str] = []
+
+    def _yes_input(*_a: Any, **_kw: Any) -> str:
+        reads.append("y")
+        return "y"
+
+    monkeypatch.setattr("builtins.input", _yes_input)
+
+    reset_state()
+    try:
+        exit_code = await run(
+            make_config(
+                multi_stack_target,
+                non_interactive=False,
+                precision_mode=True,
+                output_mode="loop",
+            )
+        )
+    finally:
+        reset_state()
+
+    assert exit_code == 0
+    assert reads, "the apply-fixes gate never reached input() -- no prompt was answered"
+    assert fix_marker.is_file(), (
+        "a typed 'y' at the apply-fixes gate did not reach phase_fix -- the gate "
+        "declined despite an affirmative answer"
+    )
+
 # --cleanup / --no-cleanup (finding #6, R2 round on #330)
 
 
