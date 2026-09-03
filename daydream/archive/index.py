@@ -22,6 +22,9 @@ Exports:
         then recency) label_observations row for each session in a collection —
         single round-trip alternative to calling ``latest_label_observation`` in
         a loop.
+    delete_runs: Delete ``runs`` rows whose ``session_id`` matches any member of
+        a collection (exact match, parameterized ``IN``); return the ``int``
+        count of rows deleted. ``label_observations`` is untouched.
     reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
         runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
         outcome prior (C4).
@@ -67,8 +70,10 @@ spelling is ``datetime.isoformat()`` in UTC — ``YYYY-MM-DDTHH:MM:SS[.ffffff]+0
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import warnings
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -100,6 +105,7 @@ __all__ = [
     "append_label_observation",
     "latest_label_observation",
     "bulk_latest_label_observations",
+    "delete_runs",
     "reviewer_set_penalty_prior",
     "label_observation_history",
     "label_count_summary",
@@ -684,6 +690,70 @@ def bulk_latest_label_observations(
         return {row["session_id"]: dict(row) for row in cursor.fetchall()}
     finally:
         conn.close()
+
+
+def delete_runs(archive_dir: Path, session_ids: Iterable[object]) -> int:
+    """Destructively prune ``runs`` rows for the given session ids.
+
+    Deletes rows from the ``runs`` table and removes the on-disk bundle
+    directory each row points at (``archive_path``); the append-only
+    ``label_observations`` history is never touched, so label provenance
+    survives hydration reruns that prune rejected sessions.
+
+    The bundle removal matters for consistency: ``rebuild_index`` re-upserts
+    every directory under ``runs/``, so an index-only deletion would be
+    silently resurrected by the next filesystem-driven hydrate/sanitize
+    pass.  Only bundles located inside ``<archive_dir>/runs/`` are removed;
+    rows pointing elsewhere are pruned from the index but their directories
+    are left untouched.
+
+    Every member is coerced via ``str()`` during normalization, so ints,
+    UUIDs, and Path-like objects are accepted.
+
+    Session ids missing from the index are silent no-ops. The deletion runs as
+    a single ``DELETE ... WHERE session_id IN (?, ...)`` statement, which is
+    bounded by SQLite's host-parameter limit; per-stage run counts sit far
+    below that limit, so no chunking is performed today.
+
+    Returns:
+        The number of rows deleted (``0`` when ``session_ids`` is empty —
+        the database is never opened in that case).
+    """
+    ids = [str(item) for item in session_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" * len(ids))
+    conn = _get_connection(archive_dir)
+    try:
+        cursor = conn.execute(
+            f"DELETE FROM runs WHERE session_id IN ({placeholders})",
+            ids,
+        )
+        deleted = int(cursor.rowcount)
+        conn.commit()
+        _remove_bundles(archive_dir, ids)
+        return deleted
+    finally:
+        conn.close()
+
+
+def _remove_bundles(archive_dir: Path, ids: list[str]) -> None:
+    """Remove on-disk bundles for deleted sessions so rebuild cannot resurrect them.
+
+    Mirrors the sibling hydrate/sanitize contract where ``rebuild_index``
+    reflects the on-disk ``runs/`` tree: a surviving bundle directory would
+    be re-upserted by the next filesystem-driven pass.  Only bare session-id
+    directories under ``<archive_dir>/runs/`` are removed; anything else
+    (including traversal-shaped ids or archive paths outside ``runs/``) is
+    left untouched.
+    """
+    runs_root = (archive_dir / "runs").resolve()
+    for sid in ids:
+        if not sid or Path(sid).name != sid:
+            continue
+        bundle = runs_root / sid
+        if bundle.is_dir():
+            shutil.rmtree(bundle, ignore_errors=True)
 
 
 def reviewer_set_penalty_prior(
