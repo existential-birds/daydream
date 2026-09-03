@@ -69,6 +69,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import warnings
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -682,6 +683,39 @@ def bulk_latest_label_observations(
             params,
         )
         return {row["session_id"]: dict(row) for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def delete_runs(archive_dir: Path, session_ids: Iterable[str]) -> int:
+    """Destructively prune ``runs`` rows for the given session ids.
+
+    Deletes rows from the ``runs`` table only; the append-only
+    ``label_observations`` history is never touched, so label provenance
+    survives hydration reruns that prune rejected sessions.
+
+    Session ids missing from the index are silent no-ops. The deletion runs as
+    a single ``DELETE ... WHERE session_id IN (?, ...)`` statement, which is
+    bounded by SQLite's host-parameter limit; per-stage run counts sit far
+    below that limit, so no chunking is performed today.
+
+    Returns:
+        The number of rows deleted (``0`` when ``session_ids`` is empty —
+        the database is never opened in that case).
+    """
+    ids = [str(item) for item in session_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" * len(ids))
+    conn = _get_connection(archive_dir)
+    try:
+        cursor = conn.execute(
+            f"DELETE FROM runs WHERE session_id IN ({placeholders})",
+            ids,
+        )
+        deleted = int(cursor.rowcount)
+        conn.commit()
+        return deleted
     finally:
         conn.close()
 

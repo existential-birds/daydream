@@ -20,6 +20,7 @@ from daydream.archive.index import (
     append_label_observation,
     bulk_latest_label_observations,
     canonical_utc_iso,
+    delete_runs,
     label_count_summary,
     label_observation_history,
     latest_label_observation,
@@ -1284,6 +1285,17 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
 
 
 # index: label_observations (Task 12)
+
+
+def test_delete_runs_removes_matching_rows_and_returns_count(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+    _seed_one_run(tmp_path, "sess-b")
+
+    deleted = delete_runs(tmp_path, ["sess-a", "sess-missing"])
+
+    assert deleted == 1
+    remaining = [r["session_id"] for r in query_runs(tmp_path)]
+    assert remaining == ["sess-b"]
 
 
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
