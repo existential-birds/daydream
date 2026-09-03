@@ -22,6 +22,9 @@ Exports:
         then recency) label_observations row for each session in a collection —
         single round-trip alternative to calling ``latest_label_observation`` in
         a loop.
+    delete_runs: Delete ``runs`` rows whose ``session_id`` matches any member of
+        a collection (exact match, parameterized ``IN``); return the ``int``
+        count of rows deleted. ``label_observations`` is untouched.
     reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
         runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
         outcome prior (C4).
@@ -101,6 +104,7 @@ __all__ = [
     "append_label_observation",
     "latest_label_observation",
     "bulk_latest_label_observations",
+    "delete_runs",
     "reviewer_set_penalty_prior",
     "label_observation_history",
     "label_count_summary",

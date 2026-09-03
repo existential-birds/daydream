@@ -2498,3 +2498,10 @@ def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) ->
             labeler_version="1055-human-r1", evidence_sha=None, source="human",
             observed_at="not-a-timestamp")
     assert label_observation_history(tmp_path, "sess-bad") == []
+
+
+def test_delete_runs_is_exported() -> None:
+    import daydream.archive.index as index_module
+
+    assert "delete_runs" in index_module.__all__
+    assert "delete_runs:" in index_module.__doc__
