@@ -469,15 +469,88 @@ class TestPublish:
         assert state.redownloaded == []  # digests verified remotely, nothing refetched
 
 
-def _seed_admitted_runs(stage: Path, specs: list[tuple[str, str | None]]) -> None:
-    """Seed admitted derivatives directly under ``stage/runs/`` (enrichment input set)."""
-    for sid, slug in specs:
+def _seed_admitted_runs(
+    stage: Path, specs: list[tuple[str, str | None] | tuple[str, str | None, dict[str, str] | None]],
+) -> None:
+    """Seed admitted derivatives directly under ``stage/runs/`` (enrichment input set).
+
+    A spec may carry an optional declared ``license_evidence`` dict as its third
+    element (written straight into the manifest like producer data would be).
+    """
+    for spec in specs:
+        sid, slug = spec[0], spec[1]
+        declared = spec[2] if len(spec) > 2 else None
         d = stage / "runs" / sid
         d.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {"session_id": sid}
         if slug is not None:
             data["git"] = {"remote_url": f"https://github.com/{slug}", "repo_slug": slug}
+        if declared is not None:
+            data["license_evidence"] = declared
         (d / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+class _StaticResolver:
+    """Test seam for :class:`RepoLicenseResolver`: every repo resolves to MIT."""
+
+    def resolve(self, repo_slug: str, repo_commit: str | None) -> Any:  # noqa: ANN201
+        from daydream.archive import license_enrich
+
+        return license_enrich.EnrichedEvidence(
+            spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
+        )
+
+
+def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) -> None:
+    """Issue #1094 task 11: the same (repo, spdx) decided via a declared
+    manifest vs via enrichment must yield identical decisions and identical
+    published manifest rows — the gate proves the two evidence supply paths
+    agree under one contract."""
+    from daydream.archive import license_enrich
+    from daydream.training.corpus_v2.license import (
+        load_license_policy,
+        resolve_repo_decision,
+    )
+
+    stage = tmp_path / "stage"
+    _seed_admitted_runs(stage, [
+        ("sess-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}),
+        ("sess-enriched", "acme/widget", None),
+    ])
+    evidence = license_enrich.enrich_license_evidence(
+        stage, revision="a" * 40, resolver=_StaticResolver())
+    policy, _digest = load_license_policy(
+        "daydream/training/schema/license-policy-production.json")
+    declared = resolve_repo_decision(
+        "acme/widget", {"spdx_id": "MIT"}, policy, frozenset())
+    enriched = resolve_repo_decision(
+        "acme/widget", {"spdx_id": evidence["sess-enriched"]["spdx_id"]}, policy, frozenset())
+    assert (declared.status, declared.reason_code) == (enriched.status, enriched.reason_code)
+    assert (declared.status, declared.reason_code) == ("admitted", None)
+
+    # Gate-level parity: the enrichment-written manifest evidence is consumed
+    # by the gate exactly like declared evidence — both sessions stay admitted
+    # and the ledger records no rejections for either.
+    rejected = hydrate.apply_license_gate(
+        stage, revision="a" * 40,
+        license_policy_path="daydream/training/schema/license-policy-production.json",
+        allow_copyleft=frozenset(),
+    )
+    assert rejected == []
+
+    # Manifest rows: both sessions publish the same decision fields, differing
+    # only in the evidence source string.
+    row_declared_t: tuple[str | None, dict[str, str] | None] = hydrate._session_identity(
+        stage, "sess-declared", "a" * 40, root="runs", collision=False)
+    row_enriched_t: tuple[str | None, dict[str, str] | None] = hydrate._session_identity(
+        stage, "sess-enriched", "a" * 40, root="runs", collision=False)
+    assert row_declared_t == ("acme/widget", {"spdx_id": "MIT", "source": "producer"})
+    assert row_enriched_t == ("acme/widget", {"spdx_id": "MIT", "source": "fake:acme/widget"})
+    assert row_declared_t[1] is not None and row_enriched_t[1] is not None
+    assert set(row_declared_t[1]) == set(row_enriched_t[1]) == {"spdx_id", "source"}
+    assert row_declared_t[1]["spdx_id"] == row_enriched_t[1]["spdx_id"] == "MIT"
+    assert row_declared_t[1]["source"] == "producer"
+    assert row_enriched_t[1]["source"] == "fake:acme/widget"
 
 
 def _staged_with(tmp_path: Path, remote_urls: dict[str, str | None]) -> Path:
