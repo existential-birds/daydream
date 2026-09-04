@@ -1,0 +1,8 @@
+flowchart TD
+    N1([resolve_identity]) --> N2{Ro-Passthrough enabled?}
+    N2 -->|yes| N3[Extract client ID and patient UUID]
+    N2 -->|no| N4{Bearer token present?}
+    N4 -->|yes| N5[[verify_jwt]]
+    N4 -->|no| N6([Reject 401])
+    N3 --> N7([Return unverified identity])
+    N5 --> N8([Return verified claims])
