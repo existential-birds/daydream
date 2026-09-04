@@ -410,7 +410,7 @@ def test_dry_run_reports_per_repo_decision_counts(
     assert sum(sum(v.values()) for v in per_repo.values()) == report["discovered"]
 
 
-def test_runbook_hydrate_hub_invocation_carries_policy_and_dry_run_gate():
+def test_runbook_hydrate_hub_invocation_carries_policy_and_dry_run_gate() -> None:
     text = pathlib.Path("docs/runbooks/annotation-final-publish.md").read_text()
     # The production hydrate-hub line carries the policy + opt-in args...
     hydrate_line = next(

@@ -134,14 +134,16 @@ class TestHydrateRules:
 
     def test_derive_curation_id_v2_binds_policy_inputs(self) -> None:
         from daydream.archive.hydrate_rules import derive_curation_id_v2
-        base = dict(
-            source_commit="a" * 40,
-            policy_digest="d" * 64,
-            policy_version="prod-1",
-            allow_copyleft=frozenset({"acme/widget"}),
-            exclusions_digest="e" * 64,
-        )
-        cid = derive_curation_id_v2(**base, decisions_digest="f" * 64, distribution_digest="0" * 64)
+        base: dict[str, object] = {
+            "source_commit": "a" * 40,
+            "policy_digest": "d" * 64,
+            "policy_version": "prod-1",
+            "allow_copyleft": frozenset({"acme/widget"}),
+            "exclusions_digest": "e" * 64,
+            "decisions_digest": "f" * 64,
+            "distribution_digest": "0" * 64,
+        }
+        cid = derive_curation_id_v2(**base)  # type: ignore[arg-type]
         assert cid.startswith("cur-") and len(cid) == 20 and cid[4:].isalnum()
         # Any change to any bound input changes the id (identity-breaking by design).
         for key, value in [
@@ -152,7 +154,7 @@ class TestHydrateRules:
             ("decisions_digest", "f" * 63 + "0"),
             ("distribution_digest", "0" * 63 + "1"),
         ]:
-            assert derive_curation_id_v2(**{**base, key: value}) != cid
+            assert derive_curation_id_v2(**{**base, key: value}) != cid  # type: ignore[arg-type]
         # v1 ids are untouched: existing prefixes keep the old derivation.
         from daydream.archive.hydrate_rules import derive_curation_id
         assert derive_curation_id("a" * 40, "1", "1", "1") == derive_curation_id("a" * 40, "1", "1", "1")
@@ -1282,7 +1284,7 @@ def test_curation_id_changes_with_policy_binding(tmp_path: Path) -> None:
     assert cid_a != v1
 
 
-def test_repo_commit_unresolved_is_a_license_bucket_code():
+def test_repo_commit_unresolved_is_a_license_bucket_code() -> None:
     from daydream.archive.hydrate import admission_summary_buckets
     from daydream.archive.hydrate_rules import (
         EXCLUSION_CODES,
