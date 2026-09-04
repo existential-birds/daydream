@@ -117,6 +117,13 @@ Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.
 `Metrics`, `TurnEnd`, `Result`). Adding a backend means producing that stream correctly — phases and the
 recorder are backend-agnostic.
 
+The Claude backend enforces two always-on `PreToolUse` guards in every phase and profile: the
+dangerous-command guard (root-anchored scans, `rm -rf /`) and the background-Bash guard. The host reads a
+turn's final text as the phase result and stops consuming the session when the turn ends, at which point
+the CLI kills its background tasks — so `Bash(run_in_background=True)` can never report and is denied. The
+CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts the Bash timeout ceiling to
+`TEST_WALL_BUDGET_S` so a slow test suite has no reason to be backgrounded.
+
 ### Run-agent budgets
 
 | Bound | Value | Scope |
@@ -221,7 +228,7 @@ Full contract: `docs/extensions.md`.
 
 ## Constraints and conventions
 
-- **SDK** `claude-agent-sdk==0.2.116`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
+- **SDK** `claude-agent-sdk==0.2.147`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
   unshielded on cancellation, so a budget/fan-out cancel mid-stream corrupts anyio's cancel-scope stack.
 - **ATIF** vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0), pinned to v1.7 emission.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in

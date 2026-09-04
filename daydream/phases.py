@@ -3128,6 +3128,18 @@ def _reject_test_healing_generated_file_edits(
     return None if restoration_failed else direct_violations
 
 
+# Shared tail of both test-phase prompts. The host parses this turn's final text
+# for the verdict (``detect_test_success``), so the agent must run the suite to
+# completion inside the turn and quote the runner's own summary: a
+# "still running, I'll report later" narration would be parsed as a failure and
+# fed to the fix agent as if it were test output. The Claude backend also
+# enforces the foreground rule mechanically (``_background_bash_guard``).
+_TEST_RUN_INSTRUCTIONS = (
+    "Run it in the foreground and wait for it to finish; never run it in the background. "
+    "Report if tests pass or fail, quoting the test runner's final summary line verbatim."
+)
+
+
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
@@ -3202,10 +3214,10 @@ async def phase_test_and_heal(
             prompt = (
                 "Run this exact test command:\n"
                 f"```\n{sanitized_cmd}\n```\n"
-                "Report if tests pass or fail."
+                f"{_TEST_RUN_INSTRUCTIONS}"
             )
         else:
-            prompt = "Run the project's test suite. Report if tests pass or fail."
+            prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
         # Use-once: clear after consuming above so the next iteration falls back
         # to the default prompt. Must stay before the bottom-of-loop branches that
         # may re-assign test_command_override (choice "1" → setup investigator).

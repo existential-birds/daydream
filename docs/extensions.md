@@ -211,8 +211,8 @@ model = "claude-sonnet-5"
 
 The built-in tool supervisor applies the shared file globs to `Write` and
 `Edit`, and applies `tool_bash_deny` as regular expressions to `Bash` commands.
-Claude's always-on dangerous-command guard remains active; this configuration
-adds rules and does not replace it.
+Claude's always-on guards (dangerous-command and background-Bash) remain
+active; this configuration adds rules and does not replace them.
 
 Supervisor actions are `allow`, `drop`, `edit`, and `hold`. A held finding is
 removed from the actionable `items` list and stored under the top-level `held`
