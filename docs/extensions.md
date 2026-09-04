@@ -311,7 +311,7 @@ name is stable.
 
 ### Prompts
 
-The 15 registered prompt names and the exact kwargs their builders receive
+The 17 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
@@ -329,6 +329,8 @@ noted.
 | `merge` | `strategy`, `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
 | `verify` | `strategy`, `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
 | `fix-verify` | `items`, `changed_hunks`, `cwd`, `round_number` |
+| `diagram_sequence` | `diff_path`, `inline_diff`, `files_by_module`, `cwd`, `exploration_dir`, `schema` |
+| `diagram_flowchart` | `diff_path`, `inline_diff`, `candidate_roots`, `forced`, `cwd`, `exploration_dir`, `schema` |
 | `audit` | `category`, `strategy`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `strategy`, `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |

@@ -54,6 +54,8 @@ def _register_builtin_prompts(registry: Registry) -> None:
     registry.override_prompt("merge", deep_prompts.build_merge_prompt)
     registry.override_prompt("verify", deep_prompts.build_verification_prompt)
     registry.override_prompt("fix-verify", deep_prompts.build_fix_verify_prompt)
+    registry.override_prompt("diagram_sequence", deep_prompts.build_sequence_diagram_prompt)
+    registry.override_prompt("diagram_flowchart", deep_prompts.build_flowchart_prompt)
 
 
 def _register_builtin_renderers(registry: Registry) -> None:

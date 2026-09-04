@@ -1,6 +1,7 @@
 """Deep-mode prompt builder tests (D-09, D-10, D-19, D-20)."""
+import json
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pytest
 
@@ -8,20 +9,25 @@ from daydream.deep.prompts import (
     ANTI_SLOP_RUBRIC_INSTRUCTION,
     CONFIG_FLOW_TRACE_INSTRUCTION,
     CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
+    DIAGRAM_GROUNDING_INSTRUCTION,
     DOC_REVIEW_NOTICE,
     TEST_QUALITY_RUBRIC_INSTRUCTION,
     TRUST_MODEL_INSTRUCTION,
     bound_deep_diff,
     build_arbiter_prompt,
+    build_diagram_repair_prompt,
+    build_flowchart_prompt,
     build_generic_fallback_prompt,
     build_merge_prompt,
     build_per_stack_prompt,
+    build_sequence_diagram_prompt,
     build_structural_prompt,
     build_supervise_prompt,
     build_suppression_prompt,
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 
 class _PromptPaths(TypedDict):
@@ -1720,3 +1726,265 @@ def test_adjudication_prompts_reference_severity_rubric(builder: str, tmp_path: 
 def test_adjudication_prompts_no_divergent_severity_fragment(builder: str, tmp_path: Path) -> None:
     """R1.3: no adjudication prompt retains a bare "high | medium" restatement."""
     assert "high | medium" not in _adjudication_prompts(tmp_path)[builder]
+
+
+# =============================================================================
+# Issue #1113 — grounded diagram prompts
+# =============================================================================
+
+
+def _diagram_schema() -> dict[str, object]:
+    """A stand-in spec schema: the builders take the schema as a kwarg."""
+    return {
+        "type": "object",
+        "properties": {"participants": {"type": "array"}},
+        "required": ["participants"],
+        "additionalProperties": False,
+    }
+
+
+def _sequence_prompt(tmp_path: Path, **overrides: object) -> str:
+    kwargs: dict[str, object] = {
+        "diff_path": tmp_path / ".daydream" / "diff.patch",
+        "inline_diff": None,
+        "files_by_module": {"api": ["api/handler.py"], "core": ["core/resolve.py", "core/db.py"]},
+        "cwd": tmp_path,
+        "exploration_dir": tmp_path / ".daydream" / "exploration",
+        "schema": _diagram_schema(),
+    }
+    kwargs.update(overrides)
+    return build_sequence_diagram_prompt(**kwargs)  # type: ignore[arg-type]
+
+
+def _flowchart_prompt(tmp_path: Path, **overrides: object) -> str:
+    kwargs: dict[str, object] = {
+        "diff_path": tmp_path / ".daydream" / "diff.patch",
+        "inline_diff": None,
+        "candidate_roots": [
+            {"file": "core/resolve.py", "name": "resolve_identity", "line": 22, "end_line": 71, "branch_points": 4},
+            {"file": "api/handler.py", "name": "handle", "line": 8, "end_line": 30, "branch_points": 3},
+        ],
+        "forced": False,
+        "cwd": tmp_path,
+        "exploration_dir": tmp_path / ".daydream" / "exploration",
+        "schema": _diagram_schema(),
+    }
+    kwargs.update(overrides)
+    return build_flowchart_prompt(**kwargs)  # type: ignore[arg-type]
+
+
+_FAILURES: list[dict[str, Any]] = [
+    {"element": "message", "ref": "2", "reason": "FILE_MISSING", "grounded": False},
+    {"element": "participant", "ref": "Identity Resolver", "reason": "PARTICIPANT_FILE_MISSING"},
+    {"element": "root", "ref": "core/resolve.py:resolve_identity", "reason": "ROOT_NOT_CANDIDATE"},
+]
+
+
+def test_diagram_prompts_open_with_their_role_sentence(tmp_path: Path) -> None:
+    """D17: the role sentence is the prompt's opening text (the stub dispatches on it)."""
+    assert _sequence_prompt(tmp_path).startswith("You are the sequence-diagram author for this pull request.")
+    assert _flowchart_prompt(tmp_path).startswith("You are the flowchart author for this pull request.")
+    repair = build_diagram_repair_prompt(
+        kind="flowchart", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
+    )
+    assert repair.startswith("Diagram repair turn (flowchart):")
+
+
+def test_diagram_grounding_instruction_states_the_three_host_guarantees() -> None:
+    """The constant carries Gate-0, the same-turn read rule, and the deterministic drop."""
+    text = DIAGRAM_GROUNDING_INSTRUCTION
+    assert "Gate-0 anti-confabulation" in text
+    assert "read freshly in THIS turn" in text
+    assert "must be read in this turn" in text
+    assert "verifies every file:line you emit deterministically" in text
+    assert "dropped from the rendered diagram" in text
+    assert "never write mermaid" in text
+
+
+@pytest.mark.parametrize("builder", ["sequence", "flowchart", "repair"])
+def test_diagram_prompts_carry_the_grounding_instruction(builder: str, tmp_path: Path) -> None:
+    """Delivery matrix: every diagram prompt embeds the Gate-0 diagram text."""
+    prompts = {
+        "sequence": _sequence_prompt(tmp_path),
+        "flowchart": _flowchart_prompt(tmp_path),
+        "repair": build_diagram_repair_prompt(
+            kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
+        ),
+    }
+    assert DIAGRAM_GROUNDING_INSTRUCTION in prompts[builder]
+
+
+def test_diagram_grounding_instruction_not_delivered_to_review_prompts(tmp_path: Path) -> None:
+    """Delivery matrix: the diagram gate is scoped to the diagram phase only."""
+    per_stack = build_per_stack_prompt(
+        strategy=_default_strategy("discovery.per_stack"),
+        stack_name="python",
+        files=["api/handler.py"],
+        **_paths(tmp_path),
+    )
+    assert DIAGRAM_GROUNDING_INSTRUCTION not in per_stack
+
+
+@pytest.mark.parametrize("builder", ["sequence", "flowchart"])
+def test_diagram_prompts_inline_a_small_diff(builder: str, tmp_path: Path) -> None:
+    """Under the byte budget the diff is inlined and the pointer is dropped."""
+    diff = "diff --git a/api/handler.py b/api/handler.py\n@@ -1 +1 @@\n-old\n+new\n"
+    build = _sequence_prompt if builder == "sequence" else _flowchart_prompt
+    prompt = build(tmp_path, inline_diff=diff)
+    assert "+new" in prompt
+    assert "do NOT re-Read diff.patch" in prompt
+    assert str(tmp_path / ".daydream" / "diff.patch") not in prompt
+
+
+@pytest.mark.parametrize("builder", ["sequence", "flowchart"])
+def test_diagram_prompts_fall_back_to_the_diff_pointer(builder: str, tmp_path: Path) -> None:
+    """An oversized (or absent) inline diff degrades to the on-disk pointer."""
+    oversized = "x" * (INLINE_DIFF_BUDGET_BYTES + 1)
+    build = _sequence_prompt if builder == "sequence" else _flowchart_prompt
+    for inline in (None, oversized):
+        prompt = build(tmp_path, inline_diff=inline)
+        assert str(tmp_path / ".daydream" / "diff.patch") in prompt
+        assert "The full PR diff (base..HEAD) is at" in prompt
+        assert oversized not in prompt
+
+
+def test_sequence_prompt_groups_changed_files_by_module(tmp_path: Path) -> None:
+    """Participants must align with real boundaries, so the modules are enumerated."""
+    prompt = _sequence_prompt(tmp_path)
+    assert "grouped by module/service" in prompt
+    assert "- api\n    - api/handler.py" in prompt
+    assert "- core\n    - core/resolve.py\n    - core/db.py" in prompt
+
+
+def test_sequence_prompt_states_the_spec_rules(tmp_path: Path) -> None:
+    """Spec section 2: participant/message/block rules and the render floor."""
+    prompt = _sequence_prompt(tmp_path)
+    assert "3 to 10 entries" in prompt
+    assert "`internal` | `external`" in prompt
+    assert "≤ 80" in prompt
+    assert "`call` | `reply` | `self`" in prompt
+    assert "the FIRST message" in prompt
+    assert "`alt` (2 or more branches)" in prompt
+    assert "0-based indices" in prompt
+    assert "at least 3 grounded messages" in prompt
+
+
+def test_flowchart_prompt_lists_candidate_roots_with_ranges_and_counts(tmp_path: Path) -> None:
+    """The model may only pick a root from this list, so ranges and counts are shown."""
+    prompt = _flowchart_prompt(tmp_path)
+    assert "- `resolve_identity` in core/resolve.py, lines 22-71, 4 changed branch point(s)" in prompt
+    assert "- `handle` in api/handler.py, lines 8-30, 3 changed branch point(s)" in prompt
+    assert "MUST be one of these" in prompt
+    assert "explicitly requested" not in prompt
+
+
+def test_flowchart_prompt_forced_names_the_widened_candidate_list(tmp_path: Path) -> None:
+    """forced=True: the list is every changed function, not only threshold-meeting ones."""
+    prompt = _flowchart_prompt(tmp_path, forced=True)
+    assert "explicitly requested" in prompt
+    assert "every changed function rather than only those meeting the branch-point threshold" in prompt
+    assert "rather than inventing branches" in prompt
+
+
+def test_flowchart_prompt_states_the_spec_rules(tmp_path: Path) -> None:
+    """Spec section 2: node kinds, per-kind evidence, edge labels, and the floor."""
+    prompt = _flowchart_prompt(tmp_path)
+    assert "4 to 25 entries" in prompt
+    assert "`start` | `end` | `process` | `decision` | `subroutine` | `io`" in prompt
+    assert "≤ 60" in prompt
+    assert "cites the CALL SITE" in prompt
+    assert "at least 2 outgoing edges with distinct labels" in prompt
+    assert "Exactly one `start` node; at least one `end` node" in prompt
+    assert "at least 4 grounded nodes" in prompt
+
+
+def test_flowchart_prompt_has_no_candidate_roots(tmp_path: Path) -> None:
+    """An empty candidate list renders as ``(none)`` rather than an empty section."""
+    prompt = _flowchart_prompt(tmp_path, candidate_roots=[], forced=True)
+    assert "- (none)" in prompt
+
+
+def test_repair_prompt_lists_every_failure_with_its_reason_code() -> None:
+    """Spec section 4: each failing element is named with its reason code."""
+    prompt = build_diagram_repair_prompt(
+        kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
+    )
+    assert "- message `2`: FILE_MISSING" in prompt
+    assert "- participant `Identity Resolver`: PARTICIPANT_FILE_MISSING" in prompt
+    assert "- root `core/resolve.py:resolve_identity`: ROOT_NOT_CANDIDATE" in prompt
+
+
+def test_repair_prompt_states_the_repair_contract() -> None:
+    """Correct or remove, return the full spec, exactly one repair turn."""
+    prompt = build_diagram_repair_prompt(
+        kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
+    )
+    assert "Correct its evidence" in prompt
+    assert "Remove the element from the spec entirely" in prompt
+    assert "Return the FULL corrected spec in the same JSON shape" in prompt
+    assert "ONLY repair turn" in prompt
+    assert "ROOT_NOT_CANDIDATE` verdict" not in prompt
+
+
+def test_repair_prompt_repeats_the_candidate_list_for_a_root_repick() -> None:
+    """A flowchart repair carries the candidate list and the re-pick instruction."""
+    prompt = build_diagram_repair_prompt(
+        kind="flowchart",
+        failures=_FAILURES,
+        candidate_roots=[
+            {"file": "core/resolve.py", "name": "resolve_identity", "line": 22, "end_line": 71, "branch_points": 4}
+        ],
+        schema=_diagram_schema(),
+    )
+    assert "`ROOT_NOT_CANDIDATE` verdict means the root you chose is not in the candidate list" in prompt
+    assert "Re-pick a root from the list below" in prompt
+    assert "- `resolve_identity` in core/resolve.py, lines 22-71, 4 changed branch point(s)" in prompt
+    assert "explicitly requested" not in prompt
+
+
+@pytest.mark.parametrize("builder", ["sequence", "flowchart", "repair"])
+def test_diagram_prompts_embed_the_output_schema(builder: str, tmp_path: Path) -> None:
+    """Every diagram prompt ends with the structured-output schema block."""
+    prompts = {
+        "sequence": _sequence_prompt(tmp_path),
+        "flowchart": _flowchart_prompt(tmp_path),
+        "repair": build_diagram_repair_prompt(
+            kind="flowchart", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
+        ),
+    }
+    prompt = prompts[builder]
+    assert "Return ONLY a JSON object matching this schema:" in prompt
+    assert json.dumps(_diagram_schema(), indent=2) in prompt
+
+
+@pytest.mark.parametrize("builder", ["sequence", "flowchart"])
+def test_diagram_prompts_ground_cwd_and_fence_untrusted_content(builder: str, tmp_path: Path) -> None:
+    """Shared scaffold: cwd grounding, the untrusted-content boundary, exploration pointers."""
+    build = _sequence_prompt if builder == "sequence" else _flowchart_prompt
+    prompt = build(tmp_path)
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in prompt
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+    assert str(tmp_path / ".daydream" / "exploration" / "affected_files.md") in prompt
+    assert str(tmp_path / ".daydream" / "exploration") + "/dependencies.md" in prompt
+
+
+@pytest.mark.parametrize("builder", ["sequence", "flowchart"])
+def test_diagram_prompts_without_exploration_keep_the_content_boundary(builder: str, tmp_path: Path) -> None:
+    """No exploration directory still fences repository content as untrusted data."""
+    build = _sequence_prompt if builder == "sequence" else _flowchart_prompt
+    prompt = build(tmp_path, exploration_dir=None)
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+    assert "Pre-scan exploration" not in prompt
+
+
+def test_diagram_prompt_names_are_registered() -> None:
+    """Both prompt names resolve through the built-in registry (docs/extensions.md)."""
+    from daydream.extensions import Registry
+    from daydream.extensions.builtins import register_builtins
+
+    reg = Registry()
+    register_builtins(reg)
+    assert "diagram_sequence" in reg.prompt_names()
+    assert "diagram_flowchart" in reg.prompt_names()
+    assert reg.prompt("diagram_sequence") is build_sequence_diagram_prompt
+    assert reg.prompt("diagram_flowchart") is build_flowchart_prompt
