@@ -1,0 +1,26 @@
+{
+  "policy_version": "production-1",
+  "spdx_decisions": {
+    "MIT": "accepted",
+    "Apache-2.0": "accepted",
+    "BSD-2-Clause": "accepted",
+    "BSD-3-Clause": "accepted",
+    "ISC": "accepted",
+    "0BSD": "accepted",
+    "Unlicense": "accepted",
+    "CC0-1.0": "accepted",
+    "Zlib": "accepted",
+    "BSL-1.0": "accepted",
+    "GPL-2.0-only": "rejected",
+    "GPL-2.0-or-later": "rejected",
+    "GPL-3.0-only": "rejected",
+    "GPL-3.0-or-later": "rejected",
+    "AGPL-3.0-only": "rejected",
+    "AGPL-3.0-or-later": "rejected",
+    "LGPL-2.1-only": "rejected",
+    "LGPL-2.1-or-later": "rejected",
+    "LGPL-3.0-only": "rejected",
+    "LGPL-3.0-or-later": "rejected",
+    "MPL-2.0": "rejected"
+  }
+}

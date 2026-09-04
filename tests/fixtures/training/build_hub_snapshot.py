@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.hydrate_rules import (
@@ -32,6 +33,29 @@ from tests.fixtures.training.build_archive import _MINIMAL_TRAJECTORY, FIXTURE_S
 
 REPO_ID = "org/private-ds"
 SNAPSHOT_REVISION = hashlib.sha256(b"fixture-hub-snapshot-v1").hexdigest()[:40]
+
+# Pinned archive fixture (issue #1094 Task 10): a second digest-pinned revision
+# whose five sessions exercise the full enrich -> gate -> v2-identity path.
+PINNED_REVISION = hashlib.sha256(b"fixture-hub-snapshot-pinned-v1").hexdigest()[:40]
+
+# (session_id, repo_slug, declared license_evidence | None):
+#   pin-declared  — well-formed declared MIT evidence (enrichment never re-derives)
+#   pin-enrich    — legacy record, repo identity only (enrichment fills MIT)
+#   pin-gpl       — enrichment resolves GPL-3.0-only -> c8_copyleft_unopted
+#   pin-unknown   — enrichment cannot resolve -> license_evidence_missing
+#   pin-c5        — C5-listed repo (getsentry/sentry) -> c5_excluded_repo
+_PINNED_SESSIONS: tuple[tuple[str, str, dict[str, str] | None], ...] = (
+    ("pin-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}),
+    ("pin-enrich", "acme/widget", None),
+    ("pin-gpl", "acme/copyleft", None),
+    ("pin-unknown", "ghost/nope", None),
+    ("pin-c5", "getsentry/sentry", None),
+)
+
+# The pinned policy: the same content as the checked-in production SPDX policy
+# (daydream/training/schema/license-policy-production.json), committed as a
+# fixture so the policy digest in every pinned-fixture run is stable.
+PINNED_POLICY_FIXTURE = Path(__file__).parent / "license-policy-pinned-fixture.json"
 
 # Three §9 sessions, aliased to the stable ids the integration scenarios assert on.
 _SNAPSHOT_SESSION_IDS = ("sess-a", "sess-b", "sess-c")
@@ -137,6 +161,29 @@ def build_snapshot(*, hostile: bool = False) -> FakeHub:
 
     hub = FakeHub(repo_id=REPO_ID, private=True, files=files)
     hub.commit_revision(SNAPSHOT_REVISION)
+    return hub
+
+
+def build_pinned_snapshot() -> FakeHub:
+    """Materialize the pinned five-session archive fixture as an in-memory FakeHub.
+
+    Same builder pattern as :func:`build_snapshot` (shared manifest/trajectory
+    constructors, canonical ``<session_id>/`` layout, pinned 40-hex revision);
+    the sessions carry the mixed declared/enriched/C5/copyleft/unknown license
+    matrix the Task 10 integration test asserts on.
+    """
+    files: dict[str, bytes] = {}
+    for session_id, repo_slug, evidence in _PINNED_SESSIONS:
+        manifest = _snapshot_manifest(session_id, repo_slug, "pr_review", ("merged",))
+        data = manifest.to_dict()
+        if evidence is not None:
+            data["license_evidence"] = evidence
+        files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()
+        files[f"{session_id}/trajectory.json"] = json.dumps(
+            _snapshot_trajectory(session_id), indent=2
+        ).encode()
+    hub = FakeHub(repo_id=REPO_ID, private=True, files=files)
+    hub.commit_revision(PINNED_REVISION)
     return hub
 
 

@@ -14,7 +14,14 @@ import pytest
 
 from daydream.archive import hydrate, hydrate_rules
 from daydream.archive.hydrate_client import FakeHub
-from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
+from tests.fixtures.training.build_hub_snapshot import (
+    PINNED_POLICY_FIXTURE,
+    PINNED_REVISION,
+    REPO_ID,
+    SNAPSHOT_REVISION,
+    build_pinned_snapshot,
+    build_snapshot,
+)
 
 REVISION = SNAPSHOT_REVISION  # 40-hex pinned by the fixture builder
 
@@ -200,6 +207,162 @@ class TestPathTraversal:
             hydrate.run_hydrate_hub(_config(tmp_path / "stage"), client=hub)
         assert not (tmp_path / "escape.txt").exists()
         assert not (tmp_path / "etc").exists()
+
+
+# ---------------------------------------------------------------------------
+# Pinned archive fixture (issue #1094 Task 10): enrichment -> gate -> v2
+# identity -> publication over a committed, digest-pinned snapshot + policy.
+# ---------------------------------------------------------------------------
+
+
+class _PinnedResolver:
+    """Canned per-slug enrichment results; records queried slugs."""
+
+    def __init__(self, results: dict[str, object]) -> None:
+        self.results = results
+        self.queried: list[str] = []
+
+    def resolve(self, repo_slug: str, repo_commit: str | None):  # type: ignore[no-untyped-def]
+        from daydream.archive import license_enrich
+
+        self.queried.append(repo_slug)
+        evidence = self.results.get(repo_slug)
+        if evidence is None:
+            return None
+        assert isinstance(evidence, license_enrich.EnrichedEvidence)
+        return evidence
+
+
+class _ReplayResolver:
+    """Fresh-VM replay resolver: serves only from the published
+    ``license-evidence.jsonl`` cache bytes. There is no live source to query —
+    a slug absent from the published cache fails the test (never re-queried).
+    """
+
+    def __init__(self, published_cache: bytes) -> None:
+        self.by_slug: dict[str, dict[str, object]] = {}
+        for line in published_cache.decode("utf-8").splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            slug = entry.get("repo_slug")
+            if isinstance(slug, str):
+                self.by_slug.setdefault(slug, entry)
+        self.served: list[str] = []
+
+    def resolve(self, repo_slug: str, repo_commit: str | None):  # type: ignore[no-untyped-def]
+        from daydream.archive import license_enrich
+
+        entry = self.by_slug.get(repo_slug)
+        assert entry is not None, (
+            f"replay resolver asked for {repo_slug!r}, which the published "
+            "cache never resolved — the live source would be re-queried"
+        )
+        self.served.append(repo_slug)
+        if entry.get("status") != "resolved":
+            return None
+        return license_enrich.EnrichedEvidence(
+            spdx_id=str(entry["spdx_id"]),
+            source=str(entry["source"]),
+            repo_commit=str(entry["repo_commit"]),
+        )
+
+
+def _pinned_resolver() -> _PinnedResolver:
+    from daydream.archive import license_enrich
+
+    commit = "d" * 40
+    return _PinnedResolver({
+        "acme/widget": license_enrich.EnrichedEvidence(
+            spdx_id="MIT", source=f"github:acme/widget@{commit}", repo_commit=commit,
+        ),
+        "acme/copyleft": license_enrich.EnrichedEvidence(
+            spdx_id="GPL-3.0-only", source=f"github:acme/copyleft@{commit}", repo_commit=commit,
+        ),
+        "ghost/nope": None,  # unresolvable at the source: stable-code miss
+        "getsentry/sentry": license_enrich.EnrichedEvidence(
+            spdx_id="MIT", source=f"github:getsentry/sentry@{commit}", repo_commit=commit,
+        ),
+    })
+
+
+def run_pinned_fixture_hydration(
+    stage_root: Path,
+    *,
+    hub: FakeHub | None = None,
+    resolver: object | None = None,
+) -> hydrate.HydrateSummary:
+    """One full ``run_hydrate_hub`` pass over the pinned snapshot + policy fixture.
+
+    ``resolver`` (default: the canned pinned resolver) is injected through the
+    production ``_make_license_resolver`` seam.
+    """
+    from daydream.archive import license_enrich
+
+    hub = hub if hub is not None else build_pinned_snapshot()
+    resolver = resolver if resolver is not None else _pinned_resolver()
+    stage_root.mkdir(parents=True, exist_ok=True)
+    policy = stage_root / "license-policy.json"
+    policy.write_bytes(PINNED_POLICY_FIXTURE.read_bytes())
+    config = hydrate.HydrateHubConfig(
+        source_repo=REPO_ID,
+        source_revision=PINNED_REVISION,
+        destination_repo=REPO_ID,
+        stage_dir=stage_root / "stage",
+        license_policy_path=str(policy),
+        allow_copyleft=frozenset(),
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(license_enrich, "_make_license_resolver", lambda: resolver)
+        return hydrate.run_hydrate_hub(config, client=hub)
+
+
+class TestPinnedArchiveFixture:
+    def test_pinned_archive_fixture_full_path_enrich_gate_identity_publish(
+        self, tmp_path: Path
+    ) -> None:
+        # Pinned snapshot fixture (committed builder bytes, digest-pinned
+        # revision) + pinned policy fixture: enrichment fills legacy evidence,
+        # the gate excludes per stable code, the v2 identity binds, publication
+        # + verify pass, _SUCCESS lands last.
+        hub = build_pinned_snapshot()
+        summary = run_pinned_fixture_hydration(tmp_path, hub=hub)
+        assert summary.verified is True
+        assert summary.license_admission["admitted"] >= 1          # nonzero admitted data
+        assert summary.license_admission["c8_copyleft_unopted"] == 1
+        assert summary.license_admission["license_evidence_missing"] >= 1
+        # Full record accounting over the pinned five-session matrix.
+        assert summary.license_admission == {
+            "admitted": 2,               # declared MIT + enriched MIT
+            "c5_excluded": 1,            # getsentry/sentry (C5 preempts evidence)
+            "c8_copyleft_unopted": 1,    # GPL-3.0-only, no exact-slug opt-in
+            "license_evidence_missing": 1,  # unresolvable repo
+        }
+        assert summary.dry_run_discovered == 5
+        assert (
+            summary.dry_run_admitted
+            + summary.dry_run_rejected
+            == summary.dry_run_discovered
+        )
+
+        # Fresh-VM replay: identical decisions and identity from the published
+        # cache + pinned inputs — the replay resolver reads the published
+        # license-evidence.jsonl and is never re-queried against a live source.
+        from daydream.archive.license_enrich import _PUBLISHED_CACHE_NAME
+
+        published_key = f"curated/{summary.curation_id}/{_PUBLISHED_CACHE_NAME}"
+        assert published_key in hub.files  # published under the v2 prefix
+        replay_resolver = _ReplayResolver(hub.files[published_key])
+        replay = run_pinned_fixture_hydration(
+            tmp_path / "replay", hub=build_pinned_snapshot(), resolver=replay_resolver,
+        )
+        assert replay.curation_id == summary.curation_id
+        assert replay.license_admission == summary.license_admission
+        assert replay.verified is True
+        # Every enrichment slug was served from the published cache, never the live source.
+        assert set(replay_resolver.served) == {
+            "acme/widget", "acme/copyleft", "ghost/nope", "getsentry/sentry",
+        }
 
 
 class TestDeterministicReindex:
