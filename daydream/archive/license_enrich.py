@@ -283,18 +283,26 @@ def enrich_license_evidence(
     return resolved
 
 
-def publish_enrichment_cache(stage: Path, *, revision: str) -> Path | None:
+def publish_enrichment_cache(
+    stage: Path, *, revision: str | None = None, curated_dir: Path | None = None,
+) -> Path | None:
     """Copy the staging-internal enrichment cache into the curated prefix.
 
     The cache at ``stage/_enrich/`` is VM-local bookkeeping (mirroring
     ``_dedupe``'s published-set exclusion); the curated copy
     ``license-evidence.jsonl`` is the published pinned state a fresh-VM replay
     consumes. Returns the published path, or ``None`` when nothing was cached.
+
+    Issue #1094: publication passes the post-gate v2 ``curated_dir`` (the
+    curation id is only known after the gate); callers without one fall back
+    to the pre-identity v1-shaped location.
     """
     cache = _cache_path(stage)
     if not cache.is_file():
         return None
-    target = _curated_dir(stage, str(revision)) / _PUBLISHED_CACHE_NAME
+    if curated_dir is None:
+        curated_dir = _curated_dir(stage, str(revision))
+    target = curated_dir / _PUBLISHED_CACHE_NAME
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(cache.read_bytes())
     return target

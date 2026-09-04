@@ -1875,15 +1875,35 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         _hydrate.download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
         _hydrate.ingest_bundles(config.stage_dir, revision=source_commit)
         _hydrate.dedupe_admitted(config.stage_dir, revision=source_commit)
+        binding = None
         if config.license_policy_path is not None:
+            # Issue #1094: the dry-run derives and reports the v2 candidate id
+            # from the same binding inputs the publication will use — enrich
+            # (production resolver), gate, then the post-gate binding.
+            from daydream.archive.license_enrich import (
+                _make_license_resolver,
+                enrich_license_evidence,
+            )
+
+            enrich_license_evidence(
+                config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+            )
+            _hydrate.restamp_admitted_digests(config.stage_dir, revision=source_commit)
             _hydrate.apply_license_gate(
                 config.stage_dir,
                 revision=source_commit,
                 license_policy_path=config.license_policy_path,
                 allow_copyleft=config.allow_copyleft,
             )
+            binding = _hydrate.resolve_curation_identity(
+                config.stage_dir,
+                source_commit=source_commit,
+                license_policy_path=config.license_policy_path,
+                allow_copyleft=config.allow_copyleft,
+            )
         ledger = _hydrate.build_import_ledger(
-            config.stage_dir, revision=source_commit, source_commit=source_commit
+            config.stage_dir, revision=source_commit, source_commit=source_commit,
+            binding=binding,
         )
         license_admission = (
             _hydrate.license_admission_summary(ledger)

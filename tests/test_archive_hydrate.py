@@ -1097,6 +1097,58 @@ class TestAdmissionSummary:
         assert sum(summary.values()) == 5
 
 
+def _identity_for(
+    stage: Path, *, policy_path: str, allow_copyleft: frozenset[str] = frozenset(),
+) -> str:
+    """Thin test helper: stages the pipeline stages the identity depends on
+    (enrich -> gate) and then calls the production post-gate binding
+    derivation exactly as ``run_hydrate_hub`` does — never a reimplementation."""
+    from daydream.archive import license_enrich
+    revision = "a" * 40
+
+    class FakeResolver:
+        def resolve(
+            self, repo_slug: str, repo_commit: str | None
+        ) -> license_enrich.EnrichedEvidence | None:
+            return license_enrich.EnrichedEvidence(
+                spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
+            )
+
+    license_enrich.enrich_license_evidence(stage, revision=revision, resolver=FakeResolver())
+    hydrate.restamp_admitted_digests(stage, revision=revision)
+    hydrate.apply_license_gate(
+        stage, revision=revision, license_policy_path=policy_path,
+        allow_copyleft=allow_copyleft,
+    )
+    binding = hydrate.resolve_curation_identity(
+        stage, source_commit=revision, license_policy_path=policy_path,
+        allow_copyleft=allow_copyleft,
+    )
+    return str(binding["curation_id"])
+
+
+def test_curation_id_changes_with_policy_binding(tmp_path: Path) -> None:
+    """Issue #1094 task 6: the v2 curation id is derived post-gate from the
+    resolved policy binding, so two full runs over the same stage with
+    different policies land under different curated/ prefixes; the same
+    policy twice reproduces the same prefix (byte-reproducible identity)."""
+    stage = tmp_path / "stage"
+    _seed_admitted_runs(stage, [("sess-1", "acme/widget")])
+    policy_a = _write_policy(tmp_path)  # policy_version "1"
+    policy_b_path = tmp_path / "policy-b.json"
+    policy_b_path.write_text(
+        json.dumps({"policy_version": "2", "spdx_decisions": {"MIT": "accepted"}}))
+    cid_a = _identity_for(stage, policy_path=policy_a, allow_copyleft=frozenset())
+    cid_b = _identity_for(stage, policy_path=str(policy_b_path))  # different policy_version
+    assert cid_a != cid_b
+    assert _identity_for(stage, policy_path=policy_a, allow_copyleft=frozenset()) == cid_a
+    # The v2 id is never the v1 derivation (which ignores the policy inputs).
+    v1 = hydrate_rules.derive_curation_id(
+        "a" * 40, hydrate_rules.SANITIZER_VERSION,
+        hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION, hydrate_rules.ADMISSION_POLICY_VERSION)
+    assert cid_a != v1
+
+
 def test_repo_commit_unresolved_is_a_license_bucket_code():
     from daydream.archive.hydrate import admission_summary_buckets
     from daydream.archive.hydrate_rules import (

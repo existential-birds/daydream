@@ -777,7 +777,7 @@ def apply_license_gate(
     )
 
     policy, _digest = load_license_policy(license_policy_path)
-    curated = _curated_dir(stage, str(revision))
+    curated = _pre_identity_dir(stage, str(revision))
     ledger_path = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
     rejected: list[tuple[str, str]] = []
     runs_dir = stage / "runs"
@@ -952,15 +952,163 @@ class DedupeResult:
     excluded: list[tuple[str, str]] = field(default_factory=list)  # (session_id, reason_code)
 
 
-def _curated_dir(stage: Path, source_commit: str) -> Path:
-    """Curated prefix for a source commit: ``stage/curated/<curation-id>/``."""
-    cid = hydrate_rules.derive_curation_id(
-        source_commit,
-        hydrate_rules.SANITIZER_VERSION,
-        hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
-        hydrate_rules.ADMISSION_POLICY_VERSION,
-    )
+_EXCLUSION_LIST_PATH = (
+    Path(__file__).resolve().parents[1] / "training" / "schema" / "exclusion.txt"
+)
+
+
+def _curated_dir(stage: Path, source_commit: str, binding: dict[str, Any] | None = None) -> Path:
+    """Curated prefix for a source commit: ``stage/curated/<curation-id>/``.
+
+    Issue #1094: with a post-gate ``binding`` (from
+    :func:`resolve_curation_identity`) the curation id is the v2 derivation,
+    which binds the policy digest/version, exact copyleft opt-ins, the
+    exclusions digest, the resolved per-repo decisions digest, and the license
+    distribution digest. Without a binding the historical v1 derivation (four
+    inputs) is kept for pre-identity staging and historical prefixes only —
+    publications are always keyed by the v2 id.
+    """
+    if binding is not None:
+        cid = hydrate_rules.derive_curation_id_v2(
+            source_commit,
+            str(binding["policy_digest"]),
+            str(binding["policy_version"]),
+            binding["allow_copyleft"],
+            str(binding["exclusions_digest"]),
+            str(binding["decisions_digest"]),
+            str(binding["distribution_digest"]),
+        )
+    else:
+        cid = hydrate_rules.derive_curation_id(
+            source_commit,
+            hydrate_rules.SANITIZER_VERSION,
+            hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+            hydrate_rules.ADMISSION_POLICY_VERSION,
+        )
     return stage / "curated" / cid
+
+
+def _pre_identity_dir(stage: Path, source_commit: str) -> Path:
+    """Pre-identity staging location for the dedupe ledger key (issue #1094).
+
+    The v2 curation id cannot exist until after the license gate (it binds the
+    resolved decisions), so every pre-gate ledger writer (dedupe, enrichment
+    restamp, gate rejections) keys the VM-local dedupe state by a
+    source-commit-scoped v1-shaped staging id (Assumption A4). Staging-
+    internal only — never published.
+    """
+    return _curated_dir(stage, source_commit)
+
+
+def _exclusions_digest() -> str:
+    """sha256 over the sorted stable exclusion-codes string of the pinned C5
+    exclusion list (``training/schema/exclusion.txt`` bytes) — a bound identity
+    input, so editing the list changes the curation id."""
+    codes = sorted(
+        line.strip() for line in
+        _EXCLUSION_LIST_PATH.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+    canonical = "".join(f"{code}\n" for code in codes)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _policy_binding(
+    stage: Path,
+    source_commit: str,
+    policy: Any,
+    policy_digest: str,
+    allow_copyleft: frozenset[str] | set[str],
+) -> dict[str, Any]:
+    """Post-gate identity binding (issue #1094): pure function of the gate
+    outputs plus the pinned inputs, so fresh-VM replay from the published
+    evidence cache is byte-identical.
+
+    Computes, over every resolved per-repo decision of the post-gate admitted
+    runs (the gate is a pure function of policy + evidence, so re-resolving
+    the survivors reproduces the gate's decisions exactly):
+
+    - ``exclusions_digest``: sha256 over the sorted stable exclusion-codes
+      string of the pinned C5 list (see :func:`_exclusions_digest`);
+    - ``decisions_digest``: sha256 over the canonical sorted
+      ``repo_slug\\tstatus\\treason_code\\tspdx_id\\n`` lines, deduped per
+      repo slug;
+    - ``distribution_digest``: sha256 over the sorted ``spdx_id\\tcount\\n``
+      license-distribution lines.
+
+    The binding carries the policy digest/version and the exact copyleft
+    opt-ins so ``derive_curation_id_v2`` can bind all of them.
+    """
+    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle
+        resolve_repo_decision,
+    )
+
+    decisions: dict[str, tuple[str, str | None, str | None]] = {}
+    runs_dir = stage / "runs"
+    if runs_dir.is_dir():
+        for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+            data = _read_manifest_dict(derivative)
+            if data is None:
+                raise HydrationError(
+                    redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
+                )
+            decision = resolve_repo_decision(
+                _manifest_repo_slug(data) or "",
+                _manifest_license_evidence(data),
+                policy,
+                allow_copyleft,
+            )
+            decisions[str(decision.repo_slug)] = (
+                str(decision.status), decision.reason_code, decision.spdx_id,
+            )
+    decision_lines = sorted(
+        f"{slug}\t{status}\t{reason_code or ''}\t{spdx_id or ''}\n"
+        for slug, (status, reason_code, spdx_id) in decisions.items()
+    )
+    decisions_digest = hashlib.sha256("".join(decision_lines).encode()).hexdigest()
+    distribution = Counter(spdx for (_, __, spdx) in decisions.values() if spdx)
+    distribution_lines = sorted(
+        f"{spdx}\t{count}\n" for spdx, count in distribution.items()
+    )
+    distribution_digest = hashlib.sha256("".join(distribution_lines).encode()).hexdigest()
+    return {
+        "policy_digest": str(policy_digest),
+        "policy_version": str(policy.policy_version),
+        "allow_copyleft": set(allow_copyleft),
+        "exclusions_digest": _exclusions_digest(),
+        "decisions_digest": decisions_digest,
+        "distribution_digest": distribution_digest,
+    }
+
+
+def resolve_curation_identity(
+    stage: Path,
+    *,
+    source_commit: str,
+    license_policy_path: str | Path | None,
+    allow_copyleft: frozenset[str] | set[str],
+) -> dict[str, Any]:
+    """Derive the v2 curation id from the post-gate policy binding (issue #1094).
+
+    Must be called only after :func:`apply_license_gate`: the binding is a
+    pure function of the gate outputs (resolved per-repo decisions + license
+    distribution) plus the pinned inputs (policy digest/version, opt-ins, C5
+    exclusions digest). Returns the binding plus the derived ``curation_id``.
+    Fail-closed: a missing ``license_policy_path`` raises before any
+    derivation — identity is never computed without a pinned policy.
+    """
+    if not license_policy_path:
+        raise HydrationError(
+            "curation identity requires license_policy_path (fail-closed): "
+            "no license policy file was provided"
+        )
+    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle
+        load_license_policy,
+    )
+
+    policy, policy_digest = load_license_policy(license_policy_path)
+    binding = _policy_binding(stage, str(source_commit), policy, policy_digest, allow_copyleft)
+    binding["curation_id"] = _curated_dir(stage, str(source_commit), binding=binding).name
+    return binding
 
 
 def _dedupe_dir(stage: Path, curation_id: str) -> Path:
@@ -1016,7 +1164,7 @@ def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
     runs_dir = stage / "runs"
     if not runs_dir.is_dir():
         return
-    curated = _curated_dir(stage, revision)
+    curated = _pre_identity_dir(stage, revision)
     dedupe_dir = _dedupe_dir(stage, curated.name)
     baseline_root = dedupe_dir / "admitted"
     ledger_path = dedupe_dir / "dedupe.jsonl"
@@ -1098,7 +1246,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     every decision as ``{session_id, status, content_digest, reason_code}``.
     """
     revision = str(revision)
-    curated = _curated_dir(stage, revision)
+    curated = _pre_identity_dir(stage, revision)
     dedupe_dir = _dedupe_dir(stage, curated.name)
     ledger_path = dedupe_dir / "dedupe.jsonl"
     baseline_root = dedupe_dir / "admitted"
@@ -1275,7 +1423,13 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
     return admission_summary_buckets(entries)
 
 
-def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> dict[str, Any]:
+def build_import_ledger(
+    stage: Path,
+    *,
+    revision: str,
+    source_commit: str,
+    binding: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build and persist the value-free admission ledger (issue #982 M11).
 
     Composes the ingest results, the dedupe ledger, and the staging index into
@@ -1284,11 +1438,17 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
     a raw URL, path, or any matched secret value. The write is atomic; a
     failure propagates (fatal semantics) so a partial ledger can never claim
     success.
+
+    Issue #1094: pass the post-gate ``binding`` (from
+    :func:`resolve_curation_identity`) so the ledger — and everything
+    published from it onward — is keyed by the v2 curation id. The dedupe
+    ledger is still read from the pre-identity staging location (Assumption
+    A4); only the curated output prefix moves to the v2 id.
     """
     revision = str(revision)
     source_commit = str(source_commit)
-    curated = _curated_dir(stage, source_commit)
-    dedupe_ledger = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
+    curated = _curated_dir(stage, source_commit, binding=binding)
+    dedupe_ledger = _dedupe_dir(stage, _pre_identity_dir(stage, source_commit).name) / "dedupe.jsonl"
     recorded = _load_dedupe_ledger(dedupe_ledger)
     admitted_digests = _latest_admitted_digests(dedupe_ledger)
 
@@ -2135,7 +2295,6 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     enrich_license_evidence(
         config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
     )
-    publish_enrichment_cache(config.stage_dir, revision=source_commit)
     # Enrichment may have rewritten admitted manifests; refresh the dedupe
     # baselines/ledger digests so the published content identity matches the
     # enriched content (the clean-room verify recomputes the digest).
@@ -2150,9 +2309,29 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
         license_policy_path=config.license_policy_path,
         allow_copyleft=config.allow_copyleft,
     )
-    ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
+    # Issue #1094: the v2 curation id is derived post-gate from the resolved
+    # policy binding (policy digest/version, opt-ins, exclusions digest,
+    # resolved per-repo decisions, license distribution) — everything from
+    # the ledger onward is keyed by it. The digest captured from
+    # load_license_policy is the binding's policy_digest; policy_version is
+    # the policy file's own version.
+    binding = resolve_curation_identity(
+        config.stage_dir,
+        source_commit=source_commit,
+        license_policy_path=config.license_policy_path,
+        allow_copyleft=config.allow_copyleft,
+    )
+    curation_id = str(binding["curation_id"])
+    # The enrichment cache is copied into the *v2* curated prefix so fresh-VM
+    # replay under that prefix is decision-identical.
+    publish_enrichment_cache(
+        config.stage_dir, revision=source_commit,
+        curated_dir=config.stage_dir / "curated" / curation_id,
+    )
+    ledger = build_import_ledger(
+        config.stage_dir, revision=source_commit, source_commit=source_commit, binding=binding,
+    )
     license_admission = license_admission_summary(ledger)
-    curation_id = str(ledger["curation_id"])
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
     publish_batches(
         dest_client, config.stage_dir, curation_id=curation_id, skip_sessions=checkpoint.completed_sessions

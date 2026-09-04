@@ -32,7 +32,10 @@ def _offline_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the enrichment stage offline: resolve every repo to MIT."""
     from daydream.archive import license_enrich
 
-    def resolve(repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
+    def resolve(repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence | None:
+        return resolve_evidence(repo_slug)
+
+    def resolve_evidence(repo_slug: str) -> license_enrich.EnrichedEvidence:
         return license_enrich.EnrichedEvidence(
             spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
         )
@@ -44,6 +47,37 @@ def _offline_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
             return resolve(repo_slug, repo_commit)
 
     monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: FakeResolver())
+
+
+def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
+    """Probe the production post-gate v2 identity derivation (issue #1094):
+    the pipeline's curation id comes from the resolved policy binding, not
+    the historical v1 derivation, so resume probing must use the same path."""
+    stage = tmp_path / "identity-probe"
+    hydrate.download_snapshot(hub, revision=REVISION, stage_dir=stage / "downloads")
+    hydrate.ingest_bundles(stage, revision=REVISION)
+    hydrate.dedupe_admitted(stage, revision=REVISION)
+    from daydream.archive import license_enrich
+
+    class FakeResolver:
+        def resolve(
+            self, repo_slug: str, repo_commit: str | None
+        ) -> license_enrich.EnrichedEvidence | None:
+            return license_enrich.EnrichedEvidence(
+                spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
+            )
+
+    license_enrich.enrich_license_evidence(stage, revision=REVISION, resolver=FakeResolver())
+    hydrate.restamp_admitted_digests(stage, revision=REVISION)
+    hydrate.apply_license_gate(
+        stage, revision=REVISION, license_policy_path=_write_policy(tmp_path),
+        allow_copyleft=frozenset(),
+    )
+    binding = hydrate.resolve_curation_identity(
+        stage, source_commit=REVISION, license_policy_path=_write_policy(tmp_path),
+        allow_copyleft=frozenset(),
+    )
+    return str(binding["curation_id"])
 
 # Index fields that legitimately differ between two staging roots (staging-local
 # paths) or across runs (row timestamps) — determinism is asserted on the rest.
@@ -114,11 +148,9 @@ class TestInterruptionResume:
         hydrate.download_snapshot(hub, revision=REVISION, stage_dir=stage / "downloads")
         # fresh VM simulation: empty disk except the remote ledger — resume via
         # resume_state (Hub ledger is the only canonical resume state, M15).
-        curation_id = hydrate_rules.derive_curation_id(
-            source_commit=REVISION, sanitizer_version=hydrate_rules.SANITIZER_VERSION,
-            index_schema_version=hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
-            admission_policy_version=hydrate_rules.ADMISSION_POLICY_VERSION,
-        )
+        # The candidate prefix is the post-gate v2 curation id (issue #1094):
+        # probe it through the production derivation, never the v1 inputs.
+        curation_id = _v2_curation_id(hub, tmp_path)
         state = hydrate.resume_state(
             hub, curation_id=curation_id, stage_dir=tmp_path / "fresh"
         )
