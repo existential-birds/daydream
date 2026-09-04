@@ -204,7 +204,11 @@ ignored. The dry-run summary reports discovered, admitted, rejected, and
 accounted candidate counts. A non-dry publication (omit `--dry-run`) also
 requires `--license-policy`: the per-repo license admission gate runs at
 hydration and rejected sessions are excluded before publication (issue
-#1094); a dry-run may omit it. If a pinned revision contains run-shaped
+#1094); a dry-run may omit it. License-evidence enrichment fills legacy
+bundles' missing evidence from the GitHub license API, which requires
+`GITHUB_TOKEN` in the environment (read-only; env-only, never on a URL or
+argv); a non-dry publication fails closed without it. If a pinned revision
+contains run-shaped
 manifests but no complete candidates, hydration fails with layout diagnostics
 instead of reporting a successful zero/zero plan.
 

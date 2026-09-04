@@ -1717,10 +1717,11 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     """Handle ``daydream corpus hydrate-hub [...]``.
 
     Fail-closed, fatal semantics (unlike ``hub.py``'s warn-everything): a
-    missing ``HF_TOKEN`` or a moving-branch revision without ``--exploratory``
-    exits 1 before any Hub access. Success prints the immutable output commit
-    SHA plus a value-free summary (counts and reason-code tallies only). Any
-    ``HydrationError`` is ``redact_text``-processed before display.
+    missing ``HF_TOKEN``, ``GITHUB_TOKEN``, or a moving-branch revision without
+    ``--exploratory`` exits 1 before any Hub access. Success prints the
+    immutable output commit SHA plus a value-free summary (counts and
+    reason-code tallies only). Any ``HydrationError`` is ``redact_text``-
+    processed before display.
 
     Returns:
         ``0`` on a verified run (or a completed ``--dry-run`` plan); ``1`` on
@@ -1787,6 +1788,22 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
             "A hydrate-hub publication requires a pinned license policy file; "
             "per-repo license admission decisions are resolved from it "
             "(fail-closed). A --dry-run may omit it.",
+        )
+        return 1
+
+    # Issue #1094: license-evidence enrichment (live GitHub license API calls)
+    # is a hard runtime requirement on every non-dry publication. Fail closed
+    # before any Hub access or staging work, naming the variable and the fix —
+    # an unset token would otherwise surface only as a redacted generic 401
+    # failure after download/ingest/dedupe have run. A --dry-run may omit it
+    # (planning affordance; the resolver itself fail-fasts with this same
+    # message if a policy-driven dry run reaches enrichment without one).
+    if not args.dry_run and not os.environ.get("GITHUB_TOKEN"):
+        print_error(
+            console,
+            "GITHUB_TOKEN is not set",
+            "license evidence enrichment requires a GitHub API token for the "
+            "license endpoint. Export GITHUB_TOKEN and retry.",
         )
         return 1
 

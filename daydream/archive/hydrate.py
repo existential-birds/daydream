@@ -1070,8 +1070,9 @@ def _policy_binding(
     byte-identical.
 
     Computes, over every resolved per-repo decision of the post-gate admitted
-    runs (the gate is a pure function of policy + evidence, so re-resolving
-    the survivors reproduces the gate's decisions exactly):
+    runs plus the gate-rejected derivatives under ``stage/excluded/<sid>``
+    (the gate is a pure function of policy + evidence, so re-resolving the
+    survivors reproduces the gate's decisions exactly):
 
     - ``exclusions_digest``: sha256 over the sorted stable exclusion-codes
       string of the pinned C5 list (see :func:`_exclusions_digest`);
@@ -1105,6 +1106,50 @@ def _policy_binding(
             )
             decisions[str(decision.repo_slug)] = (
                 str(decision.status), decision.reason_code, decision.spdx_id,
+            )
+    # Gate-rejected derivatives were moved out of runs/ (apply_license_gate ->
+    # stage/excluded/<sid>); the binding must cover them too, or a rejected
+    # repo's adjudication drift (e.g. repo_commit_unresolved ->
+    # c8_copyleft_unopted) would change the republished ledger/excluded bytes
+    # under a byte-identical curation id. Re-resolve the excluded session's
+    # decision and bind it under the *recorded* gate reason code (the gate
+    # records a more specific stable code, like repo_commit_unresolved, than
+    # plain re-resolution over absent evidence would produce). Non-license
+    # exclusions (ingest/fixture) were never adjudicated by the license gate
+    # and stay out of the license decisions digest.
+    recorded_excluded = _load_dedupe_ledger(
+        _dedupe_dir(stage, _pre_identity_dir(stage, str(source_commit)).name) / "dedupe.jsonl"
+    )
+    license_codes = {
+        REASON_CODE_C5_EXCLUDED_REPO,
+        REASON_CODE_C8_COPYLEFT_UNOPTED,
+        REASON_CODE_LICENSE_EVIDENCE_MISSING,
+        REASON_CODE_REPO_IDENTITY_MISSING,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
+    }
+    excluded_dir = stage / "excluded"
+    if excluded_dir.is_dir():
+        for derivative in sorted(p for p in excluded_dir.iterdir() if p.is_dir()):
+            data = _read_manifest_dict(derivative)
+            if data is None:
+                raise HydrationError(
+                    redact_text(
+                        f"excluded derivative {derivative.name} has an unreadable manifest"
+                    )
+                )
+            sid = str(data.get("session_id") or derivative.name)
+            entry = recorded_excluded.get(sid) or {}
+            code = entry.get("reason_code")
+            if code not in license_codes:
+                continue  # never a license-gate decision, never in the digest
+            decision = resolve_repo_decision(
+                _manifest_repo_slug(data) or "",
+                _manifest_license_evidence(data),
+                policy,
+                allow_copyleft,
+            )
+            decisions[str(decision.repo_slug)] = (
+                "rejected", str(code), decision.spdx_id,
             )
     decision_lines = sorted(
         f"{slug}\t{status}\t{reason_code or ''}\t{spdx_id or ''}\n"
@@ -1285,7 +1330,13 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
        derivative digest is moved to ``quarantine/<sid>.conflict`` and the
        original admitted derivative restored from the curated baseline copy —
        the admitted derivative is never overwritten. Identical digests are
-       idempotent (no duplicate ledger entry, no duplicate index row).
+       idempotent (no duplicate ledger entry, no duplicate index row). A
+       derivative matching a *previously* recorded ``admitted`` digest (the
+       pristine pre-enrichment content of an already-enriched session) is an
+       idempotent same-stage-dir re-ingest, not a collision: the published
+       baseline is restored and the admission re-recorded, so an interrupted-
+       resume or an idempotent republish of the same revision never downgrades
+       a published batch to quarantined.
 
     Admitted sessions are indexed (idempotent ``upsert_run``); an unreadable
     manifest on an admitted derivative is fatal. The dedupe ledger records
@@ -1300,6 +1351,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     # collision entry must not let a re-run re-admit the mutated derivative
     # over the published baseline (M7 durability across re-runs).
     admitted_digests = _latest_admitted_digests(ledger_path)
+    ever_admitted = _ever_admitted_digests(ledger_path)
     result = DedupeResult()
     runs_dir = stage / "runs"
     if runs_dir.is_dir():
@@ -1346,6 +1398,34 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
 
             digest = sanitize._derivative_digest(derivative)
             if admitted_digests.get(sid) not in (None, digest):
+                if digest in ever_admitted.get(sid, set()):
+                    # Idempotent re-ingest of the same source content: the
+                    # derivative differs from the *latest* admitted digest only
+                    # because this pipeline's own enrichment rewrote its
+                    # manifest after admission (restamp refreshed the baseline
+                    # + ledger to the enriched digest). Restore the published
+                    # baseline and re-record the admission — never a collision,
+                    # so an idempotent same-stage-dir re-run (interrupted-
+                    # resume or a fixed-path republish of the same revision)
+                    # does not downgrade a published batch to quarantined.
+                    baseline = baseline_root / sid
+                    if not baseline.is_dir():
+                        raise HydrationError(
+                            redact_text(
+                                f"cannot restore admitted baseline for {sid}: "
+                                "no admitted baseline exists"
+                            )
+                        )
+                    shutil.rmtree(derivative)
+                    shutil.copytree(baseline, runs_dir / sid)
+                    _append_dedupe_entry(
+                        ledger_path,
+                        {"session_id": sid, "status": "admitted", "reason_code": None,
+                         "content_digest": sanitize._derivative_digest(baseline),
+                         "revision": revision, "at": _utc_now()},
+                    )
+                    result.admitted += 1
+                    continue
                 # Identity collision: quarantine the new derivative, restore the
                 # original admitted content — never overwrite (M7).
                 baseline = baseline_root / sid
@@ -1403,6 +1483,38 @@ def _latest_admitted_digests(path: Path) -> dict[str, str | None]:
     except (OSError, ValueError):
         return {}
     return latest
+
+
+def _ever_admitted_digests(path: Path) -> dict[str, set[str]]:
+    """Every *admitted* content digest ever recorded per session id.
+
+    Richer than :func:`_latest_admitted_digests`: an idempotent same-stage-dir
+    re-run re-ingests the *pristine* pre-enrichment content, whose digest was
+    safely recorded (as ``admitted``) before enrichment rewrote the manifest
+    and :func:`restamp_admitted_digests` refreshed the baseline to the enriched
+    digest. That pristine digest is a known-good published baseline — never a
+    collision — so it must survive in the re-ingest set even after a later
+    restamp moved the latest-admitted digest on. Collision-entry digests are
+    deliberately excluded: a mutated derivative stays a collision on every
+    later run (M7 durability).
+    """
+    ever: dict[str, set[str]] = {}
+    if not path.is_file():
+        return ever
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            if isinstance(entry, dict) and entry.get("session_id") \
+                    and entry.get("status") == "admitted":
+                digest = entry.get("content_digest")
+                if isinstance(digest, str) and digest:
+                    ever.setdefault(str(entry["session_id"]), set()).add(digest)
+    except (OSError, ValueError):
+        return {}
+    return ever
 
 
 def admission_summary_buckets(
@@ -1698,13 +1810,16 @@ def _policy_binding_record(binding: dict[str, Any]) -> str:
     Byte-canonical: sorted keys, compact canonical JSON, trailing newline —
     comparison against the remote record is bytewise, so the record must never
     depend on dict ordering or whitespace. Carries the full binding: policy
-    digest/version, sorted copyleft opt-ins, exclusions digest, resolved
-    per-repo decisions digest, license distribution digest.
+    digest/version, sorted casefolded copyleft opt-ins (matching
+    :func:`hydrate_rules.derive_curation_id_v2`'s canonicalization, so a
+    differently-cased spelling of the same logical opt-in yields byte-identical
+    records), exclusions digest, resolved per-repo decisions digest, license
+    distribution digest.
     """
     record = {
         "policy_digest": str(binding["policy_digest"]),
         "policy_version": str(binding["policy_version"]),
-        "allow_copyleft": sorted(str(slug) for slug in binding["allow_copyleft"]),
+        "allow_copyleft": sorted(str(slug).casefold() for slug in binding["allow_copyleft"]),
         "exclusions_digest": str(binding["exclusions_digest"]),
         "resolved_decisions_digest": str(binding["decisions_digest"]),
         "distribution_digest": str(binding["distribution_digest"]),

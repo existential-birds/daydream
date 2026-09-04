@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -51,6 +52,22 @@ _GITHUB_API = "https://api.github.com"
 _GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 _RATE_LIMIT_ATTEMPTS = 3
 _RATE_LIMIT_BASE_DELAY_S = 2.0
+
+# A full 40-hex Git commit embedded in an evidence ``source`` string (e.g. the
+# enrichment-produced ``github:<owner>/<repo>@<commit>`` form or a URL tail).
+_FULL_COMMIT_IN_SOURCE_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])")
+
+
+def _commit_from_source(source: str) -> str | None:
+    """Extract a full 40-hex Git commit from a declared evidence source string.
+
+    Enrichment-written sources are ``github:<owner>/<repo>@<commit>``; declared
+    producer sources may carry a commit in the same or a URL shape. Returns the
+    lowercased commit, or ``None`` when the source pins no full SHA (the
+    resolution map can never fabricate one).
+    """
+    match = _FULL_COMMIT_IN_SOURCE_RE.search(source or "")
+    return match.group(0).lower() if match else None
 
 
 @dataclass(frozen=True)
@@ -88,6 +105,16 @@ class GithubLicenseResolver:
 
     def resolve(self, repo_slug: str, repo_commit: str | None) -> EnrichedEvidence | None:
         token = os.environ.get(_GITHUB_TOKEN_ENV, "")
+        if not token:
+            # Fail fast with a clear, credential-free message before any HTTP
+            # request: an empty ``Authorization: Bearer`` header is answered 401
+            # and would otherwise surface only as a redacted generic failure
+            # after download/ingest/dedupe have already run.
+            raise HydrationError(
+                "GITHUB_TOKEN is not set; license evidence enrichment requires "
+                "a GitHub API token for the license endpoint. Export "
+                "GITHUB_TOKEN and retry."
+            )
         repo_commit = repo_commit or self._resolve_head_commit(repo_slug, token)
         data = self._request_json(
             f"{_GITHUB_API}/repos/{repo_slug}/license"
@@ -106,9 +133,12 @@ class GithubLicenseResolver:
                 redact_text(f"license response for {repo_slug} carried no usable spdx_id")
             )
         if not isinstance(commit, str) or commit.strip() == "":
-            raise HydrationError(
-                redact_text(f"license response for {repo_slug} carried no usable commit")
-            )
+            # The license endpoint succeeded but no resolved Git repository
+            # commit could be pinned: a recorded stable-code miss, never a
+            # fatal abort (RepoLicenseResolver contract — None means
+            # unresolvable at this source -> repo_commit_unresolved). One
+            # unpinnable repo must not abort the entire hydration.
+            return None
         return EnrichedEvidence(
             spdx_id=spdx_id, source=f"github:{repo_slug}@{commit}", repo_commit=commit,
         )
@@ -217,7 +247,10 @@ def enrich_license_evidence(
     """Fill missing ``license_evidence`` on admitted derivatives under ``stage/runs/``.
 
     Records with well-formed declared evidence are left untouched (out of scope
-    per spec). Legacy records with a canonical repo slug are resolved through
+    per spec); when the declared source pins a full 40-hex Git commit, a
+    resolved cache row is still recorded so a repo that appears only with
+    declared evidence remains resolvable in the published resolution map.
+    Legacy records with a canonical repo slug are resolved through
     ``resolver`` (dedup per ``(repo_slug, repo_commit)``); resolved evidence is
     written into the session's ``manifest.json`` so the gate consumes it exactly
     like declared evidence. Every processed session gets a stable-code cache
@@ -244,8 +277,28 @@ def enrich_license_evidence(
                 redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
             )
         sid = str(data.get("session_id") or derivative.name)
-        if _manifest_license_evidence(data) is not None:
-            continue  # well-formed declared evidence is never re-derived
+        declared = _manifest_license_evidence(data)
+        if declared is not None:
+            # Well-formed declared evidence is never re-derived (out of scope
+            # per spec), but a repo that appears only with declared evidence
+            # must still be resolvable in the published resolution map: record
+            # a resolved cache row from the declared source when it pins a full
+            # 40-hex Git commit (the map's pinned_sha comes from these rows).
+            # No pinned commit -> no row (the map reports such a repo as
+            # unreachable, never a fabricated revision). Deliberately not
+            # seeded into by_repo so evidence-less siblings of the same repo
+            # still hit the live resolver.
+            commit = _commit_from_source(str(declared.get("source") or ""))
+            raw_slug = _manifest_repo_slug(data)
+            slug = normalize_repo_slug(raw_slug) if raw_slug else ""
+            if commit is not None and slug:
+                fresh.append({
+                    "session_id": sid, "repo_slug": slug, "status": "resolved",
+                    "spdx_id": declared["spdx_id"],
+                    "source": str(declared.get("source") or ""),
+                    "repo_commit": commit,
+                })
+            continue
         prior = by_session.get(sid)
         if prior is not None:
             if prior.get("status") == "resolved":
@@ -255,6 +308,18 @@ def enrich_license_evidence(
                     "repo_commit": str(prior.get("repo_commit") or ""),
                     "origin": "enriched",
                 }
+                # The cache records the resolution — on a same-stage-dir reuse
+                # (e.g. an idempotent re-run whose ingest re-pristined this
+                # session) the derivative's manifest has been reverted to the
+                # evidence-less form. Write the evidence back into the manifest
+                # so the gate consumes it exactly like a freshly-enriched
+                # session: the gate reads only the manifest, never the cache.
+                manifest_path = derivative / "manifest.json"
+                data["license_evidence"] = {
+                    "spdx_id": str(prior["spdx_id"]),
+                    "source": str(prior.get("source") or ""),
+                }
+                manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
             continue
         raw_slug = _manifest_repo_slug(data)
         slug = normalize_repo_slug(raw_slug) if raw_slug else ""

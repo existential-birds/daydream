@@ -63,6 +63,7 @@ def test_success_path_drives_orchestrator(
         return FakeSummary()
 
     monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
@@ -100,6 +101,7 @@ def test_cli_wires_license_policy_into_hydration(
         return FakeSummary()
 
     monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
@@ -130,6 +132,7 @@ def test_success_path_surfaces_incomplete_manifests(
         license_admission: dict[str, int] = {}
 
     monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", lambda _config: FakeSummary())
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
