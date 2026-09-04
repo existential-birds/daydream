@@ -234,6 +234,57 @@ def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin
     assert "Missing workflow file(s)" not in workflows_check.detail
 
 
+@pytest.mark.parametrize(
+    ("target", "old", "new"),
+    [
+        pytest.param(
+            "daydream-review.yml",
+            "        type: choice\n        options: [review, sequence, flowchart]\n",
+            "        type: string\n",
+            id="unbounded-command-input",
+        ),
+        pytest.param(
+            "daydream-command.yml",
+            '            -f approved_head_sha="$HEAD_SHA" \\\n',
+            "",
+            id="head-binding-removed",
+        ),
+    ],
+)
+def test_verify_rejects_workflow_that_loosens_the_command_contract(
+    fake_gh: FakeGh, repo_with_origin: Path, target: str, old: str, new: str
+) -> None:
+    """The bot-command additions may not be used to widen the approval gate.
+
+    Two drifts must stay hard failures: a ``command`` input degraded from the
+    bounded three-option ``choice`` to a free-form ``string`` (a dispatcher
+    could then name a run the maintainer never approved), and a dispatch that
+    stops binding the resolved live head to ``approved_head_sha``.
+    """
+    from daydream.templates import workflow_template_files
+    from tests.harness.git_helpers import commit as _commit
+    from tests.harness.git_helpers import git as _git
+
+    workflows_dir = repo_with_origin / ".github/workflows"
+    workflows_dir.mkdir(parents=True)
+    for template in workflow_template_files():
+        content = template.read_text()
+        if template.name == target:
+            assert content.count(old) == 1, f"{target}: anchor no longer present"
+            content = content.replace(old, new, 1)
+        (workflows_dir / template.name).write_text(content)
+    _git(repo_with_origin, "add", ".github/workflows")
+    _commit(repo_with_origin, "add loosened workflows")
+    _git(repo_with_origin, "push", "origin", "main")
+
+    result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
+    workflows_check = next(check for check in result.checks if check.name == "workflows")
+    assert result.ok is False
+    assert workflows_check.passed is False
+    assert f"Out of date workflow file(s): .github/workflows/{target}" in workflows_check.detail
+    assert "Missing workflow file(s)" not in workflows_check.detail
+
+
 def test_verify_accepts_customized_workflow_with_intact_gate(
     fake_gh: FakeGh, repo_with_origin: Path
 ) -> None:
