@@ -75,3 +75,66 @@ def test_validate_records_snaps_and_demotes() -> None:
     assert out[2]["line"] == 2285 and "location_note" not in out[2]
     assert out[3] == {"id": 4}
     assert out[4]["line"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# location_cited_line: the non-destructive record of the reviewer's citation
+# (issue #1106). The snap overwrites ``line``, so without this field the line
+# the reviewer actually cited is unrecoverable and location accuracy is
+# unmeasurable post-hoc.
+# ---------------------------------------------------------------------------
+
+
+def test_snapped_record_preserves_the_cited_line_alongside_the_snapped_line() -> None:
+    """A snap is non-destructive: both the snapped and the cited line survive."""
+    records: list[dict[str, object]] = [
+        {"id": 1, "file": "orchestrator.py", "line": 2281, "evidence": "orchestrator.py:2281"},
+    ]
+    out = validate_records(INDEX, records, tolerance=3)
+    assert out[0]["line"] == 2284  # snapped to the nearest hunk boundary
+    assert out[0]["location_cited_line"] == 2281  # what the reviewer cited
+    assert out[0]["evidence"] == "orchestrator.py:2284"
+
+
+def test_demoted_record_preserves_the_cited_line_next_to_the_demotion_marks() -> None:
+    """Beyond tolerance: the cited line is machine-readable, not just prose."""
+    records: list[dict[str, object]] = [
+        {
+            "id": 2,
+            "file": "orchestrator.py",
+            "line": 2272,
+            "severity": "high",
+            "confidence": "HIGH",
+        },
+    ]
+    out = validate_records(INDEX, records, tolerance=3)
+    assert out[0]["location_cited_line"] == 2272
+    assert out[0]["line"] == 2272  # demotion does not move the line
+    assert out[0]["location_distrust"] is True
+    assert out[0]["severity_before_demotion"] == "high"
+    assert out[0]["severity"] == "low"
+    assert out[0]["confidence"] == "LOW"
+
+
+def test_in_hunk_record_gets_no_cited_line_key() -> None:
+    """The field means "relocated or distrusted" -- an untouched record lacks it."""
+    records: list[dict[str, object]] = [{"id": 3, "file": "orchestrator.py", "line": 2285}]
+    out = validate_records(INDEX, records, tolerance=3)
+    assert "location_cited_line" not in out[0]
+    assert out[0] == {"id": 3, "file": "orchestrator.py", "line": 2285}
+
+
+def test_structural_whole_file_record_gets_no_cited_line_key() -> None:
+    """The ``lens="structural"`` / ``line: 0`` carve-out stays fully untouched."""
+    records: list[dict[str, object]] = [
+        {"id": 4, "file": "orchestrator.py", "line": 0, "lens": "structural", "severity": "high"},
+    ]
+    out = validate_records(INDEX, records, tolerance=3)
+    assert "location_cited_line" not in out[0]
+    assert out[0] == {
+        "id": 4,
+        "file": "orchestrator.py",
+        "line": 0,
+        "lens": "structural",
+        "severity": "high",
+    }

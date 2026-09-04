@@ -279,6 +279,8 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "wall_clock_seconds": manifest.wall_clock_seconds,
                 "erosion": manifest.erosion,
                 "verbosity": manifest.verbosity,
+                "location_in_hunk_rate": manifest.location_in_hunk_rate,
+                "shipped_duplicate_pairs": manifest.shipped_duplicate_pairs,
                 "fix_quality_gate": json.dumps(manifest.fix_quality_gate)
                 if manifest.fix_quality_gate is not None
                 else None,

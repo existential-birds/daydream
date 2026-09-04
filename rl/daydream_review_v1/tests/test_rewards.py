@@ -1411,7 +1411,7 @@ async def test_reward_version_is_pinned(
 
     from daydream_review_v1.taskset import ROLLOUT_REWARD_VERSION
 
-    assert REWARD_VERSION == "2026.05.28-2", (
+    assert REWARD_VERSION == "2026.09.04-1", (
         f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
         "rollout reward's expected values before trusting any run scored across the boundary."
     )

@@ -10,6 +10,7 @@ undefined (zero-findings) case, which must not report a perfect score.
 """
 import json
 import math
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +25,10 @@ from daydream.eval.analyzer import (
     analyze_coverage,
     analyze_findings,
     analyze_grounding,
+    analyze_location,
     analyze_quality,
     analyze_session,
+    analyze_shipped_duplication,
     load_trajectories,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -247,16 +250,17 @@ def test_exploration_utilization_counts_bash_mediated_reads() -> None:
     assert result["reviewers_utilizing_exploration"] == 1
 
 
-def test_grounding_rate_is_undefined_with_zero_findings() -> None:
+def test_grounding_rate_is_undefined_with_zero_findings(tmp_path: Path) -> None:
     """A review that produced NO findings has an undefined grounding rate.
 
     Reporting 1.0 here would hand a review that found nothing a perfect
     grounding score, which flows into the manifest and becomes a top RL
-    reward. ``None`` is the only honest value for 0/0.
+    reward. ``None`` is the only honest value for 0/0. Unchanged by the
+    line-tightening in issue #1106.
     """
     trajectories = {"main": None, "forked": [_read_traj("deep-python.json", "/repo/api.py")]}
 
-    result = analyze_grounding(trajectories, [])
+    result = analyze_grounding(trajectories, [], tmp_path / ".daydream")
 
     assert result["total_findings"] == 0
     assert result["grounded_count"] == 0
@@ -492,7 +496,7 @@ def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path) -> None:
     assert result["uncovered_files"] == []
 
 
-def test_analyze_grounding_counts_codex_and_pi_reads() -> None:
+def test_analyze_grounding_counts_codex_and_pi_reads(tmp_path: Path) -> None:
     trajectories = {
         "main": None,
         "forked": [
@@ -520,10 +524,14 @@ def test_analyze_grounding_counts_codex_and_pi_reads() -> None:
         }
     ]
 
-    result = analyze_grounding(trajectories, findings)
+    # No hunk artifacts under this .daydream -> hunk_source "none", so the
+    # predicate is the file-only one and the read extraction is what is measured.
+    result = analyze_grounding(trajectories, findings, tmp_path / ".daydream")
 
     entry = result["grounded"][0]
     assert entry["file_was_read"] is True
+    assert entry["location_tier"] == "unchecked"
+    assert result["hunk_source"] == "none"
     assert result["grounded_count"] == 1
     assert result["ungrounded_count"] == 0
     assert result["grounding_rate"] == 1.0
@@ -1745,3 +1753,712 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
     # Rest of the evaluation is intact -- the run is archived, not dropped.
     assert result["session_id"] == "quality-bad"
     assert result["trajectory_count"] == 1
+
+
+# --- analyze_location + analyze_shipped_duplication (issue #1106) ---
+
+# Pattern B: real temp artifact dirs. These seed helpers write the REAL
+# production artifacts (`.daydream/diff.patch`, `.daydream/hunk-index.json`,
+# `.daydream/deep/merged-items.json`, `.daydream/deep/dedup-candidates.json`)
+# so the axes are exercised over the same bytes a live run leaves behind.
+
+WORKED_A = "New helper duplicates the existing loader"
+WORKED_B = "Config reading is implemented twice in this module"
+
+
+def seed_diff_patch(dd: Path, file: str = "svc/loader.py", *, start: int = 85, count: int = 8) -> None:
+    """Write ``.daydream/diff.patch`` with a single hunk on *file*.
+
+    ``parse_hunks`` derives the new-side range from the ``@@`` header, so the
+    hunk's inclusive range is ``[start, start + count - 1]`` -- the issue's
+    worked example ``(85, 92)`` at the defaults.
+    """
+    dd.mkdir(parents=True, exist_ok=True)
+    (dd / "diff.patch").write_text(
+        f"diff --git a/{file} b/{file}\n"
+        f"--- a/{file}\n"
+        f"+++ b/{file}\n"
+        f"@@ -{start},{count} +{start},{count} @@ def load():\n"
+        "-old\n"
+        "+new\n"
+    )
+
+
+def seed_hunk_index(dd: Path, ranges: dict[str, list[tuple[int, int]]]) -> None:
+    """Write ``.daydream/hunk-index.json`` in the persisted production shape."""
+    dd.mkdir(parents=True, exist_ok=True)
+    (dd / "hunk-index.json").write_text(
+        json.dumps(
+            {
+                path: {
+                    "hunks": [
+                        {
+                            "old_start": start,
+                            "old_end": end,
+                            "new_start": start,
+                            "new_end": end,
+                            "added": 1,
+                            "removed": 1,
+                        }
+                        for start, end in file_ranges
+                    ],
+                    "added_total": len(file_ranges),
+                    "removed_total": len(file_ranges),
+                }
+                for path, file_ranges in ranges.items()
+            }
+        )
+    )
+
+
+def seed_merged_items(deep: Path, items: list[dict[str, Any]]) -> None:
+    """Write ``deep/merged-items.json`` from an explicit item list."""
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+
+
+def seed_dedup_candidates(
+    deep: Path,
+    *,
+    record_alt_pairs: list[dict[str, Any]] | None = None,
+    record_duplicate_pairs: list[dict[str, Any]] | None = None,
+) -> None:
+    """Write ``deep/dedup-candidates.json`` in the production shape.
+
+    Shape mirrors the writer (see ``tests/test_deep_merge_recovery.py``):
+    ``{"record_alt_pairs": [], "record_duplicate_pairs": []}``. These are the
+    PRE-MERGE candidate pairs handed to the merge agent -- inputs, not escapes.
+    """
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "dedup-candidates.json").write_text(
+        json.dumps(
+            {
+                "record_alt_pairs": record_alt_pairs or [],
+                "record_duplicate_pairs": record_duplicate_pairs or [],
+            }
+        )
+    )
+
+
+def _item(
+    item_id: int,
+    *,
+    file: str = "svc/loader.py",
+    line: Any = 88,
+    description: str = WORKED_A,
+    lens: str = "per-stack",
+    **extra: Any,
+) -> dict[str, Any]:
+    """A shipped ``merged-items.json`` item in the canonical shape."""
+    item: dict[str, Any] = {
+        "id": item_id,
+        "file": file,
+        "line": line,
+        "lens": lens,
+        "severity": "medium",
+        "confidence": "MEDIUM",
+        "description": description,
+        "rationale": f"see {file}",
+        "evidence": f"{file}:{line}",
+    }
+    item.update(extra)
+    return item
+
+
+def _worked_example_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """``(.daydream, .daydream/deep)`` with the issue's diff already seeded."""
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_diff_patch(dd)  # svc/loader.py, single hunk (85, 92)
+    return dd, deep
+
+
+def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
+    tmp_path: Path,
+) -> None:
+    """THE acceptance criterion of issue #1106.
+
+    The issue's worked example ships one defect twice over a diff whose only
+    hunk is ``svc/loader.py`` ``(85, 92)``: a correct finding at line 88 and a
+    structural restatement anchored at line 4, 81 lines outside the hunk.
+    Before this change both metrics reported the run as perfect
+    (``grounding_rate: 1.0``, ``coverage_ratio: 1.0``) -- indistinguishable
+    from a run that shipped only the correct finding.
+
+    Now the location axis separates them, and the duplication axis surfaces the
+    same-file pair even though its 0.1538 similarity is far under the 0.5 bar.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(1, line=88, description=WORKED_A),
+            _item(
+                2,
+                line=4,
+                description=WORKED_B,
+                lens="structural",
+                location_distrust=True,
+                location_cited_line=4,
+            ),
+        ],
+    )
+
+    location = analyze_location(dd)
+    assert location["hunk_source"] == "diff.patch"
+    assert location["shipped_items"] == 2
+    assert location["scored_items"] == 2
+    assert location["tiers"] == {
+        "in_hunk": 1,
+        "within_tolerance": 0,
+        "beyond_tolerance": 1,   # the mis-anchored twin
+        "file_absent": 0,
+    }
+    assert location["in_hunk_rate"] == 0.5    # NOT 1.0 -- the run is no longer perfect
+    assert location["distrusted_items"] == 1
+    beyond = [row for row in location["items"] if row["tier"] == "beyond_tolerance"]
+    assert [row["id"] for row in beyond] == [2]
+    assert beyond[0]["distance"] == 81        # exactly the issue's arithmetic
+
+    duplication = analyze_shipped_duplication(dd)
+    assert duplication["shipped_items"] == 2
+    assert duplication["comparable_pairs"] == 1
+    assert duplication["same_file_pairs"] == 1           # the escape IS visible
+    assert duplication["near_duplicate_pairs"] == 0      # ...but under the 0.5 bar
+    assert duplication["max_similarity"] == 0.1538       # the issue's own number
+    pair = duplication["pairs"][0]
+    assert (pair["a_id"], pair["b_id"]) == ("1", "2")
+    assert (pair["a_lens"], pair["b_lens"]) == ("per-stack", "structural")
+    assert pair["same_file"] is True
+
+    # The clean run -- one correct finding only -- now scores strictly better.
+    clean_dd, clean_deep = _worked_example_dirs(tmp_path / "clean")
+    seed_merged_items(clean_deep, [_item(1, line=88, description=WORKED_A)])
+    clean_location = analyze_location(clean_dd)
+    assert clean_location["in_hunk_rate"] == 1.0
+    assert clean_location["tiers"]["beyond_tolerance"] == 0
+    clean_duplication = analyze_shipped_duplication(clean_dd)
+    assert clean_duplication["comparable_pairs"] == 0
+    assert clean_duplication["same_file_pairs"] == 0
+    assert clean_duplication["max_similarity"] is None
+    assert clean_location["in_hunk_rate"] > location["in_hunk_rate"]
+
+
+@pytest.mark.parametrize(
+    ("file", "line", "expected_tier", "expected_distance"),
+    [
+        pytest.param("svc/loader.py", 88, "in_hunk", 0, id="in_hunk"),
+        pytest.param("svc/loader.py", 94, "within_tolerance", 2, id="within_tolerance"),
+        pytest.param("svc/loader.py", 4, "beyond_tolerance", 81, id="beyond_tolerance"),
+        pytest.param("other/untouched.py", 88, "file_absent", None, id="file_absent"),
+    ],
+)
+def test_location_tiers_are_each_reachable(
+    tmp_path: Path, file: str, line: int, expected_tier: str, expected_distance: int | None
+) -> None:
+    """Every tier is reachable over the real ``(85, 92)`` hunk.
+
+    ``within_tolerance`` uses distance 2, inside the shared ``HUNK_TOLERANCE``
+    of 3; ``beyond_tolerance`` uses the worked example's 81.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(deep, [_item(1, file=file, line=line)])
+
+    location = analyze_location(dd)
+
+    assert location["scored_items"] == 1
+    assert location["tiers"][expected_tier] == 1
+    assert location["tier_rates"][expected_tier] == 1.0
+    assert location["items"][0]["tier"] == expected_tier
+    assert location["items"][0]["distance"] == expected_distance
+
+
+def test_location_scores_the_cited_line_not_the_snapped_line(tmp_path: Path) -> None:
+    """``location_cited_line`` wins over the post-snap ``line``.
+
+    The validator SNAPS an in-tolerance citation to the hunk boundary before
+    ``merged-items.json`` is written, so reading ``line`` alone would report
+    ``in_hunk`` for a citation that was actually two lines out -- and
+    ``within_tolerance`` would be structurally almost always zero.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [_item(1, line=92, location_cited_line=94)],  # snapped to 92, cited 94
+    )
+
+    location = analyze_location(dd)
+
+    assert location["tiers"]["within_tolerance"] == 1   # the CITED line's tier
+    assert location["tiers"]["in_hunk"] == 0            # not the snapped line's
+    assert location["in_hunk_rate"] == 0.0
+    assert location["relocated_items"] == 1
+    row = location["items"][0]
+    assert (row["line"], row["cited_line"], row["distance"]) == (92, 94, 2)
+
+
+def test_location_structural_whole_file_anchor_does_not_pollute_tiers(
+    tmp_path: Path,
+) -> None:
+    """A structural ``line: 0`` item is a whole-file citation, not a line citation.
+
+    Mirrors the validator's own carve-out exactly: it is counted in
+    ``whole_file_anchors`` and excluded from ``scored_items``/``tiers``, so it
+    is never scored ``file_absent``/``beyond_tolerance`` and cannot drag
+    ``in_hunk_rate`` down.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(1, line=88),
+            _item(2, line=0, lens="structural", description=WORKED_B),
+            _item(3, line="not-an-int", description="unscorable citation"),
+            _item(4, line=True, description="bool is not a line"),
+        ],
+    )
+
+    location = analyze_location(dd)
+
+    assert location["shipped_items"] == 4
+    assert location["whole_file_anchors"] == 1
+    assert location["unscorable_items"] == 2      # the string and the bool
+    assert location["scored_items"] == 1
+    assert location["tiers"] == {
+        "in_hunk": 1,
+        "within_tolerance": 0,
+        "beyond_tolerance": 0,
+        "file_absent": 0,
+    }
+    assert location["in_hunk_rate"] == 1.0        # the exemptions cost nothing
+
+
+def test_location_prefers_persisted_hunk_index_over_the_diff(tmp_path: Path) -> None:
+    """The persisted index is the run-time authority the validator itself read.
+
+    Seeded with a range the diff does NOT contain, so the assertion can only
+    pass if the index -- not ``diff.patch`` -- supplied the ranges.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_hunk_index(dd, {"svc/loader.py": [(200, 210)]})
+    seed_merged_items(deep, [_item(1, line=205)])
+
+    location = analyze_location(dd)
+
+    assert location["hunk_source"] == "hunk-index.json"
+    assert location["tiers"]["in_hunk"] == 1
+
+
+def test_location_hunk_source_falls_back_to_diff_patch(tmp_path: Path) -> None:
+    """Archived runs carry only ``diff.patch``; the axis still scores them."""
+    dd, deep = _worked_example_dirs(tmp_path)
+    assert not (dd / "hunk-index.json").exists()
+    seed_merged_items(deep, [_item(1, line=88)])
+
+    location = analyze_location(dd)
+
+    assert location["hunk_source"] == "diff.patch"
+    assert location["in_hunk_rate"] == 1.0
+
+
+def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
+    """With neither artifact, "not measured" must be distinguishable from "clean"."""
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_merged_items(deep, [_item(1, line=4)])   # would be beyond_tolerance
+
+    location = analyze_location(dd)
+
+    assert location["hunk_source"] == "none"
+    assert location["shipped_items"] == 1
+    assert location["scored_items"] == 0
+    assert location["tiers"] == {
+        "in_hunk": 0,
+        "within_tolerance": 0,
+        "beyond_tolerance": 0,
+        "file_absent": 0,
+    }
+    assert location["tier_rates"] == {}
+    assert location["in_hunk_rate"] is None       # undefined, not perfect
+    assert location["items"] == []
+
+
+def test_location_and_duplication_are_zeroed_when_merged_items_absent(
+    tmp_path: Path,
+) -> None:
+    """An absent shipped set is not an error, but duplication's headline count
+    stays undefined rather than becoming an imputed zero.
+
+    ``deep/`` exists (created by an earlier phase, e.g. coverage) but
+    ``merged-items.json`` itself was never written, i.e. merge never produced
+    a shipped set. Location naturally scores nothing (there is nothing to
+    score), and duplication's ``near_duplicate_pairs`` is ``None`` for the
+    same reason: an imputed ``0`` here would be indistinguishable from a
+    genuinely empty, merge-completed shipped set. ``deep/``'s mere existence
+    is not evidence merge ran -- only ``merged-items.json`` is.
+    """
+    dd, _deep = _worked_example_dirs(tmp_path)
+
+    location = analyze_location(dd)
+    duplication = analyze_shipped_duplication(dd)
+
+    assert location["shipped_items"] == 0
+    assert location["scored_items"] == 0
+    assert location["in_hunk_rate"] is None
+    assert location["hunk_source"] == "diff.patch"   # honest: hunks WERE readable
+    assert duplication["shipped_items"] == 0
+    assert duplication["comparable_pairs"] == 0
+    assert duplication["near_duplicate_pairs"] is None
+    assert duplication["max_similarity"] is None
+    assert duplication["mean_similarity"] is None
+    assert duplication["pairs"] == []
+
+
+def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(
+    tmp_path: Path,
+) -> None:
+    """No ``deep/`` directory at all is another way merge never produced a
+    shipped set.
+
+    Same outcome as
+    ``test_location_and_duplication_are_zeroed_when_merged_items_absent``
+    (what's actually checked is ``merged-items.json``, not ``deep/``'s
+    existence) via a different setup: here ``deep/`` itself was never
+    created, so the manifest-archived headline count must be ``None``, not an
+    imputed zero (the same "undefined, never 0.0" contract as
+    ``location_in_hunk_rate``).
+    """
+    dd = tmp_path / ".daydream"
+    dd.mkdir(parents=True)
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["shipped_items"] == 0
+    assert duplication["comparable_pairs"] == 0
+    assert duplication["near_duplicate_pairs"] is None
+    assert duplication["max_similarity"] is None
+    assert duplication["mean_similarity"] is None
+    assert duplication["pairs"] == []
+
+
+def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(
+    tmp_path: Path,
+) -> None:
+    """Pairwise comparison is O(n^2); a pathological shipped set must not turn
+    a single eval pass into an unbounded time/memory sink (issue #1106 R2).
+
+    202 items: the first 200 fill the input cap with mutually distinct
+    descriptions, and the last two -- both beyond the cap -- are an
+    exact-duplicate pair. An uncapped scan would report that pair as the
+    escape; with the cap applied it is never compared, so
+    ``near_duplicate_pairs`` is 0 even though a genuine duplicate sits in the
+    tail. ``shipped_items`` still reports the true, uncapped total.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    # ``uuid4().hex`` descriptions share no common words/bigram structure, so
+    # none of the first 200 items accidentally clear the 0.5 similarity bar.
+    items = [_item(i, description=uuid.uuid4().hex) for i in range(200)]
+    items.append(_item(200, description="the exact same duplicate description text"))
+    items.append(_item(201, description="the exact same duplicate description text"))
+    seed_merged_items(deep, items)
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["shipped_items"] == 202
+    assert duplication["near_duplicate_pairs"] == 0   # the tail pair is beyond the cap
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_error"),
+    [
+        pytest.param("{not json", json.JSONDecodeError, id="syntax-invalid"),
+        pytest.param('{"items": {"a": 1}}', ValueError, id="wrong-shape"),
+    ],
+)
+def test_location_and_duplication_propagate_corrupt_merged_items(
+    tmp_path: Path, payload: str, expected_error: type[Exception]
+) -> None:
+    """The shared loader's raise-on-corrupt contract holds for the new axes too.
+
+    A bogus shipped set is never silently counted -- and never silently scored.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    (deep / "merged-items.json").write_text(payload)
+
+    with pytest.raises(expected_error):
+        analyze_location(dd)
+    with pytest.raises(expected_error):
+        analyze_shipped_duplication(dd)
+
+
+def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path) -> None:
+    """A >= 0.5 pair that survived merge is an ESCAPE and is counted."""
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(1, line=88, description="The loader does not validate its config path"),
+            _item(2, line=90, description="The loader fails to validate the config path"),
+        ],
+    )
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["comparable_pairs"] == 1
+    assert duplication["near_duplicate_pairs"] == 1
+    assert duplication["same_file_pairs"] == 1
+    assert duplication["same_file_near_duplicate_pairs"] == 1
+    assert duplication["max_similarity"] is not None
+    assert duplication["max_similarity"] >= 0.5
+    assert duplication["mean_similarity"] == duplication["max_similarity"]
+    assert duplication["pairs"][0]["similarity"] == duplication["max_similarity"]
+
+
+def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:
+    """The distribution -- not a threshold count -- is what reveals a mis-set bar.
+
+    A threshold-only metric would report zero for the worked example forever.
+    The sub-threshold pair must still be visible via ``same_file_pairs`` and
+    ``max_similarity``, and the pair rows are ordered by similarity desc.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(1, line=88, description=WORKED_A),
+            _item(2, line=4, description=WORKED_B, lens="structural"),
+            _item(3, file="other/untouched.py", line=1, description="A wholly unrelated concern"),
+        ],
+    )
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["comparable_pairs"] == 3          # every pair, threshold=0.0
+    assert duplication["near_duplicate_pairs"] == 0      # none clears 0.5
+    assert duplication["same_file_pairs"] == 1           # (1, 2) share svc/loader.py
+    assert duplication["max_similarity"] == 0.1538
+    similarities = [pair["similarity"] for pair in duplication["pairs"]]
+    assert similarities == sorted(similarities, reverse=True)
+    assert similarities[0] == duplication["max_similarity"]
+
+
+def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(
+    tmp_path: Path,
+) -> None:
+    """The pre-merge counter is renamed to say it counts INPUTS, not escapes.
+
+    ``record_duplicates`` read as an escape count; the escapes now live in the
+    separate ``shipped_duplication`` axis. The old key is gone (it had no
+    readers anywhere in ``daydream/`` or ``rl/``).
+    """
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_dedup_candidates(
+        deep,
+        record_alt_pairs=[{"similarity": 0.75}, {"similarity": 0.55}],
+        record_duplicate_pairs=[{"similarity": 0.9}],
+    )
+
+    dedup = analyze_findings(dd)["dedup"]
+
+    assert dedup["record_duplicate_candidates"] == 1
+    assert "record_duplicates" not in dedup
+    assert dedup["record_alt_overlaps"] == 2
+    assert dedup["avg_overlap_similarity"] == 0.65
+
+
+# --- analyze_grounding: the line-tightened predicate (issue #1106) ---
+
+
+def _grounding_finding(**extra: Any) -> dict[str, Any]:
+    """A pre-merge per-stack record tagged for the ``deep-python`` reader."""
+    finding: dict[str, Any] = {
+        "id": "py-1",
+        "_stack": "python",
+        "file": "svc/loader.py",
+        "line": 88,
+        "confidence": "HIGH",
+        "rationale": "svc/loader.py needs a guard",
+    }
+    finding.update(extra)
+    return finding
+
+
+def _loader_trajectories() -> dict[str, Any]:
+    return {
+        "main": None,
+        "forked": [_read_traj("deep-python.json", "/repo/svc/loader.py")],
+    }
+
+
+def test_grounding_requires_the_cited_line_not_just_the_cited_file(
+    tmp_path: Path,
+) -> None:
+    """The reward-bearing change: a read file with a bad anchor is NOT grounded.
+
+    Both findings cite a file the reviewer read, so the old file-only predicate
+    scored both ``grounded`` -- ``grounding_rate: 1.0``. Only the in-hunk one
+    is grounded now, and the components are reported separately so the
+    composite change is observable.
+    """
+    dd, _deep = _worked_example_dirs(tmp_path)
+    findings = [
+        _grounding_finding(id="py-1", line=88),
+        _grounding_finding(id="py-2", line=4),
+    ]
+
+    result = analyze_grounding(_loader_trajectories(), findings, dd)
+
+    assert result["hunk_source"] == "diff.patch"
+    assert result["total_findings"] == 2
+    assert result["grounded_count"] == 1
+    assert result["grounding_rate"] == 0.5
+    # Components: the file half is still perfect; only the line half moved.
+    assert result["file_grounded_count"] == 2
+    assert result["file_grounding_rate"] == 1.0
+    assert result["line_grounded_count"] == 1
+    assert result["line_grounding_rate"] == 0.5
+    assert result["tiers"]["in_hunk"] == 1
+    assert result["tiers"]["beyond_tolerance"] == 1
+    assert [entry["id"] for entry in result["ungrounded"]] == ["py-2"]
+    assert result["ungrounded"][0]["location_tier"] == "beyond_tolerance"
+    assert result["ungrounded"][0]["line_grounded"] is False
+    assert result["ungrounded"][0]["file_was_read"] is True
+    assert result["grounded"][0]["location_tier"] == "in_hunk"
+    assert result["grounded"][0]["line_grounded"] is True
+
+
+def test_grounding_accepts_a_within_tolerance_line(tmp_path: Path) -> None:
+    """``within_tolerance`` is grounded -- the validator snaps it, not demotes it."""
+    dd, _deep = _worked_example_dirs(tmp_path)
+
+    result = analyze_grounding(
+        _loader_trajectories(), [_grounding_finding(line=94)], dd
+    )
+
+    assert result["tiers"]["within_tolerance"] == 1
+    assert result["grounding_rate"] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("finding", "expected_tier"),
+    [
+        pytest.param(
+            {"line": 0, "lens": "structural"}, "whole_file", id="structural-lens-line-0"
+        ),
+        pytest.param(
+            {"line": 0, "_stack": "structure"}, "whole_file", id="structure-stack-line-0"
+        ),
+        pytest.param({"line": None}, "no_line", id="missing-line"),
+        pytest.param({"line": "top of file"}, "no_line", id="non-int-line"),
+        pytest.param({"line": True}, "no_line", id="bool-line"),
+    ],
+)
+def test_grounding_exemptions_are_counted_not_swallowed(
+    tmp_path: Path, finding: dict[str, Any], expected_tier: str
+) -> None:
+    """Each exemption keeps the finding grounded AND shows up in ``tiers``.
+
+    Structural records loaded from ``stack-structure-records.json`` carry no
+    ``lens`` key -- ``analyze_findings`` tags them ``_stack == "structure"`` --
+    so both spellings must be recognised.
+    """
+    dd, _deep = _worked_example_dirs(tmp_path)
+    record = _grounding_finding(**finding)
+    if record.get("_stack") == "structure":
+        # The structure reader is the ``deep-structure`` trajectory.
+        trajectories = {
+            "main": None,
+            "forked": [_read_traj("deep-structure.json", "/repo/svc/loader.py")],
+        }
+    else:
+        trajectories = _loader_trajectories()
+
+    result = analyze_grounding(trajectories, [record], dd)
+
+    assert result["tiers"][expected_tier] == 1
+    assert result["line_grounded_count"] == 1
+    assert result["grounding_rate"] == 1.0
+    assert result["grounded"][0]["location_tier"] == expected_tier
+
+
+def test_grounding_is_not_penalized_when_hunks_are_unreadable(tmp_path: Path) -> None:
+    """No hunk artifact -> fall back to the file-only predicate, tier "unchecked".
+
+    A run is never penalized for an artifact the analyzer could not read, and
+    the rate must equal the old file-only rate exactly.
+    """
+    dd = tmp_path / ".daydream"
+    dd.mkdir(parents=True)
+    findings = [
+        _grounding_finding(id="py-1", line=88),
+        _grounding_finding(id="py-2", line=4),        # would be beyond_tolerance
+        _grounding_finding(id="py-3", file="ghost.py", line=1),  # file never read
+    ]
+
+    result = analyze_grounding(_loader_trajectories(), findings, dd)
+
+    assert result["hunk_source"] == "none"
+    assert result["tiers"]["unchecked"] == 3
+    assert result["line_grounded_count"] == 3
+    # Identical to the pre-#1106 file-only outcome: 2 of 3 files were read.
+    assert result["file_grounded_count"] == 2
+    assert result["grounded_count"] == 2
+    assert result["grounding_rate"] == 0.6667
+    assert result["file_grounding_rate"] == result["grounding_rate"]
+
+
+def test_grounding_scores_the_cited_line_when_the_record_was_relocated(
+    tmp_path: Path,
+) -> None:
+    """``location_cited_line`` is honoured here too, for the same reason."""
+    dd, _deep = _worked_example_dirs(tmp_path)
+
+    result = analyze_grounding(
+        _loader_trajectories(),
+        [_grounding_finding(line=92, location_cited_line=4)],
+        dd,
+    )
+
+    assert result["tiers"]["beyond_tolerance"] == 1
+    assert result["grounding_rate"] == 0.0
+
+
+def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path) -> None:
+    """The two new axes reach ``analyze_session``'s result under their own keys."""
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_diff_patch(dd)
+    seed_hunk_index(dd, {"svc/loader.py": [(85, 92)]})
+    seed_merged_items(
+        deep,
+        [
+            _item(1, line=88, description=WORKED_A),
+            _item(2, line=4, description=WORKED_B, lens="structural"),
+        ],
+    )
+    run_dir = dd / "runs" / "loc-session"
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.7",
+                "session_id": "loc-session",
+                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
+                "steps": [],
+            }
+        )
+    )
+
+    result = analyze_session(dd, session_id="loc-session")
+
+    assert result["location"]["hunk_source"] == "hunk-index.json"
+    assert result["location"]["in_hunk_rate"] == 0.5
+    assert result["location"]["tiers"]["beyond_tolerance"] == 1
+    assert result["findings"]["shipped_duplication"]["same_file_pairs"] == 1
+    assert result["findings"]["shipped_duplication"]["near_duplicate_pairs"] == 0
+    assert result["grounding"]["hunk_source"] == "hunk-index.json"

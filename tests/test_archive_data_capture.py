@@ -734,3 +734,86 @@ def test_local_commit_applied_signal_uses_recommended_patch(
         file_at_fetcher=lambda repo, path, sha: file_contents,
     )
     assert sig.verdict == expected_verdict
+
+
+# --- location + shipped-duplication axes reach the archive (issue #1106) ---
+
+
+async def test_deep_run_archives_location_and_shipped_duplication_axes(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+) -> None:
+    """Real-path: the two new eval axes land in the archived ``evaluation.json``.
+
+    Drives the production entrypoint over a real temp git worktree with only the
+    backend seam mocked. The run ships two near-duplicate findings on ``api.py``
+    (whose only hunk is ``(1, 2)``): one correctly anchored on line 1 and one
+    anchored on line 88, which the live location validator demotes and stamps
+    with ``location_cited_line``. The harness's structural meta-stack item is
+    the third shipped item (in-hunk, differently worded). The archived
+    evaluation must therefore show a ``beyond_tolerance`` item scored on the
+    CITED line and a shipped near-duplicate pair -- the exact run shape that
+    previously scored perfect.
+    """
+    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    stub.fix_edit_line = "# daydream recommended change\n"
+    anchored = _merge_item(
+        1, "api.py", "high", desc="The loader does not validate its config path"
+    )
+    mis_anchored = {
+        **_merge_item(
+            2, "api.py", "medium", desc="The loader fails to validate the config path"
+        ),
+        "line": 88,
+        "evidence": "api.py:88",
+    }
+    stub.merge_items = [anchored, mis_anchored]
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    evaluation = json.loads((run_dir / "evaluation.json").read_text())
+
+    # The persisted hunk index (written next to diff.patch) supplied the ranges.
+    location = evaluation["location"]
+    assert location["hunk_source"] == "hunk-index.json"
+    assert location["shipped_items"] == 3
+    assert location["scored_items"] == 3
+    assert location["tiers"] == {
+        "in_hunk": 2,           # the anchored finding + the structural item
+        "within_tolerance": 0,
+        "beyond_tolerance": 1,  # the mis-anchored twin
+        "file_absent": 0,
+    }
+    assert location["in_hunk_rate"] == 0.6667
+    # The live validator demoted the mis-anchored item and recorded its citation.
+    assert location["distrusted_items"] == 1
+    assert location["relocated_items"] == 0   # demoted, not relocated (no snap)
+    beyond = [row for row in location["items"] if row["tier"] == "beyond_tolerance"]
+    assert len(beyond) == 1
+    assert beyond[0]["cited_line"] == 88
+    assert beyond[0]["location_distrust"] is True
+
+    # The shipped duplication escaped merge and is counted as such.
+    duplication = evaluation["findings"]["shipped_duplication"]
+    assert duplication["shipped_items"] == 3
+    assert duplication["comparable_pairs"] == 3
+    assert duplication["near_duplicate_pairs"] == 1   # the escape
+    assert duplication["same_file_pairs"] == 3        # every item cites api.py
+    assert duplication["same_file_near_duplicate_pairs"] == 1
+    assert duplication["max_similarity"] >= 0.5
+    escape = duplication["pairs"][0]
+    assert (escape["a_id"], escape["b_id"]) == ("1", "2")
+    assert escape["same_file"] is True
+
+    # Grounding records which artifact it checked against.
+    assert evaluation["grounding"]["hunk_source"] == "hunk-index.json"
+
+    # Pre-existing manifest eval metrics are unaffected.
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["metrics"]["grounding_rate"] is not None
+    assert manifest["metrics"]["total_findings"] == 3

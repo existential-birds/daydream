@@ -111,6 +111,13 @@ def validate_records(
     """Validate every finding record and snap/demote as needed.
 
     For each record with a ``file`` + integer ``line``:
+      - Not in-hunk (either branch below): record the reviewer's original
+        citation in ``record["location_cited_line"]`` before anything is
+        rewritten, so the cited line stays recoverable and location accuracy
+        stays measurable post-hoc (issue #1106). Set on exactly the records
+        that are about to be snapped or demoted -- an in-hunk record never
+        carries the key, so its presence means "this citation was relocated or
+        distrusted".
       - ``distance <= tolerance`` and not in-hunk: snap ``record["line"]`` to
         the nearest hunk boundary (the record's ``nearest_hunk`` start or end)
         and align the ``file:line`` citation in ``record["evidence"]`` to the
@@ -125,10 +132,17 @@ def validate_records(
         unverified citation no longer reaches the report at full severity while
         the originally adjudicated severity remains recoverable (issue #972 R2).
 
-    The mutation surface is the snap (line + evidence) and the demote
+    The mutation surface is ``location_cited_line`` plus the snap (line +
+    evidence) and the demote
     (severity_before_demotion/location_distrust/severity/confidence/location_note);
     an in-hunk record is untouched.
     Records without a file/line (or with a non-int line) pass through unchanged.
+
+    Not idempotent, in the same sense the existing ``severity_before_demotion``
+    is not: this is a single-pass pre-report validator, and a second pass over
+    an already-snapped record would overwrite ``location_cited_line`` with the
+    snapped line (just as a second pass over a demoted record would overwrite
+    ``severity_before_demotion`` with ``"low"``).
     Never raises. Returns the (possibly mutated) record list.
     """
     for record in records:
@@ -149,6 +163,11 @@ def validate_records(
             continue
         if check.in_hunk or check.distance == 0:
             continue
+        # Non-destructive location record (issue #1106): the snap below
+        # overwrites ``line``, so preserve what the reviewer actually cited or
+        # the citation's accuracy becomes unmeasurable after the fact. Mirrors
+        # the ``severity_before_demotion`` precedent in the demote branch.
+        record["location_cited_line"] = line
         if check.distance <= tolerance:
             start, end = check.nearest_hunk
             snapped = start if line < start else end

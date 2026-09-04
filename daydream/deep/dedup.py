@@ -203,6 +203,8 @@ def build_dedup_candidates(
 def build_record_dedup_candidates(
     records: list[dict[str, Any]],
     sources: list[str],
+    *,
+    threshold: float = _SIM_THRESHOLD,
 ) -> list[RecordDuplicatePair]:
     """Find per-stack records that likely describe the same concern.
 
@@ -216,6 +218,15 @@ def build_record_dedup_candidates(
         records: Parsed per-stack records matching FEEDBACK_SCHEMA.
         sources: Parallel list where ``sources[i]`` is the originating
             stack name (or records filename) for ``records[i]``.
+        threshold: Minimum normalized bigram Jaccard similarity a pair must
+            clear to be emitted. Defaults to ``_SIM_THRESHOLD``, preserving
+            the pre-filter's deliberately loose 0.5 bar -- safe there because
+            every candidate still goes in front of the merge agent (or the
+            arbiter) for adjudication. Pass ``threshold=0.0`` to get every
+            comparable pair with its similarity attached, for callers that
+            need the full similarity distribution rather than the pre-filter's
+            candidate set (e.g. an eval axis that has to detect a mis-set
+            threshold, which a threshold-only count cannot).
 
     Returns:
         Deterministically-ordered list of ``RecordDuplicatePair`` instances.
@@ -244,7 +255,7 @@ def build_record_dedup_candidates(
             if not b_desc or not b_bigrams:
                 continue
             sim = jaccard(a_bigrams, b_bigrams)
-            if sim >= _SIM_THRESHOLD:
+            if sim >= threshold:
                 pairs.append(
                     RecordDuplicatePair(
                         record_a_id=a_id,

@@ -790,6 +790,164 @@ def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path) -> N
     assert row["verbosity"] == pytest.approx(0.08)
 
 
+def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path) -> None:
+    """#1106: the location-accuracy and escaped-duplication axes reach the manifest.
+
+    The eval pass computes a location verdict per shipped finding and a
+    shipped-set duplication scan; both headline scalars must be projected so a
+    change to line resolution or the hunk index is measurable across runs.
+    """
+    m = _build(
+        tmp_path,
+        evaluation={
+            "location": {
+                "hunk_source": "hunk-index.json",
+                "scored_items": 4,
+                "in_hunk_rate": 0.75,
+                "tiers": {"in_hunk": 3, "within_tolerance": 1,
+                          "beyond_tolerance": 0, "file_absent": 0},
+            },
+            "findings": {
+                "total": 6,
+                "shipped_duplication": {
+                    "shipped_items": 6,
+                    "comparable_pairs": 15,
+                    "near_duplicate_pairs": 2,
+                },
+            },
+        },
+    )
+
+    assert m.location_in_hunk_rate == 0.75
+    assert m.shipped_duplicate_pairs == 2
+    d = m.to_dict()
+    assert d["metrics"]["location_in_hunk_rate"] == 0.75
+    assert d["metrics"]["shipped_duplicate_pairs"] == 2
+
+
+def test_build_manifest_location_duplication_metrics_none_when_blocks_absent(
+    tmp_path: Path,
+) -> None:
+    """#1106: an evaluation.json predating the axes yields None, never 0.
+
+    Every already-archived run carries a `findings` block without
+    `shipped_duplication` and no `location` block at all. The projection must
+    chain defensively and leave both metrics undefined rather than reporting a
+    perfect in-hunk rate or zero escaped duplicates.
+    """
+    m = _build(
+        tmp_path,
+        evaluation={
+            "timing": {"total_wall_clock_seconds": 42.5},
+            "findings": {"total": 7},
+            "grounding": {"grounding_rate": 0.85},
+        },
+    )
+
+    assert m.total_findings == 7  # the legacy axes still project
+    assert m.location_in_hunk_rate is None
+    assert m.shipped_duplicate_pairs is None
+    d = m.to_dict()
+    assert d["metrics"]["location_in_hunk_rate"] is None
+    assert d["metrics"]["shipped_duplicate_pairs"] is None
+
+
+def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> None:
+    """#1106: `in_hunk_rate: None` (no scorable finding) stays undefined end to end.
+
+    The analyzer emits None — not 0.0 — when `scored_items == 0`, because a run
+    that located nothing has no accuracy, and the reward pipeline renormalizes
+    over PRESENT axes. Coercion to 0.0 anywhere in the projection would feed it
+    an imputed worst score.
+    """
+    m = _build(
+        tmp_path,
+        evaluation={
+            "location": {"hunk_source": "none", "scored_items": 0, "in_hunk_rate": None},
+            "findings": {"total": 0, "shipped_duplication": {"near_duplicate_pairs": 0}},
+        },
+    )
+    assert m.location_in_hunk_rate is None
+    assert m.to_dict()["metrics"]["location_in_hunk_rate"] is None
+
+    upsert_run(
+        tmp_path,
+        make_manifest(
+            session_id="s-loc-null",
+            location_in_hunk_rate=m.location_in_hunk_rate,
+            shipped_duplicate_pairs=m.shipped_duplicate_pairs,
+        ),
+    )
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-loc-null",))[0]
+    assert row["location_in_hunk_rate"] is None  # SQL NULL, not 0.0
+    assert row["shipped_duplicate_pairs"] == 0  # a real zero is still a zero
+
+
+def test_upsert_run_persists_location_and_duplication_metrics(tmp_path: Path) -> None:
+    """#1106: both new metrics round-trip through upsert_run -> query_runs."""
+    upsert_run(
+        tmp_path,
+        make_manifest(
+            session_id="s-loc",
+            location_in_hunk_rate=0.6,
+            shipped_duplicate_pairs=3,
+        ),
+    )
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-loc",))[0]
+    assert row["location_in_hunk_rate"] == pytest.approx(0.6)
+    assert row["shipped_duplicate_pairs"] == 3
+
+
+def test_runs_location_duplication_columns_migrate_existing_db(tmp_path: Path) -> None:
+    """#1106: a real pre-existing v7 index.db gains both columns via ALTER-ADD.
+
+    Mirrors the erosion/verbosity additive migration: the legacy runs table (v7
+    DDL minus the two new columns, PRAGMA user_version = 7) keeps its rows and
+    gains the columns on the next production write, never dropping or
+    rewriting data.
+    """
+    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
+
+    legacy_ddl = _CREATE_TABLE.replace(
+        "    location_in_hunk_rate REAL,\n    shipped_duplicate_pairs INTEGER,\n", ""
+    )
+    assert "location_in_hunk_rate" not in legacy_ddl
+    assert "shipped_duplicate_pairs" not in legacy_ddl
+    db_path = tmp_path / "index.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(legacy_ddl)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path, erosion) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy-loc-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-loc-run"), 0.5),
+    )
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    conn.close()
+
+    # The production write path must ALTER-ADD both columns non-destructively.
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s-mig-loc", location_in_hunk_rate=0.25,
+                      shipped_duplicate_pairs=4),
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert {"location_in_hunk_rate", "shipped_duplicate_pairs"} <= cols
+    assert user_version == SCHEMA_VERSION == 8
+
+    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-loc-run",))[0]
+    assert legacy["erosion"] == pytest.approx(0.5)  # pre-existing row preserved
+    assert legacy["location_in_hunk_rate"] is None  # new columns nullable
+    assert legacy["shipped_duplicate_pairs"] is None
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-loc",))[0]
+    assert row["location_in_hunk_rate"] == pytest.approx(0.25)
+    assert row["shipped_duplicate_pairs"] == 4
+
+
 def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
     """Issue #646: per-stack review identity round-trips through the index."""
     m = make_manifest(
@@ -1752,7 +1910,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
     is migrated/recreated on the next connection: runs gains has_posterior via
     ALTER, the stale label_observations is dropped+recreated with both new
-    columns, and PRAGMA user_version reaches SCHEMA_VERSION (7)."""
+    columns, and PRAGMA user_version reaches SCHEMA_VERSION (8)."""
     from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
 
     db_path = tmp_path / "index.db"
@@ -1798,7 +1956,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
     assert "has_posterior" in runs_cols
     assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 7
+    assert user_version == SCHEMA_VERSION == 8
 
     obs = latest_label_observation(tmp_path, "mig-1")
     assert obs is not None

@@ -179,3 +179,39 @@ def test_descriptions_match_never_collapses_contentless_descriptions() -> None:
     assert not descriptions_match("", "")
     assert not descriptions_match("the a an", "of to for")
     assert not descriptions_match("", "Missing input validation")
+
+
+# ---------------------------------------------------------------------------
+# threshold= knob on build_record_dedup_candidates (issue #1106): an eval axis
+# needs the full similarity distribution, because a threshold-only count can
+# never fire when the threshold itself is mis-set.
+# ---------------------------------------------------------------------------
+
+# The issue's worked example. These two descriptions are the same defect
+# ("config reading is duplicated") in different words, yet score ~0.1538 --
+# far under the 0.5 pre-filter bar.
+_ISSUE_1106_A = "New helper duplicates the existing loader"
+_ISSUE_1106_B = "Config reading is implemented twice in this module"
+
+
+def _issue_1106_records() -> list[dict[str, object]]:
+    return [
+        {"id": "1", "file": "loader.py", "line": 10, "description": _ISSUE_1106_A},
+        {"id": "2", "file": "config.py", "line": 20, "description": _ISSUE_1106_B},
+    ]
+
+
+def test_record_dedup_threshold_zero_yields_the_full_similarity_distribution() -> None:
+    """``threshold=0.0`` emits every comparable pair with its similarity attached."""
+    pairs = build_record_dedup_candidates(
+        _issue_1106_records(), sources=["python", "python"], threshold=0.0
+    )
+    assert len(pairs) == 1
+    assert pairs[0].record_a_id == "1"
+    assert pairs[0].record_b_id == "2"
+    assert 0.0 < pairs[0].similarity < 0.5
+
+
+def test_record_dedup_default_threshold_still_rejects_the_sub_bar_pair() -> None:
+    """The default call is unchanged: the same pair is below the 0.5 bar."""
+    assert build_record_dedup_candidates(_issue_1106_records(), sources=["python", "python"]) == []

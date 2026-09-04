@@ -224,6 +224,19 @@ class Manifest:
             if available).
         verbosity: Line-flagging verbosity ratio of the post-fix workspace
             (from eval, if available).
+        location_in_hunk_rate: Share of scored shipped findings whose
+            originally cited line -- ``location_cited_line`` when the
+            validator snapped/demoted it, else ``line``; never the validator's
+            post-snap position, see ``eval.analyzer._cited_line`` -- landed
+            inside a diff hunk, i.e. the location validator's headline
+            accuracy axis (from eval, if available). ``None`` when the
+            run scored no locatable findings — undefined, never 0.0, so the
+            reward pipeline renormalizes over present axes instead of reading
+            an imputed perfect/zero score.
+        shipped_duplicate_pairs: Number of near-duplicate finding pairs
+            (similarity >= 0.5) that survived dedup into the shipped set (from
+            eval, if available) — the escaped-duplication axis. ``None`` when
+            the eval pass did not compute it.
         outcome_labels: JSON-encoded list of outcome labels.
         labeled_at: ISO 8601 timestamp of last label update.
         composite_reward: Cached composite reward scalar mirrored from the
@@ -323,6 +336,8 @@ class Manifest:
     cost_per_finding_usd: float | None = None
     erosion: float | None = None
     verbosity: float | None = None
+    location_in_hunk_rate: float | None = None
+    shipped_duplicate_pairs: int | None = None
 
     # Outcome labels (populated via `daydream harvest`)
     outcome_labels: str = field(default="[]")
@@ -403,6 +418,8 @@ class Manifest:
                 "cost_per_finding_usd": self.cost_per_finding_usd,
                 "erosion": self.erosion,
                 "verbosity": self.verbosity,
+                "location_in_hunk_rate": self.location_in_hunk_rate,
+                "shipped_duplicate_pairs": self.shipped_duplicate_pairs,
             },
             "outcome": {
                 "labels": json.loads(self.outcome_labels),
@@ -605,6 +622,17 @@ def build_manifest(
 
         findings = evaluation.get("findings", {})
         m.total_findings = findings.get("total")
+        # Escaped-duplication axis: near-duplicate pairs that survived dedup
+        # into the shipped set. Absent on every run archived before the axis
+        # existed, so the chained .get() must yield None (not 0).
+        shipped_duplication = findings.get("shipped_duplication", {})
+        m.shipped_duplicate_pairs = shipped_duplication.get("near_duplicate_pairs")
+
+        # Location-validator accuracy axis. ``in_hunk_rate`` is deliberately
+        # None when no finding was scorable; that None is preserved as
+        # "undefined" rather than coerced, same as every other eval metric.
+        location = evaluation.get("location", {})
+        m.location_in_hunk_rate = location.get("in_hunk_rate")
 
         grounding = evaluation.get("grounding", {})
         m.grounding_rate = grounding.get("grounding_rate")
