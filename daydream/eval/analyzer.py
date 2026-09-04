@@ -1,8 +1,8 @@
 """Quantitative analysis of ATIF v1.7 trajectory data from daydream runs.
 
 Parses trajectory JSON files and deep review artifacts, computes metrics
-across cost, tool usage, file coverage, finding quality, grounding, and
-training signal dimensions. Output is a JSON-serializable report for archive
+across cost, tool usage, file coverage, finding quality, grounding,
+location accuracy, shipped duplication, and training signal dimensions. Output is a JSON-serializable report for archive
 inspection and downstream training analysis.
 
 Usage::
@@ -23,6 +23,7 @@ from typing import Any, Iterator
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
 from daydream.generated_files import is_generated_file
+from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.timeutil import parse_iso_timestamp
 
 # Trajectory loading
@@ -676,6 +677,47 @@ def _bucketed_lens_counts(deep_dir: Path) -> dict[str, int]:
     return per_lens
 
 
+def _load_shipped_items(deep_dir: Path) -> list[Any] | None:
+    """Load the shipped review set from ``merged-items.json``, or ``None`` when absent.
+
+    The single load + shape-check of the shipped set, shared by
+    :func:`_shipped_counts`, :func:`analyze_location` and
+    :func:`analyze_shipped_duplication` so the raise-on-corrupt contract below
+    exists in exactly one place and cannot drift between the shipped count and
+    the axes that score the same file.
+
+    A present-but-corrupt ``merged-items.json`` is a data-integrity error that
+    propagates rather than being silently hidden behind a fallback: a
+    *syntax*-invalid file surfaces ``JSONDecodeError`` from ``json.loads``, and a
+    well-formed file with the wrong shape (top-level non-object, or an ``items``
+    field that is not a list) raises ``ValueError`` from the explicit shape
+    check. Both are the same documented error class -- a bogus shipped set is
+    never silently counted, and never silently scored.
+
+    ``None`` (file absent) is deliberately distinct from ``[]`` (file present
+    and empty, i.e. "shipped nothing") so callers keep their own absent-file
+    fallbacks. The item list is returned verbatim, non-dict entries included:
+    the shape contract is on the container, and filtering here would silently
+    change ``_shipped_counts``'s total.
+    """
+    merged_items_file = deep_dir / "merged-items.json"
+    if not merged_items_file.exists():
+        return None
+    merged = json.loads(merged_items_file.read_text())
+    # Shape-check before use so a well-formed-but-wrong-shape file (top-level
+    # non-object, or ``items`` not a list) is treated as the documented
+    # data-integrity error instead of silently yielding a bogus count. The
+    # writer always emits the ``items`` key, so a missing ``items`` is a
+    # wrong shape too -- only ``items": []`` is "shipped nothing".
+    if not isinstance(merged, dict) or not isinstance(merged.get("items"), list):
+        raise ValueError(
+            "merged-items.json must be an object whose ``items`` is a list; "
+            f"got top-level type {type(merged).__name__}"
+        )
+    items: list[Any] = merged["items"]
+    return items
+
+
 def _shipped_counts(
     deep_dir: Path, all_findings: list[dict[str, Any]], merged_review: dict[str, Any]
 ) -> tuple[int, dict[str, int]]:
@@ -689,28 +731,12 @@ def _shipped_counts(
     per-stack total so archived runs never regress to zero. ``by_confidence``
     is in every branch derived from the artifact that supplies ``total``.
 
-    A present-but-corrupt ``merged-items.json`` is a data-integrity error that
-    propagates rather than being silently hidden behind the fallback: a
-    *syntax*-invalid file surfaces ``JSONDecodeError`` from ``json.loads``, and a
-    well-formed file with the wrong shape (top-level non-object, or an ``items``
-    field that is not a list) raises ``ValueError`` from the explicit shape
-    check. Both are the same documented error class -- a bogus shipped set is
-    never silently counted.
+    The load and its raise-on-corrupt contract live in
+    :func:`_load_shipped_items`, so a present-but-corrupt file surfaces the
+    same documented error here and in every axis that scores the shipped set.
     """
-    merged_items_file = deep_dir / "merged-items.json"
-    if merged_items_file.exists():
-        merged = json.loads(merged_items_file.read_text())
-        # Shape-check before use so a well-formed-but-wrong-shape file (top-level
-        # non-object, or ``items`` not a list) is treated as the documented
-        # data-integrity error instead of silently yielding a bogus count. The
-        # writer always emits the ``items`` key, so a missing ``items`` is a
-        # wrong shape too -- only ``items": []`` is "shipped nothing".
-        if not isinstance(merged, dict) or not isinstance(merged.get("items"), list):
-            raise ValueError(
-                "merged-items.json must be an object whose ``items`` is a list; "
-                f"got top-level type {type(merged).__name__}"
-            )
-        merged_items = merged["items"]
+    merged_items = _load_shipped_items(deep_dir)
+    if merged_items is not None:
         # Every merged item is shipped: the renderer now emits wonder-lens
         # findings too (issue #741), so the shipped set equals the posted
         # review. A present-but-empty list means "shipped nothing".
@@ -771,9 +797,26 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
         pairs = dedup.get("record_alt_pairs", [])
         dupes = dedup.get("record_duplicate_pairs", [])
         avg_sim = sum(p.get("similarity", 0) for p in pairs) / len(pairs) if pairs else 0
+        # These are INPUT counters, not escapes: ``dedup-candidates.json`` holds
+        # the pre-merge candidate pairs the pre-filter handed the merge agent, so
+        # ``record_duplicate_candidates`` measures adjudication workload -- a
+        # higher value is not "worse", it is "more pairs were reviewed". The
+        # escapes (near-duplicates that survived merge into the shipped set) are
+        # the separate ``shipped_duplication`` axis over ``merged-items.json``
+        # (:func:`analyze_shipped_duplication`). Renamed from ``record_duplicates``
+        # (issue #1106) because that name read as an escape count.
+        #
+        # Known gap, deliberate and not closable here: the candidate pool is
+        # built from the language-stack record pool only -- structural meta-stack
+        # records are partitioned out upstream, and #1103/#1110 keep that
+        # partition because the pool is what the merge agent reads and it must
+        # not be pointed at records it was not given. So this counter has never
+        # been able to see a structural/language twin, in either direction. The
+        # shipped axis can, because the host appends structural items into
+        # ``merged-items.json``.
         dedup_stats = {
             "record_alt_overlaps": len(pairs),
-            "record_duplicates": len(dupes),
+            "record_duplicate_candidates": len(dupes),
             "avg_overlap_similarity": round(avg_sim, 4),
         }
 
@@ -798,28 +841,395 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
     }
 
 
-def analyze_grounding(trajectories: dict[str, Any], findings: list[dict[str, Any]]) -> dict[str, Any]:
-    """Tier 1 grounding: verify cited files were actually read by the agent.
+# Location accuracy + shipped duplication (issue #1106) ---------------------
 
-    The denominator is the pre-merge per-stack finding list held in
-    ``findings_data["findings"]`` -- those are the records tagged with
-    ``_stack`` to match against a deep-stack reader -- not the shipped ``total``
-    from ``merged-items.json``. Shipped wonder/structural items are absent from
-    this set because they have no per-stack reader stream to ground to, so they
-    neither inflate the denominator nor get grounding credit here.
+_LOCATION_TIERS = ("in_hunk", "within_tolerance", "beyond_tolerance", "file_absent")
+"""The four tiers a scored ``file:line`` citation can land in."""
+
+_GROUNDING_EXEMPT_TIERS = ("whole_file", "no_line", "unchecked")
+"""Grounding-only tiers for citations the line check cannot or must not judge."""
+
+_LOCATION_ITEM_CAP = 200
+"""Max per-item rows carried in ``analyze_location``'s ``items`` list.
+
+``evaluation.json`` is archived per run and read whole; a pathological run with
+thousands of shipped items must not turn the eval artifact into a dump. The
+counters and rates are always complete -- only the per-item detail is capped.
+"""
+
+_DUPLICATION_PAIR_CAP = 20
+"""Max pair rows carried in ``analyze_shipped_duplication``'s ``pairs`` list."""
+
+
+def _hunk_ranges(daydream_dir: Path) -> tuple[dict[str, list[tuple[int, int]]], str]:
+    """Resolve per-file new-side hunk ranges for a run, and say where they came from.
+
+    Returns ``(ranges, source)`` where ``ranges`` maps each changed file to its
+    inclusive ``(new_start, new_end)`` ranges and ``source`` is one of:
+
+    - ``"hunk-index.json"`` -- the persisted index at ``.daydream/hunk-index.json``
+      (sibling of ``diff.patch``). Preferred, because it is the run-time
+      authority the location validator itself read.
+    - ``"diff.patch"`` -- a fresh :func:`daydream.hunk_index.parse_hunks` over
+      ``.daydream/diff.patch``. Archived run directories carry only the patch,
+      so this keeps the axis working post-hoc. ``write_hunk_index`` is
+      ``parse_hunks`` projected, so the two agree by construction.
+    - ``"none"`` -- neither artifact yielded any hunk. Nothing can be checked.
+
+    Never raises: a missing, unreadable or malformed index/diff degrades to
+    ``({}, "none")`` so a new axis can never suppress ``evaluation.json``
+    through ``archive._run_eval``'s blanket ``except Exception``.
+    """
+    index: dict[str, Any] = load_hunk_index(daydream_dir)
+    source = "hunk-index.json"
+    if not index:
+        diff_path = daydream_dir / "diff.patch"
+        try:
+            index = parse_hunks(diff_path.read_text()) if diff_path.is_file() else {}
+        except (OSError, ValueError):
+            index = {}
+        source = "diff.patch" if index else "none"
+
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    for path, info in index.items():
+        if not isinstance(info, dict):
+            continue
+        hunks = info.get("hunks")
+        file_ranges: list[tuple[int, int]] = []
+        for hunk in hunks if isinstance(hunks, list) else []:
+            if not isinstance(hunk, dict):
+                continue
+            start = _int_or_none(hunk.get("new_start"))
+            end = _int_or_none(hunk.get("new_end"))
+            if start is None or end is None:
+                continue
+            file_ranges.append((start, end))
+        ranges[str(path)] = file_ranges
+    if not ranges:
+        return {}, "none"
+    return ranges, source
+
+
+def _int_or_none(value: Any) -> int | None:
+    """*value* as an ``int``, or ``None`` when it is not a usable integer.
+
+    Mirrors the validator's ``isinstance(line, int)`` pass-through and
+    additionally excludes ``bool`` the way ``pr_review.extract_item_fields``
+    does, so ``line: true`` is unscorable rather than silently scored as line 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _cited_line(record: dict[str, Any]) -> Any:
+    """The reviewer's ORIGINAL cited line: ``location_cited_line`` else ``line``.
+
+    ``daydream.deep.location_validator.validate_records`` SNAPS an in-tolerance
+    citation to the nearest hunk boundary before ``merged-items.json`` is
+    written, recording the pre-snap value in ``location_cited_line``. Reading
+    ``line`` alone would therefore measure post-snap positions, making
+    ``within_tolerance`` structurally almost always zero. The key is set on
+    exactly the records the validator snapped or demoted, so its presence also
+    means "this citation was relocated or distrusted".
+    """
+    if "location_cited_line" in record:
+        return record["location_cited_line"]
+    return record.get("line")
+
+
+def _location_tier(ranges: list[tuple[int, int]] | None, line: int) -> tuple[str, int | None]:
+    """Classify one cited *line* against its file's hunk *ranges*.
+
+    Returns ``(tier, distance)``:
+
+    - ``ranges`` is ``None`` (the file is absent from the diff) OR an empty list
+      (the file is in the diff with zero recorded new-side hunks, reachable
+      because ``parse_hunks`` drops pure-deletion hunks) -> ``("file_absent", None)``.
+    - min distance ``0`` -> ``("in_hunk", 0)``.
+    - min distance ``<= HUNK_TOLERANCE`` -> ``("within_tolerance", d)``.
+    - otherwise -> ``("beyond_tolerance", d)``.
+
+    Distance comes from :func:`daydream.hunk_index.range_distance`, and the
+    tolerance is imported from ``daydream.pr_review`` at call time (the
+    function-local-import precedent at ``daydream/phases.py:1091``) so this eval
+    axis and the pre-report validator read the same ``HUNK_TOLERANCE`` constant
+    and cannot drift.
+    """
+    from daydream.pr_review import HUNK_TOLERANCE
+
+    if not ranges:
+        return "file_absent", None
+    distance = min(range_distance(line, start, end) for start, end in ranges)
+    if distance == 0:
+        return "in_hunk", 0
+    if distance <= HUNK_TOLERANCE:
+        return "within_tolerance", distance
+    return "beyond_tolerance", distance
+
+
+def analyze_location(daydream_dir: Path) -> dict[str, Any]:
+    """Location accuracy of the SHIPPED review set (issue #1106).
+
+    Scores every item in ``deep/merged-items.json`` -- the canonical set the
+    posted review is rendered from -- against the run's diff hunks. This is a
+    different population from :func:`analyze_grounding`, which scores the
+    PRE-MERGE per-stack records; the two are not comparable and are reported
+    under separate keys.
+
+    Each item is scored on its ORIGINAL cited line (``location_cited_line`` when
+    the validator relocated it, else ``line`` -- see :func:`_cited_line`), so
+    the axis measures what the reviewer cited rather than where the validator
+    moved it.
+
+    Exemptions, each counted and visible rather than silently swallowed:
+
+    - ``lens == "structural"`` with line ``0`` is a whole-file citation, not a
+      line citation -- exactly the validator's own carve-out. Counted in
+      ``whole_file_anchors`` and excluded from ``scored_items``/``tiers``; it is
+      never scored as ``file_absent`` or ``beyond_tolerance``.
+    - No usable integer line (missing, non-int, or ``bool``) -> counted in
+      ``unscorable_items`` and excluded from ``scored_items``. A non-dict item
+      counts here too.
+
+    When ``hunk_source`` is ``"none"`` neither the persisted index nor
+    ``diff.patch`` yielded hunks, so nothing can be checked: tiers are zeroed,
+    ``scored_items`` is ``0`` and ``in_hunk_rate`` is ``None``. Reporting the
+    honest source lets a consumer tell "not measured" from "measured clean" --
+    only the deep merge path runs the location validator at all, so the axis
+    records whether validation could run rather than assuming it did.
+
+    ``in_hunk_rate`` is ``None`` (not ``1.0``) over zero scored items: the ratio
+    is undefined, not perfect -- the same reasoning as ``grounding_rate``.
+
+    An absent ``merged-items.json`` yields ``shipped_items: 0`` with everything
+    zeroed/``None`` and does NOT raise; only a present-but-corrupt file raises,
+    via :func:`_load_shipped_items` (the same error ``analyze_findings`` already
+    surfaces for the same file earlier in ``analyze_session``).
+
+    ``items`` carries one detail row per SCORED item, capped at
+    ``_LOCATION_ITEM_CAP`` (200) so ``evaluation.json`` stays bounded; the
+    counters and rates above it are always complete.
+    """
+    deep_dir = daydream_dir / "deep"
+    items = _load_shipped_items(deep_dir)
+    ranges, hunk_source = _hunk_ranges(daydream_dir)
+
+    tiers = dict.fromkeys(_LOCATION_TIERS, 0)
+    detail: list[dict[str, Any]] = []
+    whole_file_anchors = 0
+    unscorable_items = 0
+    distrusted_items = 0
+    relocated_items = 0
+    scored_items = 0
+
+    for item in items or []:
+        if not isinstance(item, dict):
+            unscorable_items += 1
+            continue
+        if item.get("location_distrust") is True:
+            distrusted_items += 1
+        if "location_cited_line" in item:
+            relocated_items += 1
+
+        lens = item.get("lens")
+        cited = _cited_line(item)
+        if lens == "structural" and cited == 0:
+            whole_file_anchors += 1
+            continue
+        line = _int_or_none(cited)
+        if line is None:
+            unscorable_items += 1
+            continue
+        if hunk_source == "none":
+            continue
+
+        cited_file = str(item.get("file", ""))
+        tier, distance = _location_tier(ranges.get(cited_file), line)
+        tiers[tier] += 1
+        scored_items += 1
+        if len(detail) < _LOCATION_ITEM_CAP:
+            detail.append({
+                "id": item.get("id"),
+                "file": cited_file,
+                "line": item.get("line"),
+                "cited_line": item.get("location_cited_line"),
+                "lens": lens,
+                "tier": tier,
+                "distance": distance,
+                "location_distrust": item.get("location_distrust") is True,
+            })
+
+    tier_rates = (
+        {name: round(count / scored_items, 4) for name, count in tiers.items()}
+        if scored_items > 0
+        else {}
+    )
+    return {
+        "hunk_source": hunk_source,
+        "shipped_items": len(items or []),
+        "scored_items": scored_items,
+        "whole_file_anchors": whole_file_anchors,
+        "unscorable_items": unscorable_items,
+        "tiers": tiers,
+        "tier_rates": tier_rates,
+        "in_hunk_rate": (
+            round(tiers["in_hunk"] / scored_items, 4) if scored_items > 0 else None
+        ),
+        "distrusted_items": distrusted_items,
+        "relocated_items": relocated_items,
+        "items": detail,
+    }
+
+
+def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
+    """Near-duplicate ESCAPES in the SHIPPED review set (issue #1106).
+
+    Recomputes ``daydream.deep.dedup``'s similarity over
+    ``deep/merged-items.json`` -- the set the posted review is rendered from --
+    so two findings describing one defect are visible after merge, not only as
+    pre-merge candidate input. The counterpart input counter is
+    ``findings.dedup.record_duplicate_candidates``; that one counts pairs handed
+    to the merge agent, this one counts pairs that survived it. Unlike the
+    candidate pool, this axis DOES see a structural/language twin, because the
+    host appends structural items into ``merged-items.json``.
+
+    A threshold-only count is deliberately not sufficient. The issue's own
+    worked example scores ~0.15 similarity, far under the pre-filter's 0.5 bar,
+    so a bare ``pairs >= threshold`` metric would silently never fire -- the
+    same "metric never fires" failure the issue warns about for a ``uid``-keyed
+    count. The full distribution (``max_similarity``, ``mean_similarity``,
+    ``same_file_pairs``, and the top ``pairs`` rows) is reported so a mis-set
+    threshold is observable instead of invisible.
+
+    Pairs come from ``build_record_dedup_candidates(..., threshold=0.0)``, which
+    returns every comparable pair with its similarity. That function compares
+    ``description`` and deliberately does NOT require file overlap, so
+    ``same_file_pairs`` is reported separately rather than used as a gate. Its
+    ``sources`` argument must be parallel to the records, so each item's
+    ``lens`` is passed as its synthetic source and surfaces as the pair's
+    ``a_lens``/``b_lens``. ``comparable_pairs`` counts the pairs the similarity
+    could actually be computed over -- an item with an empty description is not
+    comparable and contributes no pair.
+
+    ``max_similarity``/``mean_similarity`` are ``None`` (not ``0.0``) with no
+    comparable pairs: undefined, not perfect -- the ``grounding_rate``
+    precedent. An absent ``merged-items.json`` yields zeros/``None`` without
+    raising; a present-but-corrupt one raises via :func:`_load_shipped_items`.
+    ``pairs`` is capped at ``_DUPLICATION_PAIR_CAP`` (20), highest similarity
+    first.
+    """
+    # Function-local import: ``daydream.deep.orchestrator`` imports this module
+    # at module level, so a module-level ``daydream.deep.dedup`` import here
+    # would close an import cycle through ``daydream/deep/__init__.py``. Same
+    # no-cycle pattern as ``daydream/phases.py:1091``.
+    from daydream.deep.dedup import _SIM_THRESHOLD, build_record_dedup_candidates
+
+    deep_dir = daydream_dir / "deep"
+    items = _load_shipped_items(deep_dir) or []
+    records = [item for item in items if isinstance(item, dict)]
+    sources = [str(item.get("lens", "")) for item in records]
+    pairs = build_record_dedup_candidates(records, sources, threshold=0.0)
+
+    def _same_file(pair: Any) -> bool:
+        return bool(pair.record_a_file) and pair.record_a_file == pair.record_b_file
+
+    similarities = [pair.similarity for pair in pairs]
+    near = [pair for pair in pairs if pair.similarity >= _SIM_THRESHOLD]
+    same_file = [pair for pair in pairs if _same_file(pair)]
+    same_file_near = [pair for pair in same_file if pair.similarity >= _SIM_THRESHOLD]
+    top = sorted(
+        pairs, key=lambda pair: (-pair.similarity, pair.record_a_id, pair.record_b_id)
+    )[:_DUPLICATION_PAIR_CAP]
+
+    return {
+        "shipped_items": len(items),
+        "comparable_pairs": len(pairs),
+        "near_duplicate_pairs": len(near),
+        "same_file_pairs": len(same_file),
+        "same_file_near_duplicate_pairs": len(same_file_near),
+        "max_similarity": round(max(similarities), 4) if similarities else None,
+        "mean_similarity": (
+            round(sum(similarities) / len(similarities), 4) if similarities else None
+        ),
+        "pairs": [
+            {
+                "a_id": pair.record_a_id,
+                "a_file": pair.record_a_file,
+                "a_lens": pair.record_a_source,
+                "b_id": pair.record_b_id,
+                "b_file": pair.record_b_file,
+                "b_lens": pair.record_b_source,
+                "similarity": round(pair.similarity, 4),
+                "same_file": _same_file(pair),
+            }
+            for pair in top
+        ],
+    }
+
+
+def analyze_grounding(
+    trajectories: dict[str, Any],
+    findings: list[dict[str, Any]],
+    daydream_dir: Path,
+) -> dict[str, Any]:
+    """Grounding: the cited file was read AND the cited line resolves to a hunk.
+
+    The predicate is::
+
+        grounded = file_was_read and not unread_refs and line_grounded
+
+    where ``line_grounded`` is ``location_tier in ("in_hunk",
+    "within_tolerance")`` against the run's diff hunks (issue #1106). Before
+    that tightening the predicate answered only "did the agent open the files it
+    names?", so a finding anchored 81 lines outside every hunk still scored
+    fully grounded.
+
+    Exemptions -- every one is COUNTED and visible in ``tiers``, never silently
+    swallowed:
+
+    - **Structural whole-file anchor** (line ``0``): a whole-file citation, not
+      a line citation, mirroring the location validator's own carve-out.
+      Structural is detected as ``lens == "structural"`` OR ``_stack ==
+      "structure"``, because records read from ``stack-structure-records.json``
+      carry no ``lens`` key and are tagged by :func:`analyze_findings`.
+      -> ``line_grounded`` True, tier ``"whole_file"``.
+    - **No usable integer line** (missing, non-int, or ``bool``)
+      -> ``line_grounded`` True, tier ``"no_line"``.
+    - **``hunk_source == "none"``**: neither ``hunk-index.json`` nor
+      ``diff.patch`` yielded hunks, so nothing can be checked. Every finding
+      falls back to the file-only predicate with tier ``"unchecked"`` and
+      ``hunk_source`` is surfaced in the output. A run is never penalized for
+      an artifact the analyzer could not read.
+
+    Two populations, deliberately separate: the denominator here is the
+    PRE-MERGE per-stack finding list held in ``findings_data["findings"]``
+    (records tagged with ``_stack`` to match against a deep-stack reader), NOT
+    the shipped set. Shipped wonder/structural items are absent because they
+    have no per-stack reader stream to ground to, so they neither inflate the
+    denominator nor get grounding credit. The shipped set is scored separately
+    by :func:`analyze_location` and :func:`analyze_shipped_duplication`.
 
     ``grounding_rate`` is ``None`` over an empty finding set: the ratio is
     undefined, not perfect. It feeds the RL/SFT reward as a credit axis
     (``daydream/training/reward.py``), where scoring absence of evidence as 1.0
     made "report nothing" the cheapest path to a maximal composite.
+    ``file_grounding_rate``/``line_grounding_rate`` follow the same convention
+    and are reported alongside the composite so the tightening is observable as
+    components rather than one opaque number.
     """
     agent_reads: dict[str, set[str]] = {}
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
         agent_reads[label] = _files_read(_extract_tool_calls(traj))
 
+    ranges, hunk_source = _hunk_ranges(daydream_dir)
+
     grounded: list[dict[str, Any]] = []
     ungrounded: list[dict[str, Any]] = []
+    tiers = dict.fromkeys((*_LOCATION_TIERS, *_GROUNDING_EXEMPT_TIERS), 0)
+    file_grounded_count = 0
+    line_grounded_count = 0
 
     for finding in findings:
         stack = finding.get("_stack", "")
@@ -835,6 +1245,29 @@ def analyze_grounding(trajectories: dict[str, Any], findings: list[dict[str, Any
             ref for ref in rationale_refs
             if not any(_path_matches(r, ref) for r in reads)
         ]
+        file_grounded = file_was_read and len(unread_refs) == 0
+
+        cited = _cited_line(finding)
+        cited_line = _int_or_none(cited)
+        is_structural = (
+            finding.get("lens") == "structural" or finding.get("_stack") == "structure"
+        )
+        if hunk_source == "none":
+            tier = "unchecked"
+            line_grounded = True
+        elif is_structural and cited == 0:
+            tier = "whole_file"
+            line_grounded = True
+        elif cited_line is None:
+            tier = "no_line"
+            line_grounded = True
+        else:
+            tier, _distance = _location_tier(ranges.get(str(cited_file)), cited_line)
+            line_grounded = tier in ("in_hunk", "within_tolerance")
+
+        tiers[tier] += 1
+        file_grounded_count += int(file_grounded)
+        line_grounded_count += int(line_grounded)
 
         entry = {
             "id": finding.get("id"),
@@ -843,7 +1276,9 @@ def analyze_grounding(trajectories: dict[str, Any], findings: list[dict[str, Any
             "confidence": finding.get("confidence", "UNKNOWN"),
             "file_was_read": file_was_read,
             "unread_rationale_refs": unread_refs,
-            "grounded": file_was_read and len(unread_refs) == 0,
+            "location_tier": tier,
+            "line_grounded": line_grounded,
+            "grounded": file_grounded and line_grounded,
         }
         (grounded if entry["grounded"] else ungrounded).append(entry)
 
@@ -853,6 +1288,12 @@ def analyze_grounding(trajectories: dict[str, Any], findings: list[dict[str, Any
         "grounded_count": len(grounded),
         "ungrounded_count": len(ungrounded),
         "grounding_rate": round(len(grounded) / total, 4) if total > 0 else None,
+        "hunk_source": hunk_source,
+        "file_grounded_count": file_grounded_count,
+        "line_grounded_count": line_grounded_count,
+        "file_grounding_rate": round(file_grounded_count / total, 4) if total > 0 else None,
+        "line_grounding_rate": round(line_grounded_count / total, 4) if total > 0 else None,
+        "tiers": tiers,
         "grounded": grounded,
         "ungrounded": ungrounded,
     }
@@ -1911,7 +2352,9 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
     tools = analyze_tools(trajectories)
     findings_data = analyze_findings(daydream_dir)
     coverage = analyze_coverage(trajectories, daydream_dir)
-    grounding = analyze_grounding(trajectories, findings_data["findings"])
+    grounding = analyze_grounding(trajectories, findings_data["findings"], daydream_dir)
+    location = analyze_location(daydream_dir)
+    shipped_duplication = analyze_shipped_duplication(daydream_dir)
     exploration = analyze_exploration_utilization(trajectories)
     timing = analyze_timing(trajectories)
     training = analyze_training_signals(
@@ -1958,10 +2401,12 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
             "by_confidence": findings_data["by_confidence"],
             "stacks": findings_data["stacks"],
             "dedup": findings_data["dedup"],
+            "shipped_duplication": shipped_duplication,
             "merged_review": findings_data.get("merged_review", {}),
             "per_lens": findings_data.get("per_lens", {}),
         },
         "grounding": grounding,
+        "location": location,
         "exploration_utilization": exploration,
         "training_signals": training,
         "quality": quality,
