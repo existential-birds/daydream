@@ -168,6 +168,34 @@ class TestInterruptionResume:
 
         assert count_runs(stage) == 3  # no duplicate sessions after resume
 
+    def test_resume_between_publish_and_finalize_proceeds(self, hub: FakeHub, tmp_path: Path) -> None:
+        """A v2 run killed between publish_batches and finalize resumes cleanly.
+
+        The interrupted prefix has published batches + a resume ledger but no
+        policy-binding record; the pre-publish check must treat that window as
+        the documented interrupted-v2 case (allow_unbound_resume), not as a
+        pre-v2 legacy prefix, or the resume is blocked with a misdiagnosis.
+        """
+        stage = tmp_path / "stage"
+
+        def _die_before_finalize(*_args: object, **_kwargs: object) -> str:
+            raise KeyboardInterrupt(
+                "simulated death between publish_batches and finalize"
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(hydrate, "finalize", _die_before_finalize)
+            with pytest.raises(KeyboardInterrupt):
+                hydrate.run_hydrate_hub(_config(stage), client=hub)
+        # The remote prefix now holds batches + the resume ledger but no
+        # policy-binding.json (finalize never ran) — a fresh-VM resume must
+        # complete the run instead of refusing the prefix as legacy.
+        summary = hydrate.run_hydrate_hub(_config(tmp_path / "resume"), client=hub)
+        assert summary.verified
+        from daydream.archive.index import count_runs
+
+        assert count_runs(tmp_path / "resume") == 3  # no duplicate sessions
+
 
 class TestCollision:
     def test_same_identity_different_content_quarantines(self, hub: FakeHub, tmp_path: Path) -> None:

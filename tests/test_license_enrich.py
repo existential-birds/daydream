@@ -106,9 +106,10 @@ def test_enrich_records_stable_failure_codes_for_unresolvable(tmp_path: Path) ->
     ])
     enrich_license_evidence(stage, revision="a" * 40, resolver=FakeResolver({}))
     codes = {sid: v["status"] for sid, v in _as_entries(stage).items()}
-    # No-slug session: repo_identity_missing; unresolvable repo: license_evidence_missing.
+    # No-slug session: repo_identity_missing; unresolvable repo: the specific
+    # repo_commit_unresolved code (the evidence-missing bucket folds it in).
     assert codes["sess-noslug"] == "repo_identity_missing"
-    assert codes["sess-unknown"] == "license_evidence_missing"
+    assert codes["sess-unknown"] == "repo_commit_unresolved"
     # Neither record gained evidence in its manifest — the gate rejects it downstream.
     for sid in ("sess-noslug", "sess-unknown"):
         manifest = json.loads((stage / "runs" / sid / "manifest.json").read_text())
@@ -140,14 +141,31 @@ def test_enrichment_cache_copied_into_curated_prefix(tmp_path: Path) -> None:
 
 
 def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Production adapter: GITHUB_TOKEN from the environment, never an argument or a URL."""
-    from daydream.archive.license_enrich import GithubLicenseResolver
+    """Production adapter: GITHUB_TOKEN from the environment, never an argument or a URL.
+
+    Exercises the real GitHub API shapes: ``default_branch`` is a plain string,
+    the head commit lives on the branch resource, and the contents-style
+    license response carries a blob ``sha`` (no ``commit_sha`` field).
+    """
+    from daydream.archive.license_enrich import _GITHUB_API, GithubLicenseResolver
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secrettokenvalue")
     resolver = GithubLicenseResolver()
     # The token never appears in the request URL — only in the Authorization header.
     import urllib.request
 
     captured: dict[str, Any] = {}
+    commit = "b" * 40
+    responses: dict[str, dict[str, Any]] = {
+        f"{_GITHUB_API}/repos/acme/widget": {
+            "full_name": "acme/widget", "default_branch": "main",
+        },
+        f"{_GITHUB_API}/repos/acme/widget/branches/main": {
+            "name": "main", "commit": {"sha": commit},
+        },
+        f"{_GITHUB_API}/repos/acme/widget/license?ref={commit}": {
+            "name": "LICENSE", "sha": "c" * 40, "license": {"spdx_id": "MIT"},
+        },
+    }
 
     def fake_urlopen(req: Any, **kwargs: Any) -> Any:
         captured["url"] = req.full_url
@@ -161,10 +179,7 @@ def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPat
                 return None
 
             def read(self) -> bytes:
-                return json.dumps({
-                    "license": {"spdx_id": "MIT"},
-                    "commit_sha": "b" * 40,
-                }).encode()
+                return json.dumps(responses[req.full_url]).encode()
 
         return R()
 
@@ -173,4 +188,6 @@ def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPat
     assert evidence is not None and evidence.spdx_id == "MIT"
     assert "ghp_secrettokenvalue" not in captured["url"]
     assert captured["headers"]["Authorization"] == "Bearer ghp_secrettokenvalue"
+    # The evidence commit is the resolved head commit the license request was pinned at.
+    assert captured["url"] == f"{_GITHUB_API}/repos/acme/widget/license?ref={commit}"
     assert evidence.source == f"github:acme/widget@{'b' * 40}"

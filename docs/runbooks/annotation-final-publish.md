@@ -35,18 +35,21 @@ daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <com
 ```
 
 The non-dry publication below is gated on that dry-run: proceed only after a
-completed dry-run reports full record accounting (per-repo counts, per-code,
-sum = discovered) and an admitted count you accept.
+completed dry-run reports full record accounting (the discovered-candidate
+tally, the license-admission gate's per-code and per-repo counts matching over
+the license-adjudicated population — imported sessions plus license-gate
+rejections; ingest/fixture rejections are reported separately, never counted
+as adjudicated) and an admitted count you accept.
 
 ```bash
 daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --allow-copyleft <owner/repo>...
 ```
 
 `--license-policy` is required on every non-dry publication — the command
-refuses to run without it. `--allow-copyleft` opts in, by exact SPDX slug
-(one or more `owner/repo` arguments), specific copyleft-licensed repositories
-the production policy would otherwise reject; omit it when no such exception
-is intended.
+refuses to run without it. `--allow-copyleft` opts in, by exact `owner/repo`
+slug (case-insensitive; one or more arguments), specific copyleft-licensed
+repositories the production policy would otherwise reject; omit it when no
+such exception is intended.
 
 The stage dir itself is the hydrated index root this runbook refers to as
 `INDEX_ROOT`: hydration writes the SQLite index (`index.db`) and one sanitized

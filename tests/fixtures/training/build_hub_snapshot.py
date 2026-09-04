@@ -42,7 +42,7 @@ PINNED_REVISION = hashlib.sha256(b"fixture-hub-snapshot-pinned-v1").hexdigest()[
 #   pin-declared  — well-formed declared MIT evidence (enrichment never re-derives)
 #   pin-enrich    — legacy record, repo identity only (enrichment fills MIT)
 #   pin-gpl       — enrichment resolves GPL-3.0-only -> c8_copyleft_unopted
-#   pin-unknown   — enrichment cannot resolve -> license_evidence_missing
+#   pin-unknown   — enrichment cannot resolve -> repo_commit_unresolved
 #   pin-c5        — C5-listed repo (getsentry/sentry) -> c5_excluded_repo
 _PINNED_SESSIONS: tuple[tuple[str, str, dict[str, str] | None], ...] = (
     ("pin-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}),

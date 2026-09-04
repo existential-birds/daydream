@@ -1866,7 +1866,8 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
 
     Prints the per-code tallies plus per-repository license decision counts
     (value-free slugs and counts, issue #1094), with a fail-closed accounting
-    invariant: every discovered candidate lands in exactly one bucket.
+    invariant: every license-adjudicated candidate (imported plus license-gate
+    rejections) lands in exactly one per-repository license bucket.
     """
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
@@ -1916,9 +1917,12 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
             else {}
         )
         # Issue #1094 Task 8: per-repo auditable decision counts. Value-free
-        # (slugs + counts only). Full record accounting is enforced here —
-        # every discovered candidate must land in exactly one per-repo bucket,
-        # mirroring build_import_ledger's admitted+rejected==discovered check.
+        # (slugs + counts only). License accounting is enforced here — every
+        # license-adjudicated candidate (imported sessions plus license-gate
+        # rejections; ingest/fixture rejections are never adjudicated by the
+        # license gate and are reported via the ledger's non-license rejection
+        # tallies) must land in exactly one per-repo bucket, mirroring
+        # license_admission_summary's population.
         per_repo = (
             _hydrate.license_admission_by_repo(config.stage_dir, ledger)
             if config.license_policy_path is not None
@@ -1926,16 +1930,15 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         )
         if config.license_policy_path is not None:
             per_repo_total = sum(sum(b.values()) for b in per_repo.values())
-            discovered_count = int(
-                ledger.get("tallies", {}).get("discovered", 0)
-            )
-            if per_repo_total != discovered_count:
+            adjudicated_total = sum(license_admission.values())
+            if per_repo_total != adjudicated_total:
                 raise _hydrate.HydrationError(
                     redact_text(
                         f"per-repository accounting mismatch for revision "
-                        f"{source_commit!r}: discovered {discovered_count} "
-                        f"candidate(s), per-repository buckets total "
-                        f"{per_repo_total}"
+                        f"{source_commit!r}: license-adjudicated population "
+                        f"{adjudicated_total} candidate(s) (imported plus "
+                        f"license-gate rejections), per-repository buckets "
+                        f"total {per_repo_total}"
                     )
                 )
     except _hydrate.HydrationError as exc:

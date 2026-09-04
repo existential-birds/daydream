@@ -742,6 +742,39 @@ def _session_identity(stage: Path, sid: str, revision: str, *, root: str, collis
     return None, None
 
 
+def _repo_commit_unresolved_sessions(stage: Path) -> set[str]:
+    """Session ids whose enrichment recorded an unresolvable repo commit.
+
+    Reads the ``repo_commit_unresolved`` rows of ``stage/_enrich/evidence.jsonl``
+    (written by the enrichment stage, which always precedes the license gate):
+    the repo slug was identified but no resolved Git repository commit could be
+    pinned, so the gate records such evidence-missing rejections under the
+    specific stable code instead of the generic one.
+    """
+    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        _ENRICH_CACHE_NAME,
+        _ENRICH_DIR,
+    )
+
+    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
+    unresolved: set[str] = set()
+    if not path.is_file():
+        return unresolved
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("status") != REASON_CODE_REPO_COMMIT_UNRESOLVED:
+            continue
+        sid = entry.get("session_id")
+        if isinstance(sid, str) and sid:
+            unresolved.add(sid)
+    return unresolved
+
+
 def apply_license_gate(
     stage: Path,
     *,
@@ -764,7 +797,12 @@ def apply_license_gate(
     Fail-closed: a missing ``license_policy_path`` raises ``ValueError`` before
     any gate work — never downgraded to a warning. Apart from the excluded-
     directory move the gate is pure w.r.t. its inputs, so decisions are
-    replay-identical. Returns the rejected ``(session_id, reason_code)`` pairs.
+    replay-identical. When enrichment identified the repo but could not pin a
+    resolved Git repository commit (its cache recorded
+    ``repo_commit_unresolved``), the evidence-missing rejection is recorded
+    under that more specific stable code — the same rejection, bucketed
+    identically — so the ledger surfaces the commit-unresolved path. Returns
+    the rejected ``(session_id, reason_code)`` pairs.
     """
     if not license_policy_path:
         raise ValueError(
@@ -780,6 +818,7 @@ def apply_license_gate(
     curated = _pre_identity_dir(stage, str(revision))
     ledger_path = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
     rejected: list[tuple[str, str]] = []
+    unresolved = _repo_commit_unresolved_sessions(stage)
     runs_dir = stage / "runs"
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
@@ -801,13 +840,20 @@ def apply_license_gate(
             )
             if decision.status != "rejected" or decision.reason_code is None:
                 continue
+            reason_code = decision.reason_code
+            if reason_code == REASON_CODE_LICENSE_EVIDENCE_MISSING and sid in unresolved:
+                # Enrichment identified the repo but could not pin a resolved
+                # Git commit; the ledger records the specific stable code so
+                # the repo_commit_unresolved rejection path is exercisable
+                # (it folds into the evidence-missing bucket).
+                reason_code = REASON_CODE_REPO_COMMIT_UNRESOLVED
             _move_dir(derivative, stage / "excluded" / sid)
             _append_dedupe_entry(
                 ledger_path,
-                {"session_id": sid, "status": "excluded", "reason_code": decision.reason_code,
+                {"session_id": sid, "status": "excluded", "reason_code": reason_code,
                  "content_digest": None, "revision": str(revision), "at": _utc_now()},
             )
-            rejected.append((sid, decision.reason_code))
+            rejected.append((sid, reason_code))
     if rejected:
         rebuild_index(stage)  # excluded derivatives leave the staging index immediately
     return rejected
@@ -1020,8 +1066,8 @@ def _policy_binding(
     allow_copyleft: frozenset[str] | set[str],
 ) -> dict[str, Any]:
     """Post-gate identity binding (issue #1094): pure function of the gate
-    outputs plus the pinned inputs, so fresh-VM replay from the published
-    evidence cache is byte-identical.
+    outputs plus the pinned inputs, so replay over identical evidence is
+    byte-identical.
 
     Computes, over every resolved per-repo decision of the post-gate admitted
     runs (the gate is a pure function of policy + evidence, so re-resolving
@@ -1683,7 +1729,8 @@ def check_prefix_binding(
     (legacy prefixes are never republished under the new scheme). An absent
     record on a fresh prefix — or on a prefix whose resume ledger shows an
     interrupted v2 run that died between ``publish_batches`` and ``finalize``
-    (``allow_unbound_resume``, used by :func:`finalize`) — proceeds.
+    (``allow_unbound_resume``, used by :func:`run_hydrate_hub`'s pre-publish
+    check and by :func:`finalize`) — proceeds.
 
     Runs strictly before any upload, so a conflict uploads zero bytes. Errors
     name the prefix and digest fields only — never policy file contents or
@@ -2124,9 +2171,8 @@ class HydrateSummary:
     # Issue #1080 S2: four-bucket license admission summary (admitted /
     # c5-excluded / copyleft-unopted / evidence-missing, with
     # repo_identity_missing and repo_commit_unresolved folded into the
-    # evidence-missing bucket) over the import
-    # c5-excluded / copyleft-unopted / evidence-missing) over the import
-    # ledger; empty when no license policy was configured.
+    # evidence-missing bucket) over the import ledger; empty when no license
+    # policy was configured.
     license_admission: dict[str, int] = field(default_factory=dict)
 
 
@@ -2435,8 +2481,12 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     # With the policy now required on every non-dry publication path, the
     # gate and its admission summary always run (issue #1094).
     # Issue #1094: enrichment fills legacy records' missing license_evidence
-    # from an authorized immutable source before the gate. The cache is
-    # copied into the curated prefix so fresh-VM replay is decision-identical.
+    # from an authorized immutable source before the gate. The staging cache
+    # makes same-VM re-runs decision-identical; the published copy under the
+    # curated prefix is the pinned evidence record of this curation (audit +
+    # replay harnesses). Fresh-VM production runs re-enrich from the live
+    # resolver, so upstream drift surfaces as a new v2 curation id, never a
+    # silent rewrite of a previous curation.
     from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
         _make_license_resolver,
         enrich_license_evidence,
@@ -2473,8 +2523,8 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
         allow_copyleft=config.allow_copyleft,
     )
     curation_id = str(binding["curation_id"])
-    # The enrichment cache is copied into the *v2* curated prefix so fresh-VM
-    # replay under that prefix is decision-identical.
+    # The enrichment cache is copied into the *v2* curated prefix as the
+    # pinned evidence record of this curation (audit + replay harnesses).
     publish_enrichment_cache(
         config.stage_dir, revision=source_commit,
         curated_dir=config.stage_dir / "curated" / curation_id,
@@ -2486,8 +2536,16 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
     # Issue #1094 task 7: fail closed on a conflicting published policy
     # binding before a single byte is uploaded (additive republication under
-    # a prefix bound to a different policy is refused here).
-    check_prefix_binding(dest_client, curation_id=curation_id, binding=binding)
+    # a prefix bound to a different policy is refused here). The resumed run
+    # died between publish_batches and finalize: its prefix has published
+    # batches and the resume ledger but no policy-binding record yet —
+    # allow_unbound_resume lets that exact window proceed (the v2 id is
+    # deterministic, so a reachable prefix always carries this run's binding;
+    # pre-v2 legacy prefixes have no resume ledger and still fail closed).
+    check_prefix_binding(
+        dest_client, curation_id=curation_id, binding=binding,
+        allow_unbound_resume=True,
+    )
     publish_batches(
         dest_client, config.stage_dir, curation_id=curation_id, skip_sessions=checkpoint.completed_sessions
     )

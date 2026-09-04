@@ -14,9 +14,12 @@ evidence via the existing ``_session_identity`` manifest path.
 Results are appended to ``stage/_enrich/evidence.jsonl`` — one JSON line per
 session with a stable status code — deduped per ``(repo_slug, repo_commit)`` so
 repeated sessions in one repo hit the cache, not the resolver. The cache
-survives re-runs (load-before-query) and is published into the curated prefix
-as ``license-evidence.jsonl`` by :func:`publish_enrichment_cache` so fresh-VM
-replay from pinned inputs reproduces identical decisions.
+survives re-runs (load-before-query), so same-VM re-runs are decision-identical,
+and is published into the curated prefix as ``license-evidence.jsonl`` by
+:func:`publish_enrichment_cache` — the pinned evidence record of that curation,
+consumed by audit and replay harnesses. Fresh-VM production runs re-enrich from
+the live resolver; upstream license/default-branch drift therefore yields a new
+v2 curation id, never a silent rewrite of a previous curation.
 """
 
 from __future__ import annotations
@@ -94,7 +97,10 @@ class GithubLicenseResolver:
         if data is None:
             return None
         spdx_id = (data.get("license") or {}).get("spdx_id") if isinstance(data, dict) else None
-        commit = data.get("commit_sha") if isinstance(data, dict) else None
+        # The contents-style license response carries the blob ``sha``, never a
+        # commit — the commit identity is the ref this request was pinned at
+        # (the resolver-resolved head commit or the caller-supplied commit).
+        commit = repo_commit
         if not isinstance(spdx_id, str) or not spdx_id.strip():
             raise HydrationError(
                 redact_text(f"license response for {repo_slug} carried no usable spdx_id")
@@ -112,7 +118,17 @@ class GithubLicenseResolver:
         data = self._request_json(f"{_GITHUB_API}/repos/{repo_slug}", token)
         if data is None:
             return None
-        commit = (data.get("default_branch") or {}).get("sha") if isinstance(data, dict) else None
+        # GitHub's /repos/{owner}/{repo} carries ``default_branch`` as a plain
+        # string; the head commit lives on the branch resource.
+        default_branch = data.get("default_branch") if isinstance(data, dict) else None
+        if not isinstance(default_branch, str) or not default_branch.strip():
+            return None
+        branch = self._request_json(
+            f"{_GITHUB_API}/repos/{repo_slug}/branches/{default_branch}", token
+        )
+        if branch is None:
+            return None
+        commit = (branch.get("commit") or {}).get("sha") if isinstance(branch, dict) else None
         return commit if isinstance(commit, str) and commit.strip() else None
 
     def _request_json(self, url: str, token: str) -> dict[str, Any] | None:
@@ -205,7 +221,7 @@ def enrich_license_evidence(
     ``resolver`` (dedup per ``(repo_slug, repo_commit)``); resolved evidence is
     written into the session's ``manifest.json`` so the gate consumes it exactly
     like declared evidence. Every processed session gets a stable-code cache
-    entry: ``resolved`` | ``repo_identity_missing`` | ``license_evidence_missing``.
+    entry: ``resolved`` | ``repo_identity_missing`` | ``repo_commit_unresolved``.
 
     Resolver network failures propagate as redacted :class:`HydrationError`s
     (fatal); a resolver returning ``None`` is a recorded miss, never an
@@ -255,9 +271,14 @@ def enrich_license_evidence(
         else:
             evidence = resolver.resolve(slug, None)
             if evidence is None:
+                # The repo slug was identified but no resolved Git repository
+                # commit could be pinned at this source: record the specific
+                # stable code (the resolution map reports such sessions under
+                # ``unavailable``; the license gate emits the same code into
+                # the import ledger, folding into the evidence-missing bucket).
                 entry = {
                     "session_id": sid, "repo_slug": slug,
-                    "status": "license_evidence_missing",
+                    "status": "repo_commit_unresolved",
                 }
             else:
                 entry = {
@@ -290,8 +311,10 @@ def publish_enrichment_cache(
 
     The cache at ``stage/_enrich/`` is VM-local bookkeeping (mirroring
     ``_dedupe``'s published-set exclusion); the curated copy
-    ``license-evidence.jsonl`` is the published pinned state a fresh-VM replay
-    consumes. Returns the published path, or ``None`` when nothing was cached.
+    ``license-evidence.jsonl`` is the published pinned record of this
+    curation's evidence, consumed by audit and replay harnesses (production
+    fresh-VM runs re-enrich from the live resolver). Returns the published
+    path, or ``None`` when nothing was cached.
 
     Issue #1094: publication passes the post-gate v2 ``curated_dir`` (the
     curation id is only known after the gate); callers without one fall back

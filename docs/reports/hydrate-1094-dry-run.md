@@ -42,7 +42,7 @@ Stable rejection reason codes observed:
 
 - `c5_excluded_repo`: 1
 - `c8_copyleft_unopted`: 1
-- `license_evidence_missing`: 1
+- `repo_commit_unresolved`: 1
 
 ## Per-repository decision counts
 
@@ -54,18 +54,27 @@ Stable rejection reason codes observed:
 | `ghost/nope` | 0 | 0 | 0 | 1 |
 | **Total** | **5** | | | |
 
-Invariant: per-repository buckets total == discovered (5 == 5) — holds.
+Invariant: per-repository buckets total == license-adjudicated population
+(2 admitted + 3 license-gate rejections == 5) — holds.
 
 ## License distribution (adjudicated population)
 
 | SPDX id | Records |
 |---------|---------|
 | GPL-3.0-only | 1 |
-| MIT | 3 |
-| none | 1 |
+| MIT | 2 |
+| none | 2 |
 | **Total** | **5** |
 
-Invariant: distribution total == discovered (5 == 5) — holds.
+Decision identity: `acme/widget` resolves MIT (2 admitted sessions),
+`acme/copyleft` resolves GPL-3.0-only (1 c8 rejection). The C5-excluded
+(`getsentry/sentry`) and commit-unresolved (`ghost/nope`) decisions carry
+`spdx_id=None` — their evidence-level values are deliberately not counted
+(the distribution follows decision identity, not evidence values), so they
+show as no-spdx rows.
+
+Invariant: distribution total == adjudicated population (2 admitted + 3
+license-gate rejections == 5) — holds.
 
 ## Enrichment resolver traffic
 
