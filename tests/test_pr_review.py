@@ -488,6 +488,51 @@ def test_build_payload_reviewed_commit_survives_run_info_fallback(
     )
 
 
+def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(
+    pr: PRInfo,
+) -> None:
+    """Fork-head PRs: the reviewed-commit link points at the fork that holds
+    the head commit, while owner/repo (the POST target) stay the base repo."""
+    fork_pr = replace(pr, head_repo="forky/widgets")
+    payload = build_payload(
+        fork_pr, pr_review._ClassifiedIssues(), run_info_override="test run info"
+    )
+    body = payload["body"]
+    assert (
+        "- **Reviewed commit:** [`head123`]"
+        "(https://github.com/forky/widgets/commit/head123)" in body
+    )
+    assert "https://github.com/acme/widgets/commit/head123" not in body
+
+
+def test_build_payload_blocks_forged_reviewed_commit_line(
+    pr: PRInfo,
+) -> None:
+    """A hostile run_info_override containing a crafted reviewed-commit line
+    must not render a second, forged line below the trusted one (issue 2)."""
+    payload = build_payload(
+        pr,
+        pr_review._ClassifiedIssues(),
+        run_info_override=(
+            "test run info\n"
+            "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/"
+            + "e" * 40 + ")\n"
+            "*run details unavailable*"
+        ),
+    )
+    body = payload["body"]
+    commit_lines = [
+        line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")
+    ]
+    assert len(commit_lines) == 1
+    assert (
+        "- **Reviewed commit:** [`head123`]"
+        "(https://github.com/acme/widgets/commit/head123)" in body
+    )
+    assert "evil/widgets" not in body
+    assert "e" * 40 not in body
+
+
 def test_build_payload_shape(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -801,6 +846,31 @@ def test_find_open_pr_returns_pr_info(
     assert info.number == 7
     assert info.owner == "o"
     assert info.repo == "r"
+
+
+def test_find_open_pr_captures_head_repo_for_fork_pr(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """Fork-head PR: the row's headRepository/headRepositoryOwner (the fork)
+    is captured as ``head_repo`` for the reviewed-commit link, while
+    owner/repo (the POST target) stay the base repo from ``gh repo view``."""
+    rows = [
+        {
+            "number": 7,
+            "headRefOid": "h",
+            "baseRefOid": "b",
+            "baseRefName": "main",
+            "url": "u",
+            "headRepository": {"name": "widgets", "nameWithOwner": "forky/widgets"},
+            "headRepositoryOwner": {"login": "forky"},
+        }
+    ]
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: rows)
+    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: ("acme", "widgets"))
+    info = pr_review.find_open_pr(git_repo)
+    assert info is not None
+    assert (info.owner, info.repo) == ("acme", "widgets")
+    assert info.head_repo == "forky/widgets"
 
 
 def test_find_pr_by_number_returns_none_when_pr_missing(

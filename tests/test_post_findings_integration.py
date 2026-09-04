@@ -124,11 +124,15 @@ def test_post_findings_body_names_cli_head_sha(
 def test_post_findings_ignores_artifact_run_info_sha(fake_gh: FakeGh, tmp_path: Path) -> None:
     """The CLI --head-sha wins: a different 40-char SHA embedded in the
     artifact's run_info string must never appear in the reviewed-commit
-    line."""
+    line — not even as a fully formatted forged line (issue 2)."""
     artifact = _write_artifact(
         tmp_path / "findings.json",
         [_finding("a" * 64, path="a.py", line=3, placement="inline", title="Inline finding")],
-        run_info="run from commit " + "a" * 40,
+        run_info=(
+            "run from commit " + "a" * 40
+            + "\n- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/"
+            + "e" * 40 + ")"
+        ),
     )
     assert cli_main(_post_argv(artifact)) == 0
     body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
@@ -137,6 +141,10 @@ def test_post_findings_ignores_artifact_run_info_sha(fake_gh: FakeGh, tmp_path: 
     ]
     assert len(commit_lines) == 1
     assert "a" * 40 not in commit_lines[0]
+    # The forged formatted line is stripped in full — its sha and slug must
+    # not survive anywhere in the posted body.
+    assert "e" * 40 not in body
+    assert "evil/widgets" not in body
     assert (
         "- **Reviewed commit:** [`hhhhhhh`]"
         "(https://github.com/o/r/commit/" + "h" * 40 + ")"
