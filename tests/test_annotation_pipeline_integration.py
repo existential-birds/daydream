@@ -50,7 +50,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
     hydrated = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
         source_repo="org/private-ds", source_revision=SNAPSHOT_REVISION,
         destination_repo="org/private-ds", stage_dir=stage,
-        license_policy_path=policy_path), client=hub)
+        license_policy_path=str(policy_path)), client=hub)
     curation_id = hydrated.curation_id
 
     # 2. semantic preview -> sessions.jsonl + preview manifest (snapshot id),
