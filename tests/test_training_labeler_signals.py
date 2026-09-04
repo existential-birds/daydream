@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from daydream import pr_review
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
@@ -35,6 +36,30 @@ def _fake_gh_responder(responses: Any) -> Any:
         return responses[(repo, endpoint)]
 
     return responder
+
+
+def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None:
+    """M5: a comment body containing the reviewed-commit line is still
+    recognised by _is_daydream_comment and still ends with exactly one
+    version-stable footer."""
+    from daydream.pr_review import PRInfo, build_payload
+    from daydream.training import labeler_signals
+
+    pr = PRInfo(
+        number=1,
+        head_sha="f" * 40,
+        base_sha="0" * 40,
+        base_ref="main",
+        owner="acme",
+        repo="widgets",
+        url="https://github.com/acme/widgets/pull/1",
+    )
+    payload = build_payload(pr, pr_review._ClassifiedIssues())
+    body = payload["body"]
+    assert "- **Reviewed commit:**" in body  # precondition: new line present
+    assert labeler_signals._DAYDREAM_FOOTER_PREFIX in body
+    assert body.count(labeler_signals._DAYDREAM_FOOTER_PREFIX) == 1
+    assert labeler_signals._is_daydream_comment({"body": body})
 
 
 def test_pr_merge_signal_positive() -> None:

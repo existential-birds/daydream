@@ -66,7 +66,9 @@ def _finding(
     }
 
 
-def _write_artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
+def _write_artifact(
+    path: Path, findings: list[dict[str, Any]], *, run_info: str = "test run info"
+) -> Path:
     """Build a valid artifact via write_findings_artifact."""
     write_findings_artifact(
         path,
@@ -75,7 +77,7 @@ def _write_artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
             "repo": "o/r",
             "pr_number": 7,
             "head_sha": "h" * 40,
-            "run_info": "test run info",
+            "run_info": run_info,
             "findings": findings,
         },
     )
@@ -103,6 +105,50 @@ def artifact_on_disk_v2(tmp_path: Path) -> Path:
             _finding("c" * 64, path="c.py", line=5, placement="inline", title="New finding"),
         ],
     )
+
+
+def test_post_findings_body_names_cli_head_sha(
+    fake_gh: FakeGh, artifact_on_disk: Path
+) -> None:
+    """M3 CI path: the posted body's reviewed-commit line names the
+    --head-sha given on the CLI (validated event data), never the
+    artifact's untrusted run_info string."""
+    assert cli_main(_post_argv(artifact_on_disk)) == 0
+    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
+    assert (
+        "- **Reviewed commit:** [`hhhhhhh`]"
+        "(https://github.com/o/r/commit/" + "h" * 40 + ")"
+    ) in body
+
+
+def test_post_findings_ignores_artifact_run_info_sha(fake_gh: FakeGh, tmp_path: Path) -> None:
+    """The CLI --head-sha wins: a different 40-char SHA embedded in the
+    artifact's run_info string must never appear in the reviewed-commit
+    line — not even as a fully formatted forged line (issue 2)."""
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [_finding("a" * 64, path="a.py", line=3, placement="inline", title="Inline finding")],
+        run_info=(
+            "run from commit " + "a" * 40
+            + "\n- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/"
+            + "e" * 40 + ")"
+        ),
+    )
+    assert cli_main(_post_argv(artifact)) == 0
+    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
+    commit_lines = [
+        line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")
+    ]
+    assert len(commit_lines) == 1
+    assert "a" * 40 not in commit_lines[0]
+    # The forged formatted line is stripped in full — its sha and slug must
+    # not survive anywhere in the posted body.
+    assert "e" * 40 not in body
+    assert "evil/widgets" not in body
+    assert (
+        "- **Reviewed commit:** [`hhhhhhh`]"
+        "(https://github.com/o/r/commit/" + "h" * 40 + ")"
+    ) in body
 
 
 def test_fresh_post_then_idempotent_repost(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
