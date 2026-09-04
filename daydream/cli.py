@@ -1458,9 +1458,11 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         default=None,
         dest="license_policy",
         metavar="PATH",
-        help="Digest-pinned license policy JSON; when set, the per-repo license "
-        "admission gate runs at hydration and rejected sessions are excluded "
-        "before publication (issue #1080)",
+        help="Digest-pinned license policy JSON; REQUIRED for publication "
+        "(omitting it on a non-dry run refuses before any Hub access); the "
+        "per-repo license admission gate runs at hydration and rejected "
+        "sessions are excluded before publication; optional for --dry-run "
+        "planning (issue #1094, previously #1080)",
     )
     parser.add_argument(
         "--allow-copyleft",
@@ -1772,6 +1774,19 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
             "HF_TOKEN is not set",
             "hydration requires a read token for the private Hub repo. "
             "Export HF_TOKEN and retry.",
+        )
+        return 1
+
+    # Issue #1094: a non-dry hydrate-hub publication requires a pinned license
+    # policy; refuse before any Hub access or staging work. A dry-run may omit
+    # it (planning affordance). Mirrors build-v2's policy-required pattern.
+    if args.license_policy is None and not args.dry_run:
+        print_error(
+            console,
+            "Missing --license-policy",
+            "A hydrate-hub publication requires a pinned license policy file; "
+            "per-repo license admission decisions are resolved from it "
+            "(fail-closed). A --dry-run may omit it.",
         )
         return 1
 

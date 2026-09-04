@@ -18,6 +18,33 @@ from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_
 
 REVISION = SNAPSHOT_REVISION  # 40-hex pinned by the fixture builder
 
+
+def _write_policy(tmp_path: Path) -> str:
+    """Minimal permissive policy: the non-dry pipeline fail-closes without one
+    (issue #1094), and the snapshot's declared MIT evidence admits."""
+    policy = tmp_path / "license-policy.json"
+    policy.write_text(json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}))
+    return str(policy)
+
+
+@pytest.fixture(autouse=True)
+def _offline_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the enrichment stage offline: resolve every repo to MIT."""
+    from daydream.archive import license_enrich
+
+    def resolve(repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
+        return license_enrich.EnrichedEvidence(
+            spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
+        )
+
+    class FakeResolver:
+        def resolve(
+            self, repo_slug: str, repo_commit: str | None
+        ) -> license_enrich.EnrichedEvidence | None:
+            return resolve(repo_slug, repo_commit)
+
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: FakeResolver())
+
 # Index fields that legitimately differ between two staging roots (staging-local
 # paths) or across runs (row timestamps) — determinism is asserted on the rest.
 _VOLATILE_ROW_KEYS = frozenset({"archive_path", "source_path", "created_at", "updated_at"})
@@ -28,12 +55,13 @@ def hub() -> FakeHub:
     return build_snapshot()  # repo org/private-ds, private, bundles for 3 sessions
 
 
-def _config(stage: Path) -> hydrate.HydrateHubConfig:
+def _config(stage: Path, policy_dir: Path | None = None) -> hydrate.HydrateHubConfig:
     return hydrate.HydrateHubConfig(
         source_repo="org/private-ds",
         source_revision=REVISION,
         destination_repo="org/private-ds",
         stage_dir=stage,
+        license_policy_path=_write_policy(stage.parent if policy_dir is None else policy_dir),
     )
 
 

@@ -12,6 +12,32 @@ import pytest
 from daydream.archive import hydrate, hydrate_rules
 from daydream.archive.hydrate_client import FakeHub
 
+
+def _write_policy(tmp_path: Path) -> str:
+    """Minimal valid policy for tests that drive the full non-dry pipeline
+    (the orchestrator fail-closes without one since issue #1094)."""
+    policy = tmp_path / "license-policy.json"
+    policy.write_text(json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}))
+    return str(policy)
+
+
+def _fake_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the enrichment stage offline: resolve every repo to MIT."""
+    from daydream.archive import license_enrich
+
+    def resolve(repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
+        return license_enrich.EnrichedEvidence(
+            spdx_id="MIT", source=f"fake:{repo_slug}", repo_commit="c" * 40
+        )
+
+    class FakeResolver:
+        def resolve(
+            self, repo_slug: str, repo_commit: str | None
+        ) -> license_enrich.EnrichedEvidence | None:
+            return resolve(repo_slug, repo_commit)
+
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: FakeResolver())
+
 SNAPSHOT = {
     "bundles/sess-a/manifest.json": b'{"session_id": "sess-a"}',
     "bundles/sess-a/trajectory.json": b"{}",
@@ -602,10 +628,18 @@ class TestIngestAndIndex:
 
 
 class TestFinalizeAndVerify:
+    @pytest.fixture(autouse=True)
+    def _policy_required_pipeline(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The non-dry pipeline requires a policy (issue #1094) and enrichment
+        must stay offline in tests: a fake resolver resolves every repo to MIT."""
+        _fake_resolver(monkeypatch)
+        self._policy_path = _write_policy(tmp_path)
+
     def _config(self, tmp_path: Path) -> hydrate.HydrateHubConfig:
         return hydrate.HydrateHubConfig(
             source_repo="org/private-ds", source_revision="a" * 40,
-            destination_repo="org/private-ds", stage_dir=tmp_path / "stage")
+            destination_repo="org/private-ds", stage_dir=tmp_path / "stage",
+            license_policy_path=self._policy_path)
 
     def _staged(self, tmp_path: Path) -> Path:
         hub = make_fake_hub(tmp_path)
@@ -616,7 +650,8 @@ class TestFinalizeAndVerify:
         hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
         return stage
 
-    def test_verify_failure_never_publishes_success_marker(self, tmp_path: Path) -> None:
+    def test_verify_failure_never_publishes_success_marker(self, tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch) -> None:
         """A post-publication verification failure leaves no published _SUCCESS."""
         class CorruptingHub(FakeHub):
             def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
@@ -625,12 +660,24 @@ class TestFinalizeAndVerify:
                     return data + b"\ncorrupted"
                 return data
 
-        hub = CorruptingHub(repo_id="org/private-ds", private=True, files=dict(SNAPSHOT))
+        _fake_resolver(monkeypatch)
+        hub = CorruptingHub(
+            repo_id="org/private-ds", private=True,
+            files={
+                "bundles/sess-a/manifest.json": json.dumps({
+                    "session_id": "sess-a",
+                    "git": {"remote_url": "https://github.com/owner/repo-a",
+                            "repo_slug": "owner/repo-a"},
+                    "license_evidence": {"spdx_id": "MIT", "source": "manifest"},
+                }).encode(),
+                "bundles/sess-a/trajectory.json": b"{}",
+            })
         hub.commit_revision("a" * 40)
         with pytest.raises(hydrate.VerificationError):
             hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
                 source_repo="org/private-ds", source_revision="a" * 40,
-                destination_repo="org/private-ds", stage_dir=tmp_path / "stage"), client=hub)
+                destination_repo="org/private-ds", stage_dir=tmp_path / "stage",
+                license_policy_path=self._policy_path), client=hub)
         assert not any(p.endswith("_SUCCESS") for p in hub.uploaded_paths)
 
     def test_success_marker_last_and_output_sha_captured(self, tmp_path: Path) -> None:
@@ -638,7 +685,8 @@ class TestFinalizeAndVerify:
         stage = self._staged(tmp_path)
         summary = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
             source_repo="org/private-ds", source_revision="a" * 40,
-            destination_repo="org/private-ds", stage_dir=stage), client=hub)
+            destination_repo="org/private-ds", stage_dir=stage,
+            license_policy_path=self._policy_path), client=hub)
         order = hub.commit_order
         assert order[-1]["contains"] == ["curated/" + summary.curation_id + "/_SUCCESS"]
         assert summary.output_commit_sha and len(summary.output_commit_sha) == 40

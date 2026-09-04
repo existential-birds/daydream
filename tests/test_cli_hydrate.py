@@ -62,9 +62,12 @@ def test_success_path_drives_orchestrator(
 
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
+    policy = tmp_path / "license-policy.json"
+    policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
     rc = cli._handle_hydrate_hub_command(
         ["--source-repo", "org/ds", "--source-revision", "a" * 40,
-         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path)])
+         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path),
+         "--license-policy", str(policy)])
     assert rc == 0
     assert calls and calls[0].source_revision == "a" * 40
 
@@ -126,9 +129,12 @@ def test_success_path_surfaces_incomplete_manifests(
 
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", lambda _config: FakeSummary())
+    policy = tmp_path / "license-policy.json"
+    policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
     rc = cli._handle_hydrate_hub_command(
         ["--source-repo", "org/ds", "--source-revision", "a" * 40,
-         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path)])
+         "--destination-repo", "org/ds", "--stage-dir", str(tmp_path),
+         "--license-policy", str(policy)])
     assert rc == 0
     output = " ".join(capsys.readouterr().out.split())
     assert "hydration yield reduced" in output
@@ -241,3 +247,55 @@ def test_dry_run_fails_closed_on_run_shaped_zero_discovery(
     assert "zero candidates" in output
     assert "trajectory.json" in output
     assert hub.uploaded_paths == []
+
+
+def test_hydrate_hub_refuses_non_dry_run_without_policy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: pathlib.Path
+) -> None:
+    """A non-dry hydrate-hub publication requires --license-policy and must
+    refuse before any Hub access; the dry-run path still works without one."""
+    monkeypatch.setenv("HF_TOKEN", "t")
+    argv = [
+        "--source-repo",
+        "org/ds",
+        "--source-revision",
+        "a" * 40,
+        "--destination-repo",
+        "org/ds",
+        "--stage-dir",
+        str(tmp_path / "stage"),
+    ]
+    rc = cli._handle_hydrate_hub_command(argv)
+    assert rc == 1
+    out = capsys.readouterr().out + capsys.readouterr().err
+    assert "license policy" in out.lower()
+
+    # The dry-run path still works without a policy (planning affordance): it
+    # must not refuse with the policy message (it fails later, at Hub access).
+    rc = cli._handle_hydrate_hub_command([*argv, "--dry-run"])
+    output = capsys.readouterr().out + capsys.readouterr().err
+    assert rc != 1 or "license policy" not in output.lower()
+
+
+def test_production_policy_file_loads_and_rejects_copyleft() -> None:
+    """The checked-in production SPDX policy validates (M10 discipline) and
+    fail-closes: missing evidence -> reject, GPL without opt-in -> reject,
+    MIT -> admit, exact opt-in -> admit the named repo only."""
+    from daydream.training.corpus_v2.license import load_license_policy, resolve_repo_decision
+
+    policy_path = pathlib.Path("daydream/training/schema/license-policy-production.json")
+    policy, digest = load_license_policy(policy_path)
+    assert len(digest) == 64
+    assert resolve_repo_decision("acme/widget", None, policy, frozenset()).reason_code == (
+        "license_evidence_missing"
+    )
+    gpl = resolve_repo_decision("acme/widget", {"spdx_id": "GPL-3.0-only"}, policy, frozenset())
+    assert gpl.reason_code == "c8_copyleft_unopted"
+    assert (
+        resolve_repo_decision("acme/widget", {"spdx_id": "MIT"}, policy, frozenset()).status
+        == "admitted"
+    )
+    opted = resolve_repo_decision(
+        "acme/widget", {"spdx_id": "GPL-3.0-only"}, policy, frozenset({"acme/widget"})
+    )
+    assert opted.status == "admitted"

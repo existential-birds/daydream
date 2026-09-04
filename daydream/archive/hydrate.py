@@ -985,6 +985,43 @@ def _load_dedupe_ledger(path: Path) -> dict[str, dict[str, Any]]:
     return latest
 
 
+def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
+    """Refresh admitted-baseline content and dedupe-ledger digests after
+    enrichment (issue #1094).
+
+    Enrichment rewrites admitted manifests under ``stage/runs/`` *after*
+    ``dedupe_admitted`` recorded their ``content_digest``; the curation
+    manifest pins that digest and the clean-room verify recomputes
+    ``_derivative_digest`` over the published bytes — so without a restamp
+    every enriched session fails verification. For each admitted session
+    whose derivative digest changed, refresh the admitted baseline copy and
+    append a new ``admitted`` ledger entry carrying the enriched digest
+    (latest-entry-wins, same convention as the dedupe pass itself)."""
+    from daydream.archive import sanitize  # noqa: PLC0415  # local: avoid import cycle
+
+    runs_dir = stage / "runs"
+    if not runs_dir.is_dir():
+        return
+    curated = _curated_dir(stage, revision)
+    dedupe_dir = _dedupe_dir(stage, curated.name)
+    baseline_root = dedupe_dir / "admitted"
+    ledger_path = dedupe_dir / "dedupe.jsonl"
+    for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+        sid = derivative.name
+        digest = sanitize._derivative_digest(derivative)
+        baseline = baseline_root / sid
+        if baseline.is_dir() and sanitize._derivative_digest(baseline) == digest:
+            continue  # unchanged by enrichment; ledger digest stays authoritative
+        if baseline.is_dir():
+            shutil.rmtree(baseline)
+        shutil.copytree(derivative, baseline)
+        _append_dedupe_entry(
+            ledger_path,
+            {"session_id": sid, "status": "admitted", "reason_code": None,
+             "content_digest": digest, "revision": str(revision), "at": _utc_now()},
+        )
+
+
 def _move_dir(source: Path, target: Path) -> None:
     """Move a directory, replacing any prior occupant of ``target``."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2008,6 +2045,14 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     after verification passes; every failure path leaves it False and never
     uploads a success marker.
     """
+    # Issue #1094 defense-in-depth: the CLI refuses a non-dry publication
+    # without --license-policy; the orchestrator re-checks so a future caller
+    # bypassing the CLI still fails closed before any publication.
+    if config.license_policy_path is None:
+        raise HydrationError(
+            "run_hydrate_hub requires license_policy_path for any publication "
+            "path (fail-closed)"
+        )
     # Two clients: the source repo guards the pinned snapshot, the destination
     # repo receives the published output. Tests inject one FakeHub for both.
     source_client = client if client is not None else _make_client(config.source_repo)
@@ -2023,36 +2068,37 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     download_snapshot(source_client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
     ingest_bundles(config.stage_dir, revision=source_commit)
     dedupe_admitted(config.stage_dir, revision=source_commit)
-    if config.license_policy_path is not None:
-        # Issue #1094: enrichment fills legacy records' missing license_evidence
-        # from an authorized immutable source before the gate — only on a
-        # policy-bearing run (there is no gate to feed otherwise). The cache is
-        # copied into the curated prefix so fresh-VM replay is decision-identical.
-        from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
-            _make_license_resolver,
-            enrich_license_evidence,
-            publish_enrichment_cache,
-        )
-
-        enrich_license_evidence(
-            config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
-        )
-        publish_enrichment_cache(config.stage_dir, revision=source_commit)
-        # Issue #1080: the per-repo license gate runs after the existing gates;
-        # apply_license_gate itself refuses (ValueError, fail-closed) on a
-        # missing policy input.
-        apply_license_gate(
-            config.stage_dir,
-            revision=source_commit,
-            license_policy_path=config.license_policy_path,
-            allow_copyleft=config.allow_copyleft,
-        )
-    ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
-    license_admission = (
-        license_admission_summary(ledger)
-        if config.license_policy_path is not None
-        else {}
+    # With the policy now required on every non-dry publication path, the
+    # gate and its admission summary always run (issue #1094).
+    # Issue #1094: enrichment fills legacy records' missing license_evidence
+    # from an authorized immutable source before the gate. The cache is
+    # copied into the curated prefix so fresh-VM replay is decision-identical.
+    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        _make_license_resolver,
+        enrich_license_evidence,
+        publish_enrichment_cache,
     )
+
+    enrich_license_evidence(
+        config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+    )
+    publish_enrichment_cache(config.stage_dir, revision=source_commit)
+    # Enrichment may have rewritten admitted manifests; refresh the dedupe
+    # baselines/ledger digests so the published content identity matches the
+    # enriched content (the clean-room verify recomputes the digest).
+    restamp_admitted_digests(config.stage_dir, revision=source_commit)
+    # Issue #1080: the per-repo license gate runs after the existing gates;
+    # apply_license_gate itself refuses (ValueError, fail-closed) on a
+    # missing policy input (unreachable-but-documented now that the
+    # orchestrator pre-checks).
+    apply_license_gate(
+        config.stage_dir,
+        revision=source_commit,
+        license_policy_path=config.license_policy_path,
+        allow_copyleft=config.allow_copyleft,
+    )
+    ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
+    license_admission = license_admission_summary(ledger)
     curation_id = str(ledger["curation_id"])
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
     publish_batches(
