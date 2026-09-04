@@ -237,7 +237,9 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
     step, so it keeps a fix backend and drops only test. IMPROVE's built-in
     pipeline defines no fix/test phase, so it drops both. CUSTOM is classified
     by its registered pipeline; with no fork flow configured here it cannot
-    prove a fix/test phase, so it drops both.
+    prove a fix/test phase, so it drops both. DIAGRAM (issue #1113) runs
+    exploration -> diagram -> post-diagram and no fix/test phase, so it drops
+    both as well.
     """
     recorder = _MockRecorder(run_flow=flow)
     config = _MockConfig(fix_backend="codex", test_backend="codex")
@@ -253,6 +255,7 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
         DaydreamRunFlow.IMPROVE,
         DaydreamRunFlow.TTT,
         DaydreamRunFlow.CUSTOM,
+        DaydreamRunFlow.DIAGRAM,
     ):
         assert m.fix_backend is None
         assert m.test_backend is None
@@ -335,9 +338,10 @@ def test_fix_cycle_classification_covers_every_run_flow() -> None:
     """Every ``DaydreamRunFlow`` member is explicitly classified: TTT
     (review/comment) is mode-gated never to reach the fix cycle, PR (feedback)
     runs its own fix-items phase (fix yes, test no), and every other label is
-    classified by its registered pipeline (issue #648). A future enum member
-    fails this exhaustiveness check instead of silently changing which backend
-    fields the manifest emits.
+    classified by its registered pipeline (issue #648). DIAGRAM (issue #1113)
+    is classified by its own two-step registered pipeline, which runs neither
+    fix nor test. A future enum member fails this exhaustiveness check instead
+    of silently changing which backend fields the manifest emits.
     """
     mode_gated_labels = {DaydreamRunFlow.TTT}
     fix_only_labels = {DaydreamRunFlow.PR}
@@ -349,7 +353,11 @@ def test_fix_cycle_classification_covers_every_run_flow() -> None:
         mode_gated_labels
         | fix_only_labels
         | fix_cycle_builtins
-        | {DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM}
+        | {
+            DaydreamRunFlow.IMPROVE,
+            DaydreamRunFlow.CUSTOM,
+            DaydreamRunFlow.DIAGRAM,
+        }
     )
 
 
@@ -2718,3 +2726,39 @@ def test_delete_runs_is_exported() -> None:
 
     assert "delete_runs" in index_module.__all__
     assert "delete_runs:" in index_module.__doc__
+
+
+def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
+    tmp_path: Path, make_config: MakeConfig,
+) -> None:
+    """#1113 (D21/D22): a diagram-only run deliberately leaves the previous deep
+    review's ``.daydream/deep/`` artifacts on disk, so its own flow label must
+    answer "runs no merge/fix/test" — otherwise it archives that run's
+    ``merged-items.json`` as its own pipeline state."""
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
+
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
+    config = make_config(tmp_path, archive=False)
+    _archive_run_inner(
+        recorder=recorder, target_dir=tmp_path, config=config,
+        status="complete", run_eval=False, work=None, upload=False,
+    )
+
+    manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
+    m = json.loads(manifest_path.read_text())
+    assert m["run"]["flow"] == "diagram"
+    # None of the deep phases are claimed, so no stale artifact is adopted.
+    assert m["phase_states"]["merge"] == {"ran": False, "status": "absent"}
+    assert m["phase_states"]["fix"] == {"ran": False, "status": "absent"}
+    assert m["phase_states"]["test"] == {"ran": False, "status": "absent"}
+    # A two-step flow runs neither fix nor test, so neither backend is labeled.
+    assert "fix_backend" not in m["run"]
+    assert "test_backend" not in m["run"]
+    # No per-stack fan-out either: the diagram flow has no per-stack reviewers.
+    assert "per_stack_review_backend" not in m["run"]

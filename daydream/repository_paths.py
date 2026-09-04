@@ -6,6 +6,10 @@ no parent traversal, no absolute paths) and the filesystem confinement check
 (symlink-at-any-prefix walk plus resolved-root containment) that every
 consumer — core phases and the improve command contract — relies on. Living
 at package root keeps flow subpackages dependent on core, never the reverse.
+
+It also owns ``is_test_path``, the deterministic test-vs-production path
+classifier, for the same reason: two flows (improve plan gates and
+grounded-diagram eligibility) must answer that question identically.
 """
 
 from __future__ import annotations
@@ -32,6 +36,10 @@ DIRECTORY_SCOPE_PATTERN      = rf"^(?:\./)?{REPOSITORY_FILE_PATH_SEGMENTS}/?$"
 
 # POSIX PATH_MAX (4096) is a byte budget; the lexical gates measure UTF-8 bytes.
 REPOSITORY_FILE_PATH_MAX_LENGTH = 4096
+
+# Conventional test-directory names, matched case-insensitively against every
+# parent segment of a path by ``is_test_path``.
+_TEST_DIRECTORY_NAMES = {"__tests__", "spec", "specs", "test", "tests"}
 
 # \A/\Z are not ECMA-262-valid (Codex/OpenAI strict mode rejects them), so the
 # patterns anchor with ^/$; Python re.search lets $ match before a trailing
@@ -199,6 +207,38 @@ def canonicalize_working_directory(repo: Path, value: str) -> str:
     return canonicalize_directory_scope(value)
 
 
+def is_test_path(path: str) -> bool:
+    """Return whether ``path`` names a test file by repository convention.
+
+    The single deterministic test-vs-production path classifier, shared by the
+    improve plan gates (which must not accept a production deletion as
+    self-justifying) and grounded-diagram eligibility (which counts changed
+    *production* code files, issue #1113). Deliberately deterministic and
+    lexical: the exploration pass's ``role == "test"`` is model output, not a
+    fact, so nothing that gates behavior may depend on it.
+
+    A path is a test path when any parent directory is a conventional test
+    directory (``__tests__``, ``spec``, ``specs``, ``test``, ``tests``, matched
+    case-insensitively), or when the file's own name follows a test-naming
+    convention: stem ``test``/``tests``, a ``test_`` prefix or ``_test`` suffix
+    (Python, Go, Rust), a ``Test``/``Tests`` camel-case suffix (JVM/Swift), or a
+    ``.test.``/``.spec.`` infix (JS/TS). Case-folded throughout except the
+    camel-case suffix, which is meaningful only in its original casing.
+    """
+    candidate = Path(path)
+    parts = {part.casefold() for part in candidate.parts[:-1]}
+    name = candidate.name.casefold()
+    stem = candidate.stem.casefold()
+    return bool(parts & _TEST_DIRECTORY_NAMES) or (
+        stem in {"test", "tests"}
+        or stem.startswith("test_")
+        or stem.endswith("_test")
+        or candidate.stem.endswith(("Test", "Tests"))
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
 __all__ = [
     "DIRECTORY_SCOPE_PATTERN",
     "DIRECTORY_SCOPE_SCHEMA",
@@ -207,6 +247,7 @@ __all__ = [
     "REPOSITORY_FILE_PATH_SEGMENTS",
     "canonicalize_directory_scope",
     "canonicalize_working_directory",
+    "is_test_path",
     "path_is_confined",
     "valid_directory_scope_lexical",
     "valid_repository_file_path",

@@ -214,3 +214,14 @@ def test_diff_key_is_content_addressed() -> None:
 
     assert diff_key("abc") == diff_key("abc")
     assert diff_key("abc") != diff_key("abd")
+
+
+def test_diagram_artifact_paths_live_in_the_deep_dir(tmp_path: Path) -> None:
+    """#1113: the diagram decision JSON and its rendered markdown sit beside the
+    other deep artifacts, under the same deep dir the run already owns."""
+    from daydream.deep.artifacts import deep_dir, diagram_markdown_path, diagram_path
+
+    dd = deep_dir(tmp_path)
+    assert diagram_path(dd) == dd / "diagram.json"
+    assert diagram_markdown_path(dd) == dd / "diagram.md"
+    assert diagram_path(dd).parent == diagram_markdown_path(dd).parent == dd

@@ -25,6 +25,18 @@ Exports:
         reasoning effort, same key shape as PHASE_DEFAULT_MODELS.
     STRUCTURE_STACK_NAME: str - Stack identifier emitted by detect_stacks for the
         structural meta-stack assignment.
+    DIAGRAM_KINDS: tuple[str, ...] - Grounded-diagram kinds, render order.
+    DIAGRAM_MODES: tuple[str, ...] - Accepted ``--diagram`` / ``[tool.daydream.diagram]``
+        mode vocabulary.
+    DEFAULT_DIAGRAM_MIN_CODE_FILES: int - Sequence cross-module eligibility floor on
+        changed code files.
+    DEFAULT_DIAGRAM_MIN_MODULES: int - Sequence cross-module eligibility floor on
+        distinct modules.
+    DEFAULT_DIAGRAM_MIN_BRANCH_POINTS: int - Flowchart eligibility floor on changed
+        branch points in one function.
+    DIAGRAM_MAX_PARTICIPANTS / DIAGRAM_MAX_MESSAGES / DIAGRAM_MAX_BLOCKS /
+        DIAGRAM_MAX_NODES / DIAGRAM_MAX_EDGES: int - Render caps per collection.
+    DIAGRAM_LABEL_CAP_PARTICIPANT / _MESSAGE / _NODE / _EDGE: int - Label length caps.
 """
 
 from dataclasses import dataclass
@@ -101,20 +113,21 @@ VET_BATCH_MAX_FINDINGS: int = 20
 # flag is supplied. Phase names are lowercase and match the strings passed by
 # every call site (``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
 # ``"exploration"``, ``"intent"``, ``"wonder"``, ``"merge"``,
-# ``"recon"``, ``"audit"``, ``"vet"``,
+# ``"diagram"``, ``"recon"``, ``"audit"``, ``"vet"``,
 # ``"plan_write"``).
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
 #   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT,
-#                      SUPPRESSION, RECON, AUDIT
+#                      SUPPRESSION, DIAGRAM, RECON, AUDIT
 #   - heavy (opus):    REVIEW, WONDER, MERGE, ARBITER, VET,
 #                      PLAN_WRITE
 #
 # Codex tiering mirrors it across the GPT-5.6 lineup:
 #   - cheap (gpt-5.6-luna):   PARSE
 #   - mid   (gpt-5.6-terra):  FIX, TEST, VERIFY, EXPLORATION, PER_STACK_REVIEW,
-#                             INTENT, SUPPRESSION, SUPERVISE, RECON, AUDIT
+#                             INTENT, SUPPRESSION, SUPERVISE, DIAGRAM, RECON,
+#                             AUDIT
 #   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, ARBITER, VET,
 #                             PLAN_WRITE
 #
@@ -123,6 +136,11 @@ VET_BATCH_MAX_FINDINGS: int = 20
 # per-finding Opus) -- one batched Sonnet call over all suppression targets.
 # ``supervise`` is the batched findings supervisor over canonical merged items;
 # it uses the same Sonnet tier by default.
+#
+# ``diagram`` (issue #1113) is the grounded-diagram author: one call per eligible
+# kind that emits a JSON spec whose every element carries ``file:line`` evidence.
+# It never writes mermaid (a pure renderer does), and everything it proposes is
+# verified deterministically afterwards, so the mid tier is the right cost point.
 #
 # ``per_stack_review`` and ``arbiter`` split the deep per-stack fan-out off the
 # heavy ``review`` tier (issue #168): the N per-stack reviewers run on Sonnet
@@ -148,6 +166,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "arbiter": "claude-opus-5",
         "suppression": "claude-sonnet-5",
         "supervise": "claude-sonnet-5",
+        "diagram": "claude-sonnet-5",
         "wonder": "claude-opus-5",
         "merge": "claude-opus-5",
         "intent": "claude-sonnet-5",
@@ -167,6 +186,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "arbiter": "gpt-5.6-sol",
         "suppression": "gpt-5.6-terra",
         "supervise": "gpt-5.6-terra",
+        "diagram": "gpt-5.6-terra",
         "wonder": "gpt-5.6-sol",
         "merge": "gpt-5.6-sol",
         "intent": "gpt-5.6-terra",
@@ -220,6 +240,7 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "arbiter": "xhigh",
         "suppression": "medium",
         "supervise": "medium",
+        "diagram": "medium",
         "wonder": "high",
         "merge": "medium",
         "intent": "medium",
@@ -367,3 +388,46 @@ APP_PERMISSIONS: dict[str, str] = {
     "metadata": "read",
     "actions": "write",
 }
+
+
+# Issue #1113: grounded mermaid diagrams in the Code Review Summary. Two kinds,
+# rendered in this order when both are eligible.
+DIAGRAM_KINDS: tuple[str, ...] = ("sequence", "flowchart")
+
+# Accepted diagram-mode vocabulary. ``auto`` renders every kind the
+# deterministic eligibility rule admits; the three kind names force those kinds
+# eligible (forcing changes eligibility, never verification); ``off`` suppresses
+# both. ``--diagram`` accepts all five; ``[tool.daydream.diagram] mode`` accepts
+# only ``auto``/``off`` (a repo config file may not force a kind on every run);
+# ``--diagram-only`` accepts all but ``off``.
+DIAGRAM_MODES: tuple[str, ...] = ("auto", "sequence", "flowchart", "both", "off")
+
+# Sequence-diagram cross-module eligibility floors: the change must touch at
+# least this many non-test code files spanning at least this many modules, with
+# at least one cross-module import edge. Overridable via
+# ``[tool.daydream.diagram] min_code_files`` / ``min_modules``.
+DEFAULT_DIAGRAM_MIN_CODE_FILES: int = 3
+DEFAULT_DIAGRAM_MIN_MODULES: int = 2
+
+# Flowchart eligibility floor: some changed function must gain or modify at
+# least this many branch points inside head-side changed hunks. Overridable via
+# ``[tool.daydream.diagram] min_branch_points``.
+DEFAULT_DIAGRAM_MIN_BRANCH_POINTS: int = 3
+
+# Render caps. Enforced in the grounding pass (after pruning ungrounded
+# elements, before the omission floor) so a cap-induced drop can never leave a
+# rendered diagram below its floor, and asserted again by the renderers as
+# defense in depth. Every drop is counted in the result's ``capped`` map and
+# reported in the rendered ``<sub>`` line.
+DIAGRAM_MAX_PARTICIPANTS: int = 10
+DIAGRAM_MAX_MESSAGES: int = 40
+DIAGRAM_MAX_BLOCKS: int = 8
+DIAGRAM_MAX_NODES: int = 25
+DIAGRAM_MAX_EDGES: int = 40
+
+# Label length caps, applied by the renderers' sanitizer after control
+# characters and mermaid metacharacters are stripped.
+DIAGRAM_LABEL_CAP_PARTICIPANT: int = 40
+DIAGRAM_LABEL_CAP_MESSAGE: int = 80
+DIAGRAM_LABEL_CAP_NODE: int = 60
+DIAGRAM_LABEL_CAP_EDGE: int = 30

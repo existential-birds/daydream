@@ -6,8 +6,22 @@ import pytest
 from daydream.config import (
     AUDIT_CATEGORIES,
     DEEP_PHASE_DEFAULT_EFFORT,
+    DEFAULT_DIAGRAM_MIN_BRANCH_POINTS,
+    DEFAULT_DIAGRAM_MIN_CODE_FILES,
+    DEFAULT_DIAGRAM_MIN_MODULES,
     DEFAULT_EXPLORATION_MODEL,
     DEFAULT_PI_MODEL,
+    DIAGRAM_KINDS,
+    DIAGRAM_LABEL_CAP_EDGE,
+    DIAGRAM_LABEL_CAP_MESSAGE,
+    DIAGRAM_LABEL_CAP_NODE,
+    DIAGRAM_LABEL_CAP_PARTICIPANT,
+    DIAGRAM_MAX_BLOCKS,
+    DIAGRAM_MAX_EDGES,
+    DIAGRAM_MAX_MESSAGES,
+    DIAGRAM_MAX_NODES,
+    DIAGRAM_MAX_PARTICIPANTS,
+    DIAGRAM_MODES,
     EFFORT_TIERS,
     IMPROVE_PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_EFFORT,
@@ -31,6 +45,7 @@ PHASE_NAMES = {
     "intent",
     "wonder",
     "merge",
+    "diagram",
     "recon",
     "audit",
     "vet",
@@ -107,8 +122,18 @@ def test_phase_default_models_claude_tier_assignments() -> None:
     # Expensive tier: REVIEW, WONDER, MERGE, VET, PLAN_WRITE
     for phase in ("review", "wonder", "merge", "vet", "plan_write"):
         assert claude[phase] == "claude-opus-5"
-    # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, RECON, AUDIT
-    for phase in ("fix", "test", "exploration", "per_stack_review", "intent", "recon", "audit"):
+    # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, DIAGRAM,
+    # RECON, AUDIT
+    for phase in (
+        "fix",
+        "test",
+        "exploration",
+        "per_stack_review",
+        "intent",
+        "diagram",
+        "recon",
+        "audit",
+    ):
         assert claude[phase] == "claude-sonnet-5"
 
 
@@ -142,6 +167,7 @@ def test_phase_default_models_codex_tier_assignments() -> None:
         "suppression",
         "supervise",
         "intent",
+        "diagram",
         "recon",
         "audit",
     ):
@@ -190,7 +216,16 @@ def test_deep_phase_effort_tier_assignments() -> None:
     effort = DEEP_PHASE_DEFAULT_EFFORT["codex"]
     for phase in ("parse", "exploration"):
         assert effort[phase] == "low", f"{phase} should be latency-tier effort"
-    for phase in ("fix", "test", "verify", "suppression", "supervise", "merge", "intent"):
+    for phase in (
+        "fix",
+        "test",
+        "verify",
+        "suppression",
+        "supervise",
+        "merge",
+        "intent",
+        "diagram",
+    ):
         assert effort[phase] == "medium", f"{phase} should be baseline effort"
     for phase in ("per_stack_review", "review", "wonder"):
         assert effort[phase] == "high", f"{phase} should be high effort"
@@ -233,3 +268,53 @@ def test_structure_constant_is_scope_metadata_not_a_skill() -> None:
     """M2: the structural meta-stack is a scope name, never a skill string."""
     assert STRUCTURE_STACK_NAME == "structure"
     assert "/" not in STRUCTURE_STACK_NAME and ":" not in STRUCTURE_STACK_NAME
+
+
+def test_diagram_kinds_are_the_two_supported_kinds_in_render_order() -> None:
+    """#1113: sequence renders before flowchart when both are eligible."""
+    assert DIAGRAM_KINDS == ("sequence", "flowchart")
+
+
+def test_diagram_modes_cover_auto_each_kind_both_and_off() -> None:
+    """#1113: the mode vocabulary is the union of auto, each kind, both, off."""
+    assert DIAGRAM_MODES == ("auto", "sequence", "flowchart", "both", "off")
+    assert set(DIAGRAM_KINDS) < set(DIAGRAM_MODES)
+
+
+def test_diagram_eligibility_defaults_match_the_documented_thresholds() -> None:
+    """#1113: 3 code files / 2 modules / 3 branch points."""
+    assert DEFAULT_DIAGRAM_MIN_CODE_FILES == 3
+    assert DEFAULT_DIAGRAM_MIN_MODULES == 2
+    assert DEFAULT_DIAGRAM_MIN_BRANCH_POINTS == 3
+
+
+def test_diagram_render_caps_are_positive_and_bound_every_collection() -> None:
+    """#1113: every rendered collection has a cap, enforced before the floor."""
+    caps = {
+        "participants": DIAGRAM_MAX_PARTICIPANTS,
+        "messages": DIAGRAM_MAX_MESSAGES,
+        "blocks": DIAGRAM_MAX_BLOCKS,
+        "nodes": DIAGRAM_MAX_NODES,
+        "edges": DIAGRAM_MAX_EDGES,
+    }
+    assert caps == {
+        "participants": 10,
+        "messages": 40,
+        "blocks": 8,
+        "nodes": 25,
+        "edges": 40,
+    }
+    labels = (
+        DIAGRAM_LABEL_CAP_PARTICIPANT,
+        DIAGRAM_LABEL_CAP_MESSAGE,
+        DIAGRAM_LABEL_CAP_NODE,
+        DIAGRAM_LABEL_CAP_EDGE,
+    )
+    assert labels == (40, 80, 60, 30)
+
+
+def test_diagram_phase_is_mid_tier_on_both_model_backends() -> None:
+    """#1113: the diagram author is a mid-tier phase, never the heavy tier."""
+    assert PHASE_DEFAULT_MODELS["claude"]["diagram"] == PHASE_DEFAULT_MODELS["claude"]["intent"]
+    assert PHASE_DEFAULT_MODELS["codex"]["diagram"] == PHASE_DEFAULT_MODELS["codex"]["intent"]
+    assert DEEP_PHASE_DEFAULT_EFFORT["codex"]["diagram"] == "medium"

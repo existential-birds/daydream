@@ -338,6 +338,7 @@ class DaydreamPhase(str, Enum):
     AUDIT = "audit"
     VET = "vet"
     PLAN_WRITE = "plan_write"
+    DIAGRAM = "diagram"
 
 
 class DaydreamRunFlow(str, Enum):
@@ -352,6 +353,7 @@ class DaydreamRunFlow(str, Enum):
     DEEP = "deep"
     CUSTOM = "custom"
     IMPROVE = "improve"
+    DIAGRAM = "diagram"
 
 
 # Sensitive-key detection (issue #455): segment-aware, casing-agnostic.

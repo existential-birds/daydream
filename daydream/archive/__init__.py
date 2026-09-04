@@ -45,8 +45,12 @@ def _warn(message: str) -> None:
 def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
     """Whether the executed flow runs the deep cross-stack/single-stack merge.
 
-    The deep pipeline's merge step runs for normal and review flows. Improve-only
-    and the legacy PR compatibility label do not run the merge spine.
+    The deep pipeline's merge step runs for normal and review flows. Improve-only,
+    diagram-only (issue #1113) and the legacy PR compatibility label do not run
+    the merge spine. Diagram-only must answer False explicitly: it reuses the
+    deep preamble and deliberately keeps a prior deep run's
+    ``.daydream/deep/`` artifacts on disk (D21), so a True here would make it
+    adopt that run's ``merged-items.json`` as its own pipeline state.
     Custom flows are classified from their registered pipeline (a fork
     composing the built-in deep merge step is detected as it runs), mirroring
     ``_flow_fix_test_steps`` in ``archive.manifest``.
@@ -54,6 +58,8 @@ def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
     if flow is DaydreamRunFlow.PR:
         return False
     if flow is DaydreamRunFlow.IMPROVE:
+        return False
+    if flow is DaydreamRunFlow.DIAGRAM:
         return False
     if flow is DaydreamRunFlow.CUSTOM:
         from daydream.archive.manifest import _flow_phase_steps, _runtime_flow_name

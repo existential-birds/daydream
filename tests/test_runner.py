@@ -98,6 +98,16 @@ def test_run_config_exploration_depth() -> None:
     assert cfg.exploration_depth == 2
 
 
+def test_run_config_diagram_defaults_to_unset_not_auto() -> None:
+    """#1113 (D2): ``None`` is the unset marker, so a file-config
+    ``[tool.daydream.diagram] mode = "off"`` can win over the built-in default
+    while an explicit CLI value still overrides the file. A ``"auto"`` default
+    would make the file-level ``off`` unreachable.
+    """
+    assert RunConfig().diagram is None
+    assert RunConfig(diagram="both").diagram == "both"
+
+
 def test_run_config_has_no_skill_availability_field() -> None:
     """M1: RunConfig no longer carries installed-skill availability."""
     assert not hasattr(RunConfig(), "skill_availability")
@@ -1316,6 +1326,49 @@ def test_open_recorder_custom_omits_fix_test_backend(tmp_path: Path) -> None:
     )
     assert recorder.backend_name == "codex"
     assert recorder.review_backend_name == "codex"
+    assert recorder.fix_backend_name == ""
+    assert recorder.test_backend_name == ""
+
+
+def test_open_recorder_diagram_omits_fix_test_backend(tmp_path: Path) -> None:
+    """#1113: diagram-only trajectories carry no fix/test backend identity.
+
+    The ``diagram`` flow is exploration -> diagram -> post-diagram; it never
+    runs the fix cycle, so emitting fix/test labels would mislabel it. Even an
+    explicit ``--fix-backend`` must not leak onto a diagram-only run.
+    """
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.DIAGRAM,
+    )
+    assert recorder.backend_name == "codex"
+    assert recorder.review_backend_name == "codex"
+    assert recorder.fix_backend_name == ""
+    assert recorder.test_backend_name == ""
+
+
+def test_open_recorder_diagram_resolves_backend_via_the_diagram_phase(tmp_path: Path) -> None:
+    """#1113: the diagram flow's representative backend follows its only agent
+    phase, so a ``[tool.daydream.phases.diagram]`` backend override wins over
+    the never-run ``review`` phase."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(
+        target=str(target_dir),
+        run_eval=False,
+        review_backend="codex",
+        file_config=DaydreamFileConfig(phases={"diagram": {"backend": "pi"}}),
+    )
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.DIAGRAM,
+    )
+    assert recorder.backend_name == "pi"
+    assert recorder.review_backend_name == "pi"
     assert recorder.fix_backend_name == ""
     assert recorder.test_backend_name == ""
 

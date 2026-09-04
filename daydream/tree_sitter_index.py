@@ -9,16 +9,27 @@ Adding a new language requires only:
     2. One entry in the ``LANGUAGES`` dict.
     3. One query constant + a branch in ``_query_for_language``.
     4. A resolver branch in ``_resolve_import``.
+
+Also provides the grounding primitives the diagram phase needs
+(:func:`language_for_path`, :func:`branch_statement_lines`,
+:func:`is_branch_line`, :func:`is_terminal_line`, :func:`definitions_in_file`
+plus the :data:`BRANCH_NODE_TYPES`/:data:`TERMINAL_NODE_TYPES` tables). All of
+them fail open -- an unknown language, a missing file or a parse failure yields
+an empty/false answer -- except :exc:`TreeSitterBadVersionError`, which
+:func:`get_parser` raises unwrapped so a known-bad install can never parse
+natively; callers that must survive that wrap the call.
 """
 
 from __future__ import annotations
 
 import ast
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from tree_sitter import Language, Parser, Query, QueryCursor
+from tree_sitter import Language, Node, Parser, Query, QueryCursor
 
 from daydream import git_ops
 from daydream._tree_sitter_safety import assert_tree_sitter_safe
@@ -136,6 +147,57 @@ RUST_DEF_QUERY = """
 (trait_item) @def
 (impl_item) @def
 """
+# NOTE: ``(impl_item) @def`` above can never yield a record -- ``impl_item`` has no
+# ``name`` field, so ``extract_definitions`` drops it. Left as-is deliberately:
+# changing the shared query would change reverse-import-edge policy (issue #1113).
+
+# --- Diagram definition queries (issue #1113) --------------------------------
+#
+# A SEPARATE query family from ``_def_query_for_language`` above. The shared
+# query feeds ``detect_affected_files``' ``defining_paths`` gate, which decides
+# whether a generic-stem path earns reverse-import edges; widening it to
+# TypeScript/Go would silently add those edges for every ``index.ts``/``main.go``
+# in every repo. Diagram grounding needs the wide surface, so it gets its own
+# query plus its own kind mapper (``_diagram_definition_kind``) rather than
+# inheriting ``_definition_kind``'s ``else: return "class"`` fallback.
+#
+# Every pattern below was confirmed to compile against the installed grammars and
+# to place ``@def`` on a node whose ``name`` field resolves (otherwise
+# ``extract_definitions`` would silently drop it).
+
+# The same string is valid for the ``typescript``, ``tsx`` and ``javascript``
+# ids -- all three are served by the tree-sitter-typescript grammars.
+TYPESCRIPT_DIAGRAM_DEF_QUERY = """
+(function_declaration name: (identifier)) @def
+(generator_function_declaration name: (identifier)) @def
+(function_signature name: (identifier)) @def
+(method_definition name: (property_identifier)) @def
+(method_signature name: (property_identifier)) @def
+(class_declaration name: (type_identifier)) @def
+(abstract_class_declaration name: (type_identifier)) @def
+(interface_declaration name: (type_identifier)) @def
+(type_alias_declaration name: (type_identifier)) @def
+(enum_declaration name: (identifier)) @def
+(variable_declarator name: (identifier) value: [(arrow_function) (function_expression)]) @def
+"""
+
+GO_DIAGRAM_DEF_QUERY = """
+(function_declaration name: (identifier)) @def
+(method_declaration name: (field_identifier)) @def
+(type_spec name: (type_identifier)) @def
+(type_alias name: (type_identifier)) @def
+"""
+
+RUST_DIAGRAM_DEF_QUERY = """
+(function_item) @def
+(function_signature_item) @def
+(struct_item) @def
+(enum_item) @def
+(trait_item) @def
+(union_item) @def
+(type_item) @def
+(mod_item) @def
+"""
 
 
 def _query_for_language(language_id: str) -> str | None:
@@ -160,6 +222,23 @@ def _def_query_for_language(language_id: str) -> str | None:
     return None
 
 
+def _diagram_def_query_for_language(language_id: str) -> str | None:
+    """Return the *diagram* definition query for a language, or None.
+
+    Deliberately separate from :func:`_def_query_for_language`: see the comment
+    above :data:`TYPESCRIPT_DIAGRAM_DEF_QUERY`.
+    """
+    if language_id == "python":
+        return PYTHON_DEF_QUERY
+    if language_id in ("typescript", "tsx", "javascript"):
+        return TYPESCRIPT_DIAGRAM_DEF_QUERY
+    if language_id == "go":
+        return GO_DIAGRAM_DEF_QUERY
+    if language_id == "rust":
+        return RUST_DIAGRAM_DEF_QUERY
+    return None
+
+
 def _definition_kind(node_type: str) -> str:
     """Map a tree-sitter definition node type to ``function``/``class``."""
     if node_type in ("function_definition", "function_item"):
@@ -167,15 +246,74 @@ def _definition_kind(node_type: str) -> str:
     return "class"
 
 
+# Kind buckets for the diagram definition queries. Kept separate from
+# :func:`_definition_kind`, whose ``else: return "class"`` fallback would stamp
+# ``method_definition``/``variable_declarator``/``type_spec`` as ``"class"``.
+_DIAGRAM_FUNCTION_NODES = frozenset(
+    {
+        "function_definition",
+        "function_declaration",
+        "generator_function_declaration",
+        "function_signature",
+        "method_definition",
+        "method_signature",
+        "method_declaration",
+        "variable_declarator",
+        "function_item",
+        "function_signature_item",
+    }
+)
+_DIAGRAM_CLASS_NODES = frozenset(
+    {
+        "class_definition",
+        "class_declaration",
+        "abstract_class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "struct_item",
+        "enum_item",
+        "trait_item",
+        "union_item",
+    }
+)
+_DIAGRAM_TYPE_NODES = frozenset(
+    {"type_alias_declaration", "type_spec", "type_alias", "type_item"}
+)
+
+
+def _diagram_definition_kind(node_type: str) -> str:
+    """Map a diagram definition node type to a kind label.
+
+    Returns ``"function"``, ``"class"``, ``"type"``, ``"module"``, or
+    ``"other"`` for an unrecognized node type (fail-open: an unmapped capture
+    still yields a usable definition record, just an unclassified one).
+    """
+    if node_type in _DIAGRAM_FUNCTION_NODES:
+        return "function"
+    if node_type in _DIAGRAM_CLASS_NODES:
+        return "class"
+    if node_type in _DIAGRAM_TYPE_NODES:
+        return "type"
+    if node_type == "mod_item":
+        return "module"
+    return "other"
+
+
 def extract_definitions(
-    parser: Parser, source: bytes, query_string: str
+    parser: Parser,
+    source: bytes,
+    query_string: str,
+    *,
+    kind_for: Callable[[str], str] = _definition_kind,
 ) -> list[dict[str, object]]:
     """Parse ``source`` and return captured definition records.
 
     Returns a list of ``{name, line, end_line, kind}`` dicts where ``line``/``end_line``
-    are 1-based (``start_point[0] + 1`` / ``end_point[0] + 1``). ``kind`` is
-    ``"function"`` or ``"class"``. Returns an empty list on any parse/query
-    failure (graceful degradation per D-06, matching ``extract_imports``).
+    are 1-based (``start_point[0] + 1`` / ``end_point[0] + 1``). ``kind`` comes from
+    ``kind_for`` (default :func:`_definition_kind`, i.e. ``"function"``/``"class"``;
+    :func:`definitions_in_file` passes :func:`_diagram_definition_kind`). Returns an
+    empty list on any parse/query failure (graceful degradation per D-06, matching
+    ``extract_imports``).
     """
     try:
         tree = parser.parse(source)
@@ -195,7 +333,7 @@ def extract_definitions(
                     "name": name_node.text.decode("utf-8", errors="replace"),
                     "line": node.start_point[0] + 1,
                     "end_line": node.end_point[0] + 1,
-                    "kind": _definition_kind(node.type),
+                    "kind": kind_for(node.type),
                 }
             )
         return result
@@ -552,6 +690,380 @@ def build_symbol_index(repo_root: Path, paths: list[str]) -> dict[str, list[dict
                 }
             )
     return index
+
+
+# --- Control-flow tables (issue #1113) ---------------------------------------
+#
+# Every node type below was confirmed by parsing purpose-built snippets with the
+# installed grammars and by compiling ``(<type>) @x`` as a real ``Query`` against
+# the language. Nothing here may be extended by analogy: a node kind that does
+# not exist makes the whole query fail to compile.
+#
+# ``.js`` is parsed by the TypeScript grammar and ``.jsx`` by the TSX grammar
+# (there is no ``tree_sitter_javascript`` installed), so the three JS/TS ids share
+# one table.
+
+_TYPESCRIPT_BRANCH_NODES = frozenset(
+    {
+        "if_statement",
+        "switch_statement",
+        "switch_case",
+        "switch_default",
+        "try_statement",
+        "catch_clause",
+        "finally_clause",
+        "for_statement",
+        "for_in_statement",
+        "while_statement",
+        "do_statement",
+        "ternary_expression",
+        "optional_chain",
+    }
+)
+
+# Node types that open a control-flow branch. Head nodes only: ``else_clause`` is
+# deliberately absent (an ``else`` adds no new condition, matching
+# ``eval/analyzer._CC_DECISION_TYPES``), which is also what keeps an
+# if/else-if/else chain at N decisions instead of 2N -- see
+# :func:`branch_statement_lines`.
+BRANCH_NODE_TYPES: dict[str, frozenset[str]] = {
+    "python": frozenset(
+        {
+            "if_statement",
+            "elif_clause",
+            "for_statement",
+            "while_statement",
+            "try_statement",
+            "except_clause",
+            "finally_clause",
+            "with_statement",
+            "match_statement",
+            "case_clause",
+            "conditional_expression",
+            "boolean_operator",
+            "assert_statement",
+        }
+    ),
+    "typescript": _TYPESCRIPT_BRANCH_NODES,
+    "tsx": _TYPESCRIPT_BRANCH_NODES,
+    "javascript": _TYPESCRIPT_BRANCH_NODES,
+    "go": frozenset(
+        {
+            "if_statement",
+            "for_statement",
+            "expression_switch_statement",
+            "type_switch_statement",
+            "select_statement",
+            "expression_case",
+            "default_case",
+            "type_case",
+            "communication_case",
+        }
+    ),
+    "rust": frozenset(
+        {
+            "if_expression",
+            "match_expression",
+            "match_arm",
+            "while_expression",
+            "for_expression",
+            "loop_expression",
+            "let_condition",
+            "try_expression",
+        }
+    ),
+}
+
+# Statements that end a control-flow path. ``break``/``continue``/``goto``/
+# ``fallthrough`` are non-local *jumps*, not terminals, and are excluded.
+TERMINAL_NODE_TYPES: dict[str, frozenset[str]] = {
+    "python": frozenset({"return_statement", "raise_statement"}),
+    "typescript": frozenset({"return_statement", "throw_statement"}),
+    "tsx": frozenset({"return_statement", "throw_statement"}),
+    "javascript": frozenset({"return_statement", "throw_statement"}),
+    "go": frozenset({"return_statement"}),
+    "rust": frozenset({"return_expression"}),
+}
+
+# Exit-like calls have no dedicated node kind, so they are matched on the text of
+# the call's ``function:`` child (``attribute`` for python, ``member_expression``
+# for TS, ``selector_expression`` for go, ``scoped_identifier`` for rust).
+TERMINAL_CALL_NAMES: dict[str, frozenset[str]] = {
+    "python": frozenset({"sys.exit", "os._exit", "exit", "quit"}),
+    "typescript": frozenset({"process.exit"}),
+    "tsx": frozenset({"process.exit"}),
+    "javascript": frozenset({"process.exit"}),
+    "go": frozenset(
+        {"os.Exit", "panic", "log.Fatal", "log.Fatalf", "log.Panic", "t.Fatal", "t.Fatalf"}
+    ),
+    "rust": frozenset(
+        {"std::process::exit", "process::exit", "std::process::abort", "process::abort"}
+    ),
+}
+
+# Rust's panic family is a ``macro_invocation``, which on its own is far too broad
+# to be a terminal (``assert!``, ``println!`` and ``vec!`` are all
+# ``macro_invocation``), so the ``macro:`` name check below is mandatory.
+TERMINAL_MACRO_NAMES: frozenset[str] = frozenset(
+    {"panic", "unreachable", "todo", "unimplemented"}
+)
+
+_CALL_NODE_TYPES: dict[str, frozenset[str]] = {
+    "python": frozenset({"call"}),
+    "typescript": frozenset({"call_expression"}),
+    "tsx": frozenset({"call_expression"}),
+    "javascript": frozenset({"call_expression"}),
+    "go": frozenset({"call_expression"}),
+    "rust": frozenset({"call_expression"}),
+}
+
+# Switch-like containers and the case nodes they own. Counting both levels would
+# report one decision twice, so :func:`branch_statement_lines` reports the case
+# level and drops the container whenever the container actually has cases. Go has
+# four container kinds and shares ``default_case`` across three of them, which is
+# why the relation is expressed as two flat per-language sets rather than pairs.
+_SWITCH_CONTAINER_TYPES: dict[str, frozenset[str]] = {
+    "python": frozenset({"match_statement"}),
+    "typescript": frozenset({"switch_statement"}),
+    "tsx": frozenset({"switch_statement"}),
+    "javascript": frozenset({"switch_statement"}),
+    "go": frozenset(
+        {"expression_switch_statement", "type_switch_statement", "select_statement"}
+    ),
+    "rust": frozenset({"match_expression"}),
+}
+_SWITCH_CASE_TYPES: dict[str, frozenset[str]] = {
+    "python": frozenset({"case_clause"}),
+    "typescript": frozenset({"switch_case", "switch_default"}),
+    "tsx": frozenset({"switch_case", "switch_default"}),
+    "javascript": frozenset({"switch_case", "switch_default"}),
+    "go": frozenset({"expression_case", "default_case", "type_case", "communication_case"}),
+    "rust": frozenset({"match_arm"}),
+}
+# Body nodes that sit between a switch-like container and its cases: ``block``
+# (python ``match``), ``switch_body`` (TS), ``match_block`` (rust). Go's cases are
+# direct children of their container.
+_SWITCH_BODY_TYPES: frozenset[str] = frozenset({"block", "switch_body", "match_block"})
+
+# Fallback line classifiers for a file whose language has no grammar here. Pure
+# text, no parse -- deliberately crude, and only ever reached when
+# ``language_id`` is None/unknown or the parser is unavailable.
+_BRANCH_KEYWORD_RE = re.compile(
+    r"^\s*(if|elif|else|for|while|match|case|try|except|switch|catch|loop)\b"
+)
+_TERMINAL_KEYWORD_RE = re.compile(
+    r"^\s*(return|raise|throw|panic|os\.Exit|std::process::exit|sys\.exit)\b"
+)
+
+
+def language_for_path(path: str) -> str | None:
+    """Return the tree-sitter language id for ``path``, or None if unsupported.
+
+    Suffix matching is case-sensitive (``LANGUAGES`` is keyed by exact suffix).
+    Note ``.js`` maps to the id ``"javascript"`` but is parsed by the TypeScript
+    grammar, and ``.jsx`` maps to ``"tsx"``.
+    """
+    entry = LANGUAGES.get(Path(path).suffix)
+    if entry is None:
+        return None
+    return entry[0]
+
+
+def _walk(node: Node) -> Iterator[Node]:
+    """Yield ``node`` and every descendant (order unspecified)."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(current.children)
+
+
+def _container_owns_cases(node: Node, case_types: frozenset[str]) -> bool:
+    """Whether a switch-like ``node`` has at least one case of its own.
+
+    Looks at direct children and through one body wrapper
+    (:data:`_SWITCH_BODY_TYPES`) -- the only two shapes the grammars produce. A
+    nested switch's cases live under that switch's own body, so they are never
+    mistaken for the outer container's.
+    """
+    for child in node.children:
+        if child.type in case_types:
+            return True
+        if child.type in _SWITCH_BODY_TYPES:
+            for grandchild in child.children:
+                if grandchild.type in case_types:
+                    return True
+    return False
+
+
+def branch_statement_lines(language_id: str, source: bytes) -> list[int]:
+    """Return the 1-based lines of ``source`` that open a control-flow branch.
+
+    Sorted and deduplicated. Returns ``[]`` for an unknown language or on any
+    parse/query failure (fail-open).
+
+    Two counting rules are applied so one decision point is never reported
+    twice:
+
+    * ``else``/``else if`` chains contribute only their condition-bearing head
+      nodes. ``else_clause`` is absent from :data:`BRANCH_NODE_TYPES` entirely.
+      In python the chain is flat (``elif_clause`` is a *sibling* of the
+      ``if_statement``) while in TS/TSX/JS and rust it nests (the second
+      ``if_statement``/``if_expression`` lives inside the first
+      ``else_clause``) -- both shapes yield one line per condition because the
+      nested head starts on the same physical line as its ``else``. Go has no
+      ``else`` node at all; its ``alternative:`` field holds a ``block`` or a
+      nested ``if_statement`` directly.
+    * A switch-like container (``match``/``switch``/``select``) is reported only
+      when it owns no cases; otherwise its cases are reported instead. This
+      holds for nested switches too, each level being resolved independently.
+
+    Raises:
+        TreeSitterBadVersionError: propagated from :func:`get_parser` when the
+            installed tree-sitter is in the known-bad set. Callers that must not
+            fail on a bad install wrap this call.
+    """
+    branch_types = BRANCH_NODE_TYPES.get(language_id)
+    if branch_types is None:
+        return []
+    parser = get_parser(language_id)
+    if parser is None:
+        return []
+    containers = _SWITCH_CONTAINER_TYPES.get(language_id, frozenset())
+    case_types = _SWITCH_CASE_TYPES.get(language_id, frozenset())
+    lines: set[int] = set()
+    try:
+        tree = parser.parse(source)
+        for node in _walk(tree.root_node):
+            if node.type not in branch_types:
+                continue
+            if node.type in containers and _container_owns_cases(node, case_types):
+                continue
+            lines.add(node.start_point[0] + 1)
+    except Exception:
+        return []
+    return sorted(lines)
+
+
+def _source_line(source: bytes, line: int) -> str:
+    """Return the 1-based ``line`` of ``source`` as text, or ``""`` if absent."""
+    if line < 1:
+        return ""
+    rows = source.split(b"\n")
+    if line > len(rows):
+        return ""
+    return rows[line - 1].decode("utf-8", errors="replace")
+
+
+def _terminal_call_name(node: Node) -> str | None:
+    """Return the callee text of a call ``node``, or None when unreadable."""
+    callee = node.child_by_field_name("function")
+    if callee is None or callee.text is None:
+        return None
+    return callee.text.decode("utf-8", errors="replace").strip()
+
+
+def is_branch_line(language_id: str | None, source: bytes, line: int) -> bool:
+    """Whether the 1-based ``line`` of ``source`` opens a control-flow branch.
+
+    Unlike :func:`branch_statement_lines` this is a membership question, not a
+    count, so no de-duplication rule applies: a ``switch (x) {`` line is a branch
+    line even though :func:`branch_statement_lines` reports its cases instead.
+
+    Falls back to a keyword regex over the raw line when ``language_id`` is
+    None/unknown, when no parser is available, or when parsing fails (fail-open).
+
+    Raises:
+        TreeSitterBadVersionError: propagated from :func:`get_parser`; callers
+            that must not fail on a bad install wrap this call.
+    """
+    branch_types = BRANCH_NODE_TYPES.get(language_id or "")
+    parser = get_parser(language_id) if language_id else None
+    if branch_types is None or parser is None:
+        return bool(_BRANCH_KEYWORD_RE.match(_source_line(source, line)))
+    try:
+        tree = parser.parse(source)
+        for node in _walk(tree.root_node):
+            if node.type in branch_types and node.start_point[0] + 1 == line:
+                return True
+    except Exception:
+        return bool(_BRANCH_KEYWORD_RE.match(_source_line(source, line)))
+    return False
+
+
+def is_terminal_line(language_id: str | None, source: bytes, line: int) -> bool:
+    """Whether the 1-based ``line`` of ``source`` ends a control-flow path.
+
+    True for a ``return``/``raise``/``throw`` statement, for an exit-like call in
+    :data:`TERMINAL_CALL_NAMES` (matched on the callee text -- those calls have no
+    dedicated node kind), and for a rust panic-family ``macro_invocation`` named
+    in :data:`TERMINAL_MACRO_NAMES`.
+
+    Falls back to a keyword regex over the raw line when ``language_id`` is
+    None/unknown, when no parser is available, or when parsing fails (fail-open).
+
+    Raises:
+        TreeSitterBadVersionError: propagated from :func:`get_parser`; callers
+            that must not fail on a bad install wrap this call.
+    """
+    terminal_types = TERMINAL_NODE_TYPES.get(language_id or "")
+    parser = get_parser(language_id) if language_id else None
+    if terminal_types is None or parser is None:
+        return bool(_TERMINAL_KEYWORD_RE.match(_source_line(source, line)))
+    call_types = _CALL_NODE_TYPES.get(language_id or "", frozenset())
+    call_names = TERMINAL_CALL_NAMES.get(language_id or "", frozenset())
+    try:
+        tree = parser.parse(source)
+        for node in _walk(tree.root_node):
+            if node.start_point[0] + 1 != line:
+                continue
+            if node.type in terminal_types:
+                return True
+            if node.type in call_types and _terminal_call_name(node) in call_names:
+                return True
+            if node.type == "macro_invocation":
+                macro = node.child_by_field_name("macro")
+                if macro is not None and macro.text is not None:
+                    name = macro.text.decode("utf-8", errors="replace").strip()
+                    if name in TERMINAL_MACRO_NAMES:
+                        return True
+    except Exception:
+        return bool(_TERMINAL_KEYWORD_RE.match(_source_line(source, line)))
+    return False
+
+
+def definitions_in_file(repo_root: Path, path: str) -> list[dict[str, object]]:
+    """Return the definitions in ``repo_root / path`` for diagram grounding.
+
+    Each record is ``{"name", "line", "end_line", "kind"}`` with 1-based lines and
+    a kind from :func:`_diagram_definition_kind`. Returns ``[]`` for a missing or
+    unreadable file, for an unsupported language, and on any parse/query failure
+    (fail-open).
+
+    Note: a definition node's range spans its **body**, not its header (a
+    decorator sits outside it), and two definitions can share one physical line
+    (``{ meth() {}, get g() {} }``) -- so a line number alone is not a unique key.
+
+    Raises:
+        TreeSitterBadVersionError: propagated from :func:`get_parser`; callers
+            that must not fail on a bad install wrap this call.
+    """
+    language_id = language_for_path(path)
+    if language_id is None:
+        return []
+    query_string = _diagram_def_query_for_language(language_id)
+    if query_string is None:
+        return []
+    try:
+        source = (repo_root / path).read_bytes()
+    except OSError:
+        return []
+    parser = get_parser(language_id)
+    if parser is None:
+        return []
+    return extract_definitions(
+        parser, source, query_string, kind_for=_diagram_definition_kind
+    )
 
 
 def detect_affected_files(

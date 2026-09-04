@@ -125,6 +125,25 @@ class DaydreamFileConfig:
             local plan as a GitHub issue. This is an explicit repository-level
             opt-in under ``[tool.daydream.improve.github]``; absent or malformed
             values leave publishing disabled.
+        diagram_mode: Issue #1113. Grounded-diagram mode from
+            ``[tool.daydream.diagram] mode`` — ``"auto"`` or ``"off"`` only. A
+            repo file may enable or suppress diagrams but never force a kind on
+            every run (that is a per-invocation decision, so ``sequence`` /
+            ``flowchart`` / ``both`` are CLI-only). ``None`` when unset or
+            invalid; the orchestrator then applies ``"auto"``.
+        diagram_min_code_files: Issue #1113. Override for the sequence
+            cross-module rule's changed-code-file floor. ``None`` falls through
+            to ``config.DEFAULT_DIAGRAM_MIN_CODE_FILES`` (3).
+        diagram_min_modules: Issue #1113. Override for the sequence cross-module
+            rule's distinct-module floor. ``None`` falls through to
+            ``config.DEFAULT_DIAGRAM_MIN_MODULES`` (2).
+        diagram_min_branch_points: Issue #1113. Override for the flowchart
+            rule's changed-branch-point floor. ``None`` falls through to
+            ``config.DEFAULT_DIAGRAM_MIN_BRANCH_POINTS`` (3).
+        diagram_service_roots: Issue #1113. Repository-relative glob patterns
+            identifying service roots for diagram participant grouping. Empty
+            falls back to ``improve_service_roots``, then to layout inference,
+            so a repo that already declared its services need not repeat them.
     """
 
     model: str | None = None
@@ -160,6 +179,11 @@ class DaydreamFileConfig:
     improve_max_partition_groups: int | None = None
     improve_github_publish_issues: bool = False
     review_profile: Path | None = None
+    diagram_mode: str | None = None
+    diagram_min_code_files: int | None = None
+    diagram_min_modules: int | None = None
+    diagram_min_branch_points: int | None = None
+    diagram_service_roots: list[str] = field(default_factory=list)
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -218,8 +242,10 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
 
     Scalar keys (``model``, ``backend``) from ``override`` replace ``base``.
     The ``phases`` sub-table is merged per-phase so an override phase table
-    does not discard phases declared only in ``base``. The ``improve``
-    sub-table is likewise merged per-key.
+    does not discard phases declared only in ``base``. The ``improve`` and
+    ``diagram`` sub-tables are likewise merged per-key, so a dotfile that sets
+    only ``[diagram] mode`` does not discard thresholds declared in
+    ``pyproject.toml``.
     """
     merged: dict[str, Any] = dict(base)
     for key, value in override.items():
@@ -233,6 +259,8 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
             merged["phases"] = phases
         elif key == "improve" and isinstance(value, dict) and isinstance(merged.get("improve"), dict):
             merged["improve"] = {**merged["improve"], **value}
+        elif key == "diagram" and isinstance(value, dict) and isinstance(merged.get("diagram"), dict):
+            merged["diagram"] = {**merged["diagram"], **value}
         else:
             merged[key] = value
     return merged
@@ -408,6 +436,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     quality_gate_enabled: bool | None = (
         raw_quality_gate_enabled if isinstance(raw_quality_gate_enabled, bool) else None
     )
+    # Grounded diagrams (#1113): the sub-table degrades to empty on junk, so
+    # every key falls through to its config.py default rather than raising.
+    diagram = merged.get("diagram")
+    diagram = diagram if isinstance(diagram, dict) else {}
     improve = merged.get("improve")
     improve = improve if isinstance(improve, dict) else {}
     service_groups = improve.get("service_groups")
@@ -460,4 +492,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         improve_partition_max_files=_coerce_positive_int(improve, "partition_max_files"),
         improve_max_partition_groups=_coerce_positive_int(improve, "max_partition_groups"),
         improve_github_publish_issues=improve_github_publish_issues,
+        diagram_mode=_coerce_choice(diagram.get("mode"), {"auto", "off"}),
+        diagram_min_code_files=_coerce_positive_int(diagram, "min_code_files"),
+        diagram_min_modules=_coerce_positive_int(diagram, "min_modules"),
+        diagram_min_branch_points=_coerce_positive_int(diagram, "min_branch_points"),
+        diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
     )

@@ -11,6 +11,8 @@ to the single deep flow, which now carries every PR-process mode (#330)::
         other registered      -> _run_custom_flow (fork-registered custom flow)
     output_mode == "comment"  -> deep comment mode (posts inline, no fix cycle)
     output_mode == "review"   -> deep review mode (report only, no fix cycle)
+    output_mode == "diagram"  -> diagram-only mode (grounded mermaid diagrams,
+                                 posts a standalone comment, no findings)
     output_mode == "loop":
         config.shallow        -> deep shallow mode (single-stack deep)
         else                  -> deep (default)
@@ -75,8 +77,9 @@ if TYPE_CHECKING:
     from daydream.pr_review import ParsedIssue
 
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
-# comments and exits; ``review`` writes a report and exits.
-OutputMode = Literal["loop", "comment", "review"]
+# comments and exits; ``review`` writes a report and exits; ``diagram``
+# (issue #1113) runs the diagram-only flow and posts a standalone comment.
+OutputMode = Literal["loop", "comment", "review", "diagram"]
 
 
 @dataclass
@@ -136,7 +139,10 @@ class RunConfig:
         branch: Specific branch to review. If None, uses cwd's HEAD.
         base: Base ref to compare against. If None, auto-resolves.
         output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
-            (review + post inline PR comments), or ``"review"`` (review report only).
+            (review + post inline PR comments), ``"review"`` (review report only),
+            or ``"diagram"`` (issue #1113: the diagram-only flow, which runs
+            exploration plus the diagram phase and posts a standalone grounded
+            mermaid comment instead of a review).
         findings_out: Path to write the Phase A findings artifact
             (``--findings-out``; review mode only). Default None.
         dump_artifacts: Directory to copy the full assembled run bundle into
@@ -247,6 +253,14 @@ class RunConfig:
             root (R1). Flows and prompt builders read this; they never re-read
             profile files. ``None`` before resolution or when a direct caller
             skips the composition-root seam.
+        diagram: Issue #1113. Grounded-diagram mode selector — one of
+            ``"auto"``, ``"sequence"``, ``"flowchart"``, ``"both"``, ``"off"``
+            (``config.DIAGRAM_MODES``). ``None`` means "no CLI request" and
+            falls through to ``file_config.diagram_mode`` then ``"auto"``
+            (precedence CLI > file > default). Carries the ``--diagram`` value in
+            the review paths and the ``--diagram-only`` value when
+            ``output_mode == "diagram"``; an explicit ``--diagram-only`` request
+            wins over a file-config ``mode = "off"``.
 
     """
 
@@ -345,6 +359,11 @@ class RunConfig:
     # every ``FlowContext``/``run_deep`` so no consumer re-reads a file.
     review_profile_path: str | Path | None = None
     review_profile: ResolvedProfile | None = None
+    # Issue #1113: grounded mermaid diagrams. ``None`` (not ``"auto"``) is the
+    # unset marker so a file-config ``[tool.daydream.diagram] mode = "off"`` can
+    # win over the built-in default while an explicit CLI value still overrides
+    # the file. Resolved by the orchestrator's ``_resolved_diagram_mode``.
+    diagram: str | None = None
 
 
 def _make_archive_callback(
@@ -521,25 +540,33 @@ def _recorder_backend_names(
     trajectory and manifest never diverge on which backend produced the run.
     The representative backend resolves through the phase that actually governs
     the flow: deep-flow runs (DEEP/NORMAL/TTT) fan out on ``per_stack_review``;
-    improve runs on its advisory phases with ``recon`` first; other flows fall
-    back to ``review``. Per-phase fix/test are recorded only for flows that
-    statically run those phases: improve/TTT never run fix/test; PR runs fix
-    but never test; CUSTOM composition is fork-defined and unknowable at
-    recorder-open time, so labeling it unconditionally would mislabel
-    review-only forks. A flow that skips a phase yields an empty name (the key
-    is omitted on serialization) rather than a misleading label.
+    improve runs on its advisory phases with ``recon`` first; DIAGRAM runs on
+    ``diagram``, the only agent phase its two-step flow executes (issue #1113);
+    other flows fall back to ``review``. Per-phase fix/test are recorded only
+    for flows that statically run those phases: improve/TTT/DIAGRAM never run
+    fix/test; PR runs fix but never test; CUSTOM composition is fork-defined and
+    unknowable at recorder-open time, so labeling it unconditionally would
+    mislabel review-only forks. A flow that skips a phase yields an empty name
+    (the key is omitted on serialization) rather than a misleading label.
     """
     if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT):
         representative_phase = "per_stack_review"
     elif flow_kind == DaydreamRunFlow.IMPROVE:
         representative_phase = "recon"
+    elif flow_kind == DaydreamRunFlow.DIAGRAM:
+        representative_phase = "diagram"
     else:
         representative_phase = "review"
     backend = _resolved_backend_name(config, representative_phase)
     fix = (
         _resolved_backend_name(config, "fix")
         if flow_kind
-        not in (DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM)
+        not in (
+            DaydreamRunFlow.TTT,
+            DaydreamRunFlow.IMPROVE,
+            DaydreamRunFlow.CUSTOM,
+            DaydreamRunFlow.DIAGRAM,
+        )
         else ""
     )
     test = (
@@ -550,6 +577,7 @@ def _recorder_backend_names(
             DaydreamRunFlow.PR,
             DaydreamRunFlow.IMPROVE,
             DaydreamRunFlow.CUSTOM,
+            DaydreamRunFlow.DIAGRAM,
         )
         else ""
     )
