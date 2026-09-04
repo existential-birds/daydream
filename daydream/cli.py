@@ -1862,7 +1862,12 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
 
 def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
-    """Plan-only hydrate pass: pin, download, ingest, tally — no publication."""
+    """Plan-only hydrate pass: pin, download, ingest, tally — no publication.
+
+    Prints the per-code tallies plus per-repository license decision counts
+    (value-free slugs and counts, issue #1094), with a fail-closed accounting
+    invariant: every discovered candidate lands in exactly one bucket.
+    """
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
     from daydream.ui import print_warning
@@ -1910,6 +1915,29 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
             if config.license_policy_path is not None
             else {}
         )
+        # Issue #1094 Task 8: per-repo auditable decision counts. Value-free
+        # (slugs + counts only). Full record accounting is enforced here —
+        # every discovered candidate must land in exactly one per-repo bucket,
+        # mirroring build_import_ledger's admitted+rejected==discovered check.
+        per_repo = (
+            _hydrate.license_admission_by_repo(config.stage_dir, ledger)
+            if config.license_policy_path is not None
+            else {}
+        )
+        if config.license_policy_path is not None:
+            per_repo_total = sum(sum(b.values()) for b in per_repo.values())
+            discovered_count = int(
+                ledger.get("tallies", {}).get("discovered", 0)
+            )
+            if per_repo_total != discovered_count:
+                raise _hydrate.HydrationError(
+                    redact_text(
+                        f"per-repository accounting mismatch for revision "
+                        f"{source_commit!r}: discovered {discovered_count} "
+                        f"candidate(s), per-repository buckets total "
+                        f"{per_repo_total}"
+                    )
+                )
     except _hydrate.HydrationError as exc:
         print_error(console, "Hydration dry-run failed", redact_text(str(exc)))
         return 1
@@ -1937,6 +1965,16 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
             f"c5-excluded {license_admission['c5_excluded']}; "
             f"copyleft-unopted {license_admission['c8_copyleft_unopted']}; "
             f"evidence-missing {license_admission['license_evidence_missing']}",
+        )
+    for repo_slug in sorted(per_repo):
+        buckets = per_repo[repo_slug]
+        print_info(
+            console,
+            f"license admission by repo: {repo_slug} -> "
+            f"admitted {buckets['admitted']}, "
+            f"c5-excluded {buckets['c5_excluded']}, "
+            f"copyleft-unopted {buckets['c8_copyleft_unopted']}, "
+            f"evidence-missing {buckets['license_evidence_missing']}",
         )
     incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
     if incomplete:

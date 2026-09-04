@@ -1,7 +1,9 @@
 """CLI wiring tests for `daydream corpus hydrate-hub` (#982 M1/M2/M17)."""
 from __future__ import annotations
 
+import json
 import pathlib
+import re
 from typing import Any
 
 import pytest
@@ -299,3 +301,110 @@ def test_production_policy_file_loads_and_rejects_copyleft() -> None:
         "acme/widget", {"spdx_id": "GPL-3.0-only"}, policy, frozenset({"acme/widget"})
     )
     assert opted.status == "admitted"
+
+
+# --- Issue #1094 Task 8: per-repo auditable dry-run report -------------------
+
+SEED_THREE_REPO: tuple[str, str, str] = ("acme/widget", "acme/widget", "ghost/nope")
+
+
+class _FakeLicenseResolver:
+    """Minimal RepoLicenseResolver: MIT for opted-in slugs, None otherwise."""
+
+    def __init__(self, mit_repos: tuple[str, ...]) -> None:
+        self._mit = {slug.casefold() for slug in mit_repos}
+
+    def resolve(self, repo_slug: str, repo_commit: str | None) -> Any:
+        from daydream.archive.license_enrich import EnrichedEvidence
+
+        if repo_slug.casefold() not in self._mit:
+            return None
+        commit = "c" * 40
+        return EnrichedEvidence(
+            spdx_id="MIT", source=f"github:{repo_slug}@{commit}", repo_commit=commit,
+        )
+
+
+def _seed_three_repo_hub() -> FakeHub:
+    """Three-session hub over three repo outcomes: 2x MIT repo, 1x unresolvable."""
+    from tests.fixtures.training.build_hub_snapshot import (
+        _snapshot_manifest,
+        _snapshot_trajectory,
+    )
+
+    files: dict[str, bytes] = {}
+    for session_id, repo_slug in zip(
+        ("acme-run-1", "acme-run-2", "ghost-run-1"), SEED_THREE_REPO, strict=True
+    ):
+        manifest = _snapshot_manifest(session_id, repo_slug, "beagle-python:review-python", ("accepted",))
+        files[f"{session_id}/manifest.json"] = json.dumps(manifest.to_dict(), indent=2).encode()
+        files[f"{session_id}/trajectory.json"] = json.dumps(_snapshot_trajectory(session_id), indent=2).encode()
+    hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
+    hub.commit_revision(SNAPSHOT_REVISION)
+    return hub
+
+
+def run_dry_run_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    hub: FakeHub,
+    resolver: Any,
+) -> tuple[int, dict[str, Any]]:
+    """Run the real CLI dry-run path and parse the printed report.
+
+    Returns ``(rc, report)`` where ``report["per_repository"]`` maps repo slug
+    to the four license-admission buckets parsed from the printed per-repo
+    lines, and ``report["discovered"]`` is the discovered-candidate count.
+    """
+    from daydream.archive import license_enrich
+
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: resolver)
+    policy = tmp_path / "license-policy.json"
+    policy.write_text('{"policy_version": "test", "spdx_decisions": {"MIT": "accepted"}}')
+    rc = cli._handle_hydrate_hub_command(
+        [
+            "--source-repo", "org/private-ds",
+            "--source-revision", SNAPSHOT_REVISION,
+            "--destination-repo", "org/private-ds",
+            "--stage-dir", str(tmp_path / "stage"),
+            "--license-policy", str(policy),
+            "--dry-run",
+        ]
+    )
+    out = " ".join(capsys.readouterr().out.split())
+    per_repo: dict[str, dict[str, int]] = {}
+    pattern = (
+        r"by repo: ([\w./\-]+) -> admitted (\d+), c5-excluded (\d+), "
+        r"copyleft-unopted (\d+), evidence-missing (\d+)"
+    )
+    for match in re.finditer(pattern, out):
+        per_repo[match.group(1)] = {
+            "admitted": int(match.group(2)),
+            "c5_excluded": int(match.group(3)),
+            "c8_copyleft_unopted": int(match.group(4)),
+            "license_evidence_missing": int(match.group(5)),
+        }
+    discovered_match = re.search(r"discovered (\d+) candidate", out)
+    discovered = int(discovered_match.group(1)) if discovered_match else 0
+    return rc, {"per_repository": per_repo, "discovered": discovered}
+
+
+def test_dry_run_reports_per_repo_decision_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Dry run over a stage with three repos and mixed outcomes.
+    rc, report = run_dry_run_capture(
+        monkeypatch, tmp_path, capsys,
+        hub=_seed_three_repo_hub(),
+        resolver=_FakeLicenseResolver(mit_repos=("acme/widget",)),
+    )
+    assert rc == 0
+    per_repo = report["per_repository"]
+    assert per_repo["acme/widget"]["admitted"] == 2
+    assert per_repo["ghost/nope"]["license_evidence_missing"] == 1
+    # Full accounting: every discovered record lands in exactly one code bucket.
+    assert sum(sum(v.values()) for v in per_repo.values()) == report["discovered"]

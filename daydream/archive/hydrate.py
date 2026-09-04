@@ -1423,6 +1423,55 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
     return admission_summary_buckets(entries)
 
 
+def license_admission_by_repo(
+    stage: Path, ledger: Mapping[str, Any]
+) -> dict[str, dict[str, int]]:
+    """Per-repo license admission counts derived from the built import ledger
+    (issue #1094 Task 8).
+
+    Same adjudicated population as :func:`license_admission_summary` (imported
+    sessions plus license-gate rejections; ingest/fixture rejections were
+    never adjudicated by the license gate and are skipped), grouped by the
+    repo slug read from the session's manifest via ``_session_identity``
+    (enrichment wrote the resolved evidence into that same manifest, so this
+    is the slug the gate decided on). Sessions without a readable slug bucket
+    under ``"unresolved"``. Unknown reason codes raise exactly as
+    :func:`admission_summary_buckets` does — the buckets are value-free slugs
+    and counts, never URLs or paths.
+    """
+    revision = str(ledger["pinned_revision"])
+    license_codes = {
+        REASON_CODE_C5_EXCLUDED_REPO,
+        REASON_CODE_C8_COPYLEFT_UNOPTED,
+        REASON_CODE_LICENSE_EVIDENCE_MISSING,
+        REASON_CODE_REPO_IDENTITY_MISSING,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
+    }
+    entries: list[tuple[str, str | None]] = [
+        (str(item["session_id"]), None) for item in ledger.get("imported", [])
+    ]
+    for item in ledger.get("rejections", []):
+        code = item.get("reason_code")
+        if code in license_codes:
+            entries.append((str(item["session_id"]), str(code)))
+    by_repo: dict[str, dict[str, int]] = {}
+    for sid, code in entries:
+        # Imported sessions still live under stage/runs/<sid> (checked first);
+        # license-gate rejections were moved to stage/excluded/<sid>.
+        slug, _evidence = _session_identity(
+            stage, sid, revision, root="excluded", collision=False
+        )
+        buckets = by_repo.setdefault(slug or "unresolved", {
+            "admitted": 0,
+            "c5_excluded": 0,
+            "c8_copyleft_unopted": 0,
+            "license_evidence_missing": 0,
+        })
+        for bucket, count in admission_summary_buckets([(sid, code)]).items():
+            buckets[bucket] += count
+    return by_repo
+
+
 def build_import_ledger(
     stage: Path,
     *,
