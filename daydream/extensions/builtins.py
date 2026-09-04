@@ -1,8 +1,9 @@
 """Built-in registry seed.
 
 ``register_builtins(registry)`` seeds the registry with Daydream's prompt names
-and two flow definitions (deep, improve). Review/comment/shallow are modes of
-the deep flow (#330).
+and three flow definitions (deep, improve, diagram). Review/comment/shallow are
+modes of the deep flow (#330); ``diagram`` (issue #1113) is the ``--diagram-only``
+flow and reuses the deep flow's ``exploration`` and ``diagram`` steps.
 
 Uses only function-local late imports (import-cycle guard): this module must
 not import from ``daydream.runner`` or ``daydream.phases`` at module level.
@@ -67,7 +68,7 @@ def _register_builtin_renderers(registry: Registry) -> None:
 
 
 def _register_builtin_flows(registry: Registry) -> None:
-    """Seed the built-in flow definitions (deep + improve only, #330)."""
+    """Seed the built-in flow definitions (deep, improve, diagram)."""
     from daydream.deep import orchestrator as deep
     from daydream.flows.engine import LoopGroup
     from daydream.improve import orchestrator as improve
@@ -93,6 +94,13 @@ def _register_builtin_flows(registry: Registry) -> None:
         elif step.name != "fix-verify":
             entries.append(step.name)
     registry.set_flow("deep", entries)
+
+    # Issue #1113: the diagram-only flow. ``exploration`` and ``diagram`` are
+    # already registered by the ``deep.STEPS`` loop above (``register_phase``
+    # raises on a duplicate name), so only ``post-diagram`` needs registering.
+    for step in deep.DIAGRAM_STEPS:
+        registry.register_phase(step)
+    registry.set_flow("diagram", ["exploration", "diagram", "post-diagram"])
 
     for step in improve.STEPS:
         registry.register_phase(step)

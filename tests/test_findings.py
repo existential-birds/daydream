@@ -239,3 +239,116 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
             await run(config)
 
     assert not out.exists(), "an errored run must never write a findings artifact"
+
+
+# --- Grounded diagrams (issue #1113) ----------------------------------------
+
+
+def _diagram_payload() -> dict[str, Any]:
+    """A minimal but shape-real diagram payload."""
+    return {
+        "eligibility": {"sequence": {"eligible": True, "rule": "forced", "reason": "r"}},
+        "results": {
+            "sequence": {
+                "status": "rendered",
+                "reason": None,
+                "spec_proposed": {"participants": [], "messages": [], "blocks": []},
+                "spec_final": {"participants": [], "messages": [], "blocks": []},
+                "grounding": {
+                    "elements": [],
+                    "summary": {
+                        "proposed": 0,
+                        "grounded_first_pass": 0,
+                        "repaired": 0,
+                        "pruned": 0,
+                    },
+                    "capped": {},
+                    "root_range": None,
+                },
+                "omit_reasons": [],
+            },
+            "flowchart": None,
+        },
+    }
+
+
+def test_diagram_artifact_round_trips_kind_and_payload(tmp_path: Path) -> None:
+    """``kind``/``diagrams`` survive build -> write -> validate -> load."""
+    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
+                owner="o", repo="r", url="u")
+    payload = _diagram_payload()
+    artifact = build_findings_artifact(
+        tmp_path, pr, [], run_info=None, kind="diagram", diagrams=payload
+    )
+    assert artifact["kind"] == "diagram"
+    assert artifact["diagrams"] == payload
+
+    path = tmp_path / "diagram-findings.json"
+    write_findings_artifact(path, artifact)
+    loaded = load_findings_artifact(
+        path, expected_repo="o/r", expected_pr_number=7, expected_head_sha="h" * 40
+    )
+    assert loaded.kind == "diagram"
+    assert loaded.diagrams == payload
+    assert loaded.findings == []
+
+
+def test_review_artifact_defaults_kind_and_diagrams(tmp_path: Path) -> None:
+    """A pre-#1113 artifact with neither key loads as a review with no diagrams."""
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": FINDINGS_SCHEMA_VERSION,
+                "repo": "o/r",
+                "pr_number": 7,
+                "head_sha": "h" * 40,
+                "findings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_findings_artifact(
+        path, expected_repo="o/r", expected_pr_number=7, expected_head_sha="h" * 40
+    )
+    assert loaded.kind == "review"
+    assert loaded.diagrams is None
+
+
+def test_unknown_artifact_kind_is_rejected_by_the_schema(tmp_path: Path) -> None:
+    """``kind`` is an enum: an unknown value fails validation before any use."""
+    path = tmp_path / "bad-kind.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": FINDINGS_SCHEMA_VERSION,
+                "repo": "o/r",
+                "pr_number": 7,
+                "head_sha": "h" * 40,
+                "kind": "sabotage",
+                "findings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FindingsValidationError, match="schema validation"):
+        load_findings_artifact(
+            path, expected_repo="o/r", expected_pr_number=7, expected_head_sha="h" * 40
+        )
+
+
+def test_write_rejects_an_oversized_artifact(tmp_path: Path) -> None:
+    """The size cap fails in the job that produced the artifact, not one job later."""
+    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
+                owner="o", repo="r", url="u")
+    payload = _diagram_payload()
+    payload["results"]["sequence"]["spec_final"]["messages"] = [
+        {"label": "x" * 512} for _ in range(4000)
+    ]
+    artifact = build_findings_artifact(
+        tmp_path, pr, [], run_info=None, kind="diagram", diagrams=payload
+    )
+    path = tmp_path / "huge.json"
+    with pytest.raises(FindingsValidationError, match="size check failed"):
+        write_findings_artifact(path, artifact)
+    assert not path.exists(), "an over-cap artifact must not be left on disk"

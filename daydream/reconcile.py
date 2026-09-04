@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from daydream import git_ops
 from daydream.bot_identity import bot_login_matches
 from daydream.git_ops import GitError
-from daydream.pr_review import parse_finding_markers
+from daydream.pr_review import parse_diagram_markers, parse_finding_markers
 from daydream.ui import print_warning
 
 if TYPE_CHECKING:
@@ -51,6 +51,25 @@ class PriorFinding:
     thread_id: str | None
     is_resolved: bool
     comment_node_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PriorDiagramComment:
+    """One prior daydream diagram comment recovered from the PR (issue #1113).
+
+    Carries no ``is_minimized``: the REST issue-comments endpoint does not
+    expose it, and ``minimizeComment`` is idempotent server-side, so
+    re-minimizing an already-folded comment is accepted rather than avoided.
+
+    Attributes:
+        node_id: GraphQL node id of the comment -- the ``minimizeComment``
+            mutation subject.
+        kinds: The diagram kinds the comment's hidden markers claim, in marker
+            order and de-duplicated.
+    """
+
+    node_id: str
+    kinds: tuple[str, ...]
 
 
 @dataclass
@@ -238,6 +257,86 @@ def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> Reconci
     )
 
 
+def minimize_comment(target_dir: Path, node_id: str) -> bool:
+    """Mark one comment outdated via the GraphQL ``minimizeComment`` mutation.
+
+    The single minimization primitive, shared by stale-finding resolution and
+    by prior-diagram-comment superseding (issue #1113).
+    ``resolveReviewThread`` is unavailable to the least-privilege installation
+    token, so the carrying comment's node id is the subject.
+
+    Args:
+        target_dir: Repository directory the ``gh`` call runs in.
+        node_id: GraphQL node id of the comment to fold.
+
+    Returns:
+        True when GitHub reports the comment minimized. Any transport, shape,
+        or "not minimized" outcome returns False -- the caller decides how loud
+        that is.
+    """
+    try:
+        response = _graphql(target_dir, _MINIMIZE_COMMENT_MUTATION, {"subjectId": node_id})
+        return bool(response["data"]["minimizeComment"]["minimizedComment"]["isMinimized"])
+    except (GitError, KeyError, TypeError):
+        return False
+
+
+def fetch_prior_diagram_comments(
+    target_dir: Path, repo_slug: str, pr_number: int, *, bot_login: str | None
+) -> list[PriorDiagramComment]:
+    """Inventory the bot's prior standalone diagram comments on a PR (issue #1113).
+
+    A diagram comment is an *issue* comment, not a review and not a review
+    thread, so neither of ``fetch_prior_findings``' two sources sees it. Read
+    over REST (``GET /repos/{o}/{r}/issues/{n}/comments``, paginated): the
+    PR-level ``comments`` GraphQL connection would have to be added to the
+    schema surface, and REST's only loss is ``isMinimized``, which
+    :class:`PriorDiagramComment` does not need.
+
+    A comment is trusted only when it carries a ``daydream-diagram`` marker AND
+    ``bot_login_matches`` accepts its author. REST has no ``viewerDidAuthor``,
+    so an unresolved ``bot_login`` harvests nothing -- the caller then skips
+    minimization entirely rather than folding a comment it cannot attribute.
+
+    Args:
+        target_dir: Repository directory the ``gh`` call runs in.
+        repo_slug: ``owner/repo``.
+        pr_number: Target PR number.
+        bot_login: Bot login for author attribution, or None.
+
+    Returns:
+        The matching comments in API order.
+
+    Raises:
+        GitError: If the GitHub API call fails.
+    """
+    if bot_login is None:
+        return []
+    owner, name = repo_slug.split("/", 1)
+    comments = git_ops.gh_api(
+        target_dir,
+        f"repos/{owner}/{name}/issues/{pr_number}/comments",
+        paginate=True,
+        idempotent=True,
+    )
+    if not isinstance(comments, list):
+        return []
+    prior: list[PriorDiagramComment] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        if not bot_login_matches((comment.get("user") or {}).get("login"), bot_login):
+            continue
+        kinds: list[str] = []
+        for kind, _sha in parse_diagram_markers(comment.get("body") or ""):
+            if kind not in kinds:
+                kinds.append(kind)
+        node_id = comment.get("node_id")
+        if kinds and isinstance(node_id, str) and node_id:
+            prior.append(PriorDiagramComment(node_id=node_id, kinds=tuple(kinds)))
+    return prior
+
+
 def resolve_threads(target_dir: Path, stale: list[PriorFinding]) -> tuple[int, int]:
     """Mark stale findings outdated via GraphQL ``minimizeComment``.
 
@@ -261,24 +360,12 @@ def resolve_threads(target_dir: Path, stale: list[PriorFinding]) -> tuple[int, i
             )
             failed += 1
             continue
-        try:
-            response = _graphql(
-                target_dir, _MINIMIZE_COMMENT_MUTATION, {"subjectId": finding.comment_node_id}
-            )
-            minimized = response["data"]["minimizeComment"]["minimizedComment"]["isMinimized"]
-        except (GitError, KeyError, TypeError) as exc:
-            print_warning(
-                console,
-                f"Failed to minimize stale finding {finding.fingerprint[:12]}…: {exc}",
-            )
-            failed += 1
-            continue
-        if minimized:
+        if minimize_comment(target_dir, finding.comment_node_id):
             resolved += 1
         else:
             print_warning(
                 console,
-                f"minimizeComment did not minimize finding {finding.fingerprint[:12]}…",
+                f"minimizeComment failed or did not minimize finding {finding.fingerprint[:12]}…",
             )
             failed += 1
     return resolved, failed

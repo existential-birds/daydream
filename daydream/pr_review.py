@@ -35,9 +35,12 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import jsonschema
+
 import daydream
 from daydream import git_ops
 from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
+from daydream.config import DIAGRAM_KINDS
 from daydream.extensions import (
     CommentFinding,
     FindingRenderContext,
@@ -54,7 +57,7 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from daydream.findings import ArtifactFinding
+    from daydream.findings import ArtifactFinding, FindingsArtifact
 
 
 _logger = logging.getLogger(__name__)
@@ -199,6 +202,7 @@ async def post_review_to_pr_from_report(
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
+    diagram_blocks: str | None = None,
 ) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -216,6 +220,9 @@ async def post_review_to_pr_from_report(
     ``gh pr view`` (redrive) instead of the current branch's open PR;
     a failing explicit lookup returns :attr:`PostStatus.NO_PR` with no
     fallback to current-branch discovery.
+
+    ``diagram_blocks`` (issue #1113): host-rendered grounded-diagram markdown,
+    threaded through to :func:`build_payload`.
 
     Returns:
         A :class:`PostStatus` describing the outcome so the caller can decide
@@ -246,6 +253,7 @@ async def post_review_to_pr_from_report(
         post=post,
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
+        diagram_blocks=diagram_blocks,
     )
 
 
@@ -271,6 +279,22 @@ def finding_marker(fingerprint: str) -> str:
 def parse_finding_markers(text: str) -> list[str]:
     """Return all finding fingerprints embedded in ``text``, in order."""
     return FINDING_MARKER_RE.findall(text)
+
+
+# Hidden marker for a standalone grounded-diagram comment (issue #1113). One
+# per rendered kind, so a later diagram-only run of the SAME kind can find and
+# minimize its own prior comment without touching the other kind's.
+DIAGRAM_MARKER_RE = re.compile(r"<!-- daydream-diagram: ([a-z]+) ([0-9a-f]{7,40}) -->")
+
+
+def diagram_marker(kind: str, head_sha: str) -> str:
+    """Render the hidden diagram marker comment for one kind at one head."""
+    return f"<!-- daydream-diagram: {kind} {head_sha} -->"
+
+
+def parse_diagram_markers(text: str) -> list[tuple[str, str]]:
+    """Return all ``(kind, head_sha)`` diagram markers in ``text``, in order."""
+    return [(kind, sha) for kind, sha in DIAGRAM_MARKER_RE.findall(text)]
 
 
 def _normalize_severity(raw: dict[str, Any]) -> str | None:
@@ -1136,12 +1160,15 @@ def default_render_summary(ctx: SummaryContext) -> str:
     """Render the summary body between the approval line and the footer.
 
     Reproduces today's markdown byte-for-byte: ``**Code Review Summary**``, the
+    grounded-diagram blocks (issue #1113, when the run rendered any), the
     by-file non-inline findings section, the consolidated agent prompt (when
     non-empty), then the fully-wrapped review-info block. Never emits the
     approval line, the ``event`` decision, or :data:`DAYDREAM_FOOTER` — those
     stay host-owned in :func:`build_payload`.
     """
     chunks: list[str] = ["**Code Review Summary**"]
+    if ctx.diagrams:
+        chunks.append(ctx.diagrams)
     section = _render_body_section(ctx.findings)
     if section:
         chunks.append(section)
@@ -1391,6 +1418,7 @@ def build_payload(
     *,
     run_info_override: str | None = None,
     approve_on_clean: bool = False,
+    diagram_blocks: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
@@ -1413,6 +1441,10 @@ def build_payload(
             ``"APPROVE"`` with a prepended approval line; otherwise the event
             stays ``"COMMENT"`` and the body is byte-identical to the
             non-approve path.
+        diagram_blocks: Host-rendered grounded-diagram markdown (issue #1113),
+            handed to the ``"summary"`` renderer as ``ctx.diagrams`` so it
+            lands directly under the summary header. ``None`` (the default)
+            renders a byte-identical no-diagram body.
     """
     all_issues_with_inline_meta = classified.all_issues()
 
@@ -1464,6 +1496,7 @@ def build_payload(
         findings=_summary_findings(classified.body_only),
         agent_prompt=agent_prompt,
         review_info=review_info_block,
+        diagrams=diagram_blocks or None,
     )
     summary_body = _render_summary(summary_ctx)
 
@@ -1541,6 +1574,7 @@ async def _post(
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
+    diagram_blocks: str | None = None,
 ) -> PostStatus:
     pr = _resolve_pr(target_dir, console, pr_number)
     if pr is None:
@@ -1589,7 +1623,9 @@ async def _post(
             f"{len(failed)} file-level comment(s) failed to post; folded into the review body.",
         )
 
-    payload = build_payload(pr, classified, approve_on_clean=approve_on_clean)
+    payload = build_payload(
+        pr, classified, approve_on_clean=approve_on_clean, diagram_blocks=diagram_blocks
+    )
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
         # ``error_msg`` carries the GitError text from git_ops, which includes
@@ -1667,6 +1703,254 @@ def _submit_review(
     return (str(url) if url else None), None
 
 
+def post_diagram_comment_to_pr(
+    target_dir: Path,
+    pr: PRInfo,
+    *,
+    body: str,
+    kinds: list[str],
+    bot_login: str | None,
+) -> tuple[str | None, str | None]:
+    """Post a standalone grounded-diagram issue comment on a PR (issue #1113).
+
+    A diagram is not a finding: it has no line anchor, no severity, and no
+    thread to resolve, so it posts as a plain issue comment rather than a
+    review. The body carries one hidden ``daydream-diagram`` marker per kind
+    plus :data:`DAYDREAM_FOOTER`, which is how the *next* diagram-only run of
+    the same kind recognises and minimizes this comment.
+
+    Prior comments are minimized before the new one posts, so the PR never
+    shows two live diagrams of one kind. Minimization is best-effort: an
+    unresolved ``bot_login`` skips it with a warning (mirroring
+    ``BOT_LOGIN_UNRESOLVED``) rather than trusting an unattributed comment, and
+    a failed mutation warns and continues — a stale fold is a cosmetic problem,
+    a missing diagram is the run's deliverable.
+
+    Args:
+        target_dir: Repository directory the ``gh`` calls run in.
+        pr: Resolved target PR.
+        body: Rendered markdown (diagram blocks and/or omission notices).
+        kinds: The diagram kinds this comment speaks for; markers are written
+            for exactly these, and only prior comments carrying one of them are
+            minimized.
+        bot_login: Bot login for author attribution, or None.
+
+    Returns:
+        ``(html_url, None)`` on success, ``(None, error_message)`` on failure.
+    """
+    from daydream.agent import console
+    from daydream.reconcile import fetch_prior_diagram_comments, minimize_comment
+
+    repo_slug = f"{pr.owner}/{pr.repo}"
+    if bot_login is None:
+        print_warning(
+            console,
+            "BOT_LOGIN_UNRESOLVED: no bot login resolvable; skipping minimization of "
+            "prior diagram comments (a stale diagram may stay unfolded, but no "
+            "comment is ever minimized on an unproven author).",
+        )
+    else:
+        try:
+            prior = fetch_prior_diagram_comments(
+                target_dir, repo_slug, pr.number, bot_login=bot_login
+            )
+        except GitError as exc:
+            print_warning(console, f"Could not inventory prior diagram comments: {exc}")
+            prior = []
+        for comment in prior:
+            if not set(comment.kinds) & set(kinds):
+                continue
+            if not minimize_comment(target_dir, comment.node_id):
+                print_warning(
+                    console,
+                    f"Failed to minimize prior diagram comment {comment.node_id}",
+                )
+
+    markers = "\n".join(diagram_marker(kind, pr.head_sha) for kind in kinds)
+    chunks = [chunk for chunk in (markers, body.strip(), DAYDREAM_FOOTER) if chunk]
+    endpoint = f"/repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments"
+    try:
+        data = git_ops.gh_api(
+            target_dir, endpoint, method="POST", input_data={"body": "\n\n".join(chunks)}
+        )
+    except GitError as exc:
+        return None, str(exc)
+    if not isinstance(data, dict):
+        return None, None
+    url = data.get("html_url")
+    return (str(url) if url else None), None
+
+
+def diagram_comment_kinds(payload: dict[str, Any]) -> list[str]:
+    """Return the diagram kinds a standalone comment speaks for (issue #1113).
+
+    A comment speaks for the kinds the run's eligibility decision marked
+    eligible -- the kinds it actually attempted -- in render order. That is the
+    right marker set: a ``--diagram-only flowchart`` run must never minimize a
+    prior sequence-diagram comment, and a run whose requested kind ended up
+    omitted must still supersede its own prior comment for that kind.
+
+    Args:
+        payload: The ``diagram.json`` payload (``{"eligibility", "results"}``).
+
+    Returns:
+        A subset of :data:`~daydream.config.DIAGRAM_KINDS`, sequence first.
+    """
+    eligibility = payload.get("eligibility")
+    if not isinstance(eligibility, dict):
+        return []
+    kinds: list[str] = []
+    for kind in DIAGRAM_KINDS:
+        decision = eligibility.get(kind)
+        if isinstance(decision, dict) and decision.get("eligible"):
+            kinds.append(kind)
+    return kinds
+
+
+def _diagram_results(payload: dict[str, Any]) -> dict[str, dict[str, Any] | None]:
+    """Extract the per-kind result dicts from a ``diagram.json`` payload.
+
+    Total: a missing or malformed ``results`` object yields ``None`` for every
+    kind, which the renderer reads as "no block", never as an error.
+    """
+    raw = payload.get("results")
+    results: dict[str, dict[str, Any] | None] = {}
+    for kind in DIAGRAM_KINDS:
+        value = raw.get(kind) if isinstance(raw, dict) else None
+        results[kind] = value if isinstance(value, dict) else None
+    return results
+
+
+def render_diagram_blocks_from_payload(payload: dict[str, Any]) -> str:
+    """Render just the folded diagram blocks from a ``diagram.json`` payload.
+
+    Used for the review-comment slot, which carries blocks only: an omission
+    notice belongs on an explicit request (``--diagram-only`` / a mention
+    command), where silence would be ambiguous, not on every deep review.
+    """
+    from daydream.deep.diagram_render import render_diagram_blocks
+
+    return render_diagram_blocks(_diagram_results(payload))
+
+
+def render_diagram_comment_body(payload: dict[str, Any]) -> str:
+    """Render the standalone diagram comment body from a ``diagram.json`` payload.
+
+    The single renderer for both phases: the diagram-only run posts through it
+    directly, and ``post-findings`` re-renders through it from the artifact, so
+    the two produce identical markdown for identical specs. Mermaid is always
+    re-derived from ``spec_final`` -- a stored ``mermaid`` string is never read.
+
+    Rendered kinds contribute their folded block; a requested kind that was
+    skipped, failed, or fell below its grounding floor contributes its omission
+    notice, because on an explicit request silence is indistinguishable from a
+    broken run.
+
+    Args:
+        payload: The ``diagram.json`` payload.
+
+    Returns:
+        The comment body, or a short "nothing was eligible" line when the run
+        requested no kind at all.
+    """
+    from daydream.deep.diagram_render import render_omission_notice
+
+    results = _diagram_results(payload)
+    chunks: list[str] = []
+    blocks = render_diagram_blocks_from_payload(payload)
+    if blocks:
+        chunks.append(blocks)
+    for kind in diagram_comment_kinds(payload):
+        result = results.get(kind)
+        if result is None or result.get("status") == "rendered":
+            continue
+        notice = render_omission_notice(kind, result)
+        if notice:
+            chunks.append(notice)
+    if not chunks:
+        chunks.append(
+            "No grounded diagram was eligible for this pull request: the change "
+            "does not cross a module or service boundary and no changed function "
+            "gained enough branch points to be worth charting."
+        )
+    return "\n\n".join(chunks)
+
+
+def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
+    """Validate every rendered kind's ``spec_final`` against its spec schema.
+
+    The privileged poster re-renders mermaid from model-derived specs, so those
+    specs are re-validated here -- against the same hand-written schema the
+    author agent answered -- before a single character reaches GitHub.
+    ``FINDINGS_SCHEMA`` deliberately keeps ``diagrams`` permissive (it must not
+    couple to four modules' ``to_dict`` shapes), and this is the check that
+    makes that safe.
+
+    Args:
+        payload: The artifact's ``diagrams`` payload.
+
+    Returns:
+        None when every rendered kind validates, else a human error message.
+    """
+    from daydream.deep.diagram_schema import FLOWCHART_SPEC_SCHEMA, SEQUENCE_SPEC_SCHEMA
+
+    schemas = {"sequence": SEQUENCE_SPEC_SCHEMA, "flowchart": FLOWCHART_SPEC_SCHEMA}
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        return "diagrams payload has no 'results' object"
+    for kind in DIAGRAM_KINDS:
+        result = results.get(kind)
+        if not isinstance(result, dict) or result.get("status") != "rendered":
+            continue
+        try:
+            jsonschema.validate(result.get("spec_final"), schemas[kind])
+        except jsonschema.ValidationError as exc:
+            return f"{kind} spec_final failed schema validation: {exc.message}"
+    return None
+
+
+def _post_diagram_artifact(
+    artifact: "FindingsArtifact",
+    pr: PRInfo,
+    target_dir: Path,
+    *,
+    console: Console,
+    bot_login: str | None,
+) -> int:
+    """Post a ``kind == "diagram"`` artifact as a standalone PR comment.
+
+    The Phase B half of the diagram-only flow. Validates the model-derived
+    specs, re-renders the mermaid from them, then posts one issue comment --
+    never a review, and never through ``build_payload``.
+
+    Returns:
+        ``0`` on success, ``1`` on a rejected payload or a failed POST.
+    """
+    payload = artifact.diagrams
+    if not isinstance(payload, dict):
+        print_error(
+            console,
+            "Diagram Artifact Rejected",
+            "artifact declares kind 'diagram' but carries no 'diagrams' payload",
+        )
+        return 1
+    problem = validate_diagram_payload(payload)
+    if problem is not None:
+        print_error(console, "Diagram Artifact Rejected", problem)
+        return 1
+    body = render_diagram_comment_body(payload)
+    kinds = diagram_comment_kinds(payload)
+    url, error = post_diagram_comment_to_pr(
+        target_dir, pr, body=body, kinds=kinds, bot_login=bot_login
+    )
+    if url is None:
+        suffix = f" ({error})" if error else ""
+        print_error(console, "Diagram Comment Post Failed", f"No comment was posted.{suffix}")
+        return 1
+    print_success(console, f"Posted diagram comment: {url}")
+    return 0
+
+
 def post_findings_from_artifact(
     artifact_path: Path,
     *,
@@ -1739,6 +2023,28 @@ def post_findings_from_artifact(
         print_error(console, "Findings Artifact Rejected", str(exc))
         return 1
 
+    # The synthetic PRInfo depends only on this function's own arguments, so it
+    # is built once here -- above the diagram branch, which needs it too.
+    owner, repo_name = repo.split("/", 1)
+    pr = PRInfo(
+        number=pr_number,
+        head_sha=head_sha,
+        base_sha="",
+        base_ref="",
+        owner=owner,
+        repo=repo_name,
+        url="",
+    )
+
+    # Issue #1113: a diagram artifact carries no fingerprints, so it must never
+    # reach the reconcile path below -- ``partition([], prior)`` would classify
+    # EVERY prior review finding as stale and ``resolve_threads`` would minimize
+    # the bot's real open findings. Branch before ``fetch_prior_findings``.
+    if artifact.kind == "diagram":
+        return _post_diagram_artifact(
+            artifact, pr, target_dir, console=console, bot_login=effective_login
+        )
+
     try:
         prior = fetch_prior_findings(target_dir, repo, pr_number, bot_login=effective_login)
     except GitError as exc:
@@ -1788,16 +2094,6 @@ def post_findings_from_artifact(
         )
         return 0
 
-    owner, repo_name = repo.split("/", 1)
-    pr = PRInfo(
-        number=pr_number,
-        head_sha=head_sha,
-        base_sha="",
-        base_ref="",
-        owner=owner,
-        repo=repo_name,
-        url="",
-    )
     posted_files, failed_files = _submit_file_level_comments(target_dir, pr, classified.file_level)
     if failed_files:
         classified.file_level = posted_files
@@ -1807,8 +2103,23 @@ def post_findings_from_artifact(
             f"{len(failed_files)} file-level comment(s) failed to post; folded into the review body.",
         )
 
+    # Issue #1113: a --findings-out deep review may carry a diagrams payload.
+    # The privileged poster re-renders the mermaid from the validated specs, so
+    # no model-authored markdown reaches the comment.
+    diagram_blocks: str | None = None
+    if isinstance(artifact.diagrams, dict):
+        problem = validate_diagram_payload(artifact.diagrams)
+        if problem is not None:
+            print_error(console, "Diagram Payload Rejected", problem)
+            return 1
+        diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
+
     payload = build_payload(
-        pr, classified, run_info_override=artifact.run_info, approve_on_clean=can_approve
+        pr,
+        classified,
+        run_info_override=artifact.run_info,
+        approve_on_clean=can_approve,
+        diagram_blocks=diagram_blocks,
     )
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:

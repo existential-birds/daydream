@@ -960,6 +960,26 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         dest="review",
         help="Review and write a report to terminal/markdown, then exit.",
     )
+    # Issue #1113. The value is REQUIRED (no ``nargs="?"``): with an optional
+    # value, ``--diagram-only /path`` would consume the target positional as
+    # the kind and then fail as an invalid choice.
+    output_group.add_argument(
+        "--diagram-only",
+        choices=["auto", "sequence", "flowchart", "both"],
+        default=None,
+        dest="diagram_only",
+        help="Run only the grounded-diagram flow and post a standalone PR comment, "
+             "then exit (auto = whatever is eligible).",
+    )
+    parser.add_argument(
+        "--diagram",
+        choices=["auto", "sequence", "flowchart", "both", "off"],
+        default=None,
+        dest="diagram",
+        help="Control grounded diagrams in the review paths (default: auto -- render "
+             "every eligible kind). Use --diagram-only for the diagram-only mode."
+        if full_help else argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--log",
         action="store_true",
@@ -1190,18 +1210,38 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         output_mode = "comment"
     elif args.review:
         output_mode = "review"
+    elif args.diagram_only is not None:
+        output_mode = "diagram"
 
-    # ``--yes`` answers the fix/commit gates, which --review/--comment don't run;
-    # reject rather than silently ignore.
+    # Issue #1113: the two diagram flags mean different things (one modifies the
+    # review paths, one replaces them), so combining them is a request with two
+    # incompatible answers. Reject rather than pick one.
+    if args.diagram is not None and args.diagram_only is not None:
+        parser.error("--diagram cannot be combined with --diagram-only")
+
+    # ``--yes`` answers the fix/commit gates, which --review/--comment/
+    # --diagram-only don't run; reject rather than silently ignore.
     if args.assume == "yes" and output_mode != "loop":
-        parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
+        parser.error(
+            "--yes has no effect with --review/--comment/--diagram-only "
+            "(no fix phase to auto-apply)"
+        )
 
-    findings_out_allowed = output_mode == "review" or (output_mode == "loop" and not args.shallow)
+    findings_out_allowed = (
+        output_mode in ("review", "diagram")
+        or (output_mode == "loop" and not args.shallow)
+    )
     if args.findings_out is not None and not findings_out_allowed:
         parser.error(
-            "--findings-out requires --review or the default deep review flow "
-            "(not --comment/--shallow)"
+            "--findings-out requires --review, --diagram-only, or the default deep "
+            "review flow (not --comment/--shallow)"
         )
+
+    # Issue #1113: the diagram flow writes none of the artifacts a resume stage
+    # attests, so every --start-at value is meaningless for it. Reject at the
+    # CLI rather than silently accepting and ignoring it.
+    if args.diagram_only is not None and args.start_at != "review":
+        parser.error(f"--start-at {args.start_at} is not valid with --diagram-only")
 
     # ttt/per-stack/merge are deep-pipeline resume stages; not valid for shallow.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -1221,8 +1261,8 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         )
 
     if args.flow_name is not None:
-        if args.comment or args.review:
-            parser.error("--flow cannot be combined with --review/--comment")
+        if args.comment or args.review or args.diagram_only is not None:
+            parser.error("--flow cannot be combined with --review/--comment/--diagram-only")
         if args.shallow:
             parser.error("--flow cannot be combined with --shallow")
 
@@ -1261,6 +1301,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         branch=args.branch,
         base=args.base,
         output_mode=output_mode,  # type: ignore[arg-type]
+        # Issue #1113: --diagram-only's value IS the run's diagram mode, so an
+        # explicit request wins over a repo file's ``mode = "off"``.
+        diagram=args.diagram_only if args.diagram_only is not None else args.diagram,
         findings_out=args.findings_out,
         dump_artifacts=args.dump_artifacts,
         trajectory_hub_repo=args.trajectory_hub_repo,

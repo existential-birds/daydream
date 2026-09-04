@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Iterable, cast
@@ -33,6 +34,9 @@ from daydream.config import (
     DEFAULT_DEEP_SHARD_FRONTIER_MAX,
     DEFAULT_DEEP_SHARD_MAX_BYTES,
     DEFAULT_DEEP_SHARD_MAX_FILES,
+    DEFAULT_DIAGRAM_MIN_BRANCH_POINTS,
+    DEFAULT_DIAGRAM_MIN_CODE_FILES,
+    DEFAULT_DIAGRAM_MIN_MODULES,
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
@@ -42,6 +46,8 @@ from daydream.config import (
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
+    DIAGRAM_KINDS,
+    DIAGRAM_MODES,
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
 )
@@ -52,6 +58,8 @@ from daydream.deep.artifacts import (
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
+    diagram_markdown_path,
+    diagram_path,
     diff_key,
     diff_key_path,
     fix_failures_path,
@@ -90,6 +98,20 @@ from daydream.deep.dedup import (
 )
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
+from daydream.deep.diagram_render import (
+    render_diagram_blocks,
+    render_flowchart_mermaid,
+    render_sequence_mermaid,
+)
+from daydream.deep.diagram_schema import (
+    FLOWCHART_SPEC_SCHEMA,
+    SEQUENCE_SPEC_SCHEMA,
+    coerce_flowchart_spec,
+    coerce_sequence_spec,
+)
+from daydream.deep.diagram_trigger import Eligibility, decide_eligibility
+from daydream.deep.diagram_types import DiagramResult, DiagramThresholds
 from daydream.deep.records import (
     duplicate_record_uids,
     record_uid,
@@ -97,7 +119,7 @@ from daydream.deep.records import (
     stack_name_from_uid,
     stamp_record_uids,
 )
-from daydream.deep.render import render_held_section, render_report
+from daydream.deep.render import insert_diagrams_section, render_held_section, render_report
 from daydream.deep.scope_issues import (
     _file_out_of_scope_issue,
     _resolve_changed_files,
@@ -116,6 +138,7 @@ from daydream.generated_files import (
     is_generated_file,
     related_manifest_paths,
 )
+from daydream.json_utils import atomic_write_json
 from daydream.phases import (
     FIX_VERIFY_ACTIONABLE_VERDICTS,
     FIX_VERIFY_RETARGETABLE_VERDICTS,
@@ -192,6 +215,7 @@ from daydream.deep.prompts import (
     _DIFF_BLOCK_SPLIT,
     _diff_block_path,
     bound_deep_diff,
+    build_diagram_repair_prompt,
 )
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
@@ -346,6 +370,77 @@ def _supervisor_mode(config: RunConfig) -> str:
     file_config = config.file_config
     mode = file_config.supervisor if file_config is not None else None
     return mode if mode in {"off", "rules", "llm"} else "off"
+
+
+@dataclass(frozen=True)
+class DiagramSettings:
+    """One run's resolved grounded-diagram configuration (issue #1113).
+
+    Attributes:
+        mode: The resolved diagram mode -- one of
+            :data:`~daydream.config.DIAGRAM_MODES`.
+        thresholds: The eligibility thresholds the decision is taken against.
+        service_roots: Declared service-root globs for participant grouping;
+            empty means "fall back to the improve list, then to inference".
+    """
+
+    mode: str
+    thresholds: DiagramThresholds
+    service_roots: list[str]
+
+
+def _diagram_mode_for(config: RunConfig, mode: str) -> str:
+    """Resolve the diagram mode for a run: CLI > file config > ``"auto"``.
+
+    Split from :func:`_resolved_diagram_mode` so the spine can consult it
+    before a ``FlowContext`` exists (it decides whether to build the import
+    graph the cross-module rule needs).
+
+    In ``--diagram-only`` mode ``config.diagram`` carries the requested kind
+    and a repository file's ``mode = "off"`` is deliberately ignored: the user
+    asked for this run by name, and silently doing nothing would be the worst
+    possible answer. Every other mode honors the file's off switch.
+    """
+    if config.diagram in DIAGRAM_MODES:
+        return str(config.diagram)
+    if mode == "diagram":
+        return "auto"
+    file_config = config.file_config
+    file_mode = file_config.diagram_mode if file_config is not None else None
+    return file_mode if file_mode in DIAGRAM_MODES else "auto"
+
+
+def _resolved_diagram_mode(ctx: FlowContext) -> str:
+    """The active diagram mode for this flow context (issue #1113)."""
+    return _diagram_mode_for(ctx.config, _mode_of(ctx))
+
+
+def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
+    """Resolve mode + thresholds + service roots for the diagram step.
+
+    Thresholds resolve through :func:`_resolve_config_value` (``RunConfig``
+    attr, then file config, then the ``config.py`` default); there are no
+    per-threshold CLI flags, so in practice the file config is the only
+    override source. Resolved once per step and passed by value, which is what
+    keeps ``decide_eligibility`` a pure function of its arguments and its
+    verdict reproducible from ``diagram.json``.
+    """
+    file_config = ctx.config.file_config
+    return DiagramSettings(
+        mode=_resolved_diagram_mode(ctx),
+        thresholds=DiagramThresholds(
+            min_code_files=_resolve_config_value(
+                ctx.config, "diagram_min_code_files", DEFAULT_DIAGRAM_MIN_CODE_FILES
+            ),
+            min_modules=_resolve_config_value(
+                ctx.config, "diagram_min_modules", DEFAULT_DIAGRAM_MIN_MODULES
+            ),
+            min_branch_points=_resolve_config_value(
+                ctx.config, "diagram_min_branch_points", DEFAULT_DIAGRAM_MIN_BRANCH_POINTS
+            ),
+        ),
+        service_roots=list(file_config.diagram_service_roots) if file_config is not None else [],
+    )
 
 
 def _supervise_enabled(ctx: FlowContext) -> bool:
@@ -2669,7 +2764,15 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
 
     items_file: Path = ctx.data["items_file"]
     findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-    return Stop(_emit_findings_from_items(ctx.work.repo, ctx.config, findings_items))
+    # Issue #1113: a review artifact carries the run's diagram payload when the
+    # diagram step produced one, so Phase B can re-render the blocks into the
+    # posted review from the validated specs.
+    diagrams = (ctx.data.get("diagrams") or {}).get("payload")
+    return Stop(
+        _emit_findings_from_items(
+            ctx.work.repo, ctx.config, findings_items, diagrams=diagrams
+        )
+    )
 
 
 async def _step_supervise(ctx: FlowContext) -> None:
@@ -2732,10 +2835,432 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         console=console,
         post=_mode_of(ctx) == "comment",
         approve_on_clean=_approve_on_clean(ctx.config),
+        diagram_blocks=(ctx.data.get("diagrams") or {}).get("blocks"),
     )
     if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
         return Stop(1)
     return None
+
+
+# --- Grounded diagrams (issue #1113) ----------------------------------------
+#
+# Two agent turns at most per kind, and no mermaid from either of them: the
+# model proposes a JSON spec whose every element carries file:line evidence,
+# ``ground_*`` verifies each element against the head tree and the turn's own
+# read receipts, one repair turn fixes or removes what failed, survivors are
+# pruned/capped, and a pure renderer emits the diagram. What the checker could
+# not confirm is never drawn.
+
+
+def _diagram_result(status: str, reason: str | None) -> DiagramResult:
+    """A no-spec result for a kind that never produced one.
+
+    ``skipped`` (not eligible) and ``failed`` (agent or budget error) share
+    this shape: no spec, no grounding, no mermaid, and a reason the omission
+    notice and ``diagram.json`` can both render.
+    """
+    return {
+        "status": status,
+        "reason": reason,
+        "spec_proposed": None,
+        "spec_final": None,
+        "grounding": None,
+        "omit_reasons": [],
+        "mermaid": None,
+    }
+
+
+def _diagram_read_paths(fork_path: Path | None) -> set[str]:
+    """Completed diagram-phase read paths recorded in one fork's trajectory.
+
+    Fail-CLOSED: a missing, unreadable, or malformed fork file yields the empty
+    set, which makes every citation fail ``FILE_NOT_READ_BY_MODEL``. The
+    alternative -- treating "no receipts" as "all reads happened" -- would turn
+    a recording failure into an unverified diagram.
+
+    The fork file is written by ``_ForkCM.__aexit__`` even when the body
+    raised, but ``_write`` short-circuits on a fork with no steps, so absence
+    is a real and expected case.
+
+    Note that the receipts are the UNION across ``run_agent``'s retry attempts:
+    a failed retryable attempt's invocation is still flushed into the fork, so
+    a file read during an attempt that later errored still counts. That is
+    fail-open in the model's favour and is deliberate -- the read did happen,
+    and the file content it returned is what grounding cares about.
+    """
+    if fork_path is None:
+        return set()
+    try:
+        trajectory = json.loads(fork_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(trajectory, dict):
+        return set()
+    return _completed_read_paths(trajectory, phases={DaydreamPhase.DIAGRAM.value})
+
+
+def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
+    """Group the changed code files by module for the sequence prompt."""
+    grouped: dict[str, list[str]] = {}
+    for path, module in sorted(eligibility.modules.items()):
+        grouped.setdefault(module, []).append(path)
+    return grouped
+
+
+def _diagram_author_prompt(ctx: FlowContext, kind: str, eligibility: Eligibility) -> str:
+    """Build one kind's first-turn author prompt through the registry."""
+    diff_path: Path = ctx.data["diff_path"]
+    inline_diff = _ttt_diff_text(ctx)
+    exploration_dir = ctx.data.get("exploration_dir")
+    if kind == "sequence":
+        return str(
+            get_registry().prompt("diagram_sequence")(
+                diff_path=diff_path,
+                inline_diff=inline_diff,
+                files_by_module=_files_by_module(eligibility),
+                cwd=ctx.work.repo,
+                exploration_dir=exploration_dir,
+                schema=SEQUENCE_SPEC_SCHEMA,
+            )
+        )
+    return str(
+        get_registry().prompt("diagram_flowchart")(
+            diff_path=diff_path,
+            inline_diff=inline_diff,
+            candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
+            forced=eligibility.flowchart.rule == "forced",
+            cwd=ctx.work.repo,
+            exploration_dir=exploration_dir,
+            schema=FLOWCHART_SPEC_SCHEMA,
+        )
+    )
+
+
+async def _run_diagram_kind(
+    ctx: FlowContext,
+    *,
+    kind: str,
+    eligibility: Eligibility,
+    hunk_ranges: dict[str, list[tuple[int, int]]],
+    symbols: RepoSymbols,
+    recorder: "TrajectoryRecorder | None",
+    backend: Any,
+) -> DiagramResult:
+    """Author, ground, repair once, prune and render one diagram kind.
+
+    Each turn runs in its own fork (``diagram-<kind>`` then
+    ``diagram-<kind>-repair``) and the forks are strictly sequential: the first
+    must EXIT before grounding runs, because the read receipts that decide
+    ``FILE_NOT_READ_BY_MODEL`` only reach disk on exit, and the repair decision
+    depends on that grounding. Nested forks would also be illegal -- the
+    recorder ContextVar is reset LIFO.
+
+    Returns:
+        The kind's result dict (see
+        :data:`~daydream.deep.diagram_types.DiagramResult`).
+    """
+    schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
+
+    def _ground(spec: dict[str, Any], read_paths: set[str]) -> Any:
+        if kind == "sequence":
+            return ground_sequence(
+                spec,
+                repo_root=ctx.work.repo,
+                hunk_ranges=hunk_ranges,
+                read_paths=read_paths,
+                symbols=symbols,
+            )
+        return ground_flowchart(
+            spec,
+            repo_root=ctx.work.repo,
+            hunk_ranges=hunk_ranges,
+            read_paths=read_paths,
+            candidate_roots=eligibility.candidate_roots,
+            symbols=symbols,
+        )
+
+    coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
+    read_paths: set[str] = set()
+
+    async with maybe_fork(recorder, f"diagram-{kind}") as fork:
+        structured, continuation, budget_reason = await run_agent(
+            backend,
+            ctx.work.repo,
+            _diagram_author_prompt(ctx, kind, eligibility),
+            phase=DaydreamPhase.DIAGRAM,
+            output_schema=schema,
+            read_only=True,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        )
+    read_paths |= _diagram_read_paths(getattr(fork, "path", None))
+    if budget_reason:
+        # A truncated author turn did not really answer: recording it as an
+        # omission would claim the model looked and found nothing to draw.
+        return _diagram_result("failed", f"budget exhausted: {budget_reason}")
+    if not isinstance(structured, dict):
+        return _diagram_result("failed", "no structured output produced")
+
+    spec = coerce(structured)
+    report = _ground(spec, read_paths)
+    grounded_first_pass = int(report.summary["grounded"])
+    repaired = 0
+
+    # Exactly one repair turn, and only when the session can be resumed: a
+    # fresh session would have to re-derive the whole spec from scratch, which
+    # is a new proposal, not a repair.
+    if report.ungrounded() and continuation is not None:
+        repair_prompt = build_diagram_repair_prompt(
+            kind=kind,
+            failures=[check.to_dict() for check in report.ungrounded()],
+            candidate_roots=(
+                [asdict(root) for root in eligibility.candidate_roots]
+                if kind == "flowchart"
+                else None
+            ),
+            schema=schema,
+        )
+        async with maybe_fork(recorder, f"diagram-{kind}-repair") as repair_fork:
+            repaired_output, _, repair_budget = await run_agent(
+                backend,
+                ctx.work.repo,
+                repair_prompt,
+                phase=DaydreamPhase.DIAGRAM,
+                output_schema=schema,
+                continuation=continuation,
+                read_only=True,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            )
+        read_paths |= _diagram_read_paths(getattr(repair_fork, "path", None))
+        if not repair_budget and isinstance(repaired_output, dict):
+            spec = coerce(repaired_output)
+            report = _ground(spec, read_paths)
+            repaired = max(int(report.summary["grounded"]) - grounded_first_pass, 0)
+
+    omit_reasons = list(report.omit_reasons)
+    mermaid: str | None = None
+    if omit_reasons:
+        status = "omitted"
+    else:
+        status = "rendered"
+        mermaid = (
+            render_sequence_mermaid(report.spec_final)
+            if kind == "sequence"
+            else render_flowchart_mermaid(report.spec_final)
+        )
+    return {
+        "status": status,
+        "reason": report.rejected,
+        "spec_proposed": spec,
+        "spec_final": report.spec_final,
+        "grounding": {
+            "elements": [check.to_dict() for check in report.elements],
+            "summary": {
+                "proposed": int(report.summary["proposed"]),
+                "grounded_first_pass": grounded_first_pass,
+                "repaired": repaired,
+                "pruned": int(report.summary["pruned"]),
+            },
+            "capped": dict(report.capped),
+            "root_range": list(report.root_range) if report.root_range is not None else None,
+        },
+        "omit_reasons": omit_reasons,
+        "mermaid": mermaid,
+    }
+
+
+def _diagram_payload_without_mermaid(payload: dict[str, Any]) -> dict[str, Any]:
+    """The ``diagram.json`` payload with every rendered ``mermaid`` string dropped.
+
+    What travels in the Phase A findings artifact. The privileged poster
+    re-renders from ``spec_final``, so shipping the mermaid would only offer it
+    a model-adjacent string to trust by mistake.
+    """
+    results = payload.get("results")
+    stripped: dict[str, Any] = {}
+    if isinstance(results, dict):
+        for kind, result in results.items():
+            stripped[kind] = (
+                {key: value for key, value in result.items() if key != "mermaid"}
+                if isinstance(result, dict)
+                else result
+            )
+    return {"eligibility": payload.get("eligibility"), "results": stripped}
+
+
+def _apply_diagrams_to_report(ctx: FlowContext, blocks: str) -> None:
+    """Insert the ``## Diagrams`` section into both copies of the rendered report.
+
+    Textual insertion rather than a re-render: by the time this step runs,
+    ``review-output.md`` has been written by the merge write and possibly
+    rewritten by ``supervise``, and ``load-items`` has appended a ``##
+    Coverage`` section that a re-render would erase.
+    ``insert_diagrams_section`` is idempotent, so a repeated application is a
+    no-op rather than a duplicate section.
+    """
+    targets = [merged_report_path(ctx.data["dd"])]
+    canonical = ctx.data.get("merged_report")
+    if canonical is not None:
+        targets.append(Path(canonical))
+    for target in targets:
+        if not target.is_file():
+            continue
+        text = target.read_text(encoding="utf-8")
+        target.write_text(insert_diagrams_section(text, blocks), encoding="utf-8")
+
+
+async def _step_diagram(ctx: FlowContext) -> Stop | None:
+    """Decide, author, ground and render this run's grounded diagrams (#1113).
+
+    Always writes ``diagram.json`` when the step is enabled, even when nothing
+    is eligible: the recorded eligibility signals are the audit trail for why a
+    PR did or did not get a diagram, and producing them costs zero agent calls.
+
+    Fail-open in every review mode -- one kind's failure warns, records
+    ``status="failed"`` and leaves the rest of the review untouched. In
+    ``--diagram-only`` mode the diagram IS the deliverable, so a failure exits
+    1 (after the artifact is written, so the evidence survives).
+    """
+    settings = _diagram_settings(ctx)
+    mode = _mode_of(ctx)
+    target_dir = ctx.work.repo
+    dd: Path = ctx.data["dd"]
+
+    from daydream.hunk_index import head_side_ranges_by_file, load_hunk_index
+    from daydream.runner import _file_config_or_empty
+    from daydream.services import enumerate_services
+
+    changed_files = sorted(str(path) for path in ctx.data["changed_files"])
+    hunk_ranges = head_side_ranges_by_file(load_hunk_index(target_dir / ".daydream"))
+    file_config = _file_config_or_empty(ctx.config)
+    eligibility = decide_eligibility(
+        repo_root=target_dir,
+        changed_files=changed_files,
+        hunk_ranges=hunk_ranges,
+        # Detection is re-run here rather than read off ``ctx.data["stacks"]``:
+        # that list is published AFTER the tiny-diff collapse and the sharder,
+        # so on a small two-language diff every file would sit in one
+        # ``generic`` assignment and the whole diff would read as non-code.
+        stacks=detect_stacks(changed_files),
+        services=enumerate_services(
+            target_dir, file_config, service_roots=settings.service_roots or None
+        ),
+        import_graph=ctx.data.get("import_graph") or {},
+        thresholds=settings.thresholds,
+        force=settings.mode,
+    )
+
+    kinds = eligibility.eligible_kinds()
+    results: dict[str, DiagramResult | None] = {}
+    for kind in DIAGRAM_KINDS:
+        if kind in kinds:
+            continue
+        decision = eligibility.sequence if kind == "sequence" else eligibility.flowchart
+        results[kind] = _diagram_result("skipped", decision.reason)
+
+    failures: dict[str, str] = {}
+    if kinds:
+        print_info(console, f"Grounded diagrams: authoring {', '.join(kinds)}")
+        backend = ctx.backend_for("diagram")
+        recorder = get_current_recorder()
+        # One shared definition index: both kinds cite the same handful of
+        # files, and every method on it is synchronous, so the two sibling
+        # tasks cannot interleave inside one lookup.
+        symbols = RepoSymbols(target_dir)
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(2, backend))
+        async with anyio.create_task_group() as tg:
+            for kind in kinds:
+                # Default-arg capture -- prevents the late-binding closure bug.
+                async def _task(kind_name: str = kind) -> None:
+                    async with limiter:
+                        try:
+                            results[kind_name] = await _run_diagram_kind(
+                                ctx,
+                                kind=kind_name,
+                                eligibility=eligibility,
+                                hunk_ranges=hunk_ranges,
+                                symbols=symbols,
+                                recorder=recorder,
+                                backend=backend,
+                            )
+                        except Exception as exc:  # noqa: BLE001 -- parallel isolation
+                            detail = f"{type(exc).__name__}: {exc}"
+                            failures[kind_name] = detail
+                            results[kind_name] = _diagram_result("failed", detail)
+
+                tg.start_soon(_task)
+        if recorder is not None:
+            recorder.create_dispatch_step(phase=DaydreamPhase.DIAGRAM)
+
+    ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
+    blocks = render_diagram_blocks(ordered)
+    payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}
+    atomic_write_json(diagram_path(dd), payload)
+    diagram_markdown_path(dd).write_text(
+        f"{blocks}\n" if blocks else "", encoding="utf-8"
+    )
+    ctx.data["diagrams"] = {
+        "blocks": blocks,
+        "payload": _diagram_payload_without_mermaid(payload),
+        "results": ordered,
+    }
+
+    consequence = "the run fails" if mode == "diagram" else "the review continues"
+    for kind, detail in sorted(failures.items()):
+        print_warning(console, f"Diagram kind {kind} failed ({consequence}): {detail}")
+    if blocks and mode != "diagram":
+        _apply_diagrams_to_report(ctx, blocks)
+    if failures and mode == "diagram":
+        return Stop(1)
+    return None
+
+
+async def _step_post_diagram(ctx: FlowContext) -> Stop:
+    """Deliver a diagram-only run: findings artifact, or a standalone comment.
+
+    ``--findings-out`` makes this Phase A of the two-phase flow (the artifact
+    declares ``kind="diagram"`` and an empty findings list, and the privileged
+    Phase B job posts it). Otherwise the comment posts here, and -- mirroring
+    ``--comment`` -- an unresolvable PR or a failed POST ends the run with
+    exit 1, because the comment was the whole point of the run.
+    """
+    from daydream.pr_review import (
+        _resolve_pr,
+        diagram_comment_kinds,
+        post_diagram_comment_to_pr,
+        render_diagram_comment_body,
+    )
+    from daydream.runner import _emit_diagram_findings
+
+    diagrams: dict[str, Any] = ctx.data.get("diagrams") or {}
+    payload: dict[str, Any] = diagrams.get("payload") or {}
+
+    if ctx.config.findings_out is not None:
+        return Stop(_emit_diagram_findings(ctx.work.repo, ctx.config, payload))
+
+    pr = _resolve_pr(ctx.work.repo, console, ctx.config.pr_number)
+    if pr is None:
+        print_error(
+            console,
+            "Diagram Comment",
+            "no PR resolvable for --diagram-only (pass --pr-number or open a PR "
+            "for this branch)",
+        )
+        return Stop(1)
+    url, error = post_diagram_comment_to_pr(
+        ctx.work.repo,
+        pr,
+        body=render_diagram_comment_body(payload),
+        kinds=diagram_comment_kinds(payload),
+        bot_login=os.environ.get("DAYDREAM_BOT_HANDLE") or None,
+    )
+    if url is None:
+        suffix = f" ({error})" if error else ""
+        print_error(console, "Diagram Comment Post Failed", f"No comment was posted.{suffix}")
+        return Stop(1)
+    print_success(console, f"Posted diagram comment: {url}")
+    return Stop(0)
 
 
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
@@ -4261,6 +4786,24 @@ def _single_stack_merge_enabled(ctx: FlowContext) -> bool:
     return ctx.config.start_at != "fix" and ctx.data["single_stack_mode"]
 
 
+def _diagram_enabled(ctx: FlowContext) -> bool:
+    """Whether the grounded-diagram step runs (issue #1113).
+
+    Off on a ``--start-at fix`` resume (the diff-derived signals and the report
+    the blocks land in both belong to the earlier run) and off when the
+    resolved mode is ``"off"``. Note this is a WEAKER gate than "some kind is
+    eligible": when the step runs it always records its eligibility decision in
+    ``diagram.json``, which is what makes "why did this PR get no diagram?"
+    answerable. Nothing is eligible costs zero agent calls.
+
+    The same ``FlowStep`` object backs the ``diagram`` flow, where this must
+    return True: ``start_at`` defaults to ``"review"`` there (the CLI rejects
+    ``--start-at`` with ``--diagram-only``) and diagram mode's resolved mode is
+    never ``"off"`` (``off`` is not an accepted ``--diagram-only`` value).
+    """
+    return _before_fix_resume(ctx) and _resolved_diagram_mode(ctx) != "off"
+
+
 def _findings_out_enabled(ctx: FlowContext) -> bool:
     # Two-phase findings artifact (Phase A): emit the artifact and STOP —
     # never post to the PR and never apply fixes. Phase B posts later.
@@ -4271,11 +4814,16 @@ def _resolve_mode(config: RunConfig) -> str:
     """Map a RunConfig onto the single deep-flow mode key (#330).
 
     ``review`` / ``comment`` replace the review flow (stop after post-review);
-    ``shallow`` replaces the shallow flow (single-stack deep). ``loop`` is the
-    unchanged default.
+    ``shallow`` replaces the shallow flow (single-stack deep); ``diagram``
+    (issue #1113) reuses the spine's preamble but runs the two-step ``diagram``
+    flow. ``loop`` is the unchanged default.
     """
     if config.flow_name in ("review", "shallow"):
         return config.flow_name
+    # Issue #1113: checked before ``shallow`` so ``--diagram-only`` is never
+    # reinterpreted as a shallow review by an unrelated flag combination.
+    if config.output_mode == "diagram":
+        return "diagram"
     if config.output_mode == "review":
         return "review"
     if config.output_mode == "comment":
@@ -4313,12 +4861,31 @@ def _cleanup_should_run(ctx: FlowContext, exit_code: int) -> bool:
 
 
 def _flow_kind_for_mode(mode: str) -> DaydreamRunFlow:
-    """Recorder run-flow label per mode (preserves the pre-collapse mapping)."""
+    """Recorder run-flow label per mode (preserves the pre-collapse mapping).
+
+    ``diagram`` gets its own label rather than borrowing ``TTT`` (issue #1113):
+    ``archive._flow_runs_merge`` returns True for TTT, so a diagram run would
+    otherwise inherit a previous deep review's ``merged-items.json`` as its own
+    pipeline state -- and diagram runs deliberately leave those artifacts on
+    disk.
+    """
     if mode == "shallow":
         return DaydreamRunFlow.NORMAL
+    if mode == "diagram":
+        return DaydreamRunFlow.DIAGRAM
     if mode in ("review", "comment"):
         return DaydreamRunFlow.TTT
     return DaydreamRunFlow.DEEP
+
+
+def _flow_name_for_mode(mode: str) -> str:
+    """The registered flow name a mode runs (issue #1113).
+
+    Every PR-process mode runs the ``deep`` flow; only ``diagram`` has its own.
+    ``loop`` / ``comment`` / ``review`` / ``shallow`` are modes, not registered
+    flow names, so the raw mode string must never be passed to ``run_flow``.
+    """
+    return "diagram" if mode == "diagram" else "deep"
 
 
 # The deep pipeline as a registered flow (D-07):
@@ -4359,6 +4926,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
     FlowStep(name="load-items", run=_step_load_items),
     FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_supervise_enabled),
+    FlowStep(name="diagram", run=_step_diagram, config_phase="diagram", enabled=_diagram_enabled),
     FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
     FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
     # Fix cycle: loop + shallow modes only (review/comment stop after post-review).
@@ -4369,6 +4937,17 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="test", run=_step_test, enabled=_fix_cycle_enabled),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
     FlowStep(name="commit", run=_step_commit, config_phase="fix", enabled=_fix_cycle_enabled),
+)
+
+
+# The diagram-only flow's own steps (issue #1113). Deliberately NOT appended to
+# :data:`STEPS`: ``builtins._register_builtin_flows`` derives the ``deep`` flow
+# definition FROM ``STEPS``, so appending ``post-diagram`` there would splice a
+# GitHub write into every deep review. The ``diagram`` flow is
+# ``exploration -> diagram -> post-diagram``; the first two steps are the same
+# objects the deep flow registers.
+DIAGRAM_STEPS: tuple[FlowStep, ...] = (
+    FlowStep(name="post-diagram", run=_step_post_diagram),
 )
 
 
@@ -4493,7 +5072,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         print_error(console, "Git Error", "Unable to determine base branch for diff")
         return 1
     if not diff.strip():
-        print_warning(console, "No diff found -- nothing to review")
+        subject = "diagram" if mode == "diagram" else "review"
+        print_warning(console, f"No diff found -- nothing to {subject}")
         return 0
 
     daydream_dir = target_dir / ".daydream"
@@ -4509,7 +5089,14 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
     current_diff_sha = diff_key(diff)
-    if config.start_at not in ("per-stack", "merge", "fix"):
+    # Issue #1113: a diagram-only run must NEVER clear ``.daydream/deep/``. It
+    # produces none of the artifacts ``diff-key`` attests, and wiping the
+    # directory would destroy a previous deep review's intent, alternatives,
+    # per-stack records and merged items -- breaking any later ``--start-at
+    # merge``/``fix``. Consequence, accepted: diagram mode writes no
+    # ``diff-key``, which is correct for a run that produces nothing it could
+    # attest. ``deep_dir`` already created ``dd``, so it stays a valid path.
+    if mode != "diagram" and config.start_at not in ("per-stack", "merge", "fix"):
         # Fresh run only: a resume must NOT rewrite the key it is checked
         # against, or the staleness gate would self-heal and pass every time.
         shutil.rmtree(dd, ignore_errors=True)
@@ -4598,6 +5185,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # passes the stack list through untouched). ``build_import_graph`` is
         # fail-open (never raises; returns ``{}`` on any failure); byte sizing
         # uses the FULL on-disk ``diff``, not the bounded in-memory value.
+        import_graph: dict[str, set[str]] = {}
         sharding_enabled = _deep_shard_enabled(config)
         if sharding_enabled and not single_stack_mode:
             try:
@@ -4614,6 +5202,24 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 graph=import_graph,
             )
 
+        # Issue #1113: the sequence diagram's cross-module rule needs the
+        # changed-file import graph, but the sharding branch above builds it
+        # only when sharding is enabled (off by default) AND the run is not in
+        # single_stack_mode -- so in practice essentially never. Build it here
+        # when the diagram step can run, and publish it on ctx.data. The bare
+        # ``except Exception`` is required, not defensive: ``build_import_graph``
+        # documents itself as never raising, but its ``get_parser`` call reaches
+        # ``assert_tree_sitter_safe()``, which raises ``TreeSitterBadVersionError``.
+        if (
+            not import_graph
+            and config.start_at != "fix"
+            and _diagram_mode_for(config, mode) != "off"
+        ):
+            try:
+                import_graph = build_import_graph(changed_files, target_dir)
+            except Exception:
+                import_graph = {}
+
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
         # skipped, so the estimate uses ``_single_stack_agent_count``.
@@ -4627,14 +5233,19 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
             if single_stack_mode
             else total_agent_count(len(stacks))
         )
-        print_preflight_notice(
-            console,
-            stages=_preflight_stage_names(stacks),
-            stack_lines=stack_lines,
-            agent_count=notice_agent_count,
-            exploration_available=EXPLORATION_AVAILABLE,
-            sweep_note=_uncovered_sweep_preflight_note(config, changed_files),
-        )
+        # Issue #1113: the notice hardcodes "Deep-review pipeline pre-flight",
+        # the five deep pipeline stages and a 2+2N+2 agent estimate. A two-step
+        # diagram flow executes none of that, so printing it would be a lie
+        # about what the run is doing.
+        if mode != "diagram":
+            print_preflight_notice(
+                console,
+                stages=_preflight_stage_names(stacks),
+                stack_lines=stack_lines,
+                agent_count=notice_agent_count,
+                exploration_available=EXPLORATION_AVAILABLE,
+                sweep_note=_uncovered_sweep_preflight_note(config, changed_files),
+            )
 
         # Flow context (steps communicate through ctx.data); ctx shares
         # run_deep's backend cache so instance-sharing semantics are unchanged.
@@ -4686,6 +5297,10 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 "tier": tier,
                 "dd": dd,
                 "stacks": stacks,
+                # Issue #1113: the changed-file import graph, published so the
+                # diagram step's cross-module rule can read it. ``{}`` simply
+                # denies that rule; it never fails the run.
+                "import_graph": import_graph,
                 "single_stack_mode": single_stack_mode,
                 "intent_path": _intent_path(dd),
                 "alts_path": _alternatives_path(dd),
@@ -4703,7 +5318,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # subsequent --start-at resumes can find the artifacts they need.
         #
         # Cleanup is success-path only (#335); a non-zero exit returns before the guard so evidence survives.
-        exit_code = await run_flow(ctx.registry, "deep", ctx)
+        exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
         if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)
         return exit_code

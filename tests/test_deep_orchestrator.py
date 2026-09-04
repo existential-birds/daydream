@@ -5958,6 +5958,7 @@ def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[bool]
         console: Any,
         post: Any,
         approve_on_clean: Any=False,
+        diagram_blocks: Any=None,
     ) -> None:
         received.append(approve_on_clean)
 
@@ -8901,6 +8902,62 @@ async def test_uncovered_sweep_malformed_stats_does_not_fail_run(
 
     report = (multi_stack_target / ".review-output.md").read_text()
     assert "## Coverage" not in report
+
+
+def test_diagram_step_position_and_phase_key() -> None:
+    """Issue #1113: ``diagram`` sits between ``supervise`` and ``findings-out``.
+
+    Position is load-bearing, not cosmetic: the step reads the canonical items
+    file and rewrites the rendered report, both of which only exist after
+    ``load-items``/``supervise``, and its blocks must be in ``ctx.data`` before
+    ``findings-out`` emits the artifact and ``post-review`` builds the payload.
+    """
+    from daydream.deep.orchestrator import DIAGRAM_STEPS, STEPS
+
+    names = [step.name for step in STEPS]
+    assert names.index("supervise") + 1 == names.index("diagram")
+    assert names.index("diagram") + 1 == names.index("findings-out")
+    steps = {step.name: step for step in STEPS}
+    assert steps["diagram"].phase_key == "diagram"
+
+    # ``post-diagram`` must NOT be in STEPS: ``_register_builtin_flows``
+    # derives the deep flow definition from it, so a GitHub write would be
+    # spliced into every deep review.
+    assert "post-diagram" not in names
+    assert [step.name for step in DIAGRAM_STEPS] == ["post-diagram"]
+    assert DIAGRAM_STEPS[0].phase_key == "post-diagram"
+
+
+def test_diagram_flow_is_registered_with_its_three_steps() -> None:
+    """The ``diagram`` flow reuses the deep flow's exploration + diagram steps."""
+    from daydream.extensions import Registry
+    from daydream.extensions.builtins import register_builtins
+
+    registry = Registry()
+    register_builtins(registry)
+    assert sorted(registry.flow_names()) == ["deep", "diagram", "improve"]
+    assert registry.flow("diagram") == ["exploration", "diagram", "post-diagram"]
+
+
+def test_resolve_mode_maps_diagram_output_mode() -> None:
+    """``--diagram-only`` resolves to the ``diagram`` mode and its own flow."""
+    from daydream.deep.orchestrator import (
+        _flow_kind_for_mode,
+        _flow_name_for_mode,
+        _resolve_mode,
+    )
+    from daydream.runner import RunConfig
+    from daydream.trajectory import DaydreamRunFlow
+
+    config = RunConfig(target="/tmp", output_mode="diagram", diagram="sequence")
+    assert _resolve_mode(config) == "diagram"
+    assert _flow_name_for_mode("diagram") == "diagram"
+    assert _flow_kind_for_mode("diagram") is DaydreamRunFlow.DIAGRAM
+    # ``--shallow`` must not win over an explicit diagram-only request.
+    shallow = RunConfig(target="/tmp", output_mode="diagram", diagram="both", shallow=True)
+    assert _resolve_mode(shallow) == "diagram"
+    for mode in ("loop", "comment", "review", "shallow"):
+        assert _flow_name_for_mode(mode) == "deep"
 
 
 def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:

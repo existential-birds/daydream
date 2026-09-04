@@ -1616,3 +1616,92 @@ def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
     assert pr_review._finding_blocks_approval(
         issue.severity, issue.location_distrust, issue.severity_off_vocabulary
     ) is False
+
+
+# --- Grounded diagrams (issue #1113) ----------------------------------------
+
+
+def test_diagram_marker_round_trip() -> None:
+    """The hidden marker is invisible in rendered markdown and parses back exactly."""
+    from daydream.pr_review import diagram_marker, parse_diagram_markers
+
+    body = "\n\n".join(
+        [
+            diagram_marker("sequence", "a" * 40),
+            diagram_marker("flowchart", "a" * 40),
+            "<details>the diagrams</details>",
+        ]
+    )
+    assert parse_diagram_markers(body) == [
+        ("sequence", "a" * 40),
+        ("flowchart", "a" * 40),
+    ]
+    # A finding marker is a different namespace and must not cross-parse.
+    assert parse_diagram_markers(pr_review.finding_marker("f" * 64)) == []
+    assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
+
+
+def test_build_payload_places_diagram_blocks_under_the_header(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``diagram_blocks`` lands directly under ``**Code Review Summary**``."""
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+    classified = pr_review._ClassifiedIssues(
+        body_only=[
+            ParsedIssue(
+                path="b.py", line=None, title="File note", body="desc",
+                fingerprint="b" * 64,
+            )
+        ]
+    )
+    blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
+
+    payload = pr_review.build_payload(pr, classified, diagram_blocks=blocks)
+    body = payload["body"]
+    header = "**Code Review Summary**"
+    assert body[body.index(header) + len(header) :].lstrip().startswith(blocks)
+    # Absent (the default) is byte-identical to the pre-#1113 body.
+    assert pr_review.build_payload(pr, classified)["body"] == body.replace(
+        f"{header}\n\n{blocks}", header
+    )
+
+
+def test_custom_summary_renderer_receives_and_may_drop_diagrams(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec test 16: ``ctx.diagrams`` reaches a fork renderer, which owns it.
+
+    The host cannot inject the blocks around a custom renderer's output (they
+    belong inside the summary body), so a renderer that ignores ``ctx.diagrams``
+    drops them -- which is exactly what docs/extensions.md warns about.
+    """
+    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+    seen: list[str | None] = []
+
+    def keeps(ctx: Any) -> str:
+        seen.append(ctx.diagrams)
+        return f"**Custom**\n\n{ctx.diagrams}"
+
+    def drops(ctx: Any) -> str:
+        seen.append(ctx.diagrams)
+        return "**Custom**"
+
+    classified = pr_review._ClassifiedIssues()
+    blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
+    prev = get_registry()
+    try:
+        for renderer, expect_present in ((keeps, True), (drops, False)):
+            reg = Registry()
+            register_builtins(reg)
+            reg.override_renderer("summary", renderer)
+            set_registry(reg)
+            body = pr_review.build_payload(
+                pr, classified, diagram_blocks=blocks
+            )["body"]
+            assert (blocks in body) is expect_present
+    finally:
+        set_registry(prev)
+    assert seen == [blocks, blocks]

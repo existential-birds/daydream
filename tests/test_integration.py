@@ -613,6 +613,7 @@ async def test_run_comment_full_flow(
         console: Any,
         post: Any,
         approve_on_clean: Any=False,
+        diagram_blocks: Any=None,
     ) -> None:
         posted.extend(json.loads(merged_items_path.read_text())["items"])
         posted_posts.append(post)

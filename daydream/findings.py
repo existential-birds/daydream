@@ -50,6 +50,19 @@ FINDINGS_SCHEMA: dict[str, Any] = {
         "pr_number": {"type": "integer"},
         "head_sha": {"type": "string"},
         "run_info": {"type": ["string", "null"]},
+        # Optional (issue #1113). Absent means "review" -- the only kind that
+        # existed before grounded diagrams. Both keys are OPTIONAL in
+        # ``required`` but MANDATORY here: ``additionalProperties: false``
+        # above would otherwise reject every artifact that carries them.
+        "kind": {"enum": ["review", "diagram"]},
+        # Deliberately permissive. The payload is ``diagram.json`` minus the
+        # rendered mermaid, whose shape is owned by four other modules'
+        # ``to_dict`` methods; declaring it here with
+        # ``additionalProperties: false`` would break on any field they add.
+        # The real check on its model-derived content is the per-kind
+        # ``spec_final`` validation in ``pr_review.validate_diagram_payload``,
+        # which runs before the privileged poster renders anything.
+        "diagrams": {"type": ["object", "null"]},
         "findings": {
             "type": "array",
             "items": {
@@ -100,7 +113,12 @@ FINDINGS_SCHEMA: dict[str, Any] = {
 
 
 class FindingsValidationError(Exception):
-    """An artifact failed a load-time check (size, parse, schema, or event match)."""
+    """An artifact failed a validation check.
+
+    Raised on load (size, parse, schema, or event match) and on write (size --
+    issue #1113), so the size cap fails in the job that produced the artifact
+    rather than one job later in the privileged poster.
+    """
 
 
 @dataclass
@@ -154,6 +172,12 @@ class FindingsArtifact:
         head_sha: Declared PR head SHA the findings were computed against.
         run_info: Phase A's rendered run-info markdown, or None.
         findings: Validated finding entries.
+        kind: ``"review"`` (findings to post as a PR review) or ``"diagram"``
+            (issue #1113: a grounded-diagram payload to post as a standalone
+            issue comment). Defaults to ``"review"`` so a pre-#1113 artifact
+            loads unchanged.
+        diagrams: The ``diagram.json`` payload without the rendered mermaid,
+            or None. Only meaningful when ``kind == "diagram"``.
     """
 
     repo: str
@@ -161,6 +185,8 @@ class FindingsArtifact:
     head_sha: str
     run_info: str | None
     findings: list[ArtifactFinding]
+    kind: str = "review"
+    diagrams: dict[str, Any] | None = None
 
 
 def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> dict[str, Any]:
@@ -187,6 +213,8 @@ def build_findings_artifact(
     issues: list[ParsedIssue],
     *,
     run_info: str | None,
+    kind: str = "review",
+    diagrams: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify issues against the PR diff and build the findings artifact.
 
@@ -196,6 +224,11 @@ def build_findings_artifact(
 
     Args:
         issues: Parsed issues, fingerprinted for cross-run dedup.
+        run_info: Phase A's rendered run-info markdown, or None.
+        kind: Artifact kind (issue #1113). ``"diagram"`` artifacts carry an
+            empty ``findings`` list and a ``diagrams`` payload instead.
+        diagrams: The ``diagram.json`` payload with every ``mermaid`` string
+            removed (the poster re-renders from the specs), or None.
 
     Returns:
         The artifact dict, matching ``FINDINGS_SCHEMA``: inline findings
@@ -217,14 +250,32 @@ def build_findings_artifact(
         "pr_number": pr.number,
         "head_sha": pr.head_sha,
         "run_info": run_info,
+        "kind": kind,
+        "diagrams": diagrams,
         "findings": findings,
     }
 
 
 def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
-    """Write the artifact as pretty-printed UTF-8 JSON, creating parent dirs."""
+    """Write the artifact as pretty-printed UTF-8 JSON, creating parent dirs.
+
+    The :data:`MAX_ARTIFACT_BYTES` cap is enforced here as well as on load
+    (issue #1113): without a write-side check an oversized payload -- a large
+    grounded-diagram payload is the realistic case -- would succeed in Phase A
+    and fail one job later inside the privileged poster, where the failure is
+    far harder to attribute. Measured on the exact bytes about to be written.
+
+    Raises:
+        FindingsValidationError: When the rendered artifact exceeds the cap.
+    """
+    text = json.dumps(artifact, indent=2, ensure_ascii=False) + "\n"
+    size = len(text.encode("utf-8"))
+    if size > MAX_ARTIFACT_BYTES:
+        raise FindingsValidationError(
+            f"artifact size check failed: {size} bytes exceeds the {MAX_ARTIFACT_BYTES}-byte cap"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(artifact, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
 
 
 def load_findings_artifact(
@@ -283,4 +334,6 @@ def load_findings_artifact(
         head_sha=data["head_sha"],
         run_info=data.get("run_info"),
         findings=[ArtifactFinding(**f) for f in data["findings"]],
+        kind=data.get("kind") or "review",
+        diagrams=data.get("diagrams"),
     )

@@ -178,6 +178,14 @@ _DISPATCH_TARGETS = (
         ("_run_loop_deep", {"pr_number": 42}, "pr_number", 42),
         ("_run_loop_deep", {"output_mode": "comment"}, "output_mode", "comment"),
         ("_run_loop_deep", {"output_mode": "review"}, "output_mode", "review"),
+        # Issue #1113: diagram-only joins comment/review on the branch that
+        # skips ``_require_reviewable_branch`` -- it neither fixes nor commits.
+        (
+            "_run_loop_deep",
+            {"output_mode": "diagram", "diagram": "sequence"},
+            "output_mode",
+            "diagram",
+        ),
         ("_run_loop_deep", {"output_mode": "loop", "shallow": True}, "shallow", True),
         # Stage 4.2: deep is the default. No flags required to route here.
         ("_run_loop_deep", {"output_mode": "loop"}, "shallow", False),
@@ -187,6 +195,7 @@ _DISPATCH_TARGETS = (
         "pr_number_metadata_goes_deep",
         "comment_mode",
         "review_mode",
+        "diagram_only_mode",
         "shallow_mode",
         "deep_loop_by_default",
         "improve_flow",
@@ -478,6 +487,8 @@ async def test_review_run_does_not_mint_app_identity(
     ("config", "expected"),
     [
         (RunConfig(output_mode="comment"), True),
+        # Issue #1113: the diagram-only run's deliverable IS a GitHub write.
+        (RunConfig(output_mode="diagram", diagram="sequence"), True),
         (RunConfig(output_mode="loop"), True),
         (RunConfig(flow_name="deep"), True),
         (RunConfig(output_mode="review"), False),
@@ -488,6 +499,7 @@ async def test_review_run_does_not_mint_app_identity(
     ],
     ids=[
         "comment",
+        "diagram_only",
         "default_deep",
         "explicit_deep",
         "review",

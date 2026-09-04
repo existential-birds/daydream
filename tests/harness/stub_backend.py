@@ -244,6 +244,31 @@ class StubBackend:
         # When True, the uncovered-file-sweep branch raises -- exercising the
         # sweep's fail-open contract.
         self.fail_sweep: bool = False
+        # Issue #1113 (grounded diagrams). Per-kind queue of specs the diagram
+        # author branch returns: index 0 answers the first turn, index 1 the
+        # repair turn (the last entry repeats if the queue is shorter). A kind
+        # with no queue entry gets the empty spec for its shape, which grounds
+        # to an omission rather than a failure.
+        self.diagram_specs: dict[str, list[dict[str, Any]]] = {}
+        # When True, the diagram branch emits a COMPLETED Read (paired start +
+        # result) for every file its returned spec cites, so the grounding
+        # pass's read receipts are satisfied. Off by default, which is the
+        # fail-closed case: every citation fails FILE_NOT_READ_BY_MODEL.
+        self.diagram_emit_reads: bool = False
+        # Explicit per-kind read paths, replacing the spec-derived list above
+        # (for tests that need a read of a file the spec does not cite).
+        self.diagram_reads: dict[str, list[str]] = {}
+        # Files to withhold a read for even when diagram_emit_reads is on --
+        # the FILE_NOT_READ_BY_MODEL knob.
+        self.diagram_unread: frozenset[str] = frozenset()
+        # When set, the diagram author branch mints a ContinuationToken with
+        # this session id, so the repair turn can resume the session. Without
+        # it there is no continuation and the repair turn never runs.
+        self.diagram_session_id: str | None = None
+        # Diagram kinds whose author turn raises (the fail-open/exit-1 knob).
+        self.diagram_fail: frozenset[str] = frozenset()
+        # Turn counter per kind, so the repair turn reads the next queued spec.
+        self.diagram_turns: dict[str, int] = {}
 
     @staticmethod
     def _prompt_record_uid_groups(prompt: str) -> list[list[str]]:
@@ -283,6 +308,57 @@ class StubBackend:
             if uids:
                 groups.append(uids)
         return groups
+
+    @staticmethod
+    def _diagram_dispatch(pl: str) -> tuple[str, bool] | None:
+        """Classify a diagram prompt as ``(kind, is_repair)``, or None.
+
+        Keys on the role sentences the production builders open with and on the
+        repair prompt's ``Diagram repair turn (<kind>):`` opener -- the
+        deliberate discriminators (issue #1113 D17), not incidental wording.
+        """
+        for kind in ("sequence", "flowchart"):
+            if f"diagram repair turn ({kind})" in pl:
+                return kind, True
+        if "you are the sequence-diagram author for this pull request." in pl:
+            return "sequence", False
+        if "you are the flowchart author for this pull request." in pl:
+            return "flowchart", False
+        return None
+
+    @staticmethod
+    def _diagram_spec_paths(spec: dict[str, Any]) -> list[str]:
+        """Every repo-relative path the spec cites, de-duplicated, in spec order.
+
+        The paths a truthful author agent would have read. Repo-relative is
+        fine: the coverage matcher accepts an exact relative match.
+        """
+        paths: list[str] = []
+
+        def _add(value: Any) -> None:
+            if isinstance(value, str) and value and value not in paths:
+                paths.append(value)
+
+        for participant in spec.get("participants") or []:
+            if isinstance(participant, dict):
+                for path in participant.get("files") or []:
+                    _add(path)
+        for message in spec.get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("evidence"), dict):
+                _add(message["evidence"].get("file"))
+        for block in spec.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            for branch in block.get("branches") or []:
+                if isinstance(branch, dict) and isinstance(branch.get("evidence"), dict):
+                    _add(branch["evidence"].get("file"))
+        root = spec.get("root")
+        if isinstance(root, dict):
+            _add(root.get("file"))
+        for node in spec.get("nodes") or []:
+            if isinstance(node, dict) and isinstance(node.get("evidence"), dict):
+                _add(node["evidence"].get("file"))
+        return paths
 
     @staticmethod
     def _stack_scope_files(prompt: str) -> list[str]:
@@ -426,6 +502,46 @@ class StubBackend:
                     ]
                 },
                 continuation=None,
+            )
+            return
+
+        # Issue #1113: grounded-diagram author + repair turns. Returns the
+        # queued spec as structured output, optionally with completed Reads of
+        # every file it cites and a resumable continuation token.
+        dispatch = self._diagram_dispatch(pl)
+        if dispatch is not None:
+            kind, is_repair = dispatch
+            if kind in self.diagram_fail and not is_repair:
+                raise RuntimeError(f"stub: diagram author for {kind} blew up")
+            turn = self.diagram_turns.get(kind, 0)
+            self.diagram_turns[kind] = turn + 1
+            queue = self.diagram_specs.get(kind) or []
+            if queue:
+                spec = queue[min(turn, len(queue) - 1)]
+            elif kind == "sequence":
+                spec = {"participants": [], "messages": [], "blocks": []}
+            else:
+                spec = {"root": None, "nodes": [], "edges": []}
+            if self.diagram_emit_reads:
+                read_paths = self.diagram_reads.get(kind) or self._diagram_spec_paths(spec)
+                for index, path in enumerate(read_paths):
+                    if path in self.diagram_unread:
+                        continue
+                    call_id = f"diagram-{kind}-{turn}-read-{index}"
+                    yield ToolStartEvent(id=call_id, name="Read", input={"file_path": path})
+                    # Paired result: a bare start is an INTERRUPTED read and
+                    # yields no coverage, so grounding would reject the citation.
+                    yield ToolResultEvent(id=call_id, output="file content", is_error=False)
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output=spec,
+                continuation=(
+                    ContinuationToken(
+                        backend="claude", data={"session_id": self.diagram_session_id}
+                    )
+                    if self.diagram_session_id
+                    else None
+                ),
             )
             return
 
