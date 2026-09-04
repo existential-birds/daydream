@@ -414,7 +414,9 @@ def test_runbook_hydrate_hub_invocation_carries_policy_and_dry_run_gate():
     text = pathlib.Path("docs/runbooks/annotation-final-publish.md").read_text()
     # The production hydrate-hub line carries the policy + opt-in args...
     hydrate_line = next(
-        l for l in text.splitlines() if "corpus hydrate-hub" in l and "--source-repo org/run-bundles" in l
+        line
+        for line in text.splitlines()
+        if "corpus hydrate-hub" in line and "--source-repo org/run-bundles" in line
     )
     assert "--license-policy" in hydrate_line and "license-policy-production.json" in hydrate_line
     assert "--allow-copyleft" in text  # opt-in argument documented
@@ -422,9 +424,13 @@ def test_runbook_hydrate_hub_invocation_carries_policy_and_dry_run_gate():
     # a real --dry-run hydrate-hub step appears before the unpinned publication
     # command, and states that its record accounting gates the next step.
     lines = text.splitlines()
-    dry_pos = min(i for i, l in enumerate(lines) if "hydrate-hub" in l and "--dry-run" in l)
+    dry_pos = min(
+        i for i, line in enumerate(lines) if "hydrate-hub" in line and "--dry-run" in line
+    )
     publish_pos = min(
-        i for i, l in enumerate(lines) if "hydrate-hub" in l and "--dry-run" not in l and "--source-repo org/run-bundles" in l
+        i
+        for i, line in enumerate(lines)
+        if "hydrate-hub" in line and "--dry-run" not in line and "--source-repo org/run-bundles" in line
     )
     assert dry_pos < publish_pos
     gate_text = "\n".join(lines[dry_pos:publish_pos])
