@@ -64,6 +64,16 @@ RECORD_UID_KEY = "uid"
 #: is a list where a record's identity is a single value.
 RECORD_SOURCE_UIDS_KEY = "source_uids"
 
+#: Merged-item key holding the item's own durable identity.
+#:
+#: Deliberately NOT :data:`RECORD_UID_KEY`. A merged item can carry both: the
+#: host-appended structural items keep the ``uid`` of the record they were born
+#: as, and would still need an item identity on top of it. Overloading one key
+#: would make ``record_uid`` return an item identity for some items and a record
+#: identity for others -- and ``item_source_uids`` falls back to ``record_uid``,
+#: so an item identity would silently masquerade as provenance.
+ITEM_UID_KEY = "item_uid"
+
 #: Separator between the stack-name and ordinal halves of a ``uid``. Stack names
 #: never contain it, so ``rsplit`` on it recovers the stack name exactly.
 _UID_SEPARATOR = ":"
@@ -165,9 +175,14 @@ def stamp_record_uids(records: list[dict[str, Any]], stack_name: str) -> None:
     - Idempotence lets this be called at both record birth and record load
       without the second call fighting the first.
 
-    Ordinals count every record in the list, stamped or not, so a partially
-    stamped list cannot produce a collision by reusing an ordinal that an
-    already-stamped record holds.
+    A minted ordinal SKIPS any value an already-stamped record in the list
+    holds. Counting positions alone is not sufficient and was a real defect
+    here: a list like ``[{uid: python:2}, {}]`` -- a preserved record sitting
+    anywhere other than its original position -- would hand the unstamped
+    record ``python:2`` as well, emitting the duplicate this field exists to
+    make impossible. On a fully unstamped list (the backfill case) skipping
+    changes nothing, so ordinals still equal positions and the value stays
+    re-derivable from ``(stack_name, position)``.
 
     Args:
         records: Record dicts to stamp, mutated in place.
@@ -175,9 +190,72 @@ def stamp_record_uids(records: list[dict[str, Any]], stack_name: str) -> None:
             normalized via :func:`stack_name_from_records_source`.
     """
     normalized = stack_name_from_records_source(stack_name)
-    for ordinal, record in enumerate(records, start=1):
-        if not record_uid(record):
-            record[RECORD_UID_KEY] = mint_record_uid(normalized, ordinal)
+    taken = {uid for uid in (record_uid(record) for record in records) if uid}
+    ordinal = 0
+    for record in records:
+        if record_uid(record):
+            continue
+        ordinal += 1
+        while (candidate := mint_record_uid(normalized, ordinal)) in taken:
+            ordinal += 1
+        record[RECORD_UID_KEY] = candidate
+        taken.add(candidate)
+
+
+def stamp_item_uids(items: list[dict[str, Any]]) -> None:
+    """Stamp a durable :data:`ITEM_UID_KEY` onto every item lacking one, in place.
+
+    The merged-item counterpart to :func:`stamp_record_uids`, with the same
+    preserve-if-present and skip-taken-ordinal semantics and for the same
+    reasons. Preserving matters more here than for records: ``normalize_items``
+    reassigns ``id`` on every call by design, so an item that already holds an
+    identity must keep it precisely *while* its display ordinal changes -- that
+    divergence is the whole reason the two fields are not one.
+
+    Args:
+        items: Merged item dicts to stamp, mutated in place.
+    """
+    taken = {uid for uid in (item_uid(item) for item in items) if uid}
+    ordinal = 0
+    for item in items:
+        if item_uid(item):
+            continue
+        ordinal += 1
+        while (candidate := mint_item_uid(ordinal)) in taken:
+            ordinal += 1
+        item[ITEM_UID_KEY] = candidate
+        taken.add(candidate)
+
+
+def mint_item_uid(ordinal: int) -> str:
+    """Return the durable identity for the *ordinal*-th merged item.
+
+    Args:
+        ordinal: 1-based position in the merged item list at mint time.
+
+    Returns:
+        The item uid, e.g. ``item:3``.
+    """
+    return f"item{_UID_SEPARATOR}{ordinal}"
+
+
+def item_uid(item: dict[str, Any]) -> str:
+    """Return *item*'s own durable identity, or ``""`` when it carries none.
+
+    This is the post-merge counterpart to :func:`record_uid`, and it answers a
+    different question from :func:`item_source_uids`: *which shipped finding is
+    this*, not *what was it made of*. Provenance cannot serve as identity --
+    nothing stops two merged items citing the same record (the merge agent may
+    split one record into two findings), so ``source_uids`` is not unique.
+
+    Args:
+        item: A merged finding item.
+
+    Returns:
+        The item uid string, or ``""`` when absent or not a string.
+    """
+    value = item.get(ITEM_UID_KEY)
+    return value if isinstance(value, str) else ""
 
 
 def item_source_uids(item: dict[str, Any]) -> list[str]:

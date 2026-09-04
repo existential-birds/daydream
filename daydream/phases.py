@@ -999,21 +999,68 @@ class CrossStackMergeError(ValueError):
 
 
 def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assign fresh contiguous unique integer ids to every item.
+    """Stamp every merged item with its display ordinal and its durable identity.
 
-    Reassigns each item's ``id`` to a contiguous 1-based sequence regardless of
-    incoming numbering, so per-stack, cross-stack, and structural items that
-    collide on their original ids end up uniquely keyed. Order and the ``lens``
-    field are preserved.
+    The two fields written here have deliberately contradictory stability
+    requirements, which is why one field cannot serve both roles (issue #1111):
+
+    - ``id`` is the **human-facing, dense, 1..N ordinal**. It is reassigned on
+      every call by design, whatever the incoming numbering, so the report reads
+      ``1, 2, 3`` and so per-stack, cross-stack, and structural items that
+      collide on their original ids end up uniquely keyed.
+    - ``item_uid`` is the **durable handle**. It is minted once and never
+      reassigned: an item that already carries one keeps it even while its ``id``
+      is being renumbered underneath it. A dense display ordinal *must* shift
+      when the set changes; a durable handle *must not*. That divergence is the
+      whole reason both fields exist.
+
+    Scope, stated plainly: the concrete case this protects is the extension seam.
+    ``docs/extensions.md`` documents that a fork may read ``items_file`` and
+    rewrite its ``items``; a fork that renumbers, reorders, or inserts would
+    shift every ``id`` under anything holding one, and ``item_uid`` is what such
+    a holder can key on instead. No first-party consumer reads ``item_uid``
+    today — this gives the identity somewhere to live before one needs it, not a
+    fix for a break already happening.
+
+    ``item_uid`` is host-minted *after* schema validation and is deliberately
+    absent from ``MERGED_ITEMS_SCHEMA``, exactly as ``uid`` is absent from
+    ``PER_STACK_RECORD_SCHEMA``: every declared property must sit in
+    ``required``, so declaring it would force the *model* to emit a field the
+    host owns. It is also distinct from ``uid`` / ``source_uids`` — identity of
+    the shipped item, never provenance of the records it was synthesized from.
+
+    Order and every other field are preserved by the spread, including the
+    demotion annotations from location validation and the ``uid`` /
+    ``source_uids`` carried by items that bypassed the merge agent.
+
+    Args:
+        raw: Merged finding items, already in final report order.
+
+    Returns:
+        Fresh item dicts; the inputs are never mutated.
 
     Raises:
         ValueError: If ``raw`` is not a list.
     """
+    # Function-local import: ``daydream.deep.records`` sits under the
+    # ``daydream.deep`` package, whose ``__init__`` imports the orchestrator,
+    # which imports this module. A module-level import would close that cycle.
+    # Same pattern as every other ``daydream.deep`` import in this file.
+    from daydream.deep.records import stamp_item_uids
+
     if not isinstance(raw, list):
         raise ValueError(f"normalize_items expected a list, got {type(raw).__name__}")
-    normalized: list[dict[str, Any]] = []
-    for new_id, item in enumerate(raw, start=1):
-        normalized.append({**item, "id": new_id})
+    normalized: list[dict[str, Any]] = [
+        {**item, "id": new_id} for new_id, item in enumerate(raw, start=1)
+    ]
+    # Stamp the durable handle over the whole list rather than inline per item.
+    # Preserve-if-present is the point -- re-minting would make the handle track
+    # the positional ordinal, which is exactly the property it exists not to
+    # have -- but "preserve, else mint at my position" is not enough on its own:
+    # a preserved ``item:2`` sitting anywhere but position 2 would hand position
+    # 2's unstamped item the same value. ``stamp_item_uids`` skips taken
+    # ordinals, so it cannot emit the duplicate this field exists to prevent.
+    stamp_item_uids(normalized)
     return normalized
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for per-record referential identity (issue #1111).
+"""Unit tests for per-record and merged-item referential identity (issue #1111).
 
 These are supplementary to the real-path coverage in ``tests/test_deep_orchestrator.py``
 that drives ``runner.run`` end to end; what they pin here are the exact
@@ -12,13 +12,17 @@ from __future__ import annotations
 from typing import Any
 
 from daydream.deep.records import (
+    ITEM_UID_KEY,
     RECORD_UID_KEY,
     duplicate_record_uids,
     item_source_uids,
+    item_uid,
+    mint_item_uid,
     mint_record_uid,
     record_uid,
     stack_name_from_records_source,
     stack_name_from_uid,
+    stamp_item_uids,
     stamp_record_uids,
     union_source_uids,
 )
@@ -270,6 +274,71 @@ def test_item_source_uids_ignores_a_non_list_value() -> None:
     assert item_source_uids(item) == ["structure:2"]
 
 
+def test_item_uid_format_is_a_one_based_ordinal() -> None:
+    """Readable in artifacts and reproducible from position, like the record uid."""
+    assert mint_item_uid(1) == "item:1"
+    assert mint_item_uid(3) == "item:3"
+
+
+def test_item_uid_reads_the_field() -> None:
+    assert item_uid({ITEM_UID_KEY: "item:3"}) == "item:3"
+
+
+def test_item_uid_is_empty_for_an_item_without_one() -> None:
+    """Items written before the field existed must read as "no identity", not raise.
+
+    ``normalize_items`` mints with preserve-if-present semantics, so "" is the
+    signal that tells it to mint rather than keep.
+    """
+    assert item_uid({"id": 1, "file": "api.py"}) == ""
+
+
+def test_item_uid_is_empty_for_a_non_string_value() -> None:
+    """A malformed artifact must degrade to "no identity", never leak an int.
+
+    Preserve-if-present keys off this accessor, so returning the raw ``7`` would
+    preserve a non-string as an item's durable identity instead of replacing it.
+    """
+    assert item_uid({ITEM_UID_KEY: 7}) == ""
+
+
+def test_record_and_item_identities_are_reported_independently() -> None:
+    """One item can carry both identities, and each accessor must return only its own.
+
+    This is why ``ITEM_UID_KEY`` is deliberately not ``RECORD_UID_KEY``. The
+    host-appended structural items keep the ``uid`` of the record they were born
+    as *and* need an item identity on top. Overloading one key would make
+    ``record_uid`` return an item identity for some items and a record identity
+    for others -- and ``item_source_uids`` falls back to ``record_uid``, so the
+    item identity would silently masquerade as provenance.
+    """
+    item: dict[str, Any] = {
+        "id": 4,
+        RECORD_UID_KEY: "structure:1",
+        ITEM_UID_KEY: "item:7",
+        "source_uids": ["python:2", "react:2"],
+    }
+
+    assert record_uid(item) == "structure:1"
+    assert item_uid(item) == "item:7"
+    assert item_source_uids(item) == ["python:2", "react:2"]
+
+
+def test_item_uid_is_never_reported_as_provenance() -> None:
+    """Identity is not provenance, so the fallback chain must not reach ``item_uid``.
+
+    ``source_uids`` is not unique -- the merge agent may split one record into
+    two findings, so two items can cite the same record. An item identity
+    appearing in a provenance list would tie a finding to a record that was
+    never its source.
+    """
+    born_as_a_record: dict[str, Any] = {"id": 4, RECORD_UID_KEY: "structure:1", ITEM_UID_KEY: "item:7"}
+    synthesized: dict[str, Any] = {"id": 5, ITEM_UID_KEY: "item:8"}
+
+    assert item_source_uids(born_as_a_record) == ["structure:1"]
+    assert item_source_uids(synthesized) == []
+
+
 def test_union_merges_two_provenances_survivor_first() -> None:
     """The structural fold's survivor represents a defect two lenses reported.
 
@@ -289,3 +358,38 @@ def test_union_drops_empty_and_non_string_entries() -> None:
 
 def test_union_of_nothing_is_empty() -> None:
     assert union_source_uids([], []) == []
+
+
+def test_stamp_skips_an_ordinal_a_preserved_record_already_holds() -> None:
+    """Counting positions alone can emit the duplicate this field exists to prevent.
+
+    A preserved record sitting anywhere other than its original position --
+    ``python:2`` first -- would hand position 2's unstamped record ``python:2``
+    as well. That is the exact defect class issue #1111 removes, reintroduced by
+    the helper meant to enforce it, so minting skips taken ordinals.
+    """
+    records: list[dict[str, Any]] = [{RECORD_UID_KEY: "python:2"}, {"id": 1}, {"id": 2}]
+
+    stamp_record_uids(records, "python")
+
+    assert [record_uid(record) for record in records] == ["python:2", "python:1", "python:3"]
+    assert duplicate_record_uids(records) == []
+
+
+def test_stamp_item_uids_skips_an_ordinal_a_preserved_item_already_holds() -> None:
+    """Same hazard, same guarantee, on the merged-item side."""
+    items: list[dict[str, Any]] = [{ITEM_UID_KEY: "item:2"}, {"id": 1}, {"id": 2}]
+
+    stamp_item_uids(items)
+
+    assert [item_uid(item) for item in items] == ["item:2", "item:1", "item:3"]
+    assert len({item_uid(item) for item in items}) == len(items)
+
+
+def test_stamp_item_uids_leaves_a_fully_stamped_list_untouched() -> None:
+    """Idempotence: the merge write runs once, but the helper must not renumber."""
+    items: list[dict[str, Any]] = [{ITEM_UID_KEY: "item:1"}, {ITEM_UID_KEY: "item:2"}]
+
+    stamp_item_uids(items)
+
+    assert [item_uid(item) for item in items] == ["item:1", "item:2"]

@@ -88,7 +88,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
 | `deep/orchestrator.py` | Deep-flow steps: exploration, intent, wonder, per-stack, arbiter, merge, verify, fix |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
-| `deep/records.py` | Host-assigned record `uid` (`stack:ordinal`) minted at record birth, and merged-item `source_uids` derivation — the *referential* identity ("which record is this?"), never content-derived |
+| `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
 | `improve/` | Read-only recon, category audits, vetting, prioritization, plan artifacts |
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
@@ -192,6 +192,14 @@ exploration pre-scan (cached across runs)
   the merge agent emits and the host **validates against the run's record pool** (an unknown uid is dropped
   with a warning, fail-open, never trusted). Read a record's identity with `record_uid()` and an item's
   provenance with `item_source_uids()`; `""`/`[]` means "no pre-merge identity", which is a real answer.
+- **A merged item's own identity is `item_uid`, not `id`.** `normalize_items` reassigns `id` to a dense
+  1..N sequence on every call *by design* — that is what makes a report read `1, 2, 3` — so it cannot also
+  be a durable handle; the two requirements contradict. `item_uid` is minted alongside it and never
+  reassigned. Three distinct keys can sit on one merged item and answer three different questions:
+  `uid` (the record it was born as, structural/single-stack only), `item_uid` (which shipped finding this
+  is), `source_uids` (which records it was made of). Provenance is *not* identity — two items may cite the
+  same record, so `source_uids` is not unique. Keep `id` integer: five strict `*_SCHEMA` constants type the
+  echoed `id`/`issue_id` as `integer`, and the report renders it as the finding number.
 - Intent and wonder prompts inline the diff under `INLINE_DIFF_BUDGET_BYTES` (12 KiB, shared with per-stack),
   else the `diff.patch` pointer. Small diffs skip the fan-out entirely.
 - Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed

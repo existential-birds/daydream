@@ -10364,3 +10364,164 @@ async def test_legacy_artifact_backfills_structural_provenance_consistently(
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural, "the structural record must still reach the report"
     assert structural[0]["source_uids"] == ["structure:1"]
+
+
+# Issue #1111 (identity half): merged-item ``item_uid``.
+#
+# ``id`` and ``item_uid`` are written by the same call site and have
+# deliberately contradictory stability requirements, which is the whole reason
+# there are two fields: ``id`` is the dense 1..N display ordinal and is
+# reassigned on every merge write so a report reads ``1, 2, 3``; ``item_uid`` is
+# the durable handle and is never reassigned once minted. The tests below read
+# ``merged-items.json`` -- the artifact a consumer resolves as fact -- because a
+# handle that is missing, duplicated, or confused with provenance is invisible
+# anywhere else.
+
+
+def _item_uids(deep: Path) -> list[str]:
+    """Return the ``item_uid`` of every shipped item, in canonical file order."""
+    return [str(item.get("item_uid")) for item in _merged_items(deep)]
+
+
+async def test_every_shipped_item_carries_a_unique_item_uid_on_a_multi_stack_run(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
+) -> None:
+    """#1111 real-path: every merged item ships with a distinct durable handle.
+
+    A handle only earns the name if it is on *every* item and is unique across
+    all of them -- an identity that is absent for some items or shared by two of
+    them is worse than none, because a consumer keying on it silently conflates
+    two findings. The multi-stack path is where that matters most: it ships
+    merge-agent items (which carry no pre-merge ``uid`` at all) beside
+    host-appended structural ones, so before ``item_uid`` the only thing common
+    to all of them was the positional ``id`` that the next merge write reassigns.
+
+    Real path: a fresh default deep run over the four-stack fixture, backend the
+    only mock. Asserts on ``merged-items.json``: the key is present and non-empty
+    on every item, all values are distinct, and -- because nothing on a fresh run
+    arrives pre-stamped -- they line up one-to-one with the items' ``id``
+    ordering.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = deep_dir(multi_stack_target)
+    items = _merged_items(deep)
+    assert len(items) > 1, f"fixture must ship several items or uniqueness proves nothing: {items}"
+
+    for item in items:
+        assert "item_uid" in item, f"shipped item carries no durable identity key: {item}"
+        assert isinstance(item["item_uid"], str) and item["item_uid"], (
+            f"shipped item carries an empty durable identity: {item}"
+        )
+    uids = _item_uids(deep)
+    assert len(set(uids)) == len(uids), f"two shipped items share one identity: {uids}"
+
+    # Nothing in a fresh run arrives pre-stamped, so the minted handles track the
+    # display ordinals exactly. That agreement is what makes the value
+    # re-derivable for an artifact written before the field existed -- it is a
+    # property of THIS case, not the definition of the field (see the preserve
+    # tests, where the two deliberately diverge).
+    assert uids == [f"item:{item['id']}" for item in items], uids
+
+
+async def test_shipped_item_carries_id_item_uid_and_provenance_independently(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
+) -> None:
+    """#1111 real-path: three fields, three questions, one item dict.
+
+    ``id`` answers "where does this sit in the report?", ``item_uid`` answers
+    "which shipped finding is this?", and ``source_uids`` answers "which records
+    was it made of?". The host-appended structural items are the case that
+    forces all three to be separate keys: they never see the merge agent, so they
+    keep the ``uid`` they were born as -- a *record* identity -- while still
+    needing an *item* identity on top of it, and ``item_source_uids`` falls back
+    to ``record_uid``, so overloading one key would make an item identity
+    masquerade as provenance.
+
+    Real path: a fresh default deep run. Asserts ``id`` is the dense 1..N
+    sequence over the shipped list while ``item_uid`` is present on all of it,
+    and that the structural item carries all four values -- ``id``, ``uid``,
+    ``item_uid``, ``source_uids`` -- with the record and item identities
+    distinguishable rather than the same string.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = deep_dir(multi_stack_target)
+    items = _merged_items(deep)
+    # The display ordinal is dense and 1-based over the SHIPPED list -- the
+    # evidence gate deletes items after the merge agent numbered them, so this
+    # holds only because ``normalize_items`` renumbers the survivors.
+    assert [item["id"] for item in items] == list(range(1, len(items) + 1)), items
+    assert all(item.get("item_uid") for item in items), items
+
+    structural = [item for item in items if item.get("lens") == "structural"]
+    assert structural, f"no structural item shipped: {items}"
+    item = structural[0]
+    # The birth record identity: this item WAS a per-stack record of the
+    # ``structure`` meta-stack, and it never passed through the merge agent.
+    assert item["uid"] == "structure:1", item
+    # Its own item identity, from the same namespace every shipped item uses.
+    assert item["item_uid"].startswith("item:"), item
+    assert item["item_uid"] != item["uid"], (
+        f"the item identity collapsed onto the record identity: {item}"
+    )
+    # Its derivation, which is the record it is -- a list, because an item can
+    # be a synthesis of several records even though this one is not.
+    assert item["source_uids"] == ["structure:1"], item
+    # And the display ordinal, which is none of the above.
+    assert isinstance(item["id"], int), item
+
+
+async def test_item_uid_is_never_reported_as_record_provenance(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
+) -> None:
+    """#1111 real-path: an item identity never leaks into ``source_uids``.
+
+    ``source_uids`` names *records*, and every record uid is
+    ``<stack_name>:<ordinal>``. An ``item:*`` value appearing there would be a
+    finding citing itself as its own source -- provenance that resolves against
+    nothing in the run's record pool, and the exact confusion the separate
+    ``ITEM_UID_KEY`` exists to make impossible.
+
+    Real path: a fresh default deep run, asserting over every shipped item's
+    provenance list and over the raw bytes of the derivation sidecars, so a leak
+    through any of the writers is caught rather than just the one under test.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = deep_dir(multi_stack_target)
+    pool = _run_uid_pool(deep)
+    for item in _merged_items(deep):
+        provenance = item["source_uids"]
+        assert not any(uid.startswith("item:") for uid in provenance), (
+            f"an item identity was reported as record provenance: {item}"
+        )
+        # The positive half: what IS there resolves against records this run
+        # minted, so "no item: prefix" is not passing merely because the list is
+        # junk.
+        assert set(provenance) <= pool, f"{provenance} not within {sorted(pool)}"
+    assert pool and not any(uid.startswith("item:") for uid in pool), pool

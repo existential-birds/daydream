@@ -471,6 +471,22 @@ agent (the single-stack path, host-appended structural records, the salvage
 path), and for artifacts written before the field existed. An empty list means
 the merge agent declined to attribute the item — a real answer, not an error.
 
+Merged items also carry `item_uid` (`item:n`) — the item's **own durable
+identity**, distinct from both of the above. `id` is the human-facing finding
+number and `normalize_items` reassigns it to a dense `1..N` sequence by design,
+so it is not a stable handle; `item_uid` is minted once and never reassigned.
+This matters directly to a fork: if you rewrite `items_file` and renumber, every
+`id` shifts, but `item_uid` survives the round-trip. Read it with
+`daydream.deep.records.item_uid`, and preserve it when you rewrite an item —
+minting a fresh one would defeat the point. It is host-minted post-validation
+and is deliberately absent from `MERGED_ITEMS_SCHEMA`.
+
+Three keys can therefore sit on one merged item, answering three different
+questions: `uid` (which record it was born as — structural and single-stack
+items only), `item_uid` (which shipped finding this is), and `source_uids`
+(which records it was made of). Do not substitute one for another; in
+particular provenance is not identity, since two items may cite the same record.
+
 Two constraints for a fork that reads it:
 
 - `uid` itself is a **pre-merge** handle. The cross-stack merge agent re-emits
