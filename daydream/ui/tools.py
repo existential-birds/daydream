@@ -205,7 +205,7 @@ def format_callback_progress(
     name: str,
     args: dict[str, object],
     label: str | None,
-    max_len: int = 80,
+    max_len: int = _BASH_COMMAND_MAX_CHARS,
 ) -> Text:
     """Build a styled one-line progress entry for the callback render path.
 
@@ -247,11 +247,18 @@ def format_callback_progress(
         # reach this renderer while the application import graph is loading.
         from daydream.trajectory import redact_structured_text
 
-        # Redact the complete value before slicing (same invariant the panel
-        # header and agent._summarize_input hold) so a credential crossing the
-        # display boundary cannot be truncated into an unmatchable fragment.
+        # Redact only the Bash command — the same scope the panel header applies
+        # in _build_tool_header's Bash branch, where paths and grep patterns
+        # render raw. Redacting every primary value would rewrite the operator's
+        # own /home/<user>/ paths into [REDACTED_USER] markers on the callback
+        # line. Redact the complete value before slicing so a credential
+        # crossing the display boundary cannot be truncated into an unmatchable
+        # fragment.
+        display_value = value
+        if name in ("Bash", "shell") and key == "command":
+            display_value = redact_structured_text(value)
         line.append(" ")
-        line.append(redact_structured_text(value)[:max_len], style=_primary_value_style(key))
+        line.append(display_value[:max_len], style=_primary_value_style(key))
     return line
 
 

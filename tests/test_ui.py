@@ -474,6 +474,34 @@ def test_format_callback_progress_bash_shows_command() -> None:
     assert "DB_PASSWORD=[REDACTED_ENV_VAR]" in secret_text
 
 
+def test_format_callback_progress_redacts_only_bash_commands() -> None:
+    """Callback redaction is scoped to the Bash command, like the panel header.
+
+    Paths and grep patterns render raw on the panel header; the callback line
+    must not rewrite the operator's own /home/<user>/ paths into [REDACTED_USER]
+    markers or chew grep patterns into [REDACTED_CREDENTIAL].
+    """
+    from daydream.ui.tools import format_callback_progress
+
+    edit_line = format_callback_progress(
+        "Edit",
+        {"file_path": "/home/user/work/daydream/git_ops.py", "old_string": "a", "new_string": "b"},
+        None,
+    )
+    assert "/home/user/work/daydream/git_ops.py" in edit_line.plain
+    assert "[REDACTED" not in edit_line.plain
+
+    grep_line = format_callback_progress(
+        "Grep", {"pattern": "the config: token=opaque-test-12345", "path": "/home/user/work"}, None
+    )
+    assert "opaque-test-12345" in grep_line.plain
+    assert "[REDACTED" not in grep_line.plain
+
+    bash_line = format_callback_progress("Bash", {"command": "the config: token=opaque-test-12345"}, None)
+    assert "opaque-test-12345" not in bash_line.plain
+    assert "[REDACTED" in bash_line.plain
+
+
 def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     """Issue #1108 acceptance oracle: same input renders the command on all three surfaces."""
     from io import StringIO
@@ -494,7 +522,7 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     c2.print(line)
     line_text = c2.export_text()
 
-    log_summary = _summarize_input(args)
+    log_summary = _summarize_input(args, "Bash")
 
     assert "git diff --stat" in header_text
     assert "git diff --stat" in line_text
@@ -509,4 +537,6 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     long_header = _build_tool_header("Bash", {"command": long_command}, quiet_mode=True)
     assert "b" * _BASH_COMMAND_MAX_CHARS in long_header.plain
     assert long_header.plain.rstrip().endswith("...")
-    assert len(_summarize_input({"command": long_command})) == _BASH_COMMAND_MAX_CHARS
+    long_line = format_callback_progress("Bash", {"command": long_command}, None)
+    assert "b" * _BASH_COMMAND_MAX_CHARS in long_line.plain
+    assert len(_summarize_input({"command": long_command}, "Bash")) == _BASH_COMMAND_MAX_CHARS
