@@ -2024,6 +2024,20 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     ingest_bundles(config.stage_dir, revision=source_commit)
     dedupe_admitted(config.stage_dir, revision=source_commit)
     if config.license_policy_path is not None:
+        # Issue #1094: enrichment fills legacy records' missing license_evidence
+        # from an authorized immutable source before the gate — only on a
+        # policy-bearing run (there is no gate to feed otherwise). The cache is
+        # copied into the curated prefix so fresh-VM replay is decision-identical.
+        from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+            _make_license_resolver,
+            enrich_license_evidence,
+            publish_enrichment_cache,
+        )
+
+        enrich_license_evidence(
+            config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+        )
+        publish_enrichment_cache(config.stage_dir, revision=source_commit)
         # Issue #1080: the per-repo license gate runs after the existing gates;
         # apply_license_gate itself refuses (ValueError, fail-closed) on a
         # missing policy input.
