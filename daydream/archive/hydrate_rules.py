@@ -27,12 +27,13 @@ REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
 REASON_CODE_IDENTITY_COLLISION = "identity_collision"
 REASON_CODE_PATH_TRAVERSAL = "path_traversal"
 
-# License/repo-identity reason codes (issue #1080 corpus-v2 gates). Stable
-# strings (KD5); the registry extends for license/repo gates.
+# License/repo-identity reason codes (issue #1080 corpus-v2 gates; extended
+# by issue #1094 with ``repo_commit_unresolved``). Five stable strings (KD5);
 REASON_CODE_C5_EXCLUDED_REPO = "c5_excluded_repo"
 REASON_CODE_C8_COPYLEFT_UNOPTED = "c8_copyleft_unopted"
 REASON_CODE_LICENSE_EVIDENCE_MISSING = "license_evidence_missing"
 REASON_CODE_REPO_IDENTITY_MISSING = "repo_identity_missing"
+REASON_CODE_REPO_COMMIT_UNRESOLVED = "repo_commit_unresolved"
 
 # Import-specific reason codes (issue #1082 local-observation importer, fixed
 # registry). Every surviving observation row maps to exactly one of these six
@@ -111,6 +112,7 @@ EXCLUSION_CODES = (
     REASON_CODE_C8_COPYLEFT_UNOPTED,
     REASON_CODE_LICENSE_EVIDENCE_MISSING,
     REASON_CODE_REPO_IDENTITY_MISSING,
+    REASON_CODE_REPO_COMMIT_UNRESOLVED,
 )
 
 

@@ -980,3 +980,15 @@ class TestAdmissionSummary:
         assert summary["c8_copyleft_unopted"] == 1
         assert summary["license_evidence_missing"] == 2  # identity-missing folds in
         assert sum(summary.values()) == 5
+
+
+def test_repo_commit_unresolved_is_a_license_bucket_code():
+    from daydream.archive.hydrate import admission_summary_buckets
+    from daydream.archive.hydrate_rules import (
+        EXCLUSION_CODES,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
+    )
+    assert REASON_CODE_REPO_COMMIT_UNRESOLVED == "repo_commit_unresolved"
+    assert REASON_CODE_REPO_COMMIT_UNRESOLVED in EXCLUSION_CODES
+    buckets = admission_summary_buckets([("s1", REASON_CODE_REPO_COMMIT_UNRESOLVED)])
+    assert buckets["license_evidence_missing"] == 1 and sum(buckets.values()) == 1

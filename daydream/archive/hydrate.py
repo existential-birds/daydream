@@ -39,6 +39,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IDENTITY_COLLISION,
     REASON_CODE_LICENSE_EVIDENCE_MISSING,
     REASON_CODE_PATH_TRAVERSAL,
+    REASON_CODE_REPO_COMMIT_UNRESOLVED,
     REASON_CODE_REPO_IDENTITY_MISSING,
     REASON_CODE_SANITIZE_FAILED,
     REASON_CODE_SECRETS_SCAN_DIRTY,
@@ -1165,10 +1166,11 @@ def admission_summary_buckets(
     """Pure four-bucket license summary over ``(session_id, reason_code)``
     admission decisions (issue #1080 S2).
 
-    ``None`` counts as admitted; the stable Task-1 rejection codes map to the
-    human buckets (``repo_identity_missing`` folds into
-    ``license_evidence_missing`` — missing identity is missing evidence for
-    the license gate). Any other code is not a license-gate decision and
+    ``None`` counts as admitted; the stable rejection codes map to the
+    human buckets (``repo_identity_missing`` and ``repo_commit_unresolved``
+    fold into ``license_evidence_missing`` — missing identity or an
+    unresolvable repo commit is missing evidence for the license gate). Any
+    other code is not a license-gate decision and
     raises: the bucket sum equals the license-gate session count by
     construction (M8).
     """
@@ -1177,6 +1179,7 @@ def admission_summary_buckets(
         REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
         REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
         REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
+        REASON_CODE_REPO_COMMIT_UNRESOLVED: "license_evidence_missing",
     }
     buckets: dict[str, int] = {
         "admitted": 0,
@@ -1212,6 +1215,7 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
         REASON_CODE_C8_COPYLEFT_UNOPTED,
         REASON_CODE_LICENSE_EVIDENCE_MISSING,
         REASON_CODE_REPO_IDENTITY_MISSING,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
     }
     for item in ledger.get("rejections", []):
         code = item.get("reason_code")
@@ -1729,6 +1733,9 @@ class HydrateSummary:
     verify_admitted: int = 0
     verified: bool = False
     # Issue #1080 S2: four-bucket license admission summary (admitted /
+    # c5-excluded / copyleft-unopted / evidence-missing, with
+    # repo_identity_missing and repo_commit_unresolved folded into the
+    # evidence-missing bucket) over the import
     # c5-excluded / copyleft-unopted / evidence-missing) over the import
     # ledger; empty when no license policy was configured.
     license_admission: dict[str, int] = field(default_factory=dict)
