@@ -10,6 +10,7 @@ undefined (zero-findings) case, which must not report a perfect score.
 """
 import json
 import math
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -2087,7 +2088,17 @@ def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
 def test_location_and_duplication_are_zeroed_when_merged_items_absent(
     tmp_path: Path,
 ) -> None:
-    """An absent shipped set is not an error -- review-only runs ship nothing."""
+    """An absent shipped set is not an error, but duplication's headline count
+    stays undefined rather than becoming an imputed zero.
+
+    ``deep/`` exists (created by an earlier phase, e.g. coverage) but
+    ``merged-items.json`` itself was never written, i.e. merge never produced
+    a shipped set. Location naturally scores nothing (there is nothing to
+    score), and duplication's ``near_duplicate_pairs`` is ``None`` for the
+    same reason: an imputed ``0`` here would be indistinguishable from a
+    genuinely empty, merge-completed shipped set. ``deep/``'s mere existence
+    is not evidence merge ran -- only ``merged-items.json`` is.
+    """
     dd, _deep = _worked_example_dirs(tmp_path)
 
     location = analyze_location(dd)
@@ -2099,10 +2110,64 @@ def test_location_and_duplication_are_zeroed_when_merged_items_absent(
     assert location["hunk_source"] == "diff.patch"   # honest: hunks WERE readable
     assert duplication["shipped_items"] == 0
     assert duplication["comparable_pairs"] == 0
-    assert duplication["near_duplicate_pairs"] == 0
+    assert duplication["near_duplicate_pairs"] is None
     assert duplication["max_similarity"] is None
     assert duplication["mean_similarity"] is None
     assert duplication["pairs"] == []
+
+
+def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(
+    tmp_path: Path,
+) -> None:
+    """No ``deep/`` directory at all is another way merge never produced a
+    shipped set.
+
+    Same outcome as
+    ``test_location_and_duplication_are_zeroed_when_merged_items_absent``
+    (what's actually checked is ``merged-items.json``, not ``deep/``'s
+    existence) via a different setup: here ``deep/`` itself was never
+    created, so the manifest-archived headline count must be ``None``, not an
+    imputed zero (the same "undefined, never 0.0" contract as
+    ``location_in_hunk_rate``).
+    """
+    dd = tmp_path / ".daydream"
+    dd.mkdir(parents=True)
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["shipped_items"] == 0
+    assert duplication["comparable_pairs"] == 0
+    assert duplication["near_duplicate_pairs"] is None
+    assert duplication["max_similarity"] is None
+    assert duplication["mean_similarity"] is None
+    assert duplication["pairs"] == []
+
+
+def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(
+    tmp_path: Path,
+) -> None:
+    """Pairwise comparison is O(n^2); a pathological shipped set must not turn
+    a single eval pass into an unbounded time/memory sink (issue #1106 R2).
+
+    202 items: the first 200 fill the input cap with mutually distinct
+    descriptions, and the last two -- both beyond the cap -- are an
+    exact-duplicate pair. An uncapped scan would report that pair as the
+    escape; with the cap applied it is never compared, so
+    ``near_duplicate_pairs`` is 0 even though a genuine duplicate sits in the
+    tail. ``shipped_items`` still reports the true, uncapped total.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    # ``uuid4().hex`` descriptions share no common words/bigram structure, so
+    # none of the first 200 items accidentally clear the 0.5 similarity bar.
+    items = [_item(i, description=uuid.uuid4().hex) for i in range(200)]
+    items.append(_item(200, description="the exact same duplicate description text"))
+    items.append(_item(201, description="the exact same duplicate description text"))
+    seed_merged_items(deep, items)
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["shipped_items"] == 202
+    assert duplication["near_duplicate_pairs"] == 0   # the tail pair is beyond the cap
 
 
 @pytest.mark.parametrize(

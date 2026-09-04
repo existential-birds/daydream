@@ -860,6 +860,16 @@ counters and rates are always complete -- only the per-item detail is capped.
 _DUPLICATION_PAIR_CAP = 20
 """Max pair rows carried in ``analyze_shipped_duplication``'s ``pairs`` list."""
 
+_DUPLICATION_INPUT_CAP = 200
+"""Max shipped items compared in ``analyze_shipped_duplication``.
+
+Unlike ``_LOCATION_ITEM_CAP``, which only bounds an output list while its
+counters stay complete, the pairwise similarity scan itself is O(n^2): a
+pathological run with thousands of shipped items must not turn a single eval
+pass into an unbounded time/memory sink. ``shipped_items`` still reports the
+true total; only the comparison is capped.
+"""
+
 
 def _hunk_ranges(daydream_dir: Path) -> tuple[dict[str, list[tuple[int, int]]], str]:
     """Resolve per-file new-side hunk ranges for a run, and say where they came from.
@@ -1029,7 +1039,12 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
             continue
         if item.get("location_distrust") is True:
             distrusted_items += 1
-        if "location_cited_line" in item:
+        elif "location_cited_line" in item:
+            # ``location_cited_line`` is stamped on both the snap (relocate)
+            # and the demote branch of ``location_validator.validate_records``
+            # (its own docstring: the key means "relocated OR distrusted").
+            # Demoted items are already counted above, so only count this as
+            # a relocation when it was NOT a demotion (issue #1106 R2).
             relocated_items += 1
 
         lens = item.get("lens")
@@ -1114,10 +1129,24 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
 
     ``max_similarity``/``mean_similarity`` are ``None`` (not ``0.0``) with no
     comparable pairs: undefined, not perfect -- the ``grounding_rate``
-    precedent. An absent ``merged-items.json`` yields zeros/``None`` without
-    raising; a present-but-corrupt one raises via :func:`_load_shipped_items`.
-    ``pairs`` is capped at ``_DUPLICATION_PAIR_CAP`` (20), highest similarity
-    first.
+    precedent. A present-but-empty ``merged-items.json`` (a review-only run
+    that shipped nothing) yields real zeros -- there was a shipped set, it was
+    empty. When ``merged-items.json`` itself does not exist -- via
+    :func:`_load_shipped_items` returning ``None``, the same "merge ran"
+    discriminator ``archive/pipeline.py`` uses -- the shipped set was never
+    produced at all (this run never reached merge), so ``near_duplicate_pairs``
+    -- the value archived as ``manifest.shipped_duplicate_pairs`` -- is
+    ``None`` rather than an imputed zero, mirroring
+    ``location_in_hunk_rate``'s "undefined, never 0.0" contract. Note that
+    ``deep/`` itself is created earlier, in the coverage phase, so its mere
+    existence is NOT evidence merge ran. A present-but-corrupt file still
+    raises via :func:`_load_shipped_items`. ``pairs`` is capped at
+    ``_DUPLICATION_PAIR_CAP`` (20), highest similarity first; the comparison
+    itself is bounded by ``_DUPLICATION_INPUT_CAP`` (200) shipped items, since
+    the scan is O(n^2) -- ``input_truncated`` reports whether that cap dropped
+    any items, so a truncated (and therefore possibly incomplete) scan is
+    never silently indistinguishable from a complete one; ``shipped_items``
+    still reports the true, uncapped total.
     """
     # Function-local import: ``daydream.deep.orchestrator`` imports this module
     # at module level, so a module-level ``daydream.deep.dedup`` import here
@@ -1126,8 +1155,12 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     from daydream.deep.dedup import _SIM_THRESHOLD, build_record_dedup_candidates
 
     deep_dir = daydream_dir / "deep"
-    items = _load_shipped_items(deep_dir) or []
-    records = [item for item in items if isinstance(item, dict)]
+    raw_items = _load_shipped_items(deep_dir)
+    shipped_set_produced = raw_items is not None
+    items = raw_items or []
+    dict_items = [item for item in items if isinstance(item, dict)]
+    records = dict_items[:_DUPLICATION_INPUT_CAP]
+    input_truncated = len(dict_items) > _DUPLICATION_INPUT_CAP
     sources = [str(item.get("lens", "")) for item in records]
     pairs = build_record_dedup_candidates(records, sources, threshold=0.0)
 
@@ -1144,8 +1177,9 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
 
     return {
         "shipped_items": len(items),
+        "input_truncated": input_truncated,
         "comparable_pairs": len(pairs),
-        "near_duplicate_pairs": len(near),
+        "near_duplicate_pairs": len(near) if shipped_set_produced else None,
         "same_file_pairs": len(same_file),
         "same_file_near_duplicate_pairs": len(same_file_near),
         "max_similarity": round(max(similarities), 4) if similarities else None,

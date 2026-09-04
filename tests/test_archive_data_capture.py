@@ -792,7 +792,7 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     assert location["in_hunk_rate"] == 0.6667
     # The live validator demoted the mis-anchored item and recorded its citation.
     assert location["distrusted_items"] == 1
-    assert location["relocated_items"] == 1
+    assert location["relocated_items"] == 0   # demoted, not relocated (no snap)
     beyond = [row for row in location["items"] if row["tier"] == "beyond_tolerance"]
     assert len(beyond) == 1
     assert beyond[0]["cited_line"] == 88

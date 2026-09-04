@@ -224,9 +224,12 @@ class Manifest:
             if available).
         verbosity: Line-flagging verbosity ratio of the post-fix workspace
             (from eval, if available).
-        location_in_hunk_rate: Share of scored shipped findings whose resolved
-            line landed inside a diff hunk, i.e. the location validator's
-            headline accuracy axis (from eval, if available). ``None`` when the
+        location_in_hunk_rate: Share of scored shipped findings whose
+            originally cited line -- ``location_cited_line`` when the
+            validator snapped/demoted it, else ``line``; never the validator's
+            post-snap position, see ``eval.analyzer._cited_line`` -- landed
+            inside a diff hunk, i.e. the location validator's headline
+            accuracy axis (from eval, if available). ``None`` when the
             run scored no locatable findings — undefined, never 0.0, so the
             reward pipeline renormalizes over present axes instead of reading
             an imputed perfect/zero score.
