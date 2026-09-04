@@ -8,7 +8,8 @@ def test_schema_accepts_related_files() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
             "lens": "cross-stack", "severity": "high",
-            "related_files": ["b.py", "svc/handler.py"]}
+            "related_files": ["b.py", "svc/handler.py"],
+            "source_uids": ["python:1", "react:2"]}
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
 
 
@@ -16,7 +17,7 @@ def test_schema_rejects_non_string_related_files() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
             "lens": "per-stack", "severity": "medium",
-            "related_files": [42]}
+            "related_files": [42], "source_uids": []}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
 
@@ -24,7 +25,8 @@ def test_schema_rejects_non_string_related_files() -> None:
 def test_schema_requires_lens_and_severity() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
-            "lens": "structural", "severity": "high", "related_files": None}
+            "lens": "structural", "severity": "high", "related_files": None,
+            "source_uids": ["structure:1"]}
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # passes
     bad = {k: v for k, v in item.items() if k != "lens"}
     with pytest.raises(jsonschema.ValidationError):
@@ -58,5 +60,39 @@ def test_verdict_join_matches_after_collision_resolution() -> None:
 def test_schema_accepts_wonder_lens() -> None:
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "MEDIUM", "rationale": "r", "evidence": "a.py:4",
-            "lens": "wonder", "severity": "medium", "related_files": None}
+            "lens": "wonder", "severity": "medium", "related_files": None,
+            "source_uids": None}
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
+
+
+def test_schema_requires_source_uids() -> None:
+    """Provenance is not optional in the contract (issue #1111).
+
+    Strict mode rejects optional properties, so the merge agent must always emit
+    the key; ``null`` or ``[]`` is how it says "cannot attribute this item",
+    rather than saying it by omission. Omission would be indistinguishable from
+    a model that simply ignored the field.
+    """
+    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
+            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
+            "lens": "cross-stack", "severity": "high", "related_files": None,
+            "source_uids": ["python:1"]}
+    jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
+    bad = {k: v for k, v in item.items() if k != "source_uids"}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"items": [bad]}, MERGED_ITEMS_SCHEMA)
+
+
+def test_schema_rejects_non_string_source_uids() -> None:
+    """A uid is a string handle; a numeric entry is a malformed citation.
+
+    The host validates uid *values* against the run's real record pool, but the
+    schema still pins the shape so a structurally wrong payload is caught at the
+    boundary rather than silently filtered later.
+    """
+    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
+            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
+            "lens": "per-stack", "severity": "medium", "related_files": None,
+            "source_uids": [7]}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)

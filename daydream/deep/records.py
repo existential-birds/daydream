@@ -59,6 +59,11 @@ from typing import Any
 #: Record dict key holding the host-assigned referential identity.
 RECORD_UID_KEY = "uid"
 
+#: Merged-item key holding the list of record ``uid``s the item derives from.
+#: A merged item is a synthesis, possibly of several records, so its provenance
+#: is a list where a record's identity is a single value.
+RECORD_SOURCE_UIDS_KEY = "source_uids"
+
 #: Separator between the stack-name and ordinal halves of a ``uid``. Stack names
 #: never contain it, so ``rsplit`` on it recovers the stack name exactly.
 _UID_SEPARATOR = ":"
@@ -173,6 +178,68 @@ def stamp_record_uids(records: list[dict[str, Any]], stack_name: str) -> None:
     for ordinal, record in enumerate(records, start=1):
         if not record_uid(record):
             record[RECORD_UID_KEY] = mint_record_uid(normalized, ordinal)
+
+
+def item_source_uids(item: dict[str, Any]) -> list[str]:
+    """Return the pre-merge record uids *item* derives from, in order.
+
+    This is the post-merge counterpart to :func:`record_uid`. A merged item is
+    not a record: the cross-stack merge agent synthesizes items, and one item
+    may consolidate several records, so its provenance is a *list* rather than a
+    single handle. ``source_uids`` carries that list.
+
+    Resolution order, so every path a merged item can arrive by reports the same
+    way:
+
+    1. An explicit ``source_uids`` list (the merge agent's attribution, already
+       validated host-side against the run's record pool).
+    2. Failing that, the item's own ``uid`` — the case for items that never went
+       through the merge agent and therefore kept their birth identity: the
+       host-appended structural items, the single-stack bypass, and the salvage
+       path.
+    3. Failing both, empty — the item has no pre-merge provenance. That is a
+       real answer, not an error: an item the merge agent declined to attribute
+       reports nothing rather than a fabricated link.
+
+    Args:
+        item: A merged finding item.
+
+    Returns:
+        Deduplicated uids in first-seen order; empty when provenance is unknown.
+    """
+    raw = item.get(RECORD_SOURCE_UIDS_KEY)
+    if isinstance(raw, list):
+        attributed = union_source_uids(uid for uid in raw if isinstance(uid, str) and uid)
+        if attributed:
+            return attributed
+    own = record_uid(item)
+    return [own] if own else []
+
+
+def union_source_uids(*uid_groups: Any) -> list[str]:
+    """Union uid sequences into one deduplicated, first-seen-order list.
+
+    Used wherever two findings collapse into one and the survivor must inherit
+    both provenances -- the structural fold being the case that matters, since a
+    folded item represents a defect two lenses reported. Order is first-seen
+    rather than sorted so the survivor's own provenance leads, which keeps the
+    audit sidecar readable.
+
+    Accepts either a single iterable of uids or several, so callers can union
+    two items' lists without pre-flattening.
+
+    Args:
+        *uid_groups: Iterables of uid strings (or one such iterable).
+
+    Returns:
+        Deduplicated uids in first-seen order, empty strings excluded.
+    """
+    seen: dict[str, None] = {}
+    for group in uid_groups:
+        for uid in group:
+            if isinstance(uid, str) and uid:
+                seen.setdefault(uid, None)
+    return list(seen)
 
 
 def duplicate_record_uids(records: list[dict[str, Any]]) -> list[str]:

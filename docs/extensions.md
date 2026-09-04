@@ -461,13 +461,24 @@ does not bump `EXTENSION_API_VERSION`: a fork that round-trips whole record dict
 (as the recipes below do) carries it through automatically, and the
 `{**item, ...}` spread those recipes use preserves it.
 
+Merged items additionally carry `source_uids`: the list of record `uid`s the
+finding derives from. A merged item is a synthesis and may consolidate several
+records, so its provenance is a list where a record's identity is a single
+value. Read it with `daydream.deep.records.item_source_uids`, which resolves the
+explicit attribution first and falls back to the item's own `uid`, so one
+accessor is correct for merge-agent items, for items that bypassed the merge
+agent (the single-stack path, host-appended structural records, the salvage
+path), and for artifacts written before the field existed. An empty list means
+the merge agent declined to attribute the item — a real answer, not an error.
+
 Two constraints for a fork that reads it:
 
-- `uid` is a **pre-merge** handle. The cross-stack merge agent re-emits items
-  from scratch, so multi-stack merged items carry no `uid` and do not need one —
-  every merged item already has a globally unique `id`. Read it with
-  `daydream.deep.records.record_uid`, which returns `""` for "no pre-merge
-  identity"; that is the common case after a multi-stack merge, not an error.
+- `uid` itself is a **pre-merge** handle. The cross-stack merge agent re-emits
+  items from scratch, so a multi-stack merged item has no `uid` *of its own* —
+  use `source_uids` for its derivation, and note that `id` is already globally
+  unique on every merged item. `daydream.deep.records.record_uid` returns `""`
+  for "no pre-merge identity"; after a multi-stack merge that is the common
+  case, not an error.
 - Never mint one yourself, and never derive one from record content. A
   content-derived key gets *less* discriminating as two records get more
   similar, which is precisely the condition every consumer of this field runs

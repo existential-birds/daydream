@@ -2402,6 +2402,14 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     # follow-up). Apply the D-27 dedup pre-filter (issue #361): with no merge
     # agent to adjudicate, drop the duplicate side of cross-stack record pairs so
     # the partial list doesn't carry duplicates into the resume verifier/fix gate.
+    # Issue #1111: these items are host-written -- no merge agent ran, by
+    # definition of this path -- so their ``source_uids`` come from the records'
+    # own uids. That attribution is not repeated here: it lives in
+    # ``_write_single_stack_merged_items``, which is the single writer of this
+    # path's items, and duplicating it would give the salvage report a second
+    # spelling of provenance that could drift from the bypass's. The records
+    # reaching here are uid-stamped (``_step_per_stack_parse``) and pass through
+    # ``_drop_cross_stack_duplicates`` unmodified, so the uids survive.
     records = _drop_cross_stack_duplicates(dd, ctx.data["records"])
     _write_single_stack_merged_items(
         ctx.work.repo,

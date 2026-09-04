@@ -14,11 +14,13 @@ from typing import Any
 from daydream.deep.records import (
     RECORD_UID_KEY,
     duplicate_record_uids,
+    item_source_uids,
     mint_record_uid,
     record_uid,
     stack_name_from_records_source,
     stack_name_from_uid,
     stamp_record_uids,
+    union_source_uids,
 )
 
 
@@ -216,3 +218,74 @@ def test_duplicate_detection_ignores_records_without_a_uid() -> None:
     records: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {RECORD_UID_KEY: "python:1"}]
 
     assert duplicate_record_uids(records) == []
+
+
+def test_item_source_uids_prefers_the_explicit_attribution() -> None:
+    """A merged item's provenance is a list: one item may consolidate several records."""
+    item: dict[str, Any] = {"id": 3, "source_uids": ["python:2", "react:2"]}
+
+    assert item_source_uids(item) == ["python:2", "react:2"]
+
+
+def test_item_source_uids_preserves_order_and_dedupes() -> None:
+    item: dict[str, Any] = {"source_uids": ["python:1", "react:1", "python:1"]}
+
+    assert item_source_uids(item) == ["python:1", "react:1"]
+
+
+def test_item_source_uids_falls_back_to_the_items_own_uid() -> None:
+    """Items that never met the merge agent keep their birth identity.
+
+    The host-appended structural items, the single-stack bypass and the salvage
+    path all carry a record's own ``uid`` rather than a synthesized list, and
+    must report the same way as an attributed merge item.
+    """
+    item: dict[str, Any] = {"id": 4, RECORD_UID_KEY: "structure:1"}
+
+    assert item_source_uids(item) == ["structure:1"]
+
+
+def test_item_source_uids_is_empty_when_the_agent_declined_to_attribute() -> None:
+    """Empty is a real answer, not an error.
+
+    An item the merge agent could not tie to a record reports nothing rather
+    than a fabricated link -- inventing provenance here would be worse than
+    admitting there is none.
+    """
+    assert item_source_uids({"id": 1, "source_uids": []}) == []
+    assert item_source_uids({"id": 1}) == []
+
+
+def test_item_source_uids_ignores_malformed_entries() -> None:
+    """A hallucinated non-string entry must not reach a consumer as provenance."""
+    item: dict[str, Any] = {"source_uids": ["python:1", 7, None, "", "react:1"]}
+
+    assert item_source_uids(item) == ["python:1", "react:1"]
+
+
+def test_item_source_uids_ignores_a_non_list_value() -> None:
+    """A scalar where a list belongs degrades to the uid fallback, never raises."""
+    item: dict[str, Any] = {"source_uids": "python:1", RECORD_UID_KEY: "structure:2"}
+
+    assert item_source_uids(item) == ["structure:2"]
+
+
+def test_union_merges_two_provenances_survivor_first() -> None:
+    """The structural fold's survivor represents a defect two lenses reported.
+
+    First-seen order puts the survivor's own provenance first, which is what
+    keeps the fold's audit sidecar readable.
+    """
+    assert union_source_uids(["python:1"], ["structure:1"]) == ["python:1", "structure:1"]
+
+
+def test_union_dedupes_across_groups() -> None:
+    assert union_source_uids(["python:1", "react:1"], ["react:1"]) == ["python:1", "react:1"]
+
+
+def test_union_drops_empty_and_non_string_entries() -> None:
+    assert union_source_uids(["python:1", "", None, 3], []) == ["python:1"]
+
+
+def test_union_of_nothing_is_empty() -> None:
+    assert union_source_uids([], []) == []

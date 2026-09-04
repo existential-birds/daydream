@@ -9797,3 +9797,570 @@ async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
     assert _uid_list(deep, "react") == ["react:1"]
     assert _uid_list(deep, "generic") == ["generic:1"]
     assert _uid_list(deep, "structure") == ["structure:1"]
+
+
+# Issue #1111 (provenance half): merged-item ``source_uids``.
+#
+# ``uid`` answers "which record object is this?" for a PRE-merge record. The
+# cross-stack merge agent re-emits every item from scratch under
+# ``MERGED_ITEMS_SCHEMA``, so a merged item has no uid of its own and the only
+# link back to the records it was synthesized from is ``source_uids``. That
+# makes it the one field in the pipeline where a *model* names a *host-minted*
+# identity, so these tests drive the real merge and read the artifacts a
+# consumer resolves as fact -- ``merged-items.json`` and the audit sidecars --
+# because an attribution that is lost, empty, or invented is invisible anywhere
+# else.
+
+
+def _merged_items(deep: Path) -> list[dict[str, Any]]:
+    """Return the canonical merged item list written under *deep*."""
+    return cast("list[dict[str, Any]]", json.loads((deep / "merged-items.json").read_text())["items"])
+
+
+def _run_uid_pool(deep: Path) -> set[str]:
+    """Every record uid this run actually minted, read back off its artifacts.
+
+    The pool is read from disk rather than hardcoded because it is exactly what
+    ``_validate_agent_source_uids`` builds to check the agent's claims against:
+    asserting a shipped attribution is a subset of it is asserting the shipped
+    item names a record that exists.
+    """
+    return {
+        uid
+        for path in sorted(deep.glob("stack-*-records.json"))
+        for record in _record_issues(json.loads(path.read_text()))
+        if (uid := record.get("uid"))
+    }
+
+
+def _source_uids_by_description(deep: Path) -> dict[str, Any]:
+    """Map each merged item's description to its ``source_uids`` value.
+
+    Keyed on ``description`` because ``normalize_items`` reassigns every ``id``
+    at the merge write, so the reviewer-side numbering a test set up with is gone
+    by the time the artifact lands.
+    """
+    return {str(item.get("description")): item.get("source_uids") for item in _merged_items(deep)}
+
+
+def _panel_text(capsys: pytest.CaptureFixture[str]) -> str:
+    """Return captured console output with rich's panel framing normalized away.
+
+    ``print_warning`` renders inside a bordered panel, so a message long enough
+    to wrap arrives with ``│`` gutters and newlines spliced into the middle of
+    it. Dropping the border glyphs and collapsing whitespace lets a test assert
+    the sentence the operator reads rather than the width it happened to wrap at.
+    """
+    text = capsys.readouterr().out.replace("│", " ").replace("║", " ")
+    return " ".join(text.split())
+
+
+def _prime_source_uid_merge_resume(
+    target: Path,
+    *,
+    structure: list[dict[str, Any]] | None = None,
+) -> Path:
+    """Prime a four-stack merge resume whose uid pool is known before the run.
+
+    Every stack ``multi_stack_target`` detects gets exactly one grounded record,
+    so the pool is exactly ``{generic:1, python:1, react:1, structure:1}`` and a
+    test can name a real uid (or a plausible non-existent one) in the merge
+    agent's output up front -- which a fresh run cannot do, since the records do
+    not exist until it has already merged them.
+
+    Each record sits on its own file and the structural record sits alone at
+    ``api.py:5``, so arbiter selection's contested-location branch never fires
+    and no verdict rewrites a description these tests match on.
+
+    Every primed record carries its ``uid`` ON DISK, exactly as a fresh run
+    writes it at record birth. That is load-bearing rather than cosmetic:
+    ``_validate_agent_source_uids`` builds the run's uid pool by re-reading the
+    records FILES -- the same bytes the merge agent is pointed at -- so a resume
+    primed with uid-less records (a pre-#1111 artifact) legitimately has an empty
+    pool, and every uid a test made the agent cite would be dropped as invented.
+    """
+    return _prime_merge_resume(
+        target,
+        python=[_record(description="py issue", evidence="api.py:1", uid="python:1")],
+        react=[
+            _record(
+                description="tsx issue", file="App.tsx", evidence="App.tsx:1", uid="react:1"
+            )
+        ],
+        generic=[
+            _record(
+                description="docs issue",
+                file="README.md",
+                evidence="README.md:1",
+                uid="generic:1",
+            )
+        ],
+        structure=(
+            structure
+            if structure is not None
+            else [
+                _record(
+                    description="structural issue",
+                    line=5,
+                    evidence="api.py:5",
+                    uid="structure:1",
+                )
+            ]
+        ),
+    )
+
+
+def _provenance_item(
+    item_id: int,
+    description: str,
+    *,
+    file: str = "api.py",
+    line: int = 1,
+    source_uids: Any = None,
+    evidence: str | None = None,
+    severity: str = "medium",
+    rationale: str = "rationale",
+    omit_source_uids: bool = False,
+) -> dict[str, Any]:
+    """Build one merge-agent item with an explicitly chosen provenance claim.
+
+    ``_merge_item`` cannot serve here: these tests are about the ``source_uids``
+    value itself, including the shapes a real model gets wrong (a null, a bare
+    string, an omitted key), so every one of them has to be settable.
+    """
+    item: dict[str, Any] = {
+        "id": item_id,
+        "lens": "per-stack",
+        "file": file,
+        "line": line,
+        "severity": severity,
+        "description": description,
+        "confidence": "MEDIUM",
+        "rationale": rationale,
+        "evidence": f"{file}:{line}" if evidence is None else evidence,
+    }
+    if not omit_source_uids:
+        item["source_uids"] = source_uids
+    return item
+
+
+async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
+) -> None:
+    """#1111 real-path: every shipped item names the records it derives from.
+
+    This is the row of #1111's table the uid stamp alone did not deliver. A
+    multi-stack run ships merge-agent items beside host-appended structural
+    ones, and the agent's items carry no ``uid`` by construction -- so before
+    ``source_uids`` the majority of what this fixture ships (the three
+    merge-agent items of five) had no machine-readable provenance at all, and
+    the eval/archive surfaces that resolve provenance had nothing to resolve.
+
+    Real path: a fresh default deep run, backend the only mock. Asserts on
+    ``merged-items.json``: the key is present and non-empty on EVERY item, every
+    uid named is one this run actually minted (read back from the
+    ``stack-*-records.json`` artifacts), the merge agent's items name the stacks
+    they came from -- including the cross-stack item, which names all three --
+    and the host-appended structural item names its own record.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = deep_dir(multi_stack_target)
+    items = _merged_items(deep)
+    pool = _run_uid_pool(deep)
+    assert pool == {"generic:1", "python:1", "react:1", "structure:1"}, pool
+
+    # (1) No shipped item is unattributed, and none of them cites a record that
+    # does not exist. Checked over every item rather than the ones the fixture
+    # happens to name, because "3 of 5 had no provenance" was the defect.
+    for item in items:
+        assert "source_uids" in item, f"shipped item carries no provenance key: {item}"
+        assert item["source_uids"], f"shipped item carries no record attribution: {item}"
+        assert set(item["source_uids"]) <= pool, (
+            f"shipped item cites a record this run never minted: {item['source_uids']} "
+            f"not within {sorted(pool)}"
+        )
+
+    # (2) The attribution is the right one, not merely a well-formed one. The two
+    # per-stack items name their own stack's record; the cross-stack item names a
+    # record from every stack, which is the consolidation the field exists for.
+    by_description = _source_uids_by_description(deep)
+    assert by_description["Python issue"] == ["python:1"]
+    assert by_description["React issue"] == ["react:1"]
+    assert by_description["Contract drift between Python handler and React caller"] == [
+        "generic:1",
+        "python:1",
+        "react:1",
+    ]
+
+    # (3) The host-appended structural items never see the merge agent, so the
+    # host attributes them -- each to the single record it is.
+    structural = [item for item in items if item.get("lens") == "structural"]
+    assert structural, f"no structural item shipped: {items}"
+    assert [item["source_uids"] for item in structural] == [["structure:1"]]
+
+
+async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1111 real-path: an invented uid is discarded; the finding is not.
+
+    A uid is an opaque handle downstream consumers resolve as fact, not content a
+    reader can sanity-check, so a plausible invention (``python:99`` on a run
+    whose python stack produced one record) would masquerade as real provenance
+    everywhere it is read. Validation is nonetheless fail-OPEN: provenance is
+    metadata about a finding, not the finding, so a bad claim must cost the claim
+    and nothing else.
+
+    Real path: a ``--start-at merge`` resume over primed records, so the run's
+    uid pool is known before the merge agent speaks and a bogus uid can be named
+    deliberately. Asserts the bogus uids are absent from ``merged-items.json``,
+    the legitimate one survives beside them, the item left with nothing still
+    SHIPS, the run still returns 0, and one aggregate warning names what was
+    dropped.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _prime_source_uid_merge_resume(multi_stack_target)
+    stub.merge_items = [
+        # One real uid and one invention, on the same item: the real half must
+        # survive the drop of the other rather than the whole list being voided.
+        _provenance_item(1, "Partly attributed finding", source_uids=["python:1", "python:99"]),
+        # Wholly invented, including a stack name this run has no records for.
+        _provenance_item(
+            2, "Wholly misattributed finding", file="App.tsx", source_uids=["ghost:7"]
+        ),
+    ]
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    deep = deep_dir(multi_stack_target)
+    by_description = _source_uids_by_description(deep)
+    # The real uid survives; the invention beside it is gone.
+    assert by_description["Partly attributed finding"] == ["python:1"]
+    # Fail-open: the wholly misattributed finding SHIPS, with an honest empty
+    # provenance. Losing the finding to protect a bookkeeping field would be the
+    # bug, not the fix.
+    assert by_description["Wholly misattributed finding"] == []
+    raw = (deep / "merged-items.json").read_text()
+    assert "python:99" not in raw, f"invented uid reached the canonical artifact: {raw}"
+    assert "ghost:7" not in raw, f"invented uid reached the canonical artifact: {raw}"
+
+    # ONE aggregate warning for the whole merge (a model that misreads the uid
+    # convention misreads it for every item at once), naming both bad uids and
+    # how much provenance the run lost.
+    out = _panel_text(capsys)
+    assert (
+        "Merge agent cited 2 source_uid(s) that match no record in this run "
+        "(ghost:7, python:99); dropped them from item provenance. "
+        "1 of 2 merged item(s) now carry no record attribution." in out
+    ), out
+
+
+async def test_unattributable_merge_source_uids_degrade_to_empty_list(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1111 real-path: null / missing / wrong-typed provenance ships as ``[]``.
+
+    ``source_uids`` is strict-mode *required*, so the model must always emit the
+    key and says "cannot attribute" with a null or an empty array. A real backend
+    also gets the shape wrong sometimes -- a bare string instead of a list, or the
+    key omitted despite the schema. All three mean the same thing (nothing
+    claimed) and all three must resolve to the same on-disk value, so no
+    consumer has to branch on which flavour of absence it received.
+
+    "Cannot attribute" is not an error, so no aggregate warning fires and every
+    finding still ships.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _prime_source_uid_merge_resume(multi_stack_target)
+    stub.merge_items = [
+        _provenance_item(1, "Explicit null provenance", source_uids=None),
+        _provenance_item(2, "Omitted provenance key", file="App.tsx", omit_source_uids=True),
+        _provenance_item(3, "Bare-string provenance", file="README.md", source_uids="python:1"),
+    ]
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    deep = deep_dir(multi_stack_target)
+    by_description = _source_uids_by_description(deep)
+    for description in (
+        "Explicit null provenance",
+        "Omitted provenance key",
+        "Bare-string provenance",
+    ):
+        assert description in by_description, (
+            f"an unattributable finding was lost: {sorted(by_description)}"
+        )
+        assert by_description[description] == [], by_description[description]
+
+    # A null is a documented answer, not a bad claim: nothing was cited, so
+    # nothing can have been invented, so the unknown-uid warning must stay quiet.
+    out = _panel_text(capsys)
+    assert "match no record in this run" not in out, out
+
+
+async def test_single_stack_bypass_attributes_items_to_their_own_records(
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
+) -> None:
+    """#1111 real-path: the tiny-diff bypass attributes items to their records.
+
+    A single-stack run never reaches the merge agent -- the host writes the
+    canonical item list itself -- so nothing on this path would attribute
+    anything unless that writer does. It matters that it does anyway: a consumer
+    forced to read the item's own ``uid`` for bypass items and ``source_uids``
+    for merged ones would be re-deriving the resolution rule
+    ``item_source_uids`` already owns, and would get it wrong for the salvage
+    path that shares this writer.
+
+    Real path: a FRESH deep run over the two-file fixture whose stacks collapse
+    into one generic assignment -- no primed artifacts, so both the records and
+    the items under assertion are minted by this run. Asserts the merge agent
+    never ran and that the per-stack item and the host-appended structural item
+    each name the record they are.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+    mute_side_effects()
+
+    assert await _run_deep(tiny_diff_target) == 0
+
+    assert [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()] == [], (
+        "the single-stack bypass must not invoke the merge agent"
+    )
+    deep = deep_dir(tiny_diff_target)
+    assert _run_uid_pool(deep) == {"generic:1", "structure:1"}
+    by_description = _source_uids_by_description(deep)
+    assert by_description["Sample issue"] == ["generic:1"]
+    assert by_description["Structural maintainability concern"] == ["structure:1"]
+    # Bypass items keep their birth ``uid`` as well, and the two answers agree --
+    # the derivation of an item that IS a record is that record.
+    for item in _merged_items(deep):
+        assert item["source_uids"] == [item["uid"]], item
+
+
+async def test_structural_fold_survivor_inherits_both_provenances(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111/#1103 real-path: a folded item is traceable to BOTH its records.
+
+    The fold makes one item stand for a defect two lenses independently
+    reported, discarding the loser's text -- so a folded finding is precisely the
+    case where "which records produced this?" has more than one answer, and
+    before this it was the case where the question was unanswerable. The
+    survivor's own provenance leads, so the item reads as "itself, plus what
+    folded into it".
+
+    Real path: a ``--start-at merge`` resume whose structural record restates the
+    merge agent's ``api.py`` finding in the same words (clearing
+    ``FOLD_SIM_THRESHOLD``). The base item carries grounded evidence, so it wins
+    survivorship. Asserts the shipped item's ``source_uids`` and the
+    ``folded-structural.json`` sidecar entry carry the same union.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _prime_source_uid_merge_resume(
+        multi_stack_target,
+        structure=[
+            _record(
+                description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5", uid="structure:1"
+            )
+        ],
+    )
+    stub.merge_items = [
+        _provenance_item(1, _TWIN_DESCRIPTION, line=5, source_uids=["python:1"]),
+        _provenance_item(2, "Unrelated react concern", file="App.tsx", source_uids=["react:1"]),
+    ]
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    deep = deep_dir(multi_stack_target)
+    twins = [item for item in _merged_items(deep) if item["description"] == _TWIN_DESCRIPTION]
+    assert len(twins) == 1, f"the structural twin did not fold: {twins}"
+    # The base item survived (it is the evidenced side) and now stands for both
+    # records. Survivor's provenance leads.
+    assert twins[0]["lens"] == "per-stack"
+    assert twins[0]["source_uids"] == ["python:1", "structure:1"]
+    # ... and folding never demotes: the structural side's severity carries.
+    assert twins[0]["severity"] == "high"
+    # The untouched item keeps its own single attribution -- the fold is not a
+    # blanket re-attribution of everything in the merge.
+    assert _source_uids_by_description(deep)["Unrelated react concern"] == ["react:1"]
+
+    # The sidecar answers "which records does the shipped item now stand for?"
+    # without re-deriving the fold from merged-items.json.
+    folded = json.loads((deep / "folded-structural.json").read_text())
+    assert folded["folded_count"] == 1, folded
+    assert folded["folded"][0]["survivor"] == "base"
+    assert folded["folded"][0]["source_uids"] == ["python:1", "structure:1"]
+
+
+async def test_structural_fold_provenance_when_structural_side_survives(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111/#1103 real-path: the other survivorship direction unions too.
+
+    The fold runs BEFORE the evidence gate, so when the base item carries no
+    grounded evidence of its own while the structural twin does, survivorship
+    goes the other way -- otherwise the fold would hand the finding to the record
+    the gate is about to drop and delete a corroborated defect outright. The
+    provenance union has to be spelled once for both directions, or exactly this
+    branch is the one that silently loses an attribution.
+
+    Same setup as the base-survivor case with the merge agent's evidence blanked,
+    which is what makes its item ungrounded.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _prime_source_uid_merge_resume(
+        multi_stack_target,
+        structure=[
+            _record(
+                description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5", uid="structure:1"
+            )
+        ],
+    )
+    stub.merge_items = [
+        _provenance_item(
+            1, _TWIN_DESCRIPTION, line=5, evidence="", source_uids=["python:1"]
+        ),
+        _provenance_item(2, "Unrelated react concern", file="App.tsx", source_uids=["react:1"]),
+    ]
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    deep = deep_dir(multi_stack_target)
+    twins = [item for item in _merged_items(deep) if item["description"] == _TWIN_DESCRIPTION]
+    assert len(twins) == 1, f"the corroborated defect did not ship exactly once: {twins}"
+    # The STRUCTURAL side survived this time, so its own provenance leads.
+    assert twins[0]["lens"] == "structural"
+    assert twins[0]["source_uids"] == ["structure:1", "python:1"]
+
+    folded = json.loads((deep / "folded-structural.json").read_text())
+    assert folded["folded"][0]["survivor"] == "structural"
+    assert folded["folded"][0]["source_uids"] == ["structure:1", "python:1"]
+
+
+async def test_dropped_speculative_sidecar_records_item_provenance(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111 real-path: the evidence gate's sidecar records what it deleted.
+
+    ``dropped_uids`` is empty for every merge-agent item by construction (the
+    agent's items have no ``uid`` of their own), so on the common multi-stack
+    path the sidecar named nothing at all -- an audit artifact that answers
+    nothing exactly when a reviewer is asking "what did the gate throw away?".
+    ``dropped_source_uids`` answers the derivation question for every item, per
+    item rather than flattened, since which records produced THIS dropped
+    finding is the question.
+
+    Real path: a ``--start-at merge`` resume whose merge agent emits one grounded
+    item and one speculative one (blank evidence plus the legacy "no exploration
+    evidence" rationale), each with a real attribution.
+    """
+    from daydream.deep.artifacts import deep_dir
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _prime_source_uid_merge_resume(multi_stack_target)
+    stub.merge_items = [
+        _provenance_item(1, "Grounded finding", source_uids=["python:1"]),
+        _provenance_item(
+            2,
+            "Speculative unfounded finding",
+            file="App.tsx",
+            evidence="",
+            rationale="inferred from the diff alone, no exploration evidence",
+            source_uids=["react:1", "generic:1"],
+        ),
+    ]
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    deep = deep_dir(multi_stack_target)
+    by_description = _source_uids_by_description(deep)
+    assert "Speculative unfounded finding" not in by_description, by_description
+    assert by_description["Grounded finding"] == ["python:1"]
+
+    dropped = json.loads((deep / "dropped-speculative.json").read_text())
+    assert dropped["dropped_count"] == 1, dropped
+    assert dropped["dropped_ids"] == [2]
+    # Per item, not flattened -- the grouping IS the answer.
+    assert dropped["dropped_source_uids"] == [["react:1", "generic:1"]]
+    # The dropped object had no uid of its own (the merge agent authored it), so
+    # the derivation is the only handle the sidecar can offer for it.
+    assert dropped["dropped_uids"] == []
+
+
+@pytest.mark.anyio
+async def test_legacy_artifact_backfills_structural_provenance_consistently(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-uid artifact must not yield two different answers in one run (#1111).
+
+    ``_step_per_stack_parse`` backfills uids onto the per-stack records it loads,
+    but the structural append re-reads its records file from disk. Before this was
+    fixed the single-stack bypass therefore attributed its items from backfilled
+    values while the structural half saw no uid at all -- the same "legacy
+    artifact" condition answered two ways inside one run, in the very field whose
+    purpose is traceability.
+
+    Both halves now apply the same deterministic ``(stack_name, position)``
+    backfill, so the structural item reports real provenance rather than the
+    honest-but-avoidable ``[]``.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    # Prime WITHOUT uid on disk -- the shape a run from before the field existed
+    # left behind. Deliberately not `_prime_source_uid_merge_resume`, which primes
+    # uids precisely to avoid this condition.
+    _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(description="py issue", evidence="api.py:1")],
+        react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
+        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
+        structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
+    )
+    records_path = multi_stack_target / ".daydream" / "deep" / "stack-structure-records.json"
+    assert all(
+        "uid" not in rec for rec in _record_issues(json.loads(records_path.read_text()))
+    ), "fixture must start with no uid on disk or it proves nothing"
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+
+    assert exit_code == 0
+    items = json.loads(
+        (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text()
+    )["items"]
+    structural = [item for item in items if item.get("lens") == "structural"]
+    assert structural, "the structural record must still reach the report"
+    assert structural[0]["source_uids"] == ["structure:1"]

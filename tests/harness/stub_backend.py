@@ -246,6 +246,45 @@ class StubBackend:
         self.fail_sweep: bool = False
 
     @staticmethod
+    def _prompt_record_uid_groups(prompt: str) -> list[list[str]]:
+        """Read the record ``uid``s the merge prompt points this turn at (#1111).
+
+        ``build_merge_prompt`` renders its records block as one ``  - <path>``
+        line per per-stack records file (structural records are deliberately
+        absent -- the host appends those items itself), so re-reading those files
+        here is exactly what the production merge agent does when it copies a
+        ``uid`` verbatim out of a record to fill ``source_uids``. Returning one
+        group PER FILE (rather than one flat list) is what lets the default
+        payload below attribute a per-stack item to a single stack and a
+        cross-stack item to several -- the real shapes ``source_uids`` exists to
+        carry.
+
+        A records file that is missing or malformed contributes nothing: the
+        phase-level merge tests point the prompt at paths that were never
+        written, and a stub that raised there would fail tests about something
+        else entirely.
+
+        Returns:
+            One list of uids per records file that had any, in prompt order.
+        """
+        from daydream.deep.records import record_uid
+
+        groups: list[list[str]] = []
+        for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
+            try:
+                loaded = json.loads(Path(path_str).read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            uids = [
+                uid
+                for rec in _records_issues_or_empty(loaded)
+                if isinstance(rec, dict) and (uid := record_uid(rec))
+            ]
+            if uids:
+                groups.append(uids)
+        return groups
+
+    @staticmethod
     def _stack_scope_files(prompt: str) -> list[str]:
         """Extract the file list from a per-stack/generic scope instruction.
 
@@ -698,6 +737,8 @@ class StubBackend:
                 # Issue #742: fresh-run records files carry the dict shape
                 # {"issues": [...], "verdicts": [...]}; normalize to the
                 # bare issues list (legacy files stay bare lists).
+                from daydream.deep.records import record_uid
+
                 echoed: list[dict[str, Any]] = []
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
@@ -715,6 +756,14 @@ class StubBackend:
                                 "confidence": rec.get("confidence", "MEDIUM"),
                                 "rationale": rec.get("rationale", "rationale"),
                                 "evidence": rec.get("evidence", "api.py:1"),
+                                # Issue #1111: an echoed item IS one record, so
+                                # its provenance is that record's own uid. The
+                                # merge agent never emits ``uid`` (the host owns
+                                # it and re-mints nothing post-merge), so the
+                                # link is carried by ``source_uids`` only --
+                                # copied verbatim, which is what the prompt
+                                # demands and what host-side validation checks.
+                                "source_uids": [uid] if (uid := record_uid(rec)) else [],
                             }
                         )
                         next_id += 1
@@ -726,6 +775,25 @@ class StubBackend:
                     continuation=None,
                 )
                 return
+            # Issue #1111: attribute the default payload to REAL record uids
+            # read off disk, so the default multi-stack fixtures exercise the
+            # production ``source_uids`` shape rather than the "agent emitted
+            # nothing" degenerate case. The two per-stack items cite the stack
+            # they name (``Python issue`` -> a ``python:*`` record); the
+            # cross-stack item cites one record from EVERY stack, which is the
+            # consolidation the field exists to express. A run whose stacks
+            # collapsed (tiny-diff / shallow, where the only stack is
+            # ``generic``) has no python/react record to cite, so the lookup
+            # falls back to the first stack present rather than emitting ``[]``.
+            from daydream.deep.records import stack_name_from_uid
+
+            lead_uids = [group[0] for group in self._prompt_record_uid_groups(prompt)]
+            leads_by_stack = {stack_name_from_uid(uid): uid for uid in reversed(lead_uids)}
+
+            def _lead(stack: str) -> list[str]:
+                uid = leads_by_stack.get(stack) or (lead_uids[0] if lead_uids else "")
+                return [uid] if uid else []
+
             yield ResultEvent(
                 structured_output={
                     "items": [
@@ -739,6 +807,7 @@ class StubBackend:
                             "confidence": "MEDIUM",
                             "rationale": "rationale",
                             "evidence": "api.py:1",
+                            "source_uids": _lead("python"),
                         },
                         {
                             "id": 2,
@@ -750,6 +819,7 @@ class StubBackend:
                             "confidence": "MEDIUM",
                             "rationale": "rationale",
                             "evidence": "App.tsx:1",
+                            "source_uids": _lead("react"),
                         },
                         {
                             "id": 3,
@@ -761,6 +831,7 @@ class StubBackend:
                             "confidence": "HIGH",
                             "rationale": "rationale",
                             "evidence": "api.py:1",
+                            "source_uids": list(lead_uids),
                         },
                     ]
                 },

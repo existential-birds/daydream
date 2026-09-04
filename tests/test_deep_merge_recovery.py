@@ -596,3 +596,76 @@ def test_merge_salvage_keeps_both_sides_of_a_pre_uid_dedup_pair(
     out = " ".join(capsys.readouterr().out.split())
     assert "carries no record_b_uid" in out
     assert "keeping both records (issue #1111)" in out
+
+
+async def test_merge_salvage_partial_items_carry_source_uids(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111: a salvaged partial report still names the records behind each item.
+
+    On this path there IS no merge agent -- that is what "salvage" means -- so
+    the host is the only producer that can attribute anything, and the one that
+    can do it with certainty, since every item here IS a record. Nothing extra
+    writes that attribution: ``_salvage_merge_failure`` delegates to
+    ``_write_single_stack_merged_items``, deliberately, so the salvage report
+    cannot grow a second spelling of provenance that drifts from the bypass's.
+    What this pins is that the delegation actually delivers it -- on precisely
+    the path where a reader most needs it, since a partial report's provenance is
+    what tells them which stacks made it into the file.
+
+    Real path: the full deep flow with an unparseable (``str``) merge response.
+    ``parse_by_stack`` gives each stack a finding on its own file, worded with
+    no shared vocabulary, so the dedup pre-filter pairs nothing and every record
+    reaches the partial write -- the salvage applies that pre-filter itself,
+    having no merge agent to adjudicate the pairs.
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_emit_str = "no item list"
+    # Medium severity keeps every record below the arbiter's ``min_severity``,
+    # and the python finding sits at api.py:2 rather than api.py:1 so it does not
+    # collide with the structural stack's default finding either -- no
+    # arbitration, so no verdict rewrites a description asserted on below.
+    stub.parse_by_stack = {
+        "python": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "api.py",
+            "line": 2,
+            "description": "Unbounded cache write in the request handler",
+        },
+        "react": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "App.tsx",
+            "line": 1,
+            "description": "Missing key prop on the rendered list",
+        },
+        "generic": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "README.md",
+            "line": 1,
+            "description": "Setup instructions omit the migration step",
+        },
+    }
+
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+
+    dd = deep_dir(multi_stack_target)
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    provenance = {str(i["description"]): i["source_uids"] for i in items}
+    assert provenance == {
+        "Setup instructions omit the migration step": ["generic:1"],
+        "Unbounded cache write in the request handler": ["python:1"],
+        "Missing key prop on the rendered list": ["react:1"],
+        "Structural maintainability concern": ["structure:1"],
+    }, items
+    # These items never passed through the merge agent, so they still carry
+    # their birth ``uid`` -- and the two answers agree, which is the invariant
+    # ``item_source_uids`` exists to let a consumer rely on without re-deriving.
+    for item in items:
+        assert item["source_uids"] == [item["uid"]], item

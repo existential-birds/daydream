@@ -34,7 +34,7 @@ from daydream.backends import (
 )
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
-from daydream.eval.analyzer import _records_issues
+from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.generated_files import (
@@ -922,6 +922,25 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                         "type": ["array", "null"],
                         "items": _REPOSITORY_FILE_PATH_SCHEMA,
                     },
+                    # Issue #1111: the machine-readable provenance handle. A
+                    # merged item is a synthesis the agent writes from scratch,
+                    # so without this the only link back to the records it came
+                    # from is the ``(Sources: ...)`` prose in ``rationale``,
+                    # which nothing downstream can parse. Each entry is the
+                    # host-minted ``uid`` of a contributing record; a
+                    # deduplicated cross-stack item lists all of them.
+                    # Same ``["array", "null"]`` shape as ``related_files``
+                    # above and for the same reason: strict mode rejects
+                    # optional properties (test_output_schema_strict.py), so
+                    # the model must always emit the key and says "cannot
+                    # attribute" with null or an empty array rather than by
+                    # omission. Host-side validation against the run's real uid
+                    # pool happens in ``phase_cross_stack_merge`` -- the schema
+                    # constrains the shape, never the truth of the values.
+                    "source_uids": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                    },
                 },
                 "required": [
                     "id",
@@ -934,6 +953,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "lens",
                     "severity",
                     "related_files",
+                    "source_uids",
                 ],
                 "additionalProperties": False,
             },
@@ -1092,7 +1112,7 @@ def _evidence_gate_then_validate(
     the merge agent) -- see the inline notes at the write site.
     """
     from daydream.deep.location_validator import validate_records
-    from daydream.deep.records import record_uid
+    from daydream.deep.records import item_source_uids, record_uid
     from daydream.hunk_index import load_hunk_index
 
     evidenced: list[dict[str, Any]] = []
@@ -1113,18 +1133,34 @@ def _evidence_gate_then_validate(
         # uid coverage here is partial BY CONSTRUCTION, not by oversight: this
         # gate runs on post-merge items, and the cross-stack merge agent
         # re-emits its items from scratch under MERGED_ITEMS_SCHEMA, so a
-        # multi-stack merged item has no pre-merge identity to report. Only
-        # items that bypassed the merge agent (the single-stack path, the
-        # host-appended structural records) carry one. Emit an entry only where
-        # a uid actually exists, so the list never degrades into ``null``s that
-        # look like lost identities.
+        # multi-stack merged item has no ``uid`` OF ITS OWN. Only items that
+        # bypassed the merge agent (the single-stack path, the host-appended
+        # structural records) carry one. Their *derivation* is a separate
+        # question that ``source_uids`` does answer for every item (issue
+        # #1111), and this field deliberately does not conflate the two: a
+        # ``uid`` names the dropped object, a ``source_uids`` entry names a
+        # record the dropped object was synthesized from, and an auditor
+        # chasing "what exactly did the gate delete?" needs the former. Emit an
+        # entry only where a uid actually exists, so the list never degrades
+        # into ``null``s that look like lost identities.
         dropped_uids = [uid for uid in (record_uid(d) for d in dropped) if uid]
+        # ...and the derivation, which is the half that is actually populated on
+        # the main path. ``dropped_uids`` above is empty for every merge-agent
+        # item, so on its own it would leave the common multi-stack case with no
+        # traceable identity at all -- an audit sidecar that answers nothing
+        # exactly when a reviewer needs it. ``item_source_uids`` resolves the
+        # explicit ``source_uids`` attribution first and falls back to the
+        # item's own uid, so one field covers every path an item can arrive by.
+        # Per item (not flattened): which records produced THIS dropped finding
+        # is the question, and a flat union would lose that grouping.
+        dropped_source_uids = [item_source_uids(d) for d in dropped]
         sidecar_path.write_text(
             json.dumps(
                 {
                     "dropped_count": len(dropped),
                     "dropped_ids": dropped_ids,
                     "dropped_uids": dropped_uids,
+                    "dropped_source_uids": dropped_source_uids,
                     "dropped_items": dropped,
                 },
                 indent=2,
@@ -4453,7 +4489,10 @@ def _fold_structural_duplicates(
     hand survivorship to the record the gate is about to drop, deleting a
     corroborated finding outright instead of reporting it once.
 
-    Matched ``base_items`` entries are revised in place (severity only). Every
+    Matched ``base_items`` entries are revised in place: the stronger severity,
+    and (issue #1111) the union of both sides' ``source_uids``, since the
+    survivor now represents a defect two lenses reported and must be traceable
+    to the records behind both. Every
     fold decision is recorded to a ``folded-structural.json`` audit sidecar
     beside ``items_path`` (mirroring the evidence gate's
     ``dropped-speculative.json``), so a destructive, host-side similarity match
@@ -4463,7 +4502,9 @@ def _fold_structural_duplicates(
     position in ``base_items``), and reports ``tied_candidates`` -- how many
     base items matched at the winning similarity -- so a tie-broken pick is
     identifiable after the fact instead of being indistinguishable from an
-    unambiguous one.
+    unambiguous one. Each entry also carries ``source_uids``: the merged
+    provenance the survivor came away with, so the fold's effect on
+    traceability is auditable from the sidecar alone.
 
     Args:
         base_items: The merged, non-structural items the report is built from.
@@ -4483,7 +4524,12 @@ def _fold_structural_duplicates(
         jaccard,
         normalize_title,
     )
-    from daydream.deep.records import record_uid
+    from daydream.deep.records import (
+        RECORD_SOURCE_UIDS_KEY,
+        item_source_uids,
+        record_uid,
+        union_source_uids,
+    )
 
     surviving: list[dict[str, Any]] = []
     fold_records: list[dict[str, Any]] = []
@@ -4554,13 +4600,30 @@ def _fold_structural_duplicates(
         item_evidenced = _is_evidenced(item)
         survivor_is_structural = not base_evidenced and item_evidenced
         stronger = stronger_severity(twin.get("severity"), item.get("severity"))
+        # Naming the two sides once lets both survivorship directions share a
+        # single spelling of the merge, so the provenance union below cannot
+        # drift between branches the way the severity write used to be written
+        # out twice.
+        survivor = item if survivor_is_structural else twin
+        absorbed = twin if survivor_is_structural else item
+        # Issue #1111: the fold makes one item stand for a defect that TWO
+        # lenses independently reported, so the survivor has to carry both
+        # provenances. Without this the fold is quietly destructive in a second
+        # way: it already discards the loser's text, and it would also discard
+        # the only link back to the record that produced it -- and a folded
+        # finding is precisely the case where "which records produced this?"
+        # has more than one answer, so the question was unanswerable exactly
+        # where it was most worth asking. The survivor's own provenance leads
+        # (``union_source_uids`` is first-seen order), so the item reads as
+        # "itself, plus what folded into it".
+        folded_source_uids = union_source_uids(
+            item_source_uids(survivor), item_source_uids(absorbed)
+        )
+        survivor[RECORD_SOURCE_UIDS_KEY] = folded_source_uids
+        if stronger is not None:
+            survivor["severity"] = stronger
         if survivor_is_structural:
-            if stronger is not None:
-                item["severity"] = stronger
             surviving.append(item)
-        else:
-            if stronger is not None:
-                twin["severity"] = stronger
         fold_records.append(
             {
                 "structural_description": description,
@@ -4581,6 +4644,11 @@ def _fold_structural_duplicates(
                 # ran and the entry above says which candidate it picked.
                 "tied_candidates": tied_candidates,
                 "survivor": "structural" if survivor_is_structural else "base",
+                # The provenance the survivor came away with, so the sidecar
+                # answers "which records does the shipped item now stand for?"
+                # without re-reading merged-items.json and re-deriving the fold.
+                # Empty when neither side had a uid (pre-#1111 artifacts).
+                "source_uids": folded_source_uids,
             }
         )
     if fold_records:
@@ -4650,6 +4718,12 @@ def _append_structural_and_write_merged(
         canonical_path: Repo-root canonical report (``REVIEW_OUTPUT_FILE``).
 
     """
+    from daydream.deep.records import (
+        RECORD_SOURCE_UIDS_KEY,
+        record_uid,
+        stamp_record_uids,
+        union_source_uids,
+    )
     from daydream.deep.render import render_report
 
     # Append structural findings in Python, tagged lens="structural". They parse
@@ -4676,10 +4750,35 @@ def _append_structural_and_write_merged(
         if structural_records is None:
             print_warning(console, "Skipping non-list structural records; expected a list")
             structural_records = []
+        # Backfill uids on a legacy artifact, exactly as the per-stack load path
+        # does (issue #1111). Without this the two halves of one run answered the
+        # same "pre-uid artifact" question differently: ``_step_per_stack_parse``
+        # backfills the per-stack records IN MEMORY, so the single-stack bypass
+        # attributed its items from those backfilled values, while this function
+        # re-reads the structural file from disk and saw no uid at all -- one run,
+        # two answers. Same deterministic ``(stack_name, position)`` rule, and
+        # preserve-if-present means a current artifact is untouched. The stack
+        # name comes from the file's own name so it cannot drift from the path
+        # convention that minted the uids.
+        stamp_record_uids(
+            [rec for rec in structural_records if isinstance(rec, dict)],
+            structural_records_path.name,
+        )
         for rec in structural_records:
             if not isinstance(rec, dict):
                 continue
-            item = {**rec, "lens": "structural"}
+            item = {
+                **rec,
+                "lens": "structural",
+                # Issue #1111: host-authored items never pass through the merge
+                # agent, so nothing else will ever attribute them -- the host
+                # has to, and it is the one producer that can do so with
+                # certainty. A structural item derives from exactly one record:
+                # itself. ``union_source_uids`` drops the empty string, so a
+                # record from an older run that carries no uid yields ``[]``
+                # (honest "unknown") instead of a ``[""]`` phantom handle.
+                RECORD_SOURCE_UIDS_KEY: union_source_uids([record_uid(rec)]),
+            }
             item.setdefault("confidence", "HIGH")
             # The one documented exception to severity.DEFAULT_SEVERITY_POLICY
             # (R3.3 structural high-conviction invariant): a structural finding
@@ -4762,6 +4861,7 @@ def _write_single_stack_merged_items(
 
     """
     from daydream.deep.artifacts import merged_items_path, merged_report_path
+    from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, record_uid, union_source_uids
 
     canonical_path = repo / REVIEW_OUTPUT_FILE
     report_path = merged_report_path(deep_dir_path)
@@ -4795,8 +4895,20 @@ def _write_single_stack_merged_items(
     # never runs the merge agent, so these are the only merged items that still
     # hold a pre-merge identity (issue #1111). ``normalize_items`` downstream is
     # likewise a spread, so the uid survives to ``merged-items.json``.
+    # Issue #1111: ``source_uids`` is set explicitly rather than left implicit
+    # in the carried-through ``uid``, so that EVERY item in
+    # ``merged-items.json`` answers "which records produced this?" with the same
+    # key on every code path -- the merge-agent path, this bypass, the salvage
+    # path that reuses this function, and the structural append. A consumer that
+    # had to fall back to ``uid`` for some items would be re-deriving the rule
+    # ``item_source_uids`` already owns.
     per_stack_items: list[dict[str, Any]] = [
-        {**rec, "lens": "per-stack"} for rec in all_records
+        {
+            **rec,
+            "lens": "per-stack",
+            RECORD_SOURCE_UIDS_KEY: union_source_uids([record_uid(rec)]),
+        }
+        for rec in all_records
     ]
 
     # Structural append + normalize + render + copy is shared with
@@ -4805,6 +4917,123 @@ def _write_single_stack_merged_items(
     _append_structural_and_write_merged(
         per_stack_items, structural_records_path, items_path, report_path, canonical_path,
     )
+
+
+#: Cap on how many unknown uids the aggregate provenance warning names inline.
+#: The warning exists to be read, and a model that hallucinates provenance can
+#: hallucinate a lot of it; naming the first few and counting the rest keeps the
+#: message actionable instead of turning it into the per-item flood the
+#: aggregation was there to avoid.
+_MAX_REPORTED_UNKNOWN_UIDS = 10
+
+
+def _validate_agent_source_uids(
+    agent_items: list[dict[str, Any]],
+    per_stack_records_paths: list[Path],
+    structural_records_path: Path | None,
+) -> None:
+    """Clamp merge-agent ``source_uids`` to this run's real record uids, in place.
+
+    Issue #1111. ``source_uids`` is the one field in the whole pipeline where a
+    *model* gets to name a *host-minted* identity, and that asymmetry is exactly
+    why it cannot be taken on trust. A uid is not content the reader can
+    sanity-check: it is an opaque handle that downstream consumers resolve as
+    fact. An unvalidated string would let a plausible-looking invention
+    (``python:7`` on a run whose python stack produced four records) masquerade
+    as real provenance in the eval scoring and archived-trajectory surfaces,
+    where nothing has the records on hand to notice. Worse, a hallucinated uid
+    that happens to collide with a *different* stack's real record attributes
+    the finding to a record it never came from -- a wrong answer is strictly
+    worse than no answer here. So the host builds the run's actual uid pool and
+    keeps only members of it.
+
+    Validation is **fail-open by construction**: an unknown uid is dropped from
+    the item's list, never escalated. Provenance is metadata about a finding,
+    not the finding, so a bad attribution must cost the attribution and nothing
+    else -- failing the merge over it would throw away every real finding in the
+    response to protect a bookkeeping field. An item left with nothing ships
+    with ``[]``, which :func:`daydream.deep.records.item_source_uids` already
+    defines as the honest "no known provenance" answer.
+
+    Args:
+        agent_items: Merge-agent items, mutated in place. Every dict item comes
+            out carrying a ``source_uids`` list -- ``[]`` when unattributable --
+            so no downstream consumer has to handle the key being absent.
+        per_stack_records_paths: Parsed per-stack record JSON paths that fed the
+            merge; the language-stack half of the uid pool.
+        structural_records_path: Optional structural meta-stack records path.
+            Partitioned out of ``per_stack_records_paths`` by the caller, but
+            its uids are just as real, so it is pooled here too -- the merge
+            agent is told not to emit structural items, and an item that cites a
+            structural record anyway is making a true statement about where the
+            corroboration came from.
+    """
+    from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, record_uid, union_source_uids
+
+    # Build the pool schema-free. These files were written by an earlier phase
+    # of this same run, but a --start-at merge resume can hand us artifacts from
+    # an older run, so every load degrades to "contributes no uids" rather than
+    # raising: an unreadable records file must not fail a merge that already
+    # succeeded.
+    pool: set[str] = set()
+    records_paths = list(per_stack_records_paths)
+    if structural_records_path is not None:
+        records_paths.append(structural_records_path)
+    for records_path in records_paths:
+        if not records_path.is_file():
+            continue
+        try:
+            loaded = json.loads(records_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            print_warning(
+                console,
+                f"Skipping {records_path.name} for source_uids validation: {type(exc).__name__}: {exc}",
+            )
+            continue
+        issues = _records_issues_or_empty(loaded)
+        if not isinstance(issues, list):
+            continue
+        for record in issues:
+            if isinstance(record, dict):
+                uid = record_uid(record)
+                if uid:
+                    pool.add(uid)
+
+    unknown: dict[str, None] = {}
+    unattributed = 0
+    for item in agent_items:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get(RECORD_SOURCE_UIDS_KEY)
+        # A missing key, an explicit null (the schema's documented "cannot
+        # attribute" value) and a wrong-typed value all mean the same thing to
+        # us: nothing claimed. Coerce rather than branch, so every item below
+        # takes one code path.
+        claimed = raw if isinstance(raw, list) else []
+        for uid in claimed:
+            if isinstance(uid, str) and uid and uid not in pool:
+                unknown.setdefault(uid, None)
+        item[RECORD_SOURCE_UIDS_KEY] = union_source_uids(
+            uid for uid in claimed if isinstance(uid, str) and uid in pool
+        )
+        if not item[RECORD_SOURCE_UIDS_KEY]:
+            unattributed += 1
+
+    if unknown:
+        # ONE warning for the whole merge, not one per item: a large review
+        # merges hundreds of items and a model that misreads the uid convention
+        # gets it wrong on all of them at once, so per-item reporting would bury
+        # the run's real output under identical lines.
+        named = sorted(unknown)
+        shown = ", ".join(named[:_MAX_REPORTED_UNKNOWN_UIDS])
+        if len(named) > _MAX_REPORTED_UNKNOWN_UIDS:
+            shown += f", +{len(named) - _MAX_REPORTED_UNKNOWN_UIDS} more"
+        print_warning(
+            console,
+            f"Merge agent cited {len(named)} source_uid(s) that match no record in this run "
+            f"({shown}); dropped them from item provenance. "
+            f"{unattributed} of {len(agent_items)} merged item(s) now carry no record attribution.",
+        )
 
 
 async def phase_cross_stack_merge(
@@ -4947,6 +5176,15 @@ async def phase_cross_stack_merge(
             message=f"Cross-stack merge returned no item list (got {type(result).__name__})",
         )
     agent_items: list[dict[str, Any]] = item_list
+
+    # Issue #1111: the merge agent is the only producer allowed to NAME a
+    # host-minted record identity, so its claims are checked against the run's
+    # actual uid pool before anything downstream reads them as provenance. This
+    # must run before ``_append_structural_and_write_merged``: that call folds
+    # structural twins, and the fold unions the two sides' provenance into the
+    # survivor -- an unvalidated uid entering there would be laundered into a
+    # second item's attribution as well. Fail-open by design (see the helper).
+    _validate_agent_source_uids(agent_items, per_stack_records_paths, structural_records_path)
 
     # Structural append + normalize + render + copy is shared with
     # _write_single_stack_merged_items via _append_structural_and_write_merged

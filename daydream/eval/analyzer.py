@@ -1125,20 +1125,34 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     returns every comparable pair with its similarity. That function compares
     ``description`` and deliberately does NOT require file overlap, so
     ``same_file_pairs`` is reported separately rather than used as a gate. Its
-    ``sources`` argument must be parallel to the records, so each item's
-    ``lens`` is passed as its synthetic source and surfaces as the pair's
-    ``a_lens``/``b_lens``. ``comparable_pairs`` counts the pairs the similarity
-    could actually be computed over -- an item with an empty description is not
-    comparable and contributes no pair.
+    ``sources`` argument must be parallel to the records, and this caller uses
+    it as an index channel back to the item each pair side came from (see the
+    body); ``a_lens``/``b_lens`` are then read off the mapped items.
+    ``comparable_pairs`` counts the pairs the similarity could actually be
+    computed over -- an item with an empty description is not comparable and
+    contributes no pair.
 
-    Each pair row also carries ``a_uid``/``b_uid``, the host-assigned per-stack
-    record identity (issue #1111), so a shipped duplicate can be traced back to
-    the record it came from. These are POST-merge items, so a ``uid`` is present
-    only for items that never passed through the merge agent -- the single-stack
-    bypass and the host-appended structural items. The merge agent re-emits
-    items from scratch, which is why multi-stack rows carry ``""``. **``""``
-    means "no pre-merge identity", not an error**, and is the common case on a
-    multi-stack run; no ``uid`` is ever fabricated to fill it.
+    Each pair row also carries ``a_source_uids``/``b_source_uids``: the
+    host-assigned per-stack record uids (issue #1111) that side's shipped item
+    derives from, via :func:`daydream.deep.records.item_source_uids`. **These
+    are lists, not scalars**, because a merged item is a synthesis -- the merge
+    agent may consolidate several per-stack records into one shipped finding,
+    and the structural fold unions two lenses' provenance into one survivor --
+    so the honest answer to "which records produced this?" is a list. Items
+    that never passed through the merge agent (the single-stack bypass, the
+    host-appended structural items, and legacy artifacts written before
+    ``source_uids`` existed) report their own birth ``uid`` as a one-element
+    list.
+
+    An empty list means the merge agent declined to attribute that item.
+    **That is a real answer, not an error**: no uid is ever fabricated to fill
+    it. Tracing a shipped duplicate back to the records that produced it is
+    precisely the measurement gap issue #1106 describes -- knowing that two
+    shipped findings restate one defect is only actionable if you can name the
+    reviews that emitted them -- so the provenance is read off the ITEM rather
+    than off ``RecordDuplicatePair.record_a_uid``, which reads the record's own
+    ``uid`` and is therefore ``""`` for exactly the merge-agent items this axis
+    exists to catch.
 
     ``max_similarity``/``mean_similarity`` are ``None`` (not ``0.0``) with no
     comparable pairs: undefined, not perfect -- the ``grounding_rate``
@@ -1164,8 +1178,13 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     # Function-local import: ``daydream.deep.orchestrator`` imports this module
     # at module level, so a module-level ``daydream.deep.dedup`` import here
     # would close an import cycle through ``daydream/deep/__init__.py``. Same
-    # no-cycle pattern as ``daydream/phases.py:1091``.
+    # no-cycle pattern as ``daydream/phases.py:1091``. ``daydream.deep.records``
+    # is imported here for the same reason and not at module level: it has no
+    # daydream imports of its own, but importing it still executes the
+    # ``daydream.deep`` package ``__init__``, which pulls in the orchestrator
+    # and closes the very same cycle.
     from daydream.deep.dedup import _SIM_THRESHOLD, build_record_dedup_candidates
+    from daydream.deep.records import item_source_uids
 
     deep_dir = daydream_dir / "deep"
     raw_items = _load_shipped_items(deep_dir)
@@ -1174,11 +1193,53 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     dict_items = [item for item in items if isinstance(item, dict)]
     records = dict_items[:_DUPLICATION_INPUT_CAP]
     input_truncated = len(dict_items) > _DUPLICATION_INPUT_CAP
-    sources = [str(item.get("lens", "")) for item in records]
+    # ``RecordDuplicatePair`` carries no back-reference to the item it was built
+    # from, and none of the fields it does carry is a reliable key: ``id`` is
+    # unique only when ``normalize_items`` wrote the artifact (this analyzer
+    # reads whatever a run left on disk, legacy shapes included), and
+    # ``(id, file, description)`` collides worst on the near-identical rows this
+    # axis reports. So the mapping is made exact instead of inferred: ``sources``
+    # is copied verbatim onto ``record_a_source``/``record_b_source`` and is
+    # never otherwise inspected by ``build_record_dedup_candidates``, which makes
+    # it the one channel that can round-trip an index. It is also absent from
+    # that function's sort key -- ``(a_id, b_id, a_uid, b_uid)`` -- so routing
+    # the index through it leaves pair ordering, and therefore every metric and
+    # the ``top`` selection, bit-for-bit unchanged. ``lens`` is read back off the
+    # mapped item, which is where it came from in the first place.
+    sources = [str(index) for index in range(len(records))]
     pairs = build_record_dedup_candidates(records, sources, threshold=0.0)
 
     def _same_file(pair: Any) -> bool:
         return bool(pair.record_a_file) and pair.record_a_file == pair.record_b_file
+
+    def _item_at(source_index: str) -> dict[str, Any]:
+        """Return the shipped item a pair side was built from.
+
+        ``source_index`` is one of the tokens minted into ``sources`` just
+        above, so the parse and the lookup are both total by construction.
+        """
+        return records[int(source_index)]
+
+    def _pair_row(pair: Any) -> dict[str, Any]:
+        """Render one reported pair, with each side's provenance and lens.
+
+        Both are taken from the mapped items rather than from the pair, since
+        ``RecordDuplicatePair`` only knows a record's own ``uid``.
+        """
+        item_a = _item_at(pair.record_a_source)
+        item_b = _item_at(pair.record_b_source)
+        return {
+            "a_id": pair.record_a_id,
+            "a_source_uids": item_source_uids(item_a),
+            "a_file": pair.record_a_file,
+            "a_lens": str(item_a.get("lens", "")),
+            "b_id": pair.record_b_id,
+            "b_source_uids": item_source_uids(item_b),
+            "b_file": pair.record_b_file,
+            "b_lens": str(item_b.get("lens", "")),
+            "similarity": round(pair.similarity, 4),
+            "same_file": _same_file(pair),
+        }
 
     similarities = [pair.similarity for pair in pairs]
     near = [pair for pair in pairs if pair.similarity >= _SIM_THRESHOLD]
@@ -1199,21 +1260,7 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
         "mean_similarity": (
             round(sum(similarities) / len(similarities), 4) if similarities else None
         ),
-        "pairs": [
-            {
-                "a_id": pair.record_a_id,
-                "a_uid": pair.record_a_uid,
-                "a_file": pair.record_a_file,
-                "a_lens": pair.record_a_source,
-                "b_id": pair.record_b_id,
-                "b_uid": pair.record_b_uid,
-                "b_file": pair.record_b_file,
-                "b_lens": pair.record_b_source,
-                "similarity": round(pair.similarity, 4),
-                "same_file": _same_file(pair),
-            }
-            for pair in top
-        ],
+        "pairs": [_pair_row(pair) for pair in top],
     }
 
 

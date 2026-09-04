@@ -151,3 +151,35 @@ def test_merge_prompt_tags_alternatives_items_as_wonder(tmp_path: Path) -> None:
     )
     assert '"wonder"' in prompt      # the lens value the agent must emit for alt items
     assert "alternatives" in prompt
+
+
+def test_merge_prompt_demands_verbatim_source_uids(tmp_path: Path) -> None:
+    """#1111: the merge prompt asks for machine-readable provenance, verbatim.
+
+    ``source_uids`` is strict-mode required, so the model emits the key whether
+    or not it was told what to put in it -- meaning a prompt that never explains
+    the field yields a schema-valid run in which every item is attributed to
+    nothing, and the host-side validator has nothing to validate. Two halves of
+    the instruction are load-bearing and pinned here: copy the uid VERBATIM (a
+    reformatted uid is indistinguishable from an invented one to the validator,
+    which keeps only exact pool members), and list ALL contributing uids on a
+    deduplicated item (the multi-record case is the whole reason the field is a
+    list rather than a single handle).
+    """
+    prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
+        per_stack_records_paths=[tmp_path / "stack-python-records.json"],
+        intent_path=tmp_path / "i.md",
+        alternatives_path=tmp_path / "a.json",
+        dedup_candidates_path=tmp_path / "d.json",
+        output_path=tmp_path / ".review-output.md",
+    )
+    assert "source_uids" in prompt
+    assert "VERBATIM" in prompt
+    assert "list ALL contributing" in prompt
+    # The consequence of inventing one is stated, because the host silently
+    # drops an unknown uid rather than failing the merge over it.
+    assert "not in the records is discarded" in prompt
+    # ...and the human-readable citation is still required alongside it, so the
+    # machine-readable field does not quietly replace the reader's version.
+    assert "(Sources: ...)" in prompt
