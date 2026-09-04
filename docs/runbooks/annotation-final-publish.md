@@ -28,11 +28,36 @@ Every `daydream corpus adjudicate` command below (steps 1–8) is a literal, sin
 ## 1. Hydrate the source index
 
 Bring the producer's archived run bundles down from the Hub into a local,
-normalized index root:
+normalized index root. First run the identical command with `--dry-run`:
 
 ```bash
-daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate
+daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --allow-copyleft <owner/repo> --dry-run
 ```
+
+The non-dry publication below is gated on that dry-run: proceed only after a
+completed dry-run reports full record accounting (the discovered-candidate
+tally, the license-admission gate's per-code and per-repo counts matching over
+the license-adjudicated population — imported sessions plus license-gate
+rejections; ingest/fixture rejections are reported separately, never counted
+as adjudicated) and an admitted count you accept.
+
+```bash
+daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --allow-copyleft <owner/repo>
+```
+
+`--license-policy` is required on every non-dry publication — the command
+refuses to run without it. `--allow-copyleft` opts in, by exact `owner/repo`
+slug (case-insensitive; repeat the flag once per slug, e.g.
+`--allow-copyleft a/b --allow-copyleft c/d`), specific copyleft-licensed
+repositories the production policy would otherwise reject; omit it when no
+such exception is intended.
+
+License-evidence enrichment (which fills legacy bundles' missing evidence
+from the live GitHub license API during both the dry-run and the
+publication) requires `GITHUB_TOKEN` in the environment — exported,
+read-only, and never placed on a URL or argv. Export it before running
+either command above, or the step fails after download/ingest with a clear
+`GITHUB_TOKEN is not set` error instead of a silent empty-token 401.
 
 The stage dir itself is the hydrated index root this runbook refers to as
 `INDEX_ROOT`: hydration writes the SQLite index (`index.db`) and one sanitized

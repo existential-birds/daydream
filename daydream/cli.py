@@ -1458,9 +1458,11 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         default=None,
         dest="license_policy",
         metavar="PATH",
-        help="Digest-pinned license policy JSON; when set, the per-repo license "
-        "admission gate runs at hydration and rejected sessions are excluded "
-        "before publication (issue #1080)",
+        help="Digest-pinned license policy JSON; REQUIRED for publication "
+        "(omitting it on a non-dry run refuses before any Hub access); the "
+        "per-repo license admission gate runs at hydration and rejected "
+        "sessions are excluded before publication; optional for --dry-run "
+        "planning (issue #1094, previously #1080)",
     )
     parser.add_argument(
         "--allow-copyleft",
@@ -1715,10 +1717,11 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     """Handle ``daydream corpus hydrate-hub [...]``.
 
     Fail-closed, fatal semantics (unlike ``hub.py``'s warn-everything): a
-    missing ``HF_TOKEN`` or a moving-branch revision without ``--exploratory``
-    exits 1 before any Hub access. Success prints the immutable output commit
-    SHA plus a value-free summary (counts and reason-code tallies only). Any
-    ``HydrationError`` is ``redact_text``-processed before display.
+    missing ``HF_TOKEN``, ``GITHUB_TOKEN``, or a moving-branch revision without
+    ``--exploratory`` exits 1 before any Hub access. Success prints the
+    immutable output commit SHA plus a value-free summary (counts and
+    reason-code tallies only). Any ``HydrationError`` is ``redact_text``-
+    processed before display.
 
     Returns:
         ``0`` on a verified run (or a completed ``--dry-run`` plan); ``1`` on
@@ -1772,6 +1775,35 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
             "HF_TOKEN is not set",
             "hydration requires a read token for the private Hub repo. "
             "Export HF_TOKEN and retry.",
+        )
+        return 1
+
+    # Issue #1094: a non-dry hydrate-hub publication requires a pinned license
+    # policy; refuse before any Hub access or staging work. A dry-run may omit
+    # it (planning affordance). Mirrors build-v2's policy-required pattern.
+    if args.license_policy is None and not args.dry_run:
+        print_error(
+            console,
+            "Missing --license-policy",
+            "A hydrate-hub publication requires a pinned license policy file; "
+            "per-repo license admission decisions are resolved from it "
+            "(fail-closed). A --dry-run may omit it.",
+        )
+        return 1
+
+    # Issue #1094: license-evidence enrichment (live GitHub license API calls)
+    # is a hard runtime requirement on every non-dry publication. Fail closed
+    # before any Hub access or staging work, naming the variable and the fix —
+    # an unset token would otherwise surface only as a redacted generic 401
+    # failure after download/ingest/dedupe have run. A --dry-run may omit it
+    # (planning affordance; the resolver itself fail-fasts with this same
+    # message if a policy-driven dry run reaches enrichment without one).
+    if not args.dry_run and not os.environ.get("GITHUB_TOKEN"):
+        print_error(
+            console,
+            "GITHUB_TOKEN is not set",
+            "license evidence enrichment requires a GitHub API token for the "
+            "license endpoint. Export GITHUB_TOKEN and retry.",
         )
         return 1
 
@@ -1847,7 +1879,13 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
 
 def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
-    """Plan-only hydrate pass: pin, download, ingest, tally — no publication."""
+    """Plan-only hydrate pass: pin, download, ingest, tally — no publication.
+
+    Prints the per-code tallies plus per-repository license decision counts
+    (value-free slugs and counts, issue #1094), with a fail-closed accounting
+    invariant: every license-adjudicated candidate (imported plus license-gate
+    rejections) lands in exactly one per-repository license bucket.
+    """
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
     from daydream.ui import print_warning
@@ -1860,21 +1898,66 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         _hydrate.download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
         _hydrate.ingest_bundles(config.stage_dir, revision=source_commit)
         _hydrate.dedupe_admitted(config.stage_dir, revision=source_commit)
+        binding = None
         if config.license_policy_path is not None:
+            # Issue #1094: the dry-run derives and reports the v2 candidate id
+            # from the same binding inputs the publication will use — enrich
+            # (production resolver), gate, then the post-gate binding.
+            from daydream.archive.license_enrich import (
+                _make_license_resolver,
+                enrich_license_evidence,
+            )
+
+            enrich_license_evidence(
+                config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+            )
+            _hydrate.restamp_admitted_digests(config.stage_dir, revision=source_commit)
             _hydrate.apply_license_gate(
                 config.stage_dir,
                 revision=source_commit,
                 license_policy_path=config.license_policy_path,
                 allow_copyleft=config.allow_copyleft,
             )
+            binding = _hydrate.resolve_curation_identity(
+                config.stage_dir,
+                source_commit=source_commit,
+                license_policy_path=config.license_policy_path,
+                allow_copyleft=config.allow_copyleft,
+            )
         ledger = _hydrate.build_import_ledger(
-            config.stage_dir, revision=source_commit, source_commit=source_commit
+            config.stage_dir, revision=source_commit, source_commit=source_commit,
+            binding=binding,
         )
         license_admission = (
             _hydrate.license_admission_summary(ledger)
             if config.license_policy_path is not None
             else {}
         )
+        # Issue #1094 Task 8: per-repo auditable decision counts. Value-free
+        # (slugs + counts only). License accounting is enforced here — every
+        # license-adjudicated candidate (imported sessions plus license-gate
+        # rejections; ingest/fixture rejections are never adjudicated by the
+        # license gate and are reported via the ledger's non-license rejection
+        # tallies) must land in exactly one per-repo bucket, mirroring
+        # license_admission_summary's population.
+        per_repo = (
+            _hydrate.license_admission_by_repo(config.stage_dir, ledger)
+            if config.license_policy_path is not None
+            else {}
+        )
+        if config.license_policy_path is not None:
+            per_repo_total = sum(sum(b.values()) for b in per_repo.values())
+            adjudicated_total = sum(license_admission.values())
+            if per_repo_total != adjudicated_total:
+                raise _hydrate.HydrationError(
+                    redact_text(
+                        f"per-repository accounting mismatch for revision "
+                        f"{source_commit!r}: license-adjudicated population "
+                        f"{adjudicated_total} candidate(s) (imported plus "
+                        f"license-gate rejections), per-repository buckets "
+                        f"total {per_repo_total}"
+                    )
+                )
     except _hydrate.HydrationError as exc:
         print_error(console, "Hydration dry-run failed", redact_text(str(exc)))
         return 1
@@ -1902,6 +1985,16 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
             f"c5-excluded {license_admission['c5_excluded']}; "
             f"copyleft-unopted {license_admission['c8_copyleft_unopted']}; "
             f"evidence-missing {license_admission['license_evidence_missing']}",
+        )
+    for repo_slug in sorted(per_repo):
+        buckets = per_repo[repo_slug]
+        print_info(
+            console,
+            f"license admission by repo: {repo_slug} -> "
+            f"admitted {buckets['admitted']}, "
+            f"c5-excluded {buckets['c5_excluded']}, "
+            f"copyleft-unopted {buckets['c8_copyleft_unopted']}, "
+            f"evidence-missing {buckets['license_evidence_missing']}",
         )
     incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
     if incomplete:

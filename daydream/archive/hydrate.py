@@ -39,6 +39,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IDENTITY_COLLISION,
     REASON_CODE_LICENSE_EVIDENCE_MISSING,
     REASON_CODE_PATH_TRAVERSAL,
+    REASON_CODE_REPO_COMMIT_UNRESOLVED,
     REASON_CODE_REPO_IDENTITY_MISSING,
     REASON_CODE_SANITIZE_FAILED,
     REASON_CODE_SECRETS_SCAN_DIRTY,
@@ -741,6 +742,39 @@ def _session_identity(stage: Path, sid: str, revision: str, *, root: str, collis
     return None, None
 
 
+def _repo_commit_unresolved_sessions(stage: Path) -> set[str]:
+    """Session ids whose enrichment recorded an unresolvable repo commit.
+
+    Reads the ``repo_commit_unresolved`` rows of ``stage/_enrich/evidence.jsonl``
+    (written by the enrichment stage, which always precedes the license gate):
+    the repo slug was identified but no resolved Git repository commit could be
+    pinned, so the gate records such evidence-missing rejections under the
+    specific stable code instead of the generic one.
+    """
+    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        _ENRICH_CACHE_NAME,
+        _ENRICH_DIR,
+    )
+
+    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
+    unresolved: set[str] = set()
+    if not path.is_file():
+        return unresolved
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("status") != REASON_CODE_REPO_COMMIT_UNRESOLVED:
+            continue
+        sid = entry.get("session_id")
+        if isinstance(sid, str) and sid:
+            unresolved.add(sid)
+    return unresolved
+
+
 def apply_license_gate(
     stage: Path,
     *,
@@ -763,7 +797,12 @@ def apply_license_gate(
     Fail-closed: a missing ``license_policy_path`` raises ``ValueError`` before
     any gate work — never downgraded to a warning. Apart from the excluded-
     directory move the gate is pure w.r.t. its inputs, so decisions are
-    replay-identical. Returns the rejected ``(session_id, reason_code)`` pairs.
+    replay-identical. When enrichment identified the repo but could not pin a
+    resolved Git repository commit (its cache recorded
+    ``repo_commit_unresolved``), the evidence-missing rejection is recorded
+    under that more specific stable code — the same rejection, bucketed
+    identically — so the ledger surfaces the commit-unresolved path. Returns
+    the rejected ``(session_id, reason_code)`` pairs.
     """
     if not license_policy_path:
         raise ValueError(
@@ -776,9 +815,10 @@ def apply_license_gate(
     )
 
     policy, _digest = load_license_policy(license_policy_path)
-    curated = _curated_dir(stage, str(revision))
+    curated = _pre_identity_dir(stage, str(revision))
     ledger_path = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
     rejected: list[tuple[str, str]] = []
+    unresolved = _repo_commit_unresolved_sessions(stage)
     runs_dir = stage / "runs"
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
@@ -800,13 +840,20 @@ def apply_license_gate(
             )
             if decision.status != "rejected" or decision.reason_code is None:
                 continue
+            reason_code = decision.reason_code
+            if reason_code == REASON_CODE_LICENSE_EVIDENCE_MISSING and sid in unresolved:
+                # Enrichment identified the repo but could not pin a resolved
+                # Git commit; the ledger records the specific stable code so
+                # the repo_commit_unresolved rejection path is exercisable
+                # (it folds into the evidence-missing bucket).
+                reason_code = REASON_CODE_REPO_COMMIT_UNRESOLVED
             _move_dir(derivative, stage / "excluded" / sid)
             _append_dedupe_entry(
                 ledger_path,
-                {"session_id": sid, "status": "excluded", "reason_code": decision.reason_code,
+                {"session_id": sid, "status": "excluded", "reason_code": reason_code,
                  "content_digest": None, "revision": str(revision), "at": _utc_now()},
             )
-            rejected.append((sid, decision.reason_code))
+            rejected.append((sid, reason_code))
     if rejected:
         rebuild_index(stage)  # excluded derivatives leave the staging index immediately
     return rejected
@@ -872,17 +919,25 @@ def rebuild_index(stage: Path) -> None:
         upsert_run(stage, Manifest(**kwargs))
 
 
-def build_resolution_map(stage: Path, *, source_commit: str) -> dict[str, Any]:
+def build_resolution_map(
+    stage: Path, *, source_commit: str, repo_commits: Mapping[str, str],
+) -> dict[str, Any]:
     """Build the deferred-clone repository resolution map (issue #982 M5).
 
     From the admitted index rows under ``stage/runs/``, group sessions by the
     ``normalize_remote_url`` slug. Each entry carries ``repo_slug``,
-    ``pinned_sha`` (the source commit the snapshot was hydrated from —
-    deferred-clone consumers fetch exactly this revision), and the contributing
-    ``session_ids``. Rows with no resolvable slug (no remote, or a
+    ``pinned_sha`` (the resolved Git repository commit for that repo, from
+    ``repo_commits`` — the enrichment cache's per-slug resolution; the Hub
+    dataset revision is never recorded as a repository commit), and the
+    contributing ``session_ids``. Rows with no resolvable slug (no remote, or a
     non-allowlisted host) land under ``map["unavailable"]`` as a list of
-    session ids — a reported outcome, never a raw-URL fallback and never a
-    clone.
+    session ids, as do rows whose slug carries no full 40-hex resolved commit —
+    a reported outcome, never a raw-URL fallback, never a fabricated revision,
+    and never a clone.
+
+    ``source_commit`` (the Hub dataset revision the snapshot was hydrated
+    from) is accepted for ledger bookkeeping at the call site but is
+    deliberately never recorded in any map entry.
 
     No I/O beyond reading the staging index: this never shells out to git, so
     hydration never clones or fetches (M5). Raw URLs are consumed as data only
@@ -899,8 +954,14 @@ def build_resolution_map(stage: Path, *, source_commit: str) -> dict[str, Any]:
         if not slug:
             unavailable.append(str(row["session_id"]))
             continue
+        commit = repo_commits.get(str(slug))
+        if not isinstance(commit, str) or not _FULL_SHA_RE.fullmatch(commit):
+            # No resolved Git repository commit for this slug: reported, never
+            # a fabricated revision (the Hub revision is not a repo commit).
+            unavailable.append(str(row["session_id"]))
+            continue
         entry = cmap.setdefault(
-            str(slug), {"repo_slug": str(slug), "pinned_sha": source_commit, "session_ids": []}
+            str(slug), {"repo_slug": str(slug), "pinned_sha": commit, "session_ids": []}
         )
         entry["session_ids"].append(str(row["session_id"]))
     # Bundles rejected at admission for a non-allowlisted host never reached the
@@ -937,15 +998,208 @@ class DedupeResult:
     excluded: list[tuple[str, str]] = field(default_factory=list)  # (session_id, reason_code)
 
 
-def _curated_dir(stage: Path, source_commit: str) -> Path:
-    """Curated prefix for a source commit: ``stage/curated/<curation-id>/``."""
-    cid = hydrate_rules.derive_curation_id(
-        source_commit,
-        hydrate_rules.SANITIZER_VERSION,
-        hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
-        hydrate_rules.ADMISSION_POLICY_VERSION,
-    )
+_EXCLUSION_LIST_PATH = (
+    Path(__file__).resolve().parents[1] / "training" / "schema" / "exclusion.txt"
+)
+
+
+def _curated_dir(stage: Path, source_commit: str, binding: dict[str, Any] | None = None) -> Path:
+    """Curated prefix for a source commit: ``stage/curated/<curation-id>/``.
+
+    Issue #1094: with a post-gate ``binding`` (from
+    :func:`resolve_curation_identity`) the curation id is the v2 derivation,
+    which binds the policy digest/version, exact copyleft opt-ins, the
+    exclusions digest, the resolved per-repo decisions digest, and the license
+    distribution digest. Without a binding the historical v1 derivation (four
+    inputs) is kept for pre-identity staging and historical prefixes only —
+    publications are always keyed by the v2 id.
+    """
+    if binding is not None:
+        cid = hydrate_rules.derive_curation_id_v2(
+            source_commit,
+            str(binding["policy_digest"]),
+            str(binding["policy_version"]),
+            binding["allow_copyleft"],
+            str(binding["exclusions_digest"]),
+            str(binding["decisions_digest"]),
+            str(binding["distribution_digest"]),
+        )
+    else:
+        cid = hydrate_rules.derive_curation_id(
+            source_commit,
+            hydrate_rules.SANITIZER_VERSION,
+            hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
+            hydrate_rules.ADMISSION_POLICY_VERSION,
+        )
     return stage / "curated" / cid
+
+
+def _pre_identity_dir(stage: Path, source_commit: str) -> Path:
+    """Pre-identity staging location for the dedupe ledger key (issue #1094).
+
+    The v2 curation id cannot exist until after the license gate (it binds the
+    resolved decisions), so every pre-gate ledger writer (dedupe, enrichment
+    restamp, gate rejections) keys the VM-local dedupe state by a
+    source-commit-scoped v1-shaped staging id (Assumption A4). Staging-
+    internal only — never published.
+    """
+    return _curated_dir(stage, source_commit)
+
+
+def _exclusions_digest() -> str:
+    """sha256 over the sorted stable exclusion-codes string of the pinned C5
+    exclusion list (``training/schema/exclusion.txt`` bytes) — a bound identity
+    input, so editing the list changes the curation id."""
+    codes = sorted(
+        line.strip() for line in
+        _EXCLUSION_LIST_PATH.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+    canonical = "".join(f"{code}\n" for code in codes)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _policy_binding(
+    stage: Path,
+    source_commit: str,
+    policy: Any,
+    policy_digest: str,
+    allow_copyleft: frozenset[str] | set[str],
+) -> dict[str, Any]:
+    """Post-gate identity binding (issue #1094): pure function of the gate
+    outputs plus the pinned inputs, so replay over identical evidence is
+    byte-identical.
+
+    Computes, over every resolved per-repo decision of the post-gate admitted
+    runs plus the gate-rejected derivatives under ``stage/excluded/<sid>``
+    (the gate is a pure function of policy + evidence, so re-resolving the
+    survivors reproduces the gate's decisions exactly):
+
+    - ``exclusions_digest``: sha256 over the sorted stable exclusion-codes
+      string of the pinned C5 list (see :func:`_exclusions_digest`);
+    - ``decisions_digest``: sha256 over the canonical sorted
+      ``repo_slug\\tstatus\\treason_code\\tspdx_id\\n`` lines, deduped per
+      repo slug;
+    - ``distribution_digest``: sha256 over the sorted ``spdx_id\\tcount\\n``
+      license-distribution lines.
+
+    The binding carries the policy digest/version and the exact copyleft
+    opt-ins so ``derive_curation_id_v2`` can bind all of them.
+    """
+    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle
+        resolve_repo_decision,
+    )
+
+    decisions: dict[str, tuple[str, str | None, str | None]] = {}
+    runs_dir = stage / "runs"
+    if runs_dir.is_dir():
+        for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+            data = _read_manifest_dict(derivative)
+            if data is None:
+                raise HydrationError(
+                    redact_text(f"admitted derivative {derivative.name} has an unreadable manifest")
+                )
+            decision = resolve_repo_decision(
+                _manifest_repo_slug(data) or "",
+                _manifest_license_evidence(data),
+                policy,
+                allow_copyleft,
+            )
+            decisions[str(decision.repo_slug)] = (
+                str(decision.status), decision.reason_code, decision.spdx_id,
+            )
+    # Gate-rejected derivatives were moved out of runs/ (apply_license_gate ->
+    # stage/excluded/<sid>); the binding must cover them too, or a rejected
+    # repo's adjudication drift (e.g. repo_commit_unresolved ->
+    # c8_copyleft_unopted) would change the republished ledger/excluded bytes
+    # under a byte-identical curation id. Re-resolve the excluded session's
+    # decision and bind it under the *recorded* gate reason code (the gate
+    # records a more specific stable code, like repo_commit_unresolved, than
+    # plain re-resolution over absent evidence would produce). Non-license
+    # exclusions (ingest/fixture) were never adjudicated by the license gate
+    # and stay out of the license decisions digest.
+    recorded_excluded = _load_dedupe_ledger(
+        _dedupe_dir(stage, _pre_identity_dir(stage, str(source_commit)).name) / "dedupe.jsonl"
+    )
+    license_codes = {
+        REASON_CODE_C5_EXCLUDED_REPO,
+        REASON_CODE_C8_COPYLEFT_UNOPTED,
+        REASON_CODE_LICENSE_EVIDENCE_MISSING,
+        REASON_CODE_REPO_IDENTITY_MISSING,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
+    }
+    excluded_dir = stage / "excluded"
+    if excluded_dir.is_dir():
+        for derivative in sorted(p for p in excluded_dir.iterdir() if p.is_dir()):
+            data = _read_manifest_dict(derivative)
+            if data is None:
+                raise HydrationError(
+                    redact_text(
+                        f"excluded derivative {derivative.name} has an unreadable manifest"
+                    )
+                )
+            sid = str(data.get("session_id") or derivative.name)
+            entry = recorded_excluded.get(sid) or {}
+            code = entry.get("reason_code")
+            if code not in license_codes:
+                continue  # never a license-gate decision, never in the digest
+            decision = resolve_repo_decision(
+                _manifest_repo_slug(data) or "",
+                _manifest_license_evidence(data),
+                policy,
+                allow_copyleft,
+            )
+            decisions[str(decision.repo_slug)] = (
+                "rejected", str(code), decision.spdx_id,
+            )
+    decision_lines = sorted(
+        f"{slug}\t{status}\t{reason_code or ''}\t{spdx_id or ''}\n"
+        for slug, (status, reason_code, spdx_id) in decisions.items()
+    )
+    decisions_digest = hashlib.sha256("".join(decision_lines).encode()).hexdigest()
+    distribution = Counter(spdx for (_, __, spdx) in decisions.values() if spdx)
+    distribution_lines = sorted(
+        f"{spdx}\t{count}\n" for spdx, count in distribution.items()
+    )
+    distribution_digest = hashlib.sha256("".join(distribution_lines).encode()).hexdigest()
+    return {
+        "policy_digest": str(policy_digest),
+        "policy_version": str(policy.policy_version),
+        "allow_copyleft": set(allow_copyleft),
+        "exclusions_digest": _exclusions_digest(),
+        "decisions_digest": decisions_digest,
+        "distribution_digest": distribution_digest,
+    }
+
+
+def resolve_curation_identity(
+    stage: Path,
+    *,
+    source_commit: str,
+    license_policy_path: str | Path | None,
+    allow_copyleft: frozenset[str] | set[str],
+) -> dict[str, Any]:
+    """Derive the v2 curation id from the post-gate policy binding (issue #1094).
+
+    Must be called only after :func:`apply_license_gate`: the binding is a
+    pure function of the gate outputs (resolved per-repo decisions + license
+    distribution) plus the pinned inputs (policy digest/version, opt-ins, C5
+    exclusions digest). Returns the binding plus the derived ``curation_id``.
+    Fail-closed: a missing ``license_policy_path`` raises before any
+    derivation — identity is never computed without a pinned policy.
+    """
+    if not license_policy_path:
+        raise HydrationError(
+            "curation identity requires license_policy_path (fail-closed): "
+            "no license policy file was provided"
+        )
+    from daydream.training.corpus_v2.license import (  # noqa: PLC0415  # local: avoid import cycle
+        load_license_policy,
+    )
+
+    policy, policy_digest = load_license_policy(license_policy_path)
+    binding = _policy_binding(stage, str(source_commit), policy, policy_digest, allow_copyleft)
+    binding["curation_id"] = _curated_dir(stage, str(source_commit), binding=binding).name
+    return binding
 
 
 def _dedupe_dir(stage: Path, curation_id: str) -> Path:
@@ -982,6 +1236,43 @@ def _load_dedupe_ledger(path: Path) -> dict[str, dict[str, Any]]:
     except (OSError, ValueError):
         return latest
     return latest
+
+
+def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
+    """Refresh admitted-baseline content and dedupe-ledger digests after
+    enrichment (issue #1094).
+
+    Enrichment rewrites admitted manifests under ``stage/runs/`` *after*
+    ``dedupe_admitted`` recorded their ``content_digest``; the curation
+    manifest pins that digest and the clean-room verify recomputes
+    ``_derivative_digest`` over the published bytes — so without a restamp
+    every enriched session fails verification. For each admitted session
+    whose derivative digest changed, refresh the admitted baseline copy and
+    append a new ``admitted`` ledger entry carrying the enriched digest
+    (latest-entry-wins, same convention as the dedupe pass itself)."""
+    from daydream.archive import sanitize  # noqa: PLC0415  # local: avoid import cycle
+
+    runs_dir = stage / "runs"
+    if not runs_dir.is_dir():
+        return
+    curated = _pre_identity_dir(stage, revision)
+    dedupe_dir = _dedupe_dir(stage, curated.name)
+    baseline_root = dedupe_dir / "admitted"
+    ledger_path = dedupe_dir / "dedupe.jsonl"
+    for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+        sid = derivative.name
+        digest = sanitize._derivative_digest(derivative)
+        baseline = baseline_root / sid
+        if baseline.is_dir() and sanitize._derivative_digest(baseline) == digest:
+            continue  # unchanged by enrichment; ledger digest stays authoritative
+        if baseline.is_dir():
+            shutil.rmtree(baseline)
+        shutil.copytree(derivative, baseline)
+        _append_dedupe_entry(
+            ledger_path,
+            {"session_id": sid, "status": "admitted", "reason_code": None,
+             "content_digest": digest, "revision": str(revision), "at": _utc_now()},
+        )
 
 
 def _move_dir(source: Path, target: Path) -> None:
@@ -1039,14 +1330,20 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
        derivative digest is moved to ``quarantine/<sid>.conflict`` and the
        original admitted derivative restored from the curated baseline copy —
        the admitted derivative is never overwritten. Identical digests are
-       idempotent (no duplicate ledger entry, no duplicate index row).
+       idempotent (no duplicate ledger entry, no duplicate index row). A
+       derivative matching a *previously* recorded ``admitted`` digest (the
+       pristine pre-enrichment content of an already-enriched session) is an
+       idempotent same-stage-dir re-ingest, not a collision: the published
+       baseline is restored and the admission re-recorded, so an interrupted-
+       resume or an idempotent republish of the same revision never downgrades
+       a published batch to quarantined.
 
     Admitted sessions are indexed (idempotent ``upsert_run``); an unreadable
     manifest on an admitted derivative is fatal. The dedupe ledger records
     every decision as ``{session_id, status, content_digest, reason_code}``.
     """
     revision = str(revision)
-    curated = _curated_dir(stage, revision)
+    curated = _pre_identity_dir(stage, revision)
     dedupe_dir = _dedupe_dir(stage, curated.name)
     ledger_path = dedupe_dir / "dedupe.jsonl"
     baseline_root = dedupe_dir / "admitted"
@@ -1054,6 +1351,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     # collision entry must not let a re-run re-admit the mutated derivative
     # over the published baseline (M7 durability across re-runs).
     admitted_digests = _latest_admitted_digests(ledger_path)
+    ever_admitted = _ever_admitted_digests(ledger_path)
     result = DedupeResult()
     runs_dir = stage / "runs"
     if runs_dir.is_dir():
@@ -1100,6 +1398,34 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
 
             digest = sanitize._derivative_digest(derivative)
             if admitted_digests.get(sid) not in (None, digest):
+                if digest in ever_admitted.get(sid, set()):
+                    # Idempotent re-ingest of the same source content: the
+                    # derivative differs from the *latest* admitted digest only
+                    # because this pipeline's own enrichment rewrote its
+                    # manifest after admission (restamp refreshed the baseline
+                    # + ledger to the enriched digest). Restore the published
+                    # baseline and re-record the admission — never a collision,
+                    # so an idempotent same-stage-dir re-run (interrupted-
+                    # resume or a fixed-path republish of the same revision)
+                    # does not downgrade a published batch to quarantined.
+                    baseline = baseline_root / sid
+                    if not baseline.is_dir():
+                        raise HydrationError(
+                            redact_text(
+                                f"cannot restore admitted baseline for {sid}: "
+                                "no admitted baseline exists"
+                            )
+                        )
+                    shutil.rmtree(derivative)
+                    shutil.copytree(baseline, runs_dir / sid)
+                    _append_dedupe_entry(
+                        ledger_path,
+                        {"session_id": sid, "status": "admitted", "reason_code": None,
+                         "content_digest": sanitize._derivative_digest(baseline),
+                         "revision": revision, "at": _utc_now()},
+                    )
+                    result.admitted += 1
+                    continue
                 # Identity collision: quarantine the new derivative, restore the
                 # original admitted content — never overwrite (M7).
                 baseline = baseline_root / sid
@@ -1159,16 +1485,49 @@ def _latest_admitted_digests(path: Path) -> dict[str, str | None]:
     return latest
 
 
+def _ever_admitted_digests(path: Path) -> dict[str, set[str]]:
+    """Every *admitted* content digest ever recorded per session id.
+
+    Richer than :func:`_latest_admitted_digests`: an idempotent same-stage-dir
+    re-run re-ingests the *pristine* pre-enrichment content, whose digest was
+    safely recorded (as ``admitted``) before enrichment rewrote the manifest
+    and :func:`restamp_admitted_digests` refreshed the baseline to the enriched
+    digest. That pristine digest is a known-good published baseline — never a
+    collision — so it must survive in the re-ingest set even after a later
+    restamp moved the latest-admitted digest on. Collision-entry digests are
+    deliberately excluded: a mutated derivative stays a collision on every
+    later run (M7 durability).
+    """
+    ever: dict[str, set[str]] = {}
+    if not path.is_file():
+        return ever
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            if isinstance(entry, dict) and entry.get("session_id") \
+                    and entry.get("status") == "admitted":
+                digest = entry.get("content_digest")
+                if isinstance(digest, str) and digest:
+                    ever.setdefault(str(entry["session_id"]), set()).add(digest)
+    except (OSError, ValueError):
+        return {}
+    return ever
+
+
 def admission_summary_buckets(
     entries: Iterable[tuple[str, str | None]],
 ) -> dict[str, int]:
     """Pure four-bucket license summary over ``(session_id, reason_code)``
     admission decisions (issue #1080 S2).
 
-    ``None`` counts as admitted; the stable Task-1 rejection codes map to the
-    human buckets (``repo_identity_missing`` folds into
-    ``license_evidence_missing`` — missing identity is missing evidence for
-    the license gate). Any other code is not a license-gate decision and
+    ``None`` counts as admitted; the stable rejection codes map to the
+    human buckets (``repo_identity_missing`` and ``repo_commit_unresolved``
+    fold into ``license_evidence_missing`` — missing identity or an
+    unresolvable repo commit is missing evidence for the license gate). Any
+    other code is not a license-gate decision and
     raises: the bucket sum equals the license-gate session count by
     construction (M8).
     """
@@ -1177,6 +1536,7 @@ def admission_summary_buckets(
         REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
         REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
         REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
+        REASON_CODE_REPO_COMMIT_UNRESOLVED: "license_evidence_missing",
     }
     buckets: dict[str, int] = {
         "admitted": 0,
@@ -1212,6 +1572,7 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
         REASON_CODE_C8_COPYLEFT_UNOPTED,
         REASON_CODE_LICENSE_EVIDENCE_MISSING,
         REASON_CODE_REPO_IDENTITY_MISSING,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
     }
     for item in ledger.get("rejections", []):
         code = item.get("reason_code")
@@ -1220,7 +1581,62 @@ def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
     return admission_summary_buckets(entries)
 
 
-def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> dict[str, Any]:
+def license_admission_by_repo(
+    stage: Path, ledger: Mapping[str, Any]
+) -> dict[str, dict[str, int]]:
+    """Per-repo license admission counts derived from the built import ledger
+    (issue #1094 Task 8).
+
+    Same adjudicated population as :func:`license_admission_summary` (imported
+    sessions plus license-gate rejections; ingest/fixture rejections were
+    never adjudicated by the license gate and are skipped), grouped by the
+    repo slug read from the session's manifest via ``_session_identity``
+    (enrichment wrote the resolved evidence into that same manifest, so this
+    is the slug the gate decided on). Sessions without a readable slug bucket
+    under ``"unresolved"``. Unknown reason codes raise exactly as
+    :func:`admission_summary_buckets` does — the buckets are value-free slugs
+    and counts, never URLs or paths.
+    """
+    revision = str(ledger["pinned_revision"])
+    license_codes = {
+        REASON_CODE_C5_EXCLUDED_REPO,
+        REASON_CODE_C8_COPYLEFT_UNOPTED,
+        REASON_CODE_LICENSE_EVIDENCE_MISSING,
+        REASON_CODE_REPO_IDENTITY_MISSING,
+        REASON_CODE_REPO_COMMIT_UNRESOLVED,
+    }
+    entries: list[tuple[str, str | None]] = [
+        (str(item["session_id"]), None) for item in ledger.get("imported", [])
+    ]
+    for item in ledger.get("rejections", []):
+        code = item.get("reason_code")
+        if code in license_codes:
+            entries.append((str(item["session_id"]), str(code)))
+    by_repo: dict[str, dict[str, int]] = {}
+    for sid, code in entries:
+        # Imported sessions still live under stage/runs/<sid> (checked first);
+        # license-gate rejections were moved to stage/excluded/<sid>.
+        slug, _evidence = _session_identity(
+            stage, sid, revision, root="excluded", collision=False
+        )
+        buckets = by_repo.setdefault(slug or "unresolved", {
+            "admitted": 0,
+            "c5_excluded": 0,
+            "c8_copyleft_unopted": 0,
+            "license_evidence_missing": 0,
+        })
+        for bucket, count in admission_summary_buckets([(sid, code)]).items():
+            buckets[bucket] += count
+    return by_repo
+
+
+def build_import_ledger(
+    stage: Path,
+    *,
+    revision: str,
+    source_commit: str,
+    binding: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build and persist the value-free admission ledger (issue #982 M11).
 
     Composes the ingest results, the dedupe ledger, and the staging index into
@@ -1229,11 +1645,17 @@ def build_import_ledger(stage: Path, *, revision: str, source_commit: str) -> di
     a raw URL, path, or any matched secret value. The write is atomic; a
     failure propagates (fatal semantics) so a partial ledger can never claim
     success.
+
+    Issue #1094: pass the post-gate ``binding`` (from
+    :func:`resolve_curation_identity`) so the ledger — and everything
+    published from it onward — is keyed by the v2 curation id. The dedupe
+    ledger is still read from the pre-identity staging location (Assumption
+    A4); only the curated output prefix moves to the v2 id.
     """
     revision = str(revision)
     source_commit = str(source_commit)
-    curated = _curated_dir(stage, source_commit)
-    dedupe_ledger = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
+    curated = _curated_dir(stage, source_commit, binding=binding)
+    dedupe_ledger = _dedupe_dir(stage, _pre_identity_dir(stage, source_commit).name) / "dedupe.jsonl"
     recorded = _load_dedupe_ledger(dedupe_ledger)
     admitted_digests = _latest_admitted_digests(dedupe_ledger)
 
@@ -1382,6 +1804,96 @@ def _curated_upload_paths(stage: Path, curation_id: str) -> list[Path]:
     return sorted(p for p in curated.rglob("*") if p.is_file())
 
 
+def _policy_binding_record(binding: dict[str, Any]) -> str:
+    """Canonical ``policy-binding.json`` record text (issue #1094 task 7).
+
+    Byte-canonical: sorted keys, compact canonical JSON, trailing newline —
+    comparison against the remote record is bytewise, so the record must never
+    depend on dict ordering or whitespace. Carries the full binding: policy
+    digest/version, sorted casefolded copyleft opt-ins (matching
+    :func:`hydrate_rules.derive_curation_id_v2`'s canonicalization, so a
+    differently-cased spelling of the same logical opt-in yields byte-identical
+    records), exclusions digest, resolved per-repo decisions digest, license
+    distribution digest.
+    """
+    record = {
+        "policy_digest": str(binding["policy_digest"]),
+        "policy_version": str(binding["policy_version"]),
+        "allow_copyleft": sorted(str(slug).casefold() for slug in binding["allow_copyleft"]),
+        "exclusions_digest": str(binding["exclusions_digest"]),
+        "resolved_decisions_digest": str(binding["decisions_digest"]),
+        "distribution_digest": str(binding["distribution_digest"]),
+        "schema_version": "2",
+    }
+    return json.dumps(record, sort_keys=True) + "\n"
+
+
+def check_prefix_binding(
+    client: HubClient, *, curation_id: str, binding: dict[str, Any],
+    allow_unbound_resume: bool = False,
+) -> None:
+    """Fail closed when a curated prefix was published under a different
+    policy binding (issue #1094 task 7).
+
+    Downloads ``curated/<curation-id>/policy-binding.json`` from the
+    destination repo and compares it bytewise against the current run's
+    canonical binding record. A differing record raises
+    :class:`HydrationError` ("conflicting policy binding"); an absent record
+    on a prefix that already has published batches but no resume ledger is a
+    pre-v2 legacy prefix and also fails closed with a distinct legacy message
+    (legacy prefixes are never republished under the new scheme). An absent
+    record on a fresh prefix — or on a prefix whose resume ledger shows an
+    interrupted v2 run that died between ``publish_batches`` and ``finalize``
+    (``allow_unbound_resume``, used by :func:`run_hydrate_hub`'s pre-publish
+    check and by :func:`finalize`) — proceeds.
+
+    Runs strictly before any upload, so a conflict uploads zero bytes. Errors
+    name the prefix and digest fields only — never policy file contents or
+    credentials.
+    """
+    prefix = f"curated/{curation_id}/"
+    current = _policy_binding_record(binding).encode("utf-8")
+    try:
+        remote = client.download_file(f"{prefix}policy-binding.json")
+    except HubDownloadError:
+        remote = None  # no binding record yet (fresh or legacy prefix)
+    except HydrationError as exc:
+        raise HydrationError(
+            redact_text(f"cannot read the published policy binding under {prefix}: {exc}")
+        ) from exc
+    if remote is not None:
+        if remote == current:
+            return
+        detail = ""
+        try:
+            remote_digest = json.loads(remote.decode("utf-8")).get("policy_digest", "?")
+            detail = f" (remote policy_digest={remote_digest}, current policy_digest={binding['policy_digest']})"
+        except (ValueError, UnicodeDecodeError):
+            detail = " (remote record is not a readable binding record)"
+        raise HydrationError(
+            redact_text(
+                f"conflicting policy binding under {prefix}: the prefix was "
+                "published under a different policy; refuse to publish "
+                f"(fail-closed){detail}"
+            )
+        )
+    # Absent record: fresh prefix, interrupted v2 run, or pre-v2 legacy prefix.
+    repo_files = client.list_repo_files()
+    has_batches = any(p.startswith(f"{prefix}batches/") for p in repo_files)
+    if not has_batches:
+        return  # fresh prefix: nothing published yet
+    has_ledger = f"{prefix}resume/ledger.jsonl" in set(repo_files)
+    if allow_unbound_resume and has_ledger:
+        return  # interrupted v2 run; finalize is about to publish the record
+    raise HydrationError(
+        redact_text(
+            f"conflicting policy binding under {prefix}: the prefix has "
+            "published batches but no policy-binding record (pre-v2 legacy "
+            "prefix); refuse to publish (fail-closed)"
+        )
+    )
+
+
 def publish_batches(
     client: HubClient, stage: Path, *, curation_id: str, skip_sessions: set[str] | None = None
 ) -> None:
@@ -1399,6 +1911,10 @@ def publish_batches(
     session ids from the remote resume ledger — are omitted from the upload
     mapping (they already exist at their content-addressed paths from prior
     commits) while still contributing to SHA256SUMS and the resume ledger.
+    Resumability is bounded by the policy binding (issue #1094): the caller
+    must run :func:`check_prefix_binding` first — a prefix whose published
+    ``policy-binding.json`` differs from the current binding is never
+    republished, additively or otherwise.
 
     Bronze safety (M10/M13): the module asserts its own upload path list never
     leaves the ``curated/`` prefix before a single byte is written. Upload
@@ -1459,12 +1975,47 @@ def _stage_batches(stage: Path, curated: Path) -> None:
         shutil.copytree(derivative, target)
 
 
+def _repo_commits_from_enrichment_cache(stage: Path) -> dict[str, str]:
+    """Per-slug resolved Git repository commits from the enrichment cache.
+
+    Groups the ``resolved`` rows of ``stage/_enrich/evidence.jsonl`` (written
+    by the enrichment stage) by provenance slug, latest row per slug winning.
+    Only resolver-produced full 40-hex commits qualify — the Hub dataset
+    revision is never consulted and never recorded as a repository commit
+    (issue #1094).
+    """
+    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        _ENRICH_CACHE_NAME,
+        _ENRICH_DIR,
+    )
+
+    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
+    commits: dict[str, str] = {}
+    if not path.is_file():
+        return commits
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("status") != "resolved":
+            continue
+        slug = entry.get("repo_slug")
+        commit = entry.get("repo_commit")
+        if isinstance(slug, str) and isinstance(commit, str) and _FULL_SHA_RE.fullmatch(commit):
+            commits[slug] = commit
+    return commits
+
+
 def _write_resolution_map(stage: Path, curated: Path) -> None:
     """Materialize ``resolution-map.json`` under the curated prefix when absent.
 
     Rebuilt from the staging index (data only, no clones); an existing file —
     from a prior publish of the same curation id — is left untouched so the
-    published map stays stable and additive.
+    published map stays stable and additive. Per-slug ``pinned_sha`` values
+    come from the enrichment cache's resolved Git repository commits.
     """
     map_path = curated / "resolution-map.json"
     if map_path.exists():
@@ -1476,7 +2027,11 @@ def _write_resolution_map(stage: Path, curated: Path) -> None:
             source_commit = json.loads(ledger_path.read_text(encoding="utf-8")).get("source_commit")
         except (OSError, ValueError):
             source_commit = None
-    cmap = build_resolution_map(stage, source_commit=source_commit or "unknown")
+    cmap = build_resolution_map(
+        stage,
+        source_commit=source_commit or "unknown",
+        repo_commits=_repo_commits_from_enrichment_cache(stage),
+    )
     _atomic_write_json(map_path, cmap)
 
 
@@ -1729,8 +2284,10 @@ class HydrateSummary:
     verify_admitted: int = 0
     verified: bool = False
     # Issue #1080 S2: four-bucket license admission summary (admitted /
-    # c5-excluded / copyleft-unopted / evidence-missing) over the import
-    # ledger; empty when no license policy was configured.
+    # c5-excluded / copyleft-unopted / evidence-missing, with
+    # repo_identity_missing and repo_commit_unresolved folded into the
+    # evidence-missing bucket) over the import ledger; empty when no license
+    # policy was configured.
     license_admission: dict[str, int] = field(default_factory=dict)
 
 
@@ -1808,11 +2365,15 @@ def _curation_manifest_doc(
     }
 
 
-def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit: str) -> str:
+def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit: str,
+             binding: dict[str, Any]) -> str:
     """Publish the curation manifest and refreshed checksums (M18).
 
     The manifest is rendered from the real persisted import ledger and uploaded
-    with ``SHA256SUMS`` over the final published file set. The ``_SUCCESS``
+    with ``SHA256SUMS`` over the final published file set. The canonical
+    ``policy-binding.json`` record (issue #1094) is written locally and
+    re-checked against the remote prefix immediately before the manifest
+    upload, so a conflicting republication can never add bytes. The ``_SUCCESS``
     marker is deliberately NOT uploaded here: it is published only after the
     clean-room verification cycle passes (verify-before-success), so a
     verification failure can never leave a published "complete" marker.
@@ -1828,6 +2389,11 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
     manifest_path = curated / "curation-manifest.json"
     _atomic_write_json(manifest_path, doc)
     prefix = f"curated/{curation_id}/"
+    # Issue #1094: pin the policy binding into the published prefix and fail
+    # closed on any conflicting remote record before the manifest commit.
+    binding_path = curated / "policy-binding.json"
+    binding_path.write_text(_policy_binding_record(binding), encoding="utf-8")
+    check_prefix_binding(client, curation_id=curation_id, binding=binding, allow_unbound_resume=True)
     # SHA256SUMS must cover the *final* published file set — including the
     # curation manifest rendered just above, which can change between runs
     # (e.g. a newly recorded identity collision). Refresh it here so the
@@ -1849,6 +2415,7 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
         {
             f"{prefix}curation-manifest.json": manifest_path,
             f"{prefix}SHA256SUMS": curated / "SHA256SUMS",
+            f"{prefix}policy-binding.json": binding_path,
         },
         f"daydream hydrate {curation_id}: curation manifest + checksums",
     )
@@ -1990,10 +2557,12 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
 
     Composes Tasks 4–9 in order with fatal, redacted failure semantics: resolve
     the pinned source revision from the source repo, download the snapshot,
-    run the ingest gate, dedupe + ledger, publish additive batches (continuous
-    checkpoints, M16), finalize (curation manifest + refreshed checksums, M18),
-    run the clean-room verification cycle against that pinned commit (M19/M20),
-    and only after it passes publish the ``_SUCCESS`` marker as the very last
+    run the ingest gate, dedupe + ledger, fail closed on any conflicting
+    published policy binding, publish additive batches (continuous
+    checkpoints, M16), finalize (policy binding + curation manifest +
+    refreshed checksums, M18), run the clean-room verification cycle against
+    that pinned commit (M19/M20), and only after it passes publish the
+    ``_SUCCESS`` marker as the very last
     commit — a verification failure never leaves a published success marker.
     ``client=None`` builds two production :class:`HfHubClient` instances via
     :func:`_make_client` (one for the source snapshot repo, one for the
@@ -2001,6 +2570,14 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     after verification passes; every failure path leaves it False and never
     uploads a success marker.
     """
+    # Issue #1094 defense-in-depth: the CLI refuses a non-dry publication
+    # without --license-policy; the orchestrator re-checks so a future caller
+    # bypassing the CLI still fails closed before any publication.
+    if config.license_policy_path is None:
+        raise HydrationError(
+            "run_hydrate_hub requires license_policy_path for any publication "
+            "path (fail-closed)"
+        )
     # Two clients: the source repo guards the pinned snapshot, the destination
     # repo receives the published output. Tests inject one FakeHub for both.
     source_client = client if client is not None else _make_client(config.source_repo)
@@ -2016,31 +2593,82 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     download_snapshot(source_client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
     ingest_bundles(config.stage_dir, revision=source_commit)
     dedupe_admitted(config.stage_dir, revision=source_commit)
-    if config.license_policy_path is not None:
-        # Issue #1080: the per-repo license gate runs after the existing gates;
-        # apply_license_gate itself refuses (ValueError, fail-closed) on a
-        # missing policy input.
-        apply_license_gate(
-            config.stage_dir,
-            revision=source_commit,
-            license_policy_path=config.license_policy_path,
-            allow_copyleft=config.allow_copyleft,
-        )
-    ledger = build_import_ledger(config.stage_dir, revision=source_commit, source_commit=source_commit)
-    license_admission = (
-        license_admission_summary(ledger)
-        if config.license_policy_path is not None
-        else {}
+    # With the policy now required on every non-dry publication path, the
+    # gate and its admission summary always run (issue #1094).
+    # Issue #1094: enrichment fills legacy records' missing license_evidence
+    # from an authorized immutable source before the gate. The staging cache
+    # makes same-VM re-runs decision-identical; the published copy under the
+    # curated prefix is the pinned evidence record of this curation (audit +
+    # replay harnesses). Fresh-VM production runs re-enrich from the live
+    # resolver, so upstream drift surfaces as a new v2 curation id, never a
+    # silent rewrite of a previous curation.
+    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        _make_license_resolver,
+        enrich_license_evidence,
+        publish_enrichment_cache,
     )
-    curation_id = str(ledger["curation_id"])
+
+    enrich_license_evidence(
+        config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+    )
+    # Enrichment may have rewritten admitted manifests; refresh the dedupe
+    # baselines/ledger digests so the published content identity matches the
+    # enriched content (the clean-room verify recomputes the digest).
+    restamp_admitted_digests(config.stage_dir, revision=source_commit)
+    # Issue #1080: the per-repo license gate runs after the existing gates;
+    # apply_license_gate itself refuses (ValueError, fail-closed) on a
+    # missing policy input (unreachable-but-documented now that the
+    # orchestrator pre-checks).
+    apply_license_gate(
+        config.stage_dir,
+        revision=source_commit,
+        license_policy_path=config.license_policy_path,
+        allow_copyleft=config.allow_copyleft,
+    )
+    # Issue #1094: the v2 curation id is derived post-gate from the resolved
+    # policy binding (policy digest/version, opt-ins, exclusions digest,
+    # resolved per-repo decisions, license distribution) — everything from
+    # the ledger onward is keyed by it. The digest captured from
+    # load_license_policy is the binding's policy_digest; policy_version is
+    # the policy file's own version.
+    binding = resolve_curation_identity(
+        config.stage_dir,
+        source_commit=source_commit,
+        license_policy_path=config.license_policy_path,
+        allow_copyleft=config.allow_copyleft,
+    )
+    curation_id = str(binding["curation_id"])
+    # The enrichment cache is copied into the *v2* curated prefix as the
+    # pinned evidence record of this curation (audit + replay harnesses).
+    publish_enrichment_cache(
+        config.stage_dir, revision=source_commit,
+        curated_dir=config.stage_dir / "curated" / curation_id,
+    )
+    ledger = build_import_ledger(
+        config.stage_dir, revision=source_commit, source_commit=source_commit, binding=binding,
+    )
+    license_admission = license_admission_summary(ledger)
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
+    # Issue #1094 task 7: fail closed on a conflicting published policy
+    # binding before a single byte is uploaded (additive republication under
+    # a prefix bound to a different policy is refused here). The resumed run
+    # died between publish_batches and finalize: its prefix has published
+    # batches and the resume ledger but no policy-binding record yet —
+    # allow_unbound_resume lets that exact window proceed (the v2 id is
+    # deterministic, so a reachable prefix always carries this run's binding;
+    # pre-v2 legacy prefixes have no resume ledger and still fail closed).
+    check_prefix_binding(
+        dest_client, curation_id=curation_id, binding=binding,
+        allow_unbound_resume=True,
+    )
     publish_batches(
         dest_client, config.stage_dir, curation_id=curation_id, skip_sessions=checkpoint.completed_sessions
     )
     # finalize pins the verify commit (manifest + checksums); _SUCCESS is
     # uploaded only after the clean-room cycle passes (M18/M20).
     output_commit_sha = finalize(
-        dest_client, config.stage_dir, curation_id=curation_id, source_commit=source_commit
+        dest_client, config.stage_dir, curation_id=curation_id, source_commit=source_commit,
+        binding=binding,
     )
     summary = HydrateSummary(
         source_commit=source_commit,
