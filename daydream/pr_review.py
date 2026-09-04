@@ -243,7 +243,7 @@ async def post_review_to_pr_from_report(
         )
         return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
-    if not issues and not approve_on_clean:
+    if not issues and not approve_on_clean and not (diagram_blocks and diagram_blocks.strip()):
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return PostStatus.NOTHING_TO_POST
     return await _post(
@@ -1581,7 +1581,11 @@ async def _post(
         return PostStatus.NO_PR
 
     classified = classify(target_dir, pr, issues)
-    if classified.is_empty() and not approve_on_clean:
+    if (
+        classified.is_empty()
+        and not approve_on_clean
+        and not (diagram_blocks and diagram_blocks.strip())
+    ):
         print_info(
             console, "No postable issues after classification; skipping PR post."
         )
@@ -1719,12 +1723,12 @@ def post_diagram_comment_to_pr(
     plus :data:`DAYDREAM_FOOTER`, which is how the *next* diagram-only run of
     the same kind recognises and minimizes this comment.
 
-    Prior comments are minimized before the new one posts, so the PR never
-    shows two live diagrams of one kind. Minimization is best-effort: an
-    unresolved ``bot_login`` skips it with a warning (mirroring
-    ``BOT_LOGIN_UNRESOLVED``) rather than trusting an unattributed comment, and
-    a failed mutation warns and continues — a stale fold is a cosmetic problem,
-    a missing diagram is the run's deliverable.
+    Prior comments are minimized only after the new one posts successfully, so
+    a failed replacement cannot remove the PR's only live diagram.
+    Minimization is best-effort: an unresolved ``bot_login`` skips it with a
+    warning (mirroring ``BOT_LOGIN_UNRESOLVED``) rather than trusting an
+    unattributed comment, and a failed mutation warns and continues — a stale
+    fold is a cosmetic problem, a missing diagram is the run's deliverable.
 
     Args:
         target_dir: Repository directory the ``gh`` calls run in.
@@ -1742,6 +1746,7 @@ def post_diagram_comment_to_pr(
     from daydream.reconcile import fetch_prior_diagram_comments, minimize_comment
 
     repo_slug = f"{pr.owner}/{pr.repo}"
+    prior = []
     if bot_login is None:
         print_warning(
             console,
@@ -1757,14 +1762,6 @@ def post_diagram_comment_to_pr(
         except GitError as exc:
             print_warning(console, f"Could not inventory prior diagram comments: {exc}")
             prior = []
-        for comment in prior:
-            if not set(comment.kinds) & set(kinds):
-                continue
-            if not minimize_comment(target_dir, comment.node_id):
-                print_warning(
-                    console,
-                    f"Failed to minimize prior diagram comment {comment.node_id}",
-                )
 
     markers = "\n".join(diagram_marker(kind, pr.head_sha) for kind in kinds)
     chunks = [chunk for chunk in (markers, body.strip(), DAYDREAM_FOOTER) if chunk]
@@ -1778,7 +1775,19 @@ def post_diagram_comment_to_pr(
     if not isinstance(data, dict):
         return None, None
     url = data.get("html_url")
-    return (str(url) if url else None), None
+    if not url:
+        return None, None
+
+    current_kinds = set(kinds)
+    for comment in prior:
+        if not set(comment.kinds) & current_kinds:
+            continue
+        if not minimize_comment(target_dir, comment.node_id):
+            print_warning(
+                console,
+                f"Failed to minimize prior diagram comment {comment.node_id}",
+            )
+    return str(url), None
 
 
 def diagram_comment_kinds(payload: dict[str, Any]) -> list[str]:
@@ -1876,8 +1885,199 @@ def render_diagram_comment_body(payload: dict[str, Any]) -> str:
     return "\n\n".join(chunks)
 
 
+def _diagram_grounding_problem(
+    kind: str, spec: dict[str, Any], grounding: Any
+) -> str | None:
+    """Validate the host-produced grounding report attached to a rendered spec."""
+    from daydream.deep.diagram_grounding import REASON_CODES
+
+    if not isinstance(grounding, dict):
+        return f"{kind} rendered result has no grounding attestation"
+    elements = grounding.get("elements")
+    summary = grounding.get("summary")
+    capped = grounding.get("capped")
+    if not isinstance(elements, list):
+        return f"{kind} grounding attestation has no 'elements' array"
+    if not isinstance(summary, dict):
+        return f"{kind} grounding attestation has no 'summary' object"
+    if not isinstance(capped, dict):
+        return f"{kind} grounding attestation has no 'capped' object"
+
+    allowed_elements = (
+        {"participant", "message", "block", "branch"}
+        if kind == "sequence"
+        else {"root", "node", "edge"}
+    )
+    allowed_caps = (
+        {"participants", "messages", "blocks"}
+        if kind == "sequence"
+        else {"nodes", "edges"}
+    )
+    checks: list[dict[str, Any]] = []
+    seen_refs: set[tuple[str, str]] = set()
+    for index, raw in enumerate(elements):
+        if not isinstance(raw, dict):
+            return f"{kind} grounding attestation element {index} is not an object"
+        element = raw.get("element")
+        ref = raw.get("ref")
+        grounded = raw.get("grounded")
+        reason = raw.get("reason")
+        final_index = raw.get("final_index")
+        if element not in allowed_elements or not isinstance(ref, str) or not ref:
+            return f"{kind} grounding attestation element {index} has an invalid identity"
+        identity = (element, ref)
+        if identity in seen_refs:
+            return f"{kind} grounding attestation repeats {element} reference {ref!r}"
+        seen_refs.add(identity)
+        if not isinstance(grounded, bool):
+            return f"{kind} grounding attestation for {element} {ref!r} has no boolean verdict"
+        if grounded and reason is not None:
+            return f"{kind} grounding attestation for {element} {ref!r} is contradictory"
+        if not grounded and reason not in REASON_CODES:
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid reason"
+        if final_index is not None and (
+            isinstance(final_index, bool) or not isinstance(final_index, int) or final_index < 0
+        ):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid final index"
+        if final_index is not None and not grounded:
+            return f"{kind} grounding attestation publishes ungrounded {element} {ref!r}"
+        strength = raw.get("strength")
+        snapped_line = raw.get("snapped_line")
+        if strength not in (None, "definition", "token"):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid strength"
+        if snapped_line is not None and (
+            isinstance(snapped_line, bool)
+            or not isinstance(snapped_line, int)
+            or snapped_line < 1
+        ):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid snapped line"
+        if not isinstance(raw.get("in_changed_hunk"), bool):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid hunk verdict"
+        defined_at = raw.get("defined_at")
+        if defined_at is not None and (not isinstance(defined_at, str) or not defined_at):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid definition"
+        checks.append(raw)
+
+    for count_name in ("proposed", "grounded_first_pass", "repaired", "pruned"):
+        value = summary.get(count_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return (
+                f"{kind} grounding attestation summary has an invalid "
+                f"{count_name!r} count"
+            )
+    if summary["proposed"] != len(checks):
+        return f"{kind} grounding attestation summary does not match its elements"
+    if summary["pruned"] != sum(not check["grounded"] for check in checks):
+        return f"{kind} grounding attestation pruned count does not match its verdicts"
+    for collection, count in capped.items():
+        if (
+            collection not in allowed_caps
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            return f"{kind} grounding attestation has an invalid {collection!r} cap count"
+
+    claimed: set[int] = set()
+
+    def claim(element: str, final_index: int, ref: str | None = None) -> dict[str, Any] | None:
+        matches = [
+            (index, check)
+            for index, check in enumerate(checks)
+            if check["element"] == element
+            and check["final_index"] == final_index
+            and (ref is None or check["ref"] == ref)
+        ]
+        if len(matches) != 1:
+            return None
+        index, check = matches[0]
+        claimed.add(index)
+        return check
+
+    if kind == "sequence":
+        participants = spec["participants"]
+        messages = spec["messages"]
+        blocks = spec["blocks"]
+        names = {participant["name"] for participant in participants}
+        if len(names) != len(participants):
+            return "sequence spec_final has duplicate participant names"
+        for index, participant in enumerate(participants):
+            if claim("participant", index, participant["name"]) is None:
+                return f"sequence grounding attestation does not cover participant at final index {index}"
+        for index, message in enumerate(messages):
+            if message["from"] not in names or message["to"] not in names:
+                return f"sequence spec_final message {index} has an unknown participant"
+            if claim("message", index) is None:
+                return f"sequence grounding attestation does not cover message at final index {index}"
+        for block_index, block in enumerate(blocks):
+            block_check = claim("block", block_index)
+            if block_check is None:
+                return f"sequence grounding attestation does not cover block at final index {block_index}"
+            prefix = f"{block_check['ref']}."
+            for branch_index, branch in enumerate(block["branches"]):
+                if any(
+                    isinstance(message_index, bool)
+                    or message_index >= len(messages)
+                    for message_index in branch["messages"]
+                ):
+                    return f"sequence spec_final block {block_index} cites an unknown message"
+                matches = [
+                    (index, check)
+                    for index, check in enumerate(checks)
+                    if check["element"] == "branch"
+                    and check["final_index"] == branch_index
+                    and check["ref"].startswith(prefix)
+                ]
+                if len(matches) != 1:
+                    return (
+                        "sequence grounding attestation does not cover branch at "
+                        f"final index {block_index}.{branch_index}"
+                    )
+                claimed.add(matches[0][0])
+        if grounding.get("root_range") is not None:
+            return "sequence grounding attestation has an unexpected root range"
+    else:
+        root = spec["root"]
+        nodes = spec["nodes"]
+        edges = spec["edges"]
+        root_range = grounding.get("root_range")
+        if (
+            not isinstance(root_range, list)
+            or len(root_range) != 2
+            or any(isinstance(line, bool) or not isinstance(line, int) for line in root_range)
+            or root_range[0] != root["line"]
+            or root_range[1] < root_range[0]
+        ):
+            return "flowchart grounding attestation has an invalid root range"
+        if claim("root", 0, root["name"]) is None:
+            return "flowchart grounding attestation does not cover root at final index 0"
+        node_ids = {node["id"] for node in nodes}
+        if len(node_ids) != len(nodes):
+            return "flowchart spec_final has duplicate node ids"
+        for index, node in enumerate(nodes):
+            evidence = node["evidence"]
+            if evidence["file"] != root["file"] or not (
+                root_range[0] <= evidence["line"] <= root_range[1]
+            ):
+                return f"flowchart spec_final node {index} lies outside its root"
+            if claim("node", index, node["id"]) is None:
+                return f"flowchart grounding attestation does not cover node at final index {index}"
+        for index, edge in enumerate(edges):
+            if edge["from"] not in node_ids or edge["to"] not in node_ids:
+                return f"flowchart spec_final edge {index} has an unknown endpoint"
+            if claim("edge", index, f"{edge['from']}->{edge['to']}") is None:
+                return f"flowchart grounding attestation does not cover edge at final index {index}"
+
+    if any(
+        check["final_index"] is not None and index not in claimed
+        for index, check in enumerate(checks)
+    ):
+        return f"{kind} grounding attestation contains an unmatched published element"
+    return None
+
+
 def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
-    """Validate every rendered kind's ``spec_final`` against its spec schema.
+    """Validate each rendered spec and its grounding attestation before posting.
 
     The privileged poster re-renders mermaid from model-derived specs, so those
     specs are re-validated here -- against the same hand-written schema the
@@ -1892,9 +2092,24 @@ def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
     Returns:
         None when every rendered kind validates, else a human error message.
     """
+    from daydream.config import (
+        DIAGRAM_MAX_BLOCKS,
+        DIAGRAM_MAX_EDGES,
+        DIAGRAM_MAX_MESSAGES,
+        DIAGRAM_MAX_NODES,
+        DIAGRAM_MAX_PARTICIPANTS,
+    )
     from daydream.deep.diagram_schema import FLOWCHART_SPEC_SCHEMA, SEQUENCE_SPEC_SCHEMA
 
     schemas = {"sequence": SEQUENCE_SPEC_SCHEMA, "flowchart": FLOWCHART_SPEC_SCHEMA}
+    caps = {
+        "sequence": {
+            "participants": DIAGRAM_MAX_PARTICIPANTS,
+            "messages": DIAGRAM_MAX_MESSAGES,
+            "blocks": DIAGRAM_MAX_BLOCKS,
+        },
+        "flowchart": {"nodes": DIAGRAM_MAX_NODES, "edges": DIAGRAM_MAX_EDGES},
+    }
     results = payload.get("results")
     if not isinstance(results, dict):
         return "diagrams payload has no 'results' object"
@@ -1906,6 +2121,16 @@ def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
             jsonschema.validate(result.get("spec_final"), schemas[kind])
         except jsonschema.ValidationError as exc:
             return f"{kind} spec_final failed schema validation: {exc.message}"
+        spec = result["spec_final"]
+        for collection, cap in caps[kind].items():
+            size = len(spec[collection])
+            if size > cap:
+                return f"{kind} spec_final exceeds {collection} render cap: {size} > {cap}"
+        if result.get("reason") is not None or result.get("omit_reasons") not in (None, []):
+            return f"{kind} rendered result contradicts its status"
+        problem = _diagram_grounding_problem(kind, spec, result.get("grounding"))
+        if problem is not None:
+            return problem
     return None
 
 
@@ -2045,6 +2270,14 @@ def post_findings_from_artifact(
             artifact, pr, target_dir, console=console, bot_login=effective_login
         )
 
+    diagram_blocks: str | None = None
+    if isinstance(artifact.diagrams, dict):
+        problem = validate_diagram_payload(artifact.diagrams)
+        if problem is not None:
+            print_error(console, "Diagram Payload Rejected", problem)
+            return 1
+        diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
+
     try:
         prior = fetch_prior_findings(target_dir, repo, pr_number, bot_login=effective_login)
     except GitError as exc:
@@ -2087,7 +2320,7 @@ def post_findings_from_artifact(
         for finding in artifact.findings
     )
 
-    if classified.is_empty() and not can_approve:
+    if classified.is_empty() and not can_approve and diagram_blocks is None:
         print_info(
             console,
             f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
@@ -2102,17 +2335,6 @@ def post_findings_from_artifact(
             console,
             f"{len(failed_files)} file-level comment(s) failed to post; folded into the review body.",
         )
-
-    # Issue #1113: a --findings-out deep review may carry a diagrams payload.
-    # The privileged poster re-renders the mermaid from the validated specs, so
-    # no model-authored markdown reaches the comment.
-    diagram_blocks: str | None = None
-    if isinstance(artifact.diagrams, dict):
-        problem = validate_diagram_payload(artifact.diagrams)
-        if problem is not None:
-            print_error(console, "Diagram Payload Rejected", problem)
-            return 1
-        diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
 
     payload = build_payload(
         pr,

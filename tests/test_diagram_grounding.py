@@ -70,6 +70,16 @@ def verify_jwt(token):
     return token
 """
 
+_NON_EXECUTABLE_PY = '''def classify(value):
+    """Describe the flow."""
+    # perform the work
+
+    result = value
+    if result:
+        return result
+    return None
+'''
+
 _LEGACY_RB = """def resolve_legacy(request)
   request
 end
@@ -87,6 +97,9 @@ FLOW_ROOT = CandidateRoot(
 )
 #: ``pkg/big.py``'s ``big``, used by the node/edge cap tests.
 BIG_ROOT = CandidateRoot(file="pkg/big.py", name="big", line=1, end_line=39, branch_points=1)
+NON_EXECUTABLE_ROOT = CandidateRoot(
+    file="pkg/non_executable.py", name="classify", line=1, end_line=8, branch_points=1
+)
 
 #: Head-side changed ranges covering every fixture file.
 HUNKS: dict[str, list[tuple[int, int]]] = {
@@ -126,6 +139,7 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
         "pkg/api.py": _API_PY,
         "pkg/service.py": _SERVICE_PY,
         "pkg/flow.py": _FLOW_PY,
+        "pkg/non_executable.py": _NON_EXECUTABLE_PY,
         "pkg/big.py": _big_py(),
         "pkg/legacy.rb": _LEGACY_RB,
         "pkg/caller.rb": _CALLER_RB,
@@ -1125,6 +1139,65 @@ def test_flowchart_not_a_terminal_statement(repo: Path, symbols: RepoSymbols) ->
     spec["nodes"][7]["evidence"]["line"] = 8  # an assignment, not a return
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N8").reason == "NOT_A_TERMINAL_STATEMENT"
+
+
+def test_flowchart_executable_nodes_reject_non_executable_lines(
+    repo: Path, symbols: RepoSymbols
+) -> None:
+    spec = {
+        "root": {"file": "pkg/non_executable.py", "name": "classify", "line": 1},
+        "nodes": [
+            {
+                "id": "N1",
+                "kind": "start",
+                "label": "describe the flow",
+                "evidence": {"file": "pkg/non_executable.py", "line": 2, "symbol": None},
+            },
+            {
+                "id": "N2",
+                "kind": "process",
+                "label": "perform the work",
+                "evidence": {"file": "pkg/non_executable.py", "line": 3, "symbol": None},
+            },
+            {
+                "id": "N3",
+                "kind": "io",
+                "label": "read the value",
+                "evidence": {"file": "pkg/non_executable.py", "line": 4, "symbol": None},
+            },
+            {
+                "id": "N4",
+                "kind": "decision",
+                "label": "has a result?",
+                "evidence": {"file": "pkg/non_executable.py", "line": 6, "symbol": None},
+            },
+            {
+                "id": "N5",
+                "kind": "end",
+                "label": "return the result",
+                "evidence": {"file": "pkg/non_executable.py", "line": 7, "symbol": None},
+            },
+        ],
+        "edges": [
+            {"from": "N1", "to": "N2", "label": None},
+            {"from": "N2", "to": "N3", "label": None},
+            {"from": "N3", "to": "N4", "label": None},
+            {"from": "N4", "to": "N5", "label": "yes"},
+        ],
+    }
+
+    report = ground_flowchart(
+        spec,
+        repo_root=repo,
+        hunk_ranges={"pkg/non_executable.py": [(1, 8)]},
+        read_paths=reads(repo, "pkg/non_executable.py"),
+        candidate_roots=[NON_EXECUTABLE_ROOT],
+        symbols=symbols,
+    )
+
+    assert {
+        check_for(report, "node", node_id).reason for node_id in ("N1", "N2", "N3")
+    } == {"NOT_AN_EXECUTABLE_STATEMENT"}
 
 
 def test_flowchart_decision_not_a_branch_statement(repo: Path, symbols: RepoSymbols) -> None:

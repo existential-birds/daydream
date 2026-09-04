@@ -465,17 +465,18 @@ def build_manifest(
         cwd: The repository directory daydream operated on (``work.repo``), used
             to mirror PiBackend's cwd-configured default model resolution.
         fix_failures: Map of dropped fix file-group -> reason, or ``None`` when
-            every fix applied. Recorded verbatim on the manifest.
+            every fix applied. Ignored when the resolved flow has no fix phase.
         fix_leftover_untracked: Sorted list of untracked paths left behind by a
-            failed fix pass, or ``None``. Recorded verbatim on the manifest.
+            failed fix pass, or ``None``. Ignored when the resolved flow has no
+            fix phase.
         fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
-            (issue #315), or ``None`` when the artifact is absent. Recorded
-            verbatim on the manifest.
+            (issue #315), or ``None`` when the artifact is absent. Ignored when
+            the resolved flow has no fix phase.
         recommended_capture: Which tree produced the archived ``recommended.patch``
             (``"pre_test"`` = fix-phase fallback, ``"post_test"`` = post-heal
             re-capture), or ``None`` on legacy runs. On fix-bearing flows an
             absent sidecar defaults ``recommended_patch_capture`` to ``"pre_test"``;
-            flows with no fix phase (review-only / improve) leave it
+            flows with no fix phase leave it
             ``None`` since they never produce a fix-phase fallback capture.
         pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
             cancelled/unknown) derived from per-phase terminal states; distinct
@@ -575,9 +576,9 @@ def build_manifest(
         daydream=provenance,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
-        fix_failures=fix_failures or None,
-        fix_leftover_untracked=fix_leftover_untracked or None,
-        fix_quality_gate=fix_quality_gate or None,
+        fix_failures=(fix_failures or None) if runs_fix else None,
+        fix_leftover_untracked=(fix_leftover_untracked or None) if runs_fix else None,
+        fix_quality_gate=(fix_quality_gate or None) if runs_fix else None,
         recommended_patch_capture=(
             recommended_capture
             if recommended_capture

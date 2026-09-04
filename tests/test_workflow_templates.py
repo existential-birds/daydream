@@ -14,8 +14,9 @@ cannot verify and that a careless edit could silently break:
   byte-identical.
 - Every non-local action ``uses:`` in the live and shipped bot workflows
   resolves to a full commit SHA (never a mutable tag/branch/expression).
-- The daydream install stays pinned to an immutable release commit (cross-file
-  drift against ``pyproject.toml``), in every live and shipped workflow.
+- The daydream install stays pinned to an immutable compatible commit: review
+  workflows exposing diagram commands use the approved diagram-capable
+  revision, while posting-only workflows track the packaged release.
 - Every App-token action in the live and packaged posting workflows stays pinned to the approved v3.2.0 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
@@ -136,13 +137,18 @@ _DAYDREAM_RELEASE_COMMITS: dict[str, str] = {
     "v0.28.0": "e7741f17fc998a675ed2fe3f364d2e646cde5518",
 }
 
+_DAYDREAM_DIAGRAM_COMMIT = "8c6afec1493949e6fc2eed26e948d079ea77cb7e"
+
 _RELEASE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
-_DAYDREAM_INSTALL_WORKFLOW_PATHS = [
-    REPO_WORKFLOWS_DIR / "daydream-review.yml",
+_DAYDREAM_RELEASE_INSTALL_WORKFLOW_PATHS = [
     REPO_WORKFLOWS_DIR / "daydream-post.yml",
-    TEMPLATES_DIR / "daydream-review.yml",
     TEMPLATES_DIR / "daydream-post.yml",
+]
+
+_DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS = [
+    REPO_WORKFLOWS_DIR / "daydream-review.yml",
+    TEMPLATES_DIR / "daydream-review.yml",
     TEMPLATES_DIR / "single" / "daydream.yml",
 ]
 
@@ -726,9 +732,10 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
         )
 
 
-# Install-pin drift guard: the bot must install a pinned daydream release, never
-# the moving `main` tip, across every live and shipped workflow. Fails on
-# release until the pin is bumped in lockstep with the package version.
+# Install-pin drift guard: the bot must install a pinned daydream revision,
+# never the moving `main` tip, across every live and shipped workflow. Released
+# workflow surfaces track the package release; diagram-capable surfaces may
+# need a reviewed commit newer than the latest release.
 
 _INSTALL_RE = re.compile(r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?")
 
@@ -741,7 +748,7 @@ def _package_version() -> str:
 
 @pytest.mark.parametrize(
     "wf_path",
-    _DAYDREAM_INSTALL_WORKFLOW_PATHS,
+    _DAYDREAM_RELEASE_INSTALL_WORKFLOW_PATHS,
     ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
 )
 def test_daydream_install_is_pinned_to_release_commit(wf_path: Path) -> None:
@@ -758,18 +765,32 @@ def test_daydream_install_is_pinned_to_release_commit(wf_path: Path) -> None:
         f"(3) get the PEELED commit: git ls-remote origin 'refs/tags/{key}^{{}}' "
         f"(annotated tags report a tag-object SHA on the bare ref — use the ^{{}} target), "
         f"(4) add the entry to _DAYDREAM_RELEASE_COMMITS in tests/test_workflow_templates.py, "
-        f"(5) update all six workflow install refs in lockstep "
-        f"(.github/workflows/daydream-review.yml, .github/workflows/daydream-post.yml, "
-        f"daydream/templates/workflows/daydream-review.yml, "
-        f"daydream/templates/workflows/daydream-post.yml, "
-        f"daydream/templates/workflows/single/daydream.yml ×2)."
+        f"(5) update released workflow install refs in lockstep."
     )
     expected = f"@{commit}"
     for ref in refs:
         assert ref == expected, (
             f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
-            f"the immutable release commit {expected} for {key}. Update all six install refs "
-            f"in lockstep with the _DAYDREAM_RELEASE_COMMITS entry."
+            f"the immutable release commit {expected} for {key}."
+        )
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    _DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS,
+    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
+)
+def test_diagram_workflow_installs_diagram_capable_commit(wf_path: Path) -> None:
+    text = wf_path.read_text(encoding="utf-8")
+    refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
+    rel = wf_path.relative_to(_REPO_ROOT).as_posix()
+    assert "--diagram-only" in text, f"{rel} must expose the diagram-only CLI"
+    assert refs, f"{rel} must install daydream via `uv tool install git+…`"
+    expected = f"@{_DAYDREAM_DIAGRAM_COMMIT}"
+    for ref in refs:
+        assert ref == expected, (
+            f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but its "
+            f"diagram commands require the approved diagram-capable commit {expected}."
         )
 
 
@@ -873,7 +894,7 @@ def test_release_commit_map_entries_are_pinned_or_retained_provenance() -> None:
     assert current_version is not None
     pinned_commits = {
         m.group("ref")[1:]
-        for wf_path in _DAYDREAM_INSTALL_WORKFLOW_PATHS
+        for wf_path in _DAYDREAM_RELEASE_INSTALL_WORKFLOW_PATHS
         for m in _INSTALL_RE.finditer(wf_path.read_text(encoding="utf-8"))
         if m.group("ref") is not None
     }

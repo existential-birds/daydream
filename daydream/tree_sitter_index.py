@@ -12,12 +12,13 @@ Adding a new language requires only:
 
 Also provides the grounding primitives the diagram phase needs
 (:func:`language_for_path`, :func:`branch_statement_lines`,
-:func:`is_branch_line`, :func:`is_terminal_line`, :func:`definitions_in_file`
-plus the :data:`BRANCH_NODE_TYPES`/:data:`TERMINAL_NODE_TYPES` tables). All of
-them fail open -- an unknown language, a missing file or a parse failure yields
-an empty/false answer -- except :exc:`TreeSitterBadVersionError`, which
-:func:`get_parser` raises unwrapped so a known-bad install can never parse
-natively; callers that must survive that wrap the call.
+:func:`is_branch_line`, :func:`is_terminal_line`,
+:func:`is_executable_statement_line`, :func:`definitions_in_file` plus the
+associated node-type tables). All of them fail open -- an unknown language, a
+missing file or a parse failure yields an empty/false answer -- except
+:exc:`TreeSitterBadVersionError`, which :func:`get_parser` raises unwrapped so a
+known-bad install can never parse natively; callers that must survive that wrap
+the call.
 """
 
 from __future__ import annotations
@@ -817,6 +818,85 @@ _CALL_NODE_TYPES: dict[str, frozenset[str]] = {
     "rust": frozenset({"call_expression"}),
 }
 
+_PYTHON_EXECUTABLE_STATEMENT_NODES = frozenset(
+    {
+        "assert_statement",
+        "break_statement",
+        "class_definition",
+        "continue_statement",
+        "delete_statement",
+        "exec_statement",
+        "expression_statement",
+        "function_definition",
+        "future_import_statement",
+        "global_statement",
+        "import_from_statement",
+        "import_statement",
+        "nonlocal_statement",
+        "pass_statement",
+        "print_statement",
+        "type_alias_statement",
+    }
+) | BRANCH_NODE_TYPES["python"] | TERMINAL_NODE_TYPES["python"]
+
+_TYPESCRIPT_EXECUTABLE_STATEMENT_NODES = frozenset(
+    {
+        "break_statement",
+        "class_declaration",
+        "continue_statement",
+        "debugger_statement",
+        "expression_statement",
+        "function_declaration",
+        "function_signature",
+        "generator_function_declaration",
+        "labeled_statement",
+        "lexical_declaration",
+        "method_definition",
+        "method_signature",
+        "variable_declaration",
+        "with_statement",
+    }
+) | _TYPESCRIPT_BRANCH_NODES | TERMINAL_NODE_TYPES["typescript"]
+
+EXECUTABLE_STATEMENT_NODE_TYPES: dict[str, frozenset[str]] = {
+    "python": _PYTHON_EXECUTABLE_STATEMENT_NODES,
+    "typescript": _TYPESCRIPT_EXECUTABLE_STATEMENT_NODES,
+    "tsx": _TYPESCRIPT_EXECUTABLE_STATEMENT_NODES,
+    "javascript": _TYPESCRIPT_EXECUTABLE_STATEMENT_NODES,
+    "go": frozenset(
+        {
+            "assignment_statement",
+            "break_statement",
+            "const_declaration",
+            "continue_statement",
+            "dec_statement",
+            "defer_statement",
+            "expression_statement",
+            "function_declaration",
+            "go_statement",
+            "goto_statement",
+            "inc_statement",
+            "labeled_statement",
+            "method_declaration",
+            "send_statement",
+            "short_var_declaration",
+            "var_declaration",
+        }
+    )
+    | BRANCH_NODE_TYPES["go"]
+    | TERMINAL_NODE_TYPES["go"],
+    "rust": frozenset(
+        {
+            "expression_statement",
+            "function_item",
+            "function_signature_item",
+            "let_declaration",
+        }
+    )
+    | BRANCH_NODE_TYPES["rust"]
+    | TERMINAL_NODE_TYPES["rust"],
+}
+
 # Switch-like containers and the case nodes they own. Counting both levels would
 # report one decision twice, so :func:`branch_statement_lines` reports the case
 # level and drops the container whenever the container actually has cases. Go has
@@ -961,6 +1041,44 @@ def _terminal_call_name(node: Node) -> str | None:
     if callee is None or callee.text is None:
         return None
     return callee.text.decode("utf-8", errors="replace").strip()
+
+
+def _is_bare_string_statement(node: Node) -> bool:
+    if node.type != "expression_statement":
+        return False
+    contents = [child for child in node.named_children]
+    return len(contents) == 1 and contents[0].type in {"string", "string_literal"}
+
+
+def is_executable_statement_line(
+    language_id: str | None, source: bytes, line: int
+) -> bool:
+    """Whether the 1-based ``line`` starts an executable statement.
+
+    Function definition heads count so a flowchart start can cite its root.
+    Bare string expressions do not count because they are documentation or
+    directive text rather than a diagrammable action. Unknown languages, an
+    unavailable parser, and parsing failures return ``False`` so unverified
+    source cannot ground an executable node.
+
+    Raises:
+        TreeSitterBadVersionError: propagated from :func:`get_parser`; callers
+            that must not fail on a bad install wrap this call.
+    """
+    statement_types = EXECUTABLE_STATEMENT_NODE_TYPES.get(language_id or "")
+    parser = get_parser(language_id) if language_id else None
+    if statement_types is None or parser is None:
+        return False
+    try:
+        tree = parser.parse(source)
+        return any(
+            node.type in statement_types
+            and node.start_point[0] + 1 == line
+            and not _is_bare_string_statement(node)
+            for node in _walk(tree.root_node)
+        )
+    except Exception:
+        return False
 
 
 def is_branch_line(language_id: str | None, source: bytes, line: int) -> bool:

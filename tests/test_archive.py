@@ -268,6 +268,21 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
         assert run["test_backend"] == "codex"
 
 
+def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> None:
+    recorder = _MockRecorder(run_flow=DaydreamRunFlow.DIAGRAM)
+    m = _build(
+        tmp_path,
+        recorder=recorder,
+        fix_failures={"src/old.py": "reverted"},
+        fix_leftover_untracked=["src/leftover.py"],
+        fix_quality_gate={"enabled": True, "rounds": []},
+    )
+
+    assert m.fix_failures is None
+    assert m.fix_leftover_untracked is None
+    assert m.fix_quality_gate is None
+
+
 def test_build_manifest_classifies_custom_flow_by_registered_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1289,6 +1304,27 @@ def test_copy_bundle_deep_directory(tmp_path: Path) -> None:
     _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
+
+
+def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path) -> None:
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    recorder.run_flow = DaydreamRunFlow.DIAGRAM
+    deep_dir = target / ".daydream" / "deep"
+    (deep_dir / "merged-items.json").write_text('{"items": []}')
+    (deep_dir / "fix-failures.json").write_text('{"src/old.py": "reverted"}')
+    (deep_dir / "diagram.json").write_text('{"results": {}}')
+    (deep_dir / "diagram.md").write_text("current diagram")
+    (target / ".daydream" / "recommended.patch").write_text("stale recommendation")
+
+    _copy_bundle(target, run_dir, recorder, RunConfig())
+
+    assert sorted(path.name for path in (run_dir / "deep").iterdir()) == [
+        "diagram.json",
+        "diagram.md",
+    ]
+    assert (run_dir / "deep" / "diagram.md").read_text() == "current diagram"
+    assert not (run_dir / "review-output.md").exists()
+    assert not (run_dir / "recommended.patch").exists()
 
 
 def test_copy_bundle_sub_trajectories_copied(tmp_path: Path) -> None:
@@ -2753,6 +2789,9 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
     m = json.loads(manifest_path.read_text())
     assert m["run"]["flow"] == "diagram"
+    assert m["status"] == "complete"
+    assert m["archive_status"] == "complete"
+    assert m["pipeline_status"] == "unknown"
     # None of the deep phases are claimed, so no stale artifact is adopted.
     assert m["phase_states"]["merge"] == {"ran": False, "status": "absent"}
     assert m["phase_states"]["fix"] == {"ran": False, "status": "absent"}
@@ -2762,3 +2801,28 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     assert "test_backend" not in m["run"]
     # No per-stack fan-out either: the diagram flow has no per-stack reviewers.
     assert "per_stack_review_backend" not in m["run"]
+
+
+def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
+    tmp_path: Path, make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    _write_deep(
+        tmp_path,
+        "merged-items.json",
+        {"items": [{"file": "src/old.py", "line": 1, "confidence": "HIGH"}]},
+    )
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
+    config = make_config(tmp_path, archive=False)
+
+    _archive_run_inner(
+        recorder=recorder, target_dir=tmp_path, config=config,
+        status="complete", run_eval=True, work=None, upload=False,
+    )
+
+    run_dir = get_archive_dir() / "runs" / recorder.session_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert not (run_dir / "evaluation.json").exists()
+    assert manifest["metrics"]["total_findings"] is None

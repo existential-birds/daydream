@@ -58,6 +58,7 @@ from daydream.repository_paths import path_is_confined, valid_repository_file_pa
 from daydream.tree_sitter_index import (
     definitions_in_file,
     is_branch_line,
+    is_executable_statement_line,
     is_terminal_line,
     language_for_path,
 )
@@ -96,6 +97,7 @@ _FLOWCHART_REASON_CODES = frozenset(
     {
         "ROOT_NOT_CANDIDATE",
         "NODE_OUTSIDE_ROOT",
+        "NOT_AN_EXECUTABLE_STATEMENT",
         "NOT_A_TERMINAL_STATEMENT",
         "SUBROUTINE_NOT_DEFINED",
         "SUBROUTINE_NOT_CALLED_HERE",
@@ -579,6 +581,15 @@ def _terminal_line(sources: _SourceCache, file: str, line: int) -> bool:
         return is_terminal_line(language_for_path(file), source, line)
     except Exception:
         return is_terminal_line(None, source, line)
+
+
+def _executable_line(sources: _SourceCache, file: str, line: int) -> bool:
+    """Whether ``file:line`` starts an executable statement."""
+    source = sources.read(file) or b""
+    try:
+        return is_executable_statement_line(language_for_path(file), source, line)
+    except Exception:
+        return False
 
 
 def _summary(elements: list[ElementCheck]) -> dict[str, int]:
@@ -1179,6 +1190,10 @@ def _ground_node(
         check.grounded, check.reason = False, "NOT_A_TERMINAL_STATEMENT"
     elif record["kind"] == "decision" and not _branch_line(sources, file, line):
         check.grounded, check.reason = False, "NOT_A_BRANCH_STATEMENT"
+    elif record["kind"] not in {"end", "decision"} and not _executable_line(
+        sources, file, line
+    ):
+        check.grounded, check.reason = False, "NOT_AN_EXECUTABLE_STATEMENT"
     check.in_changed_hunk = _in_ranges(hunk_ranges.get(file, []), line)
     return check
 

@@ -232,11 +232,9 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        # Pinned to an immutable release commit (the peeled target of the release
-        # tag) so the bot runs exactly the reviewed source: a moved or compromised
-        # tag can't change it. Bump in lockstep with the package version on release
-        # (pin the peeled target: git ls-remote origin 'refs/tags/vX.Y.Z^{}').
-        run: uv tool install git+https://github.com/existential-birds/daydream@e7741f17fc998a675ed2fe3f364d2e646cde5518
+        # Pinned to an immutable reviewed commit containing the diagram CLI used
+        # below, so a moved or compromised tag cannot change the executable code.
+        run: uv tool install git+https://github.com/existential-birds/daydream@8c6afec1493949e6fc2eed26e948d079ea77cb7e
 
       # The gate's matched `command` selects the run. `review` runs the DEFAULT
       # deep-review pipeline (not --review); in --non-interactive the deep run
@@ -296,9 +294,9 @@ jobs:
           path: findings/
 
   # Posts the findings as the operator's App bot. Holds the App key, so it NEVER
-  # checks out PR code — it installs daydream from the pinned release and consumes
-  # only the passive findings artifact, validated by `daydream post-findings`
-  # against a strict schema and against the LIVE PR head (the trust anchor).
+  # checks out PR code — it installs the reviewed diagram-capable revision and
+  # consumes only the passive findings artifact, validated by `daydream
+  # post-findings` against a strict schema and the LIVE PR head (the trust anchor).
   post:
     needs: [gate, analyze]
     if: needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'success'
@@ -321,11 +319,9 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        # Pinned to an immutable release commit (the peeled target of the release
-        # tag) so the bot runs exactly the reviewed source: a moved or compromised
-        # tag can't change it. Bump in lockstep with the package version on release
-        # (pin the peeled target: git ls-remote origin 'refs/tags/vX.Y.Z^{}').
-        run: uv tool install git+https://github.com/existential-birds/daydream@e7741f17fc998a675ed2fe3f364d2e646cde5518
+        # Pinned to the same immutable reviewed commit as analysis so this phase
+        # can validate and post the diagram artifact that analysis produces.
+        run: uv tool install git+https://github.com/existential-birds/daydream@8c6afec1493949e6fc2eed26e948d079ea77cb7e
 
       - name: Download findings artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

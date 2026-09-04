@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from daydream import git_ops
+from daydream import git_ops, tree_sitter_index
 from daydream.tree_sitter_index import (
     _MAX_IMPORTERS,
     BRANCH_NODE_TYPES,
@@ -717,6 +717,15 @@ def _terminal_lines(language_id: str | None, source: bytes) -> list[int]:
     return [n + 1 for n in range(len(rows)) if is_terminal_line(language_id, source, n + 1)]
 
 
+def _executable_lines(language_id: str | None, source: bytes) -> list[int]:
+    rows = source.split(b"\n")
+    return [
+        n + 1
+        for n in range(len(rows))
+        if tree_sitter_index.is_executable_statement_line(language_id, source, n + 1)
+    ]
+
+
 def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
     return {
         (str(d["name"]), int(str(d["line"])), int(str(d["end_line"])), str(d["kind"]))
@@ -1093,6 +1102,120 @@ def test_is_branch_line_falls_back_to_keyword_regex() -> None:
     # Out-of-range and non-positive lines are answers, not errors.
     assert is_branch_line(None, elixir, 999) is False
     assert is_branch_line(None, elixir, 0) is False
+
+
+def test_executable_statement_line_rejects_python_non_code_lines() -> None:
+    source = (
+        b"def resolve():\n"
+        b'    \"\"\"Explain the function.\"\"\"\n'
+        b"    # describe the assignment\n"
+        b"\n"
+        b"    result = compute()\n"
+    )
+
+    assert tree_sitter_index.is_executable_statement_line("python", source, 1)
+    assert not tree_sitter_index.is_executable_statement_line("python", source, 2)
+    assert not tree_sitter_index.is_executable_statement_line("python", source, 3)
+    assert not tree_sitter_index.is_executable_statement_line("python", source, 4)
+    assert tree_sitter_index.is_executable_statement_line("python", source, 5)
+
+
+@pytest.mark.parametrize("language_id", ["typescript", "tsx", "javascript"])
+def test_executable_statement_lines_typescript_grammars(language_id: str) -> None:
+    source = (
+        b"function resolve(value: number) {\n"
+        b'  "description";\n'
+        b"  // describe the assignment\n"
+        b"\n"
+        b"  const result = compute(value);\n"
+        b"  emit(result);\n"
+        b"  if (result) {\n"
+        b"    result += 1;\n"
+        b"  }\n"
+        b"  for (const item of results) {\n"
+        b"    consume(item);\n"
+        b"  }\n"
+        b"  return result;\n"
+        b"}\n"
+    )
+
+    assert _executable_lines(language_id, source) == [1, 5, 6, 7, 8, 10, 11, 13]
+
+
+def test_executable_statement_lines_go() -> None:
+    source = (
+        b"package p\n"
+        b"func resolve(value int) int {\n"
+        b"    // describe the assignment\n"
+        b"\n"
+        b"    result := compute(value)\n"
+        b"    result = adjust(result)\n"
+        b"    emit(result)\n"
+        b"    if result > 0 {\n"
+        b"        result++\n"
+        b"    }\n"
+        b"    for _, item := range results {\n"
+        b"        consume(item)\n"
+        b"    }\n"
+        b"    go emit(result)\n"
+        b"    defer cleanup()\n"
+        b"    return result\n"
+        b"}\n"
+    )
+
+    assert _executable_lines("go", source) == [2, 5, 6, 7, 8, 9, 11, 12, 14, 15, 16]
+
+
+def test_executable_statement_lines_rust() -> None:
+    source = (
+        b"fn resolve(value: i32) -> i32 {\n"
+        b"    // describe the assignment\n"
+        b"\n"
+        b"    let mut result = compute(value);\n"
+        b"    result = adjust(result);\n"
+        b"    emit(result);\n"
+        b'    println!("{}", result);\n'
+        b"    if result > 0 {\n"
+        b"        result += 1;\n"
+        b"    }\n"
+        b"    for item in results {\n"
+        b"        consume(item);\n"
+        b"    }\n"
+        b"    return result;\n"
+        b"}\n"
+    )
+
+    assert _executable_lines("rust", source) == [1, 4, 5, 6, 7, 8, 9, 11, 12, 14]
+
+
+def test_executable_statement_line_fails_closed_without_a_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tree_sitter_index, "get_parser", lambda _language_id: None)
+    source = b"def resolve():\n    result = compute()\n"
+
+    assert not tree_sitter_index.is_executable_statement_line("python", source, 2)
+    assert not tree_sitter_index.is_executable_statement_line("elixir", b"  work()\n", 1)
+    assert not tree_sitter_index.is_executable_statement_line(None, b"  work()\n", 1)
+    assert not tree_sitter_index.is_executable_statement_line(None, source, 0)
+    assert not tree_sitter_index.is_executable_statement_line(None, source, 999)
+
+
+@pytest.mark.parametrize(
+    "language_id", sorted(tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES)
+)
+def test_executable_statement_node_types_exist_in_grammar(language_id: str) -> None:
+    parser = get_parser(language_id)
+    assert parser is not None
+    language = parser.language
+    assert language is not None
+    named_types = {
+        language.node_kind_for_id(kind_id)
+        for kind_id in range(language.node_kind_count)
+        if language.node_kind_is_named(kind_id)
+    }
+
+    assert tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES[language_id] <= named_types
 
 
 # --- is_terminal_line --------------------------------------------------------

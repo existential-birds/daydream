@@ -67,7 +67,11 @@ def _finding(
 
 
 def _write_artifact(
-    path: Path, findings: list[dict[str, Any]], *, run_info: str = "test run info"
+    path: Path,
+    findings: list[dict[str, Any]],
+    *,
+    run_info: str = "test run info",
+    diagrams: dict[str, Any] | None = None,
 ) -> Path:
     """Build a valid artifact via write_findings_artifact."""
     write_findings_artifact(
@@ -78,10 +82,78 @@ def _write_artifact(
             "pr_number": 7,
             "head_sha": "h" * 40,
             "run_info": run_info,
+            "diagrams": diagrams,
             "findings": findings,
         },
     )
     return path
+
+
+def _flowchart_payload() -> dict[str, Any]:
+    def grounded(element: str, ref: str, final_index: int) -> dict[str, Any]:
+        return {
+            "element": element,
+            "ref": ref,
+            "grounded": True,
+            "reason": None,
+            "strength": "definition",
+            "snapped_line": None,
+            "in_changed_hunk": True,
+            "defined_at": "a.py:1",
+            "final_index": final_index,
+        }
+
+    return {
+        "results": {
+            "flowchart": {
+                "status": "rendered",
+                "reason": None,
+                "omit_reasons": [],
+                "spec_final": {
+                    "root": {"file": "a.py", "name": "run", "line": 1},
+                    "nodes": [
+                        {
+                            "id": "start",
+                            "kind": "start",
+                            "label": "run",
+                            "evidence": {
+                                "file": "a.py",
+                                "line": 1,
+                                "symbol": "run",
+                            },
+                        },
+                        {
+                            "id": "end",
+                            "kind": "end",
+                            "label": "return",
+                            "evidence": {
+                                "file": "a.py",
+                                "line": 2,
+                                "symbol": None,
+                            },
+                        },
+                    ],
+                    "edges": [{"from": "start", "to": "end", "label": None}],
+                },
+                "grounding": {
+                    "elements": [
+                        grounded("root", "run", 0),
+                        grounded("node", "start", 0),
+                        grounded("node", "end", 1),
+                        grounded("edge", "start->end", 0),
+                    ],
+                    "summary": {
+                        "proposed": 4,
+                        "grounded_first_pass": 4,
+                        "repaired": 0,
+                        "pruned": 0,
+                    },
+                    "capped": {},
+                    "root_range": [1, 2],
+                },
+            }
+        }
+    }
 
 
 @pytest.fixture
@@ -323,6 +395,35 @@ def test_post_findings_all_matched_no_approve_without_flag(fake_gh: FakeGh, tmp_
     code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
     assert code == 0
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
+
+
+def test_post_findings_all_matched_still_posts_diagram(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
+    artifact = _write_artifact(
+        tmp_path / "f.json",
+        [
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Already posted",
+            )
+        ],
+        diagrams=_flowchart_payload(),
+    )
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+
+    code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
+
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert "<summary><h3>Flowchart</h3></summary>" in posts[0].payload["body"]
+    assert "flowchart TD" in posts[0].payload["body"]
 
 
 def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: Path) -> None:

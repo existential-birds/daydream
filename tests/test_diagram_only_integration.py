@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from daydream import cli, git_ops
+from daydream.config import DIAGRAM_MAX_NODES
 from tests.harness import diagram_repos as dr
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
@@ -391,6 +392,91 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(
 
     assert rc == 1
     assert fake_gh.calls("POST") == []
+
+
+def test_phase_b_rejects_rendered_source_claims_without_grounding_attestations() -> None:
+    from daydream.pr_review import validate_diagram_payload
+
+    payload = {
+        "results": {
+            "flowchart": {
+                "status": "rendered",
+                "spec_final": {
+                    "root": {"file": "does/not/exist.py", "name": "invented", "line": 999999},
+                    "nodes": [
+                        {
+                            "id": "start",
+                            "kind": "start",
+                            "label": "Invented source",
+                            "evidence": {
+                                "file": "does/not/exist.py",
+                                "line": 999999,
+                                "symbol": "invented",
+                            },
+                        }
+                    ],
+                    "edges": [],
+                },
+                "grounding": {
+                    "elements": [],
+                    "summary": {
+                        "proposed": 0,
+                        "grounded_first_pass": 0,
+                        "repaired": 0,
+                        "pruned": 0,
+                    },
+                    "capped": {},
+                    "root_range": [999999, 999999],
+                },
+            }
+        }
+    }
+
+    problem = validate_diagram_payload(payload)
+
+    assert problem == "flowchart grounding attestation does not cover root at final index 0"
+
+
+def test_phase_b_rejects_over_cap_specs_before_rendering() -> None:
+    from daydream.pr_review import validate_diagram_payload
+
+    nodes = [
+        {
+            "id": f"node-{index}",
+            "kind": "process",
+            "label": "Invented source",
+            "evidence": {"file": "a.py", "line": 1, "symbol": None},
+        }
+        for index in range(DIAGRAM_MAX_NODES + 1)
+    ]
+    payload = {
+        "results": {
+            "flowchart": {
+                "status": "rendered",
+                "spec_final": {
+                    "root": {"file": "a.py", "name": "run", "line": 1},
+                    "nodes": nodes,
+                    "edges": [],
+                },
+                "grounding": {
+                    "elements": [],
+                    "summary": {
+                        "proposed": 0,
+                        "grounded_first_pass": 0,
+                        "repaired": 0,
+                        "pruned": 0,
+                    },
+                    "capped": {},
+                    "root_range": None,
+                },
+            }
+        }
+    }
+
+    problem = validate_diagram_payload(payload)
+
+    assert problem is not None
+    assert "nodes render cap" in problem
 
 
 # --- Spec test 14 (diagram-only half): agent error exits 1 ------------------
