@@ -211,7 +211,7 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     # into it — a redact-after implementation leaks the unmatchable ``ghp_yyyyy``
     # fragment (the ``{6,}`` rule needs 6+ chars after the prefix).
     command = "x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10   # [:200] cuts into the token
-    out = _summarize_input({"command": command})
+    out = _summarize_input({"command": command}, "Bash")
     assert "ghp_" not in out        # no raw fragment survives the 200-cut
     assert "[REDACTED" in out       # redaction marker (even truncated) present
 
@@ -222,6 +222,34 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     out = _summarize_output("x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10)
     assert "ghp_" not in out
     assert "[REDACTED" in out
+
+
+def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
+    """`--log` summary and callback line key Bash from the shared _PRIMARY_TOOL_ARG table."""
+    from daydream.agent import _summarize_input
+    from daydream.ui.tools import _primary_tool_value
+
+    args: dict[str, object] = {"command": "git diff --stat", "description": "Show changes"}
+    assert _summarize_input(args, "Bash") == "git diff --stat"
+    value, key = _primary_tool_value("Bash", args)
+    assert key == "command", "both surfaces must key Bash from command-first _PRIMARY_TOOL_ARG"
+
+
+def test_log_summary_task_tools_not_subject_to_bash_primary_table() -> None:
+    """The (command, description) preference is Bash-only in the --log summary.
+
+    TaskCreate/Agent inputs carry a long ``description`` field; the Bash-only pair
+    must not shadow the short ``subject`` the generic fallback surfaces (mirrors
+    ``_derive_task_label``'s subject-before-description ordering).
+    """
+    from daydream.agent import _summarize_input
+
+    args: dict[str, object] = {
+        "subject": "Add rate limiting",
+        "description": "Investigate and implement rate limiting for the API gateway",
+        "prompt": "Add rate limiting",
+    }
+    assert _summarize_input(args, "TaskCreate") == "Add rate limiting"
 
 
 def test_log_mode_summaries_redact_structured_credentials() -> None:
@@ -237,7 +265,7 @@ def test_log_mode_summaries_redact_structured_credentials() -> None:
     from daydream.agent import _print_log, _summarize_input, _summarize_output
 
     # Nested assignment under a sensitive key: flat redaction leaks the token.
-    out = _summarize_input({"command": "the config: token=opaque-test-12345"})
+    out = _summarize_input({"command": "the config: token=opaque-test-12345"}, "Bash")
     assert "opaque-test-12345" not in out
     assert "[REDACTED" in out
 

@@ -172,6 +172,21 @@ def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
     assert "block" not in out and "timeout" not in out
 
 
+def test_bash_panel_command_truncation_shows_ellipsis() -> None:
+    """A >200-char Bash command is cut with an explicit marker, never silently."""
+    from daydream.ui.tools import _build_tool_header
+
+    header = _build_tool_header("Bash", {"command": "x" * 250}, quiet_mode=False)
+    text = header.plain
+    assert "x" * 200 in text
+    assert "x" * 201 not in text
+    assert text.rstrip().endswith("...")
+
+    # Short commands are never marked.
+    short_header = _build_tool_header("Bash", {"command": "true"}, quiet_mode=False)
+    assert not short_header.plain.rstrip().endswith("...")
+
+
 def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
     from rich.console import Console
 
@@ -417,3 +432,111 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     joined = "\n".join(line.plain for line in lines)
     assert "/repo/daydream/git_ops.py" in joined  # the meaningful primary arg
     assert "Edit False" not in joined  # the stray-boolean dump is gone
+
+
+def test_primary_tool_value_bash_prefers_command() -> None:
+    """Bash primary arg is `command` (required, always present) over `description`."""
+    from daydream.ui.tools import _primary_tool_value
+
+    value, key = _primary_tool_value("Bash", {"command": "git diff --stat", "description": "Show changes"})
+    assert (value, key) == ("git diff --stat", "command")
+
+    # description-less call still resolves via the table, not the mechanical fallback.
+    value, key = _primary_tool_value("Bash", {"command": "ls -la /tmp"})
+    assert (value, key) == ("ls -la /tmp", "command")
+
+
+def test_format_callback_progress_bash_shows_command() -> None:
+    """Callback single-line path renders the command, not the paraphrase (issue #1108).
+
+    The command is redacted before the width slice — the same redact-before-truncate
+    invariant the panel header and --log summary hold, so the callback line cannot
+    print a secret the other surfaces would redact.
+    """
+    from io import StringIO
+
+    from rich.console import Console
+
+    from daydream.ui.tools import format_callback_progress
+
+    line = format_callback_progress("Bash", {"command": "git diff --stat", "description": "Show changes"}, None)
+    c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c.print(line)
+    text = c.export_text()
+    assert "git diff --stat" in text
+    assert "Show changes" not in text
+
+    secret_line = format_callback_progress("Bash", {"command": "DB_PASSWORD=hunter2 make db-up"}, None)
+    c3 = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c3.print(secret_line)
+    secret_text = c3.export_text()
+    assert "hunter2" not in secret_text
+    assert "DB_PASSWORD=[REDACTED_ENV_VAR]" in secret_text
+
+
+def test_format_callback_progress_redacts_only_bash_commands() -> None:
+    """Callback redaction is scoped to the Bash command, like the panel header.
+
+    Paths and grep patterns render raw on the panel header; the callback line
+    must not rewrite the operator's own /home/<user>/ paths into [REDACTED_USER]
+    markers or chew grep patterns into [REDACTED_CREDENTIAL].
+    """
+    from daydream.ui.tools import format_callback_progress
+
+    edit_line = format_callback_progress(
+        "Edit",
+        {"file_path": "/home/user/work/daydream/git_ops.py", "old_string": "a", "new_string": "b"},
+        None,
+    )
+    assert "/home/user/work/daydream/git_ops.py" in edit_line.plain
+    assert "[REDACTED" not in edit_line.plain
+
+    grep_line = format_callback_progress(
+        "Grep", {"pattern": "the config: token=opaque-test-12345", "path": "/home/user/work"}, None
+    )
+    assert "opaque-test-12345" in grep_line.plain
+    assert "[REDACTED" not in grep_line.plain
+
+    bash_line = format_callback_progress("Bash", {"command": "the config: token=opaque-test-12345"}, None)
+    assert "opaque-test-12345" not in bash_line.plain
+    assert "[REDACTED" in bash_line.plain
+
+
+def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
+    """Issue #1108 acceptance oracle: same input renders the command on all three surfaces."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from daydream.agent import _summarize_input
+    from daydream.ui.tools import _build_tool_header, format_callback_progress
+
+    args: dict[str, object] = {"command": "git diff --stat"}
+    header = _build_tool_header("Bash", args, quiet_mode=True)
+    c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c.print(header)
+    header_text = c.export_text()
+
+    line = format_callback_progress("Bash", args, None)
+    c2 = Console(file=StringIO(), force_terminal=True, width=120, record=True)
+    c2.print(line)
+    line_text = c2.export_text()
+
+    log_summary = _summarize_input(args, "Bash")
+
+    assert "git diff --stat" in header_text
+    assert "git diff --stat" in line_text
+    assert log_summary == "git diff --stat"
+
+    # Cap equality: the three surfaces truncate at the shared constant, so the
+    # panel and --log copies can never silently desync (the #1108 oracle pins
+    # key consistency; this pins cap consistency too).
+    from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS
+
+    long_command = "b" * (_BASH_COMMAND_MAX_CHARS + 25)
+    long_header = _build_tool_header("Bash", {"command": long_command}, quiet_mode=True)
+    assert "b" * _BASH_COMMAND_MAX_CHARS in long_header.plain
+    assert long_header.plain.rstrip().endswith("...")
+    long_line = format_callback_progress("Bash", {"command": long_command}, None)
+    assert "b" * _BASH_COMMAND_MAX_CHARS in long_line.plain
+    assert len(_summarize_input({"command": long_command}, "Bash")) == _BASH_COMMAND_MAX_CHARS
