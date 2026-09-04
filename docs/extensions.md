@@ -450,6 +450,29 @@ every other key is internal and may change without a version bump:
 | `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
 | `intent_authoritative` | `bool` — `True` when a fresh, head-matched PR description with non-whitespace content grounded the intent phase; absent (hence read with `.get("intent_authoritative", False)`) on a `--start-at` resume because `_step_intent` is skipped in that case. Controls whether the deep review prompts carry the author-intent precedence rule. |
 
+#### Host-assigned record `uid`
+
+Per-stack review records, and the finding items behind `items` / `items_file`,
+may carry a host-assigned `uid` string (`stack:ordinal`, e.g. `python:1`). It is
+the record's *referential* identity — "which record object is this?" — minted at
+record birth by `daydream/deep/records.py` and used by dedup, arbitration,
+suppression and the per-stack records rewrite. This is an **additive** field and
+does not bump `EXTENSION_API_VERSION`: a fork that round-trips whole record dicts
+(as the recipes below do) carries it through automatically, and the
+`{**item, ...}` spread those recipes use preserves it.
+
+Two constraints for a fork that reads it:
+
+- `uid` is a **pre-merge** handle. The cross-stack merge agent re-emits items
+  from scratch, so multi-stack merged items carry no `uid` and do not need one —
+  every merged item already has a globally unique `id`. Read it with
+  `daydream.deep.records.record_uid`, which returns `""` for "no pre-merge
+  identity"; that is the common case after a multi-stack merge, not an error.
+- Never mint one yourself, and never derive one from record content. A
+  content-derived key gets *less* discriminating as two records get more
+  similar, which is precisely the condition every consumer of this field runs
+  under. A duplicate `uid` is a fatal error the host reports and stops on.
+
 This keyword-only addition to the five in-scope prompt builders does not bump
 `EXTENSION_API_VERSION` or its support floor — it is an additive kwarg per the
 versioning policy above. The host passes `intent_authoritative` on every call

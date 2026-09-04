@@ -88,6 +88,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
 | `deep/orchestrator.py` | Deep-flow steps: exploration, intent, wonder, per-stack, arbiter, merge, verify, fix |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
+| `deep/records.py` | Host-assigned record `uid` (`stack:ordinal`), minted at record birth — the *referential* identity ("which record is this?"), never content-derived |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
 | `improve/` | Read-only recon, category audits, vetting, prioritization, plan artifacts |
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
@@ -178,6 +179,16 @@ exploration pre-scan (cached across runs)
   is why the extension API is v4.
 - The N parse calls run concurrently but are consumed in **stack-name order**, keeping merge input ordering
   and global issue numbering reproducible.
+- **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
+  (`stack:ordinal`, `deep/records.py`) at birth — both birth sites, the per-stack reviewers and the uncovered
+  sweep — and backfilled by the same deterministic rule when loaded, so pre-`uid` artifacts resume cleanly.
+  The reviewer's `id` restarts at 1 per stack and is *not* unique; `normalize_items` mints the human-facing
+  `id` only at the final merge write. Dedup, arbitration, suppression and the structural fold all run before
+  that, so they key on `uid`. A content key (`compute_fingerprint`, `descriptions_match`) answers
+  "same defect?" and stays content-derived; it must never be used to answer "which record is this?" — it gets
+  *less* discriminating exactly as records get more similar, which is the only case those sites see.
+  `uid` is a **pre-merge** handle: the merge agent re-emits items from scratch, so multi-stack merged items
+  carry none and need none. Read it with `record_uid()` and treat `""` as "no pre-merge identity".
 - Intent and wonder prompts inline the diff under `INLINE_DIFF_BUDGET_BYTES` (12 KiB, shared with per-stack),
   else the `diff.patch` pointer. Small diffs skip the fan-out entirely.
 - Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed

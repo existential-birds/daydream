@@ -1,0 +1,218 @@
+"""Unit tests for per-record referential identity (issue #1111).
+
+These are supplementary to the real-path coverage in ``tests/test_deep_orchestrator.py``
+that drives ``runner.run`` end to end; what they pin here are the exact
+guarantees the rest of the pipeline is allowed to rely on, because six call
+sites key destructive decisions (dedup drops, arbitration verdicts, disk
+rewrites) on this one field.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from daydream.deep.records import (
+    RECORD_UID_KEY,
+    duplicate_record_uids,
+    mint_record_uid,
+    record_uid,
+    stack_name_from_records_source,
+    stack_name_from_uid,
+    stamp_record_uids,
+)
+
+
+def test_uid_format_is_stack_name_and_one_based_ordinal() -> None:
+    """The documented, debuggable format -- readable in artifacts, not a uuid4."""
+    assert mint_record_uid("python", 1) == "python:1"
+    assert mint_record_uid("structure", 3) == "structure:3"
+
+
+def test_source_normalization_accepts_both_spellings() -> None:
+    """A records filename and a bare stack name must collapse to one key.
+
+    The pipeline has two producers: the loop that loads records off disk tags
+    them with the filename, while the uncovered sweep tags its records with a
+    bare stack name. Both have to route to the same file.
+    """
+    assert stack_name_from_records_source("stack-python-records.json") == "python"
+    assert stack_name_from_records_source("stack-structure-records.json") == "structure"
+    assert stack_name_from_records_source("uncovered") == "uncovered"
+
+
+def test_unrecognized_source_shape_passes_through_unchanged() -> None:
+    """An unroutable source is returned as-is so the caller can detect and report it.
+
+    Silently coercing it would recreate the exact failure mode issue #1111's
+    latent bug 2 describes: a record that routes nowhere and vanishes without
+    a warning.
+    """
+    assert stack_name_from_records_source("something-else.json") == "something-else.json"
+
+
+def test_stack_name_recovered_from_uid() -> None:
+    assert stack_name_from_uid("python:1") == "python"
+    assert stack_name_from_uid("structure:12") == "structure"
+
+
+def test_stack_name_from_uid_is_empty_for_a_separatorless_value() -> None:
+    """An empty result is the "no identity" signal, distinguishable from a real name."""
+    assert stack_name_from_uid("python") == ""
+    assert stack_name_from_uid("") == ""
+
+
+def test_stack_name_from_uid_splits_on_the_last_separator() -> None:
+    """The ordinal half is always the trailing integer.
+
+    Splitting on the last separator keeps this correct even if a stack name
+    ever gained a separator character, where splitting on the first would
+    truncate the name.
+    """
+    assert stack_name_from_uid("weird:name:7") == "weird:name"
+
+
+def test_record_uid_reads_the_field() -> None:
+    assert record_uid({RECORD_UID_KEY: "python:2"}) == "python:2"
+
+
+def test_record_uid_is_empty_for_a_record_without_one() -> None:
+    """Post-merge items legitimately carry no uid; that must not raise.
+
+    The cross-stack merge agent re-emits items from scratch, so a merged item
+    has no pre-merge identity. Returning "" keeps the accessor usable on both
+    sides of that boundary.
+    """
+    assert record_uid({"id": 1, "file": "api.py"}) == ""
+
+
+def test_record_uid_is_empty_for_a_non_string_value() -> None:
+    """A malformed artifact must degrade to "no identity", not leak an int."""
+    assert record_uid({RECORD_UID_KEY: 7}) == ""
+
+
+def test_stamp_assigns_sequential_uids_in_place() -> None:
+    """Mutation is in place because the surrogate this replaces was ``id(record)``.
+
+    A stage that rebuilt a record as a fresh dict silently escaped those
+    object-identity sets. Stamping in place means a caller holding the same
+    list sees the field without re-binding anything.
+    """
+    records: list[dict[str, Any]] = [{"id": 1}, {"id": 1}, {"id": 2}]
+
+    stamp_record_uids(records, "python")
+
+    assert [record[RECORD_UID_KEY] for record in records] == ["python:1", "python:2", "python:3"]
+
+
+def test_stamp_disambiguates_records_the_reviewer_numbered_identically() -> None:
+    """The whole point: ``id`` restarts at 1 per stack, so ``id: 1`` is the norm."""
+    python_records: list[dict[str, Any]] = [{"id": 1, "file": "api.py"}]
+    react_records: list[dict[str, Any]] = [{"id": 1, "file": "api.py"}]
+
+    stamp_record_uids(python_records, "python")
+    stamp_record_uids(react_records, "react")
+
+    assert record_uid(python_records[0]) != record_uid(react_records[0])
+
+
+def test_stamp_accepts_a_records_filename_as_the_stack_name() -> None:
+    """The load path passes ``records_path.name``; it must not leak into the uid."""
+    records: list[dict[str, Any]] = [{"id": 1}]
+
+    stamp_record_uids(records, "stack-python-records.json")
+
+    assert record_uid(records[0]) == "python:1"
+
+
+def test_stamp_preserves_an_existing_uid() -> None:
+    """Never overwrite: a resume must keep the uids the producing run minted.
+
+    ``_rewrite_stack_records`` writes back a list that adjudication may have
+    compacted, so the on-disk list can be shorter than the one that produced
+    those uids. Re-minting by position would hand out different values than the
+    run that created the artifacts.
+    """
+    records: list[dict[str, Any]] = [{"id": 9, RECORD_UID_KEY: "python:4"}]
+
+    stamp_record_uids(records, "python")
+
+    assert record_uid(records[0]) == "python:4"
+
+
+def test_stamp_is_idempotent() -> None:
+    """Called at both record birth and record load, the second call must be a no-op."""
+    records: list[dict[str, Any]] = [{"id": 1}, {"id": 2}]
+
+    stamp_record_uids(records, "python")
+    first = [record_uid(record) for record in records]
+    stamp_record_uids(records, "python")
+
+    assert [record_uid(record) for record in records] == first
+
+
+def test_partial_stamp_does_not_reuse_an_ordinal_already_held() -> None:
+    """Ordinals count every entry, stamped or not, so a mixed list cannot collide.
+
+    Counting only the unstamped records would re-issue ``python:1`` here and
+    silently reintroduce the collision the field exists to prevent.
+    """
+    records: list[dict[str, Any]] = [{"id": 1, RECORD_UID_KEY: "python:1"}, {"id": 2}]
+
+    stamp_record_uids(records, "python")
+
+    assert [record_uid(record) for record in records] == ["python:1", "python:2"]
+    assert duplicate_record_uids(records) == []
+
+
+def test_stamp_handles_an_empty_list() -> None:
+    records: list[dict[str, Any]] = []
+
+    stamp_record_uids(records, "python")
+
+    assert records == []
+
+
+def test_backfill_reproduces_the_uids_the_producing_run_minted() -> None:
+    """Back-compat: a pre-``uid`` artifact resumes to the same identities.
+
+    This determinism is why the format is ``(stack_name, position)`` rather than
+    a uuid4 -- a uuid4 could not be regenerated for records written before the
+    field existed.
+    """
+    at_birth: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {"id": 3}]
+    stamp_record_uids(at_birth, "python")
+
+    reloaded_without_uids: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {"id": 3}]
+    stamp_record_uids(reloaded_without_uids, "stack-python-records.json")
+
+    assert [record_uid(r) for r in reloaded_without_uids] == [record_uid(r) for r in at_birth]
+
+
+def test_duplicate_detection_reports_collisions_sorted() -> None:
+    """A duplicate uid would reintroduce the over-delete, so it must be detectable."""
+    records: list[dict[str, Any]] = [
+        {RECORD_UID_KEY: "python:1"},
+        {RECORD_UID_KEY: "python:1"},
+        {RECORD_UID_KEY: "react:2"},
+        {RECORD_UID_KEY: "react:2"},
+        {RECORD_UID_KEY: "python:3"},
+    ]
+
+    assert duplicate_record_uids(records) == ["python:1", "react:2"]
+
+
+def test_duplicate_detection_is_empty_for_a_sound_pool() -> None:
+    records: list[dict[str, Any]] = [{RECORD_UID_KEY: "python:1"}, {RECORD_UID_KEY: "react:1"}]
+
+    assert duplicate_record_uids(records) == []
+
+
+def test_duplicate_detection_ignores_records_without_a_uid() -> None:
+    """Absence is a separate, separately reported condition -- not a collision.
+
+    Several records sharing "no uid" must not be reported as sharing an
+    identity, or the guard would fire on every post-merge item list.
+    """
+    records: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {RECORD_UID_KEY: "python:1"}]
+
+    assert duplicate_record_uids(records) == []

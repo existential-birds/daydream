@@ -814,6 +814,10 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
         # been able to see a structural/language twin, in either direction. The
         # shipped axis can, because the host appends structural items into
         # ``merged-items.json``.
+        #
+        # This block is field-agnostic for the duplicate pairs -- it only counts
+        # them -- so widening ``RecordDuplicatePair`` (e.g. the ``uid`` fields
+        # added for issue #1111) cannot change these numbers.
         dedup_stats = {
             "record_alt_overlaps": len(pairs),
             "record_duplicate_candidates": len(dupes),
@@ -1127,6 +1131,15 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     could actually be computed over -- an item with an empty description is not
     comparable and contributes no pair.
 
+    Each pair row also carries ``a_uid``/``b_uid``, the host-assigned per-stack
+    record identity (issue #1111), so a shipped duplicate can be traced back to
+    the record it came from. These are POST-merge items, so a ``uid`` is present
+    only for items that never passed through the merge agent -- the single-stack
+    bypass and the host-appended structural items. The merge agent re-emits
+    items from scratch, which is why multi-stack rows carry ``""``. **``""``
+    means "no pre-merge identity", not an error**, and is the common case on a
+    multi-stack run; no ``uid`` is ever fabricated to fill it.
+
     ``max_similarity``/``mean_similarity`` are ``None`` (not ``0.0``) with no
     comparable pairs: undefined, not perfect -- the ``grounding_rate``
     precedent. A present-but-empty ``merged-items.json`` (a review-only run
@@ -1189,9 +1202,11 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
         "pairs": [
             {
                 "a_id": pair.record_a_id,
+                "a_uid": pair.record_a_uid,
                 "a_file": pair.record_a_file,
                 "a_lens": pair.record_a_source,
                 "b_id": pair.record_b_id,
+                "b_uid": pair.record_b_uid,
                 "b_file": pair.record_b_file,
                 "b_lens": pair.record_b_source,
                 "similarity": round(pair.similarity, 4),

@@ -23,6 +23,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from daydream.deep.records import record_uid
+
 _STOP_WORDS = frozenset(
     {"the", "a", "an", "is", "on", "in", "of", "to", "for", "and", "or", "with", "by"}
 )
@@ -130,12 +132,23 @@ def _files_overlap(record_file: str, alt_files: Iterable[str]) -> bool:
 class RecordDuplicatePair:
     """Two per-stack records that likely describe the same concern.
 
+    **These field names are the on-disk wire format.** The writer,
+    ``deep.orchestrator._candidate_pair_to_json``, is a bare
+    ``dataclasses.asdict``, so every attribute below appears verbatim as a key
+    in ``dedup-candidates.json`` -- which the merge agent's prompt points at and
+    which ``eval.analyzer`` reads back. Renaming or dropping a field here
+    changes that artifact's schema; adding one widens it.
+
     Attributes:
-        record_a_id: First record's id.
+        record_a_id: First record's id (reviewer-assigned, restarts at 1 per
+            stack, so it is NOT unique across the pool).
+        record_a_uid: First record's host-assigned ``uid`` (issue #1111), or
+            ``""`` when the record carries no pre-merge identity.
         record_a_file: First record's file field.
         record_a_description: First record's description.
         record_a_source: Originating stack name or records filename for record A.
         record_b_id: Second record's id.
+        record_b_uid: Second record's host-assigned ``uid``, or ``""``.
         record_b_file: Second record's file field.
         record_b_description: Second record's description.
         record_b_source: Originating stack name or records filename for record B.
@@ -143,10 +156,12 @@ class RecordDuplicatePair:
     """
 
     record_a_id: str
+    record_a_uid: str
     record_a_file: str
     record_a_description: str
     record_a_source: str
     record_b_id: str
+    record_b_uid: str
     record_b_file: str
     record_b_description: str
     record_b_source: str
@@ -229,7 +244,8 @@ def build_record_dedup_candidates(
             threshold, which a threshold-only count cannot).
 
     Returns:
-        Deterministically-ordered list of ``RecordDuplicatePair`` instances.
+        Deterministically-ordered list of ``RecordDuplicatePair`` instances,
+        ordered by ``(record_a_id, record_b_id, record_a_uid, record_b_uid)``.
 
     Raises:
         ValueError: If ``sources`` is not parallel to ``records``.
@@ -241,6 +257,12 @@ def build_record_dedup_candidates(
     for i in range(n):
         r_a = records[i]
         a_id = str(r_a.get("id", ""))
+        # A record with no ``uid`` yields ``""`` and is still paired: this
+        # function is deliberately also called over POST-merge items by
+        # ``eval.analyzer.analyze_shipped_duplication``, and merge-agent-authored
+        # items legitimately have no pre-merge identity. Skipping them would
+        # silently blank out that whole eval axis.
+        a_uid = record_uid(r_a)
         a_file = str(r_a.get("file", ""))
         a_desc = str(r_a.get("description", ""))
         a_source = sources[i]
@@ -257,17 +279,30 @@ def build_record_dedup_candidates(
             sim = jaccard(a_bigrams, b_bigrams)
             if sim >= threshold:
                 pairs.append(
+                    # Keyword arguments throughout: the dataclass now has ten
+                    # same-typed ``str`` fields in a/b order, so a positional
+                    # construction would mis-assign silently (and type-check
+                    # clean) the next time a field is inserted.
                     RecordDuplicatePair(
                         record_a_id=a_id,
+                        record_a_uid=a_uid,
                         record_a_file=a_file,
                         record_a_description=a_desc,
                         record_a_source=a_source,
                         record_b_id=b_id,
+                        record_b_uid=record_uid(r_b),
                         record_b_file=str(r_b.get("file", "")),
                         record_b_description=b_desc,
                         record_b_source=sources[j],
                         similarity=sim,
                     )
                 )
-    pairs.sort(key=lambda p: (p.record_a_id, p.record_b_id))
+    # ``(record_a_id, record_b_id)`` alone is not a total order: those ids are
+    # reviewer-assigned and restart at 1 for every stack, so two pairs drawn
+    # from different stacks routinely tie on both components and land in
+    # whatever relative order enumeration happened to produce. The ``uid`` is
+    # the only globally unique handle a record carries (issue #1111), so it is
+    # appended as the tiebreaker. The id components stay leading so existing
+    # expected orderings do not churn.
+    pairs.sort(key=lambda p: (p.record_a_id, p.record_b_id, p.record_a_uid, p.record_b_uid))
     return pairs

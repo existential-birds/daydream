@@ -29,6 +29,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+from daydream.deep.records import record_uid, stack_name_from_records_source, stack_name_from_uid
 from daydream.severity import CANONICAL_LEVELS, SEVERITY_RANK
 
 # Canonical confidence vocabulary (uppercase HIGH|MEDIUM|LOW schema enum,
@@ -46,6 +47,31 @@ def _severity(record: dict[str, Any]) -> str:
     """
     value = record.get("severity")
     return value.lower() if isinstance(value, str) else ""
+
+
+def _stack_name(record: dict[str, Any], source: str) -> str:
+    """Return the stack that owns *record*, in one canonical spelling.
+
+    The contested branch below asks "did two or more DISTINCT stacks report this
+    location?", so it needs one spelling per stack. ``source`` does not provide
+    that: the pipeline tags records with the ``stack-<name>-records.json``
+    filename on every path that loads them off disk, and with a bare stack name
+    for the uncovered sweep's in-memory append, so comparing raw ``source``
+    strings could count a single stack twice and mark a location contested that
+    only one stack ever reported. The record's ``uid`` (issue #1111) is the
+    single-form handle -- one host-minted spelling, assigned at record birth --
+    so it is preferred; ``source`` is normalized as the fallback for a record
+    carrying no uid, which keeps such records grouped per-stack instead of
+    collapsing them all onto one empty pseudo-stack.
+
+    Args:
+        record: A parsed per-stack record.
+        source: That record's ``source`` tag (filename or bare stack name).
+
+    Returns:
+        The owning stack's bare name.
+    """
+    return stack_name_from_uid(record_uid(record)) or stack_name_from_records_source(source)
 
 
 def _confidence(record: dict[str, Any]) -> str:
@@ -85,7 +111,9 @@ def select_arbiter_targets(
             below the severity knob and only become selectable through the
             contested path.
         sources: Per-record originating stack name, positionally aligned with
-            ``records`` (``len(sources) == len(records)``).
+            ``records`` (``len(sources) == len(records)``). Used by the
+            contested branch only as a fallback spelling of the owning stack,
+            behind each record's ``uid`` (see :func:`_stack_name`).
         min_severity: Lowest canonical severity level the severity branch
             selects (``"high"`` by default; ``"medium"`` also selects medium
             records, ``"low"`` selects everything). The contested branch is
@@ -186,7 +214,9 @@ def select_arbiter_targets(
             by_location.setdefault((file, 0), list(indices))
 
         for indices in by_location.values():
-            stacks = {sources[i] for i in indices}
+            # One stack must count once however its records were tagged, hence
+            # `_stack_name` rather than the raw `sources[i]` string.
+            stacks = {_stack_name(records[i], sources[i]) for i in indices}
             severities = {_severity(records[i]) for i in indices if _severity(records[i])}
             if len(stacks) >= 2 and len(severities) >= 2:
                 selected.update(indices)

@@ -9,6 +9,10 @@ These tests drive the predicate against the structural shape it exists to
 handle: a mixed-severity, multi-stack, same-``file:line`` collision, alongside
 the near-miss shapes (same location but one stack; same location but agreeing
 severity) that must NOT trip contested selection.
+
+Issue #1111 adds the "distinct stacks" half of that predicate: ``_stack_name``
+resolves each record to ONE spelling of its owning stack, so a single stack
+tagged two ways cannot masquerade as a contest.
 """
 
 from __future__ import annotations
@@ -16,8 +20,15 @@ from __future__ import annotations
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 
 
-def _rec(file: str, line: int, severity: str) -> dict[str, object]:
-    return {
+def _rec(file: str, line: int, severity: str, uid: str | None = None) -> dict[str, object]:
+    """Build a parsed per-stack record.
+
+    ``uid`` is the host-minted ``stack:ordinal`` identity (issue #1111). It is
+    optional because most tests here drive selection off the parallel ``sources``
+    list alone, which is also the shape a record written by a pre-``uid`` run has
+    on disk; the stack-normalization tests pass it explicitly.
+    """
+    record: dict[str, object] = {
         "id": 1,
         "description": f"{severity} finding at {file}:{line}",
         "file": file,
@@ -26,6 +37,9 @@ def _rec(file: str, line: int, severity: str) -> dict[str, object]:
         "confidence": "MEDIUM",
         "rationale": "because",
     }
+    if uid is not None:
+        record["uid"] = uid
+    return record
 
 
 def _rec_conf(file: str, line: int, severity: str, confidence: str) -> dict[str, object]:
@@ -300,3 +314,92 @@ def test_select_arbiter_targets_honors_contested_location_knob() -> None:
     assert select_arbiter_targets(
         records, sources, min_severity="medium", contested_location=False
     ) == [0, 1]
+
+
+# Issue #1111: "two or more DISTINCT stacks" needs one canonical spelling per
+# stack. ``source`` has two -- the ``stack-<name>-records.json`` filename used by
+# every path that loads records off disk, and a bare stack name used by the
+# uncovered sweep's in-memory append -- so comparing raw ``source`` strings made
+# one stack count as two and marked uncontested locations contested, routing
+# low/medium findings to the expensive Opus arbiter that the cost split exists to
+# keep away from it. ``_stack_name`` prefers the stack half of the record's
+# ``uid`` and normalizes ``source`` only as the uid-less fallback.
+
+
+def test_one_stack_spelled_two_ways_is_not_contested() -> None:
+    """A single stack tagged both ways must not fake a cross-stack contest.
+
+    Same location, divergent severity, neither record high: the ONLY thing that
+    could select either is the contested branch, and it must not fire -- both
+    records are ``python``, however the pipeline happened to tag them.
+    """
+    records = [
+        _rec("api.py", 10, "medium", uid="python:1"),
+        _rec("api.py", 10, "low", uid="python:2"),
+    ]
+    sources = ["stack-python-records.json", "python"]
+    assert select_arbiter_targets(records, sources) == []
+
+
+def test_genuine_cross_stack_contest_survives_normalization() -> None:
+    """Normalizing the spelling must not also erase real contests.
+
+    The mirror of the test above with the same two ``source`` spellings, but the
+    records belong to different stacks -- the case the contested branch exists
+    for. Collapsing every record onto one key would silently disable it.
+    """
+    records = [
+        _rec("api.py", 10, "medium", uid="python:1"),
+        _rec("api.py", 10, "low", uid="react:1"),
+    ]
+    sources = ["stack-python-records.json", "react"]
+    assert select_arbiter_targets(records, sources) == [0, 1]
+
+
+def test_uid_less_records_fall_back_to_normalized_source() -> None:
+    """A record with no ``uid`` is grouped by its normalized ``source``.
+
+    Records written by a run from before ``uid`` existed reach the predicate
+    without one. ``stack_name_from_uid("")`` is ``""``, so without the ``source``
+    fallback every such record would collapse onto one empty pseudo-stack and
+    the contested branch would UNDER-count -- silently dropping real
+    cross-stack contests out of arbitration. Both spellings still normalize, so
+    the one-stack-two-ways case stays uncontested here too.
+    """
+    two_stacks = [_rec("api.py", 10, "medium"), _rec("api.py", 10, "low")]
+    assert select_arbiter_targets(two_stacks, ["stack-python-records.json", "react"]) == [0, 1]
+    one_stack = [_rec("api.py", 10, "medium"), _rec("api.py", 10, "low")]
+    assert select_arbiter_targets(one_stack, ["stack-python-records.json", "python"]) == []
+
+
+def test_uid_outranks_the_source_tag() -> None:
+    """The ``uid`` wins when the two disagree, because it is minted at birth.
+
+    ``source`` is re-derived from whichever file a record was loaded out of;
+    ``uid`` is stamped once, when the record is created, and travels with the
+    record through the structural partition, adjudication drops and record
+    rewrites. Two records sharing a ``source`` tag but carrying uids from
+    different stacks are two stacks, and the contest must fire.
+    """
+    records = [
+        _rec("api.py", 10, "medium", uid="python:1"),
+        _rec("api.py", 10, "low", uid="react:1"),
+    ]
+    sources = ["stack-python-records.json", "stack-python-records.json"]
+    assert select_arbiter_targets(records, sources) == [0, 1]
+
+
+def test_uncovered_sweep_record_is_its_own_stack() -> None:
+    """The sweep's bare ``uncovered`` tag names a real, distinct stack.
+
+    The uncovered-file sweep is the pipeline's second record-birth site and tags
+    its records with a bare stack name rather than a records filename. Both
+    spellings normalize to themselves, so a sweep finding colliding with a
+    per-stack finding is a genuine two-stack contest and must be arbitrated.
+    """
+    records = [
+        _rec("api.py", 10, "medium", uid="python:1"),
+        _rec("api.py", 10, "low", uid="uncovered:1"),
+    ]
+    sources = ["stack-python-records.json", "uncovered"]
+    assert select_arbiter_targets(records, sources) == [0, 1]

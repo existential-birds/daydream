@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
+from daydream.deep.records import mint_record_uid
 from daydream.eval.analyzer import (
     _files_read,
     _quality_python_parser,
@@ -1515,8 +1516,23 @@ def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
 
 
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
-    """Write deep/f\"stack-{stack_name}-records.json\" = [{\"id\": i, \"confidence\": \"HIGH\"}]*n."""
-    records = [{"id": i, "confidence": "HIGH"} for i in range(n)]
+    """Write ``deep/stack-{stack_name}-records.json`` with *n* HIGH records.
+
+    Each record also carries the host-minted ``uid`` a real per-stack record is
+    stamped with at birth (issue #1111), so the fixture matches the production
+    artifact shape. Ordinals are 1-based, matching ``stamp_record_uids``, while
+    the reviewer-style ``id`` stays 0-based -- the two are deliberately not the
+    same numbering, which is part of why ``id`` cannot serve as an identity.
+
+    Args:
+        deep: The ``.daydream/deep`` directory to write into.
+        stack_name: Stack whose records file is written.
+        n: How many records to seed.
+    """
+    records: list[dict[str, Any]] = [
+        {"id": i, "confidence": "HIGH", "uid": mint_record_uid(stack_name, i + 1)}
+        for i in range(n)
+    ]
     (deep / f"stack-{stack_name}-records.json").write_text(json.dumps(records))
 
 
@@ -1931,6 +1947,10 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
     assert (pair["a_id"], pair["b_id"]) == ("1", "2")
     assert (pair["a_lens"], pair["b_lens"]) == ("per-stack", "structural")
     assert pair["same_file"] is True
+    # Both items here are merge-agent-authored, so neither carries a pre-merge
+    # ``uid`` (issue #1111) -- ``""`` is the expected value, not an error, and
+    # the axis still reports the pair.
+    assert (pair["a_uid"], pair["b_uid"]) == ("", "")
 
     # The clean run -- one correct finding only -- now scores strictly better.
     clean_dd, clean_deep = _worked_example_dirs(tmp_path / "clean")
@@ -2214,6 +2234,47 @@ def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path
     assert duplication["max_similarity"] >= 0.5
     assert duplication["mean_similarity"] == duplication["max_similarity"]
     assert duplication["pairs"][0]["similarity"] == duplication["max_similarity"]
+
+
+def test_shipped_duplication_pairs_carry_the_record_uid_when_present(tmp_path: Path) -> None:
+    """A shipped duplicate is traceable to its per-stack record via ``uid``.
+
+    Merged items reach ``merged-items.json`` by two routes. The merge agent
+    re-emits items from scratch, so those carry no ``uid``; items that bypass it
+    -- the single-stack path and the host-appended structural items -- keep the
+    ``uid`` they were born with. Both routes appear here in one shipped set, so
+    the row shows a real handle on the side that has one and ``""`` on the side
+    that does not, without either dropping the pair or fabricating a uid.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(
+                1,
+                line=88,
+                description="The loader does not validate its config path",
+                lens="structural",
+                uid=mint_record_uid("structure", 3),
+            ),
+            _item(
+                2,
+                line=90,
+                description="The loader fails to validate the config path",
+            ),
+        ],
+    )
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["comparable_pairs"] == 1
+    pair = duplication["pairs"][0]
+    assert (pair["a_id"], pair["b_id"]) == ("1", "2")
+    assert pair["a_uid"] == "structure:3"
+    assert pair["b_uid"] == ""
+    # The uid columns are additive: the numeric definitions are untouched.
+    assert duplication["near_duplicate_pairs"] == 1
+    assert duplication["same_file_pairs"] == 1
 
 
 def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:

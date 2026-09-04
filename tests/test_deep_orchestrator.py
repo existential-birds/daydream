@@ -9362,3 +9362,438 @@ def test_uncovered_sweep_gate_reads_profile_pipeline(monkeypatch: pytest.MonkeyP
             return _Ctx._P()
 
     assert o._uncovered_sweep_enabled(cast(FlowContext, _Ctx())) is False
+
+
+# Issue #1111: per-stack record referential identity (``uid``).
+#
+# Every stage between the per-stack parse and the merge write resolves a record
+# by its ``uid`` -- the dedup pre-filter's b-side drop, the adjudication drop
+# set, the structural partition/rejoin, and the per-stack records rewrite. The
+# surrogates that came before it (a positional index, ``id(record)``, an
+# ``(id, file)`` tuple) all got *less* discriminating as two records got more
+# similar, and those stages only ever run on records selected for being
+# similar. The tests below drive the real pipeline and read the resulting
+# ``.daydream/deep/stack-*-records.json`` artifacts, because the artifacts are
+# where a mis-keyed drop shows up as a lost finding.
+
+
+def _uid_records(deep: Path, stack: str) -> list[dict[str, Any]]:
+    """Return the issues list on disk for *stack*'s per-stack records file."""
+    return _record_issues(json.loads((deep / f"stack-{stack}-records.json").read_text()))
+
+
+def _uid_list(deep: Path, stack: str) -> list[Any]:
+    """Return the ``uid`` of every record on disk for *stack*, in file order."""
+    return [record.get("uid") for record in _uid_records(deep, stack)]
+
+
+def _high_record(**overrides: Any) -> dict[str, Any]:
+    """Build a primed per-stack record the arbiter's severity branch selects.
+
+    ``high`` severity is what makes ``select_arbiter_targets`` pick a record up,
+    and arbitration is the only thing that rewrites the per-stack records files
+    -- so it is also what makes an in-memory ``uid`` observable on disk.
+    """
+    record = {"severity": "high", "confidence": "HIGH", "rationale": "stub", "evidence": "api.py:1"}
+    record.update(overrides)
+    return _record(**record)
+
+
+def _prime_uid_merge_resume(target: Path, python: list[dict[str, Any]]) -> Path:
+    """Prime a merge resume whose only arbiter-eligible records are *python*'s.
+
+    Unlike ``_prime_merge_resume_records`` the structural record sits at
+    ``api.py:5``, alone at that location: the contested-location branch would
+    otherwise pull both it and the python record into arbitration whenever their
+    severities diverge, which muddies "exactly this record was adjudicated".
+    """
+    return _prime_merge_resume(
+        target,
+        python=python,
+        react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
+        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
+        structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
+    )
+
+
+async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
+) -> None:
+    """#1111 real-path: every record a fresh deep run writes is born identified.
+
+    The reviewer's own ``id`` restarts at 1 in every stack and carries no
+    uniqueness constraint, so before the birth stamp the *first* globally unique
+    handle a finding got was minted at the final merge write -- after every
+    stage that needs one has already run. The uid must therefore be on the
+    artifact the reviewers themselves produce, and its stack half must name the
+    file it was written into, since that is what routes the record back to its
+    own records file after adjudication.
+
+    ``parse_by_stack`` gives the python and structural stacks a second finding so
+    the ordinals are actually a sequence rather than a single ``1``; the
+    structural meta-stack is covered explicitly because it is partitioned out of
+    the language pool and rejoined by uid.
+    """
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    borderline = {"severity": "medium", "confidence": "MEDIUM"}
+    stub.parse_by_stack = {
+        "python": {
+            **borderline,
+            "description": "python primary finding",
+            "extra": {**borderline, "description": "python second finding"},
+        },
+        "structure": {
+            **borderline,
+            "description": "structural primary finding",
+            "extra": {**borderline, "description": "structural second finding"},
+        },
+    }
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    records_files = sorted(deep.glob("stack-*-records.json"))
+    assert [p.name for p in records_files] == [
+        "stack-generic-records.json",
+        "stack-python-records.json",
+        "stack-react-records.json",
+        "stack-structure-records.json",
+    ]
+    for path in records_files:
+        stack = path.name.removeprefix("stack-").removesuffix("-records.json")
+        issues = _record_issues(json.loads(path.read_text()))
+        assert issues, f"{path.name} holds no records to identify"
+        # Stack half names this very file; ordinals are contiguous from 1.
+        assert [issue.get("uid") for issue in issues] == [
+            f"{stack}:{n}" for n in range(1, len(issues) + 1)
+        ], f"{path.name} uids are not this stack's contiguous sequence"
+    # The two-finding stacks prove the ordinal is a per-stack counter, not a
+    # constant: both records carry the reviewer's ``id: 1``.
+    assert _uid_list(deep, "python") == ["python:1", "python:2"]
+    assert _uid_list(deep, "structure") == ["structure:1", "structure:2"]
+    assert {issue["id"] for issue in _uid_records(deep, "python")} == {1, 2}
+
+
+async def test_uncovered_sweep_stamps_its_own_record_uids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#1111 real-path: the uncovered-file sweep identifies its own records.
+
+    The sweep is the pipeline's second record-birth site and the parse loop's
+    load-time backfill cannot reach it -- ``per-stack-parse`` runs before
+    ``uncovered-sweep``, so on a fresh run ``stack-uncovered-records.json`` does
+    not exist yet when that loop looks for it. An unstamped sweep record would
+    reach adjudication with no identity, and a fail-closed pass could then drop
+    it on an identity nothing could establish.
+
+    Two unread files give the sweep two findings, both carrying the reviewer's
+    ``id: 1``, so the assertion is on the sweep's own ordinal counter rather than
+    on a lone ``uncovered:1``.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    # A second file no reviewer reads, with a hunk large enough to clear the
+    # sweep's min-hunk budget, so the sweep has two targets instead of one.
+    (target / "extra.txt").write_text("".join(f"extra{i}\n" for i in range(1, 8)))
+    _git(target, "add", "extra.txt")
+    _commit(target, "test: add a second unread file for the sweep")
+
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt", "extra.txt"})
+    stub.merge_echo_records = True
+
+    assert await run(make_config(target, assume="yes", output_mode="loop")) == 0
+
+    deep = target / ".daydream" / "deep"
+    sweep_records = json.loads((deep / "stack-uncovered-records.json").read_text())
+    # Records are written in sorted-file order, so the pairing is deterministic.
+    assert [(r["file"], r["uid"]) for r in sweep_records] == [
+        ("extra.txt", "uncovered:1"),
+        ("notes.txt", "uncovered:2"),
+    ]
+    assert {r["id"] for r in sweep_records} == {1}, (
+        "both sweep records share the reviewer's id -- the uid is the only handle "
+        "that tells them apart"
+    )
+
+
+async def test_merge_resume_backfills_uids_onto_pre_uid_records(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111 real-path: a resume over artifacts written before ``uid`` existed
+    re-derives the identity the producing run would have minted.
+
+    This is why the format is ``stack:ordinal`` and not a uuid4: an opaque
+    identity could not be regenerated for an artifact that predates the field,
+    so a ``--start-at merge`` resume over one would have to either fail or run
+    the uid-keyed stages on records with no identity. Re-deriving from
+    ``(stack name, position)`` makes the backfill indistinguishable from a birth
+    stamp -- observable here because arbitration rewrites the records files, so
+    the backfilled uid lands on disk in the file whose name it names.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_uid_merge_resume(
+        multi_stack_target,
+        python=[
+            _high_record(description="py first"),
+            _record(description="py second", line=2, evidence="api.py:2"),
+        ],
+    )
+    primed = json.loads((deep / "stack-python-records.json").read_text())
+    assert all("uid" not in record for record in primed), "fixture must predate the uid field"
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    # Backfilled by position, in the file that owns them -- not renumbered
+    # globally and not routed elsewhere.
+    assert _uid_list(deep, "python") == ["python:1", "python:2"]
+    assert _uid_list(deep, "react") == ["react:1"]
+    assert _uid_list(deep, "generic") == ["generic:1"]
+    assert _uid_list(deep, "structure") == ["structure:1"]
+    # ``python:1`` is the record the arbiter was asked about, and its verdict
+    # landed on it rather than on its sibling.
+    python_records = _uid_records(deep, "python")
+    assert python_records[0]["description"] == "ARBITRATED: py first"
+    assert python_records[1]["description"] == "py second"
+    assert (deep / "merged-items.json").is_file()
+
+
+async def test_merge_resume_preserves_existing_non_contiguous_uid(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111 real-path: a uid already on disk is never re-minted by position.
+
+    ``_rewrite_stack_records`` persists only the survivors of adjudication, so a
+    records file legitimately holds a *shorter* list than the one its uids were
+    minted from -- ``python:4`` alone in the file is the normal shape after a
+    prior pass dropped its three siblings. Re-deriving uids by position on the
+    next resume would rename it to ``python:1`` and every uid an earlier stage
+    recorded (a dedup pair's ``record_b_uid``, an ``arbiter-input.json`` entry,
+    the arbiter-exclusion set) would then point at nothing. Stability across the
+    arbitration write-back is the whole property.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_uid_merge_resume(
+        multi_stack_target,
+        python=[_high_record(description="py survivor", uid="python:4")],
+    )
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    assert _uid_list(deep, "python") == ["python:4"], (
+        "the surviving record was renumbered by position instead of keeping the "
+        "uid the producing run minted"
+    )
+    assert _uid_records(deep, "python")[0]["description"] == "ARBITRATED: py survivor"
+
+
+async def test_duplicate_record_uid_stops_the_run_before_merge(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111 real-path: two records sharing one uid is fatal, not a warning.
+
+    A uid is host-minted from no content-derived input, so a collision is never
+    the near-miss judgement call a fingerprint match is -- it means two records
+    files claim one stack name, or an artifact was written from a partially
+    stamped list. Continuing would let the drop set, the structural partition and
+    the records rewrite each act on whichever of the two they reached first,
+    emitting a report quietly missing findings. The run must stop with the
+    colliding uid named, before any merged output exists to be trusted.
+    """
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_error",
+        lambda console, title, message, *a, **k: errors.append((title, message)),
+    )
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_uid_merge_resume(
+        multi_stack_target,
+        python=[
+            _high_record(description="py first", uid="python:1"),
+            _high_record(description="py collision", uid="python:1"),
+        ],
+    )
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+
+    assert not (deep / "merged-items.json").exists(), (
+        "the run merged despite a colliding record identity"
+    )
+    assert not (multi_stack_target / ".review-output.md").exists()
+    titles = [title for title, _message in errors]
+    assert "Duplicate Record Identities" in titles, f"no actionable error panel; got {titles!r}"
+    message = next(msg for title, msg in errors if title == "Duplicate Record Identities")
+    assert "python:1" in message
+    assert "stack-python-records.json" in message
+    assert "Re-run without --start-at" in message
+
+
+class _RejectingArbiterBackend(_StubBackend):
+    """Arbiter stub that rejects exactly the record carrying *reject_uid* (#1111).
+
+    The shipped stub echoes ``keep=true`` for every ``arb_id``, so no test could
+    observe a *drop* crossing the disk boundary. This one reads the uid the
+    orchestrator wrote into ``arbiter-input.json`` and names its target by that
+    uid, which is how a real reviewer would name a specific record among several
+    that share the reviewer's ``id``.
+    """
+
+    def __init__(self, target: Path, reject_uid: str) -> None:
+        super().__init__(target)
+        self._reject_uid = reject_uid
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        if "you are the arbiter" in prompt.lower():
+            self.calls.append({"prompt": prompt, "model": self.model})
+            match = re.search(r"listed in (\S+arbiter-input\.json)", prompt)
+            assert match is not None, "arbiter prompt did not point at its input artifact"
+            entries = json.loads(Path(match.group(1)).read_text())
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output={
+                    "findings": [
+                        {
+                            "arb_id": entry["arb_id"],
+                            "keep": entry["uid"] != self._reject_uid,
+                            "severity": entry.get("severity") or "high",
+                            "confidence": entry.get("confidence") or "HIGH",
+                            "description": f"ARBITRATED: {entry.get('description')}",
+                            "rationale": "arbiter second opinion",
+                        }
+                        for entry in entries
+                    ]
+                },
+                continuation=None,
+            )
+            return
+        async for event in super().execute(
+            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+        ):
+            yield event
+
+
+async def test_arbiter_drop_removes_only_the_named_record_across_stack_files(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111 real-path: an arbiter rejection deletes one record and only that one.
+
+    Four records, all carrying the reviewer's ``id: 1``, from four different
+    stacks: the exact input on which the old surrogates broke. A positional index
+    shifts as soon as the list is compacted, ``id(record)`` dies on any dict
+    rebuild or JSON round-trip, and an ``(id, file)`` tuple matches siblings the
+    drop was never meant to touch. The verdicts are written back through disk, so
+    the proof has to be read back from disk: the rejected stack's file is emptied
+    while every other file keeps its record, its uid, and (for the unarbitrated
+    structural record) its original text.
+    """
+    _silence(monkeypatch)
+    stub = _RejectingArbiterBackend(multi_stack_target, "react:1")
+    # Echo the on-disk records as merged items so the report reflects what
+    # arbitration actually wrote back, not the stub's fixed payload.
+    stub.merge_echo_records = True
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    deep = _prime_merge_resume(
+        multi_stack_target,
+        python=[_high_record(description="py issue")],
+        react=[_high_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
+        generic=[_high_record(description="docs issue", file="README.md", evidence="README.md:1")],
+        structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
+    )
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    # Exactly the named record is gone; its file is rewritten empty rather than
+    # left holding stale pre-arbitration content.
+    assert _uid_records(deep, "react") == []
+    # The survivors kept their identities and took their own verdicts.
+    assert _uid_list(deep, "python") == ["python:1"]
+    assert _uid_list(deep, "generic") == ["generic:1"]
+    assert _uid_records(deep, "python")[0]["description"] == "ARBITRATED: py issue"
+    assert _uid_records(deep, "generic")[0]["description"] == "ARBITRATED: docs issue"
+    # The structural record was never an arbiter target (alone at api.py:5, so
+    # uncontested), and the rewrite it rides through left it untouched.
+    assert _uid_list(deep, "structure") == ["structure:1"]
+    assert _uid_records(deep, "structure")[0]["description"] == "structural issue"
+    # The dropped record is absent from the merged output too, and its siblings
+    # are not.
+    merged = json.loads((deep / "merged-items.json").read_text())["items"]
+    descriptions = [item.get("description") for item in merged]
+    assert "ARBITRATED: tsx issue" not in descriptions
+    assert "tsx issue" not in descriptions
+    assert "ARBITRATED: py issue" in descriptions
+
+
+async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111 real-path: a record that routes outside the rewritten files is named.
+
+    ``_rewrite_stack_records`` rewrites each records file WHOLESALE, so a record
+    whose destination is not among those files is not merely skipped -- its
+    adjudication never reaches disk. There was no ``else`` branch for that case,
+    which meant "every adjudicated record routes to a file being rewritten" was a
+    real invariant that nothing enforced: #1110 had to add the structural records
+    path to the rewrite list precisely to keep records out of this branch, and
+    nothing would have failed loudly had that been missed.
+
+    Reached here the way an operator would reach it -- a resume over a records
+    file holding a uid that names a stack this run has no records file for. The
+    outcome is deliberately a warning rather than a raise: every other record's
+    verdict is already computed and belongs on disk, so the run completes.
+    """
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_uid_merge_resume(
+        multi_stack_target,
+        python=[_high_record(description="py issue", uid="ghost:1")],
+    )
+
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+
+    unroutable = [w for w in warnings if "ghost:1" in w]
+    assert unroutable, f"the unroutable record was not named in any warning: {warnings!r}"
+    assert "stack-python-records.json" in unroutable[0], "the warning must name the record's source"
+    assert "stack-ghost-records.json" in unroutable[0], "the warning must name the dest it resolved to"
+    assert "will not reach disk" in unroutable[0]
+    # The warning is accurate, not decorative: the adjudication genuinely did not
+    # reach disk, and no phantom records file was created for the ghost stack.
+    assert not (deep / "stack-ghost-records.json").exists()
+    assert _uid_records(deep, "python") == []
+    # Fail-open: every routable record's adjudication still landed.
+    assert _uid_list(deep, "react") == ["react:1"]
+    assert _uid_list(deep, "generic") == ["generic:1"]
+    assert _uid_list(deep, "structure") == ["structure:1"]

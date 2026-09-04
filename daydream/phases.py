@@ -58,7 +58,7 @@ from daydream.repository_paths import (
 from daydream.repository_paths import (
     path_is_confined,
 )
-from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, stronger_severity
+from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -1086,9 +1086,13 @@ def _evidence_gate_then_validate(
 
     Writes the ``dropped-speculative.json`` audit sidecar beside ``items_path``
     when any item is dropped, then returns the survivors after snap/demote
-    location validation.
+    location validation. The sidecar reports both ``dropped_ids`` (the
+    reviewer's own pre-``normalize_items`` numbering) and ``dropped_uids`` (the
+    referential identities, present only for items that never passed through
+    the merge agent) -- see the inline notes at the write site.
     """
     from daydream.deep.location_validator import validate_records
+    from daydream.deep.records import record_uid
     from daydream.hunk_index import load_hunk_index
 
     evidenced: list[dict[str, Any]] = []
@@ -1098,12 +1102,29 @@ def _evidence_gate_then_validate(
 
     if dropped:
         sidecar_path = items_path.parent / "dropped-speculative.json"
+        # These ids are the *reviewer's* own numbering, read before
+        # ``normalize_items`` mints the canonical ones: they restart at 1 per
+        # stack and carry no uniqueness guarantee, so "dropped id 3" does not
+        # identify a record. That is exactly the id-provenance weakness ``uid``
+        # exists to close (issue #1111), so record the uids alongside them
+        # rather than replacing them -- the reviewer id is still the only handle
+        # for an item that has no uid, and dropping it would lose information.
         dropped_ids = [d.get("id") for d in dropped]
+        # uid coverage here is partial BY CONSTRUCTION, not by oversight: this
+        # gate runs on post-merge items, and the cross-stack merge agent
+        # re-emits its items from scratch under MERGED_ITEMS_SCHEMA, so a
+        # multi-stack merged item has no pre-merge identity to report. Only
+        # items that bypassed the merge agent (the single-stack path, the
+        # host-appended structural records) carry one. Emit an entry only where
+        # a uid actually exists, so the list never degrades into ``null``s that
+        # look like lost identities.
+        dropped_uids = [uid for uid in (record_uid(d) for d in dropped) if uid]
         sidecar_path.write_text(
             json.dumps(
                 {
                     "dropped_count": len(dropped),
                     "dropped_ids": dropped_ids,
+                    "dropped_uids": dropped_uids,
                     "dropped_items": dropped,
                 },
                 indent=2,
@@ -3764,10 +3785,14 @@ async def phase_per_stack_reviews(
             dropped.
 
     """
+    # Every ``daydream.deep.*`` import in this module is function-local, and must
+    # stay that way: ``daydream.deep.__init__`` imports ``orchestrator``, which
+    # imports this module, so a module-level import here closes an import cycle.
     from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.artifacts import deep_dir as _deep_dir
     from daydream.deep.artifacts import per_stack_records_path, per_stack_review_path
     from daydream.deep.prompts import _diff_blocks_for_files
+    from daydream.deep.records import stamp_record_uids
 
     deep_dir_path = _deep_dir(work.repo)
     recorder = get_current_recorder()
@@ -3926,8 +3951,40 @@ async def phase_per_stack_reviews(
                     if not isinstance(structured, dict):
                         failures[stack_name] = "no structured output produced"
                         return
-                    issues = structured.get("issues")
-                    issues = issues if isinstance(issues, list) else []
+                    raw_issues = structured.get("issues")
+                    raw_issues = raw_issues if isinstance(raw_issues, list) else []
+                    # ``run_agent``'s structured-output gate is salvage-tolerant
+                    # (``agent._salvageable``: "nested item validity is
+                    # deliberately not checked here"), so a schema-shaped
+                    # payload can still carry a non-dict entry in ``issues``.
+                    # Drop those here rather than at each consumer: a non-dict
+                    # record has no field any downstream stage can read
+                    # (``_index_records`` would raise on ``rec.get``), and
+                    # dropping it at birth keeps every record's position in the
+                    # on-disk list equal to its ``uid`` ordinal, which is what
+                    # makes ``stamp_record_uids`` re-derivable on a resume.
+                    #
+                    # Each surviving record is shallow-copied because the stamp
+                    # below mutates in place: ``structured`` is the backend's
+                    # payload, still referenced by the trajectory recorder, and
+                    # writing a host-owned field back into it would both edit
+                    # what gets recorded and let one stack's uid leak into
+                    # another's records whenever the two calls happen to share a
+                    # record object. The copy makes the stamped list this
+                    # phase's own, so per-stack uid minting stays independent.
+                    issues = [dict(issue) for issue in raw_issues if isinstance(issue, dict)]
+                    # Mint each record's referential identity (issue #1111). This
+                    # is post-validation and host-side: ``run_agent`` already
+                    # validated ``structured`` against PER_STACK_RECORD_SCHEMA
+                    # before returning, and nothing re-validates a record dict
+                    # afterwards, so a host-added key can never be
+                    # schema-rejected. The schema is deliberately NOT widened to
+                    # declare ``uid`` -- every declared property must also sit in
+                    # ``required`` (tests/test_output_schema_strict.py), so
+                    # declaring it would force the *model* to emit a field the
+                    # host owns. Stamping before the write makes the artifact
+                    # self-describing when debugging.
+                    stamp_record_uids(issues, stack_name)
                     declared_verdicts = structured.get("verdicts")
                     declared = declared_verdicts if isinstance(declared_verdicts, list) else []
                     # Persist the records file with the DECLARED verdicts for
@@ -4041,6 +4098,15 @@ async def phase_supervise_review(
 
     dd = deep_dir(work.repo)
     input_path = dd / "supervise-input.json"
+    # Deliberately a verbatim dump of the canonical items, host-only fields and
+    # all (``lens``, ``location_note``, ``severity_before_demotion``,
+    # ``location_distrust``, and -- on the single-stack path -- ``uid``). The
+    # supervisor is asked to echo the canonical integer ``id``, and
+    # SUPERVISE_SCHEMA types that field as an integer, so a short opaque string
+    # under a differently named key cannot be mistaken for it under strict
+    # structured output. Filtering just ``uid`` would be an arbitrary carve-out
+    # among the host fields already here, and the next host field added would
+    # bypass the filter anyway -- so the dump stays verbatim and stays auditable.
     input_path.write_text(json.dumps(items, indent=2))
     prompt = get_registry().prompt("supervise")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["supervision"].content,
@@ -4077,10 +4143,42 @@ async def phase_supervise_review(
 
 
 def _index_records(records: list[dict[str, Any]], id_key: str) -> list[dict[str, Any]]:
-    """Tag *records* with fresh 1-based ids under *id_key* for an adjudication input artifact."""
+    """Tag *records* with fresh 1-based ids under *id_key* for an adjudication input artifact.
+
+    The positional *id_key* value (``arb_id`` / ``sup_id``) stays the token the
+    agent echoes back in ``ARBITER_SCHEMA`` / ``SUPPRESSION_SCHEMA``. That echo
+    is safe because the artifact this returns is written and the verdicts are
+    read back inside a single phase call, so the positional key cannot outlive
+    the list it indexes.
+
+    Each entry also carries the record's ``uid`` (issue #1111), which serves two
+    purposes that the positional id cannot:
+
+    - **Auditability.** ``arbiter-input.json`` / ``suppression-input.json``
+      become self-describing: ``arb_id: 3`` no longer requires re-deriving the
+      selection order to know which per-stack record it referred to.
+    - **Resolution.** A caller holding a verdict can go ``arb_id -> uid ->
+      record`` instead of ``arb_id -> offset -> list index``, which is the
+      surrogate that silently mis-targets whenever the record pool is
+      reordered or filtered between write and read.
+
+    These artifacts are agent *inputs* read from disk, not model-output
+    schemas, so adding a field costs nothing schema-side.
+
+    Args:
+        records: Selected per-stack records, in the order the agent will see.
+        id_key: Positional id field name (``arb_id`` or ``sup_id``).
+
+    Returns:
+        One projected dict per record, in input order. ``uid`` is ``""`` for a
+        record carrying no pre-merge identity.
+    """
+    from daydream.deep.records import record_uid
+
     return [
         {
             id_key: i,
+            "uid": record_uid(rec),
             "file": rec.get("file"),
             "line": rec.get("line"),
             "severity": rec.get("severity"),
@@ -4329,6 +4427,21 @@ def _fold_structural_duplicates(
     whole-file (``line: 0``) while its language twin cites the exact line, and
     those are still one defect.
 
+    The match itself is content-derived BY DESIGN and stays that way: it answers
+    "do these two findings describe the same defect?", which is a question about
+    what the findings say, so no host-assigned identity can answer it. Issue
+    #1111 lists first-match ambiguity here as something a ``uid`` closes; it
+    does not, and nothing below pretends otherwise. What #1111 did close is
+    narrower and real: when two base items in the same file clear the threshold
+    at EQUAL similarity, the winner used to be whichever the scan reached first,
+    and the in-place severity boost was then written into that arbitrary choice
+    with nothing in the audit sidecar recording that a choice had been made.
+    The tie is now broken deliberately -- the already-stronger severity wins,
+    since severity is the only field this fold writes, and earlier position is
+    the explicit last resort -- and the sidecar records the tie width plus the
+    chosen base item's identity. Only the tie-break's determinism and the
+    audit's traceability changed; the matching rule is untouched.
+
     Folding never demotes, which is what the partition was protecting: the
     survivor takes the stronger of the two severities, so a ``high``
     structural twin lifts a ``medium`` language finding rather than being
@@ -4344,7 +4457,13 @@ def _fold_structural_duplicates(
     fold decision is recorded to a ``folded-structural.json`` audit sidecar
     beside ``items_path`` (mirroring the evidence gate's
     ``dropped-speculative.json``), so a destructive, host-side similarity match
-    stays reviewable instead of collapsing to a bare count.
+    stays reviewable instead of collapsing to a bare count. Each entry names
+    the chosen base item by ``base_uid`` (its ``uid`` when it has one, ``""``
+    for the merge-agent-authored items that do not) and by ``base_index`` (its
+    position in ``base_items``), and reports ``tied_candidates`` -- how many
+    base items matched at the winning similarity -- so a tie-broken pick is
+    identifiable after the fact instead of being indistinguishable from an
+    unambiguous one.
 
     Args:
         base_items: The merged, non-structural items the report is built from.
@@ -4364,17 +4483,22 @@ def _fold_structural_duplicates(
         jaccard,
         normalize_title,
     )
+    from daydream.deep.records import record_uid
 
     surviving: list[dict[str, Any]] = []
     fold_records: list[dict[str, Any]] = []
     for item in structural_items:
         file_key = str(item.get("file", ""))
         description = str(item.get("description", ""))
-        twin: dict[str, Any] | None = None
-        best_similarity = -1.0
+        # Collect every clearing candidate before choosing one. Selecting inside
+        # the scan can only express "strictly better than what I have", which
+        # makes an equal-similarity tie resolve to scan order by accident; the
+        # tie has to be visible as a set to be broken on purpose (and to be
+        # counted for the audit sidecar).
+        candidates: list[tuple[int, dict[str, Any], float]] = []
         if file_key and description:
             item_bigrams = bigrams(normalize_title(description))
-            for base in base_items:
+            for base_index, base in enumerate(base_items):
                 if str(base.get("file", "")) != file_key:
                     continue
                 base_description = str(base.get("description", ""))
@@ -4383,9 +4507,41 @@ def _fold_structural_duplicates(
                 ):
                     continue
                 similarity = jaccard(item_bigrams, bigrams(normalize_title(base_description)))
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    twin = base
+                candidates.append((base_index, base, similarity))
+        twin: dict[str, Any] | None = None
+        twin_index = -1
+        best_similarity = -1.0
+        tied_candidates = 0
+        if candidates:
+            best_similarity = max(similarity for _index, _base, similarity in candidates)
+            tied = [
+                (index, base)
+                for index, base, similarity in candidates
+                if similarity == best_similarity
+            ]
+            tied_candidates = len(tied)
+            twin_index, twin = tied[0]
+            for index, base in tied[1:]:
+                # Tie-break on severity, because severity is the ONLY field the
+                # fold writes back into the base item: boosting the strongest
+                # tied candidate is a no-op, while boosting a weaker one
+                # promotes a sibling finding that nothing else in the pipeline
+                # asked to promote. ``stronger_severity`` is the canonical
+                # comparator and normalizes both sides first, so an unknown or
+                # absent value can never win the tie. The pick also decides
+                # whose evidence the survivorship check below reads, so making
+                # it deterministic matters beyond the severity write itself.
+                current_severity = normalize_severity(twin.get("severity"))
+                candidate_severity = normalize_severity(base.get("severity"))
+                if candidate_severity != current_severity and (
+                    stronger_severity(candidate_severity, current_severity) == candidate_severity
+                ):
+                    twin_index, twin = index, base
+            # Any tie still standing here is a genuine one -- equal similarity
+            # AND equal severity -- so earlier position wins as a documented
+            # last resort (``tied[0]``, kept above) rather than as an accident
+            # of scan order. ``tied_candidates`` in the sidecar says when this
+            # happened, so an arbitrary-looking pick is auditable.
         if twin is None:
             surviving.append(item)
             continue
@@ -4411,6 +4567,19 @@ def _fold_structural_duplicates(
                 "structural_file": file_key,
                 "base_description": str(twin.get("description", "")),
                 "similarity": best_similarity,
+                # Pin down exactly WHICH base item was chosen, not just what it
+                # said. ``base_uid`` is the real handle when the base item has
+                # one, but base items are usually merge-agent-authored and so
+                # usually carry none (empty string), which is why
+                # ``base_index`` -- its position in ``base_items``, the list the
+                # in-place severity boost was applied to -- is recorded
+                # alongside it rather than instead of it.
+                "base_uid": record_uid(twin),
+                "base_index": twin_index,
+                # How many base items were equally good matches. ``1`` is the
+                # unambiguous case; anything higher means the tie-break above
+                # ran and the entry above says which candidate it picked.
+                "tied_candidates": tied_candidates,
                 "survivor": "structural" if survivor_is_structural else "base",
             }
         )
@@ -4621,6 +4790,11 @@ def _write_single_stack_merged_items(
 
     # Tag per-stack records (the merge agent normally sets lens; here the host
     # does it). ``severity`` is already present from PER_STACK_RECORD_SCHEMA.
+    # The ``{**rec, ...}`` spread carries each record's ``uid`` through
+    # unchanged, which is load-bearing on this path: the single-stack bypass
+    # never runs the merge agent, so these are the only merged items that still
+    # hold a pre-merge identity (issue #1111). ``normalize_items`` downstream is
+    # likewise a spread, so the uid survives to ``merged-items.json``.
     per_stack_items: list[dict[str, Any]] = [
         {**rec, "lens": "per-stack"} for rec in all_records
     ]
@@ -4701,6 +4875,7 @@ async def phase_cross_stack_merge(
 
     """
     from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
+    from daydream.deep.records import stack_name_from_records_source
 
     dd = deep_dir(work.repo)
     canonical_path = work.repo / REVIEW_OUTPUT_FILE
@@ -4759,9 +4934,12 @@ async def phase_cross_stack_merge(
     elif isinstance(result, list):
         item_list = result
     if item_list is None:
+        # ``stack_name_from_records_source`` owns the ``stack-<name>-records.json``
+        # naming convention (it is the same parse the uid minting depends on), so
+        # derive the error context through it rather than re-implementing the
+        # affix surgery here and letting the two drift.
         stack_context = [
-            p.stem.removeprefix("stack-").removesuffix("-records")
-            for p in per_stack_records_paths
+            stack_name_from_records_source(p.name) for p in per_stack_records_paths
         ]
         raise CrossStackMergeError(
             type(result).__name__,
