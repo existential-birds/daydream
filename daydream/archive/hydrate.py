@@ -1597,6 +1597,92 @@ def _curated_upload_paths(stage: Path, curation_id: str) -> list[Path]:
     return sorted(p for p in curated.rglob("*") if p.is_file())
 
 
+def _policy_binding_record(binding: dict[str, Any]) -> str:
+    """Canonical ``policy-binding.json`` record text (issue #1094 task 7).
+
+    Byte-canonical: sorted keys, compact canonical JSON, trailing newline —
+    comparison against the remote record is bytewise, so the record must never
+    depend on dict ordering or whitespace. Carries the full binding: policy
+    digest/version, sorted copyleft opt-ins, exclusions digest, resolved
+    per-repo decisions digest, license distribution digest.
+    """
+    record = {
+        "policy_digest": str(binding["policy_digest"]),
+        "policy_version": str(binding["policy_version"]),
+        "allow_copyleft": sorted(str(slug) for slug in binding["allow_copyleft"]),
+        "exclusions_digest": str(binding["exclusions_digest"]),
+        "resolved_decisions_digest": str(binding["decisions_digest"]),
+        "distribution_digest": str(binding["distribution_digest"]),
+        "schema_version": "2",
+    }
+    return json.dumps(record, sort_keys=True) + "\n"
+
+
+def check_prefix_binding(
+    client: HubClient, *, curation_id: str, binding: dict[str, Any],
+    allow_unbound_resume: bool = False,
+) -> None:
+    """Fail closed when a curated prefix was published under a different
+    policy binding (issue #1094 task 7).
+
+    Downloads ``curated/<curation-id>/policy-binding.json`` from the
+    destination repo and compares it bytewise against the current run's
+    canonical binding record. A differing record raises
+    :class:`HydrationError` ("conflicting policy binding"); an absent record
+    on a prefix that already has published batches but no resume ledger is a
+    pre-v2 legacy prefix and also fails closed with a distinct legacy message
+    (legacy prefixes are never republished under the new scheme). An absent
+    record on a fresh prefix — or on a prefix whose resume ledger shows an
+    interrupted v2 run that died between ``publish_batches`` and ``finalize``
+    (``allow_unbound_resume``, used by :func:`finalize`) — proceeds.
+
+    Runs strictly before any upload, so a conflict uploads zero bytes. Errors
+    name the prefix and digest fields only — never policy file contents or
+    credentials.
+    """
+    prefix = f"curated/{curation_id}/"
+    current = _policy_binding_record(binding).encode("utf-8")
+    try:
+        remote = client.download_file(f"{prefix}policy-binding.json")
+    except HubDownloadError:
+        remote = None  # no binding record yet (fresh or legacy prefix)
+    except HydrationError as exc:
+        raise HydrationError(
+            redact_text(f"cannot read the published policy binding under {prefix}: {exc}")
+        ) from exc
+    if remote is not None:
+        if remote == current:
+            return
+        detail = ""
+        try:
+            remote_digest = json.loads(remote.decode("utf-8")).get("policy_digest", "?")
+            detail = f" (remote policy_digest={remote_digest}, current policy_digest={binding['policy_digest']})"
+        except (ValueError, UnicodeDecodeError):
+            detail = " (remote record is not a readable binding record)"
+        raise HydrationError(
+            redact_text(
+                f"conflicting policy binding under {prefix}: the prefix was "
+                "published under a different policy; refuse to publish "
+                f"(fail-closed){detail}"
+            )
+        )
+    # Absent record: fresh prefix, interrupted v2 run, or pre-v2 legacy prefix.
+    repo_files = client.list_repo_files()
+    has_batches = any(p.startswith(f"{prefix}batches/") for p in repo_files)
+    if not has_batches:
+        return  # fresh prefix: nothing published yet
+    has_ledger = f"{prefix}resume/ledger.jsonl" in set(repo_files)
+    if allow_unbound_resume and has_ledger:
+        return  # interrupted v2 run; finalize is about to publish the record
+    raise HydrationError(
+        redact_text(
+            f"conflicting policy binding under {prefix}: the prefix has "
+            "published batches but no policy-binding record (pre-v2 legacy "
+            "prefix); refuse to publish (fail-closed)"
+        )
+    )
+
+
 def publish_batches(
     client: HubClient, stage: Path, *, curation_id: str, skip_sessions: set[str] | None = None
 ) -> None:
@@ -1614,6 +1700,10 @@ def publish_batches(
     session ids from the remote resume ledger — are omitted from the upload
     mapping (they already exist at their content-addressed paths from prior
     commits) while still contributing to SHA256SUMS and the resume ledger.
+    Resumability is bounded by the policy binding (issue #1094): the caller
+    must run :func:`check_prefix_binding` first — a prefix whose published
+    ``policy-binding.json`` differs from the current binding is never
+    republished, additively or otherwise.
 
     Bronze safety (M10/M13): the module asserts its own upload path list never
     leaves the ``curated/`` prefix before a single byte is written. Upload
@@ -2065,11 +2155,15 @@ def _curation_manifest_doc(
     }
 
 
-def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit: str) -> str:
+def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit: str,
+             binding: dict[str, Any]) -> str:
     """Publish the curation manifest and refreshed checksums (M18).
 
     The manifest is rendered from the real persisted import ledger and uploaded
-    with ``SHA256SUMS`` over the final published file set. The ``_SUCCESS``
+    with ``SHA256SUMS`` over the final published file set. The canonical
+    ``policy-binding.json`` record (issue #1094) is written locally and
+    re-checked against the remote prefix immediately before the manifest
+    upload, so a conflicting republication can never add bytes. The ``_SUCCESS``
     marker is deliberately NOT uploaded here: it is published only after the
     clean-room verification cycle passes (verify-before-success), so a
     verification failure can never leave a published "complete" marker.
@@ -2085,6 +2179,11 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
     manifest_path = curated / "curation-manifest.json"
     _atomic_write_json(manifest_path, doc)
     prefix = f"curated/{curation_id}/"
+    # Issue #1094: pin the policy binding into the published prefix and fail
+    # closed on any conflicting remote record before the manifest commit.
+    binding_path = curated / "policy-binding.json"
+    binding_path.write_text(_policy_binding_record(binding), encoding="utf-8")
+    check_prefix_binding(client, curation_id=curation_id, binding=binding, allow_unbound_resume=True)
     # SHA256SUMS must cover the *final* published file set — including the
     # curation manifest rendered just above, which can change between runs
     # (e.g. a newly recorded identity collision). Refresh it here so the
@@ -2106,6 +2205,7 @@ def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit:
         {
             f"{prefix}curation-manifest.json": manifest_path,
             f"{prefix}SHA256SUMS": curated / "SHA256SUMS",
+            f"{prefix}policy-binding.json": binding_path,
         },
         f"daydream hydrate {curation_id}: curation manifest + checksums",
     )
@@ -2247,10 +2347,12 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
 
     Composes Tasks 4–9 in order with fatal, redacted failure semantics: resolve
     the pinned source revision from the source repo, download the snapshot,
-    run the ingest gate, dedupe + ledger, publish additive batches (continuous
-    checkpoints, M16), finalize (curation manifest + refreshed checksums, M18),
-    run the clean-room verification cycle against that pinned commit (M19/M20),
-    and only after it passes publish the ``_SUCCESS`` marker as the very last
+    run the ingest gate, dedupe + ledger, fail closed on any conflicting
+    published policy binding, publish additive batches (continuous
+    checkpoints, M16), finalize (policy binding + curation manifest +
+    refreshed checksums, M18), run the clean-room verification cycle against
+    that pinned commit (M19/M20), and only after it passes publish the
+    ``_SUCCESS`` marker as the very last
     commit — a verification failure never leaves a published success marker.
     ``client=None`` builds two production :class:`HfHubClient` instances via
     :func:`_make_client` (one for the source snapshot repo, one for the
@@ -2333,13 +2435,18 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     )
     license_admission = license_admission_summary(ledger)
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")
+    # Issue #1094 task 7: fail closed on a conflicting published policy
+    # binding before a single byte is uploaded (additive republication under
+    # a prefix bound to a different policy is refused here).
+    check_prefix_binding(dest_client, curation_id=curation_id, binding=binding)
     publish_batches(
         dest_client, config.stage_dir, curation_id=curation_id, skip_sessions=checkpoint.completed_sessions
     )
     # finalize pins the verify commit (manifest + checksums); _SUCCESS is
     # uploaded only after the clean-room cycle passes (M18/M20).
     output_commit_sha = finalize(
-        dest_client, config.stage_dir, curation_id=curation_id, source_commit=source_commit
+        dest_client, config.stage_dir, curation_id=curation_id, source_commit=source_commit,
+        binding=binding,
     )
     summary = HydrateSummary(
         source_commit=source_commit,

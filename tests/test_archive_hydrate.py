@@ -782,6 +782,66 @@ class TestFinalizeAndVerify:
         assert not any(p.endswith("_SUCCESS") for p in hub.uploaded_paths)
 
 
+class TestPrefixBindingGate:
+    """Issue #1094 task 7: a curated prefix records its policy binding at
+    finalize; any republication whose binding differs fails closed before a
+    single byte is uploaded."""
+
+    @pytest.fixture(autouse=True)
+    def _offline_enrichment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _fake_resolver(monkeypatch)
+
+    def _run(self, tmp_path: Path, hub: FakeHub, policy_path: str,
+             revision: str = "a" * 40) -> hydrate.HydrateSummary:
+        return hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
+            source_repo="org/private-ds", source_revision=revision,
+            destination_repo="org/private-ds", stage_dir=tmp_path / "stage",
+            license_policy_path=policy_path), client=hub)
+
+    def test_conflicting_prefix_binding_fails_closed_before_upload(self, tmp_path: Path) -> None:
+        """A prefix whose published binding record differs from the current
+        run's binding is never republished; a byte-identical record resumes."""
+        hub = make_fake_hub(tmp_path)
+        policy = _write_policy(tmp_path)
+        summary = self._run(tmp_path, hub, policy)
+        cid = summary.curation_id
+        record_path = f"curated/{cid}/policy-binding.json"
+        assert record_path in hub.uploaded_paths
+        record = hub.files[record_path]
+        assert json.loads(record)["schema_version"] == "2"
+        before = len(hub.commit_order)
+
+        # Same prefix published under a different policy binding: refuse.
+        conflicting = json.loads(record)
+        conflicting["policy_digest"] = "0" * 64
+        hub.files[record_path] = (json.dumps(conflicting, sort_keys=True) + "\n").encode()
+        with pytest.raises(hydrate.HydrationError, match="conflicting policy binding"):
+            self._run(tmp_path, hub, policy)
+        assert len(hub.commit_order) == before  # zero bytes uploaded
+
+        # Byte-identical binding resumes cleanly (no false positive).
+        hub.files[record_path] = record
+        self._run(tmp_path, hub, policy)  # must not raise
+
+    def test_legacy_prefix_without_binding_record_fails_closed(self, tmp_path: Path) -> None:
+        """A pre-v2 legacy prefix (published batches, no binding record, no
+        resume ledger) is never republished under the new scheme."""
+        from tests.fixtures.training.build_hub_snapshot import build_snapshot
+
+        hub = build_snapshot()  # fixture snapshot with admitted sessions
+        from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION
+
+        summary = self._run(tmp_path, hub, _write_policy(tmp_path), revision=SNAPSHOT_REVISION)
+        cid = summary.curation_id
+        del hub.files[f"curated/{cid}/policy-binding.json"]
+        del hub.files[f"curated/{cid}/resume/ledger.jsonl"]
+        assert any(p.startswith(f"curated/{cid}/batches/") for p in hub.files)
+        before = len(hub.commit_order)
+        with pytest.raises(hydrate.HydrationError, match="legacy"):
+            self._run(tmp_path, hub, _write_policy(tmp_path), revision=SNAPSHOT_REVISION)
+        assert len(hub.commit_order) == before
+
+
 class TestDedupeAndLedger:
     def _staged(self, tmp_path: Path, revision: str = "a" * 40) -> Path:
         hub = make_fake_hub(tmp_path)
