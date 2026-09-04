@@ -10274,9 +10274,9 @@ async def test_dropped_speculative_sidecar_records_item_provenance(
 ) -> None:
     """#1111 real-path: the evidence gate's sidecar records what it deleted.
 
-    ``dropped_uids`` is empty for every merge-agent item by construction (the
-    agent's items have no ``uid`` of their own), so on the common multi-stack
-    path the sidecar named nothing at all -- an audit artifact that answers
+    ``dropped_uids`` is ``""`` for every merge-agent item by construction
+    (the agent's items have no ``uid`` of their own), so on the common
+    multi-stack path that slot names nothing -- an audit artifact that answers
     nothing exactly when a reviewer is asking "what did the gate throw away?".
     ``dropped_source_uids`` answers the derivation question for every item, per
     item rather than flattened, since which records produced THIS dropped
@@ -10316,8 +10316,10 @@ async def test_dropped_speculative_sidecar_records_item_provenance(
     # Per item, not flattened -- the grouping IS the answer.
     assert dropped["dropped_source_uids"] == [["react:1", "generic:1"]]
     # The dropped object had no uid of its own (the merge agent authored it), so
-    # the derivation is the only handle the sidecar can offer for it.
-    assert dropped["dropped_uids"] == []
+    # its slot is "" (record_uid's own no-uid sentinel) -- but the array stays
+    # positionally aligned with dropped_ids/dropped_source_uids rather than
+    # being omitted.
+    assert dropped["dropped_uids"] == [""]
 
 
 @pytest.mark.anyio

@@ -1155,8 +1155,9 @@ def _evidence_gate_then_validate(
     when any item is dropped, then returns the survivors after snap/demote
     location validation. The sidecar reports both ``dropped_ids`` (the
     reviewer's own pre-``normalize_items`` numbering) and ``dropped_uids`` (the
-    referential identities, present only for items that never passed through
-    the merge agent) -- see the inline notes at the write site.
+    referential identities, ``""`` for items that never passed through the
+    merge agent), positionally aligned one entry per dropped item with
+    ``dropped_source_uids`` -- see the inline notes at the write site.
     """
     from daydream.deep.location_validator import validate_records
     from daydream.deep.records import item_source_uids, record_uid
@@ -1187,12 +1188,14 @@ def _evidence_gate_then_validate(
         # #1111), and this field deliberately does not conflate the two: a
         # ``uid`` names the dropped object, a ``source_uids`` entry names a
         # record the dropped object was synthesized from, and an auditor
-        # chasing "what exactly did the gate delete?" needs the former. Emit an
-        # entry only where a uid actually exists, so the list never degrades
-        # into ``null``s that look like lost identities.
-        dropped_uids = [uid for uid in (record_uid(d) for d in dropped) if uid]
+        # chasing "what exactly did the gate delete?" needs the former. Kept
+        # positionally aligned with ``dropped_ids``/``dropped_source_uids``
+        # (one entry per dropped item, ``""`` where no uid exists -- the same
+        # sentinel ``record_uid`` itself returns for a uid-less record) so the
+        # three arrays share the same index and can be zipped together.
+        dropped_uids = [record_uid(d) for d in dropped]
         # ...and the derivation, which is the half that is actually populated on
-        # the main path. ``dropped_uids`` above is empty for every merge-agent
+        # the main path. ``dropped_uids`` above is ``""`` for every merge-agent
         # item, so on its own it would leave the common multi-stack case with no
         # traceable identity at all -- an audit sidecar that answers nothing
         # exactly when a reviewer needs it. ``item_source_uids`` resolves the

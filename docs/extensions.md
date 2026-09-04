@@ -450,6 +450,16 @@ every other key is internal and may change without a version bump:
 | `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
 | `intent_authoritative` | `bool` — `True` when a fresh, head-matched PR description with non-whitespace content grounded the intent phase; absent (hence read with `.get("intent_authoritative", False)`) on a `--start-at` resume because `_step_intent` is skipped in that case. Controls whether the deep review prompts carry the author-intent precedence rule. |
 
+This keyword-only addition to the five in-scope prompt builders does not bump
+`EXTENSION_API_VERSION` or its support floor — it is an additive kwarg per the
+versioning policy above. The host passes `intent_authoritative` on every call
+to `per-stack`, `structural`, `generic-fallback`, `arbiter`, and `merge`, so an
+exact-signature override of one of those five prompts must add
+`intent_authoritative: bool = False` (or an equivalent `**kwargs` catch-all) to
+its own signature; an override that omits it raises `TypeError` and aborts that
+phase's fan-out. Read `ctx.data["intent_authoritative"]` with `.get(…, False)`
+to handle the absent-on-resume case correctly.
+
 #### Host-assigned record `uid`
 
 Per-stack review records, and the finding items behind `items` / `items_file`,
@@ -458,8 +468,7 @@ the record's *referential* identity — "which record object is this?" — minte
 record birth by `daydream/deep/records.py` and used by dedup, arbitration,
 suppression and the per-stack records rewrite. This is an **additive** field and
 does not bump `EXTENSION_API_VERSION`: a fork that round-trips whole record dicts
-(as the recipes below do) carries it through automatically, and the
-`{**item, ...}` spread those recipes use preserves it.
+carries it through automatically, and a `{**item, ...}` spread preserves it.
 
 Merged items additionally carry `source_uids`: the list of record `uid`s the
 finding derives from. A merged item is a synthesis and may consolidate several
@@ -499,16 +508,6 @@ Two constraints for a fork that reads it:
   content-derived key gets *less* discriminating as two records get more
   similar, which is precisely the condition every consumer of this field runs
   under. A duplicate `uid` is a fatal error the host reports and stops on.
-
-This keyword-only addition to the five in-scope prompt builders does not bump
-`EXTENSION_API_VERSION` or its support floor — it is an additive kwarg per the
-versioning policy above. The host passes `intent_authoritative` on every call
-to `per-stack`, `structural`, `generic-fallback`, `arbiter`, and `merge`, so an
-exact-signature override of one of those five prompts must add
-`intent_authoritative: bool = False` (or an equivalent `**kwargs` catch-all) to
-its own signature; an override that omits it raises `TypeError` and aborts that
-phase's fan-out. Read `ctx.data["intent_authoritative"]` with `.get(…, False)`
-to handle the absent-on-resume case correctly.
 
 ## Recipes
 
