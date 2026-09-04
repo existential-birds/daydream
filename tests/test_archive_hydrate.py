@@ -106,6 +106,31 @@ class TestHydrateRules:
         assert len(ids) == 3  # every input changes the id
         assert hydrate_rules.derive_curation_id(**base) not in ids
 
+    def test_derive_curation_id_v2_binds_policy_inputs(self) -> None:
+        from daydream.archive.hydrate_rules import derive_curation_id_v2
+        base = dict(
+            source_commit="a" * 40,
+            policy_digest="d" * 64,
+            policy_version="prod-1",
+            allow_copyleft=frozenset({"acme/widget"}),
+            exclusions_digest="e" * 64,
+        )
+        cid = derive_curation_id_v2(**base, decisions_digest="f" * 64, distribution_digest="0" * 64)
+        assert cid.startswith("cur-") and len(cid) == 20 and cid[4:].isalnum()
+        # Any change to any bound input changes the id (identity-breaking by design).
+        for key, value in [
+            ("policy_digest", "d" * 63 + "0"),
+            ("policy_version", "prod-2"),
+            ("allow_copyleft", frozenset({"acme/other"})),
+            ("exclusions_digest", "e" * 63 + "0"),
+            ("decisions_digest", "f" * 63 + "0"),
+            ("distribution_digest", "0" * 63 + "1"),
+        ]:
+            assert derive_curation_id_v2(**{**base, key: value}) != cid
+        # v1 ids are untouched: existing prefixes keep the old derivation.
+        from daydream.archive.hydrate_rules import derive_curation_id
+        assert derive_curation_id("a" * 40, "1", "1", "1") == derive_curation_id("a" * 40, "1", "1", "1")
+
     def test_fixture_exclusion_reason_codes(self, tmp_path: Path) -> None:
         (tmp_path / "manifest.json").write_text('{"session_id": "s", "source_path": "/tmp/pytest-of-user/x"}')
         codes = hydrate_rules.fixture_exclusion_codes(tmp_path)

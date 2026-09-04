@@ -70,6 +70,32 @@ def derive_curation_id(
     return "cur-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
+def derive_curation_id_v2(
+    source_commit: str,
+    policy_digest: str,
+    policy_version: str,
+    allow_copyleft: frozenset[str] | set[str],
+    exclusions_digest: str,
+    decisions_digest: str = "",
+    distribution_digest: str = "",
+) -> str:
+    """Curation identity v2 (issue #1094): binds the license-policy inputs.
+
+    Same canonical-string hashing discipline as ``derive_curation_id`` (v1,
+    kept untouched for historical prefixes), extended with the six bound
+    fields: policy digest/version, exact-slug copyleft opt-ins (sorted
+    casefolded so set iteration order never leaks into identity), exclusions
+    digest, resolved per-repo decisions digest, and license distribution
+    digest. Returns ``cur-`` + 16 hex chars (20 chars total).
+    """
+    opt_ins = ",".join(sorted(s.casefold() for s in allow_copyleft))
+    canonical = (
+        f"cur-v2\t{source_commit}\t{policy_digest}\t{policy_version}\t{opt_ins}"
+        f"\t{exclusions_digest}\t{decisions_digest}\t{distribution_digest}\n"
+    )
+    return "cur-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 # Frozen exclusion registry at v1. Markers -> stable codes; order never matters
 # because codes are returned as a de-duplicated, sorted list.
 _PYTEST_TMP_MARKERS = ("/tmp/pytest", "pytest-of-", "/tmp/tmp", "PYTEST_CURRENT_TEST")
