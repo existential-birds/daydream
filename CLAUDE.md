@@ -43,10 +43,12 @@ daydream --shallow -s python /path/to/project      # shallow Python single-pass 
 daydream --review /path/to/project                 # review only, skip fixes
 daydream --yes /path/to/project                    # auto-apply fixes without prompting
 daydream --non-interactive /path/to/project        # unattended/harness run
+daydream --diagram-only flowchart /path/to/project   # grounded flowchart comment only
 ```
 
-The rest of the surface — `post-findings`, `setup`, `summarize`, `ext validate`, `corpus *` — is in
-README "Additional Commands" / "Corpus Commands"; `daydream benchmark` is in `docs/benchmark.md`.
+The rest of the surface — `setup`, `ext validate`, `corpus *` — is in README "Self-hosted review bot" /
+"Extensions" / "Corpus commands"; `post-findings` and `summarize` are unattended-only helpers driven by the
+packaged workflows (`daydream/templates/workflows/README.md`); `daydream benchmark` is in `docs/benchmark.md`.
 
 ## Testing standard (mandatory)
 
@@ -90,6 +92,8 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
 | `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
+| `deep/diagram_{types,trigger,schema,grounding,render}.py` | Grounded diagrams: shared dataclasses, eligibility rules, strict spec schemas, deterministic evidence checking (the sole authority on what may be drawn), pure mermaid emitters |
+| `services.py` | The single service-discovery implementation (declared `service_roots` or layout inference), shared by improve and diagram eligibility; `improve/services.py` is a re-export shim |
 | `improve/` | Read-only recon, category audits, vetting, prioritization, plan artifacts |
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
 | `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |
@@ -174,6 +178,7 @@ exploration pre-scan (cached across runs)
     -> per-stack parse (parallel)
     -> arbiter review (Opus, scoped to high-severity/contested findings)
     -> cross-stack merge (dedup; resumes the arbiter's session)
+    -> diagrams (conditional, grounded; sequence and/or flowchart)
     -> recommendation verification (conditional)
     -> fix gate (parallel, batched per-file)
     -> test validation
@@ -211,6 +216,25 @@ exploration pre-scan (cached across runs)
   else the `diff.patch` pointer. Small diffs skip the fan-out entirely.
 - Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed
   prompt forces a re-read of the per-stack record files, rewritten after arbitration.
+- **Diagrams (`diagram` step, after merge/supervision).** The LLM **never writes mermaid**: it emits a
+  strict JSON spec whose every element carries `file:line` (+`symbol`) evidence, and
+  `deep/diagram_grounding.py` is the sole authority on what may be drawn — path confinement, existence,
+  line range, symbol-on-line (±3 snap), tree-sitter node kind, definition lookup, and a completed read
+  receipt in that kind's own fork trajectory. Then **one** repair turn with the reason codes, prune
+  (dependents go with their element), the render caps, and finally the omission floors — caps run **before**
+  the floor so a cap-induced drop cannot leave a thin diagram rendered, and `spec_final` is rebuilt
+  key-by-key so it re-validates against the `additionalProperties: false` spec schema in the privileged
+  poster. The step always writes `.daydream/deep/diagram.json` (eligibility signals + per-element verdicts —
+  the audit trail for "why did this PR get no diagram?", zero agent calls when nothing is eligible) and
+  `diagram.md`. Eligibility re-runs `detect_stacks()` itself rather than reading `ctx.data["stacks"]`, which
+  is post-tiny-diff-collapse and would read a two-language diff as non-code. Per-kind failure is **fail-open
+  in every review mode** (warn, record `status="failed"`, review continues) and **exit 1** under
+  `--diagram-only`, after the artifact is written. The `diagram` flow is
+  `exploration -> diagram -> post-diagram` and reuses the deep preamble, but the spine's fresh-run
+  `rmtree(.daydream/deep/)` is skipped in that mode — a diagram-only run must not delete a prior review's
+  artifacts — so it writes no `diff-key` either. Its recorder/manifest label is `DaydreamRunFlow.DIAGRAM`,
+  never `TTT`: that mapping would make `_flow_runs_merge` true and let the run inherit the surviving
+  `merged-items.json` as its own pipeline state.
 - `.daydream/exploration/` survives the run, reused only on an **exact** key match (format version + head SHA + diff + tier +
   depth, in a sibling `cache-key` file) — a near-match hit would misground every prompt. Uncommitted edits
   are not in the key, so an exact hit on a dirty tree can serve pre-edit exploration. `--shallow`/`--review`
@@ -252,7 +276,7 @@ Full contract: `docs/extensions.md`.
 | Variable | Scope | Purpose |
 |----------|-------|---------|
 | `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` | GitHub App | Bot identity (PEM **content**, not a path) |
-| `DAYDREAM_BOT_HANDLE` | Actions | Mention handle (no `@`) used by the `@<bot> review` command |
+| `DAYDREAM_BOT_HANDLE` | Actions | Mention handle (no `@`) used by the three PR-comment commands: `@<bot> review`, `@<bot> add sequence diagram` (alias `@<bot> add sequence`), `@<bot> add flowchart` |
 | `DAYDREAM_EXT_DIR` | Extensions | Path to `daydream_ext` (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
 | `DAYDREAM_GIT_TOKEN` | Harvest | Optional out-of-band auth for sanitized repo clones during `corpus harvest` of private repos (e.g. a GitHub PAT); injected via git config environment variables (`http.extraHeader`), **never embedded in the remote URL** and **never on the command line**. Without it, plain clone via the ambient credential helper |
