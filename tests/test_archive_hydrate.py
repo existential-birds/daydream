@@ -469,6 +469,17 @@ class TestPublish:
         assert state.redownloaded == []  # digests verified remotely, nothing refetched
 
 
+def _seed_admitted_runs(stage: Path, specs: list[tuple[str, str | None]]) -> None:
+    """Seed admitted derivatives directly under ``stage/runs/`` (enrichment input set)."""
+    for sid, slug in specs:
+        d = stage / "runs" / sid
+        d.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {"session_id": sid}
+        if slug is not None:
+            data["git"] = {"remote_url": f"https://github.com/{slug}", "repo_slug": slug}
+        (d / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+
+
 def _staged_with(tmp_path: Path, remote_urls: dict[str, str | None]) -> Path:
     """Stage a tree: ingest + index admitted bundles carrying the given remote URLs."""
     files: dict[str, bytes] = {}
@@ -493,15 +504,18 @@ class TestResolutionMap:
             "sess-a": "https://github.com/octo/repo",
             "sess-b": None,
         })
-        cmap = hydrate.build_resolution_map(stage, source_commit="a" * 40)
+        cmap = hydrate.build_resolution_map(
+            stage, source_commit="a" * 40, repo_commits={"octo/repo": "b" * 40})
         entry = cmap["octo/repo"]
-        assert entry["pinned_sha"].startswith("a" * 8) or entry["pinned_sha"] == "a" * 40
+        assert entry["pinned_sha"] == "b" * 40  # the resolved Git repo commit
+        assert entry["pinned_sha"] != "a" * 40  # never the Hub dataset revision
         assert "raw_url" not in entry and "source_path" not in entry
         assert "https://github.com/octo/repo" not in json.dumps(cmap)  # raw URL is data, not output
 
     def test_non_allowlisted_host_reported_not_cloned(self, tmp_path: Path) -> None:
         stage = _staged_with(tmp_path, remote_urls={"sess-c": "https://gitlab.com/x/y"})
-        cmap = hydrate.build_resolution_map(stage, source_commit="a" * 40)
+        cmap = hydrate.build_resolution_map(
+            stage, source_commit="a" * 40, repo_commits={})  # no resolved commit for gitlab slugs
         assert cmap["unavailable"] == ["sess-c"]     # reported, no fallback, no clone attempted
         assert "gitlab.com" not in json.dumps(cmap)  # redacted from published metadata
 
@@ -514,7 +528,60 @@ class TestResolutionMap:
         monkeypatch.setattr(git_ops, "clone_with_token", boom)
         monkeypatch.setattr(git_ops, "fetch", boom)
         stage = _staged_with(tmp_path, remote_urls={"sess-a": "https://github.com/octo/repo"})
-        hydrate.build_resolution_map(stage, source_commit="a" * 40)  # must not raise
+        hydrate.build_resolution_map(stage, source_commit="a" * 40, repo_commits={})  # must not raise
+
+
+def test_resolution_map_records_resolved_repo_commits_not_hub_revision(tmp_path: Path) -> None:
+    """Issue #1094: pinned_sha is the resolved Git repository commit; the Hub
+    dataset revision is never recorded as a repository commit."""
+    stage = tmp_path / "stage"
+    _seed_admitted_runs(stage, [
+        ("sess-1", "acme/widget"),
+        ("sess-2", "acme/widget"),
+        ("sess-nohost", None),
+    ])
+    hydrate.rebuild_index(stage)
+    # repo_commits mirrors what the enrichment cache provides (Task 3 seam:
+    # only acme/widget resolved, to its full Git repository commit).
+    cmap = hydrate.build_resolution_map(
+        stage, source_commit="a" * 40, repo_commits={"acme/widget": "b" * 40},
+    )
+    entry = cmap["acme/widget"]
+    assert entry["pinned_sha"] == "b" * 40          # the GIT repo commit
+    assert entry["pinned_sha"] != "a" * 40          # never the Hub dataset revision
+    assert set(entry["session_ids"]) == {"sess-1", "sess-2"}
+    # Unresolvable identity still reports, never fabricates a revision.
+    assert "sess-nohost" in cmap["unavailable"]
+
+
+def test_resolution_map_wired_from_enrichment_cache_in_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_hydrate_hub publishes a resolution map whose pinned_sha values come
+    from the enrichment cache's resolved Git commits, never the Hub revision."""
+    _fake_resolver(monkeypatch)
+    hub = FakeHub(repo_id="org/private-ds", private=True, files={
+        "bundles/sess-a/manifest.json": json.dumps({
+            "session_id": "sess-a",
+            "git": {"remote_url": "https://github.com/owner/repo-a", "repo_slug": "owner/repo-a"},
+        }).encode(),
+        "bundles/sess-a/trajectory.json": b"{}",
+    })
+    hub.commit_revision("a" * 40)
+    stage = tmp_path / "stage"
+    summary = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
+        source_repo="org/private-ds", source_revision="a" * 40,
+        destination_repo="org/private-ds", stage_dir=stage,
+        license_policy_path=_write_policy(tmp_path), allow_copyleft=frozenset(),
+    ), client=hub)
+    assert summary.verified is True
+    cmap = json.loads(hub.download_file(
+        f"curated/{summary.curation_id}/resolution-map.json",
+        revision=summary.output_commit_sha,
+    ))
+    entry = cmap["owner/repo-a"]
+    assert entry["pinned_sha"] == "c" * 40  # the resolver's Git repo commit
+    assert entry["pinned_sha"] != "a" * 40  # never the Hub dataset revision
 
 
 class TestIngestAndIndex:

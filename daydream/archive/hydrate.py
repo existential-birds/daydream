@@ -873,17 +873,25 @@ def rebuild_index(stage: Path) -> None:
         upsert_run(stage, Manifest(**kwargs))
 
 
-def build_resolution_map(stage: Path, *, source_commit: str) -> dict[str, Any]:
+def build_resolution_map(
+    stage: Path, *, source_commit: str, repo_commits: Mapping[str, str],
+) -> dict[str, Any]:
     """Build the deferred-clone repository resolution map (issue #982 M5).
 
     From the admitted index rows under ``stage/runs/``, group sessions by the
     ``normalize_remote_url`` slug. Each entry carries ``repo_slug``,
-    ``pinned_sha`` (the source commit the snapshot was hydrated from —
-    deferred-clone consumers fetch exactly this revision), and the contributing
-    ``session_ids``. Rows with no resolvable slug (no remote, or a
+    ``pinned_sha`` (the resolved Git repository commit for that repo, from
+    ``repo_commits`` — the enrichment cache's per-slug resolution; the Hub
+    dataset revision is never recorded as a repository commit), and the
+    contributing ``session_ids``. Rows with no resolvable slug (no remote, or a
     non-allowlisted host) land under ``map["unavailable"]`` as a list of
-    session ids — a reported outcome, never a raw-URL fallback and never a
-    clone.
+    session ids, as do rows whose slug carries no full 40-hex resolved commit —
+    a reported outcome, never a raw-URL fallback, never a fabricated revision,
+    and never a clone.
+
+    ``source_commit`` (the Hub dataset revision the snapshot was hydrated
+    from) is accepted for ledger bookkeeping at the call site but is
+    deliberately never recorded in any map entry.
 
     No I/O beyond reading the staging index: this never shells out to git, so
     hydration never clones or fetches (M5). Raw URLs are consumed as data only
@@ -900,8 +908,14 @@ def build_resolution_map(stage: Path, *, source_commit: str) -> dict[str, Any]:
         if not slug:
             unavailable.append(str(row["session_id"]))
             continue
+        commit = repo_commits.get(str(slug))
+        if not isinstance(commit, str) or not _FULL_SHA_RE.fullmatch(commit):
+            # No resolved Git repository commit for this slug: reported, never
+            # a fabricated revision (the Hub revision is not a repo commit).
+            unavailable.append(str(row["session_id"]))
+            continue
         entry = cmap.setdefault(
-            str(slug), {"repo_slug": str(slug), "pinned_sha": source_commit, "session_ids": []}
+            str(slug), {"repo_slug": str(slug), "pinned_sha": commit, "session_ids": []}
         )
         entry["session_ids"].append(str(row["session_id"]))
     # Bundles rejected at admission for a non-allowlisted host never reached the
@@ -1500,12 +1514,47 @@ def _stage_batches(stage: Path, curated: Path) -> None:
         shutil.copytree(derivative, target)
 
 
+def _repo_commits_from_enrichment_cache(stage: Path) -> dict[str, str]:
+    """Per-slug resolved Git repository commits from the enrichment cache.
+
+    Groups the ``resolved`` rows of ``stage/_enrich/evidence.jsonl`` (written
+    by the enrichment stage) by provenance slug, latest row per slug winning.
+    Only resolver-produced full 40-hex commits qualify — the Hub dataset
+    revision is never consulted and never recorded as a repository commit
+    (issue #1094).
+    """
+    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        _ENRICH_CACHE_NAME,
+        _ENRICH_DIR,
+    )
+
+    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
+    commits: dict[str, str] = {}
+    if not path.is_file():
+        return commits
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("status") != "resolved":
+            continue
+        slug = entry.get("repo_slug")
+        commit = entry.get("repo_commit")
+        if isinstance(slug, str) and isinstance(commit, str) and _FULL_SHA_RE.fullmatch(commit):
+            commits[slug] = commit
+    return commits
+
+
 def _write_resolution_map(stage: Path, curated: Path) -> None:
     """Materialize ``resolution-map.json`` under the curated prefix when absent.
 
     Rebuilt from the staging index (data only, no clones); an existing file —
     from a prior publish of the same curation id — is left untouched so the
-    published map stays stable and additive.
+    published map stays stable and additive. Per-slug ``pinned_sha`` values
+    come from the enrichment cache's resolved Git repository commits.
     """
     map_path = curated / "resolution-map.json"
     if map_path.exists():
@@ -1517,7 +1566,11 @@ def _write_resolution_map(stage: Path, curated: Path) -> None:
             source_commit = json.loads(ledger_path.read_text(encoding="utf-8")).get("source_commit")
         except (OSError, ValueError):
             source_commit = None
-    cmap = build_resolution_map(stage, source_commit=source_commit or "unknown")
+    cmap = build_resolution_map(
+        stage,
+        source_commit=source_commit or "unknown",
+        repo_commits=_repo_commits_from_enrichment_cache(stage),
+    )
     _atomic_write_json(map_path, cmap)
 
 
