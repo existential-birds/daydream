@@ -28,11 +28,25 @@ Every `daydream corpus adjudicate` command below (steps 1–8) is a literal, sin
 ## 1. Hydrate the source index
 
 Bring the producer's archived run bundles down from the Hub into a local,
-normalized index root:
+normalized index root. First run the identical command with `--dry-run`:
 
 ```bash
-daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate
+daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --allow-copyleft <owner/repo>... --dry-run
 ```
+
+The non-dry publication below is gated on that dry-run: proceed only after a
+completed dry-run reports full record accounting (per-repo counts, per-code,
+sum = discovered) and an admitted count you accept.
+
+```bash
+daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --allow-copyleft <owner/repo>...
+```
+
+`--license-policy` is required on every non-dry publication — the command
+refuses to run without it. `--allow-copyleft` opts in, by exact SPDX slug
+(one or more `owner/repo` arguments), specific copyleft-licensed repositories
+the production policy would otherwise reject; omit it when no such exception
+is intended.
 
 The stage dir itself is the hydrated index root this runbook refers to as
 `INDEX_ROOT`: hydration writes the SQLite index (`index.db`) and one sanitized

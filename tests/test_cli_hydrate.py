@@ -408,3 +408,24 @@ def test_dry_run_reports_per_repo_decision_counts(
     assert per_repo["ghost/nope"]["license_evidence_missing"] == 1
     # Full accounting: every discovered record lands in exactly one code bucket.
     assert sum(sum(v.values()) for v in per_repo.values()) == report["discovered"]
+
+
+def test_runbook_hydrate_hub_invocation_carries_policy_and_dry_run_gate():
+    text = pathlib.Path("docs/runbooks/annotation-final-publish.md").read_text()
+    # The production hydrate-hub line carries the policy + opt-in args...
+    hydrate_line = next(
+        l for l in text.splitlines() if "corpus hydrate-hub" in l and "--source-repo org/run-bundles" in l
+    )
+    assert "--license-policy" in hydrate_line and "license-policy-production.json" in hydrate_line
+    assert "--allow-copyleft" in text  # opt-in argument documented
+    # ...and the non-dry publication is gated behind a completed real dry-run:
+    # a real --dry-run hydrate-hub step appears before the unpinned publication
+    # command, and states that its record accounting gates the next step.
+    lines = text.splitlines()
+    dry_pos = min(i for i, l in enumerate(lines) if "hydrate-hub" in l and "--dry-run" in l)
+    publish_pos = min(
+        i for i, l in enumerate(lines) if "hydrate-hub" in l and "--dry-run" not in l and "--source-repo org/run-bundles" in l
+    )
+    assert dry_pos < publish_pos
+    gate_text = "\n".join(lines[dry_pos:publish_pos])
+    assert "gate" in gate_text.lower() and "discovered" in gate_text.lower()
