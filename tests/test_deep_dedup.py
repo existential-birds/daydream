@@ -8,7 +8,11 @@ similarity >= 0.5.
 
 import pytest
 
-from daydream.deep.dedup import build_dedup_candidates, build_record_dedup_candidates
+from daydream.deep.dedup import (
+    build_dedup_candidates,
+    build_record_dedup_candidates,
+    descriptions_match,
+)
 
 
 def test_file_overlap_without_title_similarity_produces_no_pair() -> None:
@@ -133,3 +137,45 @@ def test_record_dedup_cross_stack_source_disambiguation() -> None:
     assert pairs[0].record_a_source == "python"
     assert pairs[0].record_b_source == "react"
     assert pairs[0].similarity >= 0.5
+
+
+# ---------------------------------------------------------------------------
+# descriptions_match: the scalar form of the pre-filter's similarity gate
+# ---------------------------------------------------------------------------
+
+
+def test_descriptions_match_agrees_with_the_pairwise_builder() -> None:
+    """The predicate and ``build_record_dedup_candidates`` share one threshold.
+
+    Issue #1103's host-side structural fold calls the predicate directly, so a
+    drift between the two would let the host collapse findings the pre-filter
+    considers distinct (or the reverse).
+    """
+    a = "Missing input validation on the user endpoint"
+    b = "Missing input validation on user endpoints"
+    records = [
+        {"id": "1", "file": "api.py", "line": 1, "description": a},
+        {"id": "2", "file": "api.py", "line": 2, "description": b},
+    ]
+    pairs = build_record_dedup_candidates(records, sources=["python", "structure"])
+    assert bool(pairs) is descriptions_match(a, b) is True
+
+
+def test_descriptions_match_rejects_unrelated_descriptions() -> None:
+    assert not descriptions_match(
+        "Missing input validation on the user endpoint",
+        "The 1000-line file budget is exceeded",
+    )
+
+
+def test_descriptions_match_is_symmetric() -> None:
+    a = "Wrong cache URL in the staging block"
+    b = "The staging block has the wrong cache URL"
+    assert descriptions_match(a, b) == descriptions_match(b, a)
+
+
+def test_descriptions_match_never_collapses_contentless_descriptions() -> None:
+    """Two descriptions that normalize to nothing are not "the same finding"."""
+    assert not descriptions_match("", "")
+    assert not descriptions_match("the a an", "of to for")
+    assert not descriptions_match("", "Missing input validation")

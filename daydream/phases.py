@@ -58,7 +58,7 @@ from daydream.repository_paths import (
 from daydream.repository_paths import (
     path_is_confined,
 )
-from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC
+from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, stronger_severity
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -4299,6 +4299,134 @@ async def phase_suppression_review(
     return _rekey_verdicts(result["findings"], "sup_id", "Suppression")
 
 
+def _fold_structural_duplicates(
+    base_items: list[dict[str, Any]],
+    structural_items: list[dict[str, Any]],
+    items_path: Path,
+) -> list[dict[str, Any]]:
+    """Drop structural items that restate a merged finding, keeping the higher severity.
+
+    Issue #1103. The structural meta-stack is partitioned out of the dedup
+    pre-filter and the merge agent's record pool, so no upstream stage ever
+    compares a structural finding against the language-stack finding describing
+    the same defect. Concatenating both lists therefore shipped two inline
+    comments for one defect whenever the two lenses landed on the same code.
+
+    A structural item folds into the BEST-matching base item that shares its
+    ``file`` and whose description clears
+    :func:`daydream.deep.dedup.descriptions_match` at
+    :data:`daydream.deep.dedup.FOLD_SIM_THRESHOLD` -- a materially higher bar
+    than the dedup pre-filter's own threshold. The pre-filter's threshold is
+    deliberately loose because every candidate it emits still goes in front
+    of the merge agent (or the arbiter) for adjudication; this fold has no
+    such downstream review, so reusing that loose bar here would collapse
+    unrelated findings (e.g. two distinct "N-line budget exceeded" findings
+    for different budgets) into one silently-dropped record. "Best" means the
+    candidate with the highest bigram similarity, not merely the first one encountered in
+    ``base_items``, so a structural finding cannot be folded into an unrelated
+    base item just because it happens to be checked first. Line numbers are
+    not part of the match: a structural finding is frequently anchored
+    whole-file (``line: 0``) while its language twin cites the exact line, and
+    those are still one defect.
+
+    Folding never demotes, which is what the partition was protecting: the
+    survivor takes the stronger of the two severities, so a ``high``
+    structural twin lifts a ``medium`` language finding rather than being
+    discarded in its favour. The survivor is normally the base item, but when
+    the base item carries no grounded evidence of its own while the structural
+    finding does, the structural item survives instead: folding always runs
+    before the evidence gate (``_evidence_gate_then_validate``), so blindly
+    discarding the structural item in favour of an ungrounded base item would
+    hand survivorship to the record the gate is about to drop, deleting a
+    corroborated finding outright instead of reporting it once.
+
+    Matched ``base_items`` entries are revised in place (severity only). Every
+    fold decision is recorded to a ``folded-structural.json`` audit sidecar
+    beside ``items_path`` (mirroring the evidence gate's
+    ``dropped-speculative.json``), so a destructive, host-side similarity match
+    stays reviewable instead of collapsing to a bare count.
+
+    Args:
+        base_items: The merged, non-structural items the report is built from.
+        structural_items: Structural items already tagged ``lens="structural"``
+            with their confidence/severity defaults applied.
+        items_path: Canonical ``merged-items.json`` path; the audit sidecar is
+            written beside it.
+
+    Returns:
+        The structural items that found no twin (plus any structural items
+        that won survivorship over an ungrounded base twin), in input order.
+    """
+    from daydream.deep.dedup import (
+        FOLD_SIM_THRESHOLD,
+        bigrams,
+        descriptions_match,
+        jaccard,
+        normalize_title,
+    )
+
+    surviving: list[dict[str, Any]] = []
+    fold_records: list[dict[str, Any]] = []
+    for item in structural_items:
+        file_key = str(item.get("file", ""))
+        description = str(item.get("description", ""))
+        twin: dict[str, Any] | None = None
+        best_similarity = -1.0
+        if file_key and description:
+            item_bigrams = bigrams(normalize_title(description))
+            for base in base_items:
+                if str(base.get("file", "")) != file_key:
+                    continue
+                base_description = str(base.get("description", ""))
+                if not descriptions_match(
+                    description, base_description, threshold=FOLD_SIM_THRESHOLD
+                ):
+                    continue
+                similarity = jaccard(item_bigrams, bigrams(normalize_title(base_description)))
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    twin = base
+        if twin is None:
+            surviving.append(item)
+            continue
+        # Don't hand survivorship to whichever twin the evidence gate is about
+        # to drop: if the base item has no grounded evidence of its own but
+        # the structural item does, keep the structural item (it is exempt
+        # from the citation sub-check) so the corroborated defect still posts
+        # once instead of both records vanishing.
+        base_evidenced = _is_evidenced(twin)
+        item_evidenced = _is_evidenced(item)
+        survivor_is_structural = not base_evidenced and item_evidenced
+        stronger = stronger_severity(twin.get("severity"), item.get("severity"))
+        if survivor_is_structural:
+            if stronger is not None:
+                item["severity"] = stronger
+            surviving.append(item)
+        else:
+            if stronger is not None:
+                twin["severity"] = stronger
+        fold_records.append(
+            {
+                "structural_description": description,
+                "structural_file": file_key,
+                "base_description": str(twin.get("description", "")),
+                "similarity": best_similarity,
+                "survivor": "structural" if survivor_is_structural else "base",
+            }
+        )
+    if fold_records:
+        sidecar_path = items_path.parent / "folded-structural.json"
+        sidecar_path.write_text(
+            json.dumps({"folded_count": len(fold_records), "folded": fold_records}, indent=2)
+        )
+        print_info(
+            console,
+            f"Folded {len(fold_records)} structural finding(s) into the language-stack "
+            f"finding reporting the same defect, wrote {sidecar_path}",
+        )
+    return surviving
+
+
 def _append_structural_and_write_merged(
     base_items: list[dict[str, Any]],
     structural_records_path: Path | None,
@@ -4323,6 +4451,10 @@ def _append_structural_and_write_merged(
         defaulting to HIGH/high only for unlabeled records -- the structural
         lens remains high-conviction by default and must not be demoted at
         sort time;
+      - fold each structural finding that restates one of ``base_items`` into
+        the best-matching such item, keeping the stronger severity (never the
+        item the evidence gate is about to drop), so one defect seen through
+        both lenses posts once instead of twice or zero times (issue #1103);
       - validate every finding ``file:line`` against the persisted hunk index
         (snap-in-tolerance, demote-with-annotation beyond-tolerance; issue
         #745), THEN normalize the combined list (fresh unique ids) and write
@@ -4400,6 +4532,13 @@ def _append_structural_and_write_merged(
     # reaches the report at full severity while the original judgment stays
     # recoverable. Fail-open: a missing index validates nothing (pre-change
     # behavior); the validator never raises and never rejects.
+    # Issue #1103: fold structural twins into their language-stack counterpart
+    # BEFORE the gate, so the pair is resolved into one finding rather than two
+    # findings that both pass the gate and both post. The fold itself is
+    # gate-aware (see ``_fold_structural_duplicates``): it will not hand
+    # survivorship to whichever twin the gate is about to drop.
+    structural_items = _fold_structural_duplicates(base_items, structural_items, items_path)
+
     evidenced = _evidence_gate_then_validate(
         base_items + structural_items, items_path
     )
@@ -4476,6 +4615,9 @@ def _write_single_stack_merged_items(
     # Clear the evidence-gate audit sidecar too, so a prior run that dropped
     # findings can't leave phantom drops on a resume that drops none (#227).
     (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
+    # Clear the structural-fold audit sidecar too, so a prior run's folds
+    # can't leave phantom entries on a resume that folds none (#1103).
+    (items_path.parent / "folded-structural.json").unlink(missing_ok=True)
 
     # Tag per-stack records (the merge agent normally sets lens; here the host
     # does it). ``severity`` is already present from PER_STACK_RECORD_SCHEMA.
@@ -4573,6 +4715,9 @@ async def phase_cross_stack_merge(
     # Clear the evidence-gate audit sidecar too, so a prior run that dropped
     # findings can't leave phantom drops on a resume that drops none (#227).
     (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
+    # Clear the structural-fold audit sidecar too, so a prior run's folds
+    # can't leave phantom entries on a resume that folds none (#1103).
+    (items_path.parent / "folded-structural.json").unlink(missing_ok=True)
 
     prompt = get_registry().prompt("merge")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["merge"].content,

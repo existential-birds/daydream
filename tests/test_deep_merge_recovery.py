@@ -389,6 +389,8 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     merge_str: Any,
 ) -> None:
     """R6/AC4: --start-at fix after salvage picks up partial items; no re-review, no re-merge."""
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
     silence(monkeypatch)
     mute_side_effects()
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -409,15 +411,24 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     assert not any("cross-stack merge agent" in c["prompt"].lower() for c in stub.calls)
     assert not any("per-stack review" in c["prompt"].lower() for c in stub.calls)
     # R6 positive outcome: the fix phase consumed the salvaged partial items --
-    # the fix prompt (built from merged-items.json) references the surviving
-    # per-stack finding's description + file. A regression where --start-at fix
+    # the fix prompt (built from merged-items.json) references a surviving
+    # salvaged finding's description + file. A regression where --start-at fix
     # fails to load the partial merged-items.json would fail this assertion.
+    # Read the expectation off the salvaged artifact rather than hard-coding one
+    # stub description: which findings survive the salvage is decided by the
+    # D-27 pre-filter and the evidence gate, not by this test.
+    salvaged = json.loads(merged_items_path(deep_dir(multi_stack_target)).read_text())["items"]
+    assert salvaged, "salvage wrote no items to consume"
     fix_calls = [
         c["prompt"]
         for c in stub.calls
         if "fix these" in c["prompt"].lower() or "fix this issue" in c["prompt"].lower()
     ]
-    assert any("Sample issue" in p and "api.py" in p for p in fix_calls)
+    assert any(
+        item["description"] in p and item["file"] in p
+        for item in salvaged
+        for p in fix_calls
+    ), f"no fix prompt referenced a salvaged item: {salvaged}"
 
 
 async def test_merge_failure_merge_resume_skips_merge_entry(

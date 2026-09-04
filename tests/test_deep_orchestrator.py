@@ -4147,14 +4147,21 @@ async def test_orchestrator_threads_structural_records_to_merge(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Structural records ride the merge prompt as a separate input and are
-    excluded from the dedup pre-filter so they don't get silently collapsed
-    against language-stack findings.
+    """Structural records are partitioned out of the dedup pre-filter pool.
+
+    The merge agent is not shown them either: ``build_merge_prompt`` takes
+    ``structural_records_path`` for call-site compatibility and discards it, and
+    the host appends the structural findings to the canonical item list itself
+    after the agent returns. What this test pins is the partition's remaining
+    job -- keeping the structural lens out of the pools that could collapse it
+    into a language-stack bucket. Adjudication is deliberately NOT partitioned:
+    the arbiter sees both (issue #1103,
+    ``test_structural_language_twin_is_arbitrated_and_reported_once``).
 
     Drives the merge resume path (start_at="merge") with pre-written records
     JSONs including a structure record carrying a sentinel description, then
-    asserts (a) the merge prompt receives structural_records_path pointing at
-    the structure records file, (b) the dedup input lists do NOT contain the
+    asserts (a) the merge phase is still handed structural_records_path pointing
+    at the structure records file, (b) the dedup input lists do NOT contain the
     sentinel structural record.
     """
     from daydream.deep import dedup as _dedup
@@ -4207,8 +4214,8 @@ async def test_orchestrator_threads_structural_records_to_merge(
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
 
-    # (1) Merge prompt received structural_records_path; per_stack_records_paths
-    #     must NOT include the structural file (it rides as its own argument).
+    # (1) The merge phase received structural_records_path; per_stack_records_paths
+    #     must NOT include the structural file (the host appends it separately).
     assert captured_merge.get("structural_records_path") is not None
     assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
     per_stack_paths = captured_merge["per_stack_records_paths"]
@@ -4292,6 +4299,249 @@ async def test_orchestrator_threads_structural_records_to_merge_fresh_run(
     # every entry whose source == 'structure'; sources stay parallel to records.
     assert "structure" not in captured_record_dedup["sources"]
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
+
+
+_TWIN_DESCRIPTION = "The staging cache URL does not match the documented shared instance"
+
+
+def _twin_parse_by_stack(structural_line: int) -> dict[str, dict[str, Any]]:
+    """Stub per-stack overrides staging one structural/language twin on api.py.
+
+    The python stack and the structural meta-stack report the same defect in the
+    same words at the same file, diverging only on severity (and, for case B, on
+    whether the structural side is anchored whole-file). The other two stacks are
+    moved onto their own files so nothing else collides at that location and the
+    arbiter's target set is exactly the twin.
+    """
+    return {
+        "python": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "api.py",
+            "line": 1,
+            "description": _TWIN_DESCRIPTION,
+        },
+        "structure": {
+            "severity": "high",
+            "confidence": "HIGH",
+            "file": "api.py",
+            "line": structural_line,
+            "description": _TWIN_DESCRIPTION,
+        },
+        "react": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "App.tsx",
+            "line": 1,
+            "description": "Unrelated React concern",
+        },
+        "generic": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "README.md",
+            "line": 1,
+            "description": "Unrelated docs concern",
+        },
+    }
+
+
+async def test_structural_language_twin_is_arbitrated_and_reported_once(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1103 case A: a structural/language twin is adjudicated, then posts once.
+
+    Both stacks report the same defect at ``api.py:1`` and disagree on severity,
+    which is exactly the arbiter's contested-location trigger. Before the fix the
+    structural record was partitioned out of ``record_sources`` upstream, so
+    ``len(stacks) >= 2`` could never hold and the pair was neither adjudicated nor
+    deduplicated -- two inline comments shipped for one defect, the un-adjudicated
+    copy carrying the higher severity.
+
+    Real-path: drive the whole deep flow and assert on artifacts only --
+    ``arbiter-input.json`` (what the arbiter was actually shown),
+    ``stack-structure-records.json`` (the verdict written back to disk), and the
+    canonical ``merged-items.json`` (what would be posted).
+    """
+    from daydream.deep.artifacts import (
+        arbiter_input_path,
+        deep_dir,
+        merged_items_path,
+        per_stack_records_path,
+    )
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_echo_records = True
+    stub.parse_by_stack = _twin_parse_by_stack(structural_line=1)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    dd = deep_dir(multi_stack_target)
+
+    # (1) The arbiter saw the twin -- both sides, and nothing else. The other two
+    # stacks are medium and uncontested, so they stay below the default
+    # ``min_severity="high"`` knob; the structural side is selected purely by
+    # being contested, not by its own high severity (``contested_only``).
+    arbiter_input = json.loads(arbiter_input_path(dd).read_text())
+    assert sorted((e["file"], e["line"], e["severity"]) for e in arbiter_input) == [
+        ("api.py", 1, "high"),
+        ("api.py", 1, "medium"),
+    ], arbiter_input
+
+    # (2) The adjudicated verdict reached the structural records file on disk --
+    # the file cross-stack merge re-reads. The stub arbiter stamps "ARBITRATED: ".
+    structural = json.loads(per_stack_records_path(dd, "structure").read_text())
+    assert structural["issues"][0]["description"].startswith("ARBITRATED: ")
+
+    # (3) One defect, one reported finding. Both lenses landed on api.py:1; the
+    # merged item list must carry a single item there.
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    at_twin = [i for i in items if i["file"] == "api.py" and _TWIN_DESCRIPTION in i["description"]]
+    assert len(at_twin) == 1, f"structural/language twin double-posted: {at_twin}"
+
+    # (4) Folding must not demote: the survivor keeps the higher of the two
+    # severities, which is what the original partition was protecting.
+    assert at_twin[0]["severity"] == "high"
+
+    # (5) The unrelated findings are untouched -- the fold is not a blanket
+    # collapse of everything the structural stack said.
+    assert {i["file"] for i in items} == {"api.py", "App.tsx", "README.md"}
+
+
+async def test_whole_file_structural_twin_is_arbitrated_and_reported_once(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1103 case B: a whole-file (``line: 0``) structural twin also collapses.
+
+    The structural side anchors at the reserved whole-file line while the language
+    side cites the exact line, so an exact ``(file, line)`` grouping puts them in
+    different buckets and the contested branch cannot fire. Line 0 means "this
+    whole file", so it must co-locate with every line reported in that file.
+
+    Presentationally this case is the sneakier of the two: it posts one file-level
+    and one inline comment, which reads less obviously as a duplicate than case A's
+    two comments on one line.
+    """
+    from daydream.deep.artifacts import arbiter_input_path, deep_dir, merged_items_path
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_echo_records = True
+    stub.parse_by_stack = _twin_parse_by_stack(structural_line=0)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    dd = deep_dir(multi_stack_target)
+
+    arbiter_input = json.loads(arbiter_input_path(dd).read_text())
+    assert sorted((e["file"], e["line"]) for e in arbiter_input) == [
+        ("api.py", 0),
+        ("api.py", 1),
+    ], arbiter_input
+
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    at_twin = [i for i in items if i["file"] == "api.py" and _TWIN_DESCRIPTION in i["description"]]
+    assert len(at_twin) == 1, f"whole-file structural twin double-posted: {at_twin}"
+    assert at_twin[0]["severity"] == "high"
+
+
+async def test_precision_mode_suppression_never_sees_structural_records(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structural records rejoin adjudication for the arbiter only (issue #1103).
+
+    Suppression is fail-CLOSED and selects on low severity / LOW confidence, and
+    the structural meta-stack was never in its pool. Putting the two record sets
+    back together for contest detection must not leak into that pass, or the
+    #1103 fix would start deleting low-severity structural findings as a side
+    effect -- the exact demotion the record partition was written to prevent.
+
+    Real-path: precision mode on, the suppression reviewer rejecting everything
+    it is shown, and a low-severity structural finding that must still ship.
+    Both borderline findings are ``low``/``MEDIUM``, so the suppression
+    predicate's severity branch is what would select them.
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_echo_records = True
+    stub.suppression_keep = False
+    stub.parse_by_stack = {
+        "python": {
+            "severity": "low",
+            "confidence": "MEDIUM",
+            "file": "api.py",
+            "line": 1,
+            "description": "Borderline python nit the suppression pass rejects",
+        },
+        "structure": {
+            "severity": "low",
+            "confidence": "MEDIUM",
+            "file": "api.py",
+            "line": 1,
+            "description": "Low-severity structural erosion in this module",
+        },
+        "react": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "App.tsx",
+            "line": 1,
+            "description": "Unrelated React concern",
+        },
+        "generic": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "README.md",
+            "line": 1,
+            "description": "Unrelated docs concern",
+        },
+    }
+
+    assert await _run_deep(multi_stack_target, precision_mode=True) == 0
+
+    items = json.loads(merged_items_path(deep_dir(multi_stack_target)).read_text())["items"]
+    descriptions = [i["description"] for i in items]
+    # The borderline LANGUAGE finding is suppressed (that is the pass working).
+    assert not any("Borderline python nit" in d for d in descriptions), descriptions
+    # The equally borderline STRUCTURAL finding is not -- it was never eligible.
+    assert any("Low-severity structural erosion" in d for d in descriptions), descriptions
+
+
+async def test_distinct_structural_finding_survives_the_fold(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fold is a duplicate check, not a structural-lens filter.
+
+    Same file, genuinely different concerns: the structural finding must still
+    reach ``merged-items.json`` under ``lens="structural"`` and still render its
+    own report section. This is the boundary the #1103 fold must not cross --
+    dropping it would reintroduce exactly the demotion the record partition was
+    written to prevent.
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_echo_records = True
+    overrides = _twin_parse_by_stack(structural_line=1)
+    overrides["structure"]["description"] = "Module layering inverted: api.py now imports the CLI"
+    stub.parse_by_stack = overrides
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    dd = deep_dir(multi_stack_target)
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    api_items = sorted(
+        i["description"] for i in items if i["file"] == "api.py"
+    )
+    assert len(api_items) == 2, f"a distinct structural finding was folded away: {api_items}"
+    assert any(i["lens"] == "structural" for i in items)
+    assert "## Structural Review" in merged_report_path(dd).read_text()
 
 
 async def test_resume_fix_skips_pr_post(
@@ -4932,6 +5182,65 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
         "merged report missing -- the apply-fixes gate's success/exit path did not run"
     )
 
+
+async def test_apply_fixes_gate_interactive_yes_applies_fixes(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path: a typed ``y`` at the apply-fixes gate runs the fix loop.
+
+    The inverse of the two declining gate tests above, which pin the
+    non-interactive and EOF defaults but never prove the ACCEPT branch through
+    the real prompt. ``assume="yes"`` (``test_yes_auto_applies_fix``) skips
+    ``prompt_user`` entirely, so without this test nothing covers the path an
+    interactive operator actually takes: real ``prompt_user`` -> real
+    ``input()`` -> ``resolve_or_prompt`` coercion -> ``phase_fix``.
+
+    ``precision_mode=True`` mirrors ``daydream . --precision``: the extra
+    suppression pass must not consume the gate's stdin answer or drop every
+    finding before the gate. The observable consequence is the sentinel file
+    the stub writes on a fix prompt.
+    """
+    from daydream.agent import reset_state
+    from daydream.runner import run
+
+    _silence_gate_noise(monkeypatch)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    _force_interactive(monkeypatch)
+
+    fix_marker = multi_stack_target / ".daydream-fix-applied"
+    assert not fix_marker.exists()
+
+    reads: list[str] = []
+
+    def _yes_input(*_a: Any, **_kw: Any) -> str:
+        reads.append("y")
+        return "y"
+
+    monkeypatch.setattr("builtins.input", _yes_input)
+
+    reset_state()
+    try:
+        exit_code = await run(
+            make_config(
+                multi_stack_target,
+                non_interactive=False,
+                precision_mode=True,
+                output_mode="loop",
+            )
+        )
+    finally:
+        reset_state()
+
+    assert exit_code == 0
+    assert reads, "the apply-fixes gate never reached input() -- no prompt was answered"
+    assert fix_marker.is_file(), (
+        "a typed 'y' at the apply-fixes gate did not reach phase_fix -- the gate "
+        "declined despite an affirmative answer"
+    )
 
 # --cleanup / --no-cleanup (finding #6, R2 round on #330)
 
@@ -8999,11 +9308,22 @@ async def test_no_parse_phase_and_records_from_output_schema(
     assert not any("parse" in str(c.get("model", "")).lower() for c in prompts)
 
     # (2) Per-stack records files exist and hold the reviewer's structured
-    # output (the stub's per-stack branch emits "Sample issue").
-    records = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-records.json"))
+    # output. Each lens is checked against its own stub wording ("Sample issue"
+    # for the language stacks, a distinct description for the structural
+    # meta-stack), so the assertion cannot depend on glob ordering.
+    deep_dir_path = multi_stack_target / ".daydream" / "deep"
+    records = sorted(deep_dir_path.glob("stack-*-records.json"))
     assert records, "expected per-stack records written by the reviewer"
-    loaded = json.loads(records[0].read_text())
+    language = [p for p in records if p.name != "stack-structure-records.json"]
+    assert language, "expected at least one language-stack records file"
+    loaded = json.loads(language[0].read_text())
     assert loaded["issues"][0]["description"] == "Sample issue"
+    structural = deep_dir_path / "stack-structure-records.json"
+    assert structural.is_file(), "expected the structural meta-stack records file"
+    assert (
+        json.loads(structural.read_text())["issues"][0]["description"]
+        == "Structural maintainability concern"
+    )
 
 
 def test_structural_gate_resolver_reads_profile_pipeline() -> None:

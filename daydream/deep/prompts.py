@@ -762,7 +762,18 @@ def build_arbiter_prompt(
         "  - confidence: your adjudicated HIGH | MEDIUM | LOW.\n"
         "  - description: a sharpened one-line summary (keep it about the same "
         "finding; do not repurpose the slot for a different issue).\n"
-        "  - rationale: why it matters, grounded in what you actually read.\n\n" + SEVERITY_RUBRIC
+        "  - rationale: why it matters, grounded in what you actually read.\n\n"
+        "Two input findings can be the same defect seen by two reviewers -- a "
+        "language stack and the structural meta-stack read the same code at "
+        "different altitudes, so a duplicate pair may be worded differently and "
+        "one of them may be anchored at the whole file (`line: 0`) rather than a "
+        "line. When two findings are the same defect, keep exactly one: set "
+        "`keep: false` on the redundant entry and give the survivor the higher "
+        "of the two severities that the rubric below actually supports for "
+        "that defect -- never demote the survivor below either input, and "
+        "never raise it past what the rubric licenses. Never drop both, and "
+        "never reject a finding merely for overlapping with another -- only "
+        "for being the same defect.\n\n" + SEVERITY_RUBRIC
     )
     return "\n\n".join(parts)
 

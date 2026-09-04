@@ -699,6 +699,36 @@ def test_arbiter_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
 
 
+def test_arbiter_prompt_instructs_collapsing_duplicate_findings(tmp_path: Path) -> None:
+    """Issue #1103: the arbiter now receives structural/language twins, so the
+    host-owned instruction block must tell it what to do with a duplicate pair.
+
+    Selection alone is not enough -- the arbiter emits one verdict per input
+    finding, so collapsing a pair means rejecting one side and keeping the
+    other's severity. Without saying so, the pair comes back kept twice with
+    their original severities and nothing is adjudicated.
+    """
+    from daydream.deep.prompts import build_arbiter_prompt
+
+    out = build_arbiter_prompt(
+        strategy=_default_strategy("arbitration"),
+        arbiter_input_path=tmp_path / "arbiter-input.json",
+        diff_path=tmp_path / "diff.patch",
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alternatives.json",
+        cwd=tmp_path,
+    )
+    assert "the same defect, keep exactly one" in out
+    assert "`keep: false` on the redundant entry" in out
+    assert "higher of the two severities" in out
+    # The whole-file anchor is called out, because half of these pairs arrive
+    # with one side at `line: 0` rather than at the cited line.
+    assert "`line: 0`" in out
+    # Overlap alone must not be grounds for rejection -- the arbiter must not
+    # start pruning neighbouring findings that merely touch the same code.
+    assert "never reject a finding merely for overlapping" in out
+
+
 def test_generic_fallback_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 

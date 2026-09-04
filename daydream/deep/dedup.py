@@ -29,6 +29,17 @@ _STOP_WORDS = frozenset(
 _PUNCT_RE = re.compile(r"[^a-z0-9\s]+")
 _SIM_THRESHOLD = 0.5
 
+# Destructive-fold threshold (issue #1103 addendum). The pre-filter's 0.5 bar
+# is deliberately loose because every candidate it emits still goes in front
+# of the merge agent (or the arbiter) for adjudication before anything is
+# dropped. The host-side structural fold in
+# ``phases._fold_structural_duplicates`` has no such downstream review: it
+# collapses two findings into one on its own, so it needs a materially
+# higher bar than the pre-filter's. Named separately (rather than raising
+# ``_SIM_THRESHOLD`` itself) so the pre-filter's intentionally loose
+# candidate generation is untouched.
+FOLD_SIM_THRESHOLD = 0.8
+
 
 @dataclass(frozen=True)
 class CandidatePair:
@@ -79,6 +90,35 @@ def jaccard(a: set[str], b: set[str]) -> float:
     if not union:
         return 0.0
     return len(a & b) / len(union)
+
+
+def descriptions_match(a: str, b: str, *, threshold: float = _SIM_THRESHOLD) -> bool:
+    """Return True when two finding descriptions clear the given similarity bar.
+
+    The scalar form of the gate :func:`build_record_dedup_candidates` applies
+    pairwise: normalized bigram Jaccard at or above ``threshold``. Exposed so
+    callers share this module's bigram/Jaccard comparison instead of keeping
+    a second copy that can drift away from it.
+
+    ``threshold`` defaults to ``_SIM_THRESHOLD``, the pre-filter's own
+    deliberately loose bar -- safe there because every candidate the
+    pre-filter emits still goes in front of the merge agent (or the arbiter)
+    for adjudication. A caller that makes a destructive, unreviewed "same
+    defect" decision on this predicate's say-so alone -- such as the
+    host-side structural fold (issue #1103,
+    ``phases._append_structural_and_write_merged``) -- must pass
+    ``FOLD_SIM_THRESHOLD`` instead; that fold has no downstream review, so it
+    needs a materially higher bar than the pre-filter's.
+
+    Degenerate input never matches: either description empty (or reduced to
+    nothing by :func:`normalize_title`) returns ``False`` rather than letting
+    two contentless findings collapse into one.
+    """
+    a_bigrams = bigrams(normalize_title(a))
+    b_bigrams = bigrams(normalize_title(b))
+    if not a_bigrams or not b_bigrams:
+        return False
+    return jaccard(a_bigrams, b_bigrams) >= threshold
 
 
 def _files_overlap(record_file: str, alt_files: Iterable[str]) -> bool:

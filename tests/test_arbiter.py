@@ -219,6 +219,69 @@ def test_suppression_rejects_unknown_confidence_class() -> None:
         select_suppression_targets(records, ["python"], confidence_classes=("LOW", "GUESSED"))
 
 
+def test_contested_only_records_skip_the_severity_branch() -> None:
+    """``contested_only`` indices are invisible to the severity branch (#1103).
+
+    The deep pipeline passes the structural meta-stack's records here so they can
+    contest a language finding without every high-severity structural finding
+    also being pulled into arbitration on its own.
+    """
+    records = [_rec("api.py", 10, "high"), _rec("api.py", 20, "high")]
+    sources = ["python", "structure"]
+    assert select_arbiter_targets(records, sources) == [0, 1]
+    assert select_arbiter_targets(records, sources, contested_only=[1]) == [0]
+
+
+def test_contested_only_record_is_still_selected_when_contested() -> None:
+    """Issue #1103 case A: exempting the severity branch does not exempt contest.
+
+    Same file, same line, two distinct stacks, divergent severity -- the pair the
+    contested branch exists for. The structural side must come back even though
+    it opted out of severity-based selection.
+    """
+    records = [_rec("svc/config.yaml", 29, "medium"), _rec("svc/config.yaml", 29, "high")]
+    sources = ["python", "structure"]
+    assert select_arbiter_targets(records, sources, contested_only=[1]) == [0, 1]
+
+
+def test_whole_file_record_contests_every_line_in_that_file() -> None:
+    """Issue #1103 case B: ``line: 0`` is a whole-file anchor, not line zero.
+
+    A whole-file finding is about the entire file, so it co-locates with each
+    line reported in that file. Grouping strictly by ``(file, line)`` filed it
+    under its own key and the contested branch could never fire against the
+    line-anchored twin.
+    """
+    records = [_rec("svc/loader.py", 88, "medium"), _rec("svc/loader.py", 0, "high")]
+    sources = ["python", "structure"]
+    assert select_arbiter_targets(records, sources, contested_only=[1]) == [0, 1]
+
+
+def test_whole_file_record_does_not_reach_across_files() -> None:
+    """The widening is per-file: a whole-file finding contests only its own file."""
+    records = [_rec("svc/loader.py", 88, "medium"), _rec("svc/other.py", 0, "low")]
+    sources = ["python", "structure"]
+    assert select_arbiter_targets(records, sources, contested_only=[1]) == []
+
+
+def test_two_whole_file_records_contest_each_other() -> None:
+    """Two ``line: 0`` findings from different stacks still form one group.
+
+    Routing whole-file records out of the ``(file, line)`` grouping must not lose
+    the case where a file has nothing BUT whole-file findings.
+    """
+    records = [_rec("svc/loader.py", 0, "medium"), _rec("svc/loader.py", 0, "high")]
+    sources = ["python", "structure"]
+    assert select_arbiter_targets(records, sources, contested_only=[1]) == [0, 1]
+
+
+def test_whole_file_record_agreeing_on_severity_is_not_contested() -> None:
+    """The widening changes grouping only; divergent severity is still required."""
+    records = [_rec("svc/loader.py", 88, "medium"), _rec("svc/loader.py", 0, "medium")]
+    sources = ["python", "structure"]
+    assert select_arbiter_targets(records, sources, contested_only=[1]) == []
+
+
 def test_select_arbiter_targets_honors_contested_location_knob() -> None:
     """The profile's ``Arbitration.contested_location`` gates the contested
     branch of arbiter selection: disabling it leaves only the severity branch,

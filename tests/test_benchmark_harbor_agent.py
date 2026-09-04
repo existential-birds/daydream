@@ -698,9 +698,11 @@ _KNOWN_ITEMS = [
 ]
 
 # The stub-produced findings are the deterministic output of the real deep
-# pipeline over this single-python-file diff: one per-stack Record schema item,
-# normalized and rendered twice as duplicate-content findings.
-_EXPECTED_TITLES = ["Sample issue", "Sample issue"]
+# pipeline over this single-python-file diff: the language stack's Record schema
+# item plus the structural meta-stack's, each in its own lens's wording. They are
+# two distinct findings, so the merge host's structural fold (issue #1103) leaves
+# both in place; a pair that DID restate one defect would arrive here as one.
+_EXPECTED_TITLES = ["Sample issue", "Structural maintainability concern"]
 
 
 def _seed_defect_repo(tmp_path: Path) -> Path:
