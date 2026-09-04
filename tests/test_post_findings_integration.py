@@ -123,7 +123,8 @@ def test_post_findings_body_names_cli_head_sha(
 
 def test_post_findings_ignores_artifact_run_info_sha(fake_gh: FakeGh, tmp_path: Path) -> None:
     """The CLI --head-sha wins: a different 40-char SHA embedded in the
-    artifact's run_info string must never appear in the posted body."""
+    artifact's run_info string must never appear in the reviewed-commit
+    line."""
     artifact = _write_artifact(
         tmp_path / "findings.json",
         [_finding("a" * 64, path="a.py", line=3, placement="inline", title="Inline finding")],
