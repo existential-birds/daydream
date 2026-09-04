@@ -38,11 +38,19 @@ def test_full_annotation_pipeline_survives_vm_loss(
     # CLI-only.
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
 
+    # Since #1094, any non-dry publication requires a pinned license policy
+    # (fail-closed). The snapshot sessions carry declared MIT evidence, so a
+    # policy accepting MIT admits them all.
+    policy_path = tmp_path / "license-policy.json"
+    policy_path.write_text(json.dumps(
+        {"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}) + "\n")
+
     # 1. hydrate: VM-local SQLite index over the fake Hub snapshot
     stage = tmp_path / "stage"
     hydrated = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
         source_repo="org/private-ds", source_revision=SNAPSHOT_REVISION,
-        destination_repo="org/private-ds", stage_dir=stage), client=hub)
+        destination_repo="org/private-ds", stage_dir=stage,
+        license_policy_path=policy_path), client=hub)
     curation_id = hydrated.curation_id
 
     # 2. semantic preview -> sessions.jsonl + preview manifest (snapshot id),
