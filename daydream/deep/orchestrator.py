@@ -90,6 +90,13 @@ from daydream.deep.dedup import (
 )
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.deep.records import (
+    duplicate_record_uids,
+    record_uid,
+    stack_name_from_records_source,
+    stack_name_from_uid,
+    stamp_record_uids,
+)
 from daydream.deep.render import render_held_section, render_report
 from daydream.deep.scope_issues import (
     _file_out_of_scope_issue,
@@ -651,6 +658,18 @@ def _apply_adjudication_verdicts(
     rationale/evidence taken from the verdict) or dropped. ``file``/``line`` are
     never changed -- adjudication revises, it does not re-target findings.
 
+    Host-side identity is the record's ``uid`` (issue #1111), not its position:
+    the drop set holds uids, and the revise target is resolved through a uid map
+    snapshotted before anything mutates. The positional ``arb_id`` / ``sup_id``
+    is still the token the AGENT echoes, which is safe because the input
+    artifact is written in the same call that reads the verdicts back. The
+    hazard was only the host-side rebinding of indices *after* the compaction
+    below -- which is why the caller used to have to re-derive its
+    arbiter-exclusion set by ``id(record)`` object identity once this function
+    returned. It no longer does: a set of uids survives this rebuild untouched,
+    and survives a JSON round-trip or a dict copy that object identity would
+    not.
+
     Fail polarity (the sole axis on which the two passes diverge):
 
     - ``fail_closed=False`` (arbiter): a record reaches arbitration because it is
@@ -666,11 +685,12 @@ def _apply_adjudication_verdicts(
     Non-selected records always pass through untouched.
 
     Args:
-        records: Per-stack records positionally aligned with ``sources``.
+        records: Per-stack records positionally aligned with ``sources``. Each
+            carries a ``uid`` (guaranteed by ``_step_per_stack_parse``).
         sources: Per-record originating stack name.
         targets: Indices into ``records`` selected for this pass; ``targets[k]``
             carries 1-based ``id = k + 1`` echoed back in the verdict's
-            ``id_field``.
+            ``id_field``. Read once, up front, to snapshot each target's uid.
         verdicts: ``id -> verdict`` mapping from the adjudication agent.
         pass_name: Human-readable pass name (``"arbiter"`` / ``"suppression"``)
             used only in warning text.
@@ -680,9 +700,9 @@ def _apply_adjudication_verdicts(
             (see above).
 
     Returns:
-        New ``(records, sources)`` with dropped records removed and surviving
-        selected records carrying the verdict's fields. Positional alignment
-        between the two lists is preserved.
+        New ``(records, sources)`` with the dropped uids' records removed and
+        surviving selected records carrying the verdict's fields. Positional
+        alignment between the two lists is preserved.
     """
     import warnings
 
@@ -691,47 +711,103 @@ def _apply_adjudication_verdicts(
         if fail_closed
         else "retaining the original record unchanged"
     )
-    dropped: set[int] = set()
+    # Snapshot ``offset -> uid`` BEFORE anything mutates or drops a record
+    # (issue #1111). This loop is where ``targets``' indices stop being
+    # load-bearing: every host-side decision after it keys on the uid.
+    target_uids: dict[int, str] = {
+        offset: record_uid(records[record_index]) for offset, record_index in enumerate(targets)
+    }
+    # Revise targets resolve through this map rather than through
+    # ``records[record_index]``: the uid is the record's identity, the index is
+    # merely how it was selected. Built from the same list in the same call, so
+    # a lookup for a snapshotted uid cannot miss; the duplicate-uid guard in
+    # ``_step_per_stack_parse`` is what makes the mapping one-to-one.
+    by_uid: dict[str, dict[str, Any]] = {}
+    for record in records:
+        record_key = record_uid(record)
+        if record_key:
+            by_uid[record_key] = record
+    dropped: set[str] = set()
+    # A targeted record with no uid is impossible after the birth stamp plus the
+    # load-time backfill -- but "impossible" must not mean "silently
+    # mis-dropped". Such a record cannot be named in ``dropped``, so it gets a
+    # positional entry here, used ONLY to honour the caller's fail polarity for
+    # a record we are unable to identify.
+    dropped_positions: set[int] = set()
+
+    def _warn_unconfirmable(message: str, *, record_index: int, uid: str) -> None:
+        """Warn on an unconfirmable target and fail per ``fail_closed`` (#1111).
+
+        The three branches below (no uid, no verdict, mismatched id_field) all
+        warn, then either drop the record or retain it per the caller's fail
+        polarity, then move on -- the one shape this function's docstring
+        already unifies two ~80-line near-clones to avoid repeating. ``uid``
+        empty means the record itself is unidentifiable, so the drop (when
+        ``fail_closed``) can only be recorded positionally; otherwise it is
+        recorded by uid like every uid-keyed drop in this function.
+        """
+        warnings.warn(message, stacklevel=3)
+        if fail_closed:
+            if uid:
+                dropped.add(uid)
+            else:
+                dropped_positions.add(record_index)
+
     for offset, record_index in enumerate(targets):
         verdict_id = offset + 1
+        uid = target_uids[offset]
+        if not uid:
+            # Broken invariant, reported loudly and failed per the caller's
+            # polarity like every other unconfirmable branch here.
+            _warn_unconfirmable(
+                f"{pass_name.capitalize()} target {id_field}={verdict_id} "
+                f"(record_index={record_index}) carries no uid, so its verdict cannot be bound "
+                f"to a record identity; {polarity_action} (issue #1111).",
+                record_index=record_index,
+                uid="",
+            )
+            continue
         verdict = verdicts.get(verdict_id)
         if verdict is None:
             # No verdict returned for this id -- fail per the caller's polarity.
-            warnings.warn(
+            _warn_unconfirmable(
                 f"{pass_name.capitalize()} returned no verdict for {id_field}={verdict_id} "
-                f"(record_index={record_index}); {polarity_action}.",
-                stacklevel=2,
+                f"(record_index={record_index}, uid={uid}); {polarity_action}.",
+                record_index=record_index,
+                uid=uid,
             )
-            if fail_closed:
-                dropped.add(record_index)
             continue
         if verdict.get(id_field) != verdict_id:
             # Secondary key guard: the id field in the verdict must match the key
             # we looked it up by. A mismatch would silently bind the verdict to the
             # wrong record -- fail per the caller's polarity rather than mis-apply.
-            warnings.warn(
+            _warn_unconfirmable(
                 f"{pass_name.capitalize()} verdict {id_field} mismatch: "
                 f"expected {id_field}={verdict_id} "
                 f"but verdict contains {id_field}={verdict.get(id_field)!r} "
-                f"(record_index={record_index}); {polarity_action}.",
-                stacklevel=2,
+                f"(record_index={record_index}, uid={uid}); {polarity_action}.",
+                record_index=record_index,
+                uid=uid,
             )
-            if fail_closed:
-                dropped.add(record_index)
             continue
         if not verdict.get("keep", False):
-            dropped.add(record_index)
+            dropped.add(uid)
             continue
-        # Revise IN PLACE so the record keeps its object identity across this
-        # compaction. The suppression call site keys its arbiter-exclusion set by
-        # ``id(record)`` (#232); a revised record that got a fresh dict here would
-        # escape that set and be wrongly re-judged by the suppression pass.
-        revise_finding_fields(records[record_index], verdict)
+        # Revise IN PLACE rather than rebuilding the dict. A copied ``uid``
+        # would survive a rebuild, so this is no longer the load-bearing
+        # constraint it was when the suppression call site keyed its
+        # arbiter-exclusion set by ``id(record)`` (#232) -- but in-place is still
+        # the correct shape: the caller holds this same list and
+        # ``_rewrite_stack_records`` persists these very dicts, so a fresh dict
+        # would have to be threaded back into both.
+        revise_finding_fields(by_uid[uid], verdict)
 
     new_records: list[dict[str, Any]] = []
     new_sources: list[str] = []
     for i, (record, source) in enumerate(zip(records, sources, strict=True)):
-        if i in dropped:
+        # Dropped by uid; the positional set covers only the unidentifiable
+        # records warned about above.
+        if record_uid(record) in dropped or i in dropped_positions:
             continue
         new_records.append(record)
         new_sources.append(source)
@@ -751,18 +827,54 @@ def _rewrite_stack_records(
     rewritten with its surviving records (an emptied stack becomes
     ``{"issues": [], "verdicts": [...]}`` rather than retaining stale
     pre-arbitration content).
+
+    Routing is by the stack name encoded in each record's ``uid`` (issue
+    #1111), falling back to the ``source`` string for a record carrying no uid
+    at all, and a record that still routes outside ``stack_record_paths`` is
+    reported loudly instead of vanishing -- see the comments in the loop for
+    both halves of the defect this replaced.
     """
     by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
     for record, source in zip(records, sources, strict=True):
-        # `source` may be a bare stack name ("python") on a fresh run, or a
-        # filename ("stack-python-records.json") on resume.  Normalise to a
-        # Path so both formats resolve to the same key already in `by_stack`.
-        if source.endswith("-records.json"):
-            dest = deep_dir_path / source
+        # Route by the stack name in the record's own ``uid`` (issue #1111), not
+        # by the ``source`` string. ``source`` has two spellings -- the records
+        # filename on every path that loads records off disk, a bare stack name
+        # for the uncovered sweep's in-memory append -- and the branch that used
+        # to live here had to guess which one it held. The uid's stack half has
+        # exactly one spelling. ``sources`` stays zipped in (``strict=True``)
+        # both to assert the two lists are still aligned and to name the source
+        # in the warning below.
+        uid = record_uid(record)
+        if uid:
+            dest = per_stack_records_path(deep_dir_path, stack_name_from_uid(uid))
         else:
-            dest = per_stack_records_path(deep_dir_path, source)
+            # No uid at all: this is the case the uid-based routing above
+            # cannot cover, so fall back to ``source`` -- the sole routing
+            # signal before issue #1111 -- rather than letting the record fall
+            # through to the "unroutable" branch below and be erased from disk.
+            dest = per_stack_records_path(deep_dir_path, stack_name_from_records_source(source))
         if dest in by_stack:
             by_stack[dest].append(record)
+        else:
+            # There was no ``else`` here, and that was the second half of the
+            # defect (issue #1111). This function rewrites each records file
+            # WHOLESALE, so a record whose dest resolved outside
+            # ``stack_record_paths`` was not merely skipped -- it was ERASED
+            # from disk, silently. #1110 had to add the structural records path
+            # to ``stack_record_paths`` precisely to keep records out of this
+            # branch, and nothing would have failed loudly had that been missed.
+            # "Every adjudicated record routes to a file being rewritten" is a
+            # real invariant that was simply never enforced; this is where it is
+            # enforced now. A warning rather than a raise: the adjudicated
+            # verdicts for every OTHER record are already computed and belong on
+            # disk, so aborting the rewrite would lose more than it protects.
+            print_warning(
+                console,
+                f"Adjudicated record uid={record_uid(record) or '<none>'} (source {source}) "
+                f"routes to {dest.name}, which is not among the records files being rewritten "
+                f"({', '.join(sorted(path.name for path in stack_record_paths))}); "
+                "its adjudication will not reach disk (issue #1111).",
+            )
     for dest_path, stack_records in by_stack.items():
         # Issue #742: per-stack records files carry the dict shape
         # ``{"issues": [...], "verdicts": [...]}``. Preserve the verdicts from
@@ -1426,16 +1538,75 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         # issues list, so normalize the dict shape here; legacy bare-list
         # records pass through unchanged.
         records = _records_issues_or_empty(loaded)
+        # Issue #1111: this loop is the single choke point that populates
+        # ``ctx.data["records"]`` -- on a fresh run and on a ``--start-at merge``
+        # resume alike -- so it is where the ``uid`` invariant is guaranteed.
+        # ``phase_per_stack_reviews`` stamps at record birth, but two shapes
+        # still arrive here unstamped: records written by a run from before this
+        # field existed simply lack the key, and so would any future producer
+        # that missed the birth stamp. Re-deriving the uid from
+        # ``(stack_name, position)`` reproduces exactly the value the producing
+        # run would have minted -- which is precisely why the format is
+        # deterministic rather than a uuid4 -- so the backfill is
+        # indistinguishable from a birth stamp. ``stamp_record_uids`` normalizes
+        # the records filename to a bare stack name itself and PRESERVES any uid
+        # already on disk, so this is idempotent and never re-mints a uid the
+        # producing run already handed out (which matters on resume, where the
+        # on-disk list may be shorter than the list those uids were minted from).
+        stamp_record_uids(records, records_path.name)
         per_stack_records_paths.append(records_path)
         source_name = records_path.name
         all_records.extend(records)
         record_sources.extend(source_name for _ in records)
 
+    # Issue #1111: every uid-keyed stage downstream of here -- the dedup
+    # pre-filter's b-side drop, adjudication's drop set, the structural
+    # partition/rejoin, and ``_rewrite_stack_records``' file routing -- resolves
+    # a record by its uid. Two records sharing one uid make each of those act on
+    # the wrong record, which is exactly the over-delete this field exists to
+    # prevent (see ``_drop_cross_stack_duplicates``). Checked here, over the
+    # whole loaded pool, BEFORE the structural partition below splits it: one
+    # check then covers both sides and also catches a collision that spans them.
+    #
+    # FATAL rather than a warning. A uid is host-minted and deterministic with
+    # no content-derived input, so a collision is never the near-miss judgement
+    # call a fingerprint match is -- it means two records files claim the same
+    # stack name, or an artifact was written with a partially stamped list.
+    # Continuing would emit a report quietly missing findings, and CLAUDE.md's
+    # rule is that loss is never silently absorbed. A false positive costs a
+    # bounded, visible, actionable stop (the message names the colliding uids
+    # and the remedy); a false negative costs an invisible wrong answer.
+    duplicate_uids = duplicate_record_uids(all_records)
+    if duplicate_uids:
+        loaded_names = ", ".join(sorted(path.name for path in per_stack_records_paths))
+        print_error(
+            console,
+            "Duplicate Record Identities",
+            f"Per-stack records carry duplicate uid(s): {', '.join(duplicate_uids)}\n\n"
+            f"Records were loaded from: {loaded_names}\n\n"
+            "Every stage after this one (dedup, arbitration, suppression, the structural fold, "
+            "the per-stack records rewrite) resolves a record by its uid, so continuing would "
+            "drop or revise the wrong findings.\n"
+            "Re-run without --start-at to regenerate the per-stack records.",
+        )
+        return Stop(1)
+
     # Partition structural meta-stack records out before dedup: its lens
     # (file-size budgets, layering, canonical-helper gaps) differs from the
     # language stacks and collapsing it into their dedup pool would demote
-    # those findings. Filter both record_sources forms (resume=filename,
-    # fresh-run=stack_name) together to preserve the index invariant.
+    # those findings. The partition keys on the stack name encoded in each
+    # record's own uid (issue #1111) and rebuilds ``all_records`` /
+    # ``record_sources`` as pairs, so the positional index invariant between
+    # those two lists survives the split exactly as before.
+    #
+    # This test used to compare ``src`` against both ``STRUCTURE_STACK_NAME``
+    # and the records filename, on the stated belief that ``source`` is a bare
+    # stack name on a fresh run and a filename on resume. That belief was
+    # wrong: ``source_name`` is ``records_path.name`` above on every path, fresh
+    # run and resume alike, so the bare-stack-name half of the test was dead
+    # code (the only bare-name source in this module is the uncovered sweep's
+    # ``"uncovered"``). A uid's stack half has one spelling and cannot rot that
+    # way.
     #
     # The partition is scoped to the dedup pre-filter and the merge agent's
     # record pool -- the two places that could collapse a structural finding
@@ -1448,13 +1619,12 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     structural_record_sources: list[str] = []
     if structural_path_candidate in per_stack_records_paths:
         structural_records_path: Path | None = structural_path_candidate
-        structural_filename = structural_path_candidate.name
         per_stack_records_paths = [
             p for p in per_stack_records_paths if p != structural_path_candidate
         ]
         kept_pairs = []
         for rec, src in zip(all_records, record_sources, strict=True):
-            if src == STRUCTURE_STACK_NAME or src == structural_filename:
+            if stack_name_from_uid(record_uid(rec)) == STRUCTURE_STACK_NAME:
                 structural_records.append(rec)
                 structural_record_sources.append(src)
             else:
@@ -1682,7 +1852,17 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                             sweep_failures[file] = "no structured output produced"
                         else:
                             issues = structured.get("issues")
-                            issues = issues if isinstance(issues, list) else []
+                            # Schema validation guarantees ``issues`` is a list
+                            # but not that each entry is a dict (nested item
+                            # validity is deliberately the consumers' salvage
+                            # domain -- see ``agent.py``); a non-dict entry
+                            # would otherwise crash ``stamp_record_uids`` below
+                            # and discard this whole fail-open sweep.
+                            issues = (
+                                [item for item in issues if isinstance(item, dict)]
+                                if isinstance(issues, list)
+                                else []
+                            )
                             sweep_records_by_file[file] = issues
                             # Structured records are the authoritative sweep
                             # output. Markdown review files are optional backend
@@ -1740,6 +1920,25 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     }
     if completed_reviews:
         records_path = per_stack_records_path(dd, "uncovered")
+        # Issue #1111: the sweep is the pipeline's SECOND record-birth site, and
+        # the load-time backfill in ``_step_per_stack_parse`` cannot reach it --
+        # ``STEPS`` orders ``per-stack-parse`` BEFORE ``uncovered-sweep``, and on
+        # a fresh run ``stack-uncovered-records.json`` does not exist yet when
+        # that loop runs. So stamp here, BEFORE the write, and both the on-disk
+        # artifact and the in-memory pool extended below carry uids. A
+        # ``--start-at merge`` resume reloads this same file through that loop,
+        # where ``stamp_record_uids``' preserve-if-present behaviour keeps these
+        # exact uids instead of re-minting them.
+        #
+        # These uids need no duplicate check of their own: they are freshly
+        # minted over an unstamped list under a stack name no other producer
+        # uses, and the pool they join cannot already hold an ``uncovered:N``.
+        # The sweep is disabled outright on a merge/fix resume
+        # (``_uncovered_sweep_enabled``), a per-stack resume deletes this file
+        # before any new per-stack work (``_clear_sweep_artifacts``), and a fresh
+        # run wipes the whole deep dir -- so on every path that reaches this
+        # line, the parse loop found no uncovered records file to load.
+        stamp_record_uids(sweep_records, "uncovered")
         records_path.write_text(json.dumps(sweep_records, indent=2))
         ctx.data["records_paths"].append(records_path)
         ctx.data["records"].extend(sweep_records)
@@ -1760,7 +1959,7 @@ def _rejoin_structural_records(
     structural_sources: list[str],
     records_paths: list[Path],
     structural_path: Path | None,
-) -> tuple[list[dict[str, Any]], list[str], set[int], list[Path]]:
+) -> tuple[list[dict[str, Any]], list[str], set[str], list[Path], range]:
     """Rejoin structural records with language records for adjudication (#1103).
 
     The structural meta-stack is partitioned out of the dedup pool and the
@@ -1772,46 +1971,87 @@ def _rejoin_structural_records(
     `_split_structural_records` restores it afterward so the dedup pre-filter
     and the merge prompt see exactly what they saw before.
 
-    Returns the concatenated records/sources, the ``id()`` set of the
-    structural records (passed as ``contested_only`` to
-    :func:`~daydream.deep.arbiter.select_arbiter_targets` -- keeping the
-    widening to contest detection, since the severity branch must still never
-    pull in an uncontested structural finding -- and later to
-    :func:`_split_structural_records`), and ``records_paths`` extended with
-    ``structural_path`` when present: `_rewrite_stack_records` drops any
-    record whose source resolves outside this path list, so the structural
-    file must be included or an arbitrated structural verdict would never
-    reach disk, and merge re-reads that very file to build the report's
-    structural items.
+    Returns the concatenated records/sources, the ``uid`` set of the structural
+    records (used by :func:`_split_structural_records`), ``records_paths``
+    extended with ``structural_path`` when present -- `_rewrite_stack_records`
+    cannot persist a record that routes outside this path list, so the
+    structural file must be included or an arbitrated structural verdict would
+    never reach disk, and merge re-reads that very file to build the report's
+    structural items -- and ``structural_range``: the positional index range
+    every structural record occupies in the returned, freshly concatenated
+    ``adjudicated`` list.
+
+    ``structural_range`` (not the uid set) is what the caller must pass as
+    :func:`~daydream.deep.arbiter.select_arbiter_targets`'s ``contested_only``:
+    that exemption from the severity branch must cover EVERY structural
+    record, including the no-uid edge case handled below, and a
+    ``record_uid(rec) in structural_ids`` membership test silently drops that
+    exemption for such a record (its uid is ``""``, which is never in
+    ``structural_ids``) -- reopening exactly the widening this function's
+    docstring says must never happen. Position cannot fail this way: it is
+    read here, immediately after ``adjudicated`` is built and before anything
+    reorders or compacts it.
+
+    The uid set still holds uids, not ``id()`` object identities (issue
+    #1111), because :func:`_split_structural_records` runs AFTER adjudication
+    may have rebuilt the record list, where a positional range no longer
+    identifies the same records. Object identity was the strictest possible
+    key for that later use and also the most fragile one: it was invalidated
+    by any stage that rebuilt a record as a fresh dict or round-tripped it
+    through JSON, and such a record escaped the set silently, with the escape
+    looking exactly like "not a structural record". A uid is carried inside
+    the dict, so it survives both.
     """
-    structural_ids = {id(rec) for rec in structural_records}
+    # A structural record with no uid cannot be named in this set and would come
+    # back out of `_split_structural_records` as a language record -- i.e. into
+    # the dedup pool the partition exists to keep it out of. Unreachable after
+    # the duplicate/absence guarantees established in `_step_per_stack_parse`,
+    # so this reports rather than stops: adjudication itself is still correct,
+    # only the post-split routing of that one record is degraded.
+    structural_ids = {uid for rec in structural_records if (uid := record_uid(rec))}
+    unidentified = len(structural_records) - len(structural_ids)
+    if unidentified:
+        print_warning(
+            console,
+            f"{unidentified} structural record(s) carry no uid; they will be adjudicated but "
+            "rejoin the language-stack pool after arbitration instead of the structural pool "
+            "(issue #1111).",
+        )
     adjudicated = all_records + structural_records
     adjudicated_sources = record_sources + structural_sources
     rewrite_paths = list(records_paths)
     if structural_path is not None:
         rewrite_paths.append(structural_path)
-    return adjudicated, adjudicated_sources, structural_ids, rewrite_paths
+    structural_range = range(len(all_records), len(adjudicated))
+    return adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range
 
 
 def _split_structural_records(
     adjudicated: list[dict[str, Any]],
     adjudicated_sources: list[str],
-    structural_ids: set[int],
+    structural_ids: set[str],
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[str]]:
     """Split structural records back out after adjudication (#1103).
 
     Everything downstream of adjudication -- the dedup pre-filter, the merge
     prompt, the host-side structural append -- keeps the partitioned view it
-    had before. ``_apply_adjudication_verdicts`` revises in place, so
-    surviving records keep the identity this split keys on; records the
-    arbiter rejected are simply absent from both sides.
+    had before. Records the arbiter rejected are simply absent from both sides.
+
+    The split keys on each record's ``uid`` against the set
+    :func:`_rejoin_structural_records` built (issue #1111), so it does not care
+    whether adjudication revised a record in place, replaced its dict, or
+    round-tripped it through the records files -- the uid rides along inside the
+    record either way. ``record_uid`` returns ``""`` for a record carrying none
+    and ``""`` is never in the set, so an unidentifiable record lands on the
+    language side, which is the outcome ``_rejoin_structural_records`` warns
+    about when it drops one.
     """
     all_records: list[dict[str, Any]] = []
     record_sources: list[str] = []
     structural_records: list[dict[str, Any]] = []
     structural_sources: list[str] = []
     for rec, src in zip(adjudicated, adjudicated_sources, strict=True):
-        if id(rec) in structural_ids:
+        if record_uid(rec) in structural_ids:
             structural_records.append(rec)
             structural_sources.append(src)
         else:
@@ -1856,7 +2096,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         and (config.start_at != "merge" or not adjudication_marker.is_file())
     ):
         structural_path: Path | None = ctx.data.get("structural_records_path")
-        adjudicated, adjudicated_sources, structural_ids, rewrite_paths = (
+        adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range = (
             _rejoin_structural_records(
                 all_records, record_sources, structural_records, structural_sources,
                 ctx.data["records_paths"], structural_path,
@@ -1867,22 +2107,28 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             adjudicated, adjudicated_sources,
             min_severity=ctx.pipeline().arbitration.min_severity,
             contested_location=ctx.pipeline().arbitration.contested_location,
-            contested_only=[
-                i for i, rec in enumerate(adjudicated) if id(rec) in structural_ids
-            ],
+            contested_only=structural_range,
         )
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
         # are indices into this pre-apply list; once records are dropped the
         # indices shift, so suppression exclusion must be keyed by per-record
-        # object identity -- not by the stale positional indices, and not by
+        # identity -- not by the stale positional indices, and not by
         # `(file, line)`: two findings can share one location while only one is
         # arbitrated (a HIGH sibling arbitrated, a LOW sibling not), and a
         # `(file, line)` key would wrongly exclude BOTH, silently skipping the
-        # LOW sibling from suppression. `_apply_adjudication_verdicts` revises
-        # records in place, so kept AND revised arbiter records keep their
-        # identity here; only dropped records fall out.
-        arbitrated_ids = {id(adjudicated[i]) for i in arbiter_targets}
+        # LOW sibling from suppression.
+        #
+        # That identity is the record's `uid` (issue #1111). This used to be an
+        # `id(record)` set, which only worked because
+        # `_apply_adjudication_verdicts` happens to revise in place -- a stage
+        # that rebuilt a kept record as a fresh dict would have escaped the set
+        # silently and had it re-judged by the fail-CLOSED suppression pass. A
+        # uid is inside the dict, so no rebuild or JSON round-trip can shake it
+        # off. Records with no uid are left out of the set entirely rather than
+        # collapsing onto a shared `""` key; the empty-uid case is handled at
+        # the exclusion site below.
+        arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
                 arbiter_backend = ctx.backend_for("arbiter")
@@ -1929,10 +2175,15 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             # high-conviction by construction and was never in this pass's pool
             # before, so letting the union widen it would drop structural
             # findings as a side effect of fixing the duplicate-post bug.
+            # A record with no uid is excluded too (`not uid`): suppression is
+            # fail-CLOSED, so a record we cannot match against either set would
+            # otherwise be droppable on an identity we could not establish.
+            # Unreachable after `_step_per_stack_parse`, and deliberately biased
+            # toward keeping a finding rather than losing one.
             suppression_exclude = [
                 i
                 for i, r in enumerate(adjudicated)
-                if id(r) in arbitrated_ids or id(r) in structural_ids
+                if not (uid := record_uid(r)) or uid in arbitrated_ids or uid in structural_ids
             ]
             suppression_targets = select_suppression_targets(
                 adjudicated,
@@ -2040,6 +2291,15 @@ def _clear_merge_failure(dd: Path) -> None:
         failures_p.unlink()
 
 
+#: Cap on how many unidentifiable dedup pairs ``_drop_cross_stack_duplicates``
+#: names individually in its aggregate warning below, mirroring
+#: ``phases._MAX_REPORTED_UNKNOWN_UIDS``: an artifact written before
+#: ``record_b_uid`` existed can carry many such pairs at once, and naming the
+#: first few and counting the rest keeps the message actionable instead of
+#: turning it into the per-pair flood the aggregation exists to avoid.
+_MAX_REPORTED_UNIDENTIFIABLE_PAIRS = 10
+
+
 def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Apply the D-27 dedup pre-filter to a host-written partial merge (issue #361).
 
@@ -2049,8 +2309,21 @@ def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> lis
     cross-stack duplicate pairs itself -- otherwise the partial
     ``merged-items.json`` carries duplicates into the resume verifier and fix
     gate. Keeps the ``record_a`` side of each pair (deterministic sort order)
-    and drops the ``record_b`` side, matched on ``(id, file)`` because per-stack
-    record ids are not globally unique.
+    and drops the ``record_b`` side, matched on ``record_b_uid``.
+
+    We used to match the b-side on ``(id, file)``, and that was our bug -- not a
+    limitation of the artifact. That tuple is not unique (a reviewer-assigned
+    ``id`` restarts at 1 in every stack), and the filter below is a
+    set-membership test over the whole record list, so it deleted EVERY record
+    matching a dropped key instead of the one b-side it meant to. Three stacks
+    each reporting ``id: 1`` on ``api.py`` for the same defect yield pairs
+    (0,1), (0,2) and (1,2), whose b-side keys are all ``("1", "api.py")`` --
+    and record 0, the a-side this function exists to KEEP, matches that key too
+    and died with them, leaving the partial report with zero language findings.
+    It looked identical to the records being deleted, which is precisely why it
+    had been paired with them. ``record_b_uid`` (issue #1111) names one record
+    and only that record, so the same input now drops the two b-sides and keeps
+    record 0.
     """
     dedup_p = dedup_candidates_path(dd)
     if not dedup_p.is_file():
@@ -2059,21 +2332,47 @@ def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> lis
         dedup = json.loads(dedup_p.read_text())
     except json.JSONDecodeError:
         return records
-    dropped_keys: set[tuple[str, str]] = set()
+    dropped_uids: set[str] = set()
+    unidentifiable_pairs: list[str] = []
     for pair in dedup.get("record_duplicate_pairs", []) or []:
         if not isinstance(pair, dict):
             continue
-        b_id = pair.get("record_b_id")
-        b_file = pair.get("record_b_file")
-        if b_id is not None and b_file is not None:
-            dropped_keys.add((str(b_id), str(b_file)))
-    if not dropped_keys:
+        b_uid = pair.get("record_b_uid")
+        if isinstance(b_uid, str) and b_uid:
+            dropped_uids.add(b_uid)
+            continue
+        # Within one run this is unreachable: ``dedup-candidates.json`` is
+        # written unconditionally by ``_step_cross_stack_merge`` in the same call
+        # that can go on to reach this salvage, from records
+        # ``_step_per_stack_parse`` guaranteed carry uids. The guard is for the
+        # artifact a resume reads back out of a deep dir written by an older run,
+        # from before the field existed. Skip the pair rather than falling back
+        # to the ``(id, file)`` key: that fallback is the bug documented above,
+        # and leaving a duplicate in a partial report is a far smaller error
+        # than deleting the finding the pair was supposed to preserve.
+        unidentifiable_pairs.append(
+            f"{pair.get('record_a_id')!r}/{pair.get('record_b_id')!r}"
+        )
+    if unidentifiable_pairs:
+        # ONE warning for the whole salvage, not one per pair (mirrors
+        # ``phases._validate_agent_source_uids``): an artifact written before
+        # ``record_b_uid`` existed can carry many such pairs at once, and
+        # per-pair reporting would bury the run's real output under identical
+        # lines.
+        shown = ", ".join(unidentifiable_pairs[:_MAX_REPORTED_UNIDENTIFIABLE_PAIRS])
+        if len(unidentifiable_pairs) > _MAX_REPORTED_UNIDENTIFIABLE_PAIRS:
+            shown += f", +{len(unidentifiable_pairs) - _MAX_REPORTED_UNIDENTIFIABLE_PAIRS} more"
+        print_warning(
+            console,
+            "Cross-stack merge salvage: dedup pair(s) carries no record_b_uid, so "
+            "neither side can be identified; keeping both records (issue #1111). "
+            f"({len(unidentifiable_pairs)} pair(s): {shown})",
+        )
+    if not dropped_uids:
         return records
-    kept = [
-        r
-        for r in records
-        if (str(r.get("id", "")), str(r.get("file", ""))) not in dropped_keys
-    ]
+    # ``record_uid`` is ``""`` for an item with no pre-merge identity and ``""``
+    # is never in ``dropped_uids``, so such an item is always kept.
+    kept = [r for r in records if record_uid(r) not in dropped_uids]
     if len(kept) != len(records):
         print_info(
             console,
@@ -2172,6 +2471,14 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     # follow-up). Apply the D-27 dedup pre-filter (issue #361): with no merge
     # agent to adjudicate, drop the duplicate side of cross-stack record pairs so
     # the partial list doesn't carry duplicates into the resume verifier/fix gate.
+    # Issue #1111: these items are host-written -- no merge agent ran, by
+    # definition of this path -- so their ``source_uids`` come from the records'
+    # own uids. That attribution is not repeated here: it lives in
+    # ``_write_single_stack_merged_items``, which is the single writer of this
+    # path's items, and duplicating it would give the salvage report a second
+    # spelling of provenance that could drift from the bypass's. The records
+    # reaching here are uid-stamped (``_step_per_stack_parse``) and pass through
+    # ``_drop_cross_stack_duplicates`` unmodified, so the uids survive.
     records = _drop_cross_stack_duplicates(dd, ctx.data["records"])
     _write_single_stack_merged_items(
         ctx.work.repo,

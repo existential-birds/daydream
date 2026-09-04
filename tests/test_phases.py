@@ -2813,6 +2813,47 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
 
 
 @pytest.mark.asyncio
+async def test_phase_test_and_heal_prompts_require_foreground_run_and_summary_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """Both test prompts (generic and pinned-command) forbid backgrounding and ask for the summary.
+
+    The host parses the turn's final text for the verdict, so an agent that
+    backgrounds the suite and ends its turn hands the host its own narration,
+    which reads as a failure and is then fed to the fix agent as "test output".
+    The prompt must say so on both paths; the Claude backend enforces it.
+    """
+    from daydream.phases import phase_test_and_heal
+
+    silence_console("daydream.phases")
+
+    backend = _HealBackend(script=[
+        _FAIL_TURN,
+        _structured_turn({
+            "verdict": "replace",
+            "suggested_command": "make check",
+            "reason": "Makefile defines `check` as the CI test target",
+        }),
+        _PASS_TURN,
+    ])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert success is True
+    generic_prompt, pinned_prompt = backend.prompts[0], backend.prompts[2]
+    assert generic_prompt.startswith("Run the project's test suite.")
+    assert "make check" in pinned_prompt
+    for prompt in (generic_prompt, pinned_prompt):
+        assert "never run it in the background" in prompt
+        assert "final summary line verbatim" in prompt
+
+
+@pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

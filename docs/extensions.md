@@ -211,8 +211,8 @@ model = "claude-sonnet-5"
 
 The built-in tool supervisor applies the shared file globs to `Write` and
 `Edit`, and applies `tool_bash_deny` as regular expressions to `Bash` commands.
-Claude's always-on dangerous-command guard remains active; this configuration
-adds rules and does not replace it.
+Claude's always-on guards (dangerous-command and background-Bash) remain
+active; this configuration adds rules and does not replace them.
 
 Supervisor actions are `allow`, `drop`, `edit`, and `hold`. A held finding is
 removed from the actionable `items` list and stored under the top-level `held`
@@ -459,6 +459,55 @@ exact-signature override of one of those five prompts must add
 its own signature; an override that omits it raises `TypeError` and aborts that
 phase's fan-out. Read `ctx.data["intent_authoritative"]` with `.get(…, False)`
 to handle the absent-on-resume case correctly.
+
+#### Host-assigned record `uid`
+
+Per-stack review records, and the finding items behind `items` / `items_file`,
+may carry a host-assigned `uid` string (`stack:ordinal`, e.g. `python:1`). It is
+the record's *referential* identity — "which record object is this?" — minted at
+record birth by `daydream/deep/records.py` and used by dedup, arbitration,
+suppression and the per-stack records rewrite. This is an **additive** field and
+does not bump `EXTENSION_API_VERSION`: a fork that round-trips whole record dicts
+carries it through automatically, and a `{**item, ...}` spread preserves it.
+
+Merged items additionally carry `source_uids`: the list of record `uid`s the
+finding derives from. A merged item is a synthesis and may consolidate several
+records, so its provenance is a list where a record's identity is a single
+value. Read it with `daydream.deep.records.item_source_uids`, which resolves the
+explicit attribution first and falls back to the item's own `uid`, so one
+accessor is correct for merge-agent items, for items that bypassed the merge
+agent (the single-stack path, host-appended structural records, the salvage
+path), and for artifacts written before the field existed. An empty list means
+the merge agent declined to attribute the item — a real answer, not an error.
+
+Merged items also carry `item_uid` (`item:n`) — the item's **own durable
+identity**, distinct from both of the above. `id` is the human-facing finding
+number and `normalize_items` reassigns it to a dense `1..N` sequence by design,
+so it is not a stable handle; `item_uid` is minted once and never reassigned.
+This matters directly to a fork: if you rewrite `items_file` and renumber, every
+`id` shifts, but `item_uid` survives the round-trip. Read it with
+`daydream.deep.records.item_uid`, and preserve it when you rewrite an item —
+minting a fresh one would defeat the point. It is host-minted post-validation
+and is deliberately absent from `MERGED_ITEMS_SCHEMA`.
+
+Three keys can therefore sit on one merged item, answering three different
+questions: `uid` (which record it was born as — structural and single-stack
+items only), `item_uid` (which shipped finding this is), and `source_uids`
+(which records it was made of). Do not substitute one for another; in
+particular provenance is not identity, since two items may cite the same record.
+
+Two constraints for a fork that reads it:
+
+- `uid` itself is a **pre-merge** handle. The cross-stack merge agent re-emits
+  items from scratch, so a multi-stack merged item has no `uid` *of its own* —
+  use `source_uids` for its derivation, and note that `id` is already globally
+  unique on every merged item. `daydream.deep.records.record_uid` returns `""`
+  for "no pre-merge identity"; after a multi-stack merge that is the common
+  case, not an error.
+- Never mint one yourself, and never derive one from record content. A
+  content-derived key gets *less* discriminating as two records get more
+  similar, which is precisely the condition every consumer of this field runs
+  under. A duplicate `uid` is a fatal error the host reports and stops on.
 
 ## Recipes
 

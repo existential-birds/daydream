@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
+from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
 from daydream.eval.analyzer import (
     _files_read,
     _quality_python_parser,
@@ -1515,8 +1516,23 @@ def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
 
 
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
-    """Write deep/f\"stack-{stack_name}-records.json\" = [{\"id\": i, \"confidence\": \"HIGH\"}]*n."""
-    records = [{"id": i, "confidence": "HIGH"} for i in range(n)]
+    """Write ``deep/stack-{stack_name}-records.json`` with *n* HIGH records.
+
+    Each record also carries the host-minted ``uid`` a real per-stack record is
+    stamped with at birth (issue #1111), so the fixture matches the production
+    artifact shape. Ordinals are 1-based, matching ``stamp_record_uids``, while
+    the reviewer-style ``id`` stays 0-based -- the two are deliberately not the
+    same numbering, which is part of why ``id`` cannot serve as an identity.
+
+    Args:
+        deep: The ``.daydream/deep`` directory to write into.
+        stack_name: Stack whose records file is written.
+        n: How many records to seed.
+    """
+    records: list[dict[str, Any]] = [
+        {"id": i, "confidence": "HIGH", "uid": mint_record_uid(stack_name, i + 1)}
+        for i in range(n)
+    ]
     (deep / f"stack-{stack_name}-records.json").write_text(json.dumps(records))
 
 
@@ -1840,6 +1856,20 @@ def seed_dedup_candidates(
     )
 
 
+def _provenance(*uids: str) -> dict[str, Any]:
+    """Keyword payload carrying an explicit ``source_uids`` claim (issue #1111).
+
+    Returns ``dict[str, Any]`` rather than an inline literal so ``**``-unpacking
+    into :func:`_item` type-checks. The key is a module constant, not a literal,
+    so mypy cannot tell which parameter it targets and matches it against every
+    keyword-only one -- a ``list[str]`` value then fails against ``file: str``.
+
+    Call with no arguments for the "merge agent declined to attribute this item"
+    case, which is a real answer and distinct from omitting the key entirely.
+    """
+    return {RECORD_SOURCE_UIDS_KEY: list(uids)}
+
+
 def _item(
     item_id: int,
     *,
@@ -1931,6 +1961,10 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
     assert (pair["a_id"], pair["b_id"]) == ("1", "2")
     assert (pair["a_lens"], pair["b_lens"]) == ("per-stack", "structural")
     assert pair["same_file"] is True
+    # Both items here are merge-agent-authored and neither was attributed, so
+    # neither side has pre-merge provenance (issue #1111). The empty list is the
+    # expected value, not an error, and the axis still reports the pair.
+    assert (pair["a_source_uids"], pair["b_source_uids"]) == ([], [])
 
     # The clean run -- one correct finding only -- now scores strictly better.
     clean_dd, clean_deep = _worked_example_dirs(tmp_path / "clean")
@@ -2214,6 +2248,166 @@ def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path
     assert duplication["max_similarity"] >= 0.5
     assert duplication["mean_similarity"] == duplication["max_similarity"]
     assert duplication["pairs"][0]["similarity"] == duplication["max_similarity"]
+
+
+def test_shipped_duplication_pairs_carry_the_item_source_uids(tmp_path: Path) -> None:
+    """A shipped duplicate is traceable to the records that produced it.
+
+    Merged items reach ``merged-items.json`` by two routes. The merge agent
+    re-emits items from scratch and attributes them via ``source_uids``; items
+    that bypass it -- the single-stack path and the host-appended structural
+    items -- keep the ``uid`` they were born with and report it as a
+    one-element list. Both routes appear here in one shipped set, so the row
+    names real records on both sides without the reader having to know which
+    route each item took.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(
+                1,
+                line=88,
+                description="The loader does not validate its config path",
+                lens="structural",
+                uid=mint_record_uid("structure", 3),
+            ),
+            _item(
+                2,
+                line=90,
+                description="The loader fails to validate the config path",
+                **_provenance(mint_record_uid("python", 4)),
+            ),
+        ],
+    )
+
+    duplication = analyze_shipped_duplication(dd)
+
+    assert duplication["comparable_pairs"] == 1
+    pair = duplication["pairs"][0]
+    assert (pair["a_id"], pair["b_id"]) == ("1", "2")
+    assert pair["a_source_uids"] == ["structure:3"]
+    assert pair["b_source_uids"] == ["python:4"]
+    # The lens columns still describe the right item after the pair is mapped
+    # back through the synthetic index ``sources`` channel.
+    assert (pair["a_lens"], pair["b_lens"]) == ("structural", "per-stack")
+    # The provenance columns are reporting-only: the numeric definitions are
+    # untouched.
+    assert duplication["near_duplicate_pairs"] == 1
+    assert duplication["same_file_pairs"] == 1
+
+
+def test_shipped_duplication_reports_every_consolidated_source_uid_in_order(
+    tmp_path: Path,
+) -> None:
+    """A merge-agent item that consolidates two records names both, in order.
+
+    This is why the column is a list rather than a scalar: one shipped finding
+    can be the synthesis of several per-stack records, and collapsing that to a
+    single handle would drop half the trail. Order is the merge agent's own
+    attribution order, preserved so the leading uid stays the one it credited
+    first.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(
+                1,
+                line=88,
+                description="The loader does not validate its config path",
+                lens="cross-stack",
+                **_provenance("python:1", "react:2"),
+            ),
+            _item(
+                2,
+                line=90,
+                description="The loader fails to validate the config path",
+                **_provenance("python:7"),
+            ),
+        ],
+    )
+
+    duplication = analyze_shipped_duplication(dd)
+
+    pair = duplication["pairs"][0]
+    assert pair["a_source_uids"] == ["python:1", "react:2"]
+    assert pair["b_source_uids"] == ["python:7"]
+
+
+def test_shipped_duplication_reports_empty_provenance_rather_than_fabricating_one(
+    tmp_path: Path,
+) -> None:
+    """An unattributed item reports ``[]`` -- a real answer, not a placeholder.
+
+    ``source_uids: []`` is the merge agent declining to attribute an item. The
+    axis must say so rather than substituting the item's ``id``, its lens, or
+    any other handle that would read as a record uid without being one.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    seed_merged_items(
+        deep,
+        [
+            _item(
+                1,
+                line=88,
+                description="The loader does not validate its config path",
+                **_provenance(),
+            ),
+            _item(
+                2,
+                line=90,
+                description="The loader fails to validate the config path",
+                **_provenance(),
+            ),
+        ],
+    )
+
+    duplication = analyze_shipped_duplication(dd)
+
+    pair = duplication["pairs"][0]
+    assert pair["a_source_uids"] == []
+    assert pair["b_source_uids"] == []
+    # The pair is still reported: an unattributed duplicate is still a
+    # duplicate, and dropping it would blank out the axis on a real run.
+    assert duplication["near_duplicate_pairs"] == 1
+
+
+def test_shipped_duplication_falls_back_to_the_birth_uid_without_source_uids(
+    tmp_path: Path,
+) -> None:
+    """An item carrying only ``uid`` reports ``[uid]``.
+
+    This is both the host-appended shape (structural items and the single-stack
+    bypass never see the merge agent) and the legacy shape (artifacts written
+    before ``source_uids`` existed). Neither should read as unattributed just
+    because the newer key is missing.
+    """
+    dd, deep = _worked_example_dirs(tmp_path)
+    legacy_items = [
+        _item(
+            1,
+            line=88,
+            description="The loader does not validate its config path",
+            uid=mint_record_uid("python", 2),
+        ),
+        _item(
+            2,
+            line=90,
+            description="The loader fails to validate the config path",
+            uid=mint_record_uid("structure", 5),
+        ),
+    ]
+    # Guard the premise: the fallback is only under test if the newer key really
+    # is absent from the fixture.
+    assert all(RECORD_SOURCE_UIDS_KEY not in item for item in legacy_items)
+    seed_merged_items(deep, legacy_items)
+
+    duplication = analyze_shipped_duplication(dd)
+
+    pair = duplication["pairs"][0]
+    assert pair["a_source_uids"] == ["python:2"]
+    assert pair["b_source_uids"] == ["structure:5"]
 
 
 def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:

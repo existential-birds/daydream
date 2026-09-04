@@ -13,6 +13,7 @@ from daydream.deep.dedup import (
     build_record_dedup_candidates,
     descriptions_match,
 )
+from daydream.deep.records import mint_record_uid, stamp_record_uids
 
 
 def test_file_overlap_without_title_similarity_produces_no_pair() -> None:
@@ -70,10 +71,15 @@ def test_record_dedup_identical_descriptions() -> None:
         {"id": "1", "file": "cli/audit.ts", "line": 133, "description": desc},
         {"id": "2", "file": "cli/audit-storybook.ts", "line": 260, "description": desc},
     ]
+    # Production records reach the pre-filter already stamped (issue #1111), so
+    # the fixture stamps them the same way rather than hand-writing uids.
+    stamp_record_uids(records, "typescript")
     pairs = build_record_dedup_candidates(records, sources=["typescript", "typescript"])
     assert len(pairs) == 1
     assert pairs[0].record_a_id == "1"
     assert pairs[0].record_b_id == "2"
+    assert pairs[0].record_a_uid == "typescript:1"
+    assert pairs[0].record_b_uid == "typescript:2"
     assert pairs[0].record_a_source == "typescript"
     assert pairs[0].record_b_source == "typescript"
     assert pairs[0].similarity >= 0.5
@@ -137,6 +143,104 @@ def test_record_dedup_cross_stack_source_disambiguation() -> None:
     assert pairs[0].record_a_source == "python"
     assert pairs[0].record_b_source == "react"
     assert pairs[0].similarity >= 0.5
+
+
+# ---------------------------------------------------------------------------
+# uid on RecordDuplicatePair (issue #1111). The reviewer-assigned ``id``
+# restarts at 1 per stack, so it cannot say WHICH record a pair side is; the
+# host-minted ``uid`` can, and these fields are the on-disk wire format of
+# ``dedup-candidates.json`` (the writer is a bare ``dataclasses.asdict``).
+# ---------------------------------------------------------------------------
+
+_SHARED_DESC = "Missing input validation on the user endpoint"
+
+
+def test_record_dedup_carries_both_record_uids() -> None:
+    """Each pair side reports the uid of the record it was built from."""
+    records = [
+        {
+            "id": "1",
+            "file": "api.py",
+            "line": 10,
+            "description": _SHARED_DESC,
+            "uid": mint_record_uid("python", 1),
+        },
+        {
+            "id": "1",
+            "file": "routes.ts",
+            "line": 42,
+            "description": _SHARED_DESC,
+            "uid": mint_record_uid("typescript", 7),
+        },
+    ]
+    pairs = build_record_dedup_candidates(records, sources=["python", "typescript"])
+    assert len(pairs) == 1
+    # The ids collide (both "1") -- the uids are what tell the two sides apart.
+    assert (pairs[0].record_a_id, pairs[0].record_b_id) == ("1", "1")
+    assert (pairs[0].record_a_uid, pairs[0].record_b_uid) == ("python:1", "typescript:7")
+
+
+def test_record_dedup_emits_empty_uid_for_a_record_that_has_none() -> None:
+    """An unstamped record yields ``""`` on its side, and the pair still emits.
+
+    ``eval.analyzer.analyze_shipped_duplication`` deliberately runs this builder
+    over POST-merge items, which the merge agent re-emits without a uid. Dropping
+    or rejecting those pairs would blank out that eval axis entirely, so ``""``
+    is a valid value here, not an error.
+    """
+    records = [
+        {"id": "1", "file": "api.py", "line": 10, "description": _SHARED_DESC},
+        {
+            "id": "2",
+            "file": "api.py",
+            "line": 42,
+            "description": _SHARED_DESC,
+            "uid": mint_record_uid("python", 2),
+        },
+        {"id": "3", "file": "api.py", "line": 90, "description": _SHARED_DESC},
+    ]
+    pairs = build_record_dedup_candidates(records, sources=["merged", "python", "merged"])
+    assert len(pairs) == 3
+    by_ids = {(p.record_a_id, p.record_b_id): (p.record_a_uid, p.record_b_uid) for p in pairs}
+    assert by_ids[("1", "2")] == ("", "python:2")   # missing on the a side only
+    assert by_ids[("2", "3")] == ("python:2", "")   # missing on the b side only
+    assert by_ids[("1", "3")] == ("", "")           # missing on both sides
+
+
+def test_record_dedup_uid_totally_orders_pairs_that_tie_on_both_ids() -> None:
+    """The uid tiebreaker makes the emitted order total and reproducible.
+
+    Four records, ids ``1,2`` in each of two stacks, all with the same
+    description: three distinct pairs then share ``(record_a_id, record_b_id) ==
+    ("1", "2")``. Under the old ``(a_id, b_id)`` sort key those three tied and
+    kept whatever relative order pair enumeration produced. The uid pair breaks
+    every tie, so the full sequence below is exact.
+    """
+    python_records = [
+        {"id": "1", "file": "api.py", "line": 10, "description": _SHARED_DESC},
+        {"id": "2", "file": "api.py", "line": 20, "description": _SHARED_DESC},
+    ]
+    react_records = [
+        {"id": "1", "file": "App.tsx", "line": 30, "description": _SHARED_DESC},
+        {"id": "2", "file": "App.tsx", "line": 40, "description": _SHARED_DESC},
+    ]
+    stamp_record_uids(python_records, "python")
+    stamp_record_uids(react_records, "react")
+    records = [*python_records, *react_records]
+    sources = ["python", "python", "react", "react"]
+
+    pairs = build_record_dedup_candidates(records, sources=sources)
+
+    assert [(p.record_a_id, p.record_b_id, p.record_a_uid, p.record_b_uid) for p in pairs] == [
+        ("1", "1", "python:1", "react:1"),
+        ("1", "2", "python:1", "python:2"),
+        ("1", "2", "python:1", "react:2"),
+        ("1", "2", "react:1", "react:2"),
+        ("2", "1", "python:2", "react:1"),
+        ("2", "2", "python:2", "react:2"),
+    ]
+    # Reproducible: the same input yields byte-identical ordering every call.
+    assert build_record_dedup_candidates(records, sources=sources) == pairs
 
 
 # ---------------------------------------------------------------------------

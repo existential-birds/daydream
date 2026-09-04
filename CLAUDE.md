@@ -88,6 +88,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
 | `deep/orchestrator.py` | Deep-flow steps: exploration, intent, wonder, per-stack, arbiter, merge, verify, fix |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
+| `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
 | `improve/` | Read-only recon, category audits, vetting, prioritization, plan artifacts |
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
@@ -115,6 +116,13 @@ Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.
 `execute()` yields the 8-member `AgentEvent` union (`Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
 `Metrics`, `TurnEnd`, `Result`). Adding a backend means producing that stream correctly — phases and the
 recorder are backend-agnostic.
+
+The Claude backend enforces two always-on `PreToolUse` guards in every phase and profile: the
+dangerous-command guard (root-anchored scans, `rm -rf /`) and the background-Bash guard. The host reads a
+turn's final text as the phase result and stops consuming the session when the turn ends, at which point
+the CLI kills its background tasks — so `Bash(run_in_background=True)` can never report and is denied. The
+CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts the Bash timeout ceiling to
+`TEST_WALL_BUDGET_S` so a slow test suite has no reason to be backgrounded.
 
 ### Run-agent budgets
 
@@ -178,6 +186,27 @@ exploration pre-scan (cached across runs)
   is why the extension API is v4.
 - The N parse calls run concurrently but are consumed in **stack-name order**, keeping merge input ordering
   and global issue numbering reproducible.
+- **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
+  (`stack:ordinal`, `deep/records.py`) at birth — both birth sites, the per-stack reviewers and the uncovered
+  sweep — and backfilled by the same deterministic rule when loaded, so pre-`uid` artifacts resume cleanly.
+  The reviewer's `id` restarts at 1 per stack and is *not* unique; `normalize_items` mints the human-facing
+  `id` only at the final merge write. Dedup, arbitration, suppression and the structural fold all run before
+  that, so they key on `uid`. A content key (`compute_fingerprint`, `descriptions_match`) answers
+  "same defect?" and stays content-derived; it must never be used to answer "which record is this?" — it gets
+  *less* discriminating exactly as records get more similar, which is the only case those sites see.
+  `uid` is a **pre-merge** handle: the merge agent re-emits items from scratch, so a multi-stack merged item
+  has none *of its own*. Its derivation is `source_uids` — the list of records it was synthesized from, which
+  the merge agent emits and the host **validates against the run's record pool** (an unknown uid is dropped
+  with a warning, fail-open, never trusted). Read a record's identity with `record_uid()` and an item's
+  provenance with `item_source_uids()`; `""`/`[]` means "no pre-merge identity", which is a real answer.
+- **A merged item's own identity is `item_uid`, not `id`.** `normalize_items` reassigns `id` to a dense
+  1..N sequence on every call *by design* — that is what makes a report read `1, 2, 3` — so it cannot also
+  be a durable handle; the two requirements contradict. `item_uid` is minted alongside it and never
+  reassigned. Three distinct keys can sit on one merged item and answer three different questions:
+  `uid` (the record it was born as, structural/single-stack only), `item_uid` (which shipped finding this
+  is), `source_uids` (which records it was made of). Provenance is *not* identity — two items may cite the
+  same record, so `source_uids` is not unique. Keep `id` integer: five strict `*_SCHEMA` constants type the
+  echoed `id`/`issue_id` as `integer`, and the report renders it as the finding number.
 - Intent and wonder prompts inline the diff under `INLINE_DIFF_BUDGET_BYTES` (12 KiB, shared with per-stack),
   else the `diff.patch` pointer. Small diffs skip the fan-out entirely.
 - Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed
@@ -199,7 +228,7 @@ Full contract: `docs/extensions.md`.
 
 ## Constraints and conventions
 
-- **SDK** `claude-agent-sdk==0.2.116`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
+- **SDK** `claude-agent-sdk==0.2.147`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
   unshielded on cancellation, so a budget/fan-out cancel mid-stream corrupts anyio's cancel-scope stack.
 - **ATIF** vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0), pinned to v1.7 emission.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
