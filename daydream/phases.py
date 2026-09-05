@@ -3488,6 +3488,47 @@ def _verify_commit_scope(
         )
 
 
+async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
+    """Re-run the canonical test command after a declined commit/push gate.
+
+    Issue #726: declining to commit must not quietly discard a run whose fixes
+    were never validated — but it must also never claim success on a red suite.
+    The canonical host-side test command (CLI ``--test-command`` over the file
+    config, resolved exactly as in the TEST phase) runs again as a real
+    subprocess via :func:`run_test_command`; a green suite lets the run end
+    successfully with the fixes left uncommitted, and a red suite raises so
+    the caller's ``_commit_push_or_stop`` guard surfaces ``Stop(1)``.
+
+    With no canonical command configured there is nothing to validate against
+    (see :func:`_canonical_test_cmd`); the decline then behaves as before
+    rather than fabricating a verdict.
+    """
+    cmd = _canonical_test_cmd(config)
+    if cmd is None:
+        return
+    result = await run_test_command(
+        cmd=cmd,
+        cwd=work.repo,
+        wall_budget_s=TEST_WALL_BUDGET_S,
+    )
+    if result.passed:
+        print_success(
+            console,
+            "Commit declined; post-fix validation passed (changes left uncommitted)",
+        )
+        return
+    print_error(
+        console,
+        "Commit declined but post-fix validation failed",
+        "The applied fixes did not pass the configured test command; the run "
+        "cannot be reported as successful.",
+    )
+    raise RuntimeError(
+        "Post-fix validation failed after the commit/push gate was declined: "
+        "the configured test command exited non-zero."
+    )
+
+
 async def _do_commit(
     backend: Backend,
     work: WorkContext,
@@ -3496,6 +3537,7 @@ async def _do_commit(
     interactive: bool = False,
     items: list[dict[str, Any]] | None = None,
     preexisting_untracked: set[str] | None = None,
+    config: Any = None,
 ) -> bool:
     """Stage, commit, and optionally push — all host-side, no agent turn.
 
@@ -3515,7 +3557,13 @@ async def _do_commit(
         work: Current workspace context (repo path, run ID, etc.).
         push: If True, push to the remote after committing.
         interactive: If True, prompt the user for confirmation before
-            committing.
+            committing. When the gate is declined, the applied fixes are
+            still validated by re-running the canonical host-side test
+            command (:func:`_validate_declined_fixes`) — a decline no longer
+            silently skips validation (issue #726).
+        config: Optional ``RunConfig`` carrying the CLI ``--test-command"
+            flag and the merged file config, used to resolve the canonical
+            test command for the decline-path validation.
         items: Optional list of fix dicts (with ``file`` and ``description``
             keys) summarising changes applied in this run; folded into the
             deterministic commit message.
@@ -3549,6 +3597,10 @@ async def _do_commit(
         )
         if not decision:
             print_dim(console, "Skipping commit and push")
+            # Issue #726: a decline still validates the applied fixes via the
+            # host test runner; a red suite raises (surfaces as Stop(1)) so a
+            # run is never reported successful with unvalidated fixes.
+            await _validate_declined_fixes(work, config)
             return False
 
     # Defensive untracked protection: a caller without a pre-run snapshot
@@ -3598,14 +3650,25 @@ async def _do_commit(
 
 
 async def phase_commit_push(
-    backend: Backend, work: WorkContext, *, preexisting_untracked: set[str] | None = None,
+    backend: Backend,
+    work: WorkContext,
+    *,
+    preexisting_untracked: set[str] | None = None,
+    config: Any = None,
 ) -> None:
-    """Prompt user to commit and push changes."""
+    """Prompt user to commit and push changes.
+
+    When the gate is declined, the applied fixes are still validated by
+    re-running the canonical host-side test command (issue #726): the phase
+    only ends quietly when that validation passes, and raises (surfaced as
+    ``Stop(1)`` by the orchestrator's commit guard) when it fails.
+    """
     console.print()
     print_info(console, "Committing and pushing changes...")
     committed = await _do_commit(
         backend, work, push=True, interactive=True,
         preexisting_untracked=preexisting_untracked,
+        config=config,
     )
     if committed:
         print_success(console, "Commit and push complete")

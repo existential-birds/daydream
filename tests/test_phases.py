@@ -2756,6 +2756,108 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     assert "fix:" in message
 
 
+# phase_commit_push — declined gate still validates applied fixes (issue #726)
+
+
+def _init_plain_repo(tmp_path: Path) -> Path:
+    """Minimal real git repo for decline-path tests (no commit is made)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_still_runs_host_validation_before_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    silence_console: Callable[..., None],
+) -> None:
+    """Declining the commit gate must still re-run the host test runner and
+    only count the run as successful when that validation passes."""
+    from daydream.phases import phase_commit_push
+    from daydream.test_execution import TestExecutionResult
+
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.phases.resolve_or_prompt", lambda **k: False)
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run(*a: Any, **k: Any) -> TestExecutionResult:
+        calls.append(k)
+        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="ok")
+
+    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+
+    repo = _init_plain_repo(tmp_path)
+    work = make_work(repo)
+    config = make_config(tmp_path, test_command="true")
+    await phase_commit_push(_HostCommitBackend(repo), work, config=config)
+
+    assert calls, "validation must re-run the host test runner on decline"
+    assert calls[0]["cwd"] == repo
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_surfaces_failed_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    silence_console: Callable[..., None],
+) -> None:
+    """A red validation suite after a declined commit must surface the failure
+    (raise), never report success on a red suite."""
+    import pytest as _pytest
+
+    from daydream.phases import phase_commit_push
+    from daydream.test_execution import TestExecutionResult
+
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.phases.resolve_or_prompt", lambda **k: False)
+
+    async def fake_run(*a: Any, **k: Any) -> TestExecutionResult:
+        return TestExecutionResult(exit_status=1, timed_out=False, merged_output="1 failed")
+
+    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+
+    repo = _init_plain_repo(tmp_path)
+    work = make_work(repo)
+    config = make_config(tmp_path, test_command="false")
+    with _pytest.raises(RuntimeError, match="validation"):
+        await phase_commit_push(_HostCommitBackend(repo), work, config=config)
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_without_configured_command_skips_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    silence_console: Callable[..., None],
+) -> None:
+    """With no canonical test command configured there is nothing to validate
+    against; the decline path must not fabricate a verdict and must not crash."""
+    from daydream.phases import phase_commit_push
+
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.phases.resolve_or_prompt", lambda **k: False)
+
+    async def fake_run(*a: Any, **k: Any) -> None:
+        raise AssertionError("run_test_command must not be called without a command")
+
+    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+
+    repo = _init_plain_repo(tmp_path)
+    work = make_work(repo)
+    config = make_config(tmp_path)
+    await phase_commit_push(_HostCommitBackend(repo), work, config=config)
+
+
 # phase_test_and_heal — option 1 setup-investigator wiring
 
 

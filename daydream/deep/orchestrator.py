@@ -4731,6 +4731,7 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
         phase_commit_push(
             ctx.backend_for("fix"), ctx.work,
             preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+            config=ctx.config,
         )
     )
 
