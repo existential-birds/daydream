@@ -77,10 +77,17 @@ def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
     # the remote is removed: after a plain clone the clone only exposes the
     # source's checked-out branch under refs/heads/* (the rest exist only as
     # refs/remotes/origin/*), so re-create each same-named ref by explicit OID
-    # — never a symbolic ref — with update_ref's validation as the gate. Any
-    # GitError propagates fail-closed: no half-snapshotted clone is used.
-    for name, oid in git_ops.list_local_branches(source).items():
-        git_ops.update_ref(destination, f"refs/heads/{name}", oid)
+    # — never a symbolic ref — with update_refs' validation as the gate. All
+    # branches go through one `git update-ref --stdin` transaction, so prep
+    # costs a single git call regardless of branch count, and any GitError
+    # (invalid name, failed transaction) propagates fail-closed: no
+    # half-snapshotted clone is used.
+    branches = git_ops.list_local_branches(source)
+    if branches:
+        git_ops.update_refs(
+            destination,
+            {f"refs/heads/{name}": oid for name, oid in branches.items()},
+        )
     git_ops.remove_remote(destination)
     # ls-files and ls-files --others --exclude-standard are disjoint by
     # construction, so one loop covers both. Enumerate strictly so a mid-prep

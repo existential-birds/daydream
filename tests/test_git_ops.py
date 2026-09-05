@@ -1571,20 +1571,54 @@ def test_remove_remote_deletes_configured_remote(tmp_path: Path) -> None:
     assert git_ops.head_sha(clone) == before
 
 
-def test_update_ref_sets_explicit_oid_and_rejects_bad_names(tmp_path: Path) -> None:
+def test_update_ref_sets_explicit_oid(tmp_path: Path) -> None:
+    """update_ref repoints an existing ref to a *different* OID: the ref is
+    seeded to HEAD and repointed at a newer commit, so a no-op write path
+    cannot satisfy the assertion."""
     repo = _make_repo_with_main(tmp_path, name="update_ref")
-    other = _git(repo, "rev-parse", "HEAD")  # any valid OID in this repo
-    _git(repo, "update-ref", "refs/heads/scratch", other)  # seed a ref to repoint
+    start = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/heads/scratch", start)  # seed a ref to repoint
+    (repo / "second.txt").write_text("second\n")
+    _git(repo, "add", "second.txt")
+    _commit(repo, "second")  # HEAD moves, so update_ref must write a new OID
+    target = _git(repo, "rev-parse", "HEAD")
+    assert target != start
 
-    git_ops.update_ref(repo, "refs/heads/scratch", other)
+    git_ops.update_ref(repo, "refs/heads/scratch", target)
 
-    assert _git(repo, "rev-parse", "refs/heads/scratch") == other
+    assert _git(repo, "rev-parse", "refs/heads/scratch") == target
+
+
+def test_update_ref_accepts_names_merely_ending_in_lock(tmp_path: Path) -> None:
+    """git forbids only the literal ``.lock`` component suffix, so branches
+    like unlock/block/deadlock/xLock are valid refs and snapshot cleanly."""
+    repo = _make_repo_with_main(tmp_path, name="update_ref_lockish")
+    oid = _git(repo, "rev-parse", "HEAD")
+    for name in ("unlock", "block", "deadlock", "xLock"):
+        ref = f"refs/heads/{name}"
+        git_ops.update_ref(repo, ref, oid)
+        assert _git(repo, "rev-parse", ref) == oid
+
+
+def test_update_refs_snapshots_a_batch_and_aborts_atomically(tmp_path: Path) -> None:
+    """update_refs writes many refs in one transactional git call, and a bad
+    ref aborts the whole batch: nothing is written."""
+    repo = _make_repo_with_main(tmp_path, name="update_refs")
+    oid = _git(repo, "rev-parse", "HEAD")
+    good = {f"refs/heads/{name}": oid for name in ("main", "unlock", "release/9.9")}
+    git_ops.update_refs(repo, good)
+    for ref, expected in good.items():
+        assert _git(repo, "rev-parse", ref) == expected
+
+    with pytest.raises(git_ops.GitError, match="git update-ref --stdin failed"):
+        git_ops.update_refs(repo, {"refs/heads/ok": oid, "refs/heads/bad name": oid})
+    assert "ok" not in git_ops.list_local_branches(repo)  # whole batch rolled back
 
 
 def test_update_ref_rejects_invalid_ref_name(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path, name="update_ref_bad")
     oid = git_ops.head_sha(repo)
-    for bad in ("refs/heads/..", "refs/heads/foo bar", "-dash-start", "refs/heads/xLock"):
+    for bad in ("refs/heads/..", "refs/heads/foo bar", "-dash-start", "refs/heads/topic.lock"):
         with pytest.raises(git_ops.GitError, match="invalid ref name"):
             git_ops.update_ref(repo, bad, oid)
 

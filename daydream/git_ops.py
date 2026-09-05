@@ -335,6 +335,7 @@ def _run_git(
     timeout: int = 5,
     capture_bytes: Literal[True],
     retries: int = _GIT_TIMEOUT_RETRIES,
+    input_text: str | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Binary-capture variant: ``capture_bytes=True`` reads bytes stdout."""
@@ -348,6 +349,7 @@ def _run_git(
     timeout: int = 5,
     capture_bytes: Literal[False] = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
+    input_text: str | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Text-capture variant (the default): decoded ``str`` stdout."""
@@ -360,12 +362,16 @@ def _run_git(
     timeout: int = 5,
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
+    input_text: str | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` in *repo* with hardened defaults.
 
     Args:
         capture_bytes: When True, capture stdout/stderr as bytes (no decoding).
+        input_text: Optional text piped to the subprocess on **stdin** (used
+            for ``git update-ref --stdin`` batch transactions whose payload
+            cannot express the whole ref set on argv).
         retries: How many additional attempts to make after a
             :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
             Only timeouts are retried; other failures raise immediately.
@@ -398,6 +404,7 @@ def _run_git(
                 timeout=timeout,
                 shell=False,
                 check=False,
+                input=input_text,
                 env=env_cmd,
             )
         except subprocess.TimeoutExpired as exc:
@@ -1697,10 +1704,11 @@ def update_ref(repo: Path, ref: str, oid: str) -> None:
     * *ref* is checked with ``git check-ref-format`` (git's own ref-format
       authority), plus two Python-side guards git cannot express: names
       beginning with ``-`` (git would parse them as options, never as a ref)
-      and names whose final component ends in ``lock`` (case-insensitive, so
-      both ``.lock`` — forbidden by git — and ``xLock``-style lock-file
-      lookalikes are rejected). Anything invalid raises ``GitError`` without
-      invoking ``update-ref``.
+      and names whose final component ends in the literal ``.lock`` suffix
+      (case-insensitive — git forbids exactly that suffix, so ``unlock``,
+      ``block``, ``deadlock`` and ``xLock`` are valid names and snapshot
+      cleanly, while ``topic.lock``/``topic.LOCK`` stay rejected). Anything
+      invalid raises ``GitError`` without invoking ``update-ref``.
 
     * *oid* must be a full 40-character hex object ID (upper- or lowercase);
       anything else raises ``GitError`` and is never passed through to git.
@@ -1715,14 +1723,49 @@ def update_ref(repo: Path, ref: str, oid: str) -> None:
         raise GitError(f"invalid OID: {oid}")
     if ref.startswith("-"):
         raise GitError(f"invalid ref name: {ref}")
-    if ref.rsplit("/", 1)[-1].lower().endswith("lock"):
+    if ref.rsplit("/", 1)[-1].lower().endswith(".lock"):
         raise GitError(f"invalid ref name: {ref}")
-    proc = _run_git(repo, ["check-ref-format", ref], timeout=10, retries=0)
+    # check-ref-format is a read-only query, so it inherits the retrying
+    # default; only the update-ref mutation below passes retries=0.
+    proc = _run_git(repo, ["check-ref-format", ref], timeout=10)
     if proc.returncode != 0:
         raise GitError(f"invalid ref name: {ref}")
     proc = _run_git(repo, ["update-ref", ref, oid], timeout=10, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git update-ref {ref} failed in {repo}: {proc.stderr.strip()}")
+
+
+def update_refs(repo: Path, ref_oids: dict[str, str]) -> None:
+    """Point many *ref* -> *oid* pairs at once (``git update-ref --stdin``).
+
+    Fail-closed mutating wrapper for the branch-snapshot loop — ``retries=0``
+    so a timed-out ref mutation is never re-run. Every pair is validated
+    **before** any shell-out with the same Python-side guards as
+    :func:`update_ref` (full 40-hex OID; ref must not start with ``-``; final
+    component must not end in the literal ``.lock`` suffix, case-insensitive).
+    Git's own ref-format validation — the same authority ``check-ref-format``
+    consults — then gates the whole batch as a single transaction, so either
+    every ref is written or (if any line is invalid) none are: a half-written
+    snapshot is never produced. An empty *ref_oids* is a no-op.
+
+    Raises:
+        GitError: If any ref or OID is invalid or the batch fails.
+    """
+    if not ref_oids:
+        return
+    for ref, oid in ref_oids.items():
+        if _OBJECT_ID_RE.fullmatch(oid) is None:
+            raise GitError(f"invalid OID: {oid}")
+        if ref.startswith("-"):
+            raise GitError(f"invalid ref name: {ref}")
+        if ref.rsplit("/", 1)[-1].lower().endswith(".lock"):
+            raise GitError(f"invalid ref name: {ref}")
+    lines = "".join(f"update {ref} {oid}\n" for ref, oid in ref_oids.items())
+    proc = _run_git(
+        repo, ["update-ref", "--stdin"], timeout=30, retries=0, input_text=lines
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git update-ref --stdin failed in {repo}: {proc.stderr.strip()}")
 
 
 def apply_staged_patch(repo: Path, patch: bytes) -> None:
