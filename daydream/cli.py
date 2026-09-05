@@ -1392,12 +1392,15 @@ def _handle_harvest_command(argv: list[str]) -> int:
     module attribute so test monkeypatches take effect). ``run_harvest`` is a
     coroutine in production, so it is driven through :func:`anyio.run`; a
     synchronous test double that returns a summary directly is used as-is.
-    Returns an exit code; ``main`` translates it to a process exit. Per-row
-    harvest errors do not escalate to a non-zero exit — the summary's
-    ``errors`` counter surfaces them.
+    Returns an exit code; ``main`` translates it to a process exit. An
+    aborted summary (``aborted >= 1``) or any per-row harvest errors
+    (``errors > 0``) exits ``1``; a clean partial completion with unresolved
+    findings still exits ``0`` (unresolved findings in the data are not
+    process failure).
 
     Returns:
-        ``0`` on success; ``1`` on a validation error.
+        ``0`` on success; ``1`` on a validation error or an aborted/errored
+        harvest summary.
     """
     import daydream.archive as _archive
     import daydream.training.harvest as _harvest
@@ -1434,6 +1437,8 @@ def _handle_harvest_command(argv: list[str]) -> int:
         # always async, so mypy only sees the coroutine type here.
         summary = run_harvest(config)  # type: ignore[assignment]
     print_info(console, str(summary))
+    if summary.get("aborted", 0) >= 1 or summary.get("errors", 0) > 0:
+        return 1
     return 0
 
 
