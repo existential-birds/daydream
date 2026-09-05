@@ -107,9 +107,10 @@ daydream /path/to/project --trace-to otlp
 
 The generic adapter honors the standard trace-specific variables and their general
 OTLP fallbacks for endpoint, headers, protocol, timeout, compression, and TLS
-configuration. HTTP/protobuf is the default transport. Standard OTLP exporter
-timeout values are seconds. TLS certificates and client credentials follow the
-selected OpenTelemetry exporter's configuration contract.
+configuration. HTTP/protobuf is the default transport. Daydream's Python OTLP
+exporter uses seconds for timeout values: set `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT=10`
+for a 10-second timeout, not `10000`. TLS certificates and client credentials follow
+the selected OpenTelemetry exporter's configuration contract.
 
 LangSmith and HoneyHive use their own endpoint and credential variables. Generic
 OTLP endpoint/header settings do not redirect these presets. Their owned HTTP
@@ -158,8 +159,11 @@ Unavailable values remain absent, and known zero values remain zero.
 All four backends share the same trace path. Data hidden by a backend's public
 stream—such as a proprietary CLI's internal system prompt or individual provider
 request timings—cannot be captured. Daydream records the effective request it sends
-and the response/tool data the backend exposes. Native tool timings are used when
-available; synthesized completion events do not establish an unobserved start time.
+and the response/tool data the backend exposes. Native tool timestamps and durations
+are stored as metadata; span intervals follow Daydream's observed execution. Attempt
+duration metadata comes only from terminal results that report the whole invocation.
+Per-message durations stay with their message usage metadata. Synthesized completion
+events do not establish an unobserved start time.
 
 For example, current Codex CLI JSON streams omit provider identity. Daydream leaves
 that field absent instead of guessing from the model name or a partial configuration

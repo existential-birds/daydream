@@ -41,6 +41,7 @@ class PrivacyPolicy:
                     parsed = urlsplit(value)
                     for url_credential in (parsed.username, parsed.password):
                         if url_credential:
+                            secrets.add(url_credential)
                             secrets.add(unquote(url_credential))
                 except ValueError:
                     pass

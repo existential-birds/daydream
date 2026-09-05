@@ -16,6 +16,7 @@ from daydream import runner
 from daydream.backends import (
     AgentEvent,
     CostEvent,
+    MetricsEvent,
     RequestEvent,
     ResultEvent,
     TextEvent,
@@ -321,3 +322,70 @@ async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
     assert attributes(_kind(spans, "attempt")[0])["gen_ai.usage.input_tokens"] == 5
     assert attributes(_kind(spans, "attempt")[0])["gen_ai.usage.cost"] == 0.005
     assert attributes(_kind(spans, "run")[0])["daydream.exit_code"] == 1
+
+
+@pytest.mark.parametrize("terminal_result", [False, True])
+@pytest.mark.parametrize("last_duration_source", ["tool", "message"])
+async def test_runner_attempt_duration_requires_terminal_result(
+    terminal_result: bool,
+    last_duration_source: str,
+    ext_dir: ExtDir,
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _flow(ext_dir)
+    emitted = anyio.Event()
+    timings: list[AgentEvent] = [
+        MetricsEvent("message-one", 5, 1, None, None, duration_ms=123),
+        ToolResultEvent("timed-tool", "source content", False, duration_ms=42),
+    ]
+    if last_duration_source == "message":
+        timings.reverse()
+
+    class TimedBackend:
+        model = "timed-model"
+
+        async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
+            yield RequestEvent(prompt)
+            yield ToolStartEvent("timed-tool", "Read", {"path": "source.py"})
+            for event in timings:
+                yield event
+            yield TextEvent("observed answer")
+            if terminal_result:
+                yield ResultEvent(None, None, duration_ms=500, duration_api_ms=400)
+            else:
+                emitted.set()
+                await anyio.sleep_forever()
+
+        async def cancel(self) -> None:
+            pass
+
+    install_backend(TimedBackend())
+    with otlp_collector() as collector:
+        config = _config(make_config, feature_branch_repo, collector.base_url, monkeypatch)
+        with anyio.fail_after(15):
+            if terminal_result:
+                assert await runner.run(config) == 0
+            else:
+                async with anyio.create_task_group() as group:
+                    group.start_soon(runner.run, config)
+                    await emitted.wait()
+                    group.cancel_scope.cancel()
+
+    attempt = _kind(collector.spans, "attempt")[0]
+    metadata = attributes(attempt)
+    if terminal_result:
+        assert metadata["daydream.duration_ms"] == 500
+        assert metadata["daydream.duration_api_ms"] == 400
+        assert attempt["status"]["code"] == "STATUS_CODE_OK"
+        assert json.loads((feature_branch_repo / _RESULT_FILE).read_text())["output"] == "observed answer"
+    else:
+        assert "daydream.duration_ms" not in metadata
+        assert "daydream.duration_api_ms" not in metadata
+        assert attempt["status"]["code"] == "STATUS_CODE_ERROR"
+        assert metadata["daydream.outcome"] == "cancelled"
+        assert not (feature_branch_repo / _RESULT_FILE).exists()
+    assert attributes(_kind(collector.spans, "tool")[0])["daydream.tool.duration_ms"] == 42
+    assert json.loads(metadata["daydream.message_usage"])[0]["duration_ms"] == 123

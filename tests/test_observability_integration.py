@@ -112,6 +112,7 @@ async def test_runner_exports_complete_portable_trace(
     assert billed["gen_ai.usage.input_tokens"] == 100
     assert billed["gen_ai.usage.output_tokens"] == 12
     assert billed["gen_ai.response.model"] == "observed-model"
+    assert billed["gen_ai.response.finish_reasons"] == ["stop"]
     assert billed["gen_ai.provider.name"] == "observed-provider"
     assert _PROMPT in billed["gen_ai.input.messages"]
     assert _SYSTEM in billed["gen_ai.input.messages"]
@@ -133,6 +134,100 @@ async def test_runner_exports_complete_portable_trace(
         assert usage["input_token_details"]["cache_read"] == 20
         assert usage["input_token_details"]["cache_creation"] == 5
         assert usage["total_cost"] == 0.004
+
+
+async def test_runner_preserves_redacted_scalar_arrays_and_encodes_nested_attributes(
+    ext_dir: ExtDir,
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _FLOW.replace(
+        "async def trace_probe(ctx):",
+        "async def trace_probe(ctx):\n"
+        "    from daydream.observability.runtime import current_session\n"
+        "    from daydream.observability.spans import SpanScope\n"
+        "    with SpanScope(current_session(), 'attribute-probe', 'task') as scope:\n"
+        "        scope.attrs({\n"
+        f"            'probe.strings': ['safe', '{_SECRET}'],\n"
+        "            'probe.integers': [1, 2],\n"
+        "            'probe.doubles': [1.5, 2.5],\n"
+        "            'probe.booleans': [True, False],\n"
+        "            'probe.empty': [],\n"
+        "            'probe.mixed': [1, True],\n"
+        f"            'probe.nested': {{'items': ['safe', '{_SECRET}']}},\n"
+        "        })",
+    )
+    ext_dir.write_module(probe)
+    install_backend(ScriptedBackend(events=[
+        RequestEvent(_PROMPT), TextEvent(_REPLY),
+        ResultEvent({"answer": "safe"}, None, finish_reason=f"stop {_SECRET}"),
+    ]))
+    with otlp_collector() as receiver:
+        _configure(monkeypatch, receiver.base_url, "otlp")
+        assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 0
+    attempt = next(span for span in receiver.spans if attributes(span).get("daydream.span.kind") == "attempt")
+    reasons = attributes(attempt)["gen_ai.response.finish_reasons"]
+    assert isinstance(reasons, list) and len(reasons) == 1
+    assert reasons[0].startswith("stop ") and _SECRET not in reasons[0]
+    attrs = attributes(next(span for span in receiver.spans if span["name"] == "attribute-probe"))
+    assert attrs["probe.strings"] == ["safe", "[REDACTED_CREDENTIAL]"]
+    assert attrs["probe.integers"] == [1, 2]
+    assert attrs["probe.doubles"] == [1.5, 2.5]
+    assert attrs["probe.booleans"] == [True, False]
+    assert attrs["probe.empty"] == []
+    assert json.loads(attrs["probe.mixed"]) == [1, True]
+    assert json.loads(attrs["probe.nested"]) == {"items": ["safe", "[REDACTED_CREDENTIAL]"]}
+    assert _SECRET not in json.dumps([request["body"] for request in receiver.requests])
+
+
+@pytest.mark.parametrize("endpoint_setting", ["UPSTREAM_API_URL", "UPSTREAM_ENDPOINT"])
+async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malformed_unrelated_url(
+    endpoint_setting: str,
+    ext_dir: ExtDir,
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentials = ("operator%2Fname", "operator/name", "opaque%2Fsecret", "opaque/secret")
+    exposed_text = "Observed values: " + " then ".join(credentials)
+    monkeypatch.setenv(endpoint_setting, "https://operator%2Fname:opaque%2Fsecret@service.test")
+    monkeypatch.setenv("BROKEN_API_URL", "https://[malformed-ipv6")
+    ext_dir.write_module(_FLOW)
+    install_backend(ScriptedBackend(events=[
+        RequestEvent(exposed_text),
+        ToolStartEvent("credential-probe", "Read", {"note": exposed_text}),
+        ToolResultEvent("credential-probe", exposed_text, False),
+        TextEvent(exposed_text), CostEvent(0.005, 20, 4),
+        ResultEvent({"answer": "safe"}, None),
+    ]))
+    with otlp_collector() as receiver:
+        _configure(monkeypatch, receiver.base_url, "otlp")
+        assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 0
+    assert json.loads((feature_branch_repo / ".daydream/observability-result.json").read_text()) == {"answer": "safe"}
+    payload = json.dumps([request["body"] for request in receiver.requests])
+    for credential in credentials:
+        assert credential not in payload
+    spans = receiver.spans
+    assert len(spans) == 5
+    by_id = {span["spanId"]: span for span in spans}
+    tool = next(span for span in spans if attributes(span).get("daydream.span.kind") == "tool")
+    attempt = by_id[tool["parentSpanId"]]
+    agent = by_id[attempt["parentSpanId"]]
+    phase = by_id[agent["parentSpanId"]]
+    root = by_id[phase["parentSpanId"]]
+    assert not root.get("parentSpanId")
+    assert len({span["traceId"] for span in spans}) == 1
+    assert attributes(attempt)["gen_ai.usage.input_tokens"] == 20
+    assert attributes(attempt)["gen_ai.usage.output_tokens"] == 4
+    assert attributes(attempt)["gen_ai.usage.cost"] == 0.005
+    for text in (
+        attributes(attempt)["gen_ai.input.messages"], attributes(attempt)["gen_ai.output.messages"],
+        attributes(tool)["traceloop.entity.input"], attributes(tool)["traceloop.entity.output"],
+    ):
+        assert "Observed values:" in text and "[REDACTED_CREDENTIAL]" in text
 
 
 async def test_runner_metadata_policy_preserves_structure_and_omits_content(

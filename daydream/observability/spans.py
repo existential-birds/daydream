@@ -135,7 +135,12 @@ class SpanScope:
                 if value is None:
                     continue
                 safe = self.session.policy.value(value)
-                if not isinstance(safe, (str, int, float, bool)):
+                scalar_array = (
+                    isinstance(safe, list)
+                    and (not safe or type(safe[0]) in (str, int, float, bool))
+                    and all(type(item) is type(safe[0]) for item in safe)
+                )
+                if not isinstance(safe, (str, int, float, bool)) and not scalar_array:
                     safe = self.session.policy.json(safe)
                 self.span.set_attribute(key, safe)
         except Exception:
@@ -288,10 +293,15 @@ class AttemptObserver:
                 "gen_ai.response.finish_reasons": (
                     [event.finish_reason] if getattr(event, "finish_reason", None) is not None else None
                 ),
-                "daydream.duration_ms": getattr(event, "duration_ms", None),
-                "daydream.duration_api_ms": getattr(event, "duration_api_ms", None),
             }
         )
+        if isinstance(event, ResultEvent):
+            self.scope.attrs(
+                {
+                    "daydream.duration_ms": event.duration_ms,
+                    "daydream.duration_api_ms": event.duration_api_ms,
+                }
+            )
 
     def observe(self, event: AgentEvent) -> None:
         if self.scope.session is None:
