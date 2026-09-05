@@ -34,12 +34,21 @@ def _profile_label(
     Uses the same authority as the projector: ``extract_provenance`` derives
     the profile from the canonical ``profile_*`` fields, and the label is the
     canonical ``profile_name`` when present, else the legacy flat ``profile``
-    string a resolution may carry. Never ``str(None)``-coerced in the export.
+    string a resolution may carry. A nested ``profile`` block (canonical
+    annotation records carry one — ``extract_provenance``'s shape) contributes
+    its ``profile_name`` too, so a resolution row stored after the #1095
+    canonical serialization resolves to the same label its provenance would.
+    Never ``str(None)``-coerced and never ``str(dict)``-coerced in the export.
     """
     profile_name = provenance["profile"].get("profile_name")
     if profile_name is not None:
         return str(profile_name)
     flat = resolution.get("profile")
+    if isinstance(flat, Mapping):
+        nested_name = flat.get("profile_name")
+        if nested_name is not None:
+            return str(nested_name)
+        return None
     return str(flat) if flat is not None else None
 
 _ITEM_KEYS = (

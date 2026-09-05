@@ -79,37 +79,49 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     for row in _query_runs_readonly(index_root / "index.db"):
         session_id = str(row["session_id"])
         observations = _label_observations_readonly(index_root / "index.db", session_id)
-        if not observations:
-            raise HubUnavailableError(
-                f"hydrated index session {session_id!r} has no label_observations rows "
-                "to materialize"
-            )
-        winner, conflicting = _winning_observation(observations)
-        try:
-            rubric = json.loads(winner["rubric_json"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise HubUnavailableError(
-                f"session {session_id!r}: unreadable winning rubric_json: {exc}"
-            ) from exc
-        if not isinstance(rubric, dict):
-            raise HubUnavailableError(
-                f"session {session_id!r}: winning rubric_json is not an object"
-            )
-        resolutions = rubric.get("per_finding_resolutions")
-        if not isinstance(resolutions, list) or not resolutions:
-            raise HubUnavailableError(
-                f"session {session_id!r}: winning rubric_json carries no "
-                "per_finding_resolutions to materialize (legacy labels-only rows "
-                "are not backfilled)"
-            )
-        session: dict[str, Any] = {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "segment_id": session_id,
-            "resolutions": resolutions,
-        }
-        if conflicting:
-            session["conflicting"] = True
+        session: dict[str, Any]
+        if observations:
+            winner, conflicting = _winning_observation(observations)
+            try:
+                rubric = json.loads(winner["rubric_json"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HubUnavailableError(
+                    f"session {session_id!r}: unreadable winning rubric_json: {exc}"
+                ) from exc
+            if not isinstance(rubric, dict):
+                raise HubUnavailableError(
+                    f"session {session_id!r}: winning rubric_json is not an object"
+                )
+            resolutions = rubric.get("per_finding_resolutions")
+            if not isinstance(resolutions, list) or not resolutions:
+                raise HubUnavailableError(
+                    f"session {session_id!r}: winning rubric_json carries no "
+                    "per_finding_resolutions to materialize (legacy labels-only rows "
+                    "are not backfilled)"
+                )
+            session = {
+                "session_id": session_id,
+                "trajectory_id": session_id,
+                "segment_id": session_id,
+                "resolutions": resolutions,
+            }
+            if conflicting:
+                session["conflicting"] = True
+        else:
+            # Freshly hydrated staging archive: no label_observations history
+            # yet (canonical harvest appends the first rows, runbook step 5).
+            # Fall back to the sanitized per-run trajectory the hydration gate
+            # guarantees (_REQUIRED_SESSION_ARTIFACTS) -- the pre-#1095
+            # materialization source -- so the first preview pass over a new
+            # stage still works. Once any observation row exists for the
+            # session it wins; the two sources are never mixed.
+            resolutions = _trajectory_resolutions_readonly(index_root, session_id)
+            session = {
+                "session_id": session_id,
+                "trajectory_id": session_id,
+                "segment_id": session_id,
+                "resolutions": resolutions,
+            }
         sessions.append(session)
     if not sessions:
         raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
@@ -123,6 +135,35 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
             "expected exactly one pinned source commit"
         )
     return sessions, revisions[0]
+
+
+def _trajectory_resolutions_readonly(index_root: Path, session_id: str) -> list[dict[str, Any]]:
+    """Read a session's per-finding resolutions from the sanitized per-run
+    trajectory (the pre-#1095 materialization source). Used only when the
+    hydrated staging archive carries no ``label_observations`` history for
+    the session yet (freshly hydrated stage; canonical harvest appends the
+    first rows). Fail-closed: a missing/unreadable/empty trajectory raises
+    ``HubUnavailableError`` naming the session -- never silently skipped.
+    """
+    trajectory_path = index_root / "runs" / session_id / "trajectory.json"
+    if not trajectory_path.is_file():
+        raise HubUnavailableError(
+            f"hydrated index session {session_id!r} has no label_observations rows "
+            f"and no trajectory at {trajectory_path}"
+        )
+    try:
+        trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HubUnavailableError(
+            f"unreadable hydrated trajectory at {trajectory_path}: {exc}"
+        ) from exc
+    resolutions = trajectory.get("resolutions") if isinstance(trajectory, dict) else None
+    if not isinstance(resolutions, list) or not resolutions:
+        raise HubUnavailableError(
+            f"hydrated trajectory for session {session_id!r} carries no "
+            "per-finding resolutions to materialize"
+        )
+    return resolutions
 
 
 def _query_runs_readonly(db_path: Path) -> list[dict[str, Any]]:
