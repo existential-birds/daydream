@@ -1571,6 +1571,30 @@ def test_remove_remote_deletes_configured_remote(tmp_path: Path) -> None:
     assert git_ops.head_sha(clone) == before
 
 
+def test_update_ref_sets_explicit_oid_and_rejects_bad_names(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path, name="update_ref")
+    other = _git(repo, "rev-parse", "HEAD")  # any valid OID in this repo
+    _git(repo, "update-ref", "refs/heads/scratch", other)  # seed a ref to repoint
+
+    git_ops.update_ref(repo, "refs/heads/scratch", other)
+
+    assert _git(repo, "rev-parse", "refs/heads/scratch") == other
+
+
+def test_update_ref_rejects_invalid_ref_name(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path, name="update_ref_bad")
+    oid = git_ops.head_sha(repo)
+    for bad in ("refs/heads/..", "refs/heads/foo bar", "-dash-start", "refs/heads/xLock"):
+        with pytest.raises(git_ops.GitError, match="invalid ref name"):
+            git_ops.update_ref(repo, bad, oid)
+
+
+def test_update_ref_rejects_malformed_oid(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path, name="update_ref_badoid")
+    with pytest.raises(git_ops.GitError, match="invalid OID"):
+        git_ops.update_ref(repo, "refs/heads/newbranch", "not-a-sha")
+
+
 def test_staged_patch_round_trips_index_state(tmp_path: Path) -> None:
     """A staged index patch from source reproduces source's staged index in a clone.
 

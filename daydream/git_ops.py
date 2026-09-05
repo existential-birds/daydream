@@ -1685,6 +1685,46 @@ def remove_remote(repo: Path, remote: str = "origin") -> None:
         raise GitError(f"git remote remove {remote} failed in {repo}: {proc.stderr.strip()}")
 
 
+_OBJECT_ID_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def update_ref(repo: Path, ref: str, oid: str) -> None:
+    """Point *ref* at the explicit *oid* in *repo* (``git update-ref <ref> <oid>``).
+
+    Fail-closed mutating wrapper — ``retries=0`` so a timed-out ref mutation is
+    never re-run. Both arguments are validated **before** any shell-out:
+
+    * *ref* is checked with ``git check-ref-format`` (git's own ref-format
+      authority), plus two Python-side guards git cannot express: names
+      beginning with ``-`` (git would parse them as options, never as a ref)
+      and names whose final component ends in ``lock`` (case-insensitive, so
+      both ``.lock`` — forbidden by git — and ``xLock``-style lock-file
+      lookalikes are rejected). Anything invalid raises ``GitError`` without
+      invoking ``update-ref``.
+
+    * *oid* must be a full 40-character hex object ID (upper- or lowercase);
+      anything else raises ``GitError`` and is never passed through to git.
+
+    The ``update-ref`` subprocess never substitutes a fallback value: a
+    non-zero exit raises ``GitError`` with git's stderr.
+
+    Raises:
+        GitError: If *ref* or *oid* is invalid or ``git update-ref`` fails.
+    """
+    if _OBJECT_ID_RE.fullmatch(oid) is None:
+        raise GitError(f"invalid OID: {oid}")
+    if ref.startswith("-"):
+        raise GitError(f"invalid ref name: {ref}")
+    if ref.rsplit("/", 1)[-1].lower().endswith("lock"):
+        raise GitError(f"invalid ref name: {ref}")
+    proc = _run_git(repo, ["check-ref-format", ref], timeout=10, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"invalid ref name: {ref}")
+    proc = _run_git(repo, ["update-ref", ref, oid], timeout=10, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git update-ref {ref} failed in {repo}: {proc.stderr.strip()}")
+
+
 def apply_staged_patch(repo: Path, patch: bytes) -> None:
     """Apply a staged index patch to *repo*'s index (``git apply --cached --binary``).
 
