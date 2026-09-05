@@ -283,15 +283,19 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     agent = job["agents"][0]
     assert agent["import_path"] == "daydream.benchmark.harbor.agent:DaydreamReviewAgent"
     assert agent["env"]["DAYDREAM_REVIEW_BACKEND"] == "${DAYDREAM_REVIEW_BACKEND:-pi}"
-    assert "DAYDREAM_REVIEW_API_KEY" in agent["env"]
+    assert agent["env"]["DAYDREAM_REVIEW_API_KEY"] == "${DAYDREAM_REVIEW_API_KEY:-}"
+    assert agent["env"]["DAYDREAM_REVIEW_BASE_URL"] == "${DAYDREAM_REVIEW_BASE_URL:-}"
+    assert agent["env"]["DAYDREAM_REVIEW_MODEL"] == "${DAYDREAM_REVIEW_MODEL}"
     assert agent["env"]["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] == (
         "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}"
     )
     assert job["datasets"] == [{"path": "."}]
     assert job["metrics"] == [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}]
-    assert "DAYDREAM_JUDGE_API_KEY" in job["verifier"]["env"]
+    assert job["verifier"]["env"]["DAYDREAM_JUDGE_API_KEY"] == "${DAYDREAM_JUDGE_API_KEY:-}"
+    assert job["verifier"]["env"]["DAYDREAM_JUDGE_BASE_URL"] == "${DAYDREAM_JUDGE_BASE_URL:-}"
     assert job["verifier"]["env"]["DAYDREAM_JUDGE_PROVIDER"] == "${DAYDREAM_JUDGE_PROVIDER}"
-    assert job["verifier"]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "${CLAUDE_CODE_OAUTH_TOKEN}"
+    assert job["verifier"]["env"]["DAYDREAM_JUDGE_MODEL"] == "${DAYDREAM_JUDGE_MODEL}"
+    assert job["verifier"]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "${CLAUDE_CODE_OAUTH_TOKEN:-}"
     assert job["verifier"]["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == (
         "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
     )

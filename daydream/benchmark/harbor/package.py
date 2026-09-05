@@ -406,9 +406,13 @@ def render_job_config(*, oracle: bool) -> bytes:
         # supported values are validated downstream by the agent/entrypoint allowlist.
         "env": {
             "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-pi}",
+            # Mutually exclusive credentials get empty fallbacks so an unset
+            # alternative never aborts rendering: the selected provider's
+            # credential is present and the unused one resolves to "", which
+            # downstream fail-closed checks treat as missing.
             "DAYDREAM_REVIEW_MODEL": "${DAYDREAM_REVIEW_MODEL}",
-            "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY}",
-            "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL}",
+            "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY:-}",
+            "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL:-}",
             "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
             # ANTHROPIC_* carries claude-backend credentials into the container
             # (agent.build_child_env keep-set, entrypoint claude branch); the
@@ -427,11 +431,14 @@ def render_job_config(*, oracle: bool) -> bytes:
         "verifier": {"env": {
             "DAYDREAM_JUDGE_PROVIDER": "${DAYDREAM_JUDGE_PROVIDER}",
             "DAYDREAM_JUDGE_MODEL": "${DAYDREAM_JUDGE_MODEL}",
-            "DAYDREAM_JUDGE_API_KEY": "${DAYDREAM_JUDGE_API_KEY}",
-            "DAYDREAM_JUDGE_BASE_URL": "${DAYDREAM_JUDGE_BASE_URL}",
+            "DAYDREAM_JUDGE_API_KEY": "${DAYDREAM_JUDGE_API_KEY:-}",
+            "DAYDREAM_JUDGE_BASE_URL": "${DAYDREAM_JUDGE_BASE_URL:-}",
             # CLAUDE_CODE_* feeds the keyless claude-cli judge client; the
             # nonessential-traffic gate defaults on (fail-safe direction).
-            "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}",
+            # The oauth token is an alternative to DAYDREAM_JUDGE_API_KEY, so
+            # it gets the same empty fallback; downstream fail-closed checks
+            # treat "" as missing.
+            "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN:-}",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": (
                 "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
             ),
