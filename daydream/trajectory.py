@@ -197,6 +197,11 @@ _PEM_KEY_PATTERN = re.compile(
 #: Replacement marker for PEM private-key blocks. Shared (imported) by the
 #: benchmark's buffering anchors so every redaction site emits one marker.
 _PEM_KEY_REDACTED_MARKER = "[REDACTED_PEM_KEY]"
+
+# Fixed-ASCII synthetic content for the incomplete-call marker emitted by
+# ``Invocation.finish()`` for tool calls still in flight. Never formatted with
+# tool data, so it is redaction-stable.
+INCOMPLETE_CALL_CONTENT = "[interrupted: call did not complete before invocation ended]"
 #: Replacement marker for credential values under sensitive keys (issue #455).
 #: Distinct from every existing [REDACTED_*] marker so consumers can tell a
 #: key-aware credential redaction from a flat regex hit.
@@ -1436,9 +1441,41 @@ class Invocation:
         step_id = snapshot_step_id if snapshot_step_id is not None else self.recorder._step_id_counter + 1
         return [*self.steps, self._materialize_agent_step(d, step_id=step_id, extra_overrides=extra_overrides)]
 
+    def _emit_incomplete_call_markers(self) -> None:
+        """Append a synthetic failure observation for every still-in-flight tool call.
+
+        Called from ``finish()`` after ``_close_open_step()`` so each marker
+        lands on a closed Step (via the same open-dict / closed-index two-path
+        idiom the ``ToolResultEvent`` branch uses). Popping entries as we go
+        makes this idempotent — a second ``finish()`` finds nothing. Content is
+        a fixed ASCII string, never formatted with tool data, so it is
+        redaction-stable; ``extra`` carries only the two fixed keys.
+        """
+        while self._in_flight_tools:
+            tool_id, host = self._in_flight_tools.popitem()
+            result = ObservationResult(
+                source_call_id=tool_id,
+                content=INCOMPLETE_CALL_CONTENT,
+                extra={"is_error": True, "status": "interrupted"},
+            )
+            open_dict = host["open_dict"]
+            if open_dict is not None:
+                open_dict["_observation_results"].append(result)
+            else:
+                self._amend_closed_step_observation(
+                    closed_index=host["closed_index"], result=result
+                )
+
     def finish(self) -> None:
-        """Close any open step and flush all steps to the parent recorder."""
+        """Close any open step, mark in-flight tool calls interrupted, and flush.
+
+        After the final step close, every tool call still in flight (no
+        matching ``ToolResultEvent`` arrived) gets a synthetic
+        ``ObservationResult`` marker appended to its host Step so no tool call
+        dangles without a terminal outcome.
+        """
         self._close_open_step()
+        self._emit_incomplete_call_markers()
         self.recorder._extend_steps(self.steps)
 
 

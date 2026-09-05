@@ -212,6 +212,53 @@ async def test_late_result_on_closed_step_carries_extra(tmp_path: Path) -> None:
     assert result.extra == {"is_error": True, "exit_code": 1, "status": "completed"}
 
 
+# Behavior: finish() emits incomplete-call markers for in-flight tools
+# (issue #1126, Task 4).
+
+INCOMPLETE_CONTENT = "[interrupted: call did not complete before invocation ended]"
+
+
+async def test_finish_marks_in_flight_tool_on_open_step(tmp_path: Path) -> None:
+    """A tool call still in flight when the invocation ends gets a marker observation."""
+    inv, steps = await _record_events(
+        tmp_path,
+        ToolStartEvent(id="d1", name="shell", input={"command": "sleep 999"}),
+        ResultEvent(structured_output=None, continuation=None),
+    )
+    result = _single_observation_result(steps, 0)
+    assert result.source_call_id == "d1"
+    assert result.content == INCOMPLETE_CONTENT
+    assert result.extra == {"is_error": True, "status": "interrupted"}
+
+
+async def test_finish_marks_in_flight_tool_on_closed_step(tmp_path: Path) -> None:
+    """An in-flight call whose host step closed still gets its marker, amended onto it."""
+    inv, steps = await _record_events(
+        tmp_path,
+        ToolStartEvent(id="d2", name="shell", input={}),
+        TurnEndEvent(message_id="m1"),
+        ResultEvent(structured_output=None, continuation=None),
+    )
+    result = _single_observation_result(steps, 0)
+    assert result.source_call_id == "d2"
+    assert result.content == INCOMPLETE_CONTENT
+    assert result.extra == {"is_error": True, "status": "interrupted"}
+
+
+async def test_late_result_before_finish_still_amends_normally(tmp_path: Path) -> None:
+    """A result arriving before the final flush amends its step and suppresses the marker."""
+    inv, steps = await _record_events(
+        tmp_path,
+        ToolStartEvent(id="d3", name="shell", input={}),
+        TurnEndEvent(message_id="m1"),
+        ToolResultEvent(id="d3", output="made", is_error=False, exit_code=0, status="completed"),
+        ResultEvent(structured_output=None, continuation=None),
+    )
+    result = _single_observation_result(steps, 0)
+    assert result.content == "made"
+    assert result.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
+
+
 # Behavior: mark_aborted stamps extra["stop_reason"] on the closing step
 # and the trajectory stays schema-valid (Task 2).
 
