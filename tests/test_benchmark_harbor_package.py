@@ -311,6 +311,9 @@ def test_render_job_config_resolves_with_only_selected_provider_credential(
 ) -> None:
     """An unset *alternative* credential never aborts rendering (issue #979)."""
     import yaml
+
+    pytest.importorskip("harbor")
+
     from harbor.utils.env import resolve_env_vars
 
     from daydream.benchmark.harbor import package as pkg
@@ -319,7 +322,7 @@ def test_render_job_config_resolves_with_only_selected_provider_credential(
     for var in (
         "DAYDREAM_JUDGE_API_KEY", "DAYDREAM_JUDGE_BASE_URL",
         "CLAUDE_CODE_OAUTH_TOKEN", "DAYDREAM_REVIEW_API_KEY",
-        "DAYDREAM_REVIEW_BASE_URL",
+        "DAYDREAM_REVIEW_BASE_URL", "ANTHROPIC_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "anthropic")
@@ -344,6 +347,9 @@ def test_render_job_config_still_requires_selection_vars(
 ) -> None:
     """Selection vars stay bare: unset provider/model still abort rendering."""
     import yaml
+
+    pytest.importorskip("harbor")
+
     from harbor.utils.env import resolve_env_vars
 
     from daydream.benchmark.harbor import package as pkg
