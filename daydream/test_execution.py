@@ -8,6 +8,7 @@ status. "Green" means the subprocess exited 0 — nothing else.
 """
 
 import asyncio
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,42 @@ from daydream.backends._subprocess import terminate_process
 from daydream.trajectory import redact_structured_text
 
 _REDACTED_ENV_VAR = "[REDACTED_ENV_VAR]"
+
+
+class MissingTestCommandError(RuntimeError):
+    """Raised when no canonical test command is configured (fail closed).
+
+    Issue #726: a "green" daydream run must mean the target repo's test
+    command really exited 0 as a host-side subprocess — the agent never
+    guesses the command. When neither the CLI flag nor a config file declares
+    one, the run stops here with an actionable diagnostic instead of silently
+    passing or falling back to an unknown command.
+    """
+
+
+def canonical_test_command(config: object, run_config: object) -> list[str]:
+    """Resolve the canonical test command as shell-word-split argv.
+
+    Precedence (highest first): the CLI ``--test-command`` flag
+    (``run_config.test_command``), then the config-file ``test_command`` key
+    (``.daydream.toml`` root keys override ``[tool.daydream]`` in
+    ``pyproject.toml`` — that merge already happened in
+    :func:`daydream.config_file.load_file_config`). When neither is set,
+    raise :class:`MissingTestCommandError` naming the key, the precedence
+    sources checked, and exactly what to set — never fall back to an empty or
+    unknown command.
+    """
+    raw = getattr(run_config, "test_command", None) or getattr(config, "test_command", None)
+    if not raw or not raw.strip():
+        raise MissingTestCommandError(
+            "No canonical test command is configured; refusing to run tests "
+            "without one (issue #726). Set it via the --test-command flag, or "
+            "in a config file under the `test_command` key: either the root of "
+            ".daydream.toml (highest precedence) or the [tool.daydream] table "
+            "in pyproject.toml. "
+            "Example: daydream --test-command 'uv run pytest -n auto' /path/to/project"
+        )
+    return shlex.split(raw)
 
 
 @dataclass

@@ -3,6 +3,16 @@
 import asyncio
 import os
 import time
+from pathlib import Path
+
+import pytest
+
+from daydream.test_execution import (
+    MissingTestCommandError,
+    TestExecutionResult,
+    canonical_test_command,
+    run_test_command,
+)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -15,11 +25,9 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-from daydream.test_execution import TestExecutionResult, run_test_command
 
-
-def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path):
-    async def go():
+def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path: Path) -> None:
+    async def go() -> TestExecutionResult:
         return await run_test_command(
             [
                 "python",
@@ -43,8 +51,8 @@ def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path):
     assert "REAL_SECRET" not in res.merged_output  # redacted before storage
 
 
-def test_runner_nonzero_exit_sets_passed_false(tmp_path):
-    async def go():
+def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
+    async def go() -> TestExecutionResult:
         return await run_test_command(
             ["python", "-c", "import sys; print('boom'); sys.exit(3)"],
             cwd=tmp_path,
@@ -58,16 +66,46 @@ def test_runner_nonzero_exit_sets_passed_false(tmp_path):
     assert "boom" in res.merged_output
 
 
-def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path):
+def test_canonical_command_from_cli_overrides_config() -> None:
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(test_command="pytest -x")  # config value
+    run = SimpleNamespace(test_command="/cli/cmd")  # CLI wins
+    assert canonical_test_command(cfg, run) == ["/cli/cmd"]
+
+
+def test_canonical_command_from_config_when_cli_unset() -> None:
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(test_command="uv run pytest -n auto")
+    run = SimpleNamespace(test_command=None)
+    assert canonical_test_command(cfg, run) == ["uv", "run", "pytest", "-n", "auto"]
+
+
+def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(test_command=None)
+    run = SimpleNamespace(test_command=None)
+    with pytest.raises(MissingTestCommandError) as e:
+        canonical_test_command(cfg, run)
+    msg = str(e.value)
+    assert "test_command" in msg
+    assert "tool.daydream" in msg  # naming the precedence source
+    assert "--test-command" in msg  # actionable: what to set
+
+
+def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path) -> None:
     marker = tmp_path / "grandkid.pid"
 
-    async def go():
+    async def go() -> TestExecutionResult:
         return await run_test_command(
             [
                 "python",
                 "-c",
                 "import subprocess,os,time;"
-                f"subprocess.Popen(['python','-c','import os,time;open(r\"{marker}\",\"w\").write(str(os.getpid()));time.sleep(30)']);"
+                f"subprocess.Popen(['python','-c',"
+                f"'import os,time;open(r\"{marker}\",\"w\").write(str(os.getpid()));time.sleep(30)']);"
                 "time.sleep(30)",
             ],
             cwd=tmp_path,

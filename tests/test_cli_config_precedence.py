@@ -258,3 +258,43 @@ def test_trajectory_hub_repo_flag_reaches_runconfig(tmp_path: Path) -> None:
         ["improve", target, "--trajectory-hub-repo", "acme/dd-trajectories"]
     )
     assert improve.trajectory_hub_repo == "acme/dd-trajectories"
+
+
+def test_test_command_precedence_cli_over_file_config(tmp_path: Path) -> None:
+    """Issue #726: the canonical test command resolves CLI > file config.
+
+    The CLI ``--test-command`` flag overrides the ``test_command`` config key
+    (merged from ``.daydream.toml`` over ``[tool.daydream]``); when both are
+    unset, resolution fails closed with an actionable error.
+    """
+    from types import SimpleNamespace
+
+    from daydream.cli import _parse_args
+    from daydream.config_file import load_file_config
+    from daydream.test_execution import MissingTestCommandError, canonical_test_command
+
+    target = str(tmp_path)
+
+    # File config loads the key from both sources, dotfile winning.
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream]\ntest_command = "make test"\n')
+    (tmp_path / ".daydream.toml").write_text('test_command = "pytest -q"\n')
+    fc = load_file_config(tmp_path)
+    assert fc.test_command == "pytest -q"
+
+    # CLI flag wins over the file value.
+    cfg = _parse_args([target, "--test-command", "uv run pytest"])
+    assert cfg.test_command == "uv run pytest"
+    assert canonical_test_command(fc, cfg) == ["uv", "run", "pytest"]
+
+    # No CLI flag -> file value applies, shell-word-split.
+    cfg_noflag = _parse_args([target])
+    assert canonical_test_command(fc, cfg_noflag) == ["pytest", "-q"]
+
+    # Nothing set anywhere -> fail closed with a diagnostic naming key + sources.
+    empty_fc = load_file_config(tmp_path / "does-not-exist")
+    with pytest.raises(MissingTestCommandError) as e:
+        canonical_test_command(empty_fc, SimpleNamespace(test_command=None))
+    msg = str(e.value)
+    assert "test_command" in msg
+    assert "tool.daydream" in msg
+    assert "--test-command" in msg
