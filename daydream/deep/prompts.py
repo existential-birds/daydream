@@ -1387,15 +1387,19 @@ def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode:
             if not clone_mode
             else "The PR diff (base..HEAD) is inlined below:\n\n"
         )
+        if clone_mode:
+            return f"{head}{inline_diff.rstrip()}\n\n"
         return f"{head}{inline_diff.rstrip()}\n\n{_HUNK_INDEX_AUTHORITY}"
     if clone_mode:
         if not inline_diff:
             return ""
+        truncated = inline_diff.encode("utf-8")[:INLINE_DIFF_BUDGET_BYTES].decode(
+            "utf-8", errors="ignore"
+        )
         return (
             "The PR diff (base..HEAD) is inlined below:\n\n"
-            f"{inline_diff[:INLINE_DIFF_BUDGET_BYTES]}\n"
+            f"{truncated}\n"
             "[diff truncated to fit the prompt budget]\n\n"
-            f"{_HUNK_INDEX_AUTHORITY}"
         )
     return f"{_full_diff_pointer(diff_path)}\n{_HUNK_INDEX_AUTHORITY}"
 

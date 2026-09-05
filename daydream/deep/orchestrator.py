@@ -15,6 +15,7 @@ phase primitive (D-39).
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -2942,13 +2943,36 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
     except OSError:
         dependencies = None
     if dependencies is not None:
-        encoded = dependencies.encode("utf-8")
-        if len(encoded) > budget:
-            dependencies = (
-                encoded[:budget].decode("utf-8", errors="ignore")
-                + "\n[exploration truncated to fit the prompt budget]\n"
-            )
+        if budget <= 0:
+            dependencies = None
+        else:
+            encoded = dependencies.encode("utf-8")
+            if len(encoded) > budget:
+                truncated = encoded[:budget].decode("utf-8", errors="ignore")
+                dependencies = (
+                    f"{truncated}\n[exploration truncated to fit the prompt budget]\n"
+                    if truncated
+                    else None
+                )
     return summary, dependencies
+
+
+def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
+    """Whether ``builder`` accepts the clone-mode inline kwargs.
+
+    Fork overrides written against the documented extension contract predate
+    ``clone_mode``/``inline_exploration``/``inline_dependencies``; splatting
+    them into such a builder would raise ``TypeError`` on every
+    disposable-clone run, degrading the kind to failed. The builtin builders
+    accept all three; a legacy override keeps the documented kwargs instead.
+    """
+    try:
+        params = inspect.signature(builder).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return {"clone_mode", "inline_exploration", "inline_dependencies"} <= params.keys()
 
 
 def _diagram_author_prompt(
@@ -2964,13 +2988,22 @@ def _diagram_author_prompt(
     prompt budget) and the diff is handed to the builder un-truncated — the
     builder owns clone-mode truncation. Other backends keep the budget-gated
     pointer path byte-for-byte.
+
+    The clone-mode kwargs are only passed when the registered builder accepts
+    them: fork overrides written against the documented extension contract
+    predate the inline kwargs, and splatting them in would raise ``TypeError``
+    on every disposable-clone run, degrading the kind to failed. A legacy
+    override keeps the documented kwargs intact.
     """
     diff_path: Path = ctx.data["diff_path"]
     inline_diff = _ttt_diff_text(ctx)
     exploration_dir: Path | None = ctx.data.get("exploration_dir")
     clone_mode = bool(getattr(backend, "read_only_disposable_clone", False))
+    builder = get_registry().prompt(
+        "diagram_sequence" if kind == "sequence" else "diagram_flowchart"
+    )
     inline_kwargs: dict[str, Any]
-    if clone_mode:
+    if clone_mode and _prompt_builder_accepts_inline_kwargs(builder):
         inline_exploration, inline_dependencies = _inline_exploration_text(exploration_dir)
         inline_kwargs = {
             "exploration_dir": None,
@@ -2982,7 +3015,7 @@ def _diagram_author_prompt(
         inline_kwargs = {"exploration_dir": exploration_dir}
     if kind == "sequence":
         return str(
-            get_registry().prompt("diagram_sequence")(
+            builder(
                 diff_path=diff_path,
                 inline_diff=inline_diff,
                 files_by_module=_files_by_module(eligibility),
@@ -2992,7 +3025,7 @@ def _diagram_author_prompt(
             )
         )
     return str(
-        get_registry().prompt("diagram_flowchart")(
+        builder(
             diff_path=diff_path,
             inline_diff=inline_diff,
             candidate_roots=[asdict(root) for root in eligibility.candidate_roots],

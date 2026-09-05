@@ -1811,6 +1811,20 @@ def test_diagram_prompts_clone_mode_truncates_oversized_diff_with_marker(tmp_pat
         assert "diff.patch" not in prompt
 
 
+def test_diagram_prompts_clone_mode_truncation_is_byte_accurate(tmp_path: Path) -> None:
+    """The clone-mode truncation slices UTF-8 bytes, not characters, so a
+    multibyte over-budget diff cannot exceed INLINE_DIFF_BUDGET_BYTES."""
+    big = "é" * (INLINE_DIFF_BUDGET_BYTES // 2 + 100)  # 2 bytes per char
+    for prompt in (
+        _sequence_prompt(tmp_path, inline_diff=big, clone_mode=True),
+        _flowchart_prompt(tmp_path, inline_diff=big, clone_mode=True),
+    ):
+        assert "[diff truncated to fit the prompt budget]" in prompt
+        assert "diff.patch" not in prompt
+        body = prompt.split("is inlined below:\n\n", 1)[1].split("\n[diff truncated", 1)[0]
+        assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+
+
 def test_diagram_prompts_non_clone_keeps_pointer_behavior_byte_for_byte(tmp_path: Path) -> None:
     """Non-disposable backends are unchanged: default kwargs (clone_mode=False)
     render the same pointer text as today, including the over-budget degrade."""

@@ -1121,6 +1121,59 @@ def test_disposable_clone_backend_omits_unreadable_exploration(tmp_path: Path) -
     assert "diff --git a/a.py b/a.py" in prompt
 
 
+def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_path: Path) -> None:
+    """When the summary consumes the full shared budget, a pending non-empty
+    dependencies.md must not be rendered as a marker-only string: that would
+    assert 'Deterministic import edges' while carrying only the truncation
+    notice. It is omitted entirely."""
+    from daydream.deep import orchestrator as deep
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "summary.md").write_text(
+        "x" * (INLINE_DIFF_BUDGET_BYTES + 1), encoding="utf-8"
+    )
+    (exploration_dir / "dependencies.md").write_text("a -> b", encoding="utf-8")
+    summary, dependencies = deep._inline_exploration_text(exploration_dir)
+    assert "[exploration truncated to fit the prompt budget]" in summary
+    assert dependencies is None
+
+
+def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fork override written against the documented extension contract (no
+    clone-mode inline kwargs) must not receive them on a disposable-clone run:
+    splatting them in would raise TypeError and degrade the kind to failed.
+    The override gets exactly the documented kwargs and the run proceeds."""
+    from types import SimpleNamespace
+
+    from daydream.deep import orchestrator as deep
+    from daydream.extensions.registry import Registry
+
+    def _legacy_sequence_builder(
+        *,
+        diff_path: Path,
+        inline_diff: str | None,
+        files_by_module: dict[str, list[str]],
+        cwd: Path,
+        exploration_dir: Path | None,
+        schema: dict[str, Any],
+    ) -> str:
+        return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
+
+    registry = Registry()
+    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    monkeypatch.setattr(deep, "get_registry", lambda: registry)
+    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
+    ctx = _clone_test_ctx(
+        tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b"
+    )
+    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+    assert prompt.startswith("legacy:")
+
+
 async def test_disposable_clone_authoring_completes_without_artifact_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1138,7 +1191,7 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
         model = "fake"
 
     async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        for forbidden in (".daydream/exploration", "diff.patch"):
+        for forbidden in (".daydream/", "diff.patch"):
             if forbidden in prompt:
                 raise AssertionError(f"prompt references {forbidden} — clone cannot read it")
         return {"participants": []}, None, None
@@ -1173,7 +1226,7 @@ async def test_disposable_clone_flowchart_authoring_completes_without_artifact_r
         model = "fake"
 
     async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-        for forbidden in (".daydream/exploration", "diff.patch"):
+        for forbidden in (".daydream/", "diff.patch"):
             if forbidden in prompt:
                 raise AssertionError(f"prompt references {forbidden} — clone cannot read it")
         return {"participants": []}, None, None
