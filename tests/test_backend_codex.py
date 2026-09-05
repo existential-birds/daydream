@@ -371,6 +371,30 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
     assert git_ops.staged_patch(source) == before_patch
 
 
+@pytest.mark.asyncio
+async def test_codex_read_only_snapshot_failure_is_fail_closed(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GitError during branch snapshotting aborts preparation: CodexError
+    raised, no codex process launched, source git state untouched."""
+    _main, source = linked_worktree
+    before_head = git_ops.head_sha(source)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise git_ops.GitError("snapshot ref failure")
+
+    monkeypatch.setattr("daydream.backends.codex.git_ops.update_ref", boom)
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as exec_mock:
+        with pytest.raises(CodexError, match="failed to create disposable read-only checkout"):
+            async for _ in CodexBackend(model="fixture-model").execute(
+                source, "Audit repository", read_only=True,
+            ):
+                pass
+    exec_mock.assert_not_called()
+    assert git_ops.head_sha(source) == before_head
+
+
 def test_rebind_source_paths_preserves_sibling_paths() -> None:
     """The prompt rebind is anchored at path boundaries (issues #1/#9): sibling
     paths that merely share the source prefix survive, while sub-paths, the exact
