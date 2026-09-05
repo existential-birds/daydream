@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1378,3 +1379,95 @@ async def test_codex_preserves_exit_code_and_status_on_results() -> None:
     assert ok.is_error is False
     assert ok.exit_code == 0
     assert ok.status == "completed"
+
+
+@pytest.fixture(autouse=True)
+def _reset_real_git_resolution() -> Iterator[Any]:
+    """Clear the real-git resolver cache before AND after every test (S1 cache)."""
+    from daydream.backends import codex
+
+    codex._reset_real_git_resolution()
+    yield
+    codex._reset_real_git_resolution()
+
+
+class TestResolveRealGitDir:
+    """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
+
+    def test_resolves_parent_dir_of_xcrun_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        from daydream.backends import codex
+
+        # Validation requires a real executable file, so stage one on disk.
+        git_bin = tmp_path / "usr" / "bin"
+        git_bin.mkdir(parents=True)
+        git_file = git_bin / "git"
+        git_file.write_text("#!/bin/sh\n")
+        git_file.chmod(0o755)
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
+        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
+
+        assert codex._resolve_real_git_dir() == str(git_bin)
+
+    def test_caches_at_most_once_per_process(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        from daydream.backends import codex
+
+        git_bin = tmp_path / "real" / "usr" / "bin"
+        git_bin.mkdir(parents=True)
+        git_file = git_bin / "git"
+        git_file.write_text("#!/bin/sh\n")
+        git_file.chmod(0o755)
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        calls: list[int] = []
+        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
+
+        def counting_run(*a: Any, **k: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(1)
+            return proc
+
+        monkeypatch.setattr(codex.subprocess, "run", counting_run)
+        first = codex._resolve_real_git_dir()
+        second = codex._resolve_real_git_dir()
+
+        assert first == second == str(git_bin)
+        assert len(calls) == 1  # S1: repeated execute() calls never re-shell out to xcrun
+
+    def test_nonzero_xcrun_exit_falls_back_to_none_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="xcrun: error")
+        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
+        with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+            result = codex._resolve_real_git_dir()
+
+        assert result is None  # M2: never raises, never a hard failure
+        assert any("xcrun" in r.message.lower() or "git" in r.message.lower() for r in caplog.records)
+
+    def test_non_executable_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="/nonexistent/xx/git\n", stderr="")
+        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
+
+        assert codex._resolve_real_git_dir() is None  # M2: must be an existing executable file
+
+    def test_non_darwin_never_invokes_xcrun(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        assert codex.sys.platform != "darwin"  # the suite runs on Linux; guard the guard
+        monkeypatch.setattr(
+            codex.subprocess, "run",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun invoked on non-Darwin")),
+        )
+
+        assert codex._resolve_real_git_dir() is None

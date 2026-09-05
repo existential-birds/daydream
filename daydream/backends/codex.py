@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import shutil
+import subprocess as subprocess
+import sys as sys
 import tempfile
 import uuid
 from collections.abc import AsyncGenerator
@@ -143,6 +145,68 @@ _GIT_REDIRECT_STRIP_VARS = (
     "GIT_PREFIX",
 )
 
+# Darwin real-git resolution (issue #1122): the sandboxed read-only child that
+# runs inside the macOS Seatbelt sandbox cannot shell out to ``xcrun`` itself,
+# so the parent resolves the real git binary's directory once per process and
+# prepends it to the child PATH (see ``_isolated_child_env``). Cached
+# at-most-once per process — negative results included — mirroring the
+# ``set_gh_token_env``/``reset_gh_token_env`` singleton style in
+# :mod:`daydream.git_ops`.
+_REAL_GIT_DIR: str | None = None
+_REAL_GIT_RESOLVED = False
+
+
+def _resolve_real_git_dir() -> str | None:
+    """Resolve the directory of the real (non-shim) ``git`` on macOS (issue #1122).
+
+    Runs ``xcrun --find git`` in the **parent** process — never inside the
+    sandboxed child, where ``xcrun`` itself is blocked — validates the target is
+    an existing executable file, and returns its parent directory. Resolved at
+    most once per process (negative results are cached too). On non-Darwin, or
+    whenever resolution fails, returns ``None`` with a warning and the caller
+    leaves the child PATH unchanged (fail-open). Never raises.
+    """
+    global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
+    if _REAL_GIT_RESOLVED:
+        return _REAL_GIT_DIR
+    _REAL_GIT_RESOLVED = True
+    if sys.platform != "darwin":
+        return None
+    try:
+        proc = subprocess.run(
+            ["xcrun", "--find", "git"], capture_output=True, text=True, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _logger.warning(
+            "codex: could not resolve real git via 'xcrun --find git' (%s); leaving child PATH unchanged",
+            exc,
+        )
+        return None
+    if proc.returncode != 0:
+        _logger.warning(
+            "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); "
+            "leaving child PATH unchanged",
+            proc.returncode, proc.stderr.strip(),
+        )
+        return None
+    git_path = proc.stdout.strip()
+    if not git_path or not Path(git_path).is_file() or not os.access(git_path, os.X_OK):
+        _logger.warning(
+            "codex: could not resolve real git via 'xcrun --find git' (invalid target %r); "
+            "leaving child PATH unchanged",
+            git_path,
+        )
+        return None
+    _REAL_GIT_DIR = str(Path(git_path).parent)
+    return _REAL_GIT_DIR
+
+
+def _reset_real_git_resolution() -> None:
+    """Restore the real-git resolver singleton to its initial state (test seam)."""
+    global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
+    _REAL_GIT_DIR = None
+    _REAL_GIT_RESOLVED = False
+
 
 class _SharedCheckout:
     """A disposable read-only checkout shared by concurrent ``execute()`` calls.
@@ -179,6 +243,14 @@ def _isolated_child_env(cwd: Path, execution_cwd: Path) -> dict[str, str] | None
     child_env = os.environ.copy()
     for var in _GIT_REDIRECT_STRIP_VARS:
         child_env.pop(var, None)
+    # Issue #1122: on macOS the default ``git`` on PATH is an xcrun shim that
+    # sprays diagnostic noise when invoked inside the Seatbelt sandbox. Prepend
+    # the parent-resolved real git directory so the child resolves the real
+    # binary directly. Fail-open: when resolution fails, PATH is unchanged.
+    if sys.platform == "darwin":
+        real_git_dir = _resolve_real_git_dir()
+        if real_git_dir and "PATH" in child_env:
+            child_env["PATH"] = real_git_dir + os.pathsep + child_env["PATH"]
     return child_env
 
 
