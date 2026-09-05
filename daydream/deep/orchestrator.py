@@ -3193,6 +3193,10 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
         if recorder is not None:
             recorder.create_dispatch_step(phase=DaydreamPhase.DIAGRAM)
 
+    for kind, result in results.items():
+        if result is not None and result.get("status") == "failed":
+            failures.setdefault(kind, str(result.get("reason") or "unknown failure"))
+
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     blocks = render_diagram_blocks(ordered)
     payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}

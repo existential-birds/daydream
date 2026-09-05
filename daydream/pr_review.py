@@ -2067,7 +2067,6 @@ def _diagram_grounding_problem(
                 return f"flowchart spec_final edge {index} has an unknown endpoint"
             if claim("edge", index, f"{edge['from']}->{edge['to']}") is None:
                 return f"flowchart grounding attestation does not cover edge at final index {index}"
-
     if any(
         check["final_index"] is not None and index not in claimed
         for index, check in enumerate(checks)
@@ -2076,7 +2075,109 @@ def _diagram_grounding_problem(
     return None
 
 
-def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
+def _diagram_head_evidence_problem(
+    kind: str,
+    spec: dict[str, Any],
+    target_dir: Path,
+    head_sha: str,
+    sources: dict[str, list[str]],
+) -> str | None:
+    """Return a problem when a rendered diagram citation is absent at ``head_sha``."""
+    from daydream.tree_sitter_index import (
+        is_branch_line,
+        is_executable_statement_line,
+        is_terminal_line,
+        language_for_path,
+    )
+
+    def check(evidence: dict[str, Any]) -> str | None:
+        path = evidence["file"]
+        lines = sources.get(path)
+        if lines is None:
+            try:
+                lines = git_ops.show(target_dir, head_sha, path).decode(
+                    errors="replace"
+                ).splitlines()
+            except GitError:
+                return f"{kind} diagram evidence is missing from immutable head: {path}"
+            sources[path] = lines
+        if evidence["line"] > len(lines):
+            return (
+                f"{kind} diagram evidence line {evidence['line']} is missing from "
+                f"immutable head: {path}"
+            )
+        return None
+
+    if kind == "sequence":
+        paths = {
+            path
+            for participant in spec["participants"]
+            for path in participant["files"]
+        }
+        paths.update(message["evidence"]["file"] for message in spec["messages"])
+        paths.update(
+            branch["evidence"]["file"]
+            for block in spec["blocks"]
+            for branch in block["branches"]
+        )
+        with tempfile.TemporaryDirectory() as snapshot_dir:
+            snapshot_root = Path(snapshot_dir)
+            for path in paths:
+                try:
+                    source = git_ops.show(target_dir, head_sha, path)
+                except GitError:
+                    return f"sequence diagram evidence is missing from immutable head: {path}"
+                snapshot_path = snapshot_root / path
+                snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_path.write_bytes(source)
+
+            from daydream.deep.diagram_grounding import RepoSymbols, ground_sequence
+
+            report = ground_sequence(
+                spec,
+                repo_root=snapshot_root,
+                hunk_ranges={},
+                read_paths=paths,
+                symbols=RepoSymbols(snapshot_root),
+            )
+        if report.spec_final != spec:
+            return "sequence diagram evidence is not grounded in immutable head"
+    else:
+        problem = check(spec["root"])
+        if problem is not None:
+            return problem
+        for node in spec["nodes"]:
+            evidence = node["evidence"]
+            problem = check(evidence)
+            if problem is not None:
+                return problem
+            source = "\n".join(sources[evidence["file"]]).encode()
+            language = language_for_path(evidence["file"])
+            line = evidence["line"]
+            try:
+                grounded = (
+                    is_terminal_line(language, source, line)
+                    if node["kind"] == "end"
+                    else is_branch_line(language, source, line)
+                    if node["kind"] == "decision"
+                    else is_executable_statement_line(language, source, line)
+                )
+            except Exception:
+                grounded = False
+            if not grounded:
+                return (
+                    f"flowchart diagram evidence line {line} is not a valid "
+                    f"{node['kind']} node in immutable head: {evidence['file']}"
+                )
+    return None
+
+
+def validate_diagram_payload(
+    payload: dict[str, Any],
+    *,
+    target_dir: Path | None = None,
+    head_sha: str | None = None,
+) -> str | None:
     """Validate each rendered spec and its grounding attestation before posting.
 
     The privileged poster re-renders mermaid from model-derived specs, so those
@@ -2088,6 +2189,8 @@ def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
 
     Args:
         payload: The artifact's ``diagrams`` payload.
+        target_dir: Repository used to read immutable source evidence, when posting.
+        head_sha: Event-derived commit used to read immutable source evidence.
 
     Returns:
         None when every rendered kind validates, else a human error message.
@@ -2113,6 +2216,7 @@ def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
     results = payload.get("results")
     if not isinstance(results, dict):
         return "diagrams payload has no 'results' object"
+    sources: dict[str, list[str]] = {}
     for kind in DIAGRAM_KINDS:
         result = results.get(kind)
         if not isinstance(result, dict) or result.get("status") != "rendered":
@@ -2131,6 +2235,12 @@ def validate_diagram_payload(payload: dict[str, Any]) -> str | None:
         problem = _diagram_grounding_problem(kind, spec, result.get("grounding"))
         if problem is not None:
             return problem
+        if target_dir is not None and head_sha is not None:
+            problem = _diagram_head_evidence_problem(
+                kind, spec, target_dir, head_sha, sources
+            )
+            if problem is not None:
+                return problem
     return None
 
 
@@ -2159,7 +2269,9 @@ def _post_diagram_artifact(
             "artifact declares kind 'diagram' but carries no 'diagrams' payload",
         )
         return 1
-    problem = validate_diagram_payload(payload)
+    problem = validate_diagram_payload(
+        payload, target_dir=target_dir, head_sha=pr.head_sha
+    )
     if problem is not None:
         print_error(console, "Diagram Artifact Rejected", problem)
         return 1
@@ -2272,7 +2384,9 @@ def post_findings_from_artifact(
 
     diagram_blocks: str | None = None
     if isinstance(artifact.diagrams, dict):
-        problem = validate_diagram_payload(artifact.diagrams)
+        problem = validate_diagram_payload(
+            artifact.diagrams, target_dir=target_dir, head_sha=pr.head_sha
+        )
         if problem is not None:
             print_error(console, "Diagram Payload Rejected", problem)
             return 1

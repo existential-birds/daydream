@@ -1863,6 +1863,7 @@ def test_sequence_prompt_states_the_spec_rules(tmp_path: Path) -> None:
     assert "`internal` | `external`" in prompt
     assert "≤ 80" in prompt
     assert "`call` | `reply` | `self`" in prompt
+    assert "place it immediately after the reversed `call`" in prompt
     assert "the FIRST message" in prompt
     assert "`alt` (2 or more branches)" in prompt
     assert "0-based indices" in prompt

@@ -248,11 +248,12 @@ def sequence_spec() -> dict[str, Any]:
     """A fully grounded sequence spec for the cross-module fixture.
 
     Five messages across three participants: two calls out of
-    ``pkg_b/client.py``, one self-call inside ``pkg_a/core.py``, and two replies
-    whose symbol citations land two lines off and are rescued by the +/-3 snap
-    -- so the happy path exercises the snap too. Five (not the floor's three) so
-    a test that withholds the reads for ``pkg_b/client.py`` still leaves a
-    renderable diagram behind, making a PARTIAL prune observable.
+    ``pkg_b/client.py``, their adjacent replies, and one self-call inside
+    ``pkg_a/core.py``. Each reply cites its enclosing function's return line
+    and immediately follows the reversed call, as required by the sequence
+    grounding contract. Five (not the floor's three) so a test that withholds
+    the reads for ``pkg_b/client.py`` still leaves a renderable diagram behind,
+    making a PARTIAL prune observable.
     """
     return {
         "participants": [
@@ -289,23 +290,27 @@ def sequence_spec() -> dict[str, Any]:
                 },
             },
             {
+                "from": "Util",
+                "to": "Client",
+                "label": "Stripped text",
+                "kind": "reply",
+                "changed": True,
+                "evidence": {
+                    "file": "pkg_a/util.py",
+                    "line": 2,
+                    "symbol": "normalize",
+                },
+            },
+            {
                 "from": "Client",
                 "to": "Core",
                 "label": "Handle cleaned payload",
                 "kind": "call",
                 "changed": True,
-                "evidence": {"file": "pkg_b/client.py", "line": 7, "symbol": "handle"},
-            },
-            {
-                "from": "Core",
-                "to": "Core",
-                "label": "Normalize inside handler",
-                "kind": "self",
-                "changed": True,
                 "evidence": {
-                    "file": "pkg_a/core.py",
-                    "line": 2,
-                    "symbol": "normalize_payload",
+                    "file": "pkg_b/client.py",
+                    "line": 7,
+                    "symbol": "handle",
                 },
             },
             {
@@ -317,15 +322,15 @@ def sequence_spec() -> dict[str, Any]:
                 "evidence": {"file": "pkg_a/core.py", "line": 3, "symbol": "handle"},
             },
             {
-                "from": "Util",
-                "to": "Client",
-                "label": "Stripped text",
-                "kind": "reply",
+                "from": "Core",
+                "to": "Core",
+                "label": "Normalize inside handler",
+                "kind": "self",
                 "changed": True,
                 "evidence": {
-                    "file": "pkg_a/util.py",
+                    "file": "pkg_a/core.py",
                     "line": 2,
-                    "symbol": "normalize",
+                    "symbol": "normalize_payload",
                 },
             },
         ],
@@ -398,23 +403,11 @@ def cross_service_sequence_spec() -> dict[str, Any]:
             {
                 "from": "Alpha",
                 "to": "Alpha",
-                "label": "Serve alpha endpoint",
-                "kind": "self",
+                "label": "Call alpha endpoint",
+                "kind": "call",
                 "changed": True,
                 "evidence": {
                     "file": "services/alpha/api.py",
-                    "line": 1,
-                    "symbol": "endpoint",
-                },
-            },
-            {
-                "from": "Beta",
-                "to": "Beta",
-                "label": "Serve beta endpoint",
-                "kind": "self",
-                "changed": True,
-                "evidence": {
-                    "file": "services/beta/api.py",
                     "line": 1,
                     "symbol": "endpoint",
                 },
@@ -428,6 +421,18 @@ def cross_service_sequence_spec() -> dict[str, Any]:
                 "evidence": {
                     "file": "services/alpha/api.py",
                     "line": 2,
+                    "symbol": "endpoint",
+                },
+            },
+            {
+                "from": "Beta",
+                "to": "Beta",
+                "label": "Serve beta endpoint",
+                "kind": "self",
+                "changed": True,
+                "evidence": {
+                    "file": "services/beta/api.py",
+                    "line": 1,
                     "symbol": "endpoint",
                 },
             },

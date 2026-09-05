@@ -88,8 +88,11 @@ _SEQUENCE_REASON_CODES = frozenset(
     {
         "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT",
         "CALLEE_NOT_DEFINED_IN_TARGET",
+        "NOT_A_REPLY_STATEMENT",
         "PARTICIPANT_NO_FILES",
         "PARTICIPANT_FILE_MISSING",
+        "REPLY_NOT_IN_ENCLOSING_FUNCTION",
+        "REPLY_NOT_PRECEDED_BY_CALL",
         "EXTERNAL_MISUSED",
     }
 )
@@ -583,6 +586,23 @@ def _terminal_line(sources: _SourceCache, file: str, line: int) -> bool:
         return is_terminal_line(None, source, line)
 
 
+def _reply_line(sources: _SourceCache, file: str, line: int) -> bool:
+    """Whether ``file:line`` is a return statement suitable for a reply."""
+    return re.match(r"^\s*return\b", sources.line_text(file, line)) is not None
+
+
+def _reply_definition(
+    symbols: RepoSymbols, symbol: str, file: str, line: int
+) -> dict[str, object] | None:
+    """Return the enclosing function named by ``symbol`` at ``file:line``."""
+    for definition in symbols.definitions(symbol, [file]):
+        start = int(str(definition.get("line", 0)))
+        end = int(str(definition.get("end_line", 0)))
+        if definition.get("kind") == "function" and start <= line <= end:
+            return definition
+    return None
+
+
 def _executable_line(sources: _SourceCache, file: str, line: int) -> bool:
     """Whether ``file:line`` starts an executable statement."""
     source = sources.read(file) or b""
@@ -728,6 +748,8 @@ def _ground_message(
     hunk_ranges: dict[str, list[tuple[int, int]]],
     index: int,
     record: dict[str, Any],
+    previous: dict[str, Any] | None,
+    previous_check: ElementCheck | None,
     accepted: dict[str, dict[str, Any]],
 ) -> ElementCheck:
     """Check one message and rewrite its evidence line on a successful snap."""
@@ -760,6 +782,29 @@ def _ground_message(
         return check
 
     symbol = evidence["symbol"]
+    if record["kind"] == "reply":
+        if (
+            previous is None
+            or previous_check is None
+            or not previous_check.grounded
+            or previous["kind"] != "call"
+            or previous["from"] != record["to"]
+            or previous["to"] != record["from"]
+        ):
+            check.grounded, check.reason = False, "REPLY_NOT_PRECEDED_BY_CALL"
+            return check
+        if not _reply_line(sources, file, line):
+            check.grounded, check.reason = False, "NOT_A_REPLY_STATEMENT"
+            return check
+        definition = _reply_definition(symbols, symbol, file, line)
+        if definition is None:
+            check.grounded, check.reason = False, "REPLY_NOT_IN_ENCLOSING_FUNCTION"
+            return check
+        check.strength = "definition"
+        check.defined_at = _definition_location(definition)
+        check.in_changed_hunk = _in_ranges(hunk_ranges.get(file, []), line)
+        return check
+
     if not symbol or not _token_on_line(sources.line_text(file, line), symbol):
         snapped = _snap_symbol(sources, file, line, symbol)
         if snapped is None:
@@ -780,9 +825,8 @@ def _ground_message(
             return check
         check.strength, check.defined_at = strength, defined_at
     else:
-        # A reply names its enclosing function and an outbound call names a
-        # client method; neither is a callee this repository defines, so the
-        # word-boundary match on the cited line is the whole proof.
+        # An outbound call names a client method rather than a repository callee,
+        # so the word-boundary match on the cited line is the whole proof.
         check.strength = "token"
     return check
 
@@ -940,6 +984,8 @@ def ground_sequence(
                 hunk_ranges,
                 index,
                 record,
+                normalized_messages[index - 1] if index else None,
+                message_checks[index - 1] if index else None,
                 accepted,
             )
         )

@@ -653,7 +653,8 @@ their anchors eagerly.
 
 The built-in PR-process modes all run the `deep` flow; `--shallow` and
 `--review`/`--comment` are mode gates on it, not separate flow names (#330).
-The only other registered flow is `improve` (`daydream improve <target>`).
+The other registered flows are `diagram` (the `--diagram-only` grounded-diagram
+flow) and `improve` (`daydream improve <target>`).
 
 A newly registered flow is dispatched by name with `--flow <name>` (or
 `RunConfig(flow_name=...)`):

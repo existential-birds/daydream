@@ -345,6 +345,51 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
     assert fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews") == []
 
 
+async def test_phase_b_rejects_diagram_evidence_missing_from_the_immutable_head(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    diagram_run: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase B must not trust a structurally valid, artifact-supplied citation."""
+    target = dr.build_branch_heavy_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+    artifact_path = tmp_path / "findings.json"
+
+    exit_code, _ = await diagram_run(
+        target,
+        diagram="flowchart",
+        specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path),
+        pr_number=7,
+    )
+
+    assert exit_code == 0
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    spec_final = artifact["diagrams"]["results"]["flowchart"]["spec_final"]
+    spec_final["root"]["file"] = "untrusted.py"
+    for node in spec_final["nodes"]:
+        node["evidence"]["file"] = "untrusted.py"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    monkeypatch.chdir(target)
+    rc = _cli_main(
+        [
+            "post-findings",
+            str(artifact_path),
+            "--pr",
+            "7",
+            "--head-sha",
+            artifact["head_sha"],
+            "--repo",
+            "acme/widgets",
+        ]
+    )
+
+    assert rc == 1
+    assert fake_gh.calls("POST") == []
+
+
 def test_phase_b_rejects_an_invalid_diagrams_payload(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -503,6 +548,42 @@ async def test_agent_error_in_diagram_only_mode_exits_one(
     failed = _artifact(target)["results"]["sequence"]
     assert failed["status"] == "failed"
     assert "RuntimeError" in failed["reason"]
+    assert _issue_comments(fake_gh) == []
+
+
+async def test_returned_failure_in_diagram_only_mode_exits_one(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    diagram_run: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A returned failed result follows the same diagram-only exit path."""
+    from daydream.deep import orchestrator
+
+    async def _return_failure(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "reason": "stub: diagram author returned failure",
+            "spec_proposed": None,
+            "spec_final": None,
+            "grounding": None,
+            "omit_reasons": [],
+            "mermaid": None,
+        }
+
+    monkeypatch.setattr(orchestrator, "_run_diagram_kind", _return_failure)
+    target = dr.build_cross_module_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+
+    exit_code, _ = await diagram_run(
+        target,
+        diagram="sequence",
+    )
+
+    assert exit_code == 1
+    failed = _artifact(target)["results"]["sequence"]
+    assert failed["status"] == "failed"
+    assert failed["reason"] == "stub: diagram author returned failure"
     assert _issue_comments(fake_gh) == []
 
 

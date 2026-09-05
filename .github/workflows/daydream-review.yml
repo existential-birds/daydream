@@ -128,7 +128,7 @@ jobs:
       - name: Install daydream
         # Pinned to an immutable reviewed commit containing the diagram CLI used
         # below, so a moved or compromised tag cannot change the executable code.
-        run: uv tool install git+https://github.com/existential-birds/daydream@8c6afec1493949e6fc2eed26e948d079ea77cb7e
+        run: uv tool install git+https://github.com/existential-birds/daydream@8077f10ededfd9b1f6e1fcb74c47250aaa365caf
 
       # Codex backend: daydream spawns `codex exec` as a subprocess, so the CLI
       # must be on PATH. Pinned because the backend parses `codex exec

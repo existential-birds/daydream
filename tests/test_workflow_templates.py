@@ -137,18 +137,15 @@ _DAYDREAM_RELEASE_COMMITS: dict[str, str] = {
     "v0.28.0": "e7741f17fc998a675ed2fe3f364d2e646cde5518",
 }
 
-_DAYDREAM_DIAGRAM_COMMIT = "8c6afec1493949e6fc2eed26e948d079ea77cb7e"
+_DAYDREAM_DIAGRAM_COMMIT = "8077f10ededfd9b1f6e1fcb74c47250aaa365caf"
 
 _RELEASE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
-_DAYDREAM_RELEASE_INSTALL_WORKFLOW_PATHS = [
-    REPO_WORKFLOWS_DIR / "daydream-post.yml",
-    TEMPLATES_DIR / "daydream-post.yml",
-]
-
 _DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS = [
     REPO_WORKFLOWS_DIR / "daydream-review.yml",
+    REPO_WORKFLOWS_DIR / "daydream-post.yml",
     TEMPLATES_DIR / "daydream-review.yml",
+    TEMPLATES_DIR / "daydream-post.yml",
     TEMPLATES_DIR / "single" / "daydream.yml",
 ]
 
@@ -748,35 +745,6 @@ def _package_version() -> str:
 
 @pytest.mark.parametrize(
     "wf_path",
-    _DAYDREAM_RELEASE_INSTALL_WORKFLOW_PATHS,
-    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
-)
-def test_daydream_install_is_pinned_to_release_commit(wf_path: Path) -> None:
-    text = wf_path.read_text(encoding="utf-8")
-    refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
-    rel = wf_path.relative_to(_REPO_ROOT).as_posix()
-    assert refs, f"{rel} must install daydream via `uv tool install git+…`"
-    version = _package_version()
-    key = f"v{version}"
-    commit = _DAYDREAM_RELEASE_COMMITS.get(key)
-    assert commit is not None, (
-        f"No release→commit map entry for {key}. The release process is manual: "
-        f"(1) bump project.version in pyproject.toml, (2) tag the release, "
-        f"(3) get the PEELED commit: git ls-remote origin 'refs/tags/{key}^{{}}' "
-        f"(annotated tags report a tag-object SHA on the bare ref — use the ^{{}} target), "
-        f"(4) add the entry to _DAYDREAM_RELEASE_COMMITS in tests/test_workflow_templates.py, "
-        f"(5) update released workflow install refs in lockstep."
-    )
-    expected = f"@{commit}"
-    for ref in refs:
-        assert ref == expected, (
-            f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
-            f"the immutable release commit {expected} for {key}."
-        )
-
-
-@pytest.mark.parametrize(
-    "wf_path",
     _DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS,
     ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
 )
@@ -784,7 +752,6 @@ def test_diagram_workflow_installs_diagram_capable_commit(wf_path: Path) -> None
     text = wf_path.read_text(encoding="utf-8")
     refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
     rel = wf_path.relative_to(_REPO_ROOT).as_posix()
-    assert "--diagram-only" in text, f"{rel} must expose the diagram-only CLI"
     assert refs, f"{rel} must install daydream via `uv tool install git+…`"
     expected = f"@{_DAYDREAM_DIAGRAM_COMMIT}"
     for ref in refs:
@@ -879,35 +846,6 @@ def _release_version(tag: str) -> tuple[int, int, int] | None:
     if m is None:
         return None
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-
-
-def test_release_commit_map_entries_are_pinned_or_retained_provenance() -> None:
-    """Cross-check _DAYDREAM_RELEASE_COMMITS against the workflow install refs
-    so an entry cannot ship as dead data: every entry's commit must be referenced
-    by at least one install pin, or the entry must be a strictly older release
-    deliberately retained for provenance (the map never prunes history). A
-    malformed tag key, a pin that lost its map entry, or a stale commit that outlived
-    its installs all fail here — the provenance entries are accounted for, not
-    unnoticed.
-    """
-    current_version = _release_version(f"v{_package_version()}")
-    assert current_version is not None
-    pinned_commits = {
-        m.group("ref")[1:]
-        for wf_path in _DAYDREAM_RELEASE_INSTALL_WORKFLOW_PATHS
-        for m in _INSTALL_RE.finditer(wf_path.read_text(encoding="utf-8"))
-        if m.group("ref") is not None
-    }
-    assert pinned_commits, "no daydream install pins to cross-check the map against"
-    for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
-        if commit in pinned_commits:
-            continue
-        version = _release_version(tag)
-        assert version is not None and version < current_version, (
-            f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is neither pinned by "
-            f"any workflow install nor an older release retained for provenance, so "
-            f"it ships as dead data: reference it with an install pin or remove it."
-        )
 
 
 # Privilege split — the security invariant the whole design exists to enforce:

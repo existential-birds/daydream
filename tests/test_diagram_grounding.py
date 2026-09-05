@@ -226,15 +226,13 @@ def base_sequence() -> dict[str, Any]:
                 "evidence": {"file": "pkg/api.py", "line": 5, "symbol": "resolve"},
             },
             {
-                # A reply names its enclosing function, and the grounder proves
-                # only that the token is on the cited line -- here the
-                # definition line of ``resolve`` in the replying participant.
+                # A reply cites the return statement in its enclosing function.
                 "from": "Service",
                 "to": "API",
                 "label": "payload",
                 "kind": "reply",
                 "changed": False,
-                "evidence": {"file": "pkg/service.py", "line": 1, "symbol": "resolve"},
+                "evidence": {"file": "pkg/service.py", "line": 2, "symbol": "resolve"},
             },
         ],
         "blocks": [],
@@ -376,9 +374,9 @@ def test_sequence_happy_path_grounds_every_element(repo: Path, symbols: RepoSymb
     assert check_for(report, "message", "0").strength == "definition"
     assert check_for(report, "message", "0").defined_at == "pkg/api.py:4"
     assert check_for(report, "message", "1").defined_at == "pkg/service.py:1"
-    # A reply proves its symbol only as a token on the cited line.
-    assert check_for(report, "message", "2").strength == "token"
-    assert check_for(report, "message", "2").defined_at is None
+    # A reply is proven by a return statement within its enclosing function.
+    assert check_for(report, "message", "2").strength == "definition"
+    assert check_for(report, "message", "2").defined_at == "pkg/service.py:1"
     assert [check_for(report, "message", str(i)).final_index for i in range(3)] == [0, 1, 2]
     assert [check_for(report, "message", str(i)).in_changed_hunk for i in range(3)] == [
         True,
@@ -521,14 +519,14 @@ def test_sequence_symbol_not_on_line_beyond_snap_range(repo: Path, symbols: Repo
 
 def test_sequence_symbol_snap_rewrites_the_citation(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
-    # "resolve" is not on pkg/service.py:2 but is one line above it.
-    spec["messages"][2]["evidence"]["line"] = 2
+    # "resolve" is not on pkg/api.py:4 but is one line below it.
+    spec["messages"][1]["evidence"]["line"] = 4
     report = run_sequence(repo, symbols, spec)
 
-    check = check_for(report, "message", "2")
+    check = check_for(report, "message", "1")
     assert check.grounded and check.reason is None
-    assert check.snapped_line == 1
-    assert report.spec_final["messages"][2]["evidence"]["line"] == 1
+    assert check.snapped_line == 5
+    assert report.spec_final["messages"][1]["evidence"]["line"] == 5
 
 
 def test_sequence_file_not_read_by_model(repo: Path, symbols: RepoSymbols) -> None:
@@ -556,7 +554,7 @@ def test_read_receipt_matches_on_path_components_only(repo: Path, symbols: RepoS
         symbols=symbols,
     )
     assert check_for(report, "message", "0").reason == "FILE_NOT_READ_BY_MODEL"
-    assert check_for(report, "message", "2").grounded
+    assert check_for(report, "message", "2").reason == "REPLY_NOT_PRECEDED_BY_CALL"
 
 
 def test_sequence_branch_not_a_branch_statement(repo: Path, symbols: RepoSymbols) -> None:
@@ -597,6 +595,54 @@ def test_sequence_callee_not_defined_in_target(repo: Path, symbols: RepoSymbols)
     spec["messages"][1]["evidence"] = {"file": "pkg/api.py", "line": 4, "symbol": "handle"}
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "message", "1").reason == "CALLEE_NOT_DEFINED_IN_TARGET"
+
+
+def test_sequence_reply_requires_a_return_statement(repo: Path, symbols: RepoSymbols) -> None:
+    spec = base_sequence()
+    spec["messages"][2]["evidence"]["line"] = 1
+
+    report = run_sequence(repo, symbols, spec)
+
+    assert check_for(report, "message", "2").reason == "NOT_A_REPLY_STATEMENT"
+
+
+def test_sequence_reply_requires_a_reversed_preceding_call(repo: Path, symbols: RepoSymbols) -> None:
+    spec = base_sequence()
+    spec["messages"][1]["kind"] = "self"
+
+    report = run_sequence(repo, symbols, spec)
+
+    assert check_for(report, "message", "2").reason == "REPLY_NOT_PRECEDED_BY_CALL"
+
+
+def test_sequence_reply_requires_a_grounded_preceding_call(
+    repo: Path, symbols: RepoSymbols
+) -> None:
+    spec = base_sequence()
+    spec["messages"][1]["evidence"]["line"] = 999
+
+    report = run_sequence(repo, symbols, spec)
+
+    assert check_for(report, "message", "1").reason == "LINE_OUT_OF_RANGE"
+    assert check_for(report, "message", "2").reason == "REPLY_NOT_PRECEDED_BY_CALL"
+    assert all(message["kind"] != "reply" for message in report.spec_final["messages"])
+
+
+def test_sequence_reply_requires_an_enclosing_function(
+    repo: Path, symbols: RepoSymbols, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = base_sequence()
+    original_definitions = symbols.definitions
+
+    def definitions(symbol: str, files: list[str] | None = None) -> list[dict[str, object]]:
+        if symbol == "resolve" and files == ["pkg/service.py"]:
+            return [{"file": "pkg/service.py", "line": 1, "end_line": 2, "kind": "class"}]
+        return original_definitions(symbol, files)
+
+    monkeypatch.setattr(symbols, "definitions", definitions)
+    report = run_sequence(repo, symbols, spec)
+
+    assert check_for(report, "message", "2").reason == "REPLY_NOT_IN_ENCLOSING_FUNCTION"
 
 
 def test_sequence_participant_no_files(repo: Path, symbols: RepoSymbols) -> None:

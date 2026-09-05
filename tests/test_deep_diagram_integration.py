@@ -32,10 +32,10 @@ SEQUENCE_GOLDEN = """sequenceDiagram
     participant P2 as Core
     participant P3 as Util
     P1->>P3: Normalize payload
+    P3-->>P1: Stripped text
     P1->>P2: Handle cleaned payload
-    P2->>P2: Normalize inside handler
     P2-->>P1: Cleaned payload
-    P3-->>P1: Stripped text"""
+    P2->>P2: Normalize inside handler"""
 
 FLOWCHART_GOLDEN = """flowchart TD
     N1([run]) --> N2{payload is None?}
@@ -557,12 +557,12 @@ async def test_flowchart_grounding_prunes_repairs_and_demotes(
 # --- Spec test 6: read receipts ---------------------------------------------
 
 
-async def test_unread_evidence_file_prunes_sequence_messages(
+async def test_unread_evidence_file_omits_sequence_when_pairs_break(
     tmp_path: Path,
     review_run: Callable[..., Any],
     captured_post: _CapturedPost,
 ) -> None:
-    """A citation the model never read is pruned, even though the line is real."""
+    """Unread calls also invalidate their dependent replies, below the render floor."""
     target = dr.build_cross_module_repo(tmp_path)
 
     exit_code, _ = await review_run(
@@ -573,15 +573,15 @@ async def test_unread_evidence_file_prunes_sequence_messages(
 
     assert exit_code == 0
     sequence = _artifact(target)["results"]["sequence"]
-    assert sequence["status"] == "rendered"
-    assert _reasons(sequence) == {"FILE_NOT_READ_BY_MODEL"}
-    assert sequence["grounding"]["summary"]["pruned"] == 2
-    cited = [
-        message["evidence"]["file"] for message in sequence["spec_final"]["messages"]
-    ]
-    assert "pkg_b/client.py" not in cited
-    assert "Normalize payload" not in sequence["mermaid"]
-    assert SEQUENCE_HEADING in captured_post.body()
+    assert sequence["status"] == "omitted"
+    assert _reasons(sequence) == {
+        "FILE_NOT_READ_BY_MODEL",
+        "REPLY_NOT_PRECEDED_BY_CALL",
+    }
+    assert sequence["grounding"]["summary"]["pruned"] == 4
+    assert sequence["omit_reasons"] == ["TOO_FEW_MESSAGES", "TOO_FEW_PARTICIPANTS"]
+    assert sequence["mermaid"] is None
+    assert SEQUENCE_HEADING not in captured_post.body()
 
 
 async def test_unread_root_file_omits_the_flowchart(
