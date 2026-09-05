@@ -15,6 +15,7 @@ import shutil
 import subprocess as subprocess
 import sys as sys
 import tempfile
+import threading
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -154,6 +155,13 @@ _GIT_REDIRECT_STRIP_VARS = (
 # :mod:`daydream.git_ops`.
 _REAL_GIT_DIR: str | None = None
 _REAL_GIT_RESOLVED = False
+# ``execute()`` builds the child env through ``asyncio.to_thread``, so a fan-out
+# of first-wave children can enter the resolver concurrently. ``_REAL_GIT_RESOLVED``
+# is set *before* the bounded xcrun subprocess completes (negative results are
+# cached too), so the check must run under the lock: a concurrent caller that
+# observed the flag early would return before ``_REAL_GIT_DIR`` is assigned and
+# silently lose the real-git PATH.
+_REAL_GIT_RESOLUTION_LOCK = threading.Lock()
 
 # Bound for the parent-side xcrun resolution, mirroring ``git_ops._run_git``'s
 # default timeout (5s): a hung ``xcrun`` must fail open, never wedge the process.
@@ -174,42 +182,43 @@ def _resolve_real_git_dir() -> str | None:
     raises.
     """
     global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
-    if _REAL_GIT_RESOLVED:
+    with _REAL_GIT_RESOLUTION_LOCK:
+        if _REAL_GIT_RESOLVED:
+            return _REAL_GIT_DIR
+        _REAL_GIT_RESOLVED = True
+        if sys.platform != "darwin":
+            return None
+        try:
+            proc = subprocess.run(
+                ["xcrun", "--find", "git"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_XCRUN_TIMEOUT_S,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _logger.warning(
+                "codex: could not resolve real git via 'xcrun --find git' (%s); leaving child PATH unchanged",
+                exc,
+            )
+            return None
+        if proc.returncode != 0:
+            _logger.warning(
+                "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); "
+                "leaving child PATH unchanged",
+                proc.returncode, proc.stderr.strip(),
+            )
+            return None
+        git_path = proc.stdout.strip()
+        if not git_path or not Path(git_path).is_file() or not os.access(git_path, os.X_OK):
+            _logger.warning(
+                "codex: could not resolve real git via 'xcrun --find git' (invalid target %r); "
+                "leaving child PATH unchanged",
+                git_path,
+            )
+            return None
+        _REAL_GIT_DIR = str(Path(git_path).parent)
         return _REAL_GIT_DIR
-    _REAL_GIT_RESOLVED = True
-    if sys.platform != "darwin":
-        return None
-    try:
-        proc = subprocess.run(
-            ["xcrun", "--find", "git"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_XCRUN_TIMEOUT_S,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        _logger.warning(
-            "codex: could not resolve real git via 'xcrun --find git' (%s); leaving child PATH unchanged",
-            exc,
-        )
-        return None
-    if proc.returncode != 0:
-        _logger.warning(
-            "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); "
-            "leaving child PATH unchanged",
-            proc.returncode, proc.stderr.strip(),
-        )
-        return None
-    git_path = proc.stdout.strip()
-    if not git_path or not Path(git_path).is_file() or not os.access(git_path, os.X_OK):
-        _logger.warning(
-            "codex: could not resolve real git via 'xcrun --find git' (invalid target %r); "
-            "leaving child PATH unchanged",
-            git_path,
-        )
-        return None
-    _REAL_GIT_DIR = str(Path(git_path).parent)
-    return _REAL_GIT_DIR
 
 
 def _reset_real_git_resolution() -> None:

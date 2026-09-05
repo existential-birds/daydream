@@ -6,6 +6,8 @@ import json
 import logging
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -1461,6 +1463,56 @@ class TestResolveRealGitDir:
 
         assert first == second == str(git_bin)
         assert len(calls) == 1  # S1: repeated execute() calls never re-shell out to xcrun
+
+    def test_concurrent_first_wave_callers_never_see_unresolved_flag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """S1: a fan-out's first wave shares one resolution; none silently get None.
+
+        execute() builds the child env through asyncio.to_thread for every
+        caller, so a fan-out of first-wave children can enter the resolver
+        concurrently. The lock must hold the check until _REAL_GIT_DIR is
+        assigned: every concurrent caller gets the resolved dir and xcrun runs
+        exactly once.
+        """
+        from daydream.backends import codex
+
+        git_bin = tmp_path / "real" / "usr" / "bin"
+        git_bin.mkdir(parents=True)
+        git_file = git_bin / "git"
+        git_file.write_text("#!/bin/sh\n")
+        git_file.chmod(0o755)
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        calls: list[int] = []
+        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
+
+        def slow_run(*a: Any, **k: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(1)
+            time.sleep(0.1)  # widen the flag-set / dir-assign window for the racers
+            return proc
+
+        monkeypatch.setattr(codex.subprocess, "run", slow_run)
+
+        barrier = threading.Barrier(8)
+        results: list[str | None] = []
+        results_lock = threading.Lock()
+
+        def racer() -> None:
+            barrier.wait()
+            resolved = codex._resolve_real_git_dir()
+            with results_lock:
+                results.append(resolved)
+
+        threads = [threading.Thread(target=racer) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert results == [str(git_bin)] * 8  # S1: no caller observes the early flag and gets None
+        assert len(calls) == 1  # S1: the cache was not thrashed into re-shelling to xcrun
+
 
     def test_nonzero_xcrun_exit_falls_back_to_none_with_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
