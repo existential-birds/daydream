@@ -302,6 +302,55 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     assert oracle["metrics"] == job["metrics"]
 
 
+def test_render_job_config_resolves_with_only_selected_provider_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset *alternative* credential never aborts rendering (issue #979)."""
+    import yaml
+
+    from daydream.benchmark.harbor import package as pkg
+    from harbor.utils.env import resolve_env_vars
+
+    # Judge: anthropic selected -> CLAUDE_CODE_OAUTH_TOKEN must be optional.
+    for var in (
+        "DAYDREAM_JUDGE_API_KEY", "DAYDREAM_JUDGE_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN", "DAYDREAM_REVIEW_API_KEY",
+        "DAYDREAM_REVIEW_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "anthropic")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "claude-x")
+    monkeypatch.setenv("DAYDREAM_JUDGE_API_KEY", "sk-judge")
+    monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "pi")
+    monkeypatch.setenv("DAYDREAM_REVIEW_MODEL", "pi-model")
+    monkeypatch.setenv("DAYDREAM_REVIEW_API_KEY", "sk-review")
+
+    job = yaml.safe_load(pkg.render_job_config(oracle=False))
+    agent_env = resolve_env_vars(dict(job["agents"][0]["env"]))
+    verifier_env = resolve_env_vars(dict(job["verifier"]["env"]))
+    assert agent_env["DAYDREAM_REVIEW_API_KEY"] == "sk-review"
+    assert agent_env["ANTHROPIC_API_KEY"] == ""          # claude alternative, unused, unset
+    assert verifier_env["DAYDREAM_JUDGE_API_KEY"] == "sk-judge"
+    assert verifier_env["CLAUDE_CODE_OAUTH_TOKEN"] == ""  # alternative, unused, unset
+    assert verifier_env["DAYDREAM_JUDGE_MODEL"] == "claude-x"
+
+
+def test_render_job_config_still_requires_selection_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selection vars stay bare: unset provider/model still abort rendering."""
+    import yaml
+
+    from daydream.benchmark.harbor import package as pkg
+    from harbor.utils.env import resolve_env_vars
+
+    monkeypatch.delenv("DAYDREAM_JUDGE_PROVIDER", raising=False)
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
+    job = yaml.safe_load(pkg.render_job_config(oracle=False))
+    with pytest.raises(ValueError, match="DAYDREAM_JUDGE_PROVIDER"):
+        resolve_env_vars(dict(job["verifier"]["env"]))
+
+
 def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: FakeGh) -> None:
     import importlib.metadata
 
