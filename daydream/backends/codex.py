@@ -233,7 +233,10 @@ def _isolated_child_env(cwd: Path, execution_cwd: Path) -> dict[str, str] | None
     When *execution_cwd* differs from *cwd* (the disposable-clone case), the
     child must not inherit a path to the caller's repo: the returned copy of the
     parent environment strips ``$PWD``/``$OLDPWD`` and the ``GIT_*`` redirect
-    vars that could point the clone's git ops at the source. Returns ``None``
+    vars that could point the clone's git ops at the source. On Darwin only
+    (issue #1122), the directory of the parent-resolved real git binary is
+    prepended to the child PATH so the sandboxed child bypasses the xcrun shim;
+    resolution failure leaves PATH unchanged (fail-open). Returns ``None``
     when the process runs in *cwd* unchanged (nothing to strip). The isolation is
     path-hiding, not physical — a model that independently discovers the source
     path could still write to its refs.
@@ -500,7 +503,9 @@ class CodexBackend:
             # path to the caller's repo: _isolated_child_env strips $PWD/$OLDPWD
             # and the GIT_* overrides that could redirect the clone's git ops back
             # at the source, and the child is started in the clone (below) so its
-            # own cwd is never the source path. Path-hiding, not physical.
+            # own cwd is never the source path. Path-hiding, not physical. On
+            # macOS, the same isolated env also prepends the real git dir to the
+            # child PATH so sandboxed git calls bypass the xcrun shim (#1122).
             child_env = _isolated_child_env(cwd, execution_cwd)
 
             if execution_cwd != cwd:

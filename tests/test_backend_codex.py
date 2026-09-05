@@ -1471,3 +1471,66 @@ class TestResolveRealGitDir:
         )
 
         assert codex._resolve_real_git_dir() is None
+
+
+class TestIsolatedChildEnvDarwinPath:
+    """Darwin PATH-prepend in _isolated_child_env (issue #1122 M1/M4/M6/M7)."""
+
+    def test_darwin_prepends_real_git_dir_preserving_rest_of_path(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            codex, "_resolve_real_git_dir", lambda: "/Library/Developer/CommandLineTools/usr/bin",
+        )
+        monkeypatch.setenv("PATH", "/usr/bin:/usr/local/bin")
+
+        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+        assert env is not None
+        assert env["PATH"].startswith("/Library/Developer/CommandLineTools/usr/bin:")  # M1: precedes
+        assert env["PATH"].endswith("/usr/bin:/usr/local/bin")  # M1: remainder + order preserved
+
+    def test_darwin_still_strips_redirect_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: "/real/bin")
+        for var in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            monkeypatch.setenv(var, "/leak")
+
+        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+        assert env is not None
+        assert env["PATH"].startswith("/real/bin")
+        for var in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):  # M4
+            assert var not in env
+
+    def test_darwin_resolver_failure_leaves_path_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: None)  # M2 fail-open
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+        assert env is not None
+        assert env["PATH"] == "/usr/bin"  # fallback: unchanged PATH, no exception
+
+    def test_non_isolated_path_returns_none_even_on_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        called = []
+
+        def counting_resolver() -> str:
+            called.append(1)
+            return "/real/bin"
+
+        monkeypatch.setattr(codex, "_resolve_real_git_dir", counting_resolver)
+
+        assert codex._isolated_child_env(Path("/work"), Path("/work")) is None  # M7
+        assert called == []  # resolver never invoked on the non-clone path
