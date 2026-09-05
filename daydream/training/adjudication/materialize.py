@@ -262,14 +262,19 @@ def run_materialize(
             if not isinstance(row, dict):
                 raise ValueError(f"materialize: non-object resolution row in session data: {row!r}")
             resolution = _resolution_from_row(row)
-            records.append(
-                build_canonical_record(
-                    session,
-                    resolution,
-                    evidence_observed_at=pin["evidence_observed_at"],
-                    as_of=pin.get("as_of"),
-                )
+            record = build_canonical_record(
+                session,
+                resolution,
+                evidence_observed_at=pin["evidence_observed_at"],
+                as_of=pin.get("as_of"),
             )
+            if session.get("conflicting"):
+                # The session-level conflict flag rides on every emitted
+                # per-finding record so downstream consumers (canonical
+                # harvest) can exclude the disposition from decisive labels
+                # while the full record — flag included — lands in rubric_json.
+                record["conflicting"] = True
+            records.append(record)
     records.sort(key=lambda r: str(r["record_id"]))
 
     id_digest = hashlib.sha256(

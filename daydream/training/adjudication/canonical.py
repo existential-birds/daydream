@@ -257,11 +257,20 @@ def run_canonical_harvest(
             "rubric_version": pin["rubric_version"],
         }
         rubric_json = _canonical(rubric)
+        # Decisive labels come from every decisive record EXCEPT conflicted
+        # ones: a session whose harvester generations disagree is non-gold per
+        # existing precedence — its dispositions never project into
+        # ``finding-<disposition>`` labels. The full record (``conflicting``
+        # flag included) still lands in ``rubric_json`` and annotations.jsonl —
+        # provenance preserved, and acceptance is never inferred from merge
+        # state (the flag is set by the materializer and merely carried
+        # through the merge loop above).
         labels = sorted(
             {
                 f"finding-{record['disposition']}"
                 for record in session_records
                 if record["disposition"] in DECISIVE_DISPOSITIONS
+                and not record.get("conflicting")
             }
         )
         # Pin member of the auto dedup key. The dedup tuple (M14) omits

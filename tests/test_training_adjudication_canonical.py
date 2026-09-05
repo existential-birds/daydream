@@ -502,3 +502,60 @@ def test_canonical_harvest_complete_set_is_idempotent_and_exactly_once(
     assert (mat / "annotations.jsonl").read_bytes() == first
     assert summary2["appended_sessions"] == 0
     assert summary2["skipped_sessions"] == 3
+
+
+def _hydrated_sqlite_index_with_conflict(tmp_path: Path) -> Path:
+    """Task 3's ``_hydrated_sqlite_index`` shape, extended with a second,
+    distinct-dedup-key ``label_observations`` row for the same session — two
+    harvester generations disagreeing (labels differ ⇒ dedup keys differ) on
+    one ``s1``. The latest-observed auto row wins; the session is conflicting."""
+    from daydream.archive.index import _get_connection
+
+    root = tmp_path / "hydrated"
+    conn = _get_connection(root)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    )
+    rubric = {"posterior_source": "pr_review",
+              "per_finding_resolutions": [{
+                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
+                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+                  "evidence_digest": "d" * 32}]}
+    rubric_json = json.dumps(rubric)
+    for observed_at, labels, evidence_sha in (
+        ("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64),
+        ("2026-01-03T00:00:00+00:00", '["finding-rejected"]', "f" * 64),
+    ):
+        conn.execute(
+            "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
+            "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
+            "VALUES ('s1', ?, ?, 'v1', ?, ?, 0, 'auto', '980-rubric-r2')",
+            (observed_at, labels, evidence_sha, rubric_json),
+        )
+    conn.commit()
+    conn.close()
+    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
+    return root
+
+
+def test_conflicted_session_yields_no_decisive_label(tmp_path: Path) -> None:
+    """Two distinct harvester dedup keys on one session = conflicting
+    observations: the winner's resolutions still materialize, but the
+    canonical harvest must not emit a decisive finding label for it."""
+    root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    record = json.loads((tmp_path / "mat" / "sessions.jsonl").read_text().splitlines()[0])
+    assert record["conflicting"] is True  # surfaced, never silently merged
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    out = run_canonical_harvest(
+        index_root=root, materialize_dir=mat, archive_dir=archive,
+    )
+    assert out["appended_sessions"] == 1
+    history = label_observation_history(archive, "s1")
+    rubric = json.loads(history[0]["rubric_json"])
+    assert rubric["per_finding_resolutions"][0]["conflicting"] is True
+    # and no decisive label was projected from the conflicted disposition
+    assert "finding-accepted" not in history[0]["labels"]
