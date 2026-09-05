@@ -603,8 +603,9 @@ class CodexBackend:
                                 parsed.append({"path": path, "kind": kind})
                             # A missing `status` means "completed": the old
                             # code always recorded success, so an absent status
-                            # must never be archived as an error.
-                            status = item.get("status", "completed")
+                            # (or an explicit `null`) must never be archived as
+                            # an error.
+                            status = item.get("status") or "completed"
                             # Cap the joined path listing with the same limit
                             # as the stdout/stderr excerpts so a large
                             # multi-file apply or a giant path cannot produce
@@ -626,13 +627,19 @@ class CodexBackend:
                                         output += f"\n{stream}: {excerpt[:500]}"
                             # Preserve the legacy patch-input keys for
                             # extension tool supervisors keyed on
-                            # {"file", "action"} — exact only for single-file
-                            # changes; multi-file stays namespaced under
-                            # `changes`.
+                            # {"file", "action"}: exact path/kind for
+                            # single-file changes; multi-file (or empty)
+                            # keeps the pre-diff scalar fallback
+                            # ("unknown"/"modified") so the documented keys
+                            # never go silent, with the full detail
+                            # namespaced under `changes`.
                             start_input: dict[str, Any] = {"changes": parsed}
                             if len(parsed) == 1:
                                 start_input["file"] = parsed[0]["path"]
                                 start_input["action"] = parsed[0]["kind"]
+                            else:
+                                start_input["file"] = "unknown"
+                                start_input["action"] = "modified"
                             yield ToolStartEvent(
                                 id=item_id,
                                 name="patch",
@@ -674,7 +681,11 @@ class CodexBackend:
                                 k: v for k, v in item.items()
                                 if k != "type" and v != "unknown"
                             }
-                            echo = json.dumps(fields)
+                            # Cap the diagnostic echo with the same limit as the
+                            # stdout/stderr excerpts so a degenerate pathless item
+                            # carrying a large field cannot produce an unbounded
+                            # ToolResult output.
+                            echo = json.dumps(fields)[:500]
                             yield ToolStartEvent(
                                 id=item_id,
                                 name="patch",

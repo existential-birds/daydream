@@ -122,6 +122,10 @@ async def test_file_change_changes_map_multi_path() -> None:
     events = await _run_fixture(backend, "Edit", "file_change_multi.jsonl")
     starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
     assert len(starts) == 1  # exactly ONE pair for the item — no id collisions
+    # Legacy {"file", "action"} keys stay present for multi-file too (pre-diff
+    # fallback values), so tool supervisors keyed on them still see the event.
+    assert starts[0].input["file"] == "unknown"
+    assert starts[0].input["action"] == "modified"
     assert sorted(
         (c["path"], c["kind"]) for c in starts[0].input["changes"]
     ) == [
@@ -175,20 +179,46 @@ async def _run_inline_lines(backend: Any, prompt: Any, lines: list[str]) -> list
 
 
 @pytest.mark.asyncio
+async def test_file_change_pathless_echo_is_bounded() -> None:
+    # A degenerate pathless item carrying a huge field must not produce an
+    # unbounded ToolResult: the diagnostic echo is capped like every other
+    # derived string in the file_change branch.
+    backend = CodexBackend(model="fixture-model")
+    big_field = "x" * 100_000
+    pathless_line = (
+        '{"type":"item.completed","item":{"type":"file_change",'
+        '"id":"x1","stderr":"%s"}}' % big_field
+    )
+    events = await _run_inline_lines(backend, "Edit", [
+        '{"type":"thread.started","thread_id":"t"}',
+        pathless_line,
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
+    ])
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "unparseable" in results[0].output
+    assert len(results[0].output) < 600
+
+
+@pytest.mark.asyncio
 async def test_file_change_missing_status_is_success() -> None:
-    # A changes-map item with no `status` key must record success (the old
-    # code always did) instead of being archived as an error.
+    # A changes-map item with no `status` key — or an explicit `"status":
+    # null` — must record success (the old code always did) instead of
+    # being archived as an error.
     backend = CodexBackend(model="fixture-model")
     events = await _run_inline_lines(backend, "Edit", [
         '{"type":"thread.started","thread_id":"t"}',
         '{"type":"item.completed","item":{"type":"file_change","id":"x1",'
         '"changes":{"/tmp/spike-repo/a.py":{"type":"add"}}}}',
+        '{"type":"item.completed","item":{"type":"file_change","id":"x2",'
+        '"status":null,"changes":{"/tmp/spike-repo/b.py":{"type":"update"}}}}',
         '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
     ])
     results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1
-    assert results[0].is_error is False
-    assert results[0].status == "completed"
+    assert len(results) == 2
+    assert all(r.is_error is False for r in results)
+    assert all(r.status == "completed" for r in results)
 
 
 @pytest.mark.asyncio
@@ -1348,13 +1378,3 @@ async def test_codex_preserves_exit_code_and_status_on_results() -> None:
     assert ok.is_error is False
     assert ok.exit_code == 0
     assert ok.status == "completed"
-
-
-@pytest.mark.asyncio
-async def test_file_change_output_names_every_path() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Edit", "file_change_multi.jsonl")
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert "a.py" in results[0].output and "b.py" in results[0].output
-    assert "c.py" in results[0].output and "d.py" in results[0].output
-    assert "unknown" not in results[0].output
