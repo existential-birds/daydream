@@ -187,6 +187,10 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None, *, backend: str = "
         return
     api_key = (source.get(_API_KEY_ENV) or "").strip()
     base_url = (source.get(_BASE_URL_ENV) or "").strip()
+    if not base_url:
+        raise EntrypointError(
+            "missing required environment variable 'DAYDREAM_REVIEW_BASE_URL'"
+        )
     parsed = urllib.parse.urlsplit(base_url)
     if (
         parsed.scheme.lower() != "https"
