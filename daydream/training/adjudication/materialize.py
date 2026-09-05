@@ -75,10 +75,8 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
         raise HubUnavailableError(
             f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
         )
-    from daydream.archive.index import query_runs
-
     sessions: list[dict[str, Any]] = []
-    for row in query_runs(index_root):
+    for row in _query_runs_readonly(index_root / "index.db"):
         session_id = str(row["session_id"])
         observations = _label_observations_readonly(index_root / "index.db", session_id)
         if not observations:
@@ -127,14 +125,32 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     return sessions, revisions[0]
 
 
-def _label_observations_readonly(db_path: Path, session_id: str) -> list[dict[str, Any]]:
-    """Read one session's ``label_observations`` rows over a **read-only**
-    connection (``mode=ro`` URI — never ``_get_connection``, which opens
-    read-write and runs WAL pragmas against the hydrated staging index).
+def _query_runs_readonly(db_path: Path) -> list[dict[str, Any]]:
+    """Read all ``runs`` rows over a **read-only** connection (``mode=ro``
+    URI — ``query_runs`` goes through ``_get_connection``, which opens
+    read-write, runs ``PRAGMA journal_mode=WAL`` against the hydrated
+    staging index, and leaves ``-wal``/``-shm`` sidecars behind).
     """
     import sqlite3
 
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute("SELECT * FROM runs").fetchall()]
+    finally:
+        conn.close()
+
+
+def _label_observations_readonly(db_path: Path, session_id: str) -> list[dict[str, Any]]:
+    """Read one session's ``label_observations`` rows over a **read-only**
+    connection (``mode=ro&immutable=1`` URI — never ``_get_connection``,
+    which opens read-write and runs WAL pragmas against the hydrated
+    staging index; ``immutable=1`` also keeps a WAL-mode db from
+    materializing ``-shm``/``-wal`` sidecars on read).
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
