@@ -52,7 +52,7 @@ _TRAJECTORIES_SUBDIR = "trajectories"
 _DAYDREAM_DIRNAME = ".daydream"
 
 if TYPE_CHECKING:
-    from daydream.backends import AgentEvent, CostEvent
+    from daydream.backends import AgentEvent, CostEvent, ToolResultEvent
 
 _console = create_console()
 _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
@@ -849,6 +849,28 @@ def _reset_recorder_for_tests() -> None:
     _ACTIVE_RECORDERS.clear()
 
 
+def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
+    """Build ``ObservationResult.extra`` from a ToolResultEvent (issue #1126).
+
+    Deterministic scalar-only metadata: ``is_error`` always, then each
+    structured field only when the backend supplied it. Values are bool/int/
+    float/fixed-ASCII strings — never tool output or arguments — so nothing
+    free-text ever enters ``extra`` and redaction needs no special casing.
+    """
+    extra: dict[str, Any] = {"is_error": event.is_error}
+    if event.exit_code is not None:
+        extra["exit_code"] = event.exit_code
+    if event.status:
+        extra["status"] = event.status
+    if event.duration_ms is not None:
+        extra["duration_ms"] = event.duration_ms
+    if event.cancelled:
+        extra["cancelled"] = True
+    if event.truncated:
+        extra["truncated"] = True
+    return extra
+
+
 @dataclass
 class Invocation:
     """Per-``run_agent()`` recording scope for one model conversation.
@@ -1126,8 +1148,15 @@ class Invocation:
             open_dict = host["open_dict"]
             if open_dict is not None:
                 # Host Step is still open — append to its observation buffer.
+                # Failure metadata (is_error/exit_code/status, issue #1126)
+                # rides ObservationResult.extra alongside source_call_id and
+                # content.
                 open_dict["_observation_results"].append(
-                    ObservationResult(source_call_id=event.id, content=event.output)
+                    ObservationResult(
+                        source_call_id=event.id,
+                        content=event.output,
+                        extra=_result_extra(event),
+                    )
                 )
             else:
                 # Host Step was closed by an intervening TurnEndEvent. Patch the
@@ -1135,7 +1164,11 @@ class Invocation:
                 # bound to its originating turn.
                 self._amend_closed_step_observation(
                     closed_index=host["closed_index"],
-                    result=ObservationResult(source_call_id=event.id, content=event.output),
+                    result=ObservationResult(
+                        source_call_id=event.id,
+                        content=event.output,
+                        extra=_result_extra(event),
+                    ),
                 )
         elif isinstance(event, MetricsEvent):
             # EVNT-02 attribute names verbatim. prompt_tokens is the total

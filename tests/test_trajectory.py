@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from daydream.atif import validate as atif_validate
+from daydream.atif.models import Step
 from daydream.backends import (
     AgentEvent,
     MetricsEvent,
@@ -22,6 +23,7 @@ from daydream.backends import (
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
 )
 from daydream.trajectory import (
     DaydreamPhase,
@@ -135,6 +137,79 @@ async def test_tool_call_and_result_land_on_same_step(tmp_path: Path) -> None:
     step = agent_steps[0]
     assert step["tool_calls"][0]["tool_call_id"] == "tool-1"
     assert step["observation"]["results"][0]["source_call_id"] == "tool-1"
+
+
+# Behavior: ToolResultEvent failure metadata round-trips into
+# ObservationResult.extra (issue #1126, Task 3).
+
+
+async def _record_events(
+    tmp_path: Path, *events: AgentEvent
+) -> tuple[Invocation, list[Step]]:
+    """Observe *events* in one invocation; return it with its materialized steps."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            for event in events:
+                inv.observe(event)
+    return inv, inv.steps
+
+
+def _single_observation_result(steps: list[Step], index: int) -> Any:
+    """The single ObservationResult of *steps[index]*, asserting the shape."""
+    step = steps[index]
+    assert step.observation is not None
+    assert len(step.observation.results) == 1
+    return step.observation.results[0]
+
+
+async def test_result_metadata_round_trips_into_observation_extra(tmp_path: Path) -> None:
+    """exit_code/status on an error ToolResultEvent persist into result extra."""
+    inv, steps = await _record_events(
+        tmp_path,
+        ToolStartEvent(id="c1", name="shell", input={"command": "false"}),
+        ToolResultEvent(id="c1", output="fatal", is_error=True, exit_code=128, status="completed"),
+    )
+    result = _single_observation_result(steps, 0)
+    assert result.source_call_id == "c1"
+    assert result.extra == {"is_error": True, "exit_code": 128, "status": "completed"}
+
+
+async def test_success_metadata_round_trips_not_just_errors(tmp_path: Path) -> None:
+    """Metadata persists on success too — is_error is False, not omitted."""
+    inv, steps = await _record_events(
+        tmp_path,
+        ToolStartEvent(id="c2", name="shell", input={"command": "true"}),
+        ToolResultEvent(id="c2", output="ok", is_error=False, exit_code=0, status="completed"),
+    )
+    assert _single_observation_result(steps, 0).extra == {
+        "is_error": False,
+        "exit_code": 0,
+        "status": "completed",
+    }
+
+
+async def test_is_error_only_metadata_round_trips_for_scarce_backends(tmp_path: Path) -> None:
+    """Backends with no structured fields still round-trip is_error."""
+    inv, steps = await _record_events(
+        tmp_path,
+        ToolStartEvent(id="c3", name="bash", input={"command": "x"}),
+        ToolResultEvent(id="c3", output="err", is_error=True),
+    )
+    assert _single_observation_result(steps, 0).extra == {"is_error": True}
+
+
+async def test_late_result_on_closed_step_carries_extra(tmp_path: Path) -> None:
+    """The closed-step amendment path persists extra too, not just content."""
+    inv, steps = await _record_events(
+        tmp_path,
+        ToolStartEvent(id="c4", name="shell", input={}),
+        TurnEndEvent(message_id="m1"),
+        ToolResultEvent(id="c4", output="late", is_error=True, exit_code=1, status="completed"),
+        ResultEvent(structured_output=None, continuation=None),
+    )
+    result = _single_observation_result(steps, 0)
+    assert result.extra == {"is_error": True, "exit_code": 1, "status": "completed"}
 
 
 # Behavior: mark_aborted stamps extra["stop_reason"] on the closing step
