@@ -550,6 +550,36 @@ def head_sha(repo: Path) -> str:
     return proc.stdout.strip()
 
 
+def list_local_branches(repo: Path) -> dict[str, str]:
+    """Return a snapshot of local branch names mapped to their full OIDs.
+
+    Read-only. Runs ``git for-each-ref refs/heads`` and parses each output
+    line into ``short_name -> full OID``. An empty dict is returned only when
+    the repository genuinely has zero local branches and git exits 0; any
+    non-zero return code raises.
+
+    Raises:
+        GitError: If ``git for-each-ref`` fails (e.g. *repo* is not a
+            repository).
+    """
+    proc = _run_git(
+        repo,
+        ["for-each-ref", "refs/heads", "--format=%(refname:short) %(objectname)"],
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        raise GitError(
+            f"cannot list local branches in {repo}: {proc.stderr.strip()}",
+        )
+    branches: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        name, _, oid = line.strip().partition(" ")
+        branches[name] = oid
+    return branches
+
+
 def head_commit_message(repo: Path) -> str:
     """Return the full commit message of ``HEAD``.
 

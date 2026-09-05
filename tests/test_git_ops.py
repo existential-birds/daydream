@@ -118,6 +118,26 @@ def test_default_branch_falls_back_to_main(tmp_path: Path) -> None:
     assert git_ops.default_branch(repo) == "main"
 
 
+def test_list_local_branches_maps_names_to_oids(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path, name="list_branches")
+    _git(repo, "checkout", "-b", "feat/slash-name")
+    (repo / "feature.txt").write_text("feature\n")
+    _git(repo, "add", "feature.txt")
+    _commit(repo, "on feature")
+    _git(repo, "checkout", "main")
+
+    branches = git_ops.list_local_branches(repo)
+
+    assert set(branches) == {"main", "feat/slash-name"}
+    assert branches["main"] == git_ops.head_sha(repo)  # main is checked out here
+    assert branches["feat/slash-name"] == _git(repo, "rev-parse", "feat/slash-name")
+
+
+def test_list_local_branches_raises_on_failure(tmp_path: Path) -> None:
+    with pytest.raises(git_ops.GitError):
+        git_ops.list_local_branches(tmp_path / "not-a-repo")
+
+
 @pytest.mark.parametrize(
     ("init_branch", "expected"),
     [
