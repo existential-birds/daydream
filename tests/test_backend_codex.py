@@ -111,7 +111,7 @@ async def test_file_change_changes_map_single_path() -> None:
     events = await _run_fixture(backend, "Edit", "file_change_add.jsonl")
     starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
     assert len(starts) == 1
-    assert starts[0].input["changes"] == [("/tmp/spike-repo/a.py", "add")]
+    assert starts[0].input["changes"] == [{"path": "spike-repo/a.py", "kind": "add"}]
     results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(results) == 1 and not results[0].is_error
 
@@ -125,10 +125,10 @@ async def test_file_change_changes_map_multi_path() -> None:
     assert sorted(
         (c["path"], c["kind"]) for c in starts[0].input["changes"]
     ) == [
-        ("/tmp/spike-repo/a.py", "add"),
-        ("/tmp/spike-repo/b.py", "update"),
-        ("/tmp/spike-repo/c.py", "delete"),
-        ("/tmp/spike-repo/d.py", "move"),
+        ("spike-repo/a.py", "add"),
+        ("spike-repo/b.py", "update"),
+        ("spike-repo/c.py", "delete"),
+        ("spike-repo/d.py", "move"),
     ]
     results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(results) == 1 and not results[0].is_error

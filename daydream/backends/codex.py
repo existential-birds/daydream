@@ -571,18 +571,67 @@ class CodexBackend:
                     elif item_type == "file_change":
                         # file_change has no item.started — emit a synthetic pair.
                         item_id = item.get("id", str(uuid.uuid4()))
-                        file_path = item.get("file_path", "unknown")
-                        action = item.get("action", "modified")
-                        yield ToolStartEvent(
-                            id=item_id,
-                            name="patch",
-                            input={"file": file_path, "action": action},
-                        )
-                        yield ToolResultEvent(
-                            id=item_id,
-                            output=f"{action}: {file_path}",
-                            is_error=False,
-                        )
+                        changes = item.get("changes")
+                        if isinstance(changes, dict) and changes:
+                            # Current CLI shape: a map of path -> {type, ...}.
+                            # Normalize each path against execution_cwd; keep
+                            # absolute paths that fall outside it.
+                            parsed = []
+                            for raw_path, entry in changes.items():
+                                kind = entry.get("type", "unknown") if isinstance(entry, dict) else "unknown"
+                                path = str(raw_path)
+                                try:
+                                    if os.path.isabs(path) and os.path.commonpath([
+                                        path,
+                                        str(execution_cwd),
+                                    ]) == str(execution_cwd):
+                                        path = os.path.relpath(path, execution_cwd)
+                                except ValueError:
+                                    pass  # disjoint drives etc. — keep absolute
+                                parsed.append({"path": path, "kind": kind})
+                            yield ToolStartEvent(
+                                id=item_id,
+                                name="patch",
+                                input={"changes": parsed},
+                            )
+                            status = item.get("status", "")
+                            if status == "declined":
+                                output = "File change declined by sandbox"
+                            else:
+                                output = ", ".join(
+                                    f"{c['kind']}: {c['path']}" for c in parsed
+                                )
+                                if status in ("failed", "declined"):
+                                    for stream in ("stdout", "stderr"):
+                                        excerpt = item.get(stream, "")
+                                        if excerpt:
+                                            output += f"\n{stream}: {excerpt[:500]}"
+                            yield ToolResultEvent(
+                                id=item_id,
+                                output=output,
+                                is_error=status != "completed",
+                                status=status or None,
+                            )
+                        elif "file_path" in item:
+                            # Legacy scalar shape (older CLI): keep as-is.
+                            file_path = item.get("file_path", "unknown")
+                            action = item.get("action", "modified")
+                            yield ToolStartEvent(
+                                id=item_id,
+                                name="patch",
+                                input={"file": file_path, "action": action},
+                            )
+                            yield ToolResultEvent(
+                                id=item_id,
+                                output=f"{action}: {file_path}",
+                                is_error=False,
+                            )
+                        else:
+                            _warn(
+                                "file_change item without paths",
+                                item_id=item_id,
+                                status=item.get("status", ""),
+                            )
 
                     elif item_type == "mcp_tool_call":
                         item_id = item.get("id")
