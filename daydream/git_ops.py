@@ -566,6 +566,30 @@ def head_sha(repo: Path) -> str:
     return proc.stdout.strip()
 
 
+def has_executable_pre_push_hook(repo: Path) -> bool:
+    """Return True when *repo* has an executable ``pre-push`` hook.
+
+    Honors ``core.hooksPath`` when configured; otherwise resolves the default
+    hooks directory via ``git rev-parse --git-path hooks`` (falling back to
+    ``<repo>/.git/hooks`` when *repo* is not a resolvable git repository). The hook counts
+    only when the file exists **and** is executable. Absence of the directory
+    or file is a normal ``False`` (no exception); a git failure resolving the
+    hooks path silently falls back to ``<repo>/.git/hooks`` so "no executable
+    hook" stays a plain ``False`` answer.
+    """
+    proc = _run_git(repo, ["rev-parse", "--git-path", "hooks"], timeout=5)
+    if proc.returncode != 0:
+        # Not a resolvable git repository: the canonical default location is
+        # still checked so "no executable hook" stays a plain False answer.
+        hooks_dir = repo / ".git" / "hooks"
+    else:
+        hooks_dir = Path(proc.stdout.strip())
+        if not hooks_dir.is_absolute():
+            hooks_dir = repo / hooks_dir
+    hooks_path = hooks_dir / "pre-push"
+    return hooks_path.is_file() and os.access(hooks_path, os.X_OK)
+
+
 def list_local_branches(repo: Path) -> dict[str, str]:
     """Return a snapshot of local branch names mapped to their full OIDs.
 
@@ -606,57 +630,6 @@ def head_commit_message(repo: Path) -> str:
     if proc.returncode != 0:
         raise GitError(f"cannot read HEAD message in {repo}: {proc.stderr.strip()}")
     return proc.stdout.strip()
-
-
-def amend_trailers(repo: Path, trailers: dict[str, str], *, message: str | None = None) -> None:
-    """Amend ``HEAD`` to append missing git trailers.
-
-    Uses ``git interpret-trailers`` to inject trailers, then amends the
-    commit with the updated message.  This is a no-op if *trailers* is empty.
-
-    Args:
-        trailers: Mapping of trailer keys to values (e.g.
-            ``{"Daydream-Run": "abc123"}``).
-        message: When provided, use this as the current ``HEAD`` commit message
-            instead of reading it via ``git log``.  Avoids a redundant
-            subprocess call when the caller has already read the message.
-
-    Raises:
-        GitError: If the amend fails.
-    """
-    if not trailers:
-        return
-
-    trailer_args: list[str] = []
-    for key, value in trailers.items():
-        trailer_args += ["--trailer", f"{key}: {value}"]
-
-    raw_message = head_commit_message(repo) if message is None else message
-
-    # Run directly, not via _run_git, because interpret-trailers needs stdin.
-    try:
-        interp = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-            ["git", "interpret-trailers", *trailer_args],  # noqa: S607 - git is a trusted command
-            input=raw_message,
-            capture_output=True,
-            text=True,
-            cwd=repo,
-            timeout=5,
-            shell=False,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        raise GitError(f"git interpret-trailers failed: {exc}") from exc
-
-    if interp.returncode != 0:
-        raise GitError(f"git interpret-trailers failed: {interp.stderr.strip()}")
-
-    amended_msg = interp.stdout
-    amend_proc = _run_git(
-        repo, ["commit", "--amend", "-m", amended_msg.strip()], timeout=30, retries=0,
-    )
-    if amend_proc.returncode != 0:
-        raise GitError(f"git commit --amend failed: {amend_proc.stderr.strip()}")
 
 
 def remote_url(repo: Path, remote: str = "origin") -> str | None:
@@ -2376,6 +2349,26 @@ def git_ls_remote(repo: Path, url: str) -> str:
     if proc.returncode != 0:
         raise GitError(f"git ls-remote {url} failed: {proc.stderr.strip()}")
     return proc.stdout
+
+
+def remote_contains_commit(repo: Path, branch: str, sha: str, *, remote: str = "origin") -> bool:
+    """Return ``True`` iff ``remote``'s ``refs/heads/<branch>`` reports *sha*.
+
+    Uses the same authenticated ``git ls-remote`` invocation as
+    :func:`git_ls_remote` (``GIT_TERMINAL_PROMPT=0`` pinned). A git error in
+    the ls-remote itself raises :class:`GitError`; empty ref output is
+    ``False``, never ``True``.
+    """
+    proc = _run_git(
+        repo,
+        ["ls-remote", remote, f"refs/heads/{branch}"],
+        env_cmd={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if proc.returncode != 0:
+        raise GitError(
+            f"git ls-remote {remote} refs/heads/{branch} failed: {proc.stderr.strip()}"
+        )
+    return any(line.split()[0] == sha for line in proc.stdout.splitlines() if line.strip())
 
 
 def gh_repo_view(repo: Path) -> tuple[str, str] | None:

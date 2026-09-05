@@ -135,7 +135,7 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     is non-empty and the real test/heal and commit phases run before archiving.
     """
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    git(multi_stack_target, "remote", "add", "origin", str(remote))
     stub = _install_deep_capture_backend(
         multi_stack_target,
         monkeypatch,
@@ -191,7 +191,7 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     """A pre-existing untracked file (present before the run) is absent from the
     archived recommended.patch while a fix-created untracked file is present."""
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    git(multi_stack_target, "remote", "add", "origin", str(remote))
     stub = _install_deep_capture_backend(
         multi_stack_target, monkeypatch, real_internal_phases=True
     )
@@ -216,7 +216,7 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     archive_dir: Path,
 ) -> None:
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    git(multi_stack_target, "remote", "add", "origin", str(remote))
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)  # real_internal_phases=False
     stub.fix_edit_line = "# daydream recommended change\n"
     monkeypatch.setattr(
@@ -250,7 +250,7 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     """A pre-existing untracked file (before the run) is absent from the daydream
     commit's tree; a fix-created untracked file is present (issue #543)."""
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    git(multi_stack_target, "remote", "add", "origin", str(remote))
     stub = _install_deep_capture_backend(
         multi_stack_target, monkeypatch, real_internal_phases=True
     )
@@ -510,6 +510,10 @@ async def test_shallow_run_captures_recommended_patch(
     """
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
+    # Host-native commit/push (issue #726): the shallow --yes run commits and
+    # pushes to 'origin' for real, so give the repo a bare remote.
+    remote = bare_remote(archive_dir.parent / "origin.git")
+    git(feature_branch_repo, "remote", "add", "origin", str(remote))
     backend = _FixEditingBackend(feature_branch_repo)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 

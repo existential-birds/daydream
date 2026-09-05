@@ -144,6 +144,15 @@ class DaydreamFileConfig:
             identifying service roots for diagram participant grouping. Empty
             falls back to ``improve_service_roots``, then to layout inference,
             so a repo that already declared its services need not repeat them.
+        test_command: Issue #726. Canonical shell test command run host-side
+            (real subprocess, exit-status pass/fail). ``None`` falls through:
+            CLI ``--test-command`` wins over this key; when both are unset the
+            host-side run is skipped and the deprecated agent-run fallback
+            applies (warned; issue #726).
+        test_command_wall_s: Issue #726. Wall-clock ceiling in seconds for one
+            host-side test-command run (the whole process group is killed on
+            expiry). A value overrides the orchestrator default
+            (``config.TEST_WALL_BUDGET_S``); ``None`` falls through to it.
     """
 
     model: str | None = None
@@ -184,6 +193,8 @@ class DaydreamFileConfig:
     diagram_min_modules: int | None = None
     diagram_min_branch_points: int | None = None
     diagram_service_roots: list[str] = field(default_factory=list)
+    test_command: str | None = None
+    test_command_wall_s: float | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -344,6 +355,29 @@ def _coerce_quality_threshold(raw: Any) -> float | None:
     return value
 
 
+def _coerce_positive_float(raw: Any) -> float | None:
+    """Return ``raw`` as a finite positive float, else None (degrade to default).
+
+    Wall-clock budgets must be finite and positive (issue #726): a negative or
+    zero value makes ``asyncio.wait_for`` fire ``TimeoutError`` immediately,
+    instantly group-killing the suite and misreporting it as timed out, and
+    NaN/inf disable the ceiling. Anything invalid -- negative, zero, NaN, inf,
+    bool, or non-number -- degrades to ``None`` so the ``config.py`` default
+    applies.
+    """
+    value = _coerce_float(raw)
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _coerce_string(raw: Any) -> str | None:
+    """Return a non-empty string, or None for absent/malformed values."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw
+
+
 def _coerce_string_list(raw: Any) -> list[str]:
     """Return a list of strings, or an empty list for malformed values."""
     if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
@@ -497,4 +531,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         diagram_min_modules=_coerce_positive_int(diagram, "min_modules"),
         diagram_min_branch_points=_coerce_positive_int(diagram, "min_branch_points"),
         diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
+        test_command=_coerce_string(merged.get("test_command")),
+        test_command_wall_s=_coerce_positive_float(merged.get("test_command_wall_s")),
     )

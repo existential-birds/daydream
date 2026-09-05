@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -59,10 +60,17 @@ from daydream.repository_paths import (
     path_is_confined,
 )
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
+from daydream.test_execution import (
+    MissingTestCommandError,
+    TestExecutionResult,
+    canonical_test_command,
+    run_test_command,
+)
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
     get_current_recorder,
+    host_phase_scope,
     maybe_fork,
 )
 from daydream.workspace import WorkContext
@@ -263,14 +271,13 @@ SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = {
 
 
 def _sanitize_suggested_command(raw: str) -> str:
-    """Sanitize an LLM-suggested shell command for safe inclusion in a fenced prompt.
+    """Sanitize an LLM-suggested shell command for safe execution and display.
 
     Collapses all whitespace runs to a single space and strips backticks.
-    Newlines and backticks are the two characters that can break out of a
-    triple-backtick code fence in a downstream prompt; nothing in a legitimate
-    test command requires either. The result is suitable for both the
-    next-turn ``run_agent`` prompt and for surfacing in the user-facing
-    confirmation preview.
+    Newlines and backticks are the two characters that could break command
+    boundaries or injection fences; nothing in a legitimate test command
+    requires either. The result is used for the user-facing confirmation
+    preview and is what the host runner shlex-splits and executes.
     """
     return " ".join(raw.replace("`", "").split())
 
@@ -3128,22 +3135,96 @@ def _reject_test_healing_generated_file_edits(
     return None if restoration_failed else direct_violations
 
 
-# Shared tail of both test-phase prompts. The host parses this turn's final text
-# for the verdict (``detect_test_success``), so the agent must run the suite to
-# completion inside the turn and quote the runner's own summary: a
-# "still running, I'll report later" narration would be parsed as a failure and
-# fed to the fix agent as if it were test output. The Claude backend also
-# enforces the foreground rule mechanically (``_background_bash_guard``).
+# Tail of the test-phase prompt, used only by the deprecated unconfigured
+# fallback below. The host parses this turn's final text for the verdict
+# (``detect_test_success``), so the agent must run the suite to completion
+# inside the turn and quote the runner's own summary: a "still running, I'll
+# report later" narration would be parsed as a failure and fed to the fix
+# agent as if it were test output. The Claude backend also enforces the
+# foreground rule mechanically (``_background_bash_guard``).
 _TEST_RUN_INSTRUCTIONS = (
     "Run it in the foreground and wait for it to finish; never run it in the background. "
     "Report if tests pass or fail, quoting the test runner's final summary line verbatim."
 )
 
 
+def _canonical_test_cmd(config: Any) -> list[str] | None:
+    """Resolve the canonical host-side test command, or ``None`` for fallback.
+
+    Issue #726: the configured canonical test command runs host-side as a real
+    subprocess — a green run means the suite really exited 0. Precedence is
+    the CLI ``--test-command`` flag (``RunConfig.test_command``) over the
+    file-config ``test_command`` key, resolved by
+    :func:`daydream.test_execution.canonical_test_command`.
+
+    Returns ``None`` (with a warning) only when nothing is configured — or
+    when the configured value cannot be parsed as shell argv (an unbalanced
+    quote raises the same :class:`MissingTestCommandError` config-error class,
+    so the malformed-argv case takes the identical soft fallback) — so the
+    pre-#726 agent-run fallback below still operates until a valid command
+    becomes mandatory. The fallback is deprecated: an agent-reported verdict
+    is prose, not an exit status.
+    """
+    from daydream.config_file import DaydreamFileConfig
+
+    file_config = getattr(config, "file_config", None)
+    if not isinstance(file_config, DaydreamFileConfig):
+        file_config = DaydreamFileConfig()
+    try:
+        return canonical_test_command(file_config, config)
+    except MissingTestCommandError as exc:
+        print_warning(
+            console,
+            f"{exc} Falling back to agent-run tests (deprecated by issue #726).",
+        )
+        return None
+
+
+def _test_command_wall_budget(config: Any) -> float:
+    """Resolve the wall budget for one host-side test-command run.
+
+    Issue #726: the ``test_command_wall_s`` file-config key overrides the
+    orchestrator default (``config.TEST_WALL_BUDGET_S``) for host-side
+    ``run_test_command`` calls. ``config`` may be a ``RunConfig`` carrying the
+    merged file config, or absent/unset (legacy callers) — the default then
+    applies. ``None`` (unset) falls through to the orchestrator default.
+    """
+    from daydream.config_file import DaydreamFileConfig
+
+    file_config = getattr(config, "file_config", None)
+    if isinstance(file_config, DaydreamFileConfig):
+        configured = file_config.test_command_wall_s
+        if configured is not None:
+            return configured
+    return TEST_WALL_BUDGET_S
+
+
+async def _run_host_test_command(
+    cmd: list[str], work: WorkContext, config: Any
+) -> TestExecutionResult:
+    """Run *cmd* as a host-side subprocess with the resolved wall budget.
+
+    Issue #726: the four host-side test-run call sites — the TEST phase, its
+    approved-investigator retry, declined-fix validation, and the pre-push
+    hook run — share the same three-step glue: resolve the wall budget
+    (``_test_command_wall_budget``) and run the command via
+    :func:`run_test_command` with the workspace repo as cwd. Spawn errors
+    propagate unchanged; each caller applies its own failure policy (the
+    TEST-phase sites route them through the failure gate, the validate/hook
+    sites let them fail closed).
+    """
+    return await run_test_command(
+        cmd=cmd,
+        cwd=work.repo,
+        wall_budget_s=_test_command_wall_budget(config),
+    )
+
+
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
     feedback_items: list[dict[str, Any]] | None = None,
+    config: Any = None,
 ) -> tuple[bool, int, bool]:
     """Phase 4: Run tests and prompt user on failure for action.
 
@@ -3152,6 +3233,12 @@ async def phase_test_and_heal(
         work: Workspace context for running tests; ``work.repo`` is the cwd.
         feedback_items: Optional list of feedback items from the fix phase,
             used to enrich the fix prompt with file context.
+        config: Optional ``RunConfig`` carrying the CLI ``--test-command``
+            flag and the merged file config. When a canonical test command is
+            configured it runs host-side via :func:`run_test_command` (issue
+            #726) — no TEST-phase agent turn and no prose detection. When
+            nothing is configured, the deprecated agent-run fallback applies
+            (see :func:`_canonical_test_cmd`).
 
     Returns:
         Tuple of (passed: bool, retries_used: int, proceed: bool). ``passed`` is
@@ -3164,7 +3251,10 @@ async def phase_test_and_heal(
 
     retries_used = 0
     continuation: ContinuationToken | None = None
-    test_command_override: str | None = None
+    # Merged (redacted) output of a host-side test-command run whose suite came
+    # back red; consumed at the top of the next iteration so it flows through
+    # the same failure gate (environmental check + heal menu) as an agent run.
+    host_failure_output: str | None = None
 
     async def _launch_fix(output: str) -> bool:
         nonlocal retries_used, continuation
@@ -3209,31 +3299,60 @@ async def phase_test_and_heal(
         else:
             print_info(console, "Running test suite...")
 
-        if test_command_override:
-            sanitized_cmd = _sanitize_suggested_command(test_command_override)
-            prompt = (
-                "Run this exact test command:\n"
-                f"```\n{sanitized_cmd}\n```\n"
-                f"{_TEST_RUN_INSTRUCTIONS}"
-            )
+        if host_failure_output is not None:
+            # A host-side run already produced this failure; skip the agent run
+            # and feed the same output through the failure gate below.
+            output, host_failure_output = host_failure_output, None
+            test_passed = False
         else:
-            prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
-        # Use-once: clear after consuming above so the next iteration falls back
-        # to the default prompt. Must stay before the bottom-of-loop branches that
-        # may re-assign test_command_override (choice "1" → setup investigator).
-        test_command_override = None
+            cmd = _canonical_test_cmd(config)
+            if cmd is None:
+                # Deprecated fallback: no canonical test command is configured,
+                # so a TEST-phase agent turn runs the suite and its prose is
+                # pattern-matched for the verdict (untrusted by design).
+                prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
+                output, continuation, _ = await run_agent(
+                    backend,
+                    work.repo,
+                    prompt,
+                    continuation=continuation,
+                    phase=DaydreamPhase.TEST,
+                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                    wall_budget_s=TEST_WALL_BUDGET_S,
+                )
 
-        output, continuation, _ = await run_agent(
-            backend,
-            work.repo,
-            prompt,
-            continuation=continuation,
-            phase=DaydreamPhase.TEST,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=TEST_WALL_BUDGET_S,
-        )
-
-        test_passed = detect_test_success(output)
+                test_passed = detect_test_success(output)
+            else:
+                # Issue #726: the configured canonical test command runs
+                # host-side as a real subprocess; the verdict is the exit
+                # status, never the agent's prose. No agent turn here.
+                try:
+                    result = await _run_host_test_command(cmd, work, config)
+                except (OSError, ValueError) as exc:
+                    # The command could not be spawned (missing binary, a
+                    # shell-builtin argv, or malformed words). That is a test
+                    # failure, not a crash: route the diagnostic through the
+                    # same failure gate/heal menu so the run continues instead
+                    # of dying with an unhandled traceback (issue #726).
+                    print_warning(
+                        console,
+                        f"Configured test command could not be run: {exc}",
+                    )
+                    output = (
+                        "The configured test command failed to run (spawn): "
+                        f"{exc}"
+                    )
+                    test_passed = False
+                else:
+                    if result.timed_out:
+                        print_warning(
+                            console,
+                            f"Test command hit the "
+                            f"{_test_command_wall_budget(config):g}s wall "
+                            "budget and was killed.",
+                        )
+                    output = result.merged_output
+                    test_passed = result.passed
 
         if test_passed:
             print_success(console, "Tests passed")
@@ -3315,7 +3434,46 @@ async def phase_test_and_heal(
                         question="Use suggested command instead?",
                         default="n",
                     ):
-                        test_command_override = sanitized_preview
+                        # Trust boundary: the approved command is executed
+                        # host-side exactly once, as a real subprocess — it is
+                        # never embedded in a later agent prompt.
+                        try:
+                            cmd = shlex.split(sanitized_preview)
+                        except ValueError:
+                            # shlex refused it (e.g. unbalanced quotes), so
+                            # there is no argv to execute.
+                            cmd = []
+                        if not cmd:
+                            # The sanitized suggestion collapsed to an empty
+                            # argv (e.g. a backtick-only command); there is
+                            # nothing to execute, so treat it as a failed
+                            # suggestion and retry rather than crash the run.
+                            print_warning(
+                                console,
+                                "Approved test command was not executable; "
+                                "retrying with the original command.",
+                            )
+                            retries_used += 1
+                            continue
+                        try:
+                            result = await _run_host_test_command(cmd, work, config)
+                        except (OSError, ValueError) as exc:
+                            # Spawn errors (missing binary, shell builtin) and
+                            # remaining argv errors must not escape into a
+                            # traceback; surface as a failed suggestion and
+                            # re-run the original command.
+                            print_warning(
+                                console,
+                                f"Approved test command could not be run: {exc}",
+                            )
+                            retries_used += 1
+                            continue
+                        if result.passed:
+                            print_success(console, "Tests passed")
+                            return True, retries_used, True
+                        print_warning(console, "Approved test command failed.")
+                        host_failure_output = result.merged_output
+                        continue
 
             retries_used += 1
             continue
@@ -3384,9 +3542,9 @@ def _verify_commit_scope(
 ) -> None:
     """Verify the committed tree matches the pre-staged daydream set.
 
-    Issue #562: prompt compliance alone is not enforcement — a commit agent
-    that re-runs ``git add -A`` would sweep pre-existing untracked files into
-    the commit. Enforcement checks both directions:
+    Issue #562: the committed tree is checked against the pre-staged daydream
+    set — extras surface scope creep, missing files surface an under-commit —
+    so a stray staging can never silently enter the commit. Enforcement checks both directions:
 
     - extras (committed beyond the pre-staged set) surfaces scope creep;
     - missing (pre-staged files absent from the committed tree) surfaces an
@@ -3415,6 +3573,43 @@ def _verify_commit_scope(
         )
 
 
+async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
+    """Re-run the canonical test command after a declined commit/push gate.
+
+    Issue #726: declining to commit must not quietly discard a run whose fixes
+    were never validated — but it must also never claim success on a red suite.
+    The canonical host-side test command (CLI ``--test-command`` over the file
+    config, resolved exactly as in the TEST phase) runs again as a real
+    subprocess via :func:`run_test_command`; a green suite lets the run end
+    successfully with the fixes left uncommitted, and a red suite raises so
+    the caller's ``_commit_push_or_stop`` guard surfaces ``Stop(1)``.
+
+    With no canonical command configured there is nothing to validate against
+    (see :func:`_canonical_test_cmd`); the decline then behaves as before
+    rather than fabricating a verdict.
+    """
+    cmd = _canonical_test_cmd(config)
+    if cmd is None:
+        return
+    result = await _run_host_test_command(cmd, work, config)
+    if result.passed:
+        print_success(
+            console,
+            "Commit declined; post-fix validation passed (changes left uncommitted)",
+        )
+        return
+    print_error(
+        console,
+        "Commit declined but post-fix validation failed",
+        "The applied fixes did not pass the configured test command; the run "
+        "cannot be reported as successful.",
+    )
+    raise RuntimeError(
+        "Post-fix validation failed after the commit/push gate was declined: "
+        "the configured test command exited non-zero."
+    )
+
+
 async def _do_commit(
     backend: Backend,
     work: WorkContext,
@@ -3423,30 +3618,55 @@ async def _do_commit(
     interactive: bool = False,
     items: list[dict[str, Any]] | None = None,
     preexisting_untracked: set[str] | None = None,
+    config: Any = None,
 ) -> bool:
-    """Stage, commit, and optionally push with daydream trailers.
+    """Stage, commit, and optionally push — all host-side, no agent turn.
+
+    Issue #726: the commit is a real subprocess with a real exit status, not
+    an agent-planned turn. Staging is deterministic (``_stage_deterministic``),
+    the message is built by the pure :func:`build_commit_message` (trailers
+    included at commit time — no post-hoc amend), and a ``push=True`` commit
+    only reports success after ``git_ops.remote_contains_commit`` confirms the
+    remote actually holds the pushed HEAD. A failed push raises the project
+    ``GitError`` even though a local commit exists — the caller's
+    ``_commit_push_or_stop`` guard surfaces it as ``Stop(1)`` rather than
+    hiding it behind "Commit and push complete".
 
     Args:
-        backend: LLM backend used to run the commit agent.
+        backend: Unused on the host path (kept for call-site/signature
+            stability); no agent turn runs in the commit.
         work: Current workspace context (repo path, run ID, etc.).
         push: If True, push to the remote after committing.
         interactive: If True, prompt the user for confirmation before
-            committing.
+            committing. When the gate is declined, the applied fixes are
+            still validated by re-running the canonical host-side test
+            command (:func:`_validate_declined_fixes`) — a decline no longer
+            silently skips validation (issue #726).
+        config: Optional ``RunConfig`` carrying the CLI ``--test-command``
+            flag and the merged file config, used to resolve the canonical
+            test command for the decline-path validation.
         items: Optional list of fix dicts (with ``file`` and ``description``
-            keys) summarising changes applied in this run; included in the
-            agent prompt so the commit message is accurate.
+            keys) summarising changes applied in this run; folded into the
+            deterministic commit message.
         preexisting_untracked: Optional set of repo-relative paths that were
-            untracked before the daydream run started. When supplied, staging
-            is deterministic: exactly ``changed_files(...) - preexisting`` is
-            pre-staged (never ``git add --all``) so a user's pre-run scratch
-            files can never be swept into the daydream commit (issue #543).
-            The commit agent then commits the already-staged index only. When
-            ``None`` (legacy callers), the agent stages as before.
+            untracked before the daydream run started. Exactly
+            ``changed_files(...) - preexisting`` is committed (never
+            ``git add --all``) so a user's pre-run scratch files can never be
+            swept into the daydream commit (issue #543). When ``None`` (legacy
+            callers), the set is computed defensively at commit time. Caveat:
+            that snapshot is taken after the fix phase, so a NEW file created
+            by the fix is already untracked and, being indistinguishable from
+            user scratch via ``list_untracked``, is excluded from the commit
+            (an under-commit). In-tree callers always pass the pre-run
+            snapshot, which avoids this.
 
     Returns:
-        True if a commit was performed, False if the user declined.
+        True if a commit was performed, False if the user declined or there
+        was nothing to commit.
 
     """
+    del backend  # host-native commit: no agent turn (issue #726)
+
     if interactive:
         # Commit/push gate across the two interaction axes. ``--yes`` commits
         # without prompting; an unattended run with no assumption declines
@@ -3462,119 +3682,122 @@ async def _do_commit(
         )
         if not decision:
             print_dim(console, "Skipping commit and push")
+            # Issue #726: a decline still validates the applied fixes via the
+            # host test runner; a red suite raises (surfaces as Stop(1)) so a
+            # run is never reported successful with unvalidated fixes.
+            await _validate_declined_fixes(work, config)
             return False
 
-    if preexisting_untracked is not None:
-        stage = _stage_deterministic(work, preexisting_untracked)
-        if stage is None:
-            return False
+    # Defensive untracked protection: a caller without a pre-run snapshot
+    # still must not sweep user scratch files into the commit, so compute the
+    # snapshot at commit time rather than dropping the protection. Computed
+    # post-fix, a fix-created NEW file is indistinguishable from scratch and is
+    # excluded (under-commit); see the args note on ``preexisting_untracked``.
+    if preexisting_untracked is None:
+        preexisting_untracked = set(git_ops.list_untracked(work.repo))
 
-    push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
+    stage = _stage_deterministic(work, preexisting_untracked)
+    if stage is None:
+        return False
 
-    if preexisting_untracked is not None:
-        # Deterministic staging (issue #562/#543): the index already holds
-        # exactly the daydream changes, so the agent commits the pre-staged
-        # index only and must not re-stage anything.
-        staging_instruction = (
-            "The daydream changes are already staged. Review the staged diff "
-            "(git diff --cached) and commit using a conventional commit message. "
-            "Do NOT run git add or stage anything — the index is complete. "
-        )
-    else:
-        # Legacy path: no pre-run untracked snapshot — the agent stages and
-        # commits as before (the documented None contract).
-        staging_instruction = (
-            "Stage all changes and commit using a conventional commit message. "
-        )
-
-    if items:
-        summaries = "\n".join(
-            f"- {it.get('file', 'unknown')}: {it.get('description', 'no description')}"
-            for it in items
-        )
-        items_context = (
-            "The following fixes were applied in this run — use them to write "
-            f"an accurate commit message:\n{summaries}\n\n"
-        )
-    else:
-        items_context = ""
-
-    prompt = (
-        f"{staging_instruction}"
-        "Review the diff to write a meaningful summary of what was fixed or changed. "
-        "Use the format: <type>: <concise summary of changes>\n\n"
-        f"{items_context}"
-        "Pick the most appropriate type from: fix, refactor, style, perf. "
-        "If multiple categories of changes exist, pick the dominant one. "
-        "Keep the subject line under 72 characters. "
-        "Add a body with bullet points if there are multiple distinct changes. "
-        "Add these EXACT git trailers as the last lines of the commit message "
-        "(after a blank line following the body):\n\n"
-        f"Daydream-Run: {work.run_id}\n"
-        f"Daydream-Version: {daydream.__version__}\n\n"
-        f"{push_line}"
-    )
     try:
         sha_before = git_ops.head_sha(work.repo)
     except GitError:
         sha_before = None
 
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
+    message = build_commit_message(
+        items=items or [], run_id=work.run_id, version=daydream.__version__,
+    )
+    # Issue #726 task 12: the commit is its own trajectory phase, so the
+    # manifest can time it and tell it apart from test/hook/push phases.
+    async with host_phase_scope(DaydreamPhase.COMMIT):
+        git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
 
-    # Post-commit trailer verification: the agent may omit trailers, so amend if
-    # missing (daydream_commits() relies on them). Only when a new commit was
-    # created — otherwise we would silently amend the user's prior commit.
-    try:
-        sha_after = git_ops.head_sha(work.repo)
-    except GitError:
-        # No HEAD after the agent run means no commit was created.
-        return False
-
-    if sha_after == sha_before:
-        return False
-    if sha_before is None:
-        # Cannot confirm the agent created a new commit — skip trailer
-        # verification to avoid amending a pre-existing (non-daydream) commit.
-        return True
-
-    expected_trailers = {
-        "Daydream-Run": work.run_id,
-        "Daydream-Version": daydream.__version__,
-    }
-    try:
-        msg = git_ops.head_commit_message(work.repo)
-    except GitError:
-        return True
-
-    missing = {k: v for k, v in expected_trailers.items() if f"{k}: {v}" not in msg}
-    if missing:
-        print_warning(
-            console,
-            f"Commit missing daydream trailer(s): {', '.join(missing)}; amending",
-        )
-        try:
-            git_ops.amend_trailers(work.repo, missing, message=msg)
-        except GitError as exc:
-            print_warning(console, f"Failed to amend trailers: {exc}")
-
-    # stage is only ever set on the deterministic path (and non-None there,
-    # since _stage_deterministic returned early on an empty stage); the
-    # ``is not None`` narrow lets mypy prove the set type.
-    if preexisting_untracked is not None and stage is not None:
+    # Deterministic-staging invariant check (issue #562): the committed tree
+    # must match the pre-staged daydream set in both directions.
+    if sha_before is not None:
         _verify_commit_scope(work, sha_before, stage)
+
+    # Hook-aware validation orchestration (issue #726): with an executable
+    # pre-push hook present, the full suite runs via the host runner exactly
+    # once per attempt, here, before the push — the hook itself still fires
+    # during ``push_branch`` (hook bypass flags are forbidden), so the win is that
+    # daydream neither re-runs the suite a second time at push time nor
+    # skips validation when the hook makes the push the last gate. A red
+    # suite blocks the push even though the local commit exists.
+    if push and git_ops.has_executable_pre_push_hook(work.repo):
+        cmd = _canonical_test_cmd(config)
+        if cmd is None:
+            print_warning(
+                console,
+                "Pre-push hook detected but no canonical test command is "
+                "configured; the push-time suite run is skipped (set "
+                "--test-command or the `test_command` config key).",
+            )
+        else:
+            # The hook-run suite execution is its own trajectory phase, in
+            # addition to the test-execution events the runner itself emits
+            # (issue #726 task 12).
+            async with host_phase_scope(DaydreamPhase.HOOK_RUN):
+                result = await _run_host_test_command(cmd, work, config)
+            if not result.passed:
+                raise RuntimeError(
+                    "Pre-push validation failed: the configured test command "
+                    "exited non-zero, so the commit was not pushed."
+                )
+
+    if push:
+        # The push + remote verification is its own trajectory phase
+        # (issue #726 task 12).
+        async with host_phase_scope(DaydreamPhase.PUSH):
+            branch = git_ops.current_branch(work.repo)
+            if branch is None:
+                raise GitError(
+                    f"Cannot push: {work.repo} is in a detached-HEAD state "
+                    "with no current branch"
+                )
+            git_ops.push_branch(work.repo, branch)
+            sha = git_ops.head_sha(work.repo)
+            # Success requires the remote to actually hold the pushed HEAD — a
+            # push that "succeeded" without landing the commit is still a failure
+            # (issue #726: "green" means really on the remote).
+            if not git_ops.remote_contains_commit(work.repo, branch, sha):
+                raise GitError(
+                    f"Push verification failed: remote 'origin' does not report "
+                    f"refs/heads/{branch} at {sha} after the push"
+                )
 
     return True
 
 
 async def phase_commit_push(
-    backend: Backend, work: WorkContext, *, preexisting_untracked: set[str] | None = None,
+    backend: Backend,
+    work: WorkContext,
+    *,
+    preexisting_untracked: set[str] | None = None,
+    config: Any = None,
+    items: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Prompt user to commit and push changes."""
+    """Prompt user to commit and push changes.
+
+    When the gate is declined, the applied fixes are still validated by
+    re-running the canonical host-side test command (issue #726): the phase
+    only ends quietly when that validation passes, and raises (surfaced as
+    ``Stop(1)`` by the orchestrator's commit guard) when it fails.
+
+    Args:
+        items: Optional list of applied fix dicts (with ``file`` and
+            ``description`` keys) threaded from the production fix cycle;
+            folded into the deterministic commit message by
+            :func:`build_commit_message`.
+    """
     console.print()
     print_info(console, "Committing and pushing changes...")
     committed = await _do_commit(
         backend, work, push=True, interactive=True,
         preexisting_untracked=preexisting_untracked,
+        config=config,
+        items=items,
     )
     if committed:
         print_success(console, "Commit and push complete")
@@ -5257,3 +5480,45 @@ async def phase_cross_stack_merge(
         agent_items, structural_records_path, items_path, report_path, canonical_path
     )
     return canonical_path
+
+
+def build_commit_message(
+    *,
+    items: list[dict[str, Any]],
+    run_id: str,
+    version: str,
+    staged_diff: list[Path] | None = None,
+) -> str:
+    """Build a deterministic conventional commit message from applied findings.
+
+    Pure function: no I/O, no git invocation. The subject uses the dominant
+    conventional type (``fix`` in the fix-phase context) with a concise summary
+    under 72 chars; the body lists the applied findings; the message ends with
+    the ``Daydream-Run`` / ``Daydream-Version`` trailers after a blank line.
+    """
+    del staged_diff  # accepted for future subject refinement; keeps determinism
+
+    summary = "apply automated review fixes"
+    if items:
+        first = str(items[0].get("description") or "").strip()
+        if first:
+            summary = first[0].lower() + first[1:]
+
+    subject = f"fix: {summary}"
+    if len(subject) >= 72:
+        subject = subject[:71].rstrip()
+
+    lines = [subject, ""]
+    for item in sorted(items, key=lambda i: (str(i.get("file", "")), str(i.get("description", "")))):
+        file = str(item.get("file", "")).strip()
+        desc = str(item.get("description", "")).strip()
+        if file and desc:
+            lines.append(f"- {file}: {desc}")
+        elif desc:
+            lines.append(f"- {desc}")
+        elif file:
+            lines.append(f"- {file}")
+    lines.append("")
+    lines.append(f"Daydream-Run: {run_id}")
+    lines.append(f"Daydream-Version: {version}")
+    return "\n".join(lines)

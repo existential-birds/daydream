@@ -698,9 +698,14 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
             and args[0] == "git"
             and "ls-remote" in args
         ):
-            # The only production git ls-remote is git_ls_remote, which must
+            # A bare ``ls-remote <remote-name> <ref>`` (remote_contains_commit,
+            # issue #726) targets a configured local/real remote — run it for
+            # real. The authenticated URL form (git_ls_remote) must still
             # carry the command-scoped credential helper fragment; a bare
-            # ls-remote (the old unauthenticated defect) fails loudly.
+            # URL ls-remote (the old unauthenticated defect) fails loudly.
+            target = args[args.index("ls-remote") + 1] if args.index("ls-remote") + 1 < len(args) else ""
+            if "://" not in target and "@" not in target:
+                return real_run(args, *pargs, **kwargs)
             if not any("credential.helper=" in a for a in args):
                 return subprocess.CompletedProcess(
                     list(args), 1, stdout="",

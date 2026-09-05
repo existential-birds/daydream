@@ -364,6 +364,7 @@ class RunConfig:
     # win over the built-in default while an explicit CLI value still overrides
     # the file. Resolved by the orchestrator's ``_resolved_diagram_mode``.
     diagram: str | None = None
+    test_command: str | None = None
 
 
 def _make_archive_callback(

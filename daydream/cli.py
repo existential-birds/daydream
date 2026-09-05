@@ -1038,6 +1038,19 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--test-command",
+        type=str,
+        default=None,
+        dest="test_command",
+        help="Canonical shell test command run host-side as a real subprocess "
+             "(issue #726); its exit status is the pass/fail signal. Also "
+             "settable via the test_command key in .daydream.toml or "
+             "[tool.daydream] in pyproject.toml. When neither is set the "
+             "host-side run is skipped and the deprecated agent-run fallback "
+             "applies (warned; issue #726)."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--approve-on-clean",
         action="store_true",
         default=False,
@@ -1304,6 +1317,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         # Issue #1113: --diagram-only's value IS the run's diagram mode, so an
         # explicit request wins over a repo file's ``mode = "off"``.
         diagram=args.diagram_only if args.diagram_only is not None else args.diagram,
+        test_command=args.test_command,
         findings_out=args.findings_out,
         dump_artifacts=args.dump_artifacts,
         trajectory_hub_repo=args.trajectory_hub_repo,

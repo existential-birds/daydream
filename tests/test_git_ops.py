@@ -2207,3 +2207,47 @@ def test_clone_error_message_redacts_stderr_url_echo(tmp_path: Path, monkeypatch
         git_ops.clone("https://user:ghp_canaryfake123@unreachable.invalid/o/r.git", tmp_path / "t", timeout=5)
     assert "ghp_canaryfake123" not in str(excinfo.value)
     assert real_run is not None
+
+
+# --- pre-push hook detection (issue #726 task 6) -----------------------------
+
+
+def test_has_executable_pre_push_hook_default_hooks_dir(tmp_path: Path) -> None:
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    pp = hooks / "pre-push"
+    pp.write_text("#!/bin/sh\n")
+    pp.chmod(0o755)
+    assert git_ops.has_executable_pre_push_hook(tmp_path) is True
+    pp.chmod(0o644)  # non-executable => no hook
+    assert git_ops.has_executable_pre_push_hook(tmp_path) is False
+
+
+def test_has_executable_pre_push_hook_honors_core_hooks_path(tmp_path: Path) -> None:
+    custom = tmp_path / "myhooks"
+    custom.mkdir()
+    pp = custom / "pre-push"
+    pp.write_text("#!/bin/sh\n")
+    pp.chmod(0o755)
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.hooksPath", str(custom)], check=True)
+    assert git_ops.has_executable_pre_push_hook(tmp_path) is True
+
+
+def test_remote_contains_commit_true_after_push_false_before(tmp_path: Path) -> None:
+    remote = tmp_path / "remote"
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main", str(clone)], check=True, capture_output=True)
+    for k, v in {"user.email": "t@t", "user.name": "t"}.items():
+        subprocess.run(["git", "-C", str(clone), "config", k, v], check=True)
+    (clone / "a").write_text("x")
+    subprocess.run(["git", "-C", str(clone), "add", "a"], check=True)
+    subprocess.run(["git", "-C", str(clone), "commit", "-m", "c1"], check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(clone), "remote", "add", "origin", str(remote)], check=True)
+    assert git_ops.remote_contains_commit(clone, "main", sha) is False
+    subprocess.run(["git", "-C", str(clone), "push", "-u", "origin", "main"], check=True, capture_output=True)
+    assert git_ops.remote_contains_commit(clone, "main", sha) is True

@@ -214,10 +214,15 @@ async def test_fork_filter_controls_pr_post_payload(
     monkeypatch: pytest.MonkeyPatch,
     fake_gh: Any,
     make_config: MakeConfig,
+    tmp_path: Path,
 ) -> None:
     """A load-items fork controls the canonical PR review payload."""
     _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
     _serve_pr_view(fake_gh, multi_stack_target)
+    from tests.harness.git_helpers import bare_remote
+    from tests.harness.git_helpers import git as _git
+
+    _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
     rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
     # A finding reaches the PR either in the review payload or as its own
@@ -244,12 +249,17 @@ async def test_fork_filter_controls_fix_prompts(
     monkeypatch: pytest.MonkeyPatch,
     fake_gh: Any,
     make_config: MakeConfig,
+    tmp_path: Path,
 ) -> None:
     """A load-items fork controls the findings that reach the fix phase."""
     from tests.test_deep_orchestrator import _fix_prompts
 
     backend = _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
     _serve_pr_view(fake_gh, multi_stack_target)
+    from tests.harness.git_helpers import bare_remote
+    from tests.harness.git_helpers import git as _git
+
+    _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
     rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
     fix_prompts = "\n".join(_fix_prompts(backend))

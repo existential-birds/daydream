@@ -4153,8 +4153,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     else:
         pre_fix_snapshot_captured = True
     # Issue #543: thread the pre-fix untracked snapshot into the commit steps so
-    # _do_commit can exclude user scratch files from the daydream commit instead
-    # of sweeping them in via the commit agent's ``git add --all``.
+    # the host-native _do_commit can exclude user scratch files from the
+    # daydream commit (it never stages beyond the daydream change set).
     ctx.data["pre_fix_untracked"] = pre_fix_untracked
     # Pre-fix HEAD is the recommended-patch base only when the tree was
     # clean (stash_create returns None then) -- otherwise the snapshot is
@@ -4644,7 +4644,8 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     from daydream import git_ops
     async with phase_scope(DaydreamPhase.TEST):
         passed, retries, proceed = await phase_test_and_heal(
-            ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"]
+            ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"],
+            config=ctx.config,
         )
     # Persisted before the failure early-return so both outcomes leave a verdict.
     # ``passed`` is always the suite's own result: an operator who continues past
@@ -4726,10 +4727,14 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
     # stage_paths can raise GitError synchronously before the agent turn;
     # _commit_push_or_stop surfaces that as a clean Stop(1) instead of
     # an unhandled traceback terminating the deep run.
+    # The applied fix items are threaded through to build_commit_message so
+    # the deterministic commit message lists them instead of static boilerplate.
     return await _commit_push_or_stop(
         phase_commit_push(
             ctx.backend_for("fix"), ctx.work,
             preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+            config=ctx.config,
+            items=ctx.data.get("items") or [],
         )
     )
 

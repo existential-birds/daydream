@@ -57,6 +57,11 @@ _PHASE_LABELS: dict[str, str] = {
     "vet": "Vet Findings",
     "plan_write": "Write Plans",
     "diagram": "Diagram",
+    # Host-side (non-agent) operations (issue #726).
+    "test-execution": "Test Execution",
+    "hook-run": "Pre-push Hook",
+    "commit": "Commit",
+    "push": "Push",
 }
 
 FALLBACK_NOTE = "*run details unavailable*"
