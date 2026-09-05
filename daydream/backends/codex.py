@@ -536,12 +536,17 @@ class CodexBackend:
                                 id=item_id,
                                 output="Command declined by sandbox",
                                 is_error=True,
+                                status="declined",
                             )
                         else:
+                            # Forward exit status metadata alongside is_error so
+                            # trajectories preserve the structured signal.
                             yield ToolResultEvent(
                                 id=item_id,
                                 output=output,
                                 is_error=exit_code != 0,
+                                exit_code=exit_code,
+                                status=status or None,
                             )
 
                     elif item_type == "file_change":

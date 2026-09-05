@@ -1087,3 +1087,18 @@ def test_codex_fanout_concurrency_honours_the_shared_env_override(
         monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", raw)
 
     assert effective_fanout_concurrency(ceiling, CodexBackend("gpt-test")) == expected
+
+
+@pytest.mark.asyncio
+async def test_codex_preserves_exit_code_and_status_on_results() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Run failing command", "command_failures_issue1126.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    failed = results[0]
+    assert failed.is_error is True
+    assert failed.exit_code == 128
+    assert failed.status == "completed"
+    ok = results[1]
+    assert ok.is_error is False
+    assert ok.exit_code == 0
+    assert ok.status == "completed"
