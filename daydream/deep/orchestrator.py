@@ -217,6 +217,7 @@ from daydream.deep.prompts import (
     bound_deep_diff,
     build_diagram_repair_prompt,
 )
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
 _PIPELINE_STAGE_NAMES: list[str] = [
@@ -2907,11 +2908,78 @@ def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
     return grouped
 
 
-def _diagram_author_prompt(ctx: FlowContext, kind: str, eligibility: Eligibility) -> str:
-    """Build one kind's first-turn author prompt through the registry."""
+def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, str | None]:
+    """Best-effort host-side reads of the exploration summary and dependencies.
+
+    Issue #1123: on read-only disposable-clone backends the host-only
+    ``.daydream/`` artifacts are absent from the clone, so the prompt must
+    carry their content inline. Both files are read best-effort (an
+    ``OSError`` yields ``None`` — the block is omitted, never faked) and
+    share one ``INLINE_DIFF_BUDGET_BYTES`` budget: the summary takes the
+    first slice, the dependency edges fill the remainder. Each over-budget
+    piece is truncated with an explicit marker rather than dropped.
+    """
+    if exploration_dir is None:
+        return None, None
+    budget = INLINE_DIFF_BUDGET_BYTES
+    try:
+        summary: str | None = (exploration_dir / "summary.md").read_text(encoding="utf-8")
+    except OSError:
+        summary = None
+    if summary is not None:
+        encoded = summary.encode("utf-8")
+        if len(encoded) > budget:
+            summary = (
+                encoded[:budget].decode("utf-8", errors="ignore")
+                + "\n[exploration truncated to fit the prompt budget]\n"
+            )
+            encoded = summary.encode("utf-8")
+        budget = max(budget - len(encoded), 0)
+    try:
+        dependencies: str | None = (exploration_dir / "dependencies.md").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        dependencies = None
+    if dependencies is not None:
+        encoded = dependencies.encode("utf-8")
+        if len(encoded) > budget:
+            dependencies = (
+                encoded[:budget].decode("utf-8", errors="ignore")
+                + "\n[exploration truncated to fit the prompt budget]\n"
+            )
+    return summary, dependencies
+
+
+def _diagram_author_prompt(
+    ctx: FlowContext, kind: str, eligibility: Eligibility, backend: Any
+) -> str:
+    """Build one kind's first-turn author prompt through the registry.
+
+    On backends whose read-only profile executes in a disposable clone (the
+    protocol-level ``read_only_disposable_clone`` capability) the host-only
+    ``.daydream/`` artifact paths the pointer blocks name would dangle, so
+    the prompt is made self-sufficient: exploration summary and dependency
+    edges are inlined under the untrusted boundary (best-effort reads, shared
+    prompt budget) and the diff is handed to the builder un-truncated — the
+    builder owns clone-mode truncation. Other backends keep the budget-gated
+    pointer path byte-for-byte.
+    """
     diff_path: Path = ctx.data["diff_path"]
     inline_diff = _ttt_diff_text(ctx)
-    exploration_dir = ctx.data.get("exploration_dir")
+    exploration_dir: Path | None = ctx.data.get("exploration_dir")
+    clone_mode = bool(getattr(backend, "read_only_disposable_clone", False))
+    inline_kwargs: dict[str, Any]
+    if clone_mode:
+        inline_exploration, inline_dependencies = _inline_exploration_text(exploration_dir)
+        inline_kwargs = {
+            "exploration_dir": None,
+            "clone_mode": True,
+            "inline_exploration": inline_exploration,
+            "inline_dependencies": inline_dependencies,
+        }
+    else:
+        inline_kwargs = {"exploration_dir": exploration_dir}
     if kind == "sequence":
         return str(
             get_registry().prompt("diagram_sequence")(
@@ -2919,8 +2987,8 @@ def _diagram_author_prompt(ctx: FlowContext, kind: str, eligibility: Eligibility
                 inline_diff=inline_diff,
                 files_by_module=_files_by_module(eligibility),
                 cwd=ctx.work.repo,
-                exploration_dir=exploration_dir,
                 schema=SEQUENCE_SPEC_SCHEMA,
+                **inline_kwargs,
             )
         )
     return str(
@@ -2930,8 +2998,8 @@ def _diagram_author_prompt(ctx: FlowContext, kind: str, eligibility: Eligibility
             candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
             forced=eligibility.flowchart.rule == "forced",
             cwd=ctx.work.repo,
-            exploration_dir=exploration_dir,
             schema=FLOWCHART_SPEC_SCHEMA,
+            **inline_kwargs,
         )
     )
 
@@ -2986,7 +3054,7 @@ async def _run_diagram_kind(
         structured, continuation, budget_reason = await run_agent(
             backend,
             ctx.work.repo,
-            _diagram_author_prompt(ctx, kind, eligibility),
+            _diagram_author_prompt(ctx, kind, eligibility, backend),
             phase=DaydreamPhase.DIAGRAM,
             output_schema=schema,
             read_only=True,
