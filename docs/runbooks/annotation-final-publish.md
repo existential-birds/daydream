@@ -20,7 +20,8 @@ Two operator-safety constraints frame every step:
   published adjudication state from the Hub after VM loss. Re-run it any time
   you are unsure the local state is intact.
 
-Every `daydream corpus adjudicate` command below (steps 1–8) is a literal, single-line CLI invocation that parses against the real parser (enforced by
+Every `daydream corpus adjudicate` command below (steps 1–8, including the
+lettered sub-steps 3a–3b) is a literal, single-line CLI invocation that parses against the real parser (enforced by
 `tests/test_cli_adjudicate.py::test_runbook_commands_parse_against_real_parser`). The step 9 (`corpus build-v2`) and step 10 (`train --corpus-v2`) commands are not covered by that parser check — `tests/test_training_docs_v2.py` only asserts their presence.
 
 ---
@@ -102,6 +103,60 @@ curation manifest), and `--sanitized-hub-commit` is the same pinned revision.
 `/tmp/snapshot` receives `sessions.jsonl` and the `preview-manifest.json` that
 pins it. This snapshot is the input to both the canonical harvest (step 5) and
 the final bundle (steps 6–7).
+
+## 3a. Preview the ledger — the pre-harvest drift check
+
+Before labeling (or re-harvesting on a resume), build the digest-pinned preview
+ledger over the materialized snapshot and validate the export rows it feeds —
+without writing anything:
+
+```bash
+daydream corpus adjudicate export --index-root /tmp/snapshot --state-dir /tmp/state --dry-run
+```
+
+This runs the read-only preview over the snapshot's `sessions.jsonl` and pins
+`preview-ledger.json` (canonical JSON, byte-identical for an identical index)
+in `/tmp/state`. The ledger is the drift reference the canonical harvest's
+drift gate (step 5) adjudicates the queue against — a re-run of this command
+against a changed snapshot reports any drifted record ids instead of silently
+merging them, which is exactly what you want to catch before labeling or
+harvesting. Re-run it any time the snapshot or the observations change.
+
+## 3b. Import surviving local history into the hydrated archive
+
+Before the canonical harvest, merge any surviving local archive/backup roots'
+immutable `label_observations` histories into the hydrated stage's archive
+index — the same `index.db` (under `INDEX_ROOT`, i.e. `/tmp/daydream-hydrate`)
+that step 5 appends the harvest's observations into, so imported and
+harvested resolutions meet in one place. First plan the import without
+writing anything:
+
+```bash
+daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --dry-run
+```
+
+`--archive-root` (repeatable) is each local archive/backup root holding an
+`index.db` with a `label_observations` history; `--index-root` is the pinned
+materialized snapshot the import links session identity and per-finding
+evidence against. The dry run inventories the sources, runs the identity
+linkage and content-digest dedupe against the pinned index, and reports the
+reason-coded per-session accounting (the buckets always sum to the source row
+count) while writing nothing.
+
+Proceed with the real run only after the planned accounting looks right:
+
+```bash
+daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state
+```
+
+The real run is read-only over the sources: it appends the surviving
+(survived-dedupe) rows — after a fail-closed redaction + secret scan — into
+the `--archive-dir` archive and writes the digest-stable import report and
+ledger beside the scan artifacts in `--state-dir`. The import never writes
+the state-dir `index.db`; the hydrated archive is the single merge target.
+To checkpoint the merged state for fresh-VM resume, add
+`--publish --manifest /tmp/snapshot/preview-manifest.json` (mutually
+exclusive with `--dry-run`) after the real run has succeeded once.
 
 ## 4. Build, label, and publish the human queue
 
