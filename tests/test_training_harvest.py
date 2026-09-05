@@ -1982,3 +1982,28 @@ def test_hub_import_accepts_clean_bundle_in_place(tmp_path: Path) -> None:
     assert result.imported is True
     assert result.quarantined is False
     assert incoming.exists()
+
+
+def test_per_finding_resolution_round_trips_through_canonical_dict() -> None:
+    from daydream.training.labeler_signals import (
+        PerFindingResolution,
+        resolution_from_dict,
+        resolution_to_dict,
+    )
+
+    r = PerFindingResolution(
+        fingerprint="fp-1", comment_id=7, disposition="accepted",
+        evidence=[{"reply_id": 1, "body_sha256": "abc"}], evidence_digest="d" * 32,
+    )
+    restored = resolution_from_dict(resolution_to_dict(r))
+    assert restored == r  # canonical dict is the one round-trip shape
+
+def test_per_finding_resolution_from_dict_fails_closed() -> None:
+    from daydream.training.labeler_signals import resolution_from_dict
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        resolution_from_dict({"disposition": "accepted", "evidence_digest": "d" * 32})
+    with pytest.raises(ValueError, match="disposition"):
+        resolution_from_dict({"fingerprint": "fp-1", "disposition": "banana"})
+    with pytest.raises(ValueError, match="evidence_digest"):
+        resolution_from_dict({"fingerprint": "fp-1", "disposition": "accepted"})
