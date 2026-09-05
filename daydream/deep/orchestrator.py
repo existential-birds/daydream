@@ -15,6 +15,7 @@ phase primitive (D-39).
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -217,6 +218,8 @@ from daydream.deep.prompts import (
     bound_deep_diff,
     build_diagram_repair_prompt,
 )
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
 _PIPELINE_STAGE_NAMES: list[str] = [
@@ -2907,31 +2910,168 @@ def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
     return grouped
 
 
-def _diagram_author_prompt(ctx: FlowContext, kind: str, eligibility: Eligibility) -> str:
-    """Build one kind's first-turn author prompt through the registry."""
+def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, str | None]:
+    """Best-effort host-side reads of the exploration summary and dependencies.
+
+    Issue #1123: on read-only disposable-clone backends the host-only
+    ``.daydream/`` artifacts are absent from the clone, so the prompt must
+    carry their content inline. Both files are read best-effort (an
+    ``OSError`` yields ``None`` — the block is omitted, never faked) and
+    share one ``INLINE_DIFF_BUDGET_BYTES`` budget: the summary takes the
+    first slice, the dependency edges fill the remainder. Each over-budget
+    piece is truncated with an explicit marker rather than dropped. The
+    summary is scrubbed first (``_scrub_exploration_summary``) so the
+    standalone-artifact scaffolding the pre-scan writer emits cannot dangle
+    in the inline rendering.
+    """
+    if exploration_dir is None:
+        return None, None
+    budget = INLINE_DIFF_BUDGET_BYTES
+    try:
+        summary: str | None = (exploration_dir / "summary.md").read_text(encoding="utf-8")
+    except OSError:
+        summary = None
+    if summary is not None:
+        summary = _scrub_exploration_summary(summary)
+        encoded = summary.encode("utf-8")
+        if len(encoded) > budget:
+            truncated = encoded[:budget].decode("utf-8", errors="ignore")
+            summary = (
+                f"{truncated}\n[exploration summary truncated]\n" if truncated else None
+            )
+            encoded = summary.encode("utf-8") if summary is not None else b""
+        if summary is not None:
+            budget = max(budget - len(encoded), 0)
+    try:
+        dependencies: str | None = (exploration_dir / "dependencies.md").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        dependencies = None
+    if dependencies is not None:
+        if budget <= 0:
+            dependencies = None
+        else:
+            encoded = dependencies.encode("utf-8")
+            if len(encoded) > budget:
+                truncated = encoded[:budget].decode("utf-8", errors="ignore")
+                dependencies = (
+                    f"{truncated}\n[exploration summary truncated]\n"
+                    if truncated
+                    else None
+                )
+    return summary, dependencies
+
+
+def _scrub_exploration_summary(summary: str) -> str:
+    """Drop the standalone-artifact scaffolding ``summary.md`` carries.
+
+    The pre-scan writer emits the summary as a standalone artifact: an
+    embedded untrusted-content blockquote plus a table whose rows name the
+    sibling artifacts (``affected_files.md``, ``conventions.md``,
+    ``dependencies.md``). On a disposable clone only the summary body and the
+    dependency edges travel inline — the siblings are absent, so rows that
+    name them would dangle, and the clone-mode block builder re-emits the
+    boundary as its opening block. Strip that scaffolding and keep the prose.
+    """
+    kept: list[str] = []
+    in_artifact_table = False
+    for line in summary.splitlines():
+        if line == f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}":
+            continue  # re-emitted by the clone-mode block builder
+        if line == "| File | Contents |":
+            in_artifact_table = True
+            continue
+        if in_artifact_table and line.startswith("|"):
+            continue  # separator and every data row (each names a sibling)
+        in_artifact_table = False
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
+    """Whether ``builder`` accepts the clone-mode inline kwargs.
+
+    Fork overrides written against the documented extension contract predate
+    ``clone_mode``/``inline_exploration``/``inline_dependencies``; splatting
+    them into such a builder would raise ``TypeError`` on every
+    disposable-clone run, degrading the kind to failed. The builtin builders
+    accept all three; a legacy override keeps the documented kwarg set, with
+    ``exploration_dir`` arriving as ``None`` on clone runs (the host path
+    would dangle in the disposable clone).
+    """
+    try:
+        params = inspect.signature(builder).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return {"clone_mode", "inline_exploration", "inline_dependencies"} <= params.keys()
+
+
+def _diagram_author_prompt(
+    ctx: FlowContext, kind: str, eligibility: Eligibility, backend: Any
+) -> str:
+    """Build one kind's first-turn author prompt through the registry.
+
+    On backends whose read-only profile executes in a disposable clone (the
+    protocol-level ``read_only_disposable_clone`` capability) the host-only
+    ``.daydream/`` artifact paths the pointer blocks name would dangle, so
+    the prompt is made self-sufficient: exploration summary and dependency
+    edges are inlined under the untrusted boundary (best-effort reads, shared
+    prompt budget) and the diff is handed to the builder un-truncated — the
+    builder owns clone-mode truncation. Other backends keep the budget-gated
+    pointer path byte-for-byte.
+
+    The clone-mode kwargs are only passed when the registered builder accepts
+    them: fork overrides written against the documented extension contract
+    predate the inline kwargs, and splatting them in would raise ``TypeError``
+    on every disposable-clone run, degrading the kind to failed. A legacy
+    override keeps the documented kwarg set; on a clone run its
+    ``exploration_dir`` arrives as ``None`` rather than the dangling host path.
+    """
     diff_path: Path = ctx.data["diff_path"]
     inline_diff = _ttt_diff_text(ctx)
-    exploration_dir = ctx.data.get("exploration_dir")
+    exploration_dir: Path | None = ctx.data.get("exploration_dir")
+    clone_mode = bool(getattr(backend, "read_only_disposable_clone", False))
+    builder = get_registry().prompt(
+        "diagram_sequence" if kind == "sequence" else "diagram_flowchart"
+    )
+    inline_kwargs: dict[str, Any]
+    if clone_mode and _prompt_builder_accepts_inline_kwargs(builder):
+        inline_exploration, inline_dependencies = _inline_exploration_text(exploration_dir)
+        inline_kwargs = {
+            "exploration_dir": None,
+            "clone_mode": True,
+            "inline_exploration": inline_exploration,
+            "inline_dependencies": inline_dependencies,
+        }
+    else:
+        # A legacy override keeps its documented kwarg set, but a clone run
+        # must not name the host-only exploration_dir: the path dangles in
+        # the disposable clone, so it arrives as ``None`` there and untouched
+        # otherwise.
+        inline_kwargs = {"exploration_dir": None if clone_mode else exploration_dir}
     if kind == "sequence":
         return str(
-            get_registry().prompt("diagram_sequence")(
+            builder(
                 diff_path=diff_path,
                 inline_diff=inline_diff,
                 files_by_module=_files_by_module(eligibility),
                 cwd=ctx.work.repo,
-                exploration_dir=exploration_dir,
                 schema=SEQUENCE_SPEC_SCHEMA,
+                **inline_kwargs,
             )
         )
     return str(
-        get_registry().prompt("diagram_flowchart")(
+        builder(
             diff_path=diff_path,
             inline_diff=inline_diff,
             candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
             forced=eligibility.flowchart.rule == "forced",
             cwd=ctx.work.repo,
-            exploration_dir=exploration_dir,
             schema=FLOWCHART_SPEC_SCHEMA,
+            **inline_kwargs,
         )
     )
 
@@ -2986,7 +3126,7 @@ async def _run_diagram_kind(
         structured, continuation, budget_reason = await run_agent(
             backend,
             ctx.work.repo,
-            _diagram_author_prompt(ctx, kind, eligibility),
+            _diagram_author_prompt(ctx, kind, eligibility, backend),
             phase=DaydreamPhase.DIAGRAM,
             output_schema=schema,
             read_only=True,

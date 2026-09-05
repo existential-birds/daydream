@@ -1015,3 +1015,284 @@ async def test_diagram_phase_resolves_its_own_configured_model(
         if "You are the sequence-diagram author" not in call["prompt"]
     }
     assert "diagram-only-model" not in others
+
+
+# --- Issue #1123: inline host artifacts for disposable-clone author turns ----
+
+
+def _clone_test_eligibility() -> Any:
+    from daydream.deep.diagram_trigger import Eligibility, KindDecision
+    from daydream.deep.diagram_types import DiagramThresholds
+
+    return Eligibility(
+        code_files=["a.py", "b.py"],
+        modules={"a.py": "m1", "b.py": "m2"},
+        services={},
+        cross_module_edges=1,
+        function_branch_counts=[],
+        candidate_roots=[],
+        sequence=KindDecision(eligible=True, rule="cross-module", reason="test"),
+        flowchart=KindDecision(eligible=False, rule=None, reason="test"),
+        thresholds=DiagramThresholds(),
+        force="off",
+    )
+
+
+def _clone_test_ctx(tmp_path: Path, exploration_summary: str | None, deps_text: str | None) -> Any:
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
+
+    diff_path = tmp_path / "diff.patch"
+    diff_path.write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n", encoding="utf-8")
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    if exploration_summary is not None:
+        (exploration_dir / "summary.md").write_text(exploration_summary, encoding="utf-8")
+    if deps_text is not None:
+        (exploration_dir / "dependencies.md").write_text(deps_text, encoding="utf-8")
+
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="",
+        head_branch=None,
+        head_sha="",
+        is_ephemeral=False,
+        run_id="test",
+    )
+    ctx = FlowContext(
+        config=RunConfig(target=str(tmp_path)), work=work, registry=Registry(), data={}
+    )
+    ctx.data["diff_path"] = diff_path
+    ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
+    ctx.data["exploration_dir"] = exploration_dir
+    return ctx
+
+
+def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Path) -> None:
+    """Issue #1123 acceptance: a disposable-clone backend's diagram author prompt
+    carries inline exploration+dependency content, inlines the diff, and names
+    NO .daydream/exploration or diff.patch path — the author turn can complete
+    without reading any artifact the prompt references."""
+    from types import SimpleNamespace
+
+    from daydream.deep import orchestrator as deep
+
+    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
+    ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
+    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+    assert "## Summary" in prompt
+    assert "a -> b" in prompt
+    assert ".daydream/exploration" not in prompt
+    assert "diff.patch" not in prompt
+
+
+def test_worktree_backend_diagram_prompt_keeps_pointers(tmp_path: Path) -> None:
+    """A non-disposable backend takes the unchanged pointer path: the on-disk
+    diff.patch and exploration directory are named, not inlined."""
+    from types import SimpleNamespace
+
+    from daydream.deep import orchestrator as deep
+
+    backend = SimpleNamespace(read_only_disposable_clone=False, model="fake")
+    ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
+    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+    assert "diff.patch" in prompt
+    assert "summary.md" in prompt
+    assert "dependencies.md lists the deterministic import edges" in prompt
+    assert "## Summary" not in prompt
+
+
+def test_disposable_clone_backend_omits_unreadable_exploration(tmp_path: Path) -> None:
+    """Missing exploration files are omitted entirely in clone mode — never
+    faked — while the diff is still inlined."""
+    from types import SimpleNamespace
+
+    from daydream.deep import orchestrator as deep
+
+    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
+    ctx = _clone_test_ctx(tmp_path, exploration_summary=None, deps_text=None)
+    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+    assert ".daydream/exploration" not in prompt
+    assert "a -> b" not in prompt
+    assert "diff --git a/a.py b/a.py" in prompt
+
+
+def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_path: Path) -> None:
+    """When the summary consumes the full shared budget, a pending non-empty
+    dependencies.md must not be rendered as a marker-only string: that would
+    assert 'Deterministic import edges' while carrying only the truncation
+    notice. It is omitted entirely."""
+    from daydream.deep import orchestrator as deep
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "summary.md").write_text(
+        "x" * (INLINE_DIFF_BUDGET_BYTES + 1), encoding="utf-8"
+    )
+    (exploration_dir / "dependencies.md").write_text("a -> b", encoding="utf-8")
+    summary, dependencies = deep._inline_exploration_text(exploration_dir)
+    assert "[exploration summary truncated]" in summary
+    assert dependencies is None
+
+
+def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) -> None:
+    """Issue #336: the clone-mode inline summary must not name the sibling
+    artifacts that do not travel to the disposable clone (the
+    affected_files.md/conventions.md/dependencies.md rows and the embedded
+    blockquote the writer emits), while the prose is kept."""
+    from daydream.deep import orchestrator as deep
+    from daydream.exploration import _BOUNDARY_BLOCKQUOTE
+
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "summary.md").write_text(
+        "# Exploration Summary\n"
+        f"{_BOUNDARY_BLOCKQUOTE}\n"
+        "\n"
+        "Pre-scan exploration results for the current review.\n"
+        "| File | Contents |\n"
+        "|------|----------|\n"
+        "| `affected_files.md` | 3 files (static) |\n"
+        "| `conventions.md` | No data collected |\n"
+        "| `dependencies.md` | 2 dependency edges |\n"
+        "\n"
+        "## Additional Notes\nkeep me\n",
+        encoding="utf-8",
+    )
+    summary, _ = deep._inline_exploration_text(exploration_dir)
+    assert "affected_files.md" not in summary
+    assert "conventions.md" not in summary
+    assert "dependencies.md" not in summary
+    assert "| File | Contents |" not in summary
+    assert _BOUNDARY_BLOCKQUOTE not in summary
+    assert "Pre-scan exploration results for the current review." in summary
+    assert "keep me" in summary
+
+
+def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> None:
+    """Issue #336: the summary slice is byte-exact (mirroring the diff-block
+    truncation), so a multibyte summary cannot exceed INLINE_DIFF_BUDGET_BYTES."""
+    from daydream.deep import orchestrator as deep
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "summary.md").write_text(
+        "é" * (INLINE_DIFF_BUDGET_BYTES // 2 + 100), encoding="utf-8"
+    )
+    summary, _ = deep._inline_exploration_text(exploration_dir)
+    assert "[exploration summary truncated]" in summary
+    body = summary.split("\n[exploration summary truncated]", 1)[0]
+    assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+
+
+def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fork override written against the documented extension contract (no
+    clone-mode inline kwargs) must not receive them on a disposable-clone run:
+    splatting them in would raise TypeError and degrade the kind to failed.
+    The override gets exactly the documented kwarg set and the run proceeds —
+    with exploration_dir=None on the clone run, never the dangling host path."""
+    from types import SimpleNamespace
+
+    from daydream.deep import orchestrator as deep
+    from daydream.extensions.registry import Registry
+
+    def _legacy_sequence_builder(
+        *,
+        diff_path: Path,
+        inline_diff: str | None,
+        files_by_module: dict[str, list[str]],
+        cwd: Path,
+        exploration_dir: Path | None,
+        schema: dict[str, Any],
+    ) -> str:
+        return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
+
+    registry = Registry()
+    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    monkeypatch.setattr(deep, "get_registry", lambda: registry)
+    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
+    ctx = _clone_test_ctx(
+        tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b"
+    )
+    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+    assert prompt.startswith("legacy:")
+    assert "exploration=None" in prompt  # no dangling host path on a clone run
+
+
+async def test_disposable_clone_authoring_completes_without_artifact_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #1123 acceptance: the full author turn on a disposable-clone backend
+    completes with no read of .daydream/exploration or diff.patch — the prompt
+    names neither path, so the clone cannot be asked to read them."""
+    from types import SimpleNamespace
+
+    from daydream.deep import orchestrator as deep
+
+    class _Wall:
+        """Fake disposable-clone backend."""
+
+        read_only_disposable_clone = True
+        model = "fake"
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        for forbidden in (".daydream/", "diff.patch"):
+            if forbidden in prompt:
+                raise AssertionError(f"prompt references {forbidden} — clone cannot read it")
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
+    result = await deep._run_diagram_kind(
+        ctx,
+        kind="sequence",
+        eligibility=_clone_test_eligibility(),
+        hunk_ranges={},
+        symbols=SimpleNamespace(),
+        recorder=None,
+        backend=_Wall(),
+    )
+    assert result["status"] != "failed"  # authoring completed
+
+
+async def test_disposable_clone_flowchart_authoring_completes_without_artifact_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same wall for the flowchart branch: no clone-branch special-casing may
+    leak a host-only artifact path into the flowchart author prompt."""
+    from types import SimpleNamespace
+
+    from daydream.deep import orchestrator as deep
+
+    class _Wall:
+        """Fake disposable-clone backend."""
+
+        read_only_disposable_clone = True
+        model = "fake"
+
+    async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
+        for forbidden in (".daydream/", "diff.patch"):
+            if forbidden in prompt:
+                raise AssertionError(f"prompt references {forbidden} — clone cannot read it")
+        return {"participants": []}, None, None
+
+    monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
+    ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
+    result = await deep._run_diagram_kind(
+        ctx,
+        kind="flowchart",
+        eligibility=_clone_test_eligibility(),
+        hunk_ranges={},
+        symbols=SimpleNamespace(),
+        recorder=None,
+        backend=_Wall(),
+    )
+    assert result["status"] != "failed"  # authoring completed
