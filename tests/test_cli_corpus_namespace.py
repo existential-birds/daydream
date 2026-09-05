@@ -36,6 +36,32 @@ def _run_main(argv: list[str]) -> int:
     return 0
 
 
+def test_corpus_harvest_exits_nonzero_on_aborted_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_run_harvest(_config: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 0, "aborted": 1}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
+
+
+def test_corpus_harvest_exits_nonzero_on_row_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_run_harvest(_config: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 2, "aborted": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
+
+
+def test_corpus_harvest_still_exits_zero_on_clean_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unresolved findings in the data are not process failure (spec KD)."""
+
+    def _fake_run_harvest(_config: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 2, "errors": 0, "aborted": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 0
+
+
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     called = {}
 

@@ -32,6 +32,7 @@ from typing import Any
 
 from daydream.archive.index import append_label_observation
 from daydream.training.adjudication.materialize import (
+    _CONFLICTED_DISPOSITION,
     _SESSIONS_OUT_FILENAME,
     _sessions_from_hydrated_stage,
 )
@@ -186,6 +187,17 @@ def run_canonical_harvest(
     fresh_by_record_id = {
         str(item["record_id"]): item for item in build_queue(sessions, include_decisive=True)
     }
+    # The fresh session derivation is the conflict authority, never the
+    # materialized snapshot's flags: a session turned conflicting *after*
+    # materialize (runbook step-3b import appending a disagreeing generation
+    # to the same index.db) passes the evidence-digest drift gate below unless
+    # the stack re-derives its ``conflicting`` verdict here and stamps it onto
+    # the merged records before the decisive-label projection.
+    fresh_conflicting_sessions = {
+        str(session.get("session_id"))
+        for session in sessions
+        if session.get("conflicting")
+    }
 
     # Fail-closed drift gate: verify BEFORE any write.
     drifted: list[str] = []
@@ -227,6 +239,12 @@ def run_canonical_harvest(
     for record in materialized:
         record = dict(record)
         record_id = str(record["record_id"])
+        if str(record.get("session_id")) in fresh_conflicting_sessions:
+            # Freshly re-derived conflict verdict (never trusted from the
+            # materialized snapshot's merge state): decisive dispositions from
+            # a session that became conflicting after materialize must not
+            # feed the ``finding-*`` labels or the annotations projection.
+            record["conflicting"] = True
         if record_id in grouped:
             resolved = effective_adjudication(grouped[record_id])
             if (
@@ -237,7 +255,23 @@ def run_canonical_harvest(
                 record["disposition"] = resolved["disposition"]
                 record["human_labeler"] = resolved["labeler"]
                 record["human_role"] = resolved["role"]
+                # A decisive human adjudication resolves the session conflict:
+                # the operator's judgment overrides the disagreeing
+                # generations, so the flag is cleared -- the resolution must
+                # not be suppressed to non-gold.
+                if record.get("conflicting"):
+                    record["conflicting"] = False
                 human_adjudicated += 1
+        if record.get("conflicting"):
+            # The materializer neutralizes a conflicted record's disposition
+            # (``_CONFLICTED_DISPOSITION``) so the operator queue routes it to
+            # task-only adjudication and the bundle carries one disposition;
+            # restore the real decisive disposition here for the archive
+            # ``rubric_json`` provenance, from the fresh complete queue that
+            # the drift gate just verified against this record's evidence.
+            fresh = fresh_by_record_id.get(record_id)
+            if fresh is not None:
+                record["disposition"] = str(fresh["disposition"])
         record["evidence_after_as_of"] = _evidence_after_as_of(record, pin.get("as_of"))
         if record["evidence_after_as_of"]:
             flagged_after_as_of.append(record_id)
@@ -257,11 +291,22 @@ def run_canonical_harvest(
             "rubric_version": pin["rubric_version"],
         }
         rubric_json = _canonical(rubric)
+        # Decisive labels come from every decisive record EXCEPT conflicted
+        # ones: a session whose harvester generations disagree is non-gold per
+        # existing precedence — its dispositions never project into
+        # ``finding-<disposition>`` labels. The full record (``conflicting``
+        # flag included) still lands in the archive ``rubric_json`` —
+        # provenance preserved, and acceptance is never inferred from merge
+        # state (the flag is set by the materializer and merely carried
+        # through the merge loop above). The ``annotations.jsonl`` projection
+        # row (written below) neutralizes the conflicted disposition so the
+        # corpus-v2 gate never classifies it gold.
         labels = sorted(
             {
                 f"finding-{record['disposition']}"
                 for record in session_records
                 if record["disposition"] in DECISIVE_DISPOSITIONS
+                and not record.get("conflicting")
             }
         )
         # Pin member of the auto dedup key. The dedup tuple (M14) omits
@@ -302,10 +347,26 @@ def run_canonical_harvest(
             skipped_sessions += 1
 
     # annotations.jsonl from the same in-memory merged records — no second shape.
+    # The corpus-v2 gold gate (``tiers.classify_tier``) reads only
+    # disposition/evidence/evidence_after_as_of, never the ``conflicting``
+    # flag, so a conflicted record must not carry its decisive disposition
+    # here or it would project gold with ``outcome_label`` set. Emit the
+    # record (``conflicting`` rides through; provenance preserved in the
+    # archive rubric_json above) with the disposition neutralized to
+    # ``_CONFLICTED_DISPOSITION`` so the projection routes it to task-only
+    # adjudication, never gold.
+    def _annotation_row(record: dict[str, Any]) -> dict[str, Any]:
+        if record.get("conflicting"):
+            row = dict(record)
+            row["disposition"] = _CONFLICTED_DISPOSITION
+            return row
+        return record
+
     records_path = materialize_dir / _ANNOTATIONS_FILENAME
     tmp_path = records_path.with_name(records_path.name + ".tmp")
     tmp_path.write_text(
-        "".join(_canonical(record) + "\n" for record in merged_records), encoding="utf-8"
+        "".join(_canonical(_annotation_row(record)) + "\n" for record in merged_records),
+        encoding="utf-8",
     )
     tmp_path.replace(records_path)
 

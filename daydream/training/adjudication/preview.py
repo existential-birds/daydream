@@ -2,7 +2,10 @@
 
 Builds the adjudication queue over a hydrated index and writes a
 digest-pinned, canonical-JSON ledger so an operator can inspect exactly what a
-subsequent canonical harvest would adjudicate *before* running it. The ledger
+subsequent canonical harvest would adjudicate *before* running it. A
+hydrated staging archive with no ``sessions.jsonl`` is served through the
+same read-only SQLite adapter materialize uses (never the read-write
+``_get_connection``); preview never mutates the index. The ledger
 pins per-finding evidence digests (delta on
 ``corpus_v2.bundle``'s bundle-digest SHA256SUMS verification and
 the projector's two-bundle verification), and a re-preview against an
@@ -113,7 +116,18 @@ def run_preview(index_root: Path, ledger_path: Path) -> dict[str, Any]:
     ``resolve_source_revision``; malformed evidence raises ``ValueError``
     from the queue builder naming the offending fingerprint.
     """
-    sessions, index_revision = _load_sessions(index_root)
+    if (index_root / _SESSIONS_FILENAME).is_file():
+        sessions, index_revision = _load_sessions(index_root)
+    else:
+        # Hydrated staging archive: derive the sessions from the SQLite
+        # index's label_observations via the shared materialize adapter
+        # (read-only; lazy import — materialize imports this module's
+        # ``_load_sessions``).
+        from daydream.training.adjudication.materialize import (
+            _sessions_from_hydrated_stage,
+        )
+
+        sessions, index_revision = _sessions_from_hydrated_stage(index_root)
     items = [
         {k: item[k] for k in _ITEM_KEYS} for item in build_queue(sessions)
     ]

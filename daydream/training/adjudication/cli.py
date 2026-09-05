@@ -36,8 +36,9 @@ deterministic adjudication queue:
   read-only inventory, identity linkage against the roots' run metadata,
   content-digest dedupe, version gate, run-level classification,
   reason-coded accounting (bucket sum == source row count), and — unless
-  ``--dry-run`` — an append-only merge into the ``--state-dir`` archive
-  followed by fail-closed redaction + secret scan. ``--json`` prints the
+  ``--dry-run`` — an append-only merge into the ``--archive-dir`` archive
+  (the hydrated stage's index.db — the single merge target) followed by
+  fail-closed redaction + secret scan. ``--json`` prints the
   digest-stable import report (also written to
   ``--state-dir/import-report.json`` on a real run, alongside
   ``import-ledger.json``). Dry-run writes nothing (S2).
@@ -53,6 +54,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -358,6 +360,12 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_import.add_argument("--archive-root", type=Path, action="append", required=True,
                           metavar="PATH",
                           help="Source archive/backup root holding index.db (repeatable)")
+    p_import.add_argument("--index-root", type=Path, required=True, metavar="PATH",
+                          help="Pinned hydrated index / materialized snapshot root the "
+                               "import links session identity and finding evidence against")
+    p_import.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
+                          help="Hydrated archive directory holding the SQLite index the "
+                               "import merges into — the single merge target")
     _add_state_dir(p_import)
     p_import.add_argument("--json", action="store_true",
                           help="Print the digest-stable import report as JSON")
@@ -520,8 +528,18 @@ def handle_export(argv: list[str]) -> int:
         parser.error("--out is required unless --dry-run")
     ledger_path = args.state_dir / _PREVIEW_LEDGER_FILENAME
     try:
-        if not ledger_path.is_file():
-            run_preview(args.index_root, ledger_path)
+        # Regenerate the ledger on every run: a re-export after a snapshot
+        # re-materialization must re-pin the digest reference, or the stale
+        # ledger would fail the runbook's 3a "re-run it any time the snapshot
+        # or the observations change" path with AdjudicationDriftError instead
+        # of being the documented recovery (run_preview compares against the
+        # prior ledger and overwrites it).
+        preview = run_preview(args.index_root, ledger_path)
+        if preview["drifted_record_ids"]:
+            print(
+                f"preview drift: {len(preview['drifted_record_ids'])} record(s) changed "
+                f"evidence since the prior ledger: {preview['drifted_record_ids']}"
+            )
         rows = build_export_entries(
             args.index_root, ledger_path,
             observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
@@ -891,6 +909,14 @@ def _inventory_import_root(root: Path) -> dict[str, Any]:
             # precedence marker to the writer's own default ("auto") so no
             # downstream ``row["source"]`` read raises KeyError on a legacy row.
             row["source"] = "auto"
+        runs_dir = root / "runs" / str(row["session_id"])
+        if runs_dir.is_dir():
+            # Derivative content digest for identity linkage: the hydrated
+            # index side derives the same digest over its own runs/<sid>
+            # directory, so a matching pair links by session_id.
+            from daydream.archive.sanitize import _derivative_digest
+
+            row["derivative_digest"] = _derivative_digest(runs_dir)
         run = runs.get(str(row["session_id"]))
         if run is not None:
             for field in ("repo_slug", "base_sha", "head_sha", "remote_url", "source_path"):
@@ -1073,21 +1099,153 @@ def _link_imported_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
     return linked_rows
 
 
+def _load_import_index_sessions(index_root: Path) -> list[dict[str, Any]]:
+    """Load the pinned index's sessions for the import identity derivation.
+
+    A materialized snapshot root carries ``sessions.jsonl`` (the hydrated
+    session shape); a hydrated staging archive carries ``index.db`` and
+    derives its sessions from the ``label_observations`` rows via the shared
+    fail-closed materialize adapter. Anything else is a derive failure —
+    no empty-literal fallback.
+    """
+    if (index_root / _SESSIONS_FILENAME).is_file():
+        return _load_sessions_for_index(index_root)
+    if (index_root / "index.db").is_file():
+        from daydream.training.adjudication.materialize import _sessions_from_hydrated_stage
+
+        sessions, _ = _sessions_from_hydrated_stage(index_root)
+        return sessions
+    raise ValueError(
+        f"import index root {index_root} has neither sessions.jsonl nor index.db; "
+        "not a hydrated index or materialized snapshot"
+    )
+
+
+def _hydrated_identity_index(
+    sessions: list[dict[str, Any]], index_root: Path
+) -> dict[str, dict[str, Any]]:
+    """Derive the ``link_session_identity`` hydrated-index map from the pinned
+    index's sessions — never an empty literal.
+
+    Each entry carries the session's derivative content digest (sha256 over
+    ``<index_root>/runs/<session_id>`` when that directory exists, else
+    ``None``) plus the identity ``record_id``.
+    """
+    from daydream.archive.sanitize import _derivative_digest
+
+    hydrated: dict[str, dict[str, Any]] = {}
+    for session in sessions:
+        session_id = str(session["session_id"])
+        runs_dir = index_root / "runs" / session_id
+        hydrated[session_id] = {
+            "derivative_digest": _derivative_digest(runs_dir) if runs_dir.is_dir() else None,
+            "record_id": session_id,
+        }
+    return hydrated
+
+
+def _projector_findings_map(
+    sessions: list[dict[str, Any]],
+    runs_by_session: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Derive the per-finding projected map from the pinned index's sessions.
+
+    ``project_findings`` is the single enumeration authority; each finding
+    contributes its ``record_id``, its evidence anchor, and its finding
+    fingerprint.
+
+    The anchor is the session's ``head_sha`` from the inventoried source run
+    rows when one exists: ``training/harvest.py`` stores exactly ``head_sha``
+    in ``label_observations.evidence_sha``, so the importer's exact-identity
+    match (``classify_run_level`` compares ``finding["evidence_sha"]``
+    against the imported row's ``evidence_sha`` column) can actually fire for
+    harvest-produced rows instead of always reporting ``ambiguous``. Only when
+    the session has no run anchor does the map fall back to the per-finding
+    reply digest -- a digest space no archive writer stores, so rows whose
+    anchor the pinned index cannot resolve are honestly reported ambiguous
+    (per-finding validation is informational for anchor-less sessions).
+    """
+    from daydream.training.corpus_v2.projector import project_findings
+    from daydream.training.labeler_versions import reply_evidence_digest
+
+    findings_map: dict[str, list[dict[str, Any]]] = {}
+    for session in sessions:
+        session_id = str(session["session_id"])
+        run = (runs_by_session or {}).get(session_id) or {}
+        run_anchor = run.get("head_sha")
+        rows: list[dict[str, Any]] = []
+        for finding in project_findings(session):
+            evidence = finding["evidence"]
+            if not isinstance(evidence, list):
+                raise ValueError(
+                    f"session {session_id!r}: projected finding "
+                    f"{finding['finding_fingerprint']!r} carries malformed evidence"
+                )
+            rows.append(
+                {
+                    "record_id": finding["record_id"],
+                    "evidence_sha": (
+                        str(run_anchor) if run_anchor else reply_evidence_digest(evidence)
+                    ),
+                    "fingerprint": finding["finding_fingerprint"],
+                }
+            )
+        findings_map[session_id] = rows
+    return findings_map
+
+
+def _identity_summary(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-session identity-resolution summary for the import report.
+
+    ``matched_by`` comes from the identity link (``session_id`` /
+    ``repo_slug_sha``, or ``None`` for an unmatched session);
+    ``validation_outcome`` from the run-level classification (``matched``
+    when the evidence digest pinned exactly one projected finding,
+    ``ambiguous`` when it could not, ``run_level_only`` when the session has
+    no projected findings, and ``unmatched`` when identity itself failed).
+    Deterministic (sorted by session id) so the report stays digest-stable.
+    """
+    link = result["link"]
+    run_level = result["run_level"]
+    summary: dict[str, dict[str, Any]] = {}
+    for session_id in sorted(
+        set(link["linked"]) | set(link["unmatched"]) | set(link["identity_conflict"])
+    ):
+        if session_id in link["linked"]:
+            matched_by: str | None = link["linked"][session_id]["matched_by"]
+            if session_id in run_level["per_finding"]:
+                outcome = "matched"
+            elif session_id in run_level["ambiguous_run_mapping"]:
+                outcome = "ambiguous"
+            else:
+                outcome = "run_level_only"
+        else:
+            matched_by = None
+            outcome = "unmatched"
+        summary[session_id] = {"matched_by": matched_by, "validation_outcome": outcome}
+    return summary
+
+
 def _write_import_merge(
+    archive_dir: Path,
     state_dir: Path,
     linked_rows: list[dict[str, Any]],
     runs_by_session: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Redaction-gated merge of the linked rows into the state-dir archive.
+    """Redaction-gated merge of the linked rows into the hydrated archive.
+
+    The merge target is ``--archive-dir`` (the hydrated stage's index.db —
+    the single archive the canonical chain reads); ``--state-dir`` remains
+    scratch for the scan artifacts and publish payload staging only.
 
     Fail-closed gates first, before any state write (M9/AC6): the redaction +
     secret scan and the merge's drift / malformed-row / timestamp gate both
     run before the seed/merge, so a blocked or drifted import cannot leave
     partially seeded runs or unredacted observation rows committed in the
-    state archive (and every later run re-blocking on the same dirty payload).
-    The merge commits the scan's **redacted** payload — never the unredacted
-    originals — so credential-bearing metadata cannot reach the archive.
-    ``dry_run=True`` never touches the archive, so the gate can run
+    hydrated archive (and every later run re-blocking on the same dirty
+    payload). The merge commits the scan's **redacted** payload — never the
+    unredacted originals — so credential-bearing metadata cannot reach the
+    archive. ``dry_run=True`` never touches the archive, so the gate can run
     unconditionally.
 
     Returns:
@@ -1123,11 +1281,11 @@ def _write_import_merge(
             include_observed_at=row["source"] != "auto",
         )
     _seed_target_runs(
-        state_dir,
+        archive_dir,
         {str(row["session_id"]) for row in redacted_rows},
         runs_by_session,
     )
-    merged = merge_imported_observations(state_dir, redacted_rows, dry_run=False)
+    merged = merge_imported_observations(archive_dir, redacted_rows, dry_run=False)
     return {
         "planned": merged["planned"],
         "appended": merged["appended"],
@@ -1142,6 +1300,7 @@ def _build_import_report(
     *,
     dry_run: bool,
     merge_state: dict[str, Any],
+    identity_summary: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """Compose the digest-stable import report (S1).
 
@@ -1156,6 +1315,7 @@ def _build_import_report(
         "sources": sources,
         "deduped_count": result["deduped_count"],
         "accounting": dict(result["accounting"]),
+        "identity_summary": identity_summary,
         "merge": {
             "planned": len(merge_state["planned"]),
             "appended": merge_state["appended"],
@@ -1170,21 +1330,26 @@ def _build_import_report(
     return report
 
 
-def _publish_import_state(state_dir: Path, hub_repo: str, manifest: Path) -> dict[str, Any]:
+def _publish_import_state(
+    archive_dir: Path, state_dir: Path, hub_repo: str, manifest: Path
+) -> dict[str, Any]:
     """Publish the imported adjudication state additively to the private Hub.
 
     The publish composition requires the adjudication-state payload
     (queue.json / observations.jsonl / preview-ledger.json) and the state
-    archive index (index.db — where the import's appended rows live) to
-    exist; the import itself only writes ``index.db``, so fail closed with a
-    prerequisite hint on a fresh state-dir instead of a bare
-    ``FileNotFoundError``. Reuses the existing publication: the private repo
-    hard-fail and the S1 secret scan are ``publish_annotation_state``'s own
-    fail-closed gates, so a public destination or a credential-shaped payload
-    is refused before any byte reaches the Hub. The published bundle carries
-    ``index.db`` and the checkpoint always records its digest, so a fresh-VM
-    resume restores the imported rows themselves, not just the queue/report
-    (AC5: the VM-local ``--state-dir`` is scratch only).
+    archive index (index.db) to exist; fail closed with a prerequisite hint
+    on a fresh state-dir instead of a bare ``FileNotFoundError``. The import
+    merges into the ``--archive-dir`` index (never the state-dir index), so
+    the merged index is staged byte-for-byte into the state dir here before
+    the gate; a fresh-VM resume from the published checkpoint then restores
+    the import's rows, not just the queue/report.
+    Reuses the existing publication: the private repo hard-fail and the S1
+    secret scan are ``publish_annotation_state``'s own fail-closed gates, so
+    a public destination or a credential-shaped payload is refused before
+    any byte reaches the Hub. The published bundle carries ``index.db`` and
+    the checkpoint always records its digest, so a fresh-VM resume restores
+    the published archive index, not just the queue/report (AC5: the
+    VM-local ``--state-dir`` is scratch only).
 
     Returns:
         ``{"prefix": ..., "uploaded": ...}``.
@@ -1193,8 +1358,16 @@ def _publish_import_state(state_dir: Path, hub_repo: str, manifest: Path) -> dic
         _ImportPublishError: When the state archive is missing a publishable
             adjudication-state file.
         ValueError/HubUnavailableError/HydrationError/PublicDestinationError/
-        FileNotFoundError: Propagated from the publication steps.
+        OSError: Propagated from the staging copy (OSError) and the
+            publication steps.
     """
+    # Stage the merge target into the state dir for publication: the import
+    # writes only the --archive-dir index, and publish_annotation_state
+    # uploads state_dir/index.db. Identical dirs are a no-op; a missing
+    # archive index falls through to the gate's standard prerequisite hint.
+    if archive_dir.resolve() != state_dir.resolve() and (archive_dir / "index.db").is_file():
+        state_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(archive_dir / "index.db", state_dir / "index.db")
     missing = [
         name
         for name in ("queue.json", "observations.jsonl", "preview-ledger.json", "index.db")
@@ -1218,15 +1391,23 @@ def handle_import_local_observations(argv: list[str]) -> int:
     """Handle ``corpus adjudicate import-local-observations`` (KD6, S1/S2/S3).
 
     Thin composition over the independently testable pipeline units: read-only
-    inventory (``_inventory_import_roots``), the pure import pipeline
-    (``run_pure_import``), identity linkage (``_link_imported_rows``), then —
-    unless ``--dry-run`` — the redaction-gated append-only merge
+    inventory (``_inventory_import_roots``), the pinned-index identity
+    derivation (``_load_import_index_sessions`` -> ``_hydrated_identity_index``
+    + ``_projector_findings_map`` — real identity inputs, never empty
+    literals), the pure import pipeline (``run_pure_import``), identity
+    linkage (``_link_imported_rows``), then — unless ``--dry-run`` — the
+    redaction-gated append-only merge into the ``--archive-dir`` archive
     (``_write_import_merge``), the digest-stable report
-    (``_build_import_report``), and the optional publish
-    (``_publish_import_state``). This handler owns only arg parsing, the
-    fail-closed error surface, and output; ``--json`` prints the report and a
-    real run writes it to ``--state-dir/import-report.json`` with the ledger
-    in ``--state-dir/import-ledger.json``. Dry-run writes nothing (S2).
+    (``_build_import_report``, carrying the per-session ``identity_summary``),
+    and the optional publish (``_publish_import_state`` — which stages the
+    merged ``--archive-dir`` index into the state dir for the payload). The
+    state-dir ``index.db`` is never written by the import; ``--state-dir``
+    stays for the scan artifacts, report/ledger, and ``--publish`` payload
+    staging.
+    This handler owns only arg parsing, the fail-closed error surface, and
+    output; ``--json`` prints the report and a real run writes it to
+    ``--state-dir/import-report.json`` with the ledger in
+    ``--state-dir/import-ledger.json``. Dry-run writes nothing (S2).
     """
     from daydream.ui import create_console, print_error, print_success
 
@@ -1242,23 +1423,32 @@ def handle_import_local_observations(argv: list[str]) -> int:
         inventory = _inventory_import_roots(
             args.archive_root, console=None if args.json else console
         )
+        # Real identity inputs, derived from the pinned index — never empty
+        # literals: the hydrated-index map for session linkage and the
+        # projector's per-finding map for exact run-level evidence matching.
+        sessions = _load_import_index_sessions(args.index_root)
+        hydrated_index = _hydrated_identity_index(sessions, args.index_root)
+        projector_findings = _projector_findings_map(
+            sessions, inventory["runs_by_session"]
+        )
         result = run_pure_import(
             inventory["inventories"],
-            hydrated_index={},
+            hydrated_index=hydrated_index,
             repo_slug_sha_lookup=inventory["repo_slug_sha_lookup"],
-            projector_findings={},
+            projector_findings=projector_findings,
             unmatched_identity_less=True,
         )
         linked_rows = _link_imported_rows(result)
         # Dry-run still exercises the merge's fail-closed drift gate, but the
         # planned appends are counted, never written (S2). The real path runs
         # the redaction + secret scan and the drift / malformed-row gate
-        # before any state write (M9/AC6).
+        # before any state write (M9/AC6). The merge targets --archive-dir —
+        # the hydrated stage's index.db — never the state-dir index.
         merge_state = (
-            merge_imported_observations(args.state_dir, linked_rows, dry_run=True)
+            merge_imported_observations(args.archive_dir, linked_rows, dry_run=True)
             if args.dry_run
             else _write_import_merge(
-                args.state_dir, linked_rows, inventory["runs_by_session"]
+                args.archive_dir, args.state_dir, linked_rows, inventory["runs_by_session"]
             )
         )
     except _ImportBlockedError as exc:
@@ -1268,24 +1458,25 @@ def handle_import_local_observations(argv: list[str]) -> int:
             exc.message,
         )
         return 1
-    except (ValueError, sqlite3.Error, OSError) as exc:
+    except (ValueError, sqlite3.Error, OSError, HubUnavailableError, HydrationError) as exc:
         print_error(console, "adjudicate import-local-observations failed", str(exc))
         return 1
 
     report = _build_import_report(
-        inventory["sources"], result, dry_run=bool(args.dry_run), merge_state=merge_state
+        inventory["sources"], result, dry_run=bool(args.dry_run), merge_state=merge_state,
+        identity_summary=_identity_summary(result),
     )
     if args.publish:
         try:
             report["publish"] = _publish_import_state(
-                args.state_dir, args.hub_repo, args.manifest
+                args.archive_dir, args.state_dir, args.hub_repo, args.manifest
             )
         except _ImportPublishError as exc:
             print_error(
                 console, "adjudicate import-local-observations publish failed", exc.message
             )
             return 1
-        except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
+        except (ValueError, OSError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
             print_error(console, "adjudicate import-local-observations failed", str(exc))
             return 1
 

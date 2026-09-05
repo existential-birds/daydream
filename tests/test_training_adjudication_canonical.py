@@ -502,3 +502,207 @@ def test_canonical_harvest_complete_set_is_idempotent_and_exactly_once(
     assert (mat / "annotations.jsonl").read_bytes() == first
     assert summary2["appended_sessions"] == 0
     assert summary2["skipped_sessions"] == 3
+
+
+def _hydrated_sqlite_index_with_conflict(tmp_path: Path) -> Path:
+    """Task 3's ``_hydrated_sqlite_index`` shape, extended with a second,
+    distinct-dedup-key ``label_observations`` row for the same session — two
+    harvester generations disagreeing (labels differ ⇒ dedup keys differ) on
+    one ``s1``. The latest-observed auto row wins; the session is conflicting."""
+    from daydream.archive.index import _get_connection
+
+    root = tmp_path / "hydrated"
+    conn = _get_connection(root)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    )
+    rubric = {"posterior_source": "pr_review",
+              "per_finding_resolutions": [{
+                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
+                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+                  "evidence_digest": "d" * 32}]}
+    rubric_json = json.dumps(rubric)
+    for observed_at, labels, evidence_sha in (
+        ("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64),
+        ("2026-01-03T00:00:00+00:00", '["finding-rejected"]', "f" * 64),
+    ):
+        conn.execute(
+            "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
+            "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
+            "VALUES ('s1', ?, ?, 'v1', ?, ?, 0, 'auto', '980-rubric-r2')",
+            (observed_at, labels, evidence_sha, rubric_json),
+        )
+    conn.commit()
+    conn.close()
+    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
+    return root
+
+
+def test_conflicted_session_yields_no_decisive_label(tmp_path: Path) -> None:
+    """Two distinct harvester dedup keys on one session = conflicting
+    observations: the winner's resolutions still materialize, but the
+    canonical harvest must not emit a decisive finding label for it."""
+    root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    record = json.loads((tmp_path / "mat" / "sessions.jsonl").read_text().splitlines()[0])
+    assert record["conflicting"] is True  # surfaced, never silently merged
+    # The conflicted disposition is neutralized so the operator queue routes
+    # the finding to task-only adjudication and the bundle carries one
+    # disposition (issue #336 item 7) -- the archive rubric_json restores the
+    # real decisive disposition for provenance in the harvest below.
+    assert record["disposition"] == "ambiguous"
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    out = run_canonical_harvest(
+        index_root=root, materialize_dir=mat, archive_dir=archive,
+    )
+    assert out["appended_sessions"] == 1
+    history = label_observation_history(archive, "s1")
+    rubric = json.loads(history[0]["rubric_json"])
+    assert rubric["per_finding_resolutions"][0]["conflicting"] is True
+    # and no decisive label was projected from the conflicted disposition
+    assert "finding-accepted" not in history[0]["labels"]
+
+
+def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path) -> None:
+    """A session that becomes conflicting *after* materialize (runbook step-3b
+    import appends a disagreeing generation to the same index.db) passes the
+    evidence-digest drift gate but must not emit decisive labels: the conflict
+    verdict is re-derived from the fresh sessions at harvest time, never
+    trusted from the materialized snapshot's flags (issue #336 item 2)."""
+    from daydream.archive.index import _get_connection
+
+    root = tmp_path / "hydrated"
+    conn = _get_connection(root)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    )
+    rubric = {"posterior_source": "pr_review",
+              "per_finding_resolutions": [{
+                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
+                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+                  "evidence_digest": "d" * 32}]}
+    rubric_json = json.dumps(rubric)
+    conn.execute(
+        "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
+        "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
+        "VALUES ('s1', '2026-01-02T00:00:00+00:00', '[\"finding-accepted\"]', 'v1', "
+        "'e' * 64, ?, 0, 'auto', '980-rubric-r2')",
+        (rubric_json,),
+    )
+    conn.commit()
+    conn.close()
+    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    record = json.loads((tmp_path / "mat" / "sessions.jsonl").read_text().splitlines()[0])
+    assert record.get("conflicting") is None  # not conflicting at materialize time
+    # Step-3b import: an older disagreeing generation lands in the same
+    # index.db -- the winning row (and its evidence digest) is unchanged.
+    conn = _get_connection(root)
+    conn.execute(
+        "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
+        "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
+        "VALUES ('s1', '2026-01-01T00:00:00+00:00', '[\"finding-rejected\"]', 'v1', "
+        "'d' * 64, ?, 0, 'auto', '980-rubric-r2')",
+        (rubric_json,),
+    )
+    conn.commit()
+    conn.close()
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    out = run_canonical_harvest(index_root=root, materialize_dir=mat, archive_dir=archive)
+    assert out["appended_sessions"] == 1
+    history = label_observation_history(archive, "s1")
+    # The freshly re-derived conflict suppressed the decisive label even
+    # though the materialized snapshot had no conflicting flag.
+    assert "finding-accepted" not in history[0]["labels"]
+    rows = [
+        json.loads(line)
+        for line in (mat / "annotations.jsonl").read_text().splitlines()
+        if line
+    ]
+    assert rows[0]["disposition"] == "ambiguous"
+    assert rows[0]["conflicting"] is True
+
+
+def test_canonical_harvest_human_resolution_clears_session_conflict(
+    tmp_path: Path,
+) -> None:
+    """A decisive human adjudication on a conflicted finding resolves the
+    conflict: the precedence merge clears the ``conflicting`` flag so the
+    resolution is not suppressed to non-gold, and the archive row projects the
+    decisive label (issue #336 item 7 -- a human override is never ignored)."""
+    from daydream.training.corpus_v2.identity import record_id
+
+    root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    rid = record_id("s1", "s1", "s1", "fp-1")
+    obs = tmp_path / "observations.jsonl"
+    obs.write_text(json.dumps({
+        "record_id": rid, "disposition": "accepted", "evidence_digest": "d" * 32,
+        "evidence": [], "labeler": "alice", "role": "adjudicator",
+        "rationale": "operator resolved the disagreeing generations",
+        "valid_at": "2026-01-02T00:00:00+00:00",
+        "observed_at": "2026-01-02T01:00:00+00:00", "rubric_version": "v1",
+    }) + "\n", encoding="utf-8")
+    out = run_canonical_harvest(
+        index_root=root, materialize_dir=mat, archive_dir=archive,
+        observations_path=obs,
+    )
+    assert out["human_adjudicated"] == 1
+    history = label_observation_history(archive, "s1")
+    rubric = json.loads(history[0]["rubric_json"])
+    record = rubric["per_finding_resolutions"][0]
+    assert record.get("conflicting") is not True  # cleared by the human resolution
+    assert record["disposition"] == "accepted"
+    assert "finding-accepted" in history[0]["labels"]
+    rows = [
+        json.loads(line)
+        for line in (mat / "annotations.jsonl").read_text().splitlines()
+        if line
+    ]
+    assert rows[0]["disposition"] == "accepted"
+    assert rows[0].get("conflicting") is not True
+
+
+def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
+    """The non-gold guarantee extends to the corpus-v2 projection: a
+    conflicted session's annotations.jsonl row (full record, ``conflicting``
+    flag intact) must never classify gold with ``outcome_label`` set even
+    with a decisive disposition + evidence -- the same gate canonical.py
+    applies to the archive labels column, enforced where ``classify_tier``
+    flows into the projected record."""
+    from daydream.training.corpus_v2.projector import project_findings
+
+    root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    run_canonical_harvest(index_root=root, materialize_dir=mat, archive_dir=archive)
+    rows = [
+        json.loads(line)
+        for line in (mat / "annotations.jsonl").read_text().splitlines()
+        if line
+    ]
+    # the flag rides through the harvest into the projection input verbatim
+    assert any(row.get("conflicting") is True for row in rows)
+    # run_build_corpus_v2's snapshot assembly (session-scoped resolutions) --
+    # the boundary classify_tier reaches the corpus-v2 gold label through.
+    session = {
+        "session_id": "s1",
+        "trajectory_id": "s1",
+        "segment_id": "s1",
+        "resolutions": [row for row in rows if row.get("session_id") == "s1"],
+    }
+    records = project_findings(session)
+    assert records  # the finding is still projected -- provenance preserved
+    assert all(r["tier"] != "gold" for r in records)
+    assert all(r["outcome_label"] is None for r in records)

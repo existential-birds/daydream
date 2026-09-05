@@ -30,6 +30,7 @@ from daydream.training.labeler_signals import (
     LocalCommitAppliedSignal,
     PerFindingResolution,
     PRMergeSignal,
+    resolution_to_dict,
 )
 
 PosteriorSource = Literal["pr_review", "local_branch", "none"]
@@ -56,7 +57,10 @@ class Rubric:
             carries the authoritative outcome label.
         per_finding_resolutions: Per-finding dispositions joined by
             fingerprint, or ``None`` when no per-finding join was
-            performed. Serialized as ``per_finding_outcomes``.
+            performed. Serialized two ways: the full resolution objects
+            (fingerprint, disposition, evidence, evidence digest) under
+            ``per_finding_resolutions``, and the derived labels-only view
+            under ``per_finding_outcomes`` for existing consumers.
     """
 
     pr_merge: PRMergeSignal
@@ -95,6 +99,7 @@ class Rubric:
         if self.local_commit_applied is not None:
             out["local_commit_applied"] = {"verdict": self.local_commit_applied.verdict}
         if self.per_finding_resolutions is not None:
+            out["per_finding_resolutions"] = [resolution_to_dict(r) for r in self.per_finding_resolutions]
             out["per_finding_outcomes"] = derive_per_finding_labels(self, self.per_finding_resolutions)
         return out
 
