@@ -676,6 +676,12 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     body = payload["body"]
     assert isinstance(body, str)
 
+    # M3/M4: deep --comment path names the fixture PR's head SHA.
+    assert (
+        "- **Reviewed commit:** [`0000000`]"
+        "(https://github.com/test-owner/test-repo/commit/" + "0" * 40 + ")"
+    ) in body, f"reviewed-commit line missing from payload body.\n\nfull body:\n{body}"
+
     # --- Mode line: removed everywhere ----------------------------------
     assert "**Mode:**" not in body, (
         f"BUG: Mode line should be gone from PR-comment body.\n\nfull body:\n{body}"

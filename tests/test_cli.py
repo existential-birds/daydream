@@ -83,6 +83,20 @@ def test_run_config_flow_name_settable() -> None:
     assert RunConfig(target="/tmp/p", flow_name="ro-audit").flow_name == "ro-audit"
 
 
+def test_file_scope_issues_flag_reaches_runconfig(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(monkeypatch, ["--file-scope-issues", "/tmp/project"])
+    assert cfg.scope_issue_filing is True
+
+
+def test_file_scope_issues_defaults_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(monkeypatch, ["/tmp/project"])
+    assert cfg.scope_issue_filing is False
+
+
+def test_runconfig_scope_issue_filing_defaults_false() -> None:
+    assert RunConfig(target="/t").scope_issue_filing is False
+
+
 def test_flow_flag_sets_flow_name(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _cfg(monkeypatch, ["--flow", "ro-audit", "/tmp/project"])
     assert cfg.flow_name == "ro-audit"
@@ -225,6 +239,75 @@ def test_findings_out_rejects_flows_without_pipeline_errors(
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "--findings-out" in err
+
+
+def test_diagram_only_sets_output_mode_and_diagram_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1113: ``--diagram-only KIND`` selects the mode AND the kind."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--diagram-only", "flowchart", "/tmp/repo"])
+    config = _parse_args()
+    assert config.output_mode == "diagram"
+    assert config.diagram == "flowchart"
+
+
+def test_diagram_flag_leaves_output_mode_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--diagram`` modifies the review paths; it is not an output mode."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--diagram", "off", "/tmp/repo"])
+    config = _parse_args()
+    assert config.output_mode == "loop"
+    assert config.diagram == "off"
+
+
+def test_diagram_defaults_to_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset (not ``"auto"``) so a repo file's ``mode = "off"`` can still win."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/repo"])
+    assert _parse_args().diagram is None
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--diagram", "both", "--diagram-only", "sequence"], "--diagram-only"),
+        (["--diagram-only", "sequence", "--comment"], "not allowed with argument"),
+        (["--diagram-only", "sequence", "--review"], "not allowed with argument"),
+        (["--diagram-only", "sequence", "--flow", "improve"], "--flow"),
+        (["--diagram-only", "sequence", "--start-at", "merge"], "--start-at merge"),
+        (["--diagram-only", "sequence", "--yes"], "--yes"),
+    ],
+    ids=[
+        "diagram_with_diagram_only",
+        "diagram_only_with_comment",
+        "diagram_only_with_review",
+        "diagram_only_with_flow",
+        "diagram_only_with_start_at",
+        "diagram_only_with_yes",
+    ],
+)
+def test_diagram_only_conflicts_are_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    expected: str,
+) -> None:
+    """Every incompatible combination fails loudly instead of silently picking one."""
+    monkeypatch.setattr(sys, "argv", ["daydream", *argv, "/tmp/repo"])
+    with pytest.raises(SystemExit) as exc_info:
+        _parse_args()
+    assert exc_info.value.code == 2
+    assert expected in capsys.readouterr().err
+
+
+def test_findings_out_with_diagram_only_populates_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--findings-out`` is honored in diagram-only mode (Phase A of #1113)."""
+    monkeypatch.setattr(sys, "argv", [
+        "daydream", "--diagram-only", "sequence", "--findings-out", "f.json", "/tmp/repo",
+    ])
+    config = _parse_args()
+    assert config.findings_out == "f.json"
+    assert config.output_mode == "diagram"
 
 
 def test_findings_out_with_deep_flow_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:

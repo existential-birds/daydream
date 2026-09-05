@@ -19,6 +19,13 @@ structured, salvageable failure instead of a fatal run abort:
          while a bare-``list`` response containing a parseable item list is
          merged normally.
 
+Issue #1111 extends the salvage dedup coverage: the drop is keyed on the
+host-minted ``uid`` rather than the non-unique ``(id, file)`` tuple, so a
+duplicate group whose members are indistinguishable under that tuple keeps its
+a-side instead of losing every member; and a pre-``uid``
+``dedup-candidates.json`` keeps both sides with a warning rather than falling
+back to the tuple.
+
 The phase-level tests drive the real production path
 (``phase_cross_stack_merge -> run_agent -> backend ResultEvent``) with only the
 backend mocked; ``_MergeTextBackend`` reproduces the pi contract faithfully
@@ -389,6 +396,8 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     merge_str: Any,
 ) -> None:
     """R6/AC4: --start-at fix after salvage picks up partial items; no re-review, no re-merge."""
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
     silence(monkeypatch)
     mute_side_effects()
     stub = install_stub_backend(monkeypatch, multi_stack_target)
@@ -409,15 +418,24 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     assert not any("cross-stack merge agent" in c["prompt"].lower() for c in stub.calls)
     assert not any("per-stack review" in c["prompt"].lower() for c in stub.calls)
     # R6 positive outcome: the fix phase consumed the salvaged partial items --
-    # the fix prompt (built from merged-items.json) references the surviving
-    # per-stack finding's description + file. A regression where --start-at fix
+    # the fix prompt (built from merged-items.json) references a surviving
+    # salvaged finding's description + file. A regression where --start-at fix
     # fails to load the partial merged-items.json would fail this assertion.
+    # Read the expectation off the salvaged artifact rather than hard-coding one
+    # stub description: which findings survive the salvage is decided by the
+    # D-27 pre-filter and the evidence gate, not by this test.
+    salvaged = json.loads(merged_items_path(deep_dir(multi_stack_target)).read_text())["items"]
+    assert salvaged, "salvage wrote no items to consume"
     fix_calls = [
         c["prompt"]
         for c in stub.calls
         if "fix these" in c["prompt"].lower() or "fix this issue" in c["prompt"].lower()
     ]
-    assert any("Sample issue" in p and "api.py" in p for p in fix_calls)
+    assert any(
+        item["description"] in p and item["file"] in p
+        for item in salvaged
+        for p in fix_calls
+    ), f"no fix prompt referenced a salvaged item: {salvaged}"
 
 
 async def test_merge_failure_merge_resume_skips_merge_entry(
@@ -448,3 +466,206 @@ async def test_merge_failure_merge_resume_skips_merge_entry(
     assert merge_calls, "expected a merge-agent relaunch"
     prompt = "\n".join(c["prompt"].lower() for c in merge_calls)
     assert "__merge__" not in prompt
+
+
+
+async def test_merge_salvage_keeps_a_side_when_three_stacks_share_id_and_file(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Callable[..., None],
+) -> None:
+    """F2/#1111: a salvage keeps the a-side when every duplicate shares ``(id, file)``.
+
+    The reported live bug. Three stacks reviewing one diff each report ``id: 1``
+    on ``api.py`` with the same description -- not an exotic shape but the norm:
+    per-stack reviewer ids restart at 1 in every stack, and two stacks landing on
+    one file is precisely what the cross-stack machinery exists to reconcile. The
+    pre-filter pairs them (0,1), (0,2) and (1,2), so record 0 -- the a-side
+    ``_drop_cross_stack_duplicates`` exists to KEEP -- is itself the a-side of two
+    pairs whose b-sides are indistinguishable from it under an ``(id, file)`` key.
+    The old set-membership filter therefore deleted all three and the partial
+    report shipped with zero language findings; only the structural item (worded
+    differently, so never paired) kept ``items`` non-empty and the pre-existing
+    ``len(items) > 0`` salvage assertions green.
+
+    Keying the drop on the host-minted ``uid`` names one record and only that
+    record, so exactly the two b-sides go and ``generic:1`` survives -- asserted
+    here on the uid the surviving item still carries, because the three findings
+    are otherwise byte-identical and nothing else can tell them apart.
+    """
+    from daydream.deep.artifacts import dedup_candidates_path, deep_dir, merged_items_path
+
+    silence(monkeypatch)
+    mute_side_effects()
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    # Byte-identical findings from all three language stacks of multi_stack_target.
+    # Same reviewer id (the stub emits ``id: 1`` per stack), same file, same
+    # description -> similarity 1.0 -> all three pairwise combinations are
+    # cross-stack duplicate candidates.
+    collision = {
+        "severity": "high",
+        "confidence": "HIGH",
+        "file": "api.py",
+        "line": 1,
+        "description": "Sample issue",
+    }
+    stub.parse_by_stack = {
+        "generic": dict(collision),
+        "python": dict(collision),
+        "react": dict(collision),
+    }
+    stub.merge_emit_str = "no item list"
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+    dd = deep_dir(multi_stack_target)
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    per_stack = [i for i in items if i.get("lens") == "per-stack"]
+    # The regression: on the old ``(id, file)`` key this list is EMPTY -- every
+    # record matched the single dropped key ``("1", "api.py")``.
+    assert len(per_stack) == 1, f"salvage lost the a-side of the duplicate group: {items}"
+    # ... and it is the a-side, not an arbitrary survivor. ``generic`` sorts
+    # first, so it is record 0 and the a-side of both pairs it appears in.
+    assert per_stack[0]["uid"] == "generic:1"
+    assert per_stack[0]["file"] == "api.py"
+    # The structural item is worded differently and is never paired, so it must
+    # be untouched -- it is also what masked this bug, by keeping items non-empty.
+    assert [i["uid"] for i in items if i.get("lens") == "structural"] == ["structure:1"]
+    # Pin the exact pairing that makes the collision reachable, so a future
+    # pre-filter change that stops emitting these pairs cannot make the
+    # assertions above pass vacuously.
+    dedup = json.loads(dedup_candidates_path(dd).read_text())
+    assert [
+        (p["record_a_uid"], p["record_b_uid"]) for p in dedup["record_duplicate_pairs"]
+    ] == [("generic:1", "python:1"), ("generic:1", "react:1"), ("python:1", "react:1")]
+    assert {p["record_b_id"] for p in dedup["record_duplicate_pairs"]} == {"1"}
+    assert {p["record_b_file"] for p in dedup["record_duplicate_pairs"]} == {"api.py"}
+
+
+def test_merge_salvage_keeps_both_sides_of_a_pre_uid_dedup_pair(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1111: a pre-uid ``dedup-candidates.json`` loses nothing, and says so.
+
+    Every producer in the current pipeline stamps ``record_b_uid``, so this shape
+    is only reachable through an artifact left by a run from before the field
+    existed -- ``_step_cross_stack_merge`` rewrites ``dedup-candidates.json``
+    before every merge, which is why this enters at the salvage helper with a
+    real deep dir on disk rather than through ``runner.run``.
+
+    The deliberate choice under test is that the b-side is NOT re-identified by
+    falling back to ``(id, file)``: that fallback is the bug above. A duplicate
+    surviving into a partial report is a far smaller error than deleting the
+    finding the pair existed to preserve, so both sides are kept and the
+    un-applied pair is named on the console instead of silently swallowed.
+    """
+    from daydream.deep.artifacts import dedup_candidates_path
+    from daydream.deep.orchestrator import _drop_cross_stack_duplicates
+
+    dd = tmp_path / ".daydream" / "deep"
+    dd.mkdir(parents=True)
+    # The pre-#1111 pair shape: a/b identified only by the non-unique (id, file).
+    dedup_candidates_path(dd).write_text(
+        json.dumps(
+            {
+                "record_alt_pairs": [],
+                "record_duplicate_pairs": [
+                    {
+                        "record_a_id": "1",
+                        "record_a_file": "api.py",
+                        "record_a_description": "Sample issue",
+                        "record_a_source": "stack-generic-records.json",
+                        "record_b_id": "1",
+                        "record_b_file": "api.py",
+                        "record_b_description": "Sample issue",
+                        "record_b_source": "stack-python-records.json",
+                        "similarity": 1.0,
+                    }
+                ],
+            }
+        )
+    )
+    records = [
+        {"id": 1, "file": "api.py", "description": "Sample issue", "uid": "generic:1"},
+        {"id": 1, "file": "api.py", "description": "Sample issue", "uid": "python:1"},
+    ]
+
+    kept = _drop_cross_stack_duplicates(dd, records)
+
+    assert [r["uid"] for r in kept] == ["generic:1", "python:1"]
+    out = " ".join(capsys.readouterr().out.split())
+    assert "carries no record_b_uid" in out
+    assert "keeping both records (issue #1111)" in out
+
+
+async def test_merge_salvage_partial_items_carry_source_uids(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111: a salvaged partial report still names the records behind each item.
+
+    On this path there IS no merge agent -- that is what "salvage" means -- so
+    the host is the only producer that can attribute anything, and the one that
+    can do it with certainty, since every item here IS a record. Nothing extra
+    writes that attribution: ``_salvage_merge_failure`` delegates to
+    ``_write_single_stack_merged_items``, deliberately, so the salvage report
+    cannot grow a second spelling of provenance that drifts from the bypass's.
+    What this pins is that the delegation actually delivers it -- on precisely
+    the path where a reader most needs it, since a partial report's provenance is
+    what tells them which stacks made it into the file.
+
+    Real path: the full deep flow with an unparseable (``str``) merge response.
+    ``parse_by_stack`` gives each stack a finding on its own file, worded with
+    no shared vocabulary, so the dedup pre-filter pairs nothing and every record
+    reaches the partial write -- the salvage applies that pre-filter itself,
+    having no merge agent to adjudicate the pairs.
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_emit_str = "no item list"
+    # Medium severity keeps every record below the arbiter's ``min_severity``,
+    # and the python finding sits at api.py:2 rather than api.py:1 so it does not
+    # collide with the structural stack's default finding either -- no
+    # arbitration, so no verdict rewrites a description asserted on below.
+    stub.parse_by_stack = {
+        "python": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "api.py",
+            "line": 2,
+            "description": "Unbounded cache write in the request handler",
+        },
+        "react": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "App.tsx",
+            "line": 1,
+            "description": "Missing key prop on the rendered list",
+        },
+        "generic": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "README.md",
+            "line": 1,
+            "description": "Setup instructions omit the migration step",
+        },
+    }
+
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+
+    dd = deep_dir(multi_stack_target)
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    provenance = {str(i["description"]): i["source_uids"] for i in items}
+    assert provenance == {
+        "Setup instructions omit the migration step": ["generic:1"],
+        "Unbounded cache write in the request handler": ["python:1"],
+        "Missing key prop on the rendered list": ["react:1"],
+        "Structural maintainability concern": ["structure:1"],
+    }, items
+    # These items never passed through the merge agent, so they still carry
+    # their birth ``uid`` -- and the two answers agree, which is the invariant
+    # ``item_source_uids`` exists to let a consumer rely on without re-deriving.
+    for item in items:
+        assert item["source_uids"] == [item["uid"]], item

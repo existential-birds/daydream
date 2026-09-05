@@ -56,6 +56,7 @@ _PHASE_LABELS: dict[str, str] = {
     "audit": "Audit",
     "vet": "Vet Findings",
     "plan_write": "Write Plans",
+    "diagram": "Diagram",
 }
 
 FALLBACK_NOTE = "*run details unavailable*"

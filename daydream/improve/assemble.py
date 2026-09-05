@@ -37,6 +37,7 @@ from daydream.improve.command_contract import (
 )
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 from daydream.improve.render import plan_slug, redact_secret_values
+from daydream.repository_paths import is_test_path
 
 GIT_PUSH_POLICY = "never-without-operator-instruction"
 GIT_PULL_REQUEST_POLICY = "never-without-operator-instruction"
@@ -61,7 +62,6 @@ _DOCUMENTATION_NAMES = {
     "readme",
     "security",
 }
-_TEST_DIRECTORY_NAMES = {"__tests__", "spec", "specs", "test", "tests"}
 _COMMENT_KIND = re.compile(r"\b(?:comment|docstring)\b", re.IGNORECASE)
 _ABSENCE_WORD = re.compile(r"\b(?:absent|delete[ds]?|no longer|remove[ds]?)\b", re.IGNORECASE)
 _COMMENT_REWRITE = re.compile(r"\b(?:condense|rewrite|shorten|simplif(?:y|ies)|trim)\b", re.IGNORECASE)
@@ -222,21 +222,6 @@ def _is_documentation_path(path: str) -> bool:
     return candidate.suffix.casefold() in _DOCUMENTATION_SUFFIXES or stem in _DOCUMENTATION_NAMES
 
 
-def _is_test_path(path: str) -> bool:
-    candidate = Path(path)
-    parts = {part.casefold() for part in candidate.parts[:-1]}
-    name = candidate.name.casefold()
-    stem = candidate.stem.casefold()
-    return bool(parts & _TEST_DIRECTORY_NAMES) or (
-        stem in {"test", "tests"}
-        or stem.startswith("test_")
-        or stem.endswith("_test")
-        or candidate.stem.endswith(("Test", "Tests"))
-        or ".test." in name
-        or ".spec." in name
-    )
-
-
 def _is_comment_only_change(change: dict[str, Any]) -> bool:
     if change.get("operation") not in {"modify", "delete"}:
         return False
@@ -268,7 +253,7 @@ def _not_applicable_change_allowed(change: dict[str, Any]) -> bool:
         return False
     if _is_documentation_path(path) or _is_comment_only_change(change):
         return True
-    return change.get("operation") == "delete" and _is_test_path(path)
+    return change.get("operation") == "delete" and is_test_path(path)
 
 
 def _has_test_declaration(path: str, source: str, symbol: str) -> bool:
@@ -276,7 +261,7 @@ def _has_test_declaration(path: str, source: str, symbol: str) -> bool:
 
     if not symbol or "\n" in symbol or "\r" in symbol:
         return False
-    test_path = _is_test_path(path)
+    test_path = is_test_path(path)
     if Path(path).suffix.casefold() == ".py" and _IDENTIFIER.fullmatch(symbol):
         if not test_path or not symbol.casefold().startswith("test"):
             return False

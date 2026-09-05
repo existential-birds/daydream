@@ -20,6 +20,7 @@ from daydream.archive.index import (
     append_label_observation,
     bulk_latest_label_observations,
     canonical_utc_iso,
+    delete_runs,
     label_count_summary,
     label_observation_history,
     latest_label_observation,
@@ -236,7 +237,9 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
     step, so it keeps a fix backend and drops only test. IMPROVE's built-in
     pipeline defines no fix/test phase, so it drops both. CUSTOM is classified
     by its registered pipeline; with no fork flow configured here it cannot
-    prove a fix/test phase, so it drops both.
+    prove a fix/test phase, so it drops both. DIAGRAM (issue #1113) runs
+    exploration -> diagram -> post-diagram and no fix/test phase, so it drops
+    both as well.
     """
     recorder = _MockRecorder(run_flow=flow)
     config = _MockConfig(fix_backend="codex", test_backend="codex")
@@ -252,6 +255,7 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
         DaydreamRunFlow.IMPROVE,
         DaydreamRunFlow.TTT,
         DaydreamRunFlow.CUSTOM,
+        DaydreamRunFlow.DIAGRAM,
     ):
         assert m.fix_backend is None
         assert m.test_backend is None
@@ -262,6 +266,21 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
         assert m.test_backend == "codex"
         assert run["fix_backend"] == "codex"
         assert run["test_backend"] == "codex"
+
+
+def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> None:
+    recorder = _MockRecorder(run_flow=DaydreamRunFlow.DIAGRAM)
+    m = _build(
+        tmp_path,
+        recorder=recorder,
+        fix_failures={"src/old.py": "reverted"},
+        fix_leftover_untracked=["src/leftover.py"],
+        fix_quality_gate={"enabled": True, "rounds": []},
+    )
+
+    assert m.fix_failures is None
+    assert m.fix_leftover_untracked is None
+    assert m.fix_quality_gate is None
 
 
 def test_build_manifest_classifies_custom_flow_by_registered_pipeline(
@@ -334,9 +353,10 @@ def test_fix_cycle_classification_covers_every_run_flow() -> None:
     """Every ``DaydreamRunFlow`` member is explicitly classified: TTT
     (review/comment) is mode-gated never to reach the fix cycle, PR (feedback)
     runs its own fix-items phase (fix yes, test no), and every other label is
-    classified by its registered pipeline (issue #648). A future enum member
-    fails this exhaustiveness check instead of silently changing which backend
-    fields the manifest emits.
+    classified by its registered pipeline (issue #648). DIAGRAM (issue #1113)
+    is classified by its own two-step registered pipeline, which runs neither
+    fix nor test. A future enum member fails this exhaustiveness check instead
+    of silently changing which backend fields the manifest emits.
     """
     mode_gated_labels = {DaydreamRunFlow.TTT}
     fix_only_labels = {DaydreamRunFlow.PR}
@@ -348,7 +368,11 @@ def test_fix_cycle_classification_covers_every_run_flow() -> None:
         mode_gated_labels
         | fix_only_labels
         | fix_cycle_builtins
-        | {DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM}
+        | {
+            DaydreamRunFlow.IMPROVE,
+            DaydreamRunFlow.CUSTOM,
+            DaydreamRunFlow.DIAGRAM,
+        }
     )
 
 
@@ -789,6 +813,164 @@ def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path) -> N
     assert row["verbosity"] == pytest.approx(0.08)
 
 
+def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path) -> None:
+    """#1106: the location-accuracy and escaped-duplication axes reach the manifest.
+
+    The eval pass computes a location verdict per shipped finding and a
+    shipped-set duplication scan; both headline scalars must be projected so a
+    change to line resolution or the hunk index is measurable across runs.
+    """
+    m = _build(
+        tmp_path,
+        evaluation={
+            "location": {
+                "hunk_source": "hunk-index.json",
+                "scored_items": 4,
+                "in_hunk_rate": 0.75,
+                "tiers": {"in_hunk": 3, "within_tolerance": 1,
+                          "beyond_tolerance": 0, "file_absent": 0},
+            },
+            "findings": {
+                "total": 6,
+                "shipped_duplication": {
+                    "shipped_items": 6,
+                    "comparable_pairs": 15,
+                    "near_duplicate_pairs": 2,
+                },
+            },
+        },
+    )
+
+    assert m.location_in_hunk_rate == 0.75
+    assert m.shipped_duplicate_pairs == 2
+    d = m.to_dict()
+    assert d["metrics"]["location_in_hunk_rate"] == 0.75
+    assert d["metrics"]["shipped_duplicate_pairs"] == 2
+
+
+def test_build_manifest_location_duplication_metrics_none_when_blocks_absent(
+    tmp_path: Path,
+) -> None:
+    """#1106: an evaluation.json predating the axes yields None, never 0.
+
+    Every already-archived run carries a `findings` block without
+    `shipped_duplication` and no `location` block at all. The projection must
+    chain defensively and leave both metrics undefined rather than reporting a
+    perfect in-hunk rate or zero escaped duplicates.
+    """
+    m = _build(
+        tmp_path,
+        evaluation={
+            "timing": {"total_wall_clock_seconds": 42.5},
+            "findings": {"total": 7},
+            "grounding": {"grounding_rate": 0.85},
+        },
+    )
+
+    assert m.total_findings == 7  # the legacy axes still project
+    assert m.location_in_hunk_rate is None
+    assert m.shipped_duplicate_pairs is None
+    d = m.to_dict()
+    assert d["metrics"]["location_in_hunk_rate"] is None
+    assert d["metrics"]["shipped_duplicate_pairs"] is None
+
+
+def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> None:
+    """#1106: `in_hunk_rate: None` (no scorable finding) stays undefined end to end.
+
+    The analyzer emits None — not 0.0 — when `scored_items == 0`, because a run
+    that located nothing has no accuracy, and the reward pipeline renormalizes
+    over PRESENT axes. Coercion to 0.0 anywhere in the projection would feed it
+    an imputed worst score.
+    """
+    m = _build(
+        tmp_path,
+        evaluation={
+            "location": {"hunk_source": "none", "scored_items": 0, "in_hunk_rate": None},
+            "findings": {"total": 0, "shipped_duplication": {"near_duplicate_pairs": 0}},
+        },
+    )
+    assert m.location_in_hunk_rate is None
+    assert m.to_dict()["metrics"]["location_in_hunk_rate"] is None
+
+    upsert_run(
+        tmp_path,
+        make_manifest(
+            session_id="s-loc-null",
+            location_in_hunk_rate=m.location_in_hunk_rate,
+            shipped_duplicate_pairs=m.shipped_duplicate_pairs,
+        ),
+    )
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-loc-null",))[0]
+    assert row["location_in_hunk_rate"] is None  # SQL NULL, not 0.0
+    assert row["shipped_duplicate_pairs"] == 0  # a real zero is still a zero
+
+
+def test_upsert_run_persists_location_and_duplication_metrics(tmp_path: Path) -> None:
+    """#1106: both new metrics round-trip through upsert_run -> query_runs."""
+    upsert_run(
+        tmp_path,
+        make_manifest(
+            session_id="s-loc",
+            location_in_hunk_rate=0.6,
+            shipped_duplicate_pairs=3,
+        ),
+    )
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-loc",))[0]
+    assert row["location_in_hunk_rate"] == pytest.approx(0.6)
+    assert row["shipped_duplicate_pairs"] == 3
+
+
+def test_runs_location_duplication_columns_migrate_existing_db(tmp_path: Path) -> None:
+    """#1106: a real pre-existing v7 index.db gains both columns via ALTER-ADD.
+
+    Mirrors the erosion/verbosity additive migration: the legacy runs table (v7
+    DDL minus the two new columns, PRAGMA user_version = 7) keeps its rows and
+    gains the columns on the next production write, never dropping or
+    rewriting data.
+    """
+    from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
+
+    legacy_ddl = _CREATE_TABLE.replace(
+        "    location_in_hunk_rate REAL,\n    shipped_duplicate_pairs INTEGER,\n", ""
+    )
+    assert "location_in_hunk_rate" not in legacy_ddl
+    assert "shipped_duplicate_pairs" not in legacy_ddl
+    db_path = tmp_path / "index.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(legacy_ddl)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path, erosion) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy-loc-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-loc-run"), 0.5),
+    )
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    conn.close()
+
+    # The production write path must ALTER-ADD both columns non-destructively.
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s-mig-loc", location_in_hunk_rate=0.25,
+                      shipped_duplicate_pairs=4),
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert {"location_in_hunk_rate", "shipped_duplicate_pairs"} <= cols
+    assert user_version == SCHEMA_VERSION == 8
+
+    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-loc-run",))[0]
+    assert legacy["erosion"] == pytest.approx(0.5)  # pre-existing row preserved
+    assert legacy["location_in_hunk_rate"] is None  # new columns nullable
+    assert legacy["shipped_duplicate_pairs"] is None
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-loc",))[0]
+    assert row["location_in_hunk_rate"] == pytest.approx(0.25)
+    assert row["shipped_duplicate_pairs"] == 4
+
+
 def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
     """Issue #646: per-stack review identity round-trips through the index."""
     m = make_manifest(
@@ -1124,6 +1306,27 @@ def test_copy_bundle_deep_directory(tmp_path: Path) -> None:
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
 
 
+def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path) -> None:
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    recorder.run_flow = DaydreamRunFlow.DIAGRAM
+    deep_dir = target / ".daydream" / "deep"
+    (deep_dir / "merged-items.json").write_text('{"items": []}')
+    (deep_dir / "fix-failures.json").write_text('{"src/old.py": "reverted"}')
+    (deep_dir / "diagram.json").write_text('{"results": {}}')
+    (deep_dir / "diagram.md").write_text("current diagram")
+    (target / ".daydream" / "recommended.patch").write_text("stale recommendation")
+
+    _copy_bundle(target, run_dir, recorder, RunConfig())
+
+    assert sorted(path.name for path in (run_dir / "deep").iterdir()) == [
+        "diagram.json",
+        "diagram.md",
+    ]
+    assert (run_dir / "deep" / "diagram.md").read_text() == "current diagram"
+    assert not (run_dir / "review-output.md").exists()
+    assert not (run_dir / "recommended.patch").exists()
+
+
 def test_copy_bundle_sub_trajectories_copied(tmp_path: Path) -> None:
     """Sibling trajectories under the live run dir copy verbatim — no prefix filtering."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
@@ -1286,6 +1489,96 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
 # index: label_observations (Task 12)
 
 
+def test_delete_runs_removes_matching_rows_and_returns_count(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+    _seed_one_run(tmp_path, "sess-b")
+
+    deleted = delete_runs(tmp_path, ["sess-a", "sess-missing"])
+
+    assert deleted == 1
+    remaining = [r["session_id"] for r in query_runs(tmp_path)]
+    assert remaining == ["sess-b"]
+
+
+def test_delete_runs_empty_collection_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+
+    def _fail_open(archive_dir: Path) -> sqlite3.Connection:
+        raise AssertionError("delete_runs must not open the database for an empty collection")
+
+    monkeypatch.setattr("daydream.archive.index._get_connection", _fail_open)
+
+    assert delete_runs(tmp_path, []) == 0
+
+    monkeypatch.undo()
+    assert len(query_runs(tmp_path)) == 1
+
+
+def test_delete_runs_coerces_non_string_members(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "42")
+
+    assert delete_runs(tmp_path, [42]) == 1
+    assert query_runs(tmp_path) == []
+
+
+def test_delete_runs_matches_exactly_no_like_semantics(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+    _seed_one_run(tmp_path, "sess-a%")  # LIKE wildcard sibling must survive
+    _seed_one_run(tmp_path, "sess-a_x")  # LIKE single-char wildcard sibling
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    remaining = {r["session_id"] for r in query_runs(tmp_path)}
+    assert remaining == {"sess-a%", "sess-a_x"}
+
+
+def test_delete_runs_hydration_rerun_reflects_only_kept_session(tmp_path: Path) -> None:
+    # Prior hydration run admitted both sessions.
+    _seed_one_run(tmp_path, "sess-kept")
+    _seed_one_run(tmp_path, "sess-rejected")
+    assert len(query_runs(tmp_path)) == 2
+
+    # Rerun admission: prune the rejected session's index row.
+    deleted = delete_runs(tmp_path, ["sess-rejected"])
+
+    assert deleted == 1
+    visible = query_runs(tmp_path)
+    assert [r["session_id"] for r in visible] == ["sess-kept"]
+    # The kept session's harvest-visible row is fully intact.
+    assert visible[0]["status"] == "complete"
+
+
+def test_delete_runs_removes_bundle_directory_under_runs(tmp_path: Path) -> None:
+    # Sibling contract (hydrate/sanitize): the on-disk ``runs/`` tree is the
+    # source of truth for ``rebuild_index``, so a surviving bundle directory
+    # would silently resurrect the pruned row.
+    _seed_one_run(tmp_path, "sess-a")
+    runs_root = tmp_path / "runs"
+    bundle = runs_root / "sess-a"
+    bundle.mkdir(parents=True)
+    (bundle / "manifest.json").write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(
+        "UPDATE runs SET archive_path = ? WHERE session_id = 'sess-a'",
+        (str(bundle),),
+    )
+    conn.commit()
+    conn.close()
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    assert query_runs(tmp_path) == []
+    assert not bundle.exists()
+
+
+def test_delete_runs_leaves_bundle_outside_runs_untouched(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")  # archive_path: archive_dir/sess-a
+    (tmp_path / "sess-a").mkdir()
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    assert (tmp_path / "sess-a").is_dir()
+
+
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
     upsert_run(
         archive_dir,
@@ -1307,6 +1600,24 @@ def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path) -> Non
     conn.close()
     assert {"valid_at", "reward_version", "reward_json"} <= lo_cols
     assert "composite_reward" in runs_cols
+
+
+def test_delete_runs_leaves_label_observations_intact(tmp_path: Path) -> None:
+    _seed_one_run(tmp_path, "sess-a")
+    append_label_observation(
+        tmp_path,
+        "sess-a",
+        labels=["rejected"],
+        pr_state=None,
+        labeler_version="v1",
+        evidence_sha=None,
+    )
+
+    assert delete_runs(tmp_path, ["sess-a"]) == 1
+    assert query_runs(tmp_path) == []
+    history = label_observation_history(tmp_path, "sess-a")
+    assert len(history) == 1
+    assert json.loads(history[0]["labels"]) == ["rejected"]
 
 
 _OLD_LABEL_OBSERVATIONS_DDL = """
@@ -1643,7 +1954,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
     is migrated/recreated on the next connection: runs gains has_posterior via
     ALTER, the stale label_observations is dropped+recreated with both new
-    columns, and PRAGMA user_version reaches SCHEMA_VERSION (7)."""
+    columns, and PRAGMA user_version reaches SCHEMA_VERSION (8)."""
     from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
 
     db_path = tmp_path / "index.db"
@@ -1689,7 +2000,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
     assert "has_posterior" in runs_cols
     assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 7
+    assert user_version == SCHEMA_VERSION == 8
 
     obs = latest_label_observation(tmp_path, "mig-1")
     assert obs is not None
@@ -2405,3 +2716,113 @@ def test_migration_marks_legacy_rows(tmp_path: Path) -> None:
     # original labels/observed_at untouched:
     assert rows[0]["observed_at"] == _LEGACY_ROW_OBSERVED_AT_SNAPSHOT
     assert rows[0]["labels"] == '["accepted"]'
+
+
+def test_append_label_observation_preserves_observed_at(tmp_path: Path) -> None:
+    """An explicit ``observed_at`` is preserved bitemporally (M3 of the
+    local-observations import): the stored row carries the original data
+    timestamp verbatim (canonicalized to UTC), not the wall clock."""
+    _seed_one_run(tmp_path, "sess-obs")
+    original = "2025-06-01T12:00:00+00:00"
+    appended = append_label_observation(
+        tmp_path, "sess-obs", labels=["accepted"], pr_state="merged",
+        labeler_version="1055-human-r1", evidence_sha=None, source="human",
+        observed_at=original)
+    assert appended is True
+    row = latest_label_observation(tmp_path, "sess-obs")
+    assert row is not None
+    assert row["observed_at"] == "2025-06-01T12:00:00+00:00"
+
+
+def test_append_label_observation_observed_at_none_uses_wall_clock(tmp_path: Path) -> None:
+    """Default (``observed_at=None``) keeps the existing now() behavior."""
+    _seed_one_run(tmp_path, "sess-now")
+    appended = append_label_observation(
+        tmp_path, "sess-now", labels=["accepted"], pr_state="merged",
+        labeler_version="1055-human-r1", evidence_sha=None, source="human")
+    assert appended is True
+    row = latest_label_observation(tmp_path, "sess-now")
+    assert row is not None
+    assert row["observed_at"].startswith("2")
+
+
+def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) -> None:
+    """A non-ISO-8601 ``observed_at`` fails closed before any write."""
+    _seed_one_run(tmp_path, "sess-bad")
+    with pytest.raises(ValueError, match="observed_at"):
+        append_label_observation(
+            tmp_path, "sess-bad", labels=["accepted"], pr_state="merged",
+            labeler_version="1055-human-r1", evidence_sha=None, source="human",
+            observed_at="not-a-timestamp")
+    assert label_observation_history(tmp_path, "sess-bad") == []
+
+
+def test_delete_runs_is_exported() -> None:
+    import daydream.archive.index as index_module
+
+    assert "delete_runs" in index_module.__all__
+    assert "delete_runs:" in index_module.__doc__
+
+
+def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
+    tmp_path: Path, make_config: MakeConfig,
+) -> None:
+    """#1113 (D21/D22): a diagram-only run deliberately leaves the previous deep
+    review's ``.daydream/deep/`` artifacts on disk, so its own flow label must
+    answer "runs no merge/fix/test" — otherwise it archives that run's
+    ``merged-items.json`` as its own pipeline state."""
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
+
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
+    config = make_config(tmp_path, archive=False)
+    _archive_run_inner(
+        recorder=recorder, target_dir=tmp_path, config=config,
+        status="complete", run_eval=False, work=None, upload=False,
+    )
+
+    manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
+    m = json.loads(manifest_path.read_text())
+    assert m["run"]["flow"] == "diagram"
+    assert m["status"] == "complete"
+    assert m["archive_status"] == "complete"
+    assert m["pipeline_status"] == "unknown"
+    # None of the deep phases are claimed, so no stale artifact is adopted.
+    assert m["phase_states"]["merge"] == {"ran": False, "status": "absent"}
+    assert m["phase_states"]["fix"] == {"ran": False, "status": "absent"}
+    assert m["phase_states"]["test"] == {"ran": False, "status": "absent"}
+    # A two-step flow runs neither fix nor test, so neither backend is labeled.
+    assert "fix_backend" not in m["run"]
+    assert "test_backend" not in m["run"]
+    # No per-stack fan-out either: the diagram flow has no per-stack reviewers.
+    assert "per_stack_review_backend" not in m["run"]
+
+
+def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
+    tmp_path: Path, make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    _write_deep(
+        tmp_path,
+        "merged-items.json",
+        {"items": [{"file": "src/old.py", "line": 1, "confidence": "HIGH"}]},
+    )
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
+    config = make_config(tmp_path, archive=False)
+
+    _archive_run_inner(
+        recorder=recorder, target_dir=tmp_path, config=config,
+        status="complete", run_eval=True, work=None, upload=False,
+    )
+
+    run_dir = get_archive_dir() / "runs" / recorder.session_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert not (run_dir / "evaluation.json").exists()
+    assert manifest["metrics"]["total_findings"] is None

@@ -118,6 +118,26 @@ def test_default_branch_falls_back_to_main(tmp_path: Path) -> None:
     assert git_ops.default_branch(repo) == "main"
 
 
+def test_list_local_branches_maps_names_to_oids(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path, name="list_branches")
+    _git(repo, "checkout", "-b", "feat/slash-name")
+    (repo / "feature.txt").write_text("feature\n")
+    _git(repo, "add", "feature.txt")
+    _commit(repo, "on feature")
+    _git(repo, "checkout", "main")
+
+    branches = git_ops.list_local_branches(repo)
+
+    assert set(branches) == {"main", "feat/slash-name"}
+    assert branches["main"] == git_ops.head_sha(repo)  # main is checked out here
+    assert branches["feat/slash-name"] == _git(repo, "rev-parse", "feat/slash-name")
+
+
+def test_list_local_branches_raises_on_failure(tmp_path: Path) -> None:
+    with pytest.raises(git_ops.GitError):
+        git_ops.list_local_branches(tmp_path / "not-a-repo")
+
+
 @pytest.mark.parametrize(
     ("init_branch", "expected"),
     [
@@ -873,6 +893,19 @@ def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert calls["n"] == 1  # no retries for non-timeout failures
 
 
+def test_run_git_encodes_input_text_when_capturing_bytes(tmp_path: Path) -> None:
+    """`_run_git(capture_bytes=True, input_text=...)` encodes the payload to
+    bytes: subprocess.run raises a raw TypeError for str input with text=False,
+    which in a retry loop would mask a genuine git failure."""
+    repo = _make_repo_with_main(tmp_path)
+    bytes_proc = git_ops._run_git(
+        repo, ["hash-object", "--stdin"], capture_bytes=True, input_text="abc\n"
+    )
+    text_proc = git_ops._run_git(repo, ["hash-object", "--stdin"], input_text="abc\n")
+    assert bytes_proc.returncode == 0
+    assert bytes_proc.stdout == text_proc.stdout.encode()
+
+
 @pytest.mark.parametrize(
     "operation",
     [
@@ -1549,6 +1582,89 @@ def test_remove_remote_deletes_configured_remote(tmp_path: Path) -> None:
     git_ops.remove_remote(clone)
     assert git_ops.remote_url(clone) is None
     assert git_ops.head_sha(clone) == before
+
+
+def test_update_ref_sets_explicit_oid(tmp_path: Path) -> None:
+    """update_ref repoints an existing ref to a *different* OID: the ref is
+    seeded to HEAD and repointed at a newer commit, so a no-op write path
+    cannot satisfy the assertion."""
+    repo = _make_repo_with_main(tmp_path, name="update_ref")
+    start = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/heads/scratch", start)  # seed a ref to repoint
+    (repo / "second.txt").write_text("second\n")
+    _git(repo, "add", "second.txt")
+    _commit(repo, "second")  # HEAD moves, so update_ref must write a new OID
+    target = _git(repo, "rev-parse", "HEAD")
+    assert target != start
+
+    git_ops.update_ref(repo, "refs/heads/scratch", target)
+
+    assert _git(repo, "rev-parse", "refs/heads/scratch") == target
+
+
+def test_update_ref_accepts_names_merely_ending_in_lock(tmp_path: Path) -> None:
+    """git forbids only the literal lowercase ``.lock`` component suffix, so
+    branches like unlock/block/deadlock/xLock as well as case-variants git
+    accepts (topic.LOCK, release.LOCK, x.lOck) are valid refs and snapshot
+    cleanly."""
+    repo = _make_repo_with_main(tmp_path, name="update_ref_lockish")
+    oid = _git(repo, "rev-parse", "HEAD")
+    for name in ("unlock", "block", "deadlock", "xLock", "topic.LOCK", "release.LOCK", "x.lOck"):
+        ref = f"refs/heads/{name}"
+        git_ops.update_ref(repo, ref, oid)
+        assert _git(repo, "rev-parse", ref) == oid
+
+
+def test_update_refs_snapshots_a_batch_and_aborts_atomically(tmp_path: Path) -> None:
+    """update_refs writes many refs in one transactional git call, and a bad
+    ref aborts the whole batch: nothing is written."""
+    repo = _make_repo_with_main(tmp_path, name="update_refs")
+    oid = _git(repo, "rev-parse", "HEAD")
+    good = {f"refs/heads/{name}": oid for name in ("main", "unlock", "release/9.9", "topic.LOCK")}
+    git_ops.update_refs(repo, good)
+    for ref, expected in good.items():
+        assert _git(repo, "rev-parse", ref) == expected
+
+    with pytest.raises(git_ops.GitError, match="git update-ref --stdin failed"):
+        # ".." passes the Python guards but git rejects it, so the whole
+        # batch still aborts atomically on git's side: nothing is written.
+        git_ops.update_refs(repo, {"refs/heads/ok": oid, "refs/heads/foo..bar": oid})
+    assert "ok" not in git_ops.list_local_branches(repo)  # whole batch rolled back
+
+
+def test_update_ref_rejects_invalid_ref_name(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path, name="update_ref_bad")
+    oid = git_ops.head_sha(repo)
+    for bad in (
+        "refs/heads/..",
+        "refs/heads/foo bar",
+        "refs/heads/bad\nname",
+        "-dash-start",
+        "refs/heads/topic.lock",
+    ):
+        with pytest.raises(git_ops.GitError, match="invalid ref name"):
+            git_ops.update_ref(repo, bad, oid)
+
+
+def test_update_ref_rejects_malformed_oid(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path, name="update_ref_badoid")
+    with pytest.raises(git_ops.GitError, match="invalid OID"):
+        git_ops.update_ref(repo, "refs/heads/newbranch", "not-a-sha")
+
+
+def test_update_refs_rejects_injectable_ref_names_before_shell_out(tmp_path: Path) -> None:
+    """update_refs rejects refs carrying whitespace/control characters up
+    front, naming the ref, so a newline can never smuggle extra ``update``
+    lines into the stdin payload; a malformed OID is rejected the same way."""
+    repo = _make_repo_with_main(tmp_path, name="update_refs_inject")
+    oid = git_ops.head_sha(repo)
+    for bad in ("refs/heads/bad\nname", "refs/heads/two words", "-dash-start"):
+        with pytest.raises(git_ops.GitError, match="invalid ref name"):
+            git_ops.update_refs(repo, {bad: oid})
+    with pytest.raises(git_ops.GitError, match="invalid OID"):
+        git_ops.update_refs(repo, {"refs/heads/ok": "not-a-sha"})
+    assert "bad" not in git_ops.list_local_branches(repo)
+    assert "two" not in git_ops.list_local_branches(repo)
 
 
 def test_staged_patch_round_trips_index_state(tmp_path: Path) -> None:

@@ -211,8 +211,8 @@ model = "claude-sonnet-5"
 
 The built-in tool supervisor applies the shared file globs to `Write` and
 `Edit`, and applies `tool_bash_deny` as regular expressions to `Bash` commands.
-Claude's always-on dangerous-command guard remains active; this configuration
-adds rules and does not replace it.
+Claude's always-on guards (dangerous-command and background-Bash) remain
+active; this configuration adds rules and does not replace them.
 
 Supervisor actions are `allow`, `drop`, `edit`, and `hold`. A held finding is
 removed from the actionable `items` list and stored under the top-level `held`
@@ -229,7 +229,8 @@ policy or the built-in policy.
 
 ### Flows and steps
 
-Two flows are registered: `deep` (the single PR-process flow) and `improve`.
+Three flows are registered: `deep` (the single PR-process flow), `improve`, and
+`diagram` (the `--diagram-only` grounded-diagram flow).
 Each step's *config key* is its `[tool.daydream.phases.<key>]` key
 (`FlowStep.config_phase`, defaulting to the step name) — the key per-phase
 model/backend overrides resolve against.
@@ -255,18 +256,20 @@ follow the same convention: pick globally unique step names, and use
 | 8 | `single-stack-merge` | `single-stack-merge` |
 | 9 | `load-items` | `load-items` |
 | 10 | `supervise` | `supervise` |
-| 11 | `findings-out` | `findings-out` |
-| 12 | `post-review` | `post-review` |
-| 13 | `fix-gate` | `fix-gate` |
-| 14 | `verify` | `verify` |
-| 15 | `fix` | `fix` |
-| 16 | `fix-verify` | `verify` |
-| 17 | `test` | `test` |
-| 18 | `commit` | `fix` |
+| 11 | `diagram` | `diagram` |
+| 12 | `findings-out` | `findings-out` |
+| 13 | `post-review` | `post-review` |
+| 14 | `fix-gate` | `fix-gate` |
+| 15 | `verify` | `verify` |
+| 16 | `fix` | `fix` |
+| 17 | `fix-verify` | `verify` |
+| 18 | `test` | `test` |
+| 19 | `commit` | `fix` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble. `review` / `comment` run the review spine and stop after `post-review`;
-`shallow` forces `single_stack_mode`; `loop` is the default fixing flow.
+`shallow` forces `single_stack_mode`; `loop` is the default fixing flow;
+`diagram` runs the separate `diagram` flow below over the same preamble.
 
 `.review-output.md` cleanup is not a flow step; it runs in `_run_review_spine`
 after `run_flow` returns, tied to a successful outcome, an applicable mode, and
@@ -287,6 +290,36 @@ its own. Its per-phase config key is still `wonder`
 `uncovered-sweep` (issue #309) re-reviews diff files no per-stack reviewer read
 with a cheap second-pass agent; it resolves its backend via the `parse` phase
 key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
+
+`diagram` (issue #1113) decides deterministically which grounded diagram kinds
+apply, runs one read-only author agent per eligible kind (plus at most one
+repair turn each), verifies every proposed element against the head tree, and
+writes `.daydream/deep/diagram.json` + `diagram.md`. It is gated off on a
+`--start-at fix` resume and by `--diagram off` / `[tool.daydream.diagram] mode
+= "off"`; otherwise it always runs and records its eligibility decision, even
+when no kind is eligible (which costs zero agent calls). The rendered blocks
+reach the PR summary through `ctx.diagrams` and `review-output.md` through a
+`## Diagrams` section.
+
+#### `diagram` (`daydream --diagram-only KIND <target>`)
+
+| # | Step | Config key |
+|---|------|------------|
+| 1 | `exploration` | `exploration` |
+| 2 | `diagram` | `diagram` |
+| 3 | `post-diagram` | `post-diagram` |
+
+The first two steps are the same registered `FlowStep` objects the `deep` flow
+uses, so a fork that overrides `diagram` overrides it in both flows.
+`post-diagram` is the flow's deliverable: it writes the `kind = "diagram"`
+findings artifact and stops when `--findings-out` is set, and otherwise posts a
+standalone PR issue comment (never a review) carrying one hidden
+`daydream-diagram` marker per kind. It always ends the flow.
+
+The `diagram` flow reuses the deep spine's preamble (workspace, diff, hunk
+index, exploration cache) but deliberately does **not** clear
+`.daydream/deep/`, so a diagram-only run never destroys a previous deep
+review's resumable artifacts.
 
 #### `improve` (`daydream improve <target>`)
 
@@ -311,7 +344,7 @@ name is stable.
 
 ### Prompts
 
-The 15 registered prompt names and the exact kwargs their builders receive
+The 17 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
@@ -329,6 +362,8 @@ noted.
 | `merge` | `strategy`, `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
 | `verify` | `strategy`, `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
 | `fix-verify` | `items`, `changed_hunks`, `cwd`, `round_number` |
+| `diagram_sequence` | `diff_path`, `inline_diff`, `files_by_module`, `cwd`, `exploration_dir`, `schema` |
+| `diagram_flowchart` | `diff_path`, `inline_diff`, `candidate_roots`, `forced`, `cwd`, `exploration_dir`, `schema` |
 | `audit` | `category`, `strategy`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `strategy`, `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
@@ -402,6 +437,10 @@ The `"summary"` renderer receives one `SummaryContext`:
 - `agent_prompt: str` — the consolidated agent prompt (empty when there is
   nothing to fix).
 - `review_info: str` — the fully-wrapped review-info `<details>` block.
+- `diagrams: str | None` — the host-rendered grounded-diagram blocks (issue
+  #1113), or `None` when the run rendered none. Already-folded
+  `<details>` blocks containing host-generated mermaid; the model never
+  authors this markdown.
 
 #### Host-owned invariants
 
@@ -415,7 +454,11 @@ around whatever a renderer returns, the parts that dedup and identity depend on:
 - the review `event` decision (approve / comment / request-changes).
 
 A renderer therefore cannot drop the footer, `<details>` scaffolding, approval
-line, or `event` decision. However, **the per-finding dedup marker lives inside
+line, or `event` decision. It **can** drop `ctx.diagrams`: a custom `"summary"`
+renderer that never emits it silently discards the run's grounded diagrams from
+the posted comment (they still land in `.daydream/deep/diagram.md` and in
+`review-output.md`). Include `ctx.diagrams` verbatim, near the top of your
+output, to keep them. However, **the per-finding dedup marker lives inside
 `body_block`** (it is embedded by the host before `body_block` is passed to the
 renderer via `SummaryFinding`). A custom `"summary"` renderer that omits
 `body_block` from its output will drop those markers, causing duplicate
@@ -448,6 +491,8 @@ every other key is internal and may change without a version bump:
 | `alts_path` | Path to the alternatives-review output |
 | `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON and may include top-level `held`. An extension may read this file and rewrite its `items` before downstream consumers run. |
 | `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
+| `diagrams` | Issue #1113. Published by the `diagram` step as `{"blocks": str, "payload": dict, "results": dict}`: `blocks` is the rendered markdown, `payload` is `diagram.json`'s content (`{"eligibility", "results"}`) with every rendered `mermaid` string removed, and `results` is the per-kind result dict keyed by `"sequence"` / `"flowchart"`. Absent when the diagram step did not run, so read it with `.get("diagrams")`. |
+| `import_graph` | Issue #1113. `{changed file: set of changed files it imports}` over the reviewed diff, or `{}` when no graph could be built (no grammar, a parse failure, or the 5s build budget). Advisory: an empty graph denies the diagram's cross-module rule and nothing else. |
 | `intent_authoritative` | `bool` — `True` when a fresh, head-matched PR description with non-whitespace content grounded the intent phase; absent (hence read with `.get("intent_authoritative", False)`) on a `--start-at` resume because `_step_intent` is skipped in that case. Controls whether the deep review prompts carry the author-intent precedence rule. |
 
 This keyword-only addition to the five in-scope prompt builders does not bump
@@ -459,6 +504,55 @@ exact-signature override of one of those five prompts must add
 its own signature; an override that omits it raises `TypeError` and aborts that
 phase's fan-out. Read `ctx.data["intent_authoritative"]` with `.get(…, False)`
 to handle the absent-on-resume case correctly.
+
+#### Host-assigned record `uid`
+
+Per-stack review records, and the finding items behind `items` / `items_file`,
+may carry a host-assigned `uid` string (`stack:ordinal`, e.g. `python:1`). It is
+the record's *referential* identity — "which record object is this?" — minted at
+record birth by `daydream/deep/records.py` and used by dedup, arbitration,
+suppression and the per-stack records rewrite. This is an **additive** field and
+does not bump `EXTENSION_API_VERSION`: a fork that round-trips whole record dicts
+carries it through automatically, and a `{**item, ...}` spread preserves it.
+
+Merged items additionally carry `source_uids`: the list of record `uid`s the
+finding derives from. A merged item is a synthesis and may consolidate several
+records, so its provenance is a list where a record's identity is a single
+value. Read it with `daydream.deep.records.item_source_uids`, which resolves the
+explicit attribution first and falls back to the item's own `uid`, so one
+accessor is correct for merge-agent items, for items that bypassed the merge
+agent (the single-stack path, host-appended structural records, the salvage
+path), and for artifacts written before the field existed. An empty list means
+the merge agent declined to attribute the item — a real answer, not an error.
+
+Merged items also carry `item_uid` (`item:n`) — the item's **own durable
+identity**, distinct from both of the above. `id` is the human-facing finding
+number and `normalize_items` reassigns it to a dense `1..N` sequence by design,
+so it is not a stable handle; `item_uid` is minted once and never reassigned.
+This matters directly to a fork: if you rewrite `items_file` and renumber, every
+`id` shifts, but `item_uid` survives the round-trip. Read it with
+`daydream.deep.records.item_uid`, and preserve it when you rewrite an item —
+minting a fresh one would defeat the point. It is host-minted post-validation
+and is deliberately absent from `MERGED_ITEMS_SCHEMA`.
+
+Three keys can therefore sit on one merged item, answering three different
+questions: `uid` (which record it was born as — structural and single-stack
+items only), `item_uid` (which shipped finding this is), and `source_uids`
+(which records it was made of). Do not substitute one for another; in
+particular provenance is not identity, since two items may cite the same record.
+
+Two constraints for a fork that reads it:
+
+- `uid` itself is a **pre-merge** handle. The cross-stack merge agent re-emits
+  items from scratch, so a multi-stack merged item has no `uid` *of its own* —
+  use `source_uids` for its derivation, and note that `id` is already globally
+  unique on every merged item. `daydream.deep.records.record_uid` returns `""`
+  for "no pre-merge identity"; after a multi-stack merge that is the common
+  case, not an error.
+- Never mint one yourself, and never derive one from record content. A
+  content-derived key gets *less* discriminating as two records get more
+  similar, which is precisely the condition every consumer of this field runs
+  under. A duplicate `uid` is a fatal error the host reports and stops on.
 
 ## Recipes
 
@@ -559,7 +653,8 @@ their anchors eagerly.
 
 The built-in PR-process modes all run the `deep` flow; `--shallow` and
 `--review`/`--comment` are mode gates on it, not separate flow names (#330).
-The only other registered flow is `improve` (`daydream improve <target>`).
+The other registered flows are `diagram` (the `--diagram-only` grounded-diagram
+flow) and `improve` (`daydream improve <target>`).
 
 A newly registered flow is dispatched by name with `--flow <name>` (or
 `RunConfig(flow_name=...)`):

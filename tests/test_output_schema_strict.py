@@ -32,6 +32,7 @@ from typing import Any
 
 import pytest
 
+import daydream.deep.diagram_schema as diagram_schema
 import daydream.improve.orchestrator as improve_orchestrator
 import daydream.improve.prompts as improve_prompts
 import daydream.phases as phases
@@ -43,6 +44,7 @@ _SCHEMA_MODULES = [
     exploration_subagents,
     improve_prompts,
     improve_orchestrator,
+    diagram_schema,
 ]
 
 # OpenAI Structured Outputs accepts only this documented JSON Schema subset.

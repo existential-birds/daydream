@@ -45,8 +45,12 @@ def _warn(message: str) -> None:
 def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
     """Whether the executed flow runs the deep cross-stack/single-stack merge.
 
-    The deep pipeline's merge step runs for normal and review flows. Improve-only
-    and the legacy PR compatibility label do not run the merge spine.
+    The deep pipeline's merge step runs for normal and review flows. Improve-only,
+    diagram-only (issue #1113) and the legacy PR compatibility label do not run
+    the merge spine. Diagram-only must answer False explicitly: it reuses the
+    deep preamble and deliberately keeps a prior deep run's
+    ``.daydream/deep/`` artifacts on disk (D21), so a True here would make it
+    adopt that run's ``merged-items.json`` as its own pipeline state.
     Custom flows are classified from their registered pipeline (a fork
     composing the built-in deep merge step is detected as it runs), mirroring
     ``_flow_fix_test_steps`` in ``archive.manifest``.
@@ -54,6 +58,8 @@ def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
     if flow is DaydreamRunFlow.PR:
         return False
     if flow is DaydreamRunFlow.IMPROVE:
+        return False
+    if flow is DaydreamRunFlow.DIAGRAM:
         return False
     if flow is DaydreamRunFlow.CUSTOM:
         from daydream.archive.manifest import _flow_phase_steps, _runtime_flow_name
@@ -169,19 +175,25 @@ def _archive_run_inner(
                 except GitError:
                     git_ctx.changed_files = []
 
+    runs_fix, runs_test = _flow_fix_test_steps(recorder.run_flow, config.flow_name)
+
     # 3. Optionally run deterministic evaluation
     evaluation: dict[str, Any] | None = None
-    if run_eval:
+    if run_eval and recorder.run_flow is not DaydreamRunFlow.DIAGRAM:
         evaluation = _run_eval(target_dir, recorder.session_id, run_dir)
 
     # 3b. Surface dropped fix groups. A deep fix run that hit per-group failures
     #     left partial/reverted edits in the tree; the run is NOT "complete".
     #     Read from the source deep dir (written by the orchestrator before it
     #     returned, so it is reliably present here), force status to "partial".
-    fix_failures = _read_fix_failures(target_dir)
-    fix_leftover_untracked = _read_fix_leftover_untracked(target_dir)
-    fix_quality_gate = _read_fix_quality_gate(target_dir, recorder.session_id)
-    recommended_capture = _read_recommended_capture(target_dir, recorder.session_id)
+    fix_failures = _read_fix_failures(target_dir) if runs_fix else None
+    fix_leftover_untracked = _read_fix_leftover_untracked(target_dir) if runs_fix else None
+    fix_quality_gate = (
+        _read_fix_quality_gate(target_dir, recorder.session_id) if runs_fix else None
+    )
+    recommended_capture = (
+        _read_recommended_capture(target_dir, recorder.session_id) if runs_fix else None
+    )
     if fix_failures:
         status = "partial"
 
@@ -194,7 +206,6 @@ def _archive_run_inner(
     from daydream.archive.provenance import capture_executable_provenance
 
     provenance = capture_executable_provenance()
-    runs_fix, runs_test = _flow_fix_test_steps(recorder.run_flow, config.flow_name)
     # Gate the per-phase derivation to only the phases THIS flow actually runs:
     # the deep artifacts it reads are session-agnostic, so a non-deep flow on a
     # previously deep-reviewed repo must not inherit a prior run's state (#336,
@@ -385,7 +396,9 @@ def _copy_bundle(
     ``runs/<session_id>/trajectories/``) is copied wholesale via copytree
     so the archive layout mirrors the live layout exactly. Other artifacts
     (``review-output.md``, ``deep/``, ``diff.patch``, ``findings.json``)
-    keep their existing copy logic. Missing files are silently skipped.
+    keep their existing copy logic. Diagram-only runs retain prior deep-review
+    state in the live tree, so they archive only ``diagram.json`` and
+    ``diagram.md`` from that directory. Missing files are silently skipped.
     """
     daydream_dir = target_dir / ".daydream"
 
@@ -408,15 +421,23 @@ def _copy_bundle(
         if not inside_run_dir:
             shutil.copy2(recorder.path, run_dir / "trajectory.json")
 
+    diagram_only = recorder.run_flow is DaydreamRunFlow.DIAGRAM
+    deep_dir = daydream_dir / "deep"
+    if diagram_only:
+        from daydream.deep.artifacts import diagram_markdown_path, diagram_path
+
+        for source in (diagram_path(deep_dir), diagram_markdown_path(deep_dir)):
+            if source.is_file():
+                destination = run_dir / "deep" / source.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+    elif deep_dir.is_dir():
+        shutil.copytree(deep_dir, run_dir / "deep", dirs_exist_ok=True)
+
     # Review output (in target root, not .daydream/)
     review_output = target_dir / REVIEW_OUTPUT_FILE
-    if review_output.is_file():
+    if not diagram_only and review_output.is_file():
         shutil.copy2(review_output, run_dir / "review-output.md")
-
-    # Deep artifacts directory
-    deep_dir = daydream_dir / "deep"
-    if deep_dir.is_dir():
-        shutil.copytree(deep_dir, run_dir / "deep", dirs_exist_ok=True)
 
     # Diff patch (the PR-under-review diff, captured before fixes)
     diff_patch = daydream_dir / "diff.patch"
@@ -425,7 +446,7 @@ def _copy_bundle(
 
     # Recommended-change patch (daydream's proposed diff, captured after fixes)
     recommended_patch = daydream_dir / "recommended.patch"
-    if recommended_patch.is_file():
+    if not diagram_only and recommended_patch.is_file():
         shutil.copy2(recommended_patch, run_dir / "recommended.patch")
 
     # Findings artifact (``--findings-out`` / Phase A). Archived so the corpus

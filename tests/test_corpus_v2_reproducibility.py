@@ -4,6 +4,7 @@ Mirrors ``tests/test_corpus_reproducibility.py``'s determinism standard and
 ``tests/test_corpus_leakage.py``'s as_of boundary standard.
 """
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from daydream.training import corpus_v2 as corpus_v2_pkg
 from daydream.training.corpus import BuildCorpusConfig, CorpusFilters, run_build_corpus
 from daydream.training.corpus_v2.projector import BuildCorpusV2Config, run_build_corpus_v2
 from daydream.training.corpus_v2.splits import assign_split
-from tests.test_corpus_v2 import _cfg, _write_annotations_snapshot, _write_bundle
+from tests.test_corpus_v2 import _cfg, _policy_file, _write_annotations_snapshot, _write_bundle
 from tests.test_training_corpus import _seed_run_with_annotation
 
 
@@ -55,6 +56,113 @@ def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path) -> None:
         assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
 
 
+def _enrich_bundle(bundle_dir: Path) -> None:
+    """Give the admitted batch the review artifacts the projector joins on:
+    findings.json (bodies keyed by fingerprint), diff.patch, and a
+    producer-realistic manifest.json carrying the git shas."""
+    batch_dir = bundle_dir / "batches" / "sess-a"
+    (batch_dir / "manifest.json").write_text(json.dumps({
+        "git": {"head_sha": "2" * 40},
+        "code_context": {"base_sha": "1" * 40, "head_sha": "2" * 40},
+    }))
+    (batch_dir / "findings.json").write_text(json.dumps({"findings": [
+        {"fingerprint": "a1" * 32, "body": "exact localized finding body"},
+    ]}))
+    (batch_dir / "diff.patch").write_text("diff --git a/x.py b/x.py\n+print(1)\n")
+
+
+def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) -> None:
+    """The projected gold-accepted record from an enriched bundle is pinned
+    dict-for-dict at the additive v2 shape: finding_text + its sha256, the
+    task_identity block, and the diff pointer mirrored into lineage. The
+    exact equality IS the reproducibility contract — new projector keys must
+    regenerate this dict, never relax it to a subset check."""
+    bundle_dir = _write_bundle(tmp_path)
+    _enrich_bundle(bundle_dir)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    run_build_corpus_v2(_cfg(tmp_path / "out", bundle_dir, snap))
+    records = [json.loads(line) for line in
+               (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
+    accepted = next(r for r in records if r["outcome_label"] == "accepted")
+    assert accepted == {
+        "disposition": "accepted",
+        "diff": "diff --git a/x.py b/x.py\n+print(1)\n",
+        "evidence": [
+            {"classifier_label": "accepted", "comment_id": 1,
+             "created_at": "2026-02-01T00:00:00+00:00",
+             "valid_at": "2026-01-01T00:00:00+00:00"},
+        ],
+        "finding_fingerprint": "a1" * 32,
+        "finding_text": "exact localized finding body",
+        "finding_text_sha256": hashlib.sha256(
+            b"exact localized finding body").hexdigest(),
+        "lineage": {
+            "as_of": None,
+            "content_digests": [
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "e12d0a7e8ecda05271e3faa36158292462221f5cf8c5cc530bc825f463e77b6d",
+            ],
+            "curation_id": "cur-0123456789abcdef",
+            "diff_digest": "4b7fad43c00ef2883fec22db7e9132310846cef11e0ec4cbbf936bc69a2c57a9",
+            "diff_ref": {
+                "batch": "1111111111111111111111111111111111111111111111111111111111111111",
+                "relpath": "batches/sess-a/diff.patch",
+            },
+            "exclusion_reason": None,
+            "hub_commit": "0123456789abcdef0123456789abcdef01234567",
+            "labeler_policy_version": "1",
+            "license_decision": {
+                "evidence_ref": "manifest", "policy_version": "1",
+                "reason_code": None, "repo_slug": "owner/repo-a",
+                "spdx_id": "MIT", "status": "admitted",
+            },
+            "reply_classifier_version": "1",
+            "repo_slug": "owner/repo-a",
+            "rubric_schema_version": "per-finding-resolutions-v1",
+            "split": "train",
+            "valid_at": "2026-01-01T00:00:00+00:00",
+        },
+        "outcome_label": "accepted",
+        "profile": {
+            "profile_digest": "d" * 64, "profile_name": "deep-review",
+            "profile_schema_version": 2, "profile_source_kind": "builtin",
+        },
+        "record_id": "6bfc34f5a65f3a68bd0409c7893b22a6d884e4c515a74ebe62b8b42e88e0dfda",
+        "record_type": "outcome-finding",
+        "schema_version": "2",
+        "session_id": "sess-a",
+        "stack": "python",
+        "task_identity": {
+            "base_sha": "1" * 40,
+            "diff_digest": "4b7fad43c00ef2883fec22db7e9132310846cef11e0ec4cbbf936bc69a2c57a9",
+            "diff_ref": {
+                "batch": "1111111111111111111111111111111111111111111111111111111111111111",
+                "relpath": "batches/sess-a/diff.patch",
+            },
+            "head_sha": "2" * 40,
+            "repo_slug": "owner/repo-a",
+        },
+        "task_segment": "seg-0",
+        "tier": "gold",
+        "trajectory_id": "sess-a:fix-0",
+    }
+
+
+def test_enriched_reprojection_is_byte_identical(tmp_path: Path) -> None:
+    """Reproducibility covers the additive enrichment: the same enriched
+    bundle projects byte-identically twice, so the emitted digests deterministically
+    cover finding_text / task_identity / lineage diff pointers."""
+    bundle_dir = _write_bundle(tmp_path)
+    _enrich_bundle(bundle_dir)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+    run_build_corpus_v2(_cfg(tmp_path / "a", bundle_dir, snap))
+    run_build_corpus_v2(_cfg(tmp_path / "b", bundle_dir, snap))
+    assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
+    assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
+    for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
+        assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
+
+
 def test_splits_are_disjoint_and_frozen(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir)
@@ -85,6 +193,59 @@ def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
         assert record["lineage"]["split"] in {"train", "validation", "holdout"}
 
 
+def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path) -> None:
+    import hashlib
+
+    from tests.test_corpus_v2 import (
+        _admit_second_batch,
+        _write_annotations_snapshot,
+        _write_bundle,
+    )
+
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(
+        bundle_dir, session_id="sess-a", n_siblings=4,
+        dispositions=["accepted", "accepted", "accepted"],
+    )
+    # A second admitted session with a distinct stack/repo so every configured
+    # share cap is satisfiable (a lone value is 100% of the population and can
+    # never satisfy a <1.0 cap); re-profile only the last row to a second
+    # profile value so the profile trim branch executes without ever leaving a
+    # lone survivor, then refresh the annotation bundle's SHA256SUMS (same
+    # mechanics as the build-wiring fixtures).
+    _admit_second_batch(bundle_dir, "owner/repo-b", spdx_id="MIT")
+    snap = _write_annotations_snapshot(
+        bundle_dir, session_id="sess-b", n_siblings=2,
+        dispositions=["accepted", "accepted"], stack="rust",
+    )
+    rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
+    rows[-1]["profile"]["profile_name"] = "quick-review"
+    snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    ann_dir = snap.parent
+    rel = sorted(
+        p.relative_to(ann_dir).as_posix() for p in ann_dir.rglob("*")
+        if p.is_file() and p.name != "SHA256SUMS"
+    )
+    (ann_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((ann_dir / p).read_bytes()).hexdigest()}  {p}\n" for p in rel
+    ))
+    for out in (tmp_path / "a", tmp_path / "b"):
+        run_build_corpus_v2(
+            _cfg(out, bundle_dir, snap, max_stack_share=0.5, max_repo_share=0.6,
+                 max_profile_share=0.7)
+        )
+    for name in ("corpus.jsonl", "corpus-v2.jsonl", "lineage.json",
+                 "train.jsonl", "validation.jsonl", "holdout.jsonl"):
+        assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
+    train, val, hold = _read_split_memberships(tmp_path / "a")
+    assert not (set(train) & set(val))
+    assert not (set(train) & set(hold))
+    assert not (set(val) & set(hold))
+    # share caps present in the lineage of a capped build
+    lineage = json.loads((tmp_path / "a" / "lineage.json").read_text())
+    assert lineage["share_caps"]["version"] == 1
+
+
 def test_v1_and_v2_projection_paths_are_independent(tmp_path: Path, archive_dir: Any) -> None:
     """Run BOTH projectors over the same pinned inputs; assert (a) v1 bytes
     are identical before/after any v2 build, and (b) v2 reprojection is
@@ -104,7 +265,8 @@ def test_v1_and_v2_projection_paths_are_independent(tmp_path: Path, archive_dir:
         bundle_dir = _write_bundle(out_dir)
         snap = _write_annotations_snapshot(bundle_dir)
         run_build_corpus_v2(BuildCorpusV2Config(out_dir=out_dir / "out", bundle_dir=bundle_dir,
-                                                annotations_snapshot=snap))
+                                                annotation_bundle_dir=snap.parent,
+                                                license_policy_path=_policy_file(bundle_dir.parent)))
         return out_dir / "out" / "corpus.jsonl"
 
     v1_before = _run_v1_build(tmp_path / "v1a" / "corpus.jsonl").read_bytes()

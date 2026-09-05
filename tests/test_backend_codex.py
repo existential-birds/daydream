@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -246,6 +247,8 @@ async def test_codex_read_only_uses_read_only_sandbox(
         captured["has_notes"] = (isolated / "notes.md").exists()
         captured["notes"] = (isolated / "notes.md").read_text() if captured["has_notes"] else None
         captured["remote"] = git_ops.remote_url(isolated)
+        captured["branches"] = git_ops.list_local_branches(isolated)
+        captured["source_branches"] = git_ops.list_local_branches(source)
         captured["args"] = flat
         return mock_proc
 
@@ -267,6 +270,11 @@ async def test_codex_read_only_uses_read_only_sandbox(
     assert captured["has_notes"] is True
     assert captured["notes"] == notes.read_text()
     assert captured["remote"] is None
+    # Issue #1121: every source local branch resolves in the clone by name,
+    # to the exact OID it had on the source at snapshot time.
+    assert captured["branches"] == captured["source_branches"]
+    assert "main" in captured["branches"]
+    assert "feature" in captured["branches"]
     # Prompt rebound: isolated path present, source path absent in stdin bytes.
     written = mock_proc.stdin.write.call_args.args[0]
     assert isinstance(written, bytes)
@@ -274,6 +282,64 @@ async def test_codex_read_only_uses_read_only_sandbox(
     assert str(source).encode() not in written
     # Temp dir removed after execute.
     assert not isolated.exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
+    tmp_path: Path, linked_worktree: tuple[Path, Path],
+) -> None:
+    """Issue #1121: a source with >=3 branches (incl. a slash name) snapshots
+    ALL of them into the clone by OID; git diff <base>...HEAD works; the
+    clone has no remote and no source path in its config; ref mutation in
+    the clone cannot alter the source's HEAD, refs, or index."""
+    _main, source = linked_worktree
+    # Third branch with a slash-containing name, branched off main.
+    _git(source, "branch", "release/9.9", "main")
+    source_branches = git_ops.list_local_branches(source)
+    assert set(source_branches) == {"main", "feature", "release/9.9"}
+    head_before = git_ops.head_sha(source)
+
+    captured: dict[str, Any] = {}
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+        isolated = Path(list(args)[list(args).index("--cd") + 1])
+        captured["branches"] = git_ops.list_local_branches(isolated)
+        # git diff main...HEAD must succeed inside the clone (the exact
+        # command from the archived failure: 'ambiguous argument main...HEAD').
+        captured["diff_rc"] = subprocess.run(
+            ["git", "diff", "main...HEAD", "--stat"], cwd=isolated,
+            capture_output=True, text=True,
+        ).returncode
+        captured["diff_feature_rc"] = subprocess.run(
+            ["git", "diff", "release/9.9...HEAD", "--stat"], cwd=isolated,
+            capture_output=True, text=True,
+        ).returncode
+        captured["head"] = git_ops.head_sha(isolated)
+        captured["config"] = subprocess.run(
+            ["git", "config", "--local", "--list"], cwd=isolated,
+            capture_output=True, text=True,
+        ).stdout
+        # Source-immutability sentinel: mutate a ref inside the clone, then
+        # verify the source's refs and HEAD are untouched.
+        git_ops.update_ref(isolated, "refs/heads/main", git_ops.head_sha(isolated))
+        return mock_proc
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
+        async for _ in CodexBackend(model="fixture-model").execute(
+            source, "Audit repository", read_only=True,
+        ):
+            pass
+
+    assert captured["branches"] == source_branches  # all names, exact OIDs
+    assert captured["head"] == head_before  # still detached at source HEAD
+    assert captured["diff_rc"] == 0
+    assert captured["diff_feature_rc"] == 0
+    assert "remote" not in captured["config"]
+    assert str(source) not in captured["config"]
+    # Source untouched by the in-clone ref mutation.
+    assert git_ops.head_sha(source) == head_before
+    assert git_ops.list_local_branches(source) == source_branches
 
 
 @pytest.mark.asyncio
@@ -303,6 +369,30 @@ async def test_codex_read_only_isolation_failure_is_fail_closed(
 
     assert git_ops.head_sha(source) == before_head
     assert git_ops.staged_patch(source) == before_patch
+
+
+@pytest.mark.asyncio
+async def test_codex_read_only_snapshot_failure_is_fail_closed(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GitError during branch snapshotting aborts preparation: CodexError
+    raised, no codex process launched, source git state untouched."""
+    _main, source = linked_worktree
+    before_head = git_ops.head_sha(source)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise git_ops.GitError("snapshot ref failure")
+
+    monkeypatch.setattr("daydream.backends.codex.git_ops.update_refs", boom)
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as exec_mock:
+        with pytest.raises(CodexError, match="failed to create disposable read-only checkout"):
+            async for _ in CodexBackend(model="fixture-model").execute(
+                source, "Audit repository", read_only=True,
+            ):
+                pass
+    exec_mock.assert_not_called()
+    assert git_ops.head_sha(source) == before_head
 
 
 def test_rebind_source_paths_preserves_sibling_paths() -> None:
@@ -1087,3 +1177,18 @@ def test_codex_fanout_concurrency_honours_the_shared_env_override(
         monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", raw)
 
     assert effective_fanout_concurrency(ceiling, CodexBackend("gpt-test")) == expected
+
+
+@pytest.mark.asyncio
+async def test_codex_preserves_exit_code_and_status_on_results() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Run failing command", "command_failures_issue1126.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    failed = results[0]
+    assert failed.is_error is True
+    assert failed.exit_code == 128
+    assert failed.status == "completed"
+    ok = results[1]
+    assert ok.is_error is False
+    assert ok.exit_code == 0
+    assert ok.status == "completed"

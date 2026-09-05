@@ -14,7 +14,8 @@ SANITIZER_VERSION = "1"
 HYDRATION_INDEX_SCHEMA_VERSION = "1"
 ADMISSION_POLICY_VERSION = "1"
 
-# Stable quarantine/exclusion reason codes (fixed registry at v1).
+# Stable quarantine/exclusion reason codes (v1 registry; extended for
+# license/repo gates by issue #1080).
 REASON_CODE_FIXTURE_PYTEST_PATH = "fixture_pytest_path"
 REASON_CODE_FIXTURE_TMP_ARTIFACT = "fixture_tmp_artifact"
 REASON_CODE_NON_PRODUCTION_BUNDLE = "non_production_bundle"
@@ -25,6 +26,27 @@ REASON_CODE_UNTRUSTED_REMOTE_HOST = "untrusted_remote_host"
 REASON_CODE_SANITIZE_FAILED = "sanitize_failed"
 REASON_CODE_IDENTITY_COLLISION = "identity_collision"
 REASON_CODE_PATH_TRAVERSAL = "path_traversal"
+
+# License/repo-identity reason codes (issue #1080 corpus-v2 gates; extended
+# by issue #1094 with ``repo_commit_unresolved``). Five stable strings (KD5);
+REASON_CODE_C5_EXCLUDED_REPO = "c5_excluded_repo"
+REASON_CODE_C8_COPYLEFT_UNOPTED = "c8_copyleft_unopted"
+REASON_CODE_LICENSE_EVIDENCE_MISSING = "license_evidence_missing"
+REASON_CODE_REPO_IDENTITY_MISSING = "repo_identity_missing"
+REASON_CODE_REPO_COMMIT_UNRESOLVED = "repo_commit_unresolved"
+
+# Import-specific reason codes (issue #1082 local-observation importer, fixed
+# registry). Every surviving observation row maps to exactly one of these six
+# buckets; byte-identical duplicates dropped by the dedupe are never bucket-
+# accounted, so ``sum(accounting) + deduped_count`` equals the source row
+# inventory count (M7) and the codes are stable strings (KD5).
+REASON_CODE_IMPORT_UNMATCHED_SESSION = "import_unmatched_session"
+REASON_CODE_IMPORT_IDENTITY_CONFLICT = "import_identity_conflict"
+REASON_CODE_IMPORT_STALE_EVIDENCE = "import_stale_evidence"
+REASON_CODE_IMPORT_INVALID_VERSION = "import_invalid_version"
+REASON_CODE_IMPORT_DECISIVE_PER_FINDING = "import_decisive_per_finding"
+REASON_CODE_IMPORT_RUN_LEVEL_ONLY = "import_run_level_only"
+REASON_CODE_IMPORT_UNREDACTABLE_METADATA = "import_unredactable_metadata"
 
 # ---------------------------------------------------------------------------
 # Curation-id derivation (Task 3)
@@ -49,6 +71,32 @@ def derive_curation_id(
     return "cur-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
+def derive_curation_id_v2(
+    source_commit: str,
+    policy_digest: str,
+    policy_version: str,
+    allow_copyleft: frozenset[str] | set[str],
+    exclusions_digest: str,
+    decisions_digest: str = "",
+    distribution_digest: str = "",
+) -> str:
+    """Curation identity v2 (issue #1094): binds the license-policy inputs.
+
+    Same canonical-string hashing discipline as ``derive_curation_id`` (v1,
+    kept untouched for historical prefixes), extended with the six bound
+    fields: policy digest/version, exact-slug copyleft opt-ins (sorted
+    casefolded so set iteration order never leaks into identity), exclusions
+    digest, resolved per-repo decisions digest, and license distribution
+    digest. Returns ``cur-`` + 16 hex chars (20 chars total).
+    """
+    opt_ins = ",".join(sorted(s.casefold() for s in allow_copyleft))
+    canonical = (
+        f"cur-v2\t{source_commit}\t{policy_digest}\t{policy_version}\t{opt_ins}"
+        f"\t{exclusions_digest}\t{decisions_digest}\t{distribution_digest}\n"
+    )
+    return "cur-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 # Frozen exclusion registry at v1. Markers -> stable codes; order never matters
 # because codes are returned as a de-duplicated, sorted list.
 _PYTEST_TMP_MARKERS = ("/tmp/pytest", "pytest-of-", "/tmp/tmp", "PYTEST_CURRENT_TEST")
@@ -58,6 +106,13 @@ EXCLUSION_CODES = (
     "fixture_pytest_path",
     "fixture_tmp_artifact",
     "non_production_bundle",
+    # License/repo-identity admission codes (issue #1080): a gate rejection is
+    # an exclusion, not a quarantine — the bundle content is fine, the repo is.
+    REASON_CODE_C5_EXCLUDED_REPO,
+    REASON_CODE_C8_COPYLEFT_UNOPTED,
+    REASON_CODE_LICENSE_EVIDENCE_MISSING,
+    REASON_CODE_REPO_IDENTITY_MISSING,
+    REASON_CODE_REPO_COMMIT_UNRESOLVED,
 )
 
 

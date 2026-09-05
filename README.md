@@ -23,21 +23,40 @@ The following tools are optional:
 
 ## Quick start
 
-Clone the repository and install the dependencies:
+Clone the repository and install the `daydream` command:
 
 ```bash
 git clone https://github.com/existential-birds/daydream.git
 cd daydream
-uv sync
+uv tool install --editable .
 ```
 
+This command installs a `daydream` executable in the uv tool directory. On Linux and macOS this
+directory is `~/.local/bin`. If your shell shows `daydream: command not found`, the directory is not
+on your `PATH`. Run `uv tool update-shell`, then open a new shell.
 
-To update daydream, run the following commands:
+The `--editable` flag makes the installed command read the source from this clone. A `git pull` is
+sufficient for a code change. Install the command again after a pull that changes the dependencies in
+`pyproject.toml`:
 
 ```bash
 git pull
-uv sync
+uv tool install --editable .    # necessary only for a dependency change
 ```
+
+### Run without an installed command
+
+`uv sync` does **not** make a `daydream` command on your `PATH`. It builds the project virtualenv and
+writes the executable to `.venv/bin/daydream`. Use `uv run` to run daydream from the clone without a
+tool install:
+
+```bash
+uv sync
+uv run daydream /path/to/project
+```
+
+`uv run` is only available in the clone. In the remainder of this README, `daydream ...` and
+`uv run daydream ...` are equivalent.
 
 ## Usage
 
@@ -63,6 +82,7 @@ daydream --comment /path/to/project          # review, then post inline PR comme
 daydream --review /path/to/project           # write a report only; no fixes or PR comments
 daydream --shallow /path/to/project          # review one stack in one pass
 daydream --yes /path/to/project              # apply fixes without prompting
+daydream --diagram-only flowchart /path/to/project       # post one grounded flowchart comment, then exit
 daydream --review-profile review.toml /path/to/project   # explicit review profile
 daydream -s python /path/to/project                      # force a specific stack
 ```
@@ -172,7 +192,26 @@ daydream corpus build --out out.jsonl --min-reward 0.5 --include-all-labels
 daydream corpus build --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
 daydream corpus label <session-id> --outcome accepted  # manual outcome override
 daydream corpus calibrate-reward ...                   # deterministic reward-calibration artifact (see docs/calibration.md)
+daydream corpus hydrate-hub --source-repo org/ds --source-revision <commit-sha> \
+  --destination-repo org/ds --stage-dir /tmp/daydream-hydrate --dry-run
 ```
+
+`corpus hydrate-hub` discovers the producer's canonical Hub layout,
+`<session-id>/manifest.json` plus `trajectory.json`, and also accepts the
+tested legacy `bundles/<session-id>/...` layout. Accepted sessions are
+normalized into `downloads/<revision>/bundles/<session-id>/`; unrelated
+top-level metadata and derived `curated/**` or `annotations/**` files are
+ignored. The dry-run summary reports discovered, admitted, rejected, and
+accounted candidate counts. A non-dry publication (omit `--dry-run`) also
+requires `--license-policy`: the per-repo license admission gate runs at
+hydration and rejected sessions are excluded before publication (issue
+#1094); a dry-run may omit it. License-evidence enrichment fills legacy
+bundles' missing evidence from the GitHub license API, which requires
+`GITHUB_TOKEN` in the environment (read-only; env-only, never on a URL or
+argv); a non-dry publication fails closed without it. If a pinned revision
+contains run-shaped
+manifests but no complete candidates, hydration fails with layout diagnostics
+instead of reporting a successful zero/zero plan.
 
 The pipeline has three stages:
 
@@ -181,6 +220,8 @@ The pipeline has three stages:
 3. **Build.** Project the annotations into a JSONL training corpus. Add a lineage manifest.
 
 `calibrate-reward` validates a pinned calibration bundle and emits a deterministic, versioned reward-calibration artifact (input wire format: [docs/calibration.md](docs/calibration.md)).
+
+`corpus adjudicate publish-final` constructs and publishes the immutable, per-finding annotation bundle (annotations, sessions, observation history, report, generated lineage) to the private Hub — use `--dry-run` to validate the staging bundle without uploading. The full operator sequence, from hydration through corpus-v2 projection on a fresh VM, is in [docs/runbooks/annotation-final-publish.md](docs/runbooks/annotation-final-publish.md).
 
 The harvest stage clones the target repository into a local cache before scoring. Setting `DAYDREAM_GIT_TOKEN` (for example, a GitHub PAT with read access) authenticates clones of private repos. The token is injected out-of-band via git config environment variables (`http.extraHeader`). It is never embedded in the remote URL and never on the command line. Without the token, the harvest stage performs a plain clone via the ambient credential helper. A failed clone emits a warning and never blocks the harvest run. The token is only needed for private repos. See docs/runbooks/credential-remediation.md for operational guidance.
 
@@ -284,6 +325,7 @@ The dotfile uses bare top-level keys. It wins on scalar conflicts.
 [tool.daydream]
 model = "claude-opus-5"     # global default across phases
 backend = "claude"          # global default backend
+scope_issue_filing = false  # default; set true to file out-of-scope work as GitHub issues
 
 [tool.daydream.phases.fix]  # per-phase override
 backend = "codex"
@@ -303,9 +345,13 @@ The resolution order, highest first, is:
 
 **CLI > config file (phase, then global) > built-in per-backend default.**
 
+### Out-of-scope issue filing
+
+`scope_issue_filing` (default `false`) opts a repository into filing out-of-scope findings and reverted out-of-scope edits as GitHub issues. By default daydream makes no GitHub writes for out-of-scope work — findings are excluded from the fix pass and out-of-scope edits are reverted regardless; only the issue filing is gated. Enable it in the target repo's config: `[tool.daydream] scope_issue_filing = true`, or per-run with `daydream --file-scope-issues /path/to/project`.
+
 ### Per-phase settings
 
-Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`, `supervise`, and more. Any name is accepted, including phases a fork defines.
+Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`, `supervise`, `diagram`, and more. Any name is accepted, including phases a fork defines.
 
 ### Reasoning effort
 
@@ -358,6 +404,61 @@ The fix-phase anti-degradation quality gate prevents a fix from degrading a file
 | `quality_gate_verbosity_absolute` | `0.05` | Absolute post-fix verbosity threshold. |
 
 The gate is fail-open. A flagged file surfaces as a warning plus a manifest record. It never aborts a run. Daydream clamps the thresholds to finite non-negative numbers. An invalid value degrades to the named default.
+
+### Diagrams
+
+A review can post grounded mermaid diagrams — a sequence diagram, a flowchart, or both — folded into the PR summary comment and into `review-output.md`. The model never writes mermaid. It proposes a structured JSON spec in which every participant, message, node, and edge carries `file:line` evidence (plus a `symbol` where one applies). The host verifies that evidence against the head tree, and a pure renderer draws only what survived.
+
+Diagram settings are config-file-only:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `mode` | `"auto"` | `"auto"` renders every eligible kind; `"off"` disables diagrams. A repo file may enable or suppress, never force a kind — `sequence`, `flowchart`, and `both` are per-invocation and CLI-only. |
+| `min_code_files` | `3` | Changed-code-file floor for the sequence cross-module rule. |
+| `min_modules` | `2` | Distinct-module floor for the sequence cross-module rule. |
+| `min_branch_points` | `3` | Changed-branch-point floor for the flowchart rule. |
+| `service_roots` | `[]` | Repository-relative globs naming service roots for participant grouping. Empty falls back to `[tool.daydream.improve] service_roots`, then to layout inference. |
+
+```toml
+# pyproject.toml  →  [tool.daydream.diagram]
+[tool.daydream.diagram]
+mode = "auto"
+min_branch_points = 4
+service_roots = ["services/*"]
+```
+
+```toml
+# .daydream.toml  (top-level keys; no [tool.daydream] prefix)
+[diagram]
+mode = "off"
+```
+
+The diagram author's model and reasoning effort come from `[tool.daydream.phases.diagram]`.
+
+Two flags override the file config for one run:
+
+- `--diagram KIND` selects `auto`, `sequence`, `flowchart`, `both`, or `off` for the review paths. It is on the `--help-all` tier.
+- `--diagram-only KIND` selects `auto`, `sequence`, `flowchart`, or `both` and is its own output mode: it runs the pre-scan and the diagram phase, posts one standalone PR comment, and exits. It is mutually exclusive with `--comment` and `--review`, and daydream rejects it together with `--diagram`, `--flow`, or `--start-at`.
+
+The self-hosted bot serves the same two kinds from a PR comment: `@<bot> add sequence diagram` (alias `@<bot> add sequence`) and `@<bot> add flowchart`. Each runs a diagram-only pass over the approved head SHA and posts one standalone comment carrying no findings. A prior bot diagram comment of the same kind is minimized as outdated rather than edited.
+
+Which diagram and why:
+
+| Situation | Sequence | Flowchart |
+|---|---|---|
+| Deep review, cross-module or cross-service, no branch-heavy function | rendered | skipped |
+| Deep review, single module, one function with ≥ 3 changed branch points | skipped | rendered |
+| Deep review, both signals | rendered | rendered (below the sequence block) |
+| `--diagram sequence` / `@<bot> add sequence diagram` | forced | skipped |
+| `--diagram flowchart` / `@<bot> add flowchart` | skipped | forced (candidates become all changed functions when none meets the threshold) |
+| `--diagram both` | forced | forced |
+| `--diagram off` / `mode = "off"` | skipped | skipped |
+
+A forced kind still goes through grounding and may still be omitted. Forcing changes eligibility, never verification.
+
+**How grounding works.** Every cited path must resolve inside the repository, the file must exist at head, the line must be in range, the cited symbol must appear on that line (a ±3-line snap is attempted and recorded), and the file must carry a completed read in the diagram phase's own trajectory — an unread file is never drawn. A sequence message additionally requires its evidence file to belong to the `from` participant and, for an internal target, the callee to be defined in a `to` participant file. A flowchart node must sit inside the chosen root function's tree-sitter range; a `decision` line must be a real branch statement in that file's language, an `end` line a real return/raise/throw/panic/exit, and a `subroutine` symbol must be on the cited call-site line and defined somewhere in the repository. Ungrounded elements are pruned together with whatever depended on them, the author gets exactly one repair turn with the reason codes, the render caps are applied, and a diagram left below its floor (3 messages, 2 participants, and 1 message in a changed hunk; 4 nodes including a start, an end, and a grounded decision) is omitted with a stated reason instead of drawn thin. Every decision — eligibility signals, per-element reason codes, prune and cap counts — is recorded in `.daydream/deep/diagram.json`, and the rendered blocks in `.daydream/deep/diagram.md`.
+
+Flowchart grounding proves that each node is a real statement of the stated kind inside the root function, and that each subroutine call exists at its call site and has a definition. It does **not** prove the arrows. Edge order is checked only for structural validity — a decision's fan-out, and both endpoints being grounded — and no control-flow graph is extracted or compared, so the sequencing of a flowchart is the model's reading of the function rather than a verified execution order. A diagram failure in a review path is fail-open: it warns and the review continues. Under `--diagram-only` the diagram is the deliverable, so a failure exits 1 after the artifact is written.
 
 ### Cost pricing
 
@@ -438,6 +539,9 @@ make rl-check   # standalone RL: lockcheck + ruff + mypy + pytest
 make check      # all root + workflow + RL CI checks
 ```
 
+`make install` runs `uv sync --all-extras`. This builds the virtualenv for the targets above. Like
+`uv sync`, it does not make a `daydream` command on your `PATH`. See [Quick start](#quick-start).
+
 `make hooks` installs two gates: a commit-time gate that runs ruff on the staged
 Python files, and the pre-push gate (the hook verifies commit signatures first,
 then delegates to `make check` — the quality-gate portion of that hook). A running Docker daemon
@@ -445,6 +549,10 @@ is required for `make actionlint` (the workflow YAML checks run the pinned
 container); when no daemon is available that target is skipped with a note and
 exits 0, so `make check` still succeeds without a daemon (CI always runs
 actionlint).
+
+Editors that support [EditorConfig](https://editorconfig.org) pick up the root
+`.editorconfig` automatically (UTF-8, LF, final newline; 4-space Python, 2-space
+YAML, 4-space TOML, tabs in Makefiles, preserved Markdown hard breaks).
 
 See [docs/coverage.md](docs/coverage.md) for the coverage gate and ratchet procedure.
 

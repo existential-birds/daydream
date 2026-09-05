@@ -82,7 +82,9 @@ def _task(
 
 def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> vf.Trace:
     trace: vf.Trace = vf.Trace(
-        task=vf.TraceTask(type=type(task).__name__, data=task.data), state=DaydreamReviewState()
+        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        agent=vf.AgentInfo(config=vf.AgentConfig()),
+        state=DaydreamReviewState(),
     )
     trace.info["daydream_archive_root"] = str(archive_root)
     trace.info["daydream_repo_path"] = str(repo_path)
@@ -146,12 +148,15 @@ def test_review_state_guard_rejects_base_state() -> None:
         test_command="true",
         protected_test_paths=["tests/"],
     )
-    base_trace = vf.Trace(task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data))
+    base_trace = vf.Trace(
+        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
+        agent=vf.AgentInfo(config=vf.AgentConfig()),
+    )
     with pytest.raises(TypeError):
         _review_state(base_trace)
     good_trace = vf.Trace(
         task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
-        state=DaydreamReviewState(),
+        agent=vf.AgentInfo(config=vf.AgentConfig()), state=DaydreamReviewState(),
     )
     assert _review_state(good_trace).run_dir is None
 
@@ -170,7 +175,10 @@ async def test_score_without_runtime_records_nothing(
     state guard, the run-dir fetch, or the runtime.
     """
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    trace = vf.Trace(
+        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        agent=vf.AgentInfo(config=vf.AgentConfig()),
+    )
     trace.info["daydream_archive_root"] = "/does/not/exist"
     trace.info["daydream_repo_path"] = "/does/not/exist"
 
@@ -439,7 +447,7 @@ async def test_intrinsic_composite_parity(
         assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
     ).composite
     assert expected is not None
-    assert trace.rewards["intrinsic_composite"] == expected
+    assert trace.rewards["intrinsic_composite"].score == expected
     assert trace.info["reward_breakdown"]["composite"] == expected
 
 
@@ -504,7 +512,7 @@ async def test_zero_finding_rollout_scores_no_intrinsic_reward(
     await task.score(trace, runtime)
 
     breakdown = trace.info["reward_breakdown"]
-    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.rewards["intrinsic_composite"].score == 0.0
     assert breakdown["axes_present"]["grounding"] is False
     assert breakdown["composite"] is None
     # Not merely "grounding went away": no credit axis survives, so the
@@ -523,7 +531,7 @@ async def test_missing_run_dir_scores_zero(
 
     await task.score(trace, runtime)
 
-    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.rewards["intrinsic_composite"].score == 0.0
     assert trace.info["reward_breakdown"] == {"error": "no archived run dir"}
     assert trace.metrics["n_findings"] == 0.0
 
@@ -1213,7 +1221,7 @@ async def test_score_reuses_one_archived_run_snapshot(
         assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
     ).composite
     assert expected is not None
-    assert trace.rewards["intrinsic_composite"] == expected
+    assert trace.rewards["intrinsic_composite"].score == expected
     assert trace.metrics["test_claim_passed_without_fix"] == 1.0
     assert trace.metrics["n_findings"] == 1.0
     assert trace.state.run_dir is None
@@ -1403,7 +1411,7 @@ async def test_reward_version_is_pinned(
 
     from daydream_review_v1.taskset import ROLLOUT_REWARD_VERSION
 
-    assert REWARD_VERSION == "2026.05.28-2", (
+    assert REWARD_VERSION == "2026.09.04-1", (
         f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
         "rollout reward's expected values before trusting any run scored across the boundary."
     )
@@ -1441,7 +1449,7 @@ async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
     await task.score(trace, runtime)
 
     assert trace.metrics["seal_verified"] == 0.0
-    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.rewards["intrinsic_composite"].score == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
 
 
@@ -1459,7 +1467,7 @@ async def test_untampered_sealed_run_scores_normally(
     await task.score(trace, runtime)
 
     assert trace.metrics["seal_verified"] == 1.0
-    assert trace.rewards["intrinsic_composite"] == (
+    assert trace.rewards["intrinsic_composite"].score == (
         score_trajectory(
             assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
         ).composite
@@ -1491,7 +1499,7 @@ async def test_seal_detects_committed_diff_changed_after_sealing(
     await task.score(trace, runtime)
 
     assert trace.metrics["seal_verified"] == 0.0
-    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.rewards["intrinsic_composite"].score == 0.0
 
 
 async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
@@ -1515,7 +1523,7 @@ async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
     await task.score(trace, runtime)
 
     assert trace.metrics["seal_verified"] == 0.0
-    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.rewards["intrinsic_composite"].score == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
 
 
@@ -1551,7 +1559,7 @@ async def test_git_failure_at_verify_time_fails_closed(
     await task.score(trace, runtime)
 
     assert trace.metrics["seal_verified"] == 0.0
-    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.rewards["intrinsic_composite"].score == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
 
 

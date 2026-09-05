@@ -75,3 +75,23 @@ def normalize_severity(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized if normalized in CANONICAL_LEVELS else None
+
+
+def stronger_severity(a: object, b: object) -> str | None:
+    """Return the more severe of two severity values.
+
+    Both inputs go through :func:`normalize_severity`, so an unknown or absent
+    value never wins and is never fabricated into a level: when only one side is
+    canonical that side is returned, and when neither is, the result is ``None``.
+
+    Used where two findings that describe one defect are folded into a single
+    reported finding and the survivor must not be demoted below either input
+    (issue #1103).
+    """
+    left = normalize_severity(a)
+    right = normalize_severity(b)
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left if SEVERITY_RANK[left] <= SEVERITY_RANK[right] else right

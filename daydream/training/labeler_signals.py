@@ -28,7 +28,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, cast
+from typing import Any, Callable, Literal, Mapping, cast, get_args
 
 from daydream.pr_review import parse_finding_markers
 from daydream.training.labeler_versions import reply_evidence_digest
@@ -236,6 +236,46 @@ class PerFindingResolution:
     disposition: PerFindingDisposition
     evidence: list[dict[str, Any]] = field(default_factory=list)
     evidence_digest: str = ""
+
+
+def resolution_to_dict(r: PerFindingResolution) -> dict[str, Any]:
+    """Serialize a ``PerFindingResolution`` to the canonical dict shape.
+
+    Emits exactly the canonical keys; ``evidence`` is copied, never aliased.
+    """
+
+    return {
+        "fingerprint": r.fingerprint,
+        "comment_id": r.comment_id,
+        "disposition": r.disposition,
+        "evidence": list(r.evidence),
+        "evidence_digest": r.evidence_digest,
+    }
+
+
+def resolution_from_dict(payload: Mapping[str, Any]) -> PerFindingResolution:
+    """Rebuild a ``PerFindingResolution`` from the canonical dict shape.
+
+    Fail-closed: missing required fields raise ``ValueError`` naming the
+    field; never ``None``-coerced, no fallback substitution.
+    """
+
+    fingerprint = payload.get("fingerprint")
+    if not fingerprint:
+        raise ValueError("missing or empty fingerprint")
+    disposition = payload.get("disposition")
+    if disposition not in get_args(PerFindingDisposition):
+        raise ValueError(f"invalid disposition: {disposition!r}")
+    evidence_digest = payload.get("evidence_digest")
+    if not evidence_digest:
+        raise ValueError("missing or empty evidence_digest")
+    return PerFindingResolution(
+        fingerprint=fingerprint,
+        comment_id=payload.get("comment_id"),
+        disposition=cast(PerFindingDisposition, disposition),
+        evidence=list(payload.get("evidence") or []),
+        evidence_digest=evidence_digest,
+    )
 
 
 @dataclass(frozen=True)

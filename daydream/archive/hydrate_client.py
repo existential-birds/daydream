@@ -103,7 +103,10 @@ class FakeHub:
         downloading that revision observes the mutation while older pinned
         revisions remain untouched.
         """
-        path = f"bundles/{session_id}/manifest.json"
+        path = f"{session_id}/manifest.json"
+        if path not in self.files:
+            # Keep the test double useful for legacy bundles/<id>/ snapshots.
+            path = f"bundles/{session_id}/manifest.json"
         self.files[path] = content
         if revision in self._revisions:
             self._revisions[revision][path] = content

@@ -151,7 +151,7 @@ In the same area, switch to the **Variables** tab → **New repository variable*
 
 - `DAYDREAM_BOT_HANDLE` — the mention handle the command workflow matches,
   **without** the `@` (e.g. `daydream-review`, so `@daydream-review review`
-  triggers it).
+  triggers it). The same handle serves every bot command listed in step 7.
 
 ### 6. Add the three workflow files
 
@@ -185,16 +185,33 @@ MEMBER, or COLLABORATOR) comment `@<bot> review`. The command workflow records
 the PR's current head SHA as the approved target and starts the unprivileged
 review workflow. Findings are posted as `<your-app>[bot]`.
 
+Three commands share that trusted-comment path, the same trust gate, and the
+same approved-head binding:
+
+| Comment | What runs | What is posted |
+|---|---|---|
+| `@<bot> review` | The full review over the approved head | Inline findings plus a review summary |
+| `@<bot> add sequence diagram` (alias `@<bot> add sequence`) | A diagram-only pass over the approved head | One standalone sequence-diagram comment, bound to the approved head; no findings |
+| `@<bot> add flowchart` | A diagram-only pass over the approved head | One standalone flowchart comment, bound to the approved head; no findings |
+
+Matching is case-sensitive and exact (`@<bot> add flowcharts` matches nothing),
+and only the fixed command token is ever read out of the comment — no comment
+text reaches a workflow shell step or a model prompt.
+
 The approval is bound to that exact commit. If a commit is pushed after the
 comment, the review fails loudly before checkout rather than running with model
-credentials against code that was never approved. Comment `@<bot> review`
-again to approve and review the new head.
+credentials against code that was never approved. Comment the same command
+again to approve and act on the new head.
 
 If you have a terminal available, run the `--verify` command shown at the top of
 this guide to audit the install component-by-component, including that the
 installed workflows still satisfy the approval-gate contract of the packaged
 versions (contract-intact customizations, such as a different model backend,
 pass with a warning; only drift that breaks the gate is a hard failure).
+
+### Out-of-scope issue filing
+
+By default daydream makes **no** GitHub issue writes for out-of-scope work: findings outside the reviewed diff are excluded from the fix pass, and out-of-scope post-fix edits are reverted — nothing is filed. If the bot runs unattended on repositories you don't own, leave `scope_issue_filing` off (the default) so the bot never opens issues on someone else's tracker. Opting in (`[tool.daydream] scope_issue_filing = true` in the target repo's config, or `daydream --file-scope-issues` per run) re-enables both filing paths — pre-fix out-of-scope findings and reverted post-fix edits — with the reverted-edit path cross-run deduplicated via a hidden fingerprint marker so repeat runs don't file duplicates.
 
 ---
 

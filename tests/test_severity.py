@@ -18,3 +18,20 @@ def test_severity_rank_matches_current_ordering() -> None:
     # Pins the existing sort semantics: unknown/absent ranks as medium (1).
     assert severity.SEVERITY_RANK == {"low": 2, "medium": 1, "high": 0}
     assert severity.SEVERITY_RANK.get("bogus", 1) == 1
+
+
+def test_stronger_severity_returns_the_more_severe_level() -> None:
+    assert severity.stronger_severity("medium", "high") == "high"
+    assert severity.stronger_severity("high", "medium") == "high"
+    assert severity.stronger_severity("low", "medium") == "medium"
+    assert severity.stronger_severity("low", "low") == "low"
+
+
+def test_stronger_severity_never_fabricates_a_level() -> None:
+    # Off-vocabulary and absent values lose to any canonical value and never
+    # become one themselves (P6): two unusable inputs stay unusable.
+    assert severity.stronger_severity(None, "low") == "low"
+    assert severity.stronger_severity("CRITICAL", "medium") == "medium"
+    assert severity.stronger_severity("high", None) == "high"
+    assert severity.stronger_severity(None, None) is None
+    assert severity.stronger_severity("bogus", 7) is None

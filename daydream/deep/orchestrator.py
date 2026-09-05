@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Iterable, cast
@@ -33,6 +34,9 @@ from daydream.config import (
     DEFAULT_DEEP_SHARD_FRONTIER_MAX,
     DEFAULT_DEEP_SHARD_MAX_BYTES,
     DEFAULT_DEEP_SHARD_MAX_FILES,
+    DEFAULT_DIAGRAM_MIN_BRANCH_POINTS,
+    DEFAULT_DIAGRAM_MIN_CODE_FILES,
+    DEFAULT_DIAGRAM_MIN_MODULES,
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
@@ -42,6 +46,8 @@ from daydream.config import (
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
+    DIAGRAM_KINDS,
+    DIAGRAM_MODES,
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
 )
@@ -52,6 +58,8 @@ from daydream.deep.artifacts import (
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
+    diagram_markdown_path,
+    diagram_path,
     diff_key,
     diff_key_path,
     fix_failures_path,
@@ -90,11 +98,33 @@ from daydream.deep.dedup import (
 )
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
-from daydream.deep.render import render_held_section, render_report
+from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
+from daydream.deep.diagram_render import (
+    render_diagram_blocks,
+    render_flowchart_mermaid,
+    render_sequence_mermaid,
+)
+from daydream.deep.diagram_schema import (
+    FLOWCHART_SPEC_SCHEMA,
+    SEQUENCE_SPEC_SCHEMA,
+    coerce_flowchart_spec,
+    coerce_sequence_spec,
+)
+from daydream.deep.diagram_trigger import Eligibility, decide_eligibility
+from daydream.deep.diagram_types import DiagramResult, DiagramThresholds
+from daydream.deep.records import (
+    duplicate_record_uids,
+    record_uid,
+    stack_name_from_records_source,
+    stack_name_from_uid,
+    stamp_record_uids,
+)
+from daydream.deep.render import insert_diagrams_section, render_held_section, render_report
 from daydream.deep.scope_issues import (
     _file_out_of_scope_issue,
     _resolve_changed_files,
     _revert_out_of_scope_edits,
+    _scope_filing_note,
 )
 from daydream.deep.sharding import shard_stacks
 from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
@@ -108,6 +138,7 @@ from daydream.generated_files import (
     is_generated_file,
     related_manifest_paths,
 )
+from daydream.json_utils import atomic_write_json
 from daydream.phases import (
     FIX_VERIFY_ACTIONABLE_VERDICTS,
     FIX_VERIFY_RETARGETABLE_VERDICTS,
@@ -184,6 +215,7 @@ from daydream.deep.prompts import (
     _DIFF_BLOCK_SPLIT,
     _diff_block_path,
     bound_deep_diff,
+    build_diagram_repair_prompt,
 )
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
@@ -317,11 +349,98 @@ def _approve_on_clean(config: RunConfig) -> bool:
     return False
 
 
+def _scope_issue_filing(config: RunConfig) -> bool:
+    """Resolve the out-of-scope issue-filing opt-in (issue #1056).
+
+    Precedence mirrors ``_approve_on_clean``: 1) ``RunConfig.scope_issue_filing``
+    (CLI tier), 2) ``DaydreamFileConfig.scope_issue_filing`` (file-config
+    scalar), 3) built-in default ``False`` (no out-of-scope GitHub issues are
+    filed unless a repo explicitly opts in).
+    """
+    if config.scope_issue_filing:
+        return True
+    file_config = config.file_config
+    if file_config is not None and file_config.scope_issue_filing:
+        return True
+    return False
+
+
 def _supervisor_mode(config: RunConfig) -> str:
     """Resolve the file-config-only findings supervisor mode."""
     file_config = config.file_config
     mode = file_config.supervisor if file_config is not None else None
     return mode if mode in {"off", "rules", "llm"} else "off"
+
+
+@dataclass(frozen=True)
+class DiagramSettings:
+    """One run's resolved grounded-diagram configuration (issue #1113).
+
+    Attributes:
+        mode: The resolved diagram mode -- one of
+            :data:`~daydream.config.DIAGRAM_MODES`.
+        thresholds: The eligibility thresholds the decision is taken against.
+        service_roots: Declared service-root globs for participant grouping;
+            empty means "fall back to the improve list, then to inference".
+    """
+
+    mode: str
+    thresholds: DiagramThresholds
+    service_roots: list[str]
+
+
+def _diagram_mode_for(config: RunConfig, mode: str) -> str:
+    """Resolve the diagram mode for a run: CLI > file config > ``"auto"``.
+
+    Split from :func:`_resolved_diagram_mode` so the spine can consult it
+    before a ``FlowContext`` exists (it decides whether to build the import
+    graph the cross-module rule needs).
+
+    In ``--diagram-only`` mode ``config.diagram`` carries the requested kind
+    and a repository file's ``mode = "off"`` is deliberately ignored: the user
+    asked for this run by name, and silently doing nothing would be the worst
+    possible answer. Every other mode honors the file's off switch.
+    """
+    if config.diagram in DIAGRAM_MODES:
+        return str(config.diagram)
+    if mode == "diagram":
+        return "auto"
+    file_config = config.file_config
+    file_mode = file_config.diagram_mode if file_config is not None else None
+    return file_mode if file_mode in DIAGRAM_MODES else "auto"
+
+
+def _resolved_diagram_mode(ctx: FlowContext) -> str:
+    """The active diagram mode for this flow context (issue #1113)."""
+    return _diagram_mode_for(ctx.config, _mode_of(ctx))
+
+
+def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
+    """Resolve mode + thresholds + service roots for the diagram step.
+
+    Thresholds resolve through :func:`_resolve_config_value` (``RunConfig``
+    attr, then file config, then the ``config.py`` default); there are no
+    per-threshold CLI flags, so in practice the file config is the only
+    override source. Resolved once per step and passed by value, which is what
+    keeps ``decide_eligibility`` a pure function of its arguments and its
+    verdict reproducible from ``diagram.json``.
+    """
+    file_config = ctx.config.file_config
+    return DiagramSettings(
+        mode=_resolved_diagram_mode(ctx),
+        thresholds=DiagramThresholds(
+            min_code_files=_resolve_config_value(
+                ctx.config, "diagram_min_code_files", DEFAULT_DIAGRAM_MIN_CODE_FILES
+            ),
+            min_modules=_resolve_config_value(
+                ctx.config, "diagram_min_modules", DEFAULT_DIAGRAM_MIN_MODULES
+            ),
+            min_branch_points=_resolve_config_value(
+                ctx.config, "diagram_min_branch_points", DEFAULT_DIAGRAM_MIN_BRANCH_POINTS
+            ),
+        ),
+        service_roots=list(file_config.diagram_service_roots) if file_config is not None else [],
+    )
 
 
 def _supervise_enabled(ctx: FlowContext) -> bool:
@@ -634,6 +753,18 @@ def _apply_adjudication_verdicts(
     rationale/evidence taken from the verdict) or dropped. ``file``/``line`` are
     never changed -- adjudication revises, it does not re-target findings.
 
+    Host-side identity is the record's ``uid`` (issue #1111), not its position:
+    the drop set holds uids, and the revise target is resolved through a uid map
+    snapshotted before anything mutates. The positional ``arb_id`` / ``sup_id``
+    is still the token the AGENT echoes, which is safe because the input
+    artifact is written in the same call that reads the verdicts back. The
+    hazard was only the host-side rebinding of indices *after* the compaction
+    below -- which is why the caller used to have to re-derive its
+    arbiter-exclusion set by ``id(record)`` object identity once this function
+    returned. It no longer does: a set of uids survives this rebuild untouched,
+    and survives a JSON round-trip or a dict copy that object identity would
+    not.
+
     Fail polarity (the sole axis on which the two passes diverge):
 
     - ``fail_closed=False`` (arbiter): a record reaches arbitration because it is
@@ -649,11 +780,12 @@ def _apply_adjudication_verdicts(
     Non-selected records always pass through untouched.
 
     Args:
-        records: Per-stack records positionally aligned with ``sources``.
+        records: Per-stack records positionally aligned with ``sources``. Each
+            carries a ``uid`` (guaranteed by ``_step_per_stack_parse``).
         sources: Per-record originating stack name.
         targets: Indices into ``records`` selected for this pass; ``targets[k]``
             carries 1-based ``id = k + 1`` echoed back in the verdict's
-            ``id_field``.
+            ``id_field``. Read once, up front, to snapshot each target's uid.
         verdicts: ``id -> verdict`` mapping from the adjudication agent.
         pass_name: Human-readable pass name (``"arbiter"`` / ``"suppression"``)
             used only in warning text.
@@ -663,9 +795,9 @@ def _apply_adjudication_verdicts(
             (see above).
 
     Returns:
-        New ``(records, sources)`` with dropped records removed and surviving
-        selected records carrying the verdict's fields. Positional alignment
-        between the two lists is preserved.
+        New ``(records, sources)`` with the dropped uids' records removed and
+        surviving selected records carrying the verdict's fields. Positional
+        alignment between the two lists is preserved.
     """
     import warnings
 
@@ -674,47 +806,103 @@ def _apply_adjudication_verdicts(
         if fail_closed
         else "retaining the original record unchanged"
     )
-    dropped: set[int] = set()
+    # Snapshot ``offset -> uid`` BEFORE anything mutates or drops a record
+    # (issue #1111). This loop is where ``targets``' indices stop being
+    # load-bearing: every host-side decision after it keys on the uid.
+    target_uids: dict[int, str] = {
+        offset: record_uid(records[record_index]) for offset, record_index in enumerate(targets)
+    }
+    # Revise targets resolve through this map rather than through
+    # ``records[record_index]``: the uid is the record's identity, the index is
+    # merely how it was selected. Built from the same list in the same call, so
+    # a lookup for a snapshotted uid cannot miss; the duplicate-uid guard in
+    # ``_step_per_stack_parse`` is what makes the mapping one-to-one.
+    by_uid: dict[str, dict[str, Any]] = {}
+    for record in records:
+        record_key = record_uid(record)
+        if record_key:
+            by_uid[record_key] = record
+    dropped: set[str] = set()
+    # A targeted record with no uid is impossible after the birth stamp plus the
+    # load-time backfill -- but "impossible" must not mean "silently
+    # mis-dropped". Such a record cannot be named in ``dropped``, so it gets a
+    # positional entry here, used ONLY to honour the caller's fail polarity for
+    # a record we are unable to identify.
+    dropped_positions: set[int] = set()
+
+    def _warn_unconfirmable(message: str, *, record_index: int, uid: str) -> None:
+        """Warn on an unconfirmable target and fail per ``fail_closed`` (#1111).
+
+        The three branches below (no uid, no verdict, mismatched id_field) all
+        warn, then either drop the record or retain it per the caller's fail
+        polarity, then move on -- the one shape this function's docstring
+        already unifies two ~80-line near-clones to avoid repeating. ``uid``
+        empty means the record itself is unidentifiable, so the drop (when
+        ``fail_closed``) can only be recorded positionally; otherwise it is
+        recorded by uid like every uid-keyed drop in this function.
+        """
+        warnings.warn(message, stacklevel=3)
+        if fail_closed:
+            if uid:
+                dropped.add(uid)
+            else:
+                dropped_positions.add(record_index)
+
     for offset, record_index in enumerate(targets):
         verdict_id = offset + 1
+        uid = target_uids[offset]
+        if not uid:
+            # Broken invariant, reported loudly and failed per the caller's
+            # polarity like every other unconfirmable branch here.
+            _warn_unconfirmable(
+                f"{pass_name.capitalize()} target {id_field}={verdict_id} "
+                f"(record_index={record_index}) carries no uid, so its verdict cannot be bound "
+                f"to a record identity; {polarity_action} (issue #1111).",
+                record_index=record_index,
+                uid="",
+            )
+            continue
         verdict = verdicts.get(verdict_id)
         if verdict is None:
             # No verdict returned for this id -- fail per the caller's polarity.
-            warnings.warn(
+            _warn_unconfirmable(
                 f"{pass_name.capitalize()} returned no verdict for {id_field}={verdict_id} "
-                f"(record_index={record_index}); {polarity_action}.",
-                stacklevel=2,
+                f"(record_index={record_index}, uid={uid}); {polarity_action}.",
+                record_index=record_index,
+                uid=uid,
             )
-            if fail_closed:
-                dropped.add(record_index)
             continue
         if verdict.get(id_field) != verdict_id:
             # Secondary key guard: the id field in the verdict must match the key
             # we looked it up by. A mismatch would silently bind the verdict to the
             # wrong record -- fail per the caller's polarity rather than mis-apply.
-            warnings.warn(
+            _warn_unconfirmable(
                 f"{pass_name.capitalize()} verdict {id_field} mismatch: "
                 f"expected {id_field}={verdict_id} "
                 f"but verdict contains {id_field}={verdict.get(id_field)!r} "
-                f"(record_index={record_index}); {polarity_action}.",
-                stacklevel=2,
+                f"(record_index={record_index}, uid={uid}); {polarity_action}.",
+                record_index=record_index,
+                uid=uid,
             )
-            if fail_closed:
-                dropped.add(record_index)
             continue
         if not verdict.get("keep", False):
-            dropped.add(record_index)
+            dropped.add(uid)
             continue
-        # Revise IN PLACE so the record keeps its object identity across this
-        # compaction. The suppression call site keys its arbiter-exclusion set by
-        # ``id(record)`` (#232); a revised record that got a fresh dict here would
-        # escape that set and be wrongly re-judged by the suppression pass.
-        revise_finding_fields(records[record_index], verdict)
+        # Revise IN PLACE rather than rebuilding the dict. A copied ``uid``
+        # would survive a rebuild, so this is no longer the load-bearing
+        # constraint it was when the suppression call site keyed its
+        # arbiter-exclusion set by ``id(record)`` (#232) -- but in-place is still
+        # the correct shape: the caller holds this same list and
+        # ``_rewrite_stack_records`` persists these very dicts, so a fresh dict
+        # would have to be threaded back into both.
+        revise_finding_fields(by_uid[uid], verdict)
 
     new_records: list[dict[str, Any]] = []
     new_sources: list[str] = []
     for i, (record, source) in enumerate(zip(records, sources, strict=True)):
-        if i in dropped:
+        # Dropped by uid; the positional set covers only the unidentifiable
+        # records warned about above.
+        if record_uid(record) in dropped or i in dropped_positions:
             continue
         new_records.append(record)
         new_sources.append(source)
@@ -734,18 +922,54 @@ def _rewrite_stack_records(
     rewritten with its surviving records (an emptied stack becomes
     ``{"issues": [], "verdicts": [...]}`` rather than retaining stale
     pre-arbitration content).
+
+    Routing is by the stack name encoded in each record's ``uid`` (issue
+    #1111), falling back to the ``source`` string for a record carrying no uid
+    at all, and a record that still routes outside ``stack_record_paths`` is
+    reported loudly instead of vanishing -- see the comments in the loop for
+    both halves of the defect this replaced.
     """
     by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
     for record, source in zip(records, sources, strict=True):
-        # `source` may be a bare stack name ("python") on a fresh run, or a
-        # filename ("stack-python-records.json") on resume.  Normalise to a
-        # Path so both formats resolve to the same key already in `by_stack`.
-        if source.endswith("-records.json"):
-            dest = deep_dir_path / source
+        # Route by the stack name in the record's own ``uid`` (issue #1111), not
+        # by the ``source`` string. ``source`` has two spellings -- the records
+        # filename on every path that loads records off disk, a bare stack name
+        # for the uncovered sweep's in-memory append -- and the branch that used
+        # to live here had to guess which one it held. The uid's stack half has
+        # exactly one spelling. ``sources`` stays zipped in (``strict=True``)
+        # both to assert the two lists are still aligned and to name the source
+        # in the warning below.
+        uid = record_uid(record)
+        if uid:
+            dest = per_stack_records_path(deep_dir_path, stack_name_from_uid(uid))
         else:
-            dest = per_stack_records_path(deep_dir_path, source)
+            # No uid at all: this is the case the uid-based routing above
+            # cannot cover, so fall back to ``source`` -- the sole routing
+            # signal before issue #1111 -- rather than letting the record fall
+            # through to the "unroutable" branch below and be erased from disk.
+            dest = per_stack_records_path(deep_dir_path, stack_name_from_records_source(source))
         if dest in by_stack:
             by_stack[dest].append(record)
+        else:
+            # There was no ``else`` here, and that was the second half of the
+            # defect (issue #1111). This function rewrites each records file
+            # WHOLESALE, so a record whose dest resolved outside
+            # ``stack_record_paths`` was not merely skipped -- it was ERASED
+            # from disk, silently. #1110 had to add the structural records path
+            # to ``stack_record_paths`` precisely to keep records out of this
+            # branch, and nothing would have failed loudly had that been missed.
+            # "Every adjudicated record routes to a file being rewritten" is a
+            # real invariant that was simply never enforced; this is where it is
+            # enforced now. A warning rather than a raise: the adjudicated
+            # verdicts for every OTHER record are already computed and belong on
+            # disk, so aborting the rewrite would lose more than it protects.
+            print_warning(
+                console,
+                f"Adjudicated record uid={record_uid(record) or '<none>'} (source {source}) "
+                f"routes to {dest.name}, which is not among the records files being rewritten "
+                f"({', '.join(sorted(path.name for path in stack_record_paths))}); "
+                "its adjudication will not reach disk (issue #1111).",
+            )
     for dest_path, stack_records in by_stack.items():
         # Issue #742: per-stack records files carry the dict shape
         # ``{"issues": [...], "verdicts": [...]}``. Preserve the verdicts from
@@ -1409,28 +1633,97 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         # issues list, so normalize the dict shape here; legacy bare-list
         # records pass through unchanged.
         records = _records_issues_or_empty(loaded)
+        # Issue #1111: this loop is the single choke point that populates
+        # ``ctx.data["records"]`` -- on a fresh run and on a ``--start-at merge``
+        # resume alike -- so it is where the ``uid`` invariant is guaranteed.
+        # ``phase_per_stack_reviews`` stamps at record birth, but two shapes
+        # still arrive here unstamped: records written by a run from before this
+        # field existed simply lack the key, and so would any future producer
+        # that missed the birth stamp. Re-deriving the uid from
+        # ``(stack_name, position)`` reproduces exactly the value the producing
+        # run would have minted -- which is precisely why the format is
+        # deterministic rather than a uuid4 -- so the backfill is
+        # indistinguishable from a birth stamp. ``stamp_record_uids`` normalizes
+        # the records filename to a bare stack name itself and PRESERVES any uid
+        # already on disk, so this is idempotent and never re-mints a uid the
+        # producing run already handed out (which matters on resume, where the
+        # on-disk list may be shorter than the list those uids were minted from).
+        stamp_record_uids(records, records_path.name)
         per_stack_records_paths.append(records_path)
         source_name = records_path.name
         all_records.extend(records)
         record_sources.extend(source_name for _ in records)
 
+    # Issue #1111: every uid-keyed stage downstream of here -- the dedup
+    # pre-filter's b-side drop, adjudication's drop set, the structural
+    # partition/rejoin, and ``_rewrite_stack_records``' file routing -- resolves
+    # a record by its uid. Two records sharing one uid make each of those act on
+    # the wrong record, which is exactly the over-delete this field exists to
+    # prevent (see ``_drop_cross_stack_duplicates``). Checked here, over the
+    # whole loaded pool, BEFORE the structural partition below splits it: one
+    # check then covers both sides and also catches a collision that spans them.
+    #
+    # FATAL rather than a warning. A uid is host-minted and deterministic with
+    # no content-derived input, so a collision is never the near-miss judgement
+    # call a fingerprint match is -- it means two records files claim the same
+    # stack name, or an artifact was written with a partially stamped list.
+    # Continuing would emit a report quietly missing findings, and CLAUDE.md's
+    # rule is that loss is never silently absorbed. A false positive costs a
+    # bounded, visible, actionable stop (the message names the colliding uids
+    # and the remedy); a false negative costs an invisible wrong answer.
+    duplicate_uids = duplicate_record_uids(all_records)
+    if duplicate_uids:
+        loaded_names = ", ".join(sorted(path.name for path in per_stack_records_paths))
+        print_error(
+            console,
+            "Duplicate Record Identities",
+            f"Per-stack records carry duplicate uid(s): {', '.join(duplicate_uids)}\n\n"
+            f"Records were loaded from: {loaded_names}\n\n"
+            "Every stage after this one (dedup, arbitration, suppression, the structural fold, "
+            "the per-stack records rewrite) resolves a record by its uid, so continuing would "
+            "drop or revise the wrong findings.\n"
+            "Re-run without --start-at to regenerate the per-stack records.",
+        )
+        return Stop(1)
+
     # Partition structural meta-stack records out before dedup: its lens
     # (file-size budgets, layering, canonical-helper gaps) differs from the
     # language stacks and collapsing it into their dedup pool would demote
-    # those findings. Filter both record_sources forms (resume=filename,
-    # fresh-run=stack_name) together to preserve the index invariant.
+    # those findings. The partition keys on the stack name encoded in each
+    # record's own uid (issue #1111) and rebuilds ``all_records`` /
+    # ``record_sources`` as pairs, so the positional index invariant between
+    # those two lists survives the split exactly as before.
+    #
+    # This test used to compare ``src`` against both ``STRUCTURE_STACK_NAME``
+    # and the records filename, on the stated belief that ``source`` is a bare
+    # stack name on a fresh run and a filename on resume. That belief was
+    # wrong: ``source_name`` is ``records_path.name`` above on every path, fresh
+    # run and resume alike, so the bare-stack-name half of the test was dead
+    # code (the only bare-name source in this module is the uncovered sweep's
+    # ``"uncovered"``). A uid's stack half has one spelling and cannot rot that
+    # way.
+    #
+    # The partition is scoped to the dedup pre-filter and the merge agent's
+    # record pool -- the two places that could collapse a structural finding
+    # into a language bucket. It is NOT a partition out of adjudication: the
+    # records are kept here under their own keys so ``_step_arbiter`` can put
+    # them back in front of the contested-location branch, which is the one
+    # mechanism designed to catch a structural/language twin (issue #1103).
     structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
+    structural_records: list[dict[str, Any]] = []
+    structural_record_sources: list[str] = []
     if structural_path_candidate in per_stack_records_paths:
         structural_records_path: Path | None = structural_path_candidate
-        structural_filename = structural_path_candidate.name
         per_stack_records_paths = [
             p for p in per_stack_records_paths if p != structural_path_candidate
         ]
-        kept_pairs = [
-            (rec, src)
-            for rec, src in zip(all_records, record_sources, strict=True)
-            if src != STRUCTURE_STACK_NAME and src != structural_filename
-        ]
+        kept_pairs = []
+        for rec, src in zip(all_records, record_sources, strict=True):
+            if stack_name_from_uid(record_uid(rec)) == STRUCTURE_STACK_NAME:
+                structural_records.append(rec)
+                structural_record_sources.append(src)
+            else:
+                kept_pairs.append((rec, src))
         all_records = [rec for rec, _ in kept_pairs]
         record_sources = [src for _, src in kept_pairs]
     else:
@@ -1440,6 +1733,8 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     ctx.data["records"] = all_records
     ctx.data["record_sources"] = record_sources
     ctx.data["structural_records_path"] = structural_records_path
+    ctx.data["structural_records"] = structural_records
+    ctx.data["structural_record_sources"] = structural_record_sources
     return None
 
 
@@ -1652,7 +1947,17 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                             sweep_failures[file] = "no structured output produced"
                         else:
                             issues = structured.get("issues")
-                            issues = issues if isinstance(issues, list) else []
+                            # Schema validation guarantees ``issues`` is a list
+                            # but not that each entry is a dict (nested item
+                            # validity is deliberately the consumers' salvage
+                            # domain -- see ``agent.py``); a non-dict entry
+                            # would otherwise crash ``stamp_record_uids`` below
+                            # and discard this whole fail-open sweep.
+                            issues = (
+                                [item for item in issues if isinstance(item, dict)]
+                                if isinstance(issues, list)
+                                else []
+                            )
                             sweep_records_by_file[file] = issues
                             # Structured records are the authoritative sweep
                             # output. Markdown review files are optional backend
@@ -1710,6 +2015,25 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     }
     if completed_reviews:
         records_path = per_stack_records_path(dd, "uncovered")
+        # Issue #1111: the sweep is the pipeline's SECOND record-birth site, and
+        # the load-time backfill in ``_step_per_stack_parse`` cannot reach it --
+        # ``STEPS`` orders ``per-stack-parse`` BEFORE ``uncovered-sweep``, and on
+        # a fresh run ``stack-uncovered-records.json`` does not exist yet when
+        # that loop runs. So stamp here, BEFORE the write, and both the on-disk
+        # artifact and the in-memory pool extended below carry uids. A
+        # ``--start-at merge`` resume reloads this same file through that loop,
+        # where ``stamp_record_uids``' preserve-if-present behaviour keeps these
+        # exact uids instead of re-minting them.
+        #
+        # These uids need no duplicate check of their own: they are freshly
+        # minted over an unstamped list under a stack name no other producer
+        # uses, and the pool they join cannot already hold an ``uncovered:N``.
+        # The sweep is disabled outright on a merge/fix resume
+        # (``_uncovered_sweep_enabled``), a per-stack resume deletes this file
+        # before any new per-stack work (``_clear_sweep_artifacts``), and a fresh
+        # run wipes the whole deep dir -- so on every path that reaches this
+        # line, the parse loop found no uncovered records file to load.
+        stamp_record_uids(sweep_records, "uncovered")
         records_path.write_text(json.dumps(sweep_records, indent=2))
         ctx.data["records_paths"].append(records_path)
         ctx.data["records"].extend(sweep_records)
@@ -1723,12 +2047,128 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     stats_p.write_text(json.dumps(stats, indent=2))
 
 
+def _rejoin_structural_records(
+    all_records: list[dict[str, Any]],
+    record_sources: list[str],
+    structural_records: list[dict[str, Any]],
+    structural_sources: list[str],
+    records_paths: list[Path],
+    structural_path: Path | None,
+) -> tuple[list[dict[str, Any]], list[str], set[str], list[Path], range]:
+    """Rejoin structural records with language records for adjudication (#1103).
+
+    The structural meta-stack is partitioned out of the dedup pool and the
+    merge agent's record pool (`_step_per_stack_parse`) so its lens cannot be
+    collapsed into a language bucket -- but that partition also made the
+    contested-location branch unreachable for the one pair it exists to
+    catch: a structural finding and a language finding reporting the same
+    defect at the same place. This reverses the partition for arbitration;
+    `_split_structural_records` restores it afterward so the dedup pre-filter
+    and the merge prompt see exactly what they saw before.
+
+    Returns the concatenated records/sources, the ``uid`` set of the structural
+    records (used by :func:`_split_structural_records`), ``records_paths``
+    extended with ``structural_path`` when present -- `_rewrite_stack_records`
+    cannot persist a record that routes outside this path list, so the
+    structural file must be included or an arbitrated structural verdict would
+    never reach disk, and merge re-reads that very file to build the report's
+    structural items -- and ``structural_range``: the positional index range
+    every structural record occupies in the returned, freshly concatenated
+    ``adjudicated`` list.
+
+    ``structural_range`` (not the uid set) is what the caller must pass as
+    :func:`~daydream.deep.arbiter.select_arbiter_targets`'s ``contested_only``:
+    that exemption from the severity branch must cover EVERY structural
+    record, including the no-uid edge case handled below, and a
+    ``record_uid(rec) in structural_ids`` membership test silently drops that
+    exemption for such a record (its uid is ``""``, which is never in
+    ``structural_ids``) -- reopening exactly the widening this function's
+    docstring says must never happen. Position cannot fail this way: it is
+    read here, immediately after ``adjudicated`` is built and before anything
+    reorders or compacts it.
+
+    The uid set still holds uids, not ``id()`` object identities (issue
+    #1111), because :func:`_split_structural_records` runs AFTER adjudication
+    may have rebuilt the record list, where a positional range no longer
+    identifies the same records. Object identity was the strictest possible
+    key for that later use and also the most fragile one: it was invalidated
+    by any stage that rebuilt a record as a fresh dict or round-tripped it
+    through JSON, and such a record escaped the set silently, with the escape
+    looking exactly like "not a structural record". A uid is carried inside
+    the dict, so it survives both.
+    """
+    # A structural record with no uid cannot be named in this set and would come
+    # back out of `_split_structural_records` as a language record -- i.e. into
+    # the dedup pool the partition exists to keep it out of. Unreachable after
+    # the duplicate/absence guarantees established in `_step_per_stack_parse`,
+    # so this reports rather than stops: adjudication itself is still correct,
+    # only the post-split routing of that one record is degraded.
+    structural_ids = {uid for rec in structural_records if (uid := record_uid(rec))}
+    unidentified = len(structural_records) - len(structural_ids)
+    if unidentified:
+        print_warning(
+            console,
+            f"{unidentified} structural record(s) carry no uid; they will be adjudicated but "
+            "rejoin the language-stack pool after arbitration instead of the structural pool "
+            "(issue #1111).",
+        )
+    adjudicated = all_records + structural_records
+    adjudicated_sources = record_sources + structural_sources
+    rewrite_paths = list(records_paths)
+    if structural_path is not None:
+        rewrite_paths.append(structural_path)
+    structural_range = range(len(all_records), len(adjudicated))
+    return adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range
+
+
+def _split_structural_records(
+    adjudicated: list[dict[str, Any]],
+    adjudicated_sources: list[str],
+    structural_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[str]]:
+    """Split structural records back out after adjudication (#1103).
+
+    Everything downstream of adjudication -- the dedup pre-filter, the merge
+    prompt, the host-side structural append -- keeps the partitioned view it
+    had before. Records the arbiter rejected are simply absent from both sides.
+
+    The split keys on each record's ``uid`` against the set
+    :func:`_rejoin_structural_records` built (issue #1111), so it does not care
+    whether adjudication revised a record in place, replaced its dict, or
+    round-tripped it through the records files -- the uid rides along inside the
+    record either way. ``record_uid`` returns ``""`` for a record carrying none
+    and ``""`` is never in the set, so an unidentifiable record lands on the
+    language side, which is the outcome ``_rejoin_structural_records`` warns
+    about when it drops one.
+    """
+    all_records: list[dict[str, Any]] = []
+    record_sources: list[str] = []
+    structural_records: list[dict[str, Any]] = []
+    structural_sources: list[str] = []
+    for rec, src in zip(adjudicated, adjudicated_sources, strict=True):
+        if record_uid(rec) in structural_ids:
+            structural_records.append(rec)
+            structural_sources.append(src)
+        else:
+            all_records.append(rec)
+            record_sources.append(src)
+    return all_records, record_sources, structural_records, structural_sources
+
+
 async def _step_arbiter(ctx: FlowContext) -> None:
     """Scoped arbiter over high-severity/contested findings (#168)."""
     config = ctx.config
     dd = ctx.data["dd"]
     all_records: list[dict[str, Any]] = ctx.data["records"]
     record_sources: list[str] = ctx.data["record_sources"]
+    # Issue #1103: adjudicate over language AND structural records together.
+    # `_rejoin_structural_records` below reverses the partition applied in
+    # `_step_per_stack_parse` (so structural findings can contest a language
+    # finding restating them) and `_split_structural_records` restores it
+    # afterward so the dedup pre-filter and the merge prompt see exactly what
+    # they saw before.
+    structural_records: list[dict[str, Any]] = ctx.data.get("structural_records", [])
+    structural_sources: list[str] = ctx.data.get("structural_record_sources", [])
 
     # Scoped Opus arbiter (#168). Sonnet ran the per-stack reviews;
     # a single heavyweight arbiter now re-reviews ONLY the
@@ -1750,30 +2190,47 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         ctx.pipeline().arbitration.enabled
         and (config.start_at != "merge" or not adjudication_marker.is_file())
     ):
+        structural_path: Path | None = ctx.data.get("structural_records_path")
+        adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range = (
+            _rejoin_structural_records(
+                all_records, record_sources, structural_records, structural_sources,
+                ctx.data["records_paths"], structural_path,
+            )
+        )
+
         arbiter_targets = select_arbiter_targets(
-            all_records, record_sources,
+            adjudicated, adjudicated_sources,
             min_severity=ctx.pipeline().arbitration.min_severity,
             contested_location=ctx.pipeline().arbitration.contested_location,
+            contested_only=structural_range,
         )
         # Capture the identities of records the arbiter will see, before
         # `_apply_adjudication_verdicts` compacts the list (#232). `arbiter_targets`
         # are indices into this pre-apply list; once records are dropped the
         # indices shift, so suppression exclusion must be keyed by per-record
-        # object identity -- not by the stale positional indices, and not by
+        # identity -- not by the stale positional indices, and not by
         # `(file, line)`: two findings can share one location while only one is
         # arbitrated (a HIGH sibling arbitrated, a LOW sibling not), and a
         # `(file, line)` key would wrongly exclude BOTH, silently skipping the
-        # LOW sibling from suppression. `_apply_adjudication_verdicts` revises
-        # records in place, so kept AND revised arbiter records keep their
-        # identity here; only dropped records fall out.
-        arbitrated_ids = {id(all_records[i]) for i in arbiter_targets}
+        # LOW sibling from suppression.
+        #
+        # That identity is the record's `uid` (issue #1111). This used to be an
+        # `id(record)` set, which only worked because
+        # `_apply_adjudication_verdicts` happens to revise in place -- a stage
+        # that rebuilt a kept record as a fresh dict would have escaped the set
+        # silently and had it re-judged by the fail-CLOSED suppression pass. A
+        # uid is inside the dict, so no rebuild or JSON round-trip can shake it
+        # off. Records with no uid are left out of the set entirely rather than
+        # collapsing onto a shared `""` key; the empty-uid case is handled at
+        # the exclusion site below.
+        arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
                 arbiter_backend = ctx.backend_for("arbiter")
                 verdicts, arbiter_continuation = await phase_arbiter_review(
                     arbiter_backend,
                     ctx.work,
-                    selected_records=[all_records[i] for i in arbiter_targets],
+                    selected_records=[adjudicated[i] for i in arbiter_targets],
                     diff_path=ctx.data["diff_path"],
                     intent_path=ctx.data["intent_path"],
                     alternatives_path=ctx.data["alts_path"],
@@ -1786,14 +2243,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 # different backend gets the cold path.
                 if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
                     ctx.data["arbiter_continuation"] = arbiter_continuation
-            all_records, record_sources = _apply_adjudication_verdicts(
-                all_records, record_sources, arbiter_targets, verdicts,
+            adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
+                adjudicated, adjudicated_sources, arbiter_targets, verdicts,
                 pass_name="arbiter",
                 id_field="arb_id",
                 fail_closed=False,
             )
             _rewrite_stack_records(
-                dd, ctx.data["records_paths"], all_records, record_sources
+                dd, rewrite_paths, adjudicated, adjudicated_sources
             )
 
         # Precision-mode suppression pass (#232). OPT-IN: when precision_mode is
@@ -1807,12 +2264,25 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # here. One batched agent call, resolved via the cheaper `suppression`
         # phase key (Sonnet default) -- never per-finding Opus.
         if ctx.pipeline().suppression.enabled or _precision_mode(config):
+            # Structural records join the exclusion set alongside the arbiter's
+            # targets (issue #1103). Suppression is fail-CLOSED and selects on
+            # low severity / LOW confidence; the structural lens is
+            # high-conviction by construction and was never in this pass's pool
+            # before, so letting the union widen it would drop structural
+            # findings as a side effect of fixing the duplicate-post bug.
+            # A record with no uid is excluded too (`not uid`): suppression is
+            # fail-CLOSED, so a record we cannot match against either set would
+            # otherwise be droppable on an identity we could not establish.
+            # Unreachable after `_step_per_stack_parse`, and deliberately biased
+            # toward keeping a finding rather than losing one.
             suppression_exclude = [
-                i for i, r in enumerate(all_records) if id(r) in arbitrated_ids
+                i
+                for i, r in enumerate(adjudicated)
+                if not (uid := record_uid(r)) or uid in arbitrated_ids or uid in structural_ids
             ]
             suppression_targets = select_suppression_targets(
-                all_records,
-                record_sources,
+                adjudicated,
+                adjudicated_sources,
                 suppression_exclude,
                 severity_classes=ctx.pipeline().suppression.severity_classes,
                 confidence_classes=ctx.pipeline().suppression.confidence_classes,
@@ -1822,25 +2292,30 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     sup_verdicts = await phase_suppression_review(
                         ctx.backend_for("suppression"),
                         ctx.work,
-                        selected_records=[all_records[i] for i in suppression_targets],
+                        selected_records=[adjudicated[i] for i in suppression_targets],
                         diff_path=ctx.data["diff_path"],
                         intent_path=ctx.data["intent_path"],
                         alternatives_path=ctx.data["alts_path"],
                         exploration_dir=ctx.data["exploration_dir"],
                         strategy=ctx.strategy("suppression"),
                     )
-                all_records, record_sources = _apply_adjudication_verdicts(
-                    all_records, record_sources, suppression_targets, sup_verdicts,
+                adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
+                    adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
                     pass_name="suppression",
                     id_field="sup_id",
                     fail_closed=True,
                 )
                 _rewrite_stack_records(
-                    dd, ctx.data["records_paths"], all_records, record_sources
+                    dd, rewrite_paths, adjudicated, adjudicated_sources
                 )
         adjudication_marker.write_text("")
+        all_records, record_sources, structural_records, structural_sources = (
+            _split_structural_records(adjudicated, adjudicated_sources, structural_ids)
+        )
     ctx.data["records"] = all_records
     ctx.data["record_sources"] = record_sources
+    ctx.data["structural_records"] = structural_records
+    ctx.data["structural_record_sources"] = structural_sources
 
 
 # Structured merge-failure entry reserved in ``per-stack-failures.json`` (issue #361).
@@ -1911,6 +2386,15 @@ def _clear_merge_failure(dd: Path) -> None:
         failures_p.unlink()
 
 
+#: Cap on how many unidentifiable dedup pairs ``_drop_cross_stack_duplicates``
+#: names individually in its aggregate warning below, mirroring
+#: ``phases._MAX_REPORTED_UNKNOWN_UIDS``: an artifact written before
+#: ``record_b_uid`` existed can carry many such pairs at once, and naming the
+#: first few and counting the rest keeps the message actionable instead of
+#: turning it into the per-pair flood the aggregation exists to avoid.
+_MAX_REPORTED_UNIDENTIFIABLE_PAIRS = 10
+
+
 def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Apply the D-27 dedup pre-filter to a host-written partial merge (issue #361).
 
@@ -1920,8 +2404,21 @@ def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> lis
     cross-stack duplicate pairs itself -- otherwise the partial
     ``merged-items.json`` carries duplicates into the resume verifier and fix
     gate. Keeps the ``record_a`` side of each pair (deterministic sort order)
-    and drops the ``record_b`` side, matched on ``(id, file)`` because per-stack
-    record ids are not globally unique.
+    and drops the ``record_b`` side, matched on ``record_b_uid``.
+
+    We used to match the b-side on ``(id, file)``, and that was our bug -- not a
+    limitation of the artifact. That tuple is not unique (a reviewer-assigned
+    ``id`` restarts at 1 in every stack), and the filter below is a
+    set-membership test over the whole record list, so it deleted EVERY record
+    matching a dropped key instead of the one b-side it meant to. Three stacks
+    each reporting ``id: 1`` on ``api.py`` for the same defect yield pairs
+    (0,1), (0,2) and (1,2), whose b-side keys are all ``("1", "api.py")`` --
+    and record 0, the a-side this function exists to KEEP, matches that key too
+    and died with them, leaving the partial report with zero language findings.
+    It looked identical to the records being deleted, which is precisely why it
+    had been paired with them. ``record_b_uid`` (issue #1111) names one record
+    and only that record, so the same input now drops the two b-sides and keeps
+    record 0.
     """
     dedup_p = dedup_candidates_path(dd)
     if not dedup_p.is_file():
@@ -1930,21 +2427,47 @@ def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> lis
         dedup = json.loads(dedup_p.read_text())
     except json.JSONDecodeError:
         return records
-    dropped_keys: set[tuple[str, str]] = set()
+    dropped_uids: set[str] = set()
+    unidentifiable_pairs: list[str] = []
     for pair in dedup.get("record_duplicate_pairs", []) or []:
         if not isinstance(pair, dict):
             continue
-        b_id = pair.get("record_b_id")
-        b_file = pair.get("record_b_file")
-        if b_id is not None and b_file is not None:
-            dropped_keys.add((str(b_id), str(b_file)))
-    if not dropped_keys:
+        b_uid = pair.get("record_b_uid")
+        if isinstance(b_uid, str) and b_uid:
+            dropped_uids.add(b_uid)
+            continue
+        # Within one run this is unreachable: ``dedup-candidates.json`` is
+        # written unconditionally by ``_step_cross_stack_merge`` in the same call
+        # that can go on to reach this salvage, from records
+        # ``_step_per_stack_parse`` guaranteed carry uids. The guard is for the
+        # artifact a resume reads back out of a deep dir written by an older run,
+        # from before the field existed. Skip the pair rather than falling back
+        # to the ``(id, file)`` key: that fallback is the bug documented above,
+        # and leaving a duplicate in a partial report is a far smaller error
+        # than deleting the finding the pair was supposed to preserve.
+        unidentifiable_pairs.append(
+            f"{pair.get('record_a_id')!r}/{pair.get('record_b_id')!r}"
+        )
+    if unidentifiable_pairs:
+        # ONE warning for the whole salvage, not one per pair (mirrors
+        # ``phases._validate_agent_source_uids``): an artifact written before
+        # ``record_b_uid`` existed can carry many such pairs at once, and
+        # per-pair reporting would bury the run's real output under identical
+        # lines.
+        shown = ", ".join(unidentifiable_pairs[:_MAX_REPORTED_UNIDENTIFIABLE_PAIRS])
+        if len(unidentifiable_pairs) > _MAX_REPORTED_UNIDENTIFIABLE_PAIRS:
+            shown += f", +{len(unidentifiable_pairs) - _MAX_REPORTED_UNIDENTIFIABLE_PAIRS} more"
+        print_warning(
+            console,
+            "Cross-stack merge salvage: dedup pair(s) carries no record_b_uid, so "
+            "neither side can be identified; keeping both records (issue #1111). "
+            f"({len(unidentifiable_pairs)} pair(s): {shown})",
+        )
+    if not dropped_uids:
         return records
-    kept = [
-        r
-        for r in records
-        if (str(r.get("id", "")), str(r.get("file", ""))) not in dropped_keys
-    ]
+    # ``record_uid`` is ``""`` for an item with no pre-merge identity and ``""``
+    # is never in ``dropped_uids``, so such an item is always kept.
+    kept = [r for r in records if record_uid(r) not in dropped_uids]
     if len(kept) != len(records):
         print_info(
             console,
@@ -2043,6 +2566,14 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     # follow-up). Apply the D-27 dedup pre-filter (issue #361): with no merge
     # agent to adjudicate, drop the duplicate side of cross-stack record pairs so
     # the partial list doesn't carry duplicates into the resume verifier/fix gate.
+    # Issue #1111: these items are host-written -- no merge agent ran, by
+    # definition of this path -- so their ``source_uids`` come from the records'
+    # own uids. That attribution is not repeated here: it lives in
+    # ``_write_single_stack_merged_items``, which is the single writer of this
+    # path's items, and duplicating it would give the salvage report a second
+    # spelling of provenance that could drift from the bypass's. The records
+    # reaching here are uid-stamped (``_step_per_stack_parse``) and pass through
+    # ``_drop_cross_stack_duplicates`` unmodified, so the uids survive.
     records = _drop_cross_stack_duplicates(dd, ctx.data["records"])
     _write_single_stack_merged_items(
         ctx.work.repo,
@@ -2233,7 +2764,15 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
 
     items_file: Path = ctx.data["items_file"]
     findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-    return Stop(_emit_findings_from_items(ctx.work.repo, ctx.config, findings_items))
+    # Issue #1113: a review artifact carries the run's diagram payload when the
+    # diagram step produced one, so Phase B can re-render the blocks into the
+    # posted review from the validated specs.
+    diagrams = (ctx.data.get("diagrams") or {}).get("payload")
+    return Stop(
+        _emit_findings_from_items(
+            ctx.work.repo, ctx.config, findings_items, diagrams=diagrams
+        )
+    )
 
 
 async def _step_supervise(ctx: FlowContext) -> None:
@@ -2296,10 +2835,436 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         console=console,
         post=_mode_of(ctx) == "comment",
         approve_on_clean=_approve_on_clean(ctx.config),
+        diagram_blocks=(ctx.data.get("diagrams") or {}).get("blocks"),
     )
     if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
         return Stop(1)
     return None
+
+
+# --- Grounded diagrams (issue #1113) ----------------------------------------
+#
+# Two agent turns at most per kind, and no mermaid from either of them: the
+# model proposes a JSON spec whose every element carries file:line evidence,
+# ``ground_*`` verifies each element against the head tree and the turn's own
+# read receipts, one repair turn fixes or removes what failed, survivors are
+# pruned/capped, and a pure renderer emits the diagram. What the checker could
+# not confirm is never drawn.
+
+
+def _diagram_result(status: str, reason: str | None) -> DiagramResult:
+    """A no-spec result for a kind that never produced one.
+
+    ``skipped`` (not eligible) and ``failed`` (agent or budget error) share
+    this shape: no spec, no grounding, no mermaid, and a reason the omission
+    notice and ``diagram.json`` can both render.
+    """
+    return {
+        "status": status,
+        "reason": reason,
+        "spec_proposed": None,
+        "spec_final": None,
+        "grounding": None,
+        "omit_reasons": [],
+        "mermaid": None,
+    }
+
+
+def _diagram_read_paths(fork_path: Path | None) -> set[str]:
+    """Completed diagram-phase read paths recorded in one fork's trajectory.
+
+    Fail-CLOSED: a missing, unreadable, or malformed fork file yields the empty
+    set, which makes every citation fail ``FILE_NOT_READ_BY_MODEL``. The
+    alternative -- treating "no receipts" as "all reads happened" -- would turn
+    a recording failure into an unverified diagram.
+
+    The fork file is written by ``_ForkCM.__aexit__`` even when the body
+    raised, but ``_write`` short-circuits on a fork with no steps, so absence
+    is a real and expected case.
+
+    Note that the receipts are the UNION across ``run_agent``'s retry attempts:
+    a failed retryable attempt's invocation is still flushed into the fork, so
+    a file read during an attempt that later errored still counts. That is
+    fail-open in the model's favour and is deliberate -- the read did happen,
+    and the file content it returned is what grounding cares about.
+    """
+    if fork_path is None:
+        return set()
+    try:
+        trajectory = json.loads(fork_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(trajectory, dict):
+        return set()
+    return _completed_read_paths(trajectory, phases={DaydreamPhase.DIAGRAM.value})
+
+
+def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
+    """Group the changed code files by module for the sequence prompt."""
+    grouped: dict[str, list[str]] = {}
+    for path, module in sorted(eligibility.modules.items()):
+        grouped.setdefault(module, []).append(path)
+    return grouped
+
+
+def _diagram_author_prompt(ctx: FlowContext, kind: str, eligibility: Eligibility) -> str:
+    """Build one kind's first-turn author prompt through the registry."""
+    diff_path: Path = ctx.data["diff_path"]
+    inline_diff = _ttt_diff_text(ctx)
+    exploration_dir = ctx.data.get("exploration_dir")
+    if kind == "sequence":
+        return str(
+            get_registry().prompt("diagram_sequence")(
+                diff_path=diff_path,
+                inline_diff=inline_diff,
+                files_by_module=_files_by_module(eligibility),
+                cwd=ctx.work.repo,
+                exploration_dir=exploration_dir,
+                schema=SEQUENCE_SPEC_SCHEMA,
+            )
+        )
+    return str(
+        get_registry().prompt("diagram_flowchart")(
+            diff_path=diff_path,
+            inline_diff=inline_diff,
+            candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
+            forced=eligibility.flowchart.rule == "forced",
+            cwd=ctx.work.repo,
+            exploration_dir=exploration_dir,
+            schema=FLOWCHART_SPEC_SCHEMA,
+        )
+    )
+
+
+async def _run_diagram_kind(
+    ctx: FlowContext,
+    *,
+    kind: str,
+    eligibility: Eligibility,
+    hunk_ranges: dict[str, list[tuple[int, int]]],
+    symbols: RepoSymbols,
+    recorder: "TrajectoryRecorder | None",
+    backend: Any,
+) -> DiagramResult:
+    """Author, ground, repair once, prune and render one diagram kind.
+
+    Each turn runs in its own fork (``diagram-<kind>`` then
+    ``diagram-<kind>-repair``) and the forks are strictly sequential: the first
+    must EXIT before grounding runs, because the read receipts that decide
+    ``FILE_NOT_READ_BY_MODEL`` only reach disk on exit, and the repair decision
+    depends on that grounding. Nested forks would also be illegal -- the
+    recorder ContextVar is reset LIFO.
+
+    Returns:
+        The kind's result dict (see
+        :data:`~daydream.deep.diagram_types.DiagramResult`).
+    """
+    schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
+
+    def _ground(spec: dict[str, Any], read_paths: set[str]) -> Any:
+        if kind == "sequence":
+            return ground_sequence(
+                spec,
+                repo_root=ctx.work.repo,
+                hunk_ranges=hunk_ranges,
+                read_paths=read_paths,
+                symbols=symbols,
+            )
+        return ground_flowchart(
+            spec,
+            repo_root=ctx.work.repo,
+            hunk_ranges=hunk_ranges,
+            read_paths=read_paths,
+            candidate_roots=eligibility.candidate_roots,
+            symbols=symbols,
+        )
+
+    coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
+    read_paths: set[str] = set()
+
+    async with maybe_fork(recorder, f"diagram-{kind}") as fork:
+        structured, continuation, budget_reason = await run_agent(
+            backend,
+            ctx.work.repo,
+            _diagram_author_prompt(ctx, kind, eligibility),
+            phase=DaydreamPhase.DIAGRAM,
+            output_schema=schema,
+            read_only=True,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        )
+    read_paths |= _diagram_read_paths(getattr(fork, "path", None))
+    if budget_reason:
+        # A truncated author turn did not really answer: recording it as an
+        # omission would claim the model looked and found nothing to draw.
+        return _diagram_result("failed", f"budget exhausted: {budget_reason}")
+    if not isinstance(structured, dict):
+        return _diagram_result("failed", "no structured output produced")
+
+    spec = coerce(structured)
+    report = _ground(spec, read_paths)
+    grounded_first_pass = int(report.summary["grounded"])
+    repaired = 0
+
+    # Exactly one repair turn, and only when the session can be resumed: a
+    # fresh session would have to re-derive the whole spec from scratch, which
+    # is a new proposal, not a repair.
+    if report.ungrounded() and continuation is not None:
+        repair_prompt = build_diagram_repair_prompt(
+            kind=kind,
+            failures=[check.to_dict() for check in report.ungrounded()],
+            candidate_roots=(
+                [asdict(root) for root in eligibility.candidate_roots]
+                if kind == "flowchart"
+                else None
+            ),
+            schema=schema,
+        )
+        async with maybe_fork(recorder, f"diagram-{kind}-repair") as repair_fork:
+            repaired_output, _, repair_budget = await run_agent(
+                backend,
+                ctx.work.repo,
+                repair_prompt,
+                phase=DaydreamPhase.DIAGRAM,
+                output_schema=schema,
+                continuation=continuation,
+                read_only=True,
+                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            )
+        read_paths |= _diagram_read_paths(getattr(repair_fork, "path", None))
+        if not repair_budget and isinstance(repaired_output, dict):
+            spec = coerce(repaired_output)
+            report = _ground(spec, read_paths)
+            repaired = max(int(report.summary["grounded"]) - grounded_first_pass, 0)
+
+    omit_reasons = list(report.omit_reasons)
+    mermaid: str | None = None
+    if omit_reasons:
+        status = "omitted"
+    else:
+        status = "rendered"
+        mermaid = (
+            render_sequence_mermaid(report.spec_final)
+            if kind == "sequence"
+            else render_flowchart_mermaid(report.spec_final)
+        )
+    return {
+        "status": status,
+        "reason": report.rejected,
+        "spec_proposed": spec,
+        "spec_final": report.spec_final,
+        "grounding": {
+            "elements": [check.to_dict() for check in report.elements],
+            "summary": {
+                "proposed": int(report.summary["proposed"]),
+                "grounded_first_pass": grounded_first_pass,
+                "repaired": repaired,
+                "pruned": int(report.summary["pruned"]),
+            },
+            "capped": dict(report.capped),
+            "root_range": list(report.root_range) if report.root_range is not None else None,
+        },
+        "omit_reasons": omit_reasons,
+        "mermaid": mermaid,
+    }
+
+
+def _diagram_payload_without_mermaid(payload: dict[str, Any]) -> dict[str, Any]:
+    """The ``diagram.json`` payload with every rendered ``mermaid`` string dropped.
+
+    What travels in the Phase A findings artifact. The privileged poster
+    re-renders from ``spec_final``, so shipping the mermaid would only offer it
+    a model-adjacent string to trust by mistake.
+    """
+    results = payload.get("results")
+    stripped: dict[str, Any] = {}
+    if isinstance(results, dict):
+        for kind, result in results.items():
+            stripped[kind] = (
+                {key: value for key, value in result.items() if key != "mermaid"}
+                if isinstance(result, dict)
+                else result
+            )
+    return {"eligibility": payload.get("eligibility"), "results": stripped}
+
+
+def _apply_diagrams_to_report(ctx: FlowContext, blocks: str) -> None:
+    """Insert the ``## Diagrams`` section into both copies of the rendered report.
+
+    Textual insertion rather than a re-render: by the time this step runs,
+    ``review-output.md`` has been written by the merge write and possibly
+    rewritten by ``supervise``, and ``load-items`` has appended a ``##
+    Coverage`` section that a re-render would erase.
+    ``insert_diagrams_section`` is idempotent, so a repeated application is a
+    no-op rather than a duplicate section.
+    """
+    targets = [merged_report_path(ctx.data["dd"])]
+    canonical = ctx.data.get("merged_report")
+    if canonical is not None:
+        targets.append(Path(canonical))
+    for target in targets:
+        if not target.is_file():
+            continue
+        text = target.read_text(encoding="utf-8")
+        target.write_text(insert_diagrams_section(text, blocks), encoding="utf-8")
+
+
+async def _step_diagram(ctx: FlowContext) -> Stop | None:
+    """Decide, author, ground and render this run's grounded diagrams (#1113).
+
+    Always writes ``diagram.json`` when the step is enabled, even when nothing
+    is eligible: the recorded eligibility signals are the audit trail for why a
+    PR did or did not get a diagram, and producing them costs zero agent calls.
+
+    Fail-open in every review mode -- one kind's failure warns, records
+    ``status="failed"`` and leaves the rest of the review untouched. In
+    ``--diagram-only`` mode the diagram IS the deliverable, so a failure exits
+    1 (after the artifact is written, so the evidence survives).
+    """
+    settings = _diagram_settings(ctx)
+    mode = _mode_of(ctx)
+    target_dir = ctx.work.repo
+    dd: Path = ctx.data["dd"]
+
+    from daydream.hunk_index import head_side_ranges_by_file, load_hunk_index
+    from daydream.runner import _file_config_or_empty
+    from daydream.services import enumerate_services
+
+    changed_files = sorted(str(path) for path in ctx.data["changed_files"])
+    hunk_ranges = head_side_ranges_by_file(load_hunk_index(target_dir / ".daydream"))
+    file_config = _file_config_or_empty(ctx.config)
+    eligibility = decide_eligibility(
+        repo_root=target_dir,
+        changed_files=changed_files,
+        hunk_ranges=hunk_ranges,
+        # Detection is re-run here rather than read off ``ctx.data["stacks"]``:
+        # that list is published AFTER the tiny-diff collapse and the sharder,
+        # so on a small two-language diff every file would sit in one
+        # ``generic`` assignment and the whole diff would read as non-code.
+        stacks=detect_stacks(changed_files),
+        services=enumerate_services(
+            target_dir, file_config, service_roots=settings.service_roots or None
+        ),
+        import_graph=ctx.data.get("import_graph") or {},
+        thresholds=settings.thresholds,
+        force=settings.mode,
+    )
+
+    kinds = eligibility.eligible_kinds()
+    results: dict[str, DiagramResult | None] = {}
+    for kind in DIAGRAM_KINDS:
+        if kind in kinds:
+            continue
+        decision = eligibility.sequence if kind == "sequence" else eligibility.flowchart
+        results[kind] = _diagram_result("skipped", decision.reason)
+
+    failures: dict[str, str] = {}
+    if kinds:
+        print_info(console, f"Grounded diagrams: authoring {', '.join(kinds)}")
+        backend = ctx.backend_for("diagram")
+        recorder = get_current_recorder()
+        # One shared definition index: both kinds cite the same handful of
+        # files, and every method on it is synchronous, so the two sibling
+        # tasks cannot interleave inside one lookup.
+        symbols = RepoSymbols(target_dir)
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(2, backend))
+        async with anyio.create_task_group() as tg:
+            for kind in kinds:
+                # Default-arg capture -- prevents the late-binding closure bug.
+                async def _task(kind_name: str = kind) -> None:
+                    async with limiter:
+                        try:
+                            results[kind_name] = await _run_diagram_kind(
+                                ctx,
+                                kind=kind_name,
+                                eligibility=eligibility,
+                                hunk_ranges=hunk_ranges,
+                                symbols=symbols,
+                                recorder=recorder,
+                                backend=backend,
+                            )
+                        except Exception as exc:  # noqa: BLE001 -- parallel isolation
+                            detail = f"{type(exc).__name__}: {exc}"
+                            failures[kind_name] = detail
+                            results[kind_name] = _diagram_result("failed", detail)
+
+                tg.start_soon(_task)
+        if recorder is not None:
+            recorder.create_dispatch_step(phase=DaydreamPhase.DIAGRAM)
+
+    for kind, result in results.items():
+        if result is not None and result.get("status") == "failed":
+            failures.setdefault(kind, str(result.get("reason") or "unknown failure"))
+
+    ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
+    blocks = render_diagram_blocks(ordered)
+    payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}
+    atomic_write_json(diagram_path(dd), payload)
+    diagram_markdown_path(dd).write_text(
+        f"{blocks}\n" if blocks else "", encoding="utf-8"
+    )
+    ctx.data["diagrams"] = {
+        "blocks": blocks,
+        "payload": _diagram_payload_without_mermaid(payload),
+        "results": ordered,
+    }
+
+    consequence = "the run fails" if mode == "diagram" else "the review continues"
+    for kind, detail in sorted(failures.items()):
+        print_warning(console, f"Diagram kind {kind} failed ({consequence}): {detail}")
+    if blocks and mode != "diagram":
+        _apply_diagrams_to_report(ctx, blocks)
+    if failures and mode == "diagram":
+        return Stop(1)
+    return None
+
+
+async def _step_post_diagram(ctx: FlowContext) -> Stop:
+    """Deliver a diagram-only run: findings artifact, or a standalone comment.
+
+    ``--findings-out`` makes this Phase A of the two-phase flow (the artifact
+    declares ``kind="diagram"`` and an empty findings list, and the privileged
+    Phase B job posts it). Otherwise the comment posts here, and -- mirroring
+    ``--comment`` -- an unresolvable PR or a failed POST ends the run with
+    exit 1, because the comment was the whole point of the run.
+    """
+    from daydream.pr_review import (
+        _resolve_pr,
+        diagram_comment_kinds,
+        post_diagram_comment_to_pr,
+        render_diagram_comment_body,
+    )
+    from daydream.runner import _emit_diagram_findings
+
+    diagrams: dict[str, Any] = ctx.data.get("diagrams") or {}
+    payload: dict[str, Any] = diagrams.get("payload") or {}
+
+    if ctx.config.findings_out is not None:
+        return Stop(_emit_diagram_findings(ctx.work.repo, ctx.config, payload))
+
+    pr = _resolve_pr(ctx.work.repo, console, ctx.config.pr_number)
+    if pr is None:
+        print_error(
+            console,
+            "Diagram Comment",
+            "no PR resolvable for --diagram-only (pass --pr-number or open a PR "
+            "for this branch)",
+        )
+        return Stop(1)
+    url, error = post_diagram_comment_to_pr(
+        ctx.work.repo,
+        pr,
+        body=render_diagram_comment_body(payload),
+        kinds=diagram_comment_kinds(payload),
+        bot_login=os.environ.get("DAYDREAM_BOT_HANDLE") or None,
+    )
+    if url is None:
+        suffix = f" ({error})" if error else ""
+        print_error(console, "Diagram Comment Post Failed", f"No comment was posted.{suffix}")
+        return Stop(1)
+    print_success(console, f"Posted diagram comment: {url}")
+    return Stop(0)
 
 
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
@@ -2338,8 +3303,8 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         return Stop(0)
 
     # Issue #336 — pre-fix scope partition. Findings on files OUTSIDE the
-    # reviewed diff are filed as GitHub issues (best-effort) and excluded from
-    # auto-fix: the loop must not expand the PR's scope. The reviewed-diff file
+    # reviewed diff are excluded from auto-fix; issue filing is gated by
+    # ``scope_issue_filing`` (#1056). The loop must not expand the PR's scope. The reviewed-diff file
     # set is resolved via _resolve_changed_files (shared with _step_fix) so the
     # gate and the post-fix residual net agree on the allowed set (a divergence
     # left the residual net strictly weaker than the gate on the resume path).
@@ -2349,26 +3314,31 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         out_of_scope: list[dict[str, Any]] = []
         for item in items:
             (in_scope if (item.get("file") or "") in changed_files else out_of_scope).append(item)
+        file_scope_issues = _scope_issue_filing(ctx.config)
         for item in out_of_scope:
-            _file_out_of_scope_issue(ctx, item)
+            if file_scope_issues:
+                _file_out_of_scope_issue(ctx, item)
         if out_of_scope:
             print_warning(
                 console,
-                f"{len(out_of_scope)} finding(s) outside the reviewed diff filed as "
-                "issue(s), not fixed.",
+                f"{len(out_of_scope)} finding(s) outside the reviewed diff "
+                f"{_scope_filing_note(file_scope_issues)}, not fixed.",
             )
         items = in_scope
-        # Issue #336 — every finding routed to issues leaves nothing to
-        # auto-fix, so short-circuit before a no-op fix pass, a full target
+        # Issue #336 — every finding routed out of the fix list leaves nothing
+        # to auto-fix, so short-circuit before a no-op fix pass, a full target
         # test-suite run, and a commit-agent turn. Matches the pre-partition
         # "no actionable items" Stop(0) above. Keying on identity (``is not
         # None``) distinguishes an empty reviewed diff — every file is out of
-        # scope, so all findings are filed and the run ends — from ``None``,
-        # which skips the partition entirely because scope cannot be judged.
+        # scope, so every finding is excluded from auto-fix (filed as an issue
+        # only under the ``scope_issue_filing`` opt-in, issue #1056) and the
+        # run ends — from ``None``, which skips the partition entirely because
+        # scope cannot be judged.
         if not items:
             print_success(
                 console,
-                "All findings outside the reviewed diff -- filed as issues, nothing to fix.",
+                f"All findings outside the reviewed diff -- {_scope_filing_note(file_scope_issues)}, "
+                "nothing to fix.",
             )
             return Stop(0)
 
@@ -3399,6 +4369,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_untracked=pre_fix_untracked,
         changed_files=changed_files,
         finding_files={item["file"] for item in ctx.data["items"] if item.get("file")},
+        # Issue #1056 — reverted-edit filing is opt-in; the revert itself is not.
+        file_scope_issues=_scope_issue_filing(ctx.config),
     )
     if residual_guard_result is None:
         # Fail-close to match the generated-file guard: an unreverted
@@ -3818,6 +4790,24 @@ def _single_stack_merge_enabled(ctx: FlowContext) -> bool:
     return ctx.config.start_at != "fix" and ctx.data["single_stack_mode"]
 
 
+def _diagram_enabled(ctx: FlowContext) -> bool:
+    """Whether the grounded-diagram step runs (issue #1113).
+
+    Off on a ``--start-at fix`` resume (the diff-derived signals and the report
+    the blocks land in both belong to the earlier run) and off when the
+    resolved mode is ``"off"``. Note this is a WEAKER gate than "some kind is
+    eligible": when the step runs it always records its eligibility decision in
+    ``diagram.json``, which is what makes "why did this PR get no diagram?"
+    answerable. Nothing is eligible costs zero agent calls.
+
+    The same ``FlowStep`` object backs the ``diagram`` flow, where this must
+    return True: ``start_at`` defaults to ``"review"`` there (the CLI rejects
+    ``--start-at`` with ``--diagram-only``) and diagram mode's resolved mode is
+    never ``"off"`` (``off`` is not an accepted ``--diagram-only`` value).
+    """
+    return _before_fix_resume(ctx) and _resolved_diagram_mode(ctx) != "off"
+
+
 def _findings_out_enabled(ctx: FlowContext) -> bool:
     # Two-phase findings artifact (Phase A): emit the artifact and STOP —
     # never post to the PR and never apply fixes. Phase B posts later.
@@ -3828,11 +4818,16 @@ def _resolve_mode(config: RunConfig) -> str:
     """Map a RunConfig onto the single deep-flow mode key (#330).
 
     ``review`` / ``comment`` replace the review flow (stop after post-review);
-    ``shallow`` replaces the shallow flow (single-stack deep). ``loop`` is the
-    unchanged default.
+    ``shallow`` replaces the shallow flow (single-stack deep); ``diagram``
+    (issue #1113) reuses the spine's preamble but runs the two-step ``diagram``
+    flow. ``loop`` is the unchanged default.
     """
     if config.flow_name in ("review", "shallow"):
         return config.flow_name
+    # Issue #1113: checked before ``shallow`` so ``--diagram-only`` is never
+    # reinterpreted as a shallow review by an unrelated flag combination.
+    if config.output_mode == "diagram":
+        return "diagram"
     if config.output_mode == "review":
         return "review"
     if config.output_mode == "comment":
@@ -3870,12 +4865,31 @@ def _cleanup_should_run(ctx: FlowContext, exit_code: int) -> bool:
 
 
 def _flow_kind_for_mode(mode: str) -> DaydreamRunFlow:
-    """Recorder run-flow label per mode (preserves the pre-collapse mapping)."""
+    """Recorder run-flow label per mode (preserves the pre-collapse mapping).
+
+    ``diagram`` gets its own label rather than borrowing ``TTT`` (issue #1113):
+    ``archive._flow_runs_merge`` returns True for TTT, so a diagram run would
+    otherwise inherit a previous deep review's ``merged-items.json`` as its own
+    pipeline state -- and diagram runs deliberately leave those artifacts on
+    disk.
+    """
     if mode == "shallow":
         return DaydreamRunFlow.NORMAL
+    if mode == "diagram":
+        return DaydreamRunFlow.DIAGRAM
     if mode in ("review", "comment"):
         return DaydreamRunFlow.TTT
     return DaydreamRunFlow.DEEP
+
+
+def _flow_name_for_mode(mode: str) -> str:
+    """The registered flow name a mode runs (issue #1113).
+
+    Every PR-process mode runs the ``deep`` flow; only ``diagram`` has its own.
+    ``loop`` / ``comment`` / ``review`` / ``shallow`` are modes, not registered
+    flow names, so the raw mode string must never be passed to ``run_flow``.
+    """
+    return "diagram" if mode == "diagram" else "deep"
 
 
 # The deep pipeline as a registered flow (D-07):
@@ -3916,6 +4930,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
     FlowStep(name="load-items", run=_step_load_items),
     FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_supervise_enabled),
+    FlowStep(name="diagram", run=_step_diagram, config_phase="diagram", enabled=_diagram_enabled),
     FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
     FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
     # Fix cycle: loop + shallow modes only (review/comment stop after post-review).
@@ -3926,6 +4941,17 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="test", run=_step_test, enabled=_fix_cycle_enabled),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
     FlowStep(name="commit", run=_step_commit, config_phase="fix", enabled=_fix_cycle_enabled),
+)
+
+
+# The diagram-only flow's own steps (issue #1113). Deliberately NOT appended to
+# :data:`STEPS`: ``builtins._register_builtin_flows`` derives the ``deep`` flow
+# definition FROM ``STEPS``, so appending ``post-diagram`` there would splice a
+# GitHub write into every deep review. The ``diagram`` flow is
+# ``exploration -> diagram -> post-diagram``; the first two steps are the same
+# objects the deep flow registers.
+DIAGRAM_STEPS: tuple[FlowStep, ...] = (
+    FlowStep(name="post-diagram", run=_step_post_diagram),
 )
 
 
@@ -4050,7 +5076,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         print_error(console, "Git Error", "Unable to determine base branch for diff")
         return 1
     if not diff.strip():
-        print_warning(console, "No diff found -- nothing to review")
+        subject = "diagram" if mode == "diagram" else "review"
+        print_warning(console, f"No diff found -- nothing to {subject}")
         return 0
 
     daydream_dir = target_dir / ".daydream"
@@ -4066,7 +5093,14 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
     current_diff_sha = diff_key(diff)
-    if config.start_at not in ("per-stack", "merge", "fix"):
+    # Issue #1113: a diagram-only run must NEVER clear ``.daydream/deep/``. It
+    # produces none of the artifacts ``diff-key`` attests, and wiping the
+    # directory would destroy a previous deep review's intent, alternatives,
+    # per-stack records and merged items -- breaking any later ``--start-at
+    # merge``/``fix``. Consequence, accepted: diagram mode writes no
+    # ``diff-key``, which is correct for a run that produces nothing it could
+    # attest. ``deep_dir`` already created ``dd``, so it stays a valid path.
+    if mode != "diagram" and config.start_at not in ("per-stack", "merge", "fix"):
         # Fresh run only: a resume must NOT rewrite the key it is checked
         # against, or the staleness gate would self-heal and pass every time.
         shutil.rmtree(dd, ignore_errors=True)
@@ -4155,6 +5189,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # passes the stack list through untouched). ``build_import_graph`` is
         # fail-open (never raises; returns ``{}`` on any failure); byte sizing
         # uses the FULL on-disk ``diff``, not the bounded in-memory value.
+        import_graph: dict[str, set[str]] = {}
         sharding_enabled = _deep_shard_enabled(config)
         if sharding_enabled and not single_stack_mode:
             try:
@@ -4171,6 +5206,24 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 graph=import_graph,
             )
 
+        # Issue #1113: the sequence diagram's cross-module rule needs the
+        # changed-file import graph, but the sharding branch above builds it
+        # only when sharding is enabled (off by default) AND the run is not in
+        # single_stack_mode -- so in practice essentially never. Build it here
+        # when the diagram step can run, and publish it on ctx.data. The bare
+        # ``except Exception`` is required, not defensive: ``build_import_graph``
+        # documents itself as never raising, but its ``get_parser`` call reaches
+        # ``assert_tree_sitter_safe()``, which raises ``TreeSitterBadVersionError``.
+        if (
+            not import_graph
+            and config.start_at != "fix"
+            and _diagram_mode_for(config, mode) != "off"
+        ):
+            try:
+                import_graph = build_import_graph(changed_files, target_dir)
+            except Exception:
+                import_graph = {}
+
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
         # skipped, so the estimate uses ``_single_stack_agent_count``.
@@ -4184,14 +5237,19 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
             if single_stack_mode
             else total_agent_count(len(stacks))
         )
-        print_preflight_notice(
-            console,
-            stages=_preflight_stage_names(stacks),
-            stack_lines=stack_lines,
-            agent_count=notice_agent_count,
-            exploration_available=EXPLORATION_AVAILABLE,
-            sweep_note=_uncovered_sweep_preflight_note(config, changed_files),
-        )
+        # Issue #1113: the notice hardcodes "Deep-review pipeline pre-flight",
+        # the five deep pipeline stages and a 2+2N+2 agent estimate. A two-step
+        # diagram flow executes none of that, so printing it would be a lie
+        # about what the run is doing.
+        if mode != "diagram":
+            print_preflight_notice(
+                console,
+                stages=_preflight_stage_names(stacks),
+                stack_lines=stack_lines,
+                agent_count=notice_agent_count,
+                exploration_available=EXPLORATION_AVAILABLE,
+                sweep_note=_uncovered_sweep_preflight_note(config, changed_files),
+            )
 
         # Flow context (steps communicate through ctx.data); ctx shares
         # run_deep's backend cache so instance-sharing semantics are unchanged.
@@ -4243,6 +5301,10 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 "tier": tier,
                 "dd": dd,
                 "stacks": stacks,
+                # Issue #1113: the changed-file import graph, published so the
+                # diagram step's cross-module rule can read it. ``{}`` simply
+                # denies that rule; it never fails the run.
+                "import_graph": import_graph,
                 "single_stack_mode": single_stack_mode,
                 "intent_path": _intent_path(dd),
                 "alts_path": _alternatives_path(dd),
@@ -4260,7 +5322,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # subsequent --start-at resumes can find the artifacts they need.
         #
         # Cleanup is success-path only (#335); a non-zero exit returns before the guard so evidence survives.
-        exit_code = await run_flow(ctx.registry, "deep", ctx)
+        exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
         if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)
         return exit_code

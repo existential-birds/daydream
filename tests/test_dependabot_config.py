@@ -2,9 +2,9 @@
 
 The config's real acceptance happens GitHub-side (Dependency graph registration,
 first grouped PRs). These tests pin the structural invariants a careless edit
-could silently break: exactly four ecosystems at the exact directories, weekly
-Monday schedule on one timezone, PR limit 5, grouping on the three
-multi-dependency blocks, and the reviewer-facing docs that make the
+could silently break: exactly three ecosystems at the exact directories, weekly
+Monday schedule on one timezone, PR limit 5, grouping on the two
+multi-dependency uv blocks, and the reviewer-facing docs that make the
 config's volume bounds discoverable.
 """
 
@@ -38,9 +38,12 @@ def test_four_ecosystems_at_exact_directories() -> None:
     assert blocks == {
         ("uv", "/"),
         ("uv", "/rl/daydream_review_v1"),
-        ("github-actions", "/"),
         ("npm", "/.github/workflows"),  # the npm manifest trick — must NOT be "/"
     }
+    # The github-actions ecosystem was deliberately removed (PR 1065 follow-up):
+    # the repo pins every third-party action to a SHA registered in
+    # test_workflow_templates.py::_PINNED_ACTION_VERSIONS, which Dependabot
+    # cannot update, so its bump PRs were structurally unmergeable.
 
 
 def test_weekly_monday_one_timezone_limit_five_everywhere() -> None:
@@ -57,7 +60,7 @@ def test_grouping_on_multi_dependency_blocks_only() -> None:
     # not collapsed by ecosystem alone (the root uv block's grouping would
     # otherwise never be inspected).
     by_block = {(u["package-ecosystem"], u["directory"]): u for u in updates(load_dependabot())}
-    for key in (("uv", "/"), ("uv", "/rl/daydream_review_v1"), ("github-actions", "/")):
+    for key in (("uv", "/"), ("uv", "/rl/daydream_review_v1")):
         group = by_block[key]["groups"]
         assert list(group) == ["dependencies"], f"{key} needs a single group"
         pattern = group["dependencies"]["patterns"]

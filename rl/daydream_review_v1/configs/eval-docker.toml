@@ -18,7 +18,7 @@ num_tasks = 1
 num_rollouts = 1
 push = false
 
-[taskset]
+[env.taskset]
 id = "daydream-review-v1"
 corpus_dir = "tests/fixtures/corpus-mini"
 manifest_path = "images/manifest.toml"
@@ -27,7 +27,7 @@ manifest_path = "images/manifest.toml"
 # own gate artifact.
 gate_report_path = "tests/fixtures/stage0-gate.json"
 
-[harness]
+[env.agent.harness]
 id = "daydream-review-v1"
 backend = "claude"
 runtime = { type = "docker" }

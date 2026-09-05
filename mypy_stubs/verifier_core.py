@@ -1,13 +1,14 @@
 """Type-checking shim for the sandbox template's bare ``import verifier_core``.
 
 The templates/tests/score_review.py sandbox is copied into an isolated Harbor
-verifier image at build time, where ``verifier_core`` (the byte-parity twin of
-in-repo :mod:`daydream.benchmark.harbor.verifier_core`) sits beside it. At
-type-check time that top-level bare name is not on ``sys.path``; this shim
-(pinned to ``[tool.mypy] mypy_path``) re-exports the in-repo twin's public API
-so the template is checked against the real signatures instead of degrading to
-``Any``. Runtime never imports this module -- it is not packaged (see
-``[tool.hatch.build.targets.wheel]``) and no code path references it.
+verifier image at build time, where ``verifier_core`` (the canonical module
+from :mod:`daydream.benchmark.harbor.verifier_core`, deployed verbatim) sits
+beside it. At type-check time that top-level bare name is not on ``sys.path``;
+this shim (pinned to ``[tool.mypy] mypy_path``) re-exports the canonical
+module's public API so the template is checked against the real signatures
+instead of degrading to ``Any``. Runtime never imports this module -- it is
+not packaged (see ``[tool.hatch.build.targets.wheel]``) and no code path
+references it.
 """
 
 from daydream.benchmark.harbor.verifier_core import (

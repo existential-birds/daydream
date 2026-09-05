@@ -36,6 +36,7 @@ from daydream.backends import (
     TurnEndEvent,
     resolve_fanout_concurrency,
 )
+from daydream.config import TEST_WALL_BUDGET_S
 
 # Read-only Bash allowlist shared by every agent that runs under the read-only
 # guard (setup-investigator, failure summarizer, exploration specialists,
@@ -103,6 +104,28 @@ _DANGEROUS_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
 _READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
     {"Read", "Grep", "Glob", "StructuredOutput"}
 )
+
+# Ceiling for one foreground Bash call inside the CLI subprocess, in ms. The CLI
+# clamps the tool's ``timeout`` to 600s by default, which is shorter than a
+# real test suite under coverage -- and was exactly why a test-phase agent
+# reached for ``run_in_background``. The host's own per-turn wall budget
+# already bounds every turn (TEST_WALL_BUDGET_S is the largest one granted), so
+# a shell call can never usefully outlive it; raising the CLI ceiling to match
+# removes the incentive without loosening any host-side bound.
+_BASH_TIMEOUT_MS = int(TEST_WALL_BUDGET_S * 1000)
+
+# Environment for the CLI subprocess (merged over the inherited env by the SDK).
+# daydream consumes a turn's final text as the phase result and stops reading
+# the session when the turn ends; the CLI then tears down its background tasks.
+# A backgrounded command therefore never reports, and the agent's "I'll wait
+# for the notification" narration is what the host would parse as the verdict.
+# Backgrounding is switched off at the source, and ``_background_bash_guard``
+# below is the enforcement should a CLI build ignore the switch.
+_CLI_ENV: dict[str, str] = {
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    "BASH_DEFAULT_TIMEOUT_MS": str(_BASH_TIMEOUT_MS),
+    "BASH_MAX_TIMEOUT_MS": str(_BASH_TIMEOUT_MS),
+}
 
 
 def _total_input_tokens(usage: dict[str, Any]) -> int | None:
@@ -350,6 +373,36 @@ async def _dangerous_command_guard(input_data: Any, tool_use_id: Any, context: A
     return {}
 
 
+def _is_background_bash(input_data: Any) -> bool:
+    """Return True if *input_data* is a Bash call asking to run in the background.
+
+    Only a truthy ``run_in_background`` counts; a missing key, ``False``, or a
+    non-Bash tool is a foreground call. Malformed payloads are not Bash calls.
+    """
+    if _bash_command(input_data) is None:
+        return False
+    return bool(_tool_input(input_data).get("run_in_background"))
+
+
+async def _background_bash_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
+    """PreToolUse hook denying ``Bash(run_in_background=True)`` in ALL phases.
+
+    Registered unconditionally. The deny reason tells the agent why and what to
+    do instead, because the model has no other way to learn that a background
+    command's result can never reach the host: the CLI kills background tasks
+    when the turn ends, and the host reads the turn's final text as the result.
+    Composes with ``CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`` in ``_CLI_ENV``.
+    """
+    if not _is_background_bash(input_data):
+        return {}
+    return _read_only_deny(
+        "background Bash blocked (always-on guard): daydream reads this turn's final text as the "
+        "result and the CLI kills background tasks when the turn ends, so a backgrounded command "
+        f"never reports. Run it in the foreground (timeout up to {_BASH_TIMEOUT_MS} ms) and wait "
+        "for it to finish."
+    )
+
+
 _CLAUDE_EFFORT_LEVELS: frozenset[str] = frozenset(("low", "medium", "high", "xhigh", "max"))
 
 
@@ -428,15 +481,15 @@ class ClaudeBackend:
 
         # PreToolUse hooks — NOT allowed_tools — are the enforcement, since
         # bypassPermissions leaves the tool list unrestricted. The dangerous-command
-        # guard is always-on (all phases); the read-only guard composes on top when
-        # read_only=True.
+        # and background-Bash guards are always-on (all phases); the read-only guard
+        # composes on top when read_only=True.
         #
         # NOTE (#887): the skill tool is intentionally left unguarded. daydream no
         # longer invokes any skill (the skill-resolution seam and skill guard were
         # deliberately removed), so we consciously accept that a model could call an
         # operator-installed Claude Code skill. Documented rather than re-adding the
         # skill-guard machinery.
-        pre_tool_use_hooks: list[HookCallback] = [_dangerous_command_guard]
+        pre_tool_use_hooks: list[HookCallback] = [_dangerous_command_guard, _background_bash_guard]
         if read_only:
             pre_tool_use_hooks.append(_read_only_guard)
         options = ClaudeAgentOptions(
@@ -451,6 +504,7 @@ class ClaudeBackend:
             extra_args={"no-session-persistence": None} if not persist_session else {},
             # None leaves the CLI's ambient default; the SDK omits --effort.
             effort=self.reasoning_effort,
+            env=dict(_CLI_ENV),
             hooks={
                 "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
             },

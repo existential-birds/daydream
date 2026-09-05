@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from daydream import git_ops, pr_review
+from daydream import git_ops, pr_comment_renderer, pr_review
 from daydream.findings import ArtifactFinding
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
@@ -351,7 +351,11 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
         ParsedIssue(path="c.py", line=None, title="t3", body="xstack", is_cross_stack=True),
     ]
 
-    def fake_resolve(_td: Path, _sha: str, issue: ParsedIssue) -> int | None:
+    def fake_resolve(
+        _td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
+    ) -> int | None:
+        # classify must resolve the hunks first and hand them down (issue #1102).
+        assert hunks is not None, "classify called resolve_line without the file's hunks"
         return issue.line
 
     def fake_hunks(
@@ -368,6 +372,7 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
             return [(1, 5)]  # 99 is outside
         return []
 
+    monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
     monkeypatch.setattr(pr_review, "resolve_line", fake_resolve)
     monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
 
@@ -391,7 +396,10 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
         ParsedIssue(path="scripts/modernize-app.py", line=105, title="t2", body="anchor_two"),
     ]
 
-    def fake_resolve(_td: Path, _sha: str, issue: ParsedIssue) -> int | None:
+    def fake_resolve(
+        _td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
+    ) -> int | None:
+        assert hunks is not None, "classify called resolve_line without the file's hunks"
         return issue.line
 
     def fake_hunks(
@@ -408,6 +416,7 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
             return [(80, 98), (106, 120)]  # 105 is 1 before second hunk
         return []
 
+    monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
     monkeypatch.setattr(pr_review, "resolve_line", fake_resolve)
     monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
 
@@ -419,6 +428,109 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(
     # modernize-app.py:105 snapped to second hunk start 106
     assert result.inline[1]["path"] == "scripts/modernize-app.py"
     assert result.inline[1]["line"] == 106
+
+
+def test_build_payload_reviewed_commit_line_first_in_review_info(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1/M4: the reviewed-commit line is rendered, fully linked (S1),
+    and precedes Model/Cost and Severity/Confidence in the review-info block."""
+    classified = pr_review._ClassifiedIssues(
+        body_only=[
+            ParsedIssue(
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
+                confidence="MEDIUM",
+                severity="low",
+            )
+        ],
+    )
+    # Feed the enriched renderer a real fixture trajectory so run-info
+    # fields (Model/Cost/Tokens) render instead of the fallback stub.
+    fixture = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None))
+    payload = build_payload(pr, classified)
+    body = payload["body"]
+
+    expected = (
+        f"- **Reviewed commit:** [`{pr.head_sha[:7]}`]"
+        f"(https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})"
+    )
+    assert expected in body
+    # Ordering: the commit line precedes the enriched run-info fields
+    # (Model/Cost) and the conditional Severity/Confidence lines inside
+    # the Review info block. Whole-body indices suffice: the commit line
+    # appears exactly once, and all compared markers first appear inside
+    # this block.
+    assert body.index(expected) < body.index("- **Model:**")
+    assert body.index(expected) < body.index("- **Severity:**")
+    assert body.index(expected) < body.index("- **Confidence:**")
+
+
+def test_build_payload_reviewed_commit_survives_run_info_fallback(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: renderer degradation to 'run details unavailable' must not hide
+    the reviewed-commit line (host-injection, Key Decision 2)."""
+    monkeypatch.setattr(
+        pr_review,
+        "_render_review_info_block",
+        pr_comment_renderer._render_fallback,
+    )
+    payload = build_payload(pr, pr_review._ClassifiedIssues())
+    body = payload["body"]
+    assert "*run details unavailable*" in body  # degraded run-info present
+    assert (
+        f"- **Reviewed commit:** [`{pr.head_sha[:7]}`]"
+        f"(https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})" in body
+    )
+
+
+def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(
+    pr: PRInfo,
+) -> None:
+    """Fork-head PRs: the reviewed-commit link points at the fork that holds
+    the head commit, while owner/repo (the POST target) stay the base repo."""
+    fork_pr = replace(pr, head_repo="forky/widgets")
+    payload = build_payload(
+        fork_pr, pr_review._ClassifiedIssues(), run_info_override="test run info"
+    )
+    body = payload["body"]
+    assert (
+        "- **Reviewed commit:** [`head123`]"
+        "(https://github.com/forky/widgets/commit/head123)" in body
+    )
+    assert "https://github.com/acme/widgets/commit/head123" not in body
+
+
+def test_build_payload_blocks_forged_reviewed_commit_line(
+    pr: PRInfo,
+) -> None:
+    """A hostile run_info_override containing a crafted reviewed-commit line
+    must not render a second, forged line below the trusted one (issue 2)."""
+    payload = build_payload(
+        pr,
+        pr_review._ClassifiedIssues(),
+        run_info_override=(
+            "test run info\n"
+            "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/"
+            + "e" * 40 + ")\n"
+            "*run details unavailable*"
+        ),
+    )
+    body = payload["body"]
+    commit_lines = [
+        line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")
+    ]
+    assert len(commit_lines) == 1
+    assert (
+        "- **Reviewed commit:** [`head123`]"
+        "(https://github.com/acme/widgets/commit/head123)" in body
+    )
+    assert "evil/widgets" not in body
+    assert "e" * 40 not in body
 
 
 def test_build_payload_shape(
@@ -463,6 +575,10 @@ def test_build_payload_shape(
     assert payload["comments"] == classified.inline
 
     body = payload["body"]
+    assert (
+        "- **Reviewed commit:** [`head123`]"
+        "(https://github.com/acme/widgets/commit/head123)" in body
+    )
     # Title header.
     assert "**Code Review Summary**" in body
     # Bottom-of-comment wizard footer (DAYDREAM_FOOTER) carries the version.
@@ -732,6 +848,31 @@ def test_find_open_pr_returns_pr_info(
     assert info.repo == "r"
 
 
+def test_find_open_pr_captures_head_repo_for_fork_pr(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """Fork-head PR: the row's headRepository/headRepositoryOwner (the fork)
+    is captured as ``head_repo`` for the reviewed-commit link, while
+    owner/repo (the POST target) stay the base repo from ``gh repo view``."""
+    rows = [
+        {
+            "number": 7,
+            "headRefOid": "h",
+            "baseRefOid": "b",
+            "baseRefName": "main",
+            "url": "u",
+            "headRepository": {"name": "widgets", "nameWithOwner": "forky/widgets"},
+            "headRepositoryOwner": {"login": "forky"},
+        }
+    ]
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: rows)
+    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: ("acme", "widgets"))
+    info = pr_review.find_open_pr(git_repo)
+    assert info is not None
+    assert (info.owner, info.repo) == ("acme", "widgets")
+    assert info.head_repo == "forky/widgets"
+
+
 def test_find_pr_by_number_returns_none_when_pr_missing(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
@@ -979,6 +1120,44 @@ async def test_post_review_from_report_empty_items_is_nothing_to_post(
     assert status == pr_review.PostStatus.NOTHING_TO_POST
 
 
+@pytest.mark.asyncio
+async def test_post_review_from_report_empty_items_posts_diagram(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pr: PRInfo,
+) -> None:
+    merged = tmp_path / "merged-items.json"
+    merged.write_text(json.dumps({"items": []}))
+    blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(
+        pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues()
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_submit(
+        _td: Path, _pr: PRInfo, payload: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        captured["payload"] = payload
+        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
+
+    monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
+    monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
+    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+
+    status = await pr_review.post_review_to_pr_from_report(
+        tmp_path,
+        merged,
+        console=_FakeConsole(),  # type: ignore[arg-type]
+        post=True,
+        diagram_blocks=blocks,
+    )
+
+    assert status == pr_review.PostStatus.POSTED
+    assert captured["payload"]["event"] == "COMMENT"
+    assert blocks in captured["payload"]["body"]
+
+
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
     """Write *path* under *repo*, commit it, and return the new HEAD SHA."""
     file_path = repo / path
@@ -1010,6 +1189,212 @@ def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
     sha = _git(git_repo, "rev-parse", "HEAD")
     issue = ParsedIssue(path="gone.py", line=1, title="t", body="b")
     assert pr_review.resolve_line(git_repo, sha, issue) is None
+
+
+# --- Diff-aware line resolution (issue #1102) -----------------------------
+#
+# `resolve_line` is documented (deep/location_validator.py:1-10) as a
+# no-op-on-valid backstop behind the merge-time location validator. Before
+# #1102 it never saw the diff, so a correct in-hunk line was re-derived from
+# prose tokens and could be relocated to the first anchor hit anywhere in the
+# file -- after which `snap_to_hunk` dropped the finding off the diff.
+
+# The finding from the issue's reproduction: a prose-heavy rationale whose one
+# code identifier (`ttl`) is short enough that longest-first ranking cuts it.
+_PROSE_HEAVY_ISSUE = ParsedIssue(
+    path="cache.yaml",
+    line=12,
+    title="Expiration collapses from an hour to a minute",
+    body=(
+        "The new override sets `ttl` far below every other environment, so cached "
+        "entries become unavailable almost immediately and the downstream service "
+        "absorbs the additional request volume."
+    ),
+)
+
+# `prod:`'s TTL drops from an hour to a minute on line 12; every other block
+# keeps 3600, so the anchor token `ttl` occurs on four lines and the only
+# prose-matching token (`Expiration`) sits on line 1, outside the hunk.
+_CACHE_YAML_BASE = (
+    "# Expiration policy for the shared cache tier.\n"
+    "defaults:\n"
+    "  ttl: 3600\n"
+    "\n"
+    "staging:\n"
+    "  ttl: 3600\n"
+    "\n"
+    "worker:\n"
+    "  ttl: 3600\n"
+    "\n"
+    "prod:\n"
+    "  ttl: 3600\n"
+)
+_CACHE_YAML_HEAD = _CACHE_YAML_BASE.replace("prod:\n  ttl: 3600\n", "prod:\n  ttl: 60\n")
+
+
+def _pr_for(base_sha: str, head_sha: str) -> PRInfo:
+    """A PRInfo pointing at two real commits in a temp repo."""
+    return PRInfo(
+        number=7,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        base_ref="main",
+        owner="acme",
+        repo="widgets",
+        url="https://github.com/acme/widgets/pull/7",
+    )
+
+
+def test_extract_anchors_prefer_quoted_keeps_short_backticked_identifier() -> None:
+    """Quoted-first ranking keeps a 3-char identifier that prose would crowd out."""
+    text = f"{_PROSE_HEAVY_ISSUE.title}\n{_PROSE_HEAVY_ISSUE.body}"
+    assert extract_anchors(text, prefer_quoted=True)[0] == "ttl"
+    # Bare words still rank longest-first behind the quoted tokens.
+    bare = extract_anchors(text, prefer_quoted=True)[1:]
+    assert bare == sorted(bare, key=len, reverse=True)
+
+
+def test_extract_anchors_default_ordering_stays_frozen_for_fingerprints() -> None:
+    """The default (fingerprint-hashed) selection is unchanged by #1102.
+
+    ``compute_fingerprint`` hashes the default token set, so re-ranking it
+    would re-identify every open finding and defeat the reconcile dedup. The
+    prose-heavy rationale must still crowd ``ttl`` out of the default cap --
+    that is exactly the selection the existing fingerprints were built from.
+    """
+    text = f"{_PROSE_HEAVY_ISSUE.title}\n{_PROSE_HEAVY_ISSUE.body}"
+    anchors = extract_anchors(text)
+    assert anchors == [
+        "environment",
+        "unavailable",
+        "immediately",
+        "Expiration",
+        "downstream",
+        "additional",
+        "collapses",
+        "override",
+    ]
+    assert "ttl" not in anchors
+
+
+def test_resolve_line_trusts_in_hunk_hint_without_any_anchor_match(git_repo: Path) -> None:
+    """An in-hunk line hint is returned unchanged even when no anchor matches.
+
+    This is the "no-op-on-valid" contract: the merge-time validator already
+    confirmed the line against the hunk index, so posting must not re-derive it.
+    """
+    text = "\n".join(f"row_{i}" for i in range(1, 21)) + "\n"
+    sha = _commit_file(git_repo, "x.py", text, "add x.py")
+    issue = ParsedIssue(path="x.py", line=10, title="Latency regression", body="prose only")
+    # No anchor from the title/body occurs anywhere in the file.
+    assert pr_review.resolve_line(git_repo, sha, issue) is None
+    assert pr_review.resolve_line(git_repo, sha, issue, [(8, 12)]) == 10
+
+
+def test_resolve_line_prefers_in_hunk_anchor_hit_over_first_file_hit(git_repo: Path) -> None:
+    """With no usable hint, an in-hunk anchor hit beats the first hit in the file."""
+    lines = [f"row_{i}" for i in range(1, 21)]
+    lines[1] = "marker_token  # pre-existing, unchanged"
+    lines[17] = "marker_token  # the changed line"
+    sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
+    issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
+    # Without hunks the first hit (line 2) wins, as before.
+    assert pr_review.resolve_line(git_repo, sha, issue) == 2
+    # With hunks, the in-hunk hit (line 18) wins over the earlier out-of-hunk one.
+    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 18
+
+
+def test_resolve_line_returns_out_of_hunk_hit_when_no_in_hunk_candidate(
+    git_repo: Path,
+) -> None:
+    """An out-of-hunk anchor hit is still returned when no anchor hits a hunk."""
+    lines = [f"row_{i}" for i in range(1, 21)]
+    lines[1] = "marker_token  # pre-existing, unchanged"
+    sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
+    issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
+    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 2
+
+
+def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> None:
+    """Real-path #1102 repro: a correct in-hunk citation stays inline.
+
+    Drives the real :func:`classify` over a real two-commit repo -- real
+    ``git diff`` for both the changed-file set and the hunk ranges, no mocks.
+    The finding cites line 12, the only changed line. Before the fix the eight
+    surviving anchors were all rationale prose, none of them within +/-5 lines
+    of line 12, so the hint was discarded and the full-file search relocated
+    the comment to ``Expiration`` on line 1 -- 8 lines outside the hunk, so
+    ``snap_to_hunk`` returned None and the finding lost its line.
+    """
+    base = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_BASE, "add cache.yaml")
+    head = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_HEAD, "cut prod ttl")
+    issue = replace(_PROSE_HEAVY_ISSUE)
+
+    result = classify(git_repo, _pr_for(base, head), [issue])
+
+    assert [c["line"] for c in result.inline] == [12], (
+        f"in-hunk citation was not posted on its own line; "
+        f"file_level={[i.path for i in result.file_level]} "
+        f"body_only={[i.path for i in result.body_only]}"
+    )
+    assert result.inline[0]["path"] == "cache.yaml"
+    assert not result.file_level
+    assert not result.body_only
+    # Nothing moved, so nothing is annotated.
+    assert "**Placement:**" not in result.inline[0]["body"]
+
+
+def test_classify_annotates_relocated_line(git_repo: Path) -> None:
+    """A snapped line is recorded in the body instead of overwritten silently.
+
+    Real-path: the finding cites line 15, two lines outside the real hunk
+    (17, 23). ``snap_to_hunk`` moves the comment to 17, so the posted line is
+    not the cited one -- and the relocation must be visible on the comment and
+    in the issue body the findings artifact serialises (issue #1102).
+    """
+    lines = [f"row_{i}" for i in range(1, 31)]
+    lines[14] = "settle_window = 5  # cited here"
+    base = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
+    lines[19] = "row_20_changed"
+    head = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "change row 20")
+    issue = ParsedIssue(path="x.py", line=15, title="t", body="`settle_window` is too small")
+
+    result = classify(git_repo, _pr_for(base, head), [issue])
+
+    assert [c["line"] for c in result.inline] == [17]
+    note = "**Placement:** posted on line 17; reviewer cited line 15."
+    assert note in issue.body, "the relocation was not recorded on the finding"
+    assert note in result.inline[0]["body"], "the posted comment does not show the relocation"
+    # Re-classifying the same objects must not stack duplicate notes.
+    classify(git_repo, _pr_for(base, head), [issue])
+    assert issue.body.count("**Placement:**") == 1
+
+
+def test_classify_skips_file_hunks_for_path_missing_at_head(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """A path that doesn't exist at head_sha (deleted/renamed) never calls file_hunks.
+
+    ``resolve_line`` would reject such a path via its own ``git show`` no
+    matter what hunks it was handed, so `classify` should discover the path
+    is unresolvable up front instead of paying for the file_hunks() diff
+    lookup (and its gh-pr-diff network fallback) first (issue #1102 follow-up).
+    """
+    base = _commit_file(git_repo, "gone.py", "x = 1\n", "add gone.py")
+    _git(git_repo, "rm", "gone.py")
+    _git(git_repo, "commit", "-m", "delete gone.py")
+    head = _git(git_repo, "rev-parse", "HEAD")
+    issue = ParsedIssue(path="gone.py", line=1, title="t", body="`x`")
+
+    def fail_if_called(*_a: Any, **_k: Any) -> list[tuple[int, int]]:
+        raise AssertionError("file_hunks should not be called for a path missing at head_sha")
+
+    monkeypatch.setattr(pr_review, "file_hunks", fail_if_called)
+
+    result = classify(git_repo, _pr_for(base, head), [issue])
+
+    assert not result.inline
+    assert [i.path for i in result.file_level] == ["gone.py"]
 
 
 # --- file_hunks git-diff + gh-pr-diff fallback ----------------------------
@@ -1269,3 +1654,175 @@ def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
     assert pr_review._finding_blocks_approval(
         issue.severity, issue.location_distrust, issue.severity_off_vocabulary
     ) is False
+
+
+# --- Grounded diagrams (issue #1113) ----------------------------------------
+
+
+def test_diagram_marker_round_trip() -> None:
+    """The hidden marker is invisible in rendered markdown and parses back exactly."""
+    from daydream.pr_review import diagram_marker, parse_diagram_markers
+
+    body = "\n\n".join(
+        [
+            diagram_marker("sequence", "a" * 40),
+            diagram_marker("flowchart", "a" * 40),
+            "<details>the diagrams</details>",
+        ]
+    )
+    assert parse_diagram_markers(body) == [
+        ("sequence", "a" * 40),
+        ("flowchart", "a" * 40),
+    ]
+    # A finding marker is a different namespace and must not cross-parse.
+    assert parse_diagram_markers(pr_review.finding_marker("f" * 64)) == []
+    assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
+
+
+def test_diagram_replacement_post_failure_keeps_prior_comment(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from daydream.git_ops import GitError
+    from daydream.reconcile import PriorDiagramComment
+
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "daydream.reconcile.fetch_prior_diagram_comments",
+        lambda *_a, **_k: [PriorDiagramComment("IC_prior", ("sequence",))],
+    )
+
+    def minimize(_target: Path, node_id: str) -> bool:
+        calls.append(("minimize", node_id))
+        return True
+
+    monkeypatch.setattr(
+        "daydream.reconcile.minimize_comment",
+        minimize,
+    )
+
+    def fail_post(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(("post", None))
+        raise GitError("simulated POST failure")
+
+    monkeypatch.setattr(git_ops, "gh_api", fail_post)
+
+    result = pr_review.post_diagram_comment_to_pr(
+        tmp_path,
+        pr,
+        body="diagram",
+        kinds=["sequence"],
+        bot_login="daydream",
+    )
+
+    assert result == (None, "simulated POST failure")
+    assert calls == [("post", None)]
+
+
+def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from daydream.reconcile import PriorDiagramComment
+
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "daydream.reconcile.fetch_prior_diagram_comments",
+        lambda *_a, **_k: [
+            PriorDiagramComment("IC_matching", ("sequence",)),
+            PriorDiagramComment("IC_other_kind", ("flowchart",)),
+        ],
+    )
+
+    def minimize(_target: Path, node_id: str) -> bool:
+        calls.append(("minimize", node_id))
+        return True
+
+    monkeypatch.setattr(
+        "daydream.reconcile.minimize_comment",
+        minimize,
+    )
+
+    def post(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        calls.append(("post", None))
+        return {"html_url": "https://github.com/acme/widgets/issues/42#issuecomment-1"}
+
+    monkeypatch.setattr(git_ops, "gh_api", post)
+
+    result = pr_review.post_diagram_comment_to_pr(
+        tmp_path,
+        pr,
+        body="diagram",
+        kinds=["sequence"],
+        bot_login="daydream",
+    )
+
+    assert result == (
+        "https://github.com/acme/widgets/issues/42#issuecomment-1",
+        None,
+    )
+    assert calls == [("post", None), ("minimize", "IC_matching")]
+
+
+def test_build_payload_places_diagram_blocks_under_the_header(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``diagram_blocks`` lands directly under ``**Code Review Summary**``."""
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+    classified = pr_review._ClassifiedIssues(
+        body_only=[
+            ParsedIssue(
+                path="b.py", line=None, title="File note", body="desc",
+                fingerprint="b" * 64,
+            )
+        ]
+    )
+    blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
+
+    payload = pr_review.build_payload(pr, classified, diagram_blocks=blocks)
+    body = payload["body"]
+    header = "**Code Review Summary**"
+    assert body[body.index(header) + len(header) :].lstrip().startswith(blocks)
+    # Absent (the default) is byte-identical to the pre-#1113 body.
+    assert pr_review.build_payload(pr, classified)["body"] == body.replace(
+        f"{header}\n\n{blocks}", header
+    )
+
+
+def test_custom_summary_renderer_receives_and_may_drop_diagrams(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec test 16: ``ctx.diagrams`` reaches a fork renderer, which owns it.
+
+    The host cannot inject the blocks around a custom renderer's output (they
+    belong inside the summary body), so a renderer that ignores ``ctx.diagrams``
+    drops them -- which is exactly what docs/extensions.md warns about.
+    """
+    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+    seen: list[str | None] = []
+
+    def keeps(ctx: Any) -> str:
+        seen.append(ctx.diagrams)
+        return f"**Custom**\n\n{ctx.diagrams}"
+
+    def drops(ctx: Any) -> str:
+        seen.append(ctx.diagrams)
+        return "**Custom**"
+
+    classified = pr_review._ClassifiedIssues()
+    blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
+    prev = get_registry()
+    try:
+        for renderer, expect_present in ((keeps, True), (drops, False)):
+            reg = Registry()
+            register_builtins(reg)
+            reg.override_renderer("summary", renderer)
+            set_registry(reg)
+            body = pr_review.build_payload(
+                pr, classified, diagram_blocks=blocks
+            )["body"]
+            assert (blocks in body) is expect_present
+    finally:
+        set_registry(prev)
+    assert seen == [blocks, blocks]
