@@ -3457,9 +3457,9 @@ def _verify_commit_scope(
 ) -> None:
     """Verify the committed tree matches the pre-staged daydream set.
 
-    Issue #562: prompt compliance alone is not enforcement — a commit agent
-    that re-runs ``git add -A`` would sweep pre-existing untracked files into
-    the commit. Enforcement checks both directions:
+    Issue #562: the committed tree is checked against the pre-staged daydream
+    set — extras surface scope creep, missing files surface an under-commit —
+    so a stray staging can never silently enter the commit. Enforcement checks both directions:
 
     - extras (committed beyond the pre-staged set) surfaces scope creep;
     - missing (pre-staged files absent from the committed tree) surfaces an
@@ -3497,29 +3497,43 @@ async def _do_commit(
     items: list[dict[str, Any]] | None = None,
     preexisting_untracked: set[str] | None = None,
 ) -> bool:
-    """Stage, commit, and optionally push with daydream trailers.
+    """Stage, commit, and optionally push — all host-side, no agent turn.
+
+    Issue #726: the commit is a real subprocess with a real exit status, not
+    an agentpled turn. Staging is deterministic (``_stage_deterministic``),
+    the message is built by the pure :func:`build_commit_message` (trailers
+    included at commit time — no post-hoc amend), and a ``push=True`` commit
+    only reports success after ``git_ops.remote_contains_commit`` confirms the
+    remote actually holds the pushed HEAD. A failed push raises the project
+    ``GitError`` even though a local commit exists — the caller's
+    ``_commit_push_or_stop`` guard surfaces it as ``Stop(1)`` rather than
+    hiding it behind "Commit and push complete".
 
     Args:
-        backend: LLM backend used to run the commit agent.
+        backend: Unused on the host path (kept for call-site/signature
+            stability); no agent turn runs in the commit.
         work: Current workspace context (repo path, run ID, etc.).
         push: If True, push to the remote after committing.
         interactive: If True, prompt the user for confirmation before
             committing.
         items: Optional list of fix dicts (with ``file`` and ``description``
-            keys) summarising changes applied in this run; included in the
-            agent prompt so the commit message is accurate.
+            keys) summarising changes applied in this run; folded into the
+            deterministic commit message.
         preexisting_untracked: Optional set of repo-relative paths that were
-            untracked before the daydream run started. When supplied, staging
-            is deterministic: exactly ``changed_files(...) - preexisting`` is
-            pre-staged (never ``git add --all``) so a user's pre-run scratch
-            files can never be swept into the daydream commit (issue #543).
-            The commit agent then commits the already-staged index only. When
-            ``None`` (legacy callers), the agent stages as before.
+            untracked before the daydream run started. Exactly
+            ``changed_files(...) - preexisting`` is committed (never
+            ``git add --all``) so a user's pre-run scratch files can never be
+            swept into the daydream commit (issue #543). When ``None`` (legacy
+            callers), the set is defensively computed at commit time so
+            untracked protection never silently drops.
 
     Returns:
-        True if a commit was performed, False if the user declined.
+        True if a commit was performed, False if the user declined or there
+        was nothing to commit.
 
     """
+    del backend  # host-native commit: no agent turn (issue #726)
+
     if interactive:
         # Commit/push gate across the two interaction axes. ``--yes`` commits
         # without prompting; an unattended run with no assumption declines
@@ -3537,104 +3551,48 @@ async def _do_commit(
             print_dim(console, "Skipping commit and push")
             return False
 
-    if preexisting_untracked is not None:
-        stage = _stage_deterministic(work, preexisting_untracked)
-        if stage is None:
-            return False
+    # Defensive untracked protection: a caller without a pre-run snapshot
+    # still must not sweep user scratch files into the commit, so compute the
+    # snapshot at commit time rather than dropping the protection.
+    if preexisting_untracked is None:
+        preexisting_untracked = set(git_ops.list_untracked(work.repo))
 
-    push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
+    stage = _stage_deterministic(work, preexisting_untracked)
+    if stage is None:
+        return False
 
-    if preexisting_untracked is not None:
-        # Deterministic staging (issue #562/#543): the index already holds
-        # exactly the daydream changes, so the agent commits the pre-staged
-        # index only and must not re-stage anything.
-        staging_instruction = (
-            "The daydream changes are already staged. Review the staged diff "
-            "(git diff --cached) and commit using a conventional commit message. "
-            "Do NOT run git add or stage anything — the index is complete. "
-        )
-    else:
-        # Legacy path: no pre-run untracked snapshot — the agent stages and
-        # commits as before (the documented None contract).
-        staging_instruction = (
-            "Stage all changes and commit using a conventional commit message. "
-        )
-
-    if items:
-        summaries = "\n".join(
-            f"- {it.get('file', 'unknown')}: {it.get('description', 'no description')}"
-            for it in items
-        )
-        items_context = (
-            "The following fixes were applied in this run — use them to write "
-            f"an accurate commit message:\n{summaries}\n\n"
-        )
-    else:
-        items_context = ""
-
-    prompt = (
-        f"{staging_instruction}"
-        "Review the diff to write a meaningful summary of what was fixed or changed. "
-        "Use the format: <type>: <concise summary of changes>\n\n"
-        f"{items_context}"
-        "Pick the most appropriate type from: fix, refactor, style, perf. "
-        "If multiple categories of changes exist, pick the dominant one. "
-        "Keep the subject line under 72 characters. "
-        "Add a body with bullet points if there are multiple distinct changes. "
-        "Add these EXACT git trailers as the last lines of the commit message "
-        "(after a blank line following the body):\n\n"
-        f"Daydream-Run: {work.run_id}\n"
-        f"Daydream-Version: {daydream.__version__}\n\n"
-        f"{push_line}"
-    )
     try:
         sha_before = git_ops.head_sha(work.repo)
     except GitError:
         sha_before = None
 
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.FIX)
+    message = build_commit_message(
+        items=items or [], run_id=work.run_id, version=daydream.__version__,
+    )
+    git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
 
-    # Post-commit trailer verification: the agent may omit trailers, so amend if
-    # missing (daydream_commits() relies on them). Only when a new commit was
-    # created — otherwise we would silently amend the user's prior commit.
-    try:
-        sha_after = git_ops.head_sha(work.repo)
-    except GitError:
-        # No HEAD after the agent run means no commit was created.
-        return False
-
-    if sha_after == sha_before:
-        return False
-    if sha_before is None:
-        # Cannot confirm the agent created a new commit — skip trailer
-        # verification to avoid amending a pre-existing (non-daydream) commit.
-        return True
-
-    expected_trailers = {
-        "Daydream-Run": work.run_id,
-        "Daydream-Version": daydream.__version__,
-    }
-    try:
-        msg = git_ops.head_commit_message(work.repo)
-    except GitError:
-        return True
-
-    missing = {k: v for k, v in expected_trailers.items() if f"{k}: {v}" not in msg}
-    if missing:
-        print_warning(
-            console,
-            f"Commit missing daydream trailer(s): {', '.join(missing)}; amending",
-        )
-        try:
-            git_ops.amend_trailers(work.repo, missing, message=msg)
-        except GitError as exc:
-            print_warning(console, f"Failed to amend trailers: {exc}")
-
-    # stage is only ever set on the deterministic path (and non-None there,
-    # since _stage_deterministic returned early on an empty stage); the
-    # ``is not None`` narrow lets mypy prove the set type.
-    if preexisting_untracked is not None and stage is not None:
+    # Deterministic-staging invariant check (issue #562): the committed tree
+    # must match the pre-staged daydream set in both directions.
+    if sha_before is not None:
         _verify_commit_scope(work, sha_before, stage)
+
+    if push:
+        branch = git_ops.current_branch(work.repo)
+        if branch is None:
+            raise GitError(
+                f"Cannot push: {work.repo} is in a detached-HEAD state "
+                "with no current branch"
+            )
+        git_ops.push_branch(work.repo, branch)
+        sha = git_ops.head_sha(work.repo)
+        # Success requires the remote to actually hold the pushed HEAD — a
+        # push that "succeeded" without landing the commit is still a failure
+        # (issue #726: "green" means really on the remote).
+        if not git_ops.remote_contains_commit(work.repo, branch, sha):
+            raise GitError(
+                f"Push verification failed: remote 'origin' does not report "
+                f"refs/heads/{branch} at {sha} after the push"
+            )
 
     return True
 

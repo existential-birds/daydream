@@ -327,12 +327,12 @@ def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(
     assert migration.read_bytes() == original
 
 
-class _StagedCommitBackend(StubBackend):
-    """Commit-agent stub: commits the ALREADY-STAGED index with daydream trailers.
+class _HostCommitBackend(StubBackend):
+    """Backend stand-in for host-native commit tests.
 
-    Never runs ``git add`` — the deterministic pre-staging in ``_do_commit``
-    (issue #562/#543) has staged exactly the intended files, so re-staging with
-    ``--all`` would sweep pre-existing untracked files back into the commit.
+    ``_do_commit`` never runs an agent turn (issue #726), so the backend
+    parameter is a structural formality — but the Backend protocol still
+    requires a correctly typed ``execute`` for mypy.
     """
 
     async def execute(
@@ -346,122 +346,8 @@ class _StagedCommitBackend(StubBackend):
         read_only: bool = False,
         persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
-        if prompt.startswith("The daydream changes are already staged"):
-            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
-            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
-            git(
-                cwd,
-                "commit",
-                "-m",
-                f"fix: apply daydream changes\n\n"
-                f"Daydream-Run: {run_id}\nDaydream-Version: {version}",
-            )
-            yield TextEvent(text="Committed the staged changes.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
-class _ReStageCommitBackend(StubBackend):
-    """Commit-agent stub that IGNORES the staging instruction and re-runs
-    ``git add -A`` — the issue #562 failure mode the post-commit verification
-    must surface. Sweeps a pre-existing untracked file into the commit that
-    ``_do_commit`` deliberately left out of the pre-staged index.
-    """
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        if prompt.startswith("The daydream changes are already staged"):
-            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
-            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
-            git(cwd, "add", "-A")
-            git(
-                cwd,
-                "commit",
-                "-m",
-                f"fix: apply daydream changes\n\n"
-                f"Daydream-Run: {run_id}\nDaydream-Version: {version}",
-            )
-            yield TextEvent(text="Committed the staged changes.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
-class _PartialCommitBackend(StubBackend):
-    """Commit-agent stub that commits only a subset of the pre-staged index
-    (``git commit -- <one path>``), leaving the other staged fix uncommitted —
-    the under-commit direction the verification must surface.
-    """
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        if prompt.startswith("The daydream changes are already staged"):
-            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
-            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
-            # Partial commit: only app.py enters the committed tree; helper.py
-            # stays staged and must be surfaced as an under-commit.
-            git(
-                cwd,
-                "commit",
-                "-m",
-                f"fix: apply daydream changes\n\n"
-                f"Daydream-Run: {run_id}\nDaydream-Version: {version}",
-                "--",
-                "app.py",
-            )
-            yield TextEvent(text="Committed one path.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
+        yield TextEvent(text="unused on the host commit path")
+        yield ResultEvent(structured_output=None, continuation=None)
 
 
 @pytest.mark.asyncio
@@ -481,7 +367,7 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     git_commit(git_repo, "baseline app.py")
     (git_repo / "app.py").write_text("x = 1\n")            # daydream change (tracked modification)
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
-    backend = _StagedCommitBackend(git_repo)
+    backend = _HostCommitBackend(git_repo)
 
     ok = await _do_commit(
         backend, work, push=False, preexisting_untracked={"notes.txt"},
@@ -498,67 +384,40 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
 
 
 @pytest.mark.asyncio
-async def test_do_commit_warns_on_scope_creep_beyond_prestaged_set(
+async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
     git_repo: Path,
     make_work: Callable[..., WorkContext],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """#562 enforcement is not prompt-only: a commit agent that re-runs
-    ``git add -A`` sweeps a pre-existing untracked file into the commit, and
-    the post-commit verification must warn — the committed tree exceeds the
-    pre-staged daydream set."""
+    """Host-native commit: the committed tree is exactly the pre-staged daydream
+    set — no scope creep (extras beyond it) and no under-commit (pre-staged
+    files dropped) is possible, because ``commit_paths`` stages and commits the
+    same deterministic set in one host-side subprocess (issue #726)."""
     from daydream.phases import _do_commit
 
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")            # tracked baseline
-    git(git_repo, "add", "app.py")
-    git_commit(git_repo, "baseline app.py")
-    (git_repo / "app.py").write_text("x = 1\n")            # daydream change (tracked)
-    (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
-    backend = _ReStageCommitBackend(git_repo)
-
-    ok = await _do_commit(
-        backend, work, push=False, preexisting_untracked={"notes.txt"},
-    )
-    assert ok is True
-    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
-    assert "app.py" in committed
-    assert "notes.txt" in committed  # the bad agent swept it in
-    out = capsys.readouterr().out
-    assert "scope creep" in out
-    assert "notes.txt" in out
-
-
-@pytest.mark.asyncio
-async def test_do_commit_warns_on_under_commit_missing_prestaged_files(
-    git_repo: Path,
-    make_work: Callable[..., WorkContext],
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A commit agent that commits only part of the pre-staged index drops the
-    remaining tracked fixes — the verification surfaces the under-commit
-    instead of reporting a clean pass."""
-    from daydream.phases import _do_commit
-
-    work = make_work(git_repo)
-    (git_repo / "app.py").write_text("x = 0\n")
     (git_repo / "helper.py").write_text("h = 0\n")
     git(git_repo, "add", "app.py", "helper.py")
     git_commit(git_repo, "baseline")
-    (git_repo / "app.py").write_text("x = 1\n")    # daydream change
-    (git_repo / "helper.py").write_text("h = 1\n")  # daydream change
-    backend = _PartialCommitBackend(git_repo)
+    (git_repo / "app.py").write_text("x = 1\n")            # daydream change
+    (git_repo / "helper.py").write_text("h = 1\n")         # daydream change
+    (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
 
     ok = await _do_commit(
-        backend, work, push=False, preexisting_untracked=set(),
+        _HostCommitBackend(git_repo), work, push=False,
+        items=[{"file": "app.py", "description": "fix app"}],
+        preexisting_untracked={"notes.txt"},
     )
     assert ok is True
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
-    assert "app.py" in committed
-    assert "helper.py" not in committed  # dropped by the partial commit
+    assert sorted(committed) == ["app.py", "helper.py"]
+    assert "notes.txt" in git(git_repo, "status", "--porcelain")
+    # No scope-creep or under-commit warnings on the host path.
     out = capsys.readouterr().out
-    assert "under-commit" in out
-    assert "helper.py" in out
+    assert "scope creep" not in out
+    assert "under-commit" not in out
+
 
 
 @pytest.mark.asyncio
@@ -585,7 +444,7 @@ async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
     (dd / "fix-failures.json").write_text("[]\n")
     (dd / "deep").mkdir(parents=True)
     (dd / "deep" / "fix-quality-gate.json").write_text("{}\n")
-    backend = _StagedCommitBackend(git_repo)
+    backend = _HostCommitBackend(git_repo)
 
     ok = await _do_commit(
         backend, work, push=False, preexisting_untracked=set(),
@@ -596,6 +455,147 @@ async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
     assert not any(p.startswith(".daydream/") for p in committed), (
         f"commit tree carries .daydream/ artifacts: {committed}"
     )
+
+
+@pytest.mark.asyncio
+async def test_host_commit_push_verifies_remote_before_success(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Host-native commit/push: _do_commit commits deterministically, pushes,
+    and verifies the remote actually contains the pushed HEAD before the phase
+    may report success. No agent turn is involved in the commit."""
+    from daydream.phases import _do_commit
+
+    remote = tmp_path / "remote"
+    git(tmp_path, "init", "--bare", "remote")
+    work_repo = tmp_path / "clone"
+    work_repo.mkdir()
+    git(work_repo, "init", "-b", "main")
+    git(work_repo, "config", "user.email", "t@example.com")
+    git(work_repo, "config", "user.name", "t")
+    (work_repo / "app.py").write_text("x = 0\n")
+    git(work_repo, "add", "app.py")
+    git_commit(work_repo, "baseline")
+    git(work_repo, "remote", "add", "origin", str(remote))
+    (work_repo / "fix.py").write_text("fixed\n")  # the daydream change
+
+    work = make_work(work_repo)
+    ok = await _do_commit(
+        _HostCommitBackend(work_repo), work, push=True, interactive=False,
+        items=[{"file": "fix.py", "description": "fix bug"}],
+        preexisting_untracked=set(),
+    )
+    assert ok is True
+    from daydream import git_ops
+
+    sha = git_ops.head_sha(work_repo)
+    assert git_ops.remote_contains_commit(work_repo, "main", sha, remote="origin") is True
+    assert git_ops.head_commit_message(work_repo).startswith("fix:")
+    assert "fix.py: fix bug" in git_ops.head_commit_message(work_repo)
+
+
+@pytest.mark.asyncio
+async def test_push_failure_reported_as_failure_even_with_local_commit(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed push is a failure even though a local commit exists: _do_commit
+    raises the project error (surfaced as Stop(1) by _commit_push_or_stop) and
+    never reports "Commit and push complete"."""
+    from daydream.phases import _do_commit
+
+    work_repo = tmp_path / "clone"
+    work_repo.mkdir()
+    git(work_repo, "init", "-b", "main")
+    git(work_repo, "config", "user.email", "t@example.com")
+    git(work_repo, "config", "user.name", "t")
+    (work_repo / "app.py").write_text("x = 0\n")
+    git(work_repo, "add", "app.py")
+    git_commit(work_repo, "baseline")
+    (work_repo / "fix.py").write_text("fixed\n")
+    # Remote points at a non-existent repository so the push fails.
+    git(work_repo, "remote", "add", "origin", str(tmp_path / "missing.git"))
+
+    from daydream.git_ops import GitError
+
+    work = make_work(work_repo)
+    with pytest.raises(GitError):
+        await _do_commit(
+            _HostCommitBackend(work_repo), work, push=True, interactive=False,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            preexisting_untracked=set(),
+        )
+    # The local commit was still created with the deterministic message.
+    from daydream import git_ops
+
+    assert git_ops.head_commit_message(work_repo).startswith("fix:")
+    out = capsys.readouterr().out
+    assert "Commit and push complete" not in out
+
+
+@pytest.mark.asyncio
+async def test_push_verification_failure_surfaces_even_when_push_succeeds(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Success requires the remote-contains check to return True: a push that
+    "succeeds" without the remote reporting the pushed sha is still a failure."""
+    from daydream import git_ops
+    from daydream.phases import _do_commit
+
+    monkeypatch.setattr(git_ops, "remote_contains_commit", lambda *a, **k: False)
+
+    remote = tmp_path / "remote"
+    git(tmp_path, "init", "--bare", "remote")
+    work_repo = tmp_path / "clone"
+    work_repo.mkdir()
+    git(work_repo, "init", "-b", "main")
+    git(work_repo, "config", "user.email", "t@example.com")
+    git(work_repo, "config", "user.name", "t")
+    (work_repo / "app.py").write_text("x = 0\n")
+    git(work_repo, "add", "app.py")
+    git_commit(work_repo, "baseline")
+    git(work_repo, "remote", "add", "origin", str(remote))
+    (work_repo / "fix.py").write_text("fixed\n")
+
+    work = make_work(work_repo)
+    with pytest.raises(git_ops.GitError):
+        await _do_commit(
+            _HostCommitBackend(work_repo), work, push=True, interactive=False,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            preexisting_untracked=set(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
+    git_repo: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """When the pre-run untracked snapshot is None (legacy callers), the host
+    path defensively computes it at commit time so user scratch files are
+    never swept into the commit."""
+    from daydream.phases import _do_commit
+
+    (git_repo / "app.py").write_text("x = 0\n")
+    git(git_repo, "add", "app.py")
+    git_commit(git_repo, "baseline app.py")
+    (git_repo / "app.py").write_text("x = 1\n")            # daydream change
+    (git_repo / "notes.txt").write_text("user scratch\n")  # untracked scratch
+
+    ok = await _do_commit(
+        _HostCommitBackend(git_repo), make_work(git_repo), push=False,
+        interactive=False, items=[{"file": "app.py", "description": "fix app"}],
+        preexisting_untracked=None,
+    )
+    assert ok is True
+    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert "app.py" in committed
+    assert "notes.txt" not in committed
 
 
 @pytest.mark.asyncio
@@ -2713,13 +2713,14 @@ def test_build_review_prompt_without_prior_commits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_phase_commit_push_includes_daydream_trailers(
+async def test_phase_commit_push_writes_daydream_trailers_host_side(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None],
 ) -> None:
-    """commit-push must include Daydream-Run and Daydream-Version trailers."""
+    """Host-native commit-push writes Daydream-Run / Daydream-Version trailers
+    at commit time via ``build_commit_message`` — no agent prompt, no amend."""
     from daydream.phases import phase_commit_push
 
     silence_console("daydream.phases")
@@ -2727,13 +2728,32 @@ async def test_phase_commit_push_includes_daydream_trailers(
     # _do_commit uses resolve_or_prompt which calls prompt_user from agent's namespace.
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
-    backend = ScriptedBackend()
-    work = make_work(tmp_path, base_sha="ABC123", head_sha="DEF456")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    (repo / "app.py").write_text("x = 0\n")
+    git(repo, "add", "app.py")
+    git_commit(repo, "baseline")
+    (repo / "app.py").write_text("x = 1\n")
+    # A real (bare) remote so the push and its remote-contains verification pass.
+    bare = tmp_path / "remote"
+    git(tmp_path, "init", "--bare", "remote")
+    git(repo, "remote", "add", "origin", str(bare))
+
+    backend = _HostCommitBackend(repo)
+    work = make_work(repo, base_sha="ABC123", head_sha="DEF456")
     await phase_commit_push(backend, work)
 
-    assert "Daydream-Run:" in backend.last_prompt
-    assert "Daydream-Version:" in backend.last_prompt
-    assert work.run_id in backend.last_prompt
+    import daydream
+    from daydream import git_ops
+
+    message = git_ops.head_commit_message(repo)
+    assert "Daydream-Run:" in message
+    assert work.run_id in message
+    assert f"Daydream-Version: {daydream.__version__}" in message
+    assert "fix:" in message
 
 
 # phase_test_and_heal — option 1 setup-investigator wiring

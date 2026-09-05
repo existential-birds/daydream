@@ -4153,8 +4153,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     else:
         pre_fix_snapshot_captured = True
     # Issue #543: thread the pre-fix untracked snapshot into the commit steps so
-    # _do_commit can exclude user scratch files from the daydream commit instead
-    # of sweeping them in via the commit agent's ``git add --all``.
+    # the host-native _do_commit can exclude user scratch files from the
+    # daydream commit (it never stages beyond the daydream change set).
     ctx.data["pre_fix_untracked"] = pre_fix_untracked
     # Pre-fix HEAD is the recommended-patch base only when the tree was
     # clean (stash_create returns None then) -- otherwise the snapshot is

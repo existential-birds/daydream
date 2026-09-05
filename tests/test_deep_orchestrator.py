@@ -65,6 +65,21 @@ def _default_strategy(stage: str) -> str:
     return _rp.build_default_profile().strategies[stage].content
 
 
+def _add_bare_remote(repo: Path) -> None:
+    """Give *repo* a real, pushable ``origin``: a sibling bare clone.
+
+    Host-native commit/push (issue #726) really runs ``git push`` and verifies
+    the remote holds the pushed HEAD, so a flow test that leaves the commit
+    step unmuted needs an actual remote to succeed against.
+    """
+    bare = repo.parent / (repo.name + "-remote.git")
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", str(bare)],
+        check=True, capture_output=True,
+    )
+
+
 def _install_model_capturing_stubs(
     monkeypatch: pytest.MonkeyPatch,
     target: Path,
@@ -1418,10 +1433,10 @@ class _ScopeCreepBackend(_StubBackend):
     reviewed diff. This is the issue #336 post-fix residual shape: without the
     residual check the creep edit would be committed alongside the fix.
 
-    The commit agent now commits the index that ``_do_commit`` deterministically
-    pre-staged (issue #543) — it only commits, never re-stages — so this stub
-    commits the already-staged index and lets the test assert the commit step's
-    actual output.
+    The commit itself is host-side (issue #726): ``_do_commit`` deterministically
+    stages exactly the daydream change set and commits it with one subprocess,
+    so the test asserts the commit step's actual output with no agent in the
+    loop.
     """
 
     def __init__(self, target: Path, creep: Path, creep_edit: str) -> None:
@@ -1439,21 +1454,6 @@ class _ScopeCreepBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> AsyncIterator[AgentEvent]:
-        if prompt.startswith("The daydream changes are already staged"):
-            run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
-            version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
-            assert run_id is not None
-            assert version is not None
-            message = (
-                "fix: align scope-creep test\n\n"
-                f"Daydream-Run: {run_id.group(1)}\n"
-                f"Daydream-Version: {version.group(1)}"
-            )
-            _git(cwd, "commit", "-m", message)
-            yield TextEvent(text="Committed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
         async for event in super().execute(
             cwd, prompt, output_schema, continuation, agents, max_turns, read_only
         ):
@@ -2434,6 +2434,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_residual")
+    _add_bare_remote(target)
     pre_fix_unrelated = (target / "unrelated.py").read_text()
 
     _silence(monkeypatch)
@@ -2502,6 +2503,7 @@ async def test_fix_reverts_but_files_no_issue_by_default(
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_default_off")
+    _add_bare_remote(target)
     pre_fix_unrelated = (target / "unrelated.py").read_text()
 
     _silence(monkeypatch)
@@ -2540,6 +2542,7 @@ async def test_fix_reverts_and_files_when_opted_in(
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_opt_in")
+    _add_bare_remote(target)
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
@@ -2575,6 +2578,7 @@ async def test_reverted_edit_dedups_across_runs(
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_dedup")
+    _add_bare_remote(target)
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
@@ -3312,6 +3316,7 @@ async def test_yes_auto_applies_fix(
     """
     from daydream.runner import run
 
+    _add_bare_remote(multi_stack_target)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     fix_marker = multi_stack_target / ".daydream-fix-applied"
@@ -7655,13 +7660,10 @@ async def test_test_verdict_artifact_written_on_failing_suite(
 
 
 class _CommittingStubBackend(_StubBackend):
-    """Stub that answers the commit prompt with a real, untrailered git commit.
+    """Stub backend for real-commit flow tests.
 
-    ``_do_commit`` delegates the commit itself to an agent turn, so a stub that
-    only records the prompt leaves the whole implementation -- the HEAD-moved
-    check and the trailer amend that ``daydream_commits()`` depends on --
-    unexercised. Committing without the trailers the prompt asks for drives that
-    repair branch for real.
+    ``_do_commit`` commits host-side (issue #726) — no agent turn, no commit
+    prompt to answer — so this stub only serves the run's fix/heal turns.
     """
 
     async def execute(
@@ -7674,12 +7676,6 @@ class _CommittingStubBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> Any:
-        if prompt.startswith("The daydream changes are already staged"):
-            _git(cwd, "commit", "-m", "fix: align greeting copy")
-            yield TextEvent(text="Committed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
         async for event in super().execute(
             cwd,
             prompt,
@@ -7693,7 +7689,7 @@ class _CommittingStubBackend(_StubBackend):
 
 
 class _PushingCommittingStubBackend(_StubBackend):
-    """Stub commit agent that writes required trailers before pushing."""
+    """Run stub for real commit/push flow tests (commit is host-side, issue #726)."""
 
     async def execute(
         self,
@@ -7705,23 +7701,6 @@ class _PushingCommittingStubBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> Any:
-        if prompt.startswith("The daydream changes are already staged"):
-            run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
-            version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
-            assert run_id is not None
-            assert version is not None
-            message = (
-                "fix: align migration and source changes\n\n"
-                f"Daydream-Run: {run_id.group(1)}\n"
-                f"Daydream-Version: {version.group(1)}"
-            )
-            _git(cwd, "commit", "-m", message)
-            branch = _git(cwd, "branch", "--show-current")
-            _git(cwd, "push", "-u", "origin", branch)
-            yield TextEvent(text="Committed and pushed.")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
         async for event in super().execute(
             cwd,
             prompt,
@@ -7766,6 +7745,7 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     monkeypatch.setattr("daydream.phases.prompt_user", _phases_prompt)
 
     stub = _CommittingStubBackend(tiny_diff_target)
+    _add_bare_remote(tiny_diff_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
