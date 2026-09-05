@@ -1,8 +1,9 @@
 """Preview materialization of per-finding annotation snapshots (issue #1055).
 
-Runs the #980 semantic resolutions stored in a hydrated index through the
-shared serializer (``snapshot.build_canonical_record``) and emits a
-deterministic ``sessions.jsonl`` plus a pin-pinned ``preview-manifest.json``.
+Runs the #980 semantic resolutions stored in a hydrated index's
+``label_observations.rubric_json`` through the shared serializer
+(``snapshot.build_canonical_record``) and emits a deterministic
+``sessions.jsonl`` plus a pin-pinned ``preview-manifest.json``.
 
 Preview mode guarantees (AC 4 / M2): never appends ``label_observations``,
 never writes any resume-cache or harvest-complete marker. When the input is a
@@ -21,7 +22,11 @@ from typing import Any, cast, get_args
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
-from daydream.training.labeler_signals import PerFindingDisposition, PerFindingResolution
+from daydream.training.labeler_signals import (
+    PerFindingDisposition,
+    PerFindingResolution,
+    resolution_from_dict,
+)
 
 __all__ = ["run_materialize"]
 
@@ -45,11 +50,22 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     """Build queue-consumable session records from a hydrated staging archive.
 
     A hydrated staging archive (``archive.hydrate.run_hydrate_hub``) has no
-    ``sessions.jsonl``: its sessions live in the SQLite index plus one
-    sanitized ``trajectory.json`` per run under ``runs/<session_id>/``, whose
-    ``resolutions`` carry the #980 semantic dispositions. This adapter joins
-    the two into the same session shape ``_load_sessions`` returns — read-only
-    over the index, fail-closed on any missing or adjudication-empty run.
+    ``sessions.jsonl``: its per-finding resolutions live in the SQLite
+    index's ``label_observations.rubric_json`` (the canonical dict shape
+    emitted by ``Rubric.to_dict``). This adapter joins ``query_runs`` rows
+    to their observations into the same session shape ``_load_sessions``
+    returns — the observations connection is opened read-only, fail-closed
+    on any missing or adjudication-empty run.
+
+    Latest-observation selection (deterministic): a session's rows are
+    grouped by the harvester dedup key ``(evidence_sha, labeler_policy_version,
+    reply_evidence_digest, labels, has_posterior)``; within an identical key
+    the latest ``observed_at`` wins; across distinct keys the winner follows
+    the archive's ``_PRECEDENCE_ORDER`` (human-first ``source='human'``, then
+    ``observed_at DESC``). More than one distinct dedup key means the session
+    is **conflicting**: the winner still supplies the resolutions and every
+    emitted record for that session carries ``"conflicting": true`` (surfaced
+    non-gold downstream, never merged away).
 
     The index revision is the pinned source commit (the single revision
     directory under ``downloads/``) — a full 40-hex SHA, exactly what the
@@ -64,31 +80,39 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     sessions: list[dict[str, Any]] = []
     for row in query_runs(index_root):
         session_id = str(row["session_id"])
-        trajectory_path = index_root / "runs" / session_id / "trajectory.json"
-        if not trajectory_path.is_file():
+        observations = _label_observations_readonly(index_root / "index.db", session_id)
+        if not observations:
             raise HubUnavailableError(
-                f"hydrated index run {session_id!r} has no trajectory at {trajectory_path}"
+                f"hydrated index session {session_id!r} has no label_observations rows "
+                "to materialize"
             )
+        winner, conflicting = _winning_observation(observations)
         try:
-            trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+            rubric = json.loads(winner["rubric_json"])
+        except (KeyError, TypeError, ValueError) as exc:
             raise HubUnavailableError(
-                f"unreadable hydrated trajectory at {trajectory_path}: {exc}"
+                f"session {session_id!r}: unreadable winning rubric_json: {exc}"
             ) from exc
-        resolutions = trajectory.get("resolutions") if isinstance(trajectory, dict) else None
+        if not isinstance(rubric, dict):
+            raise HubUnavailableError(
+                f"session {session_id!r}: winning rubric_json is not an object"
+            )
+        resolutions = rubric.get("per_finding_resolutions")
         if not isinstance(resolutions, list) or not resolutions:
             raise HubUnavailableError(
-                f"hydrated trajectory for session {session_id!r} carries no "
-                "per-finding resolutions to materialize"
+                f"session {session_id!r}: winning rubric_json carries no "
+                "per_finding_resolutions to materialize (legacy labels-only rows "
+                "are not backfilled)"
             )
-        sessions.append(
-            {
-                "session_id": session_id,
-                "trajectory_id": session_id,
-                "segment_id": session_id,
-                "resolutions": resolutions,
-            }
-        )
+        session: dict[str, Any] = {
+            "session_id": session_id,
+            "trajectory_id": session_id,
+            "segment_id": session_id,
+            "resolutions": resolutions,
+        }
+        if conflicting:
+            session["conflicting"] = True
+        sessions.append(session)
     if not sessions:
         raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
     downloads = index_root / "downloads"
@@ -103,10 +127,59 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     return sessions, revisions[0]
 
 
-def _resolution_from_row(row: dict[str, Any]) -> PerFindingResolution:
-    """Rebuild the #980 semantic-resolution object from a stored index row.
+def _label_observations_readonly(db_path: Path, session_id: str) -> list[dict[str, Any]]:
+    """Read one session's ``label_observations`` rows over a **read-only**
+    connection (``mode=ro`` URI — never ``_get_connection``, which opens
+    read-write and runs WAL pragmas against the hydrated staging index).
+    """
+    import sqlite3
 
-    Fail-closed: a stored row missing a required field raises ``ValueError``
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(
+            "SELECT * FROM label_observations WHERE session_id = ?", (session_id,)
+        )
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def _winning_observation(
+    observations: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    """Deterministic latest-observation selection (see the module docstring for
+    the rule). Returns the winning row and whether the session is conflicting
+    (more than one distinct dedup key).
+    """
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for obs in observations:
+        key = (
+            obs.get("evidence_sha"),
+            obs.get("labeler_policy_version"),
+            obs.get("reply_evidence_digest"),
+            obs.get("labels"),
+            obs.get("has_posterior"),
+        )
+        existing = groups.get(key)
+        if existing is None or str(obs.get("observed_at", "")) > str(existing.get("observed_at", "")):
+            groups[key] = obs
+    winners = list(groups.values())
+    winner = max(
+        winners,
+        key=lambda o: (
+            1 if o.get("source") == "human" else 0,
+            str(o.get("observed_at", "")),
+        ),
+    )
+    return winner, len(groups) > 1
+
+
+def _resolution_from_row(row: dict[str, Any]) -> PerFindingResolution:
+    """Rebuild the #980 semantic-resolution object from a stored resolution entry.
+
+    Delegates to the canonical ``labeler_signals.resolution_from_dict``;
+    fail-closed: a stored entry missing a required field raises ``ValueError``
     naming the field and fingerprint — never ``None``-coerced into a record.
     """
     fingerprint = row.get("fingerprint")
@@ -128,12 +201,14 @@ def _resolution_from_row(row: dict[str, Any]) -> PerFindingResolution:
             f"disposition {disposition!r}"
         )
     typed_disposition = cast(PerFindingDisposition, disposition)
-    return PerFindingResolution(
-        fingerprint=fingerprint,
-        comment_id=row.get("comment_id"),
-        disposition=typed_disposition,
-        evidence=list(row.get("evidence") or []),
-        evidence_digest=evidence_digest,
+    return resolution_from_dict(
+        {
+            "fingerprint": fingerprint,
+            "comment_id": row.get("comment_id"),
+            "disposition": typed_disposition,
+            "evidence": list(row.get("evidence") or []),
+            "evidence_digest": evidence_digest,
+        }
     )
 
 
@@ -169,8 +244,8 @@ def run_materialize(
     if (index_root / _SESSIONS_OUT_FILENAME).is_file():
         sessions, index_revision = _load_sessions(index_root)
     else:
-        # Hydrated staging archive: derive the sessions from the SQLite index
-        # plus the sanitized per-run trajectories (read-only).
+        # Hydrated staging archive: derive the sessions from the SQLite
+        # index's label_observations (read-only).
         sessions, index_revision = _sessions_from_hydrated_stage(index_root)
 
     # Validate the pin before touching its components in the loop body:

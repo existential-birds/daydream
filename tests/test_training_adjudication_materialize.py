@@ -130,3 +130,55 @@ def test_materialize_emits_every_disposition(tmp_path: Path) -> None:
     assert {r["disposition"] for r in rows} == {
         "accepted", "rejected", "ambiguous", "unanswered", "missing"}
     assert len({r["record_id"] for r in rows}) == 5  # no silent dedup across classes
+
+
+def _hydrated_sqlite_index(tmp_path: Path) -> Path:
+    """Hydrated staging archive whose per-finding data lives ONLY in
+    label_observations.rubric_json — no trajectory.json resolutions key."""
+    from daydream.archive.index import _get_connection
+    root = tmp_path / "hydrated"
+    conn = _get_connection(root)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    )
+    rubric = {"posterior_source": "pr_review",
+              "per_finding_resolutions": [{
+                  "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
+                  "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+                  "evidence_digest": "d" * 32}]}
+    conn.execute(
+        "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
+        "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
+        "VALUES ('s1', '2026-01-02T00:00:00+00:00', '[\"finding-accepted\"]', 'v1', "
+        "'e' * 64, ?, 0, 'auto', '980-rubric-r2')",
+        (json.dumps(rubric),),
+    )
+    conn.commit()
+    conn.close()
+    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
+    return root
+
+
+def test_materialize_reads_resolutions_from_sqlite_not_trajectory(tmp_path: Path) -> None:
+    root = _hydrated_sqlite_index(tmp_path)
+    assert not (root / "runs").exists()  # no trajectory anywhere
+    summary = run_materialize(root, tmp_path / "out", pin=_PIN)
+    assert summary["record_count"] == 1
+    record = json.loads((tmp_path / "out" / "sessions.jsonl").read_text().splitlines()[0])
+    assert record["fingerprint"] == "fp-1"
+    assert record["disposition"] == "accepted"
+    assert record["evidence_digest"] == "d" * 32
+
+
+def test_materialize_fails_closed_on_labels_only_rubric(tmp_path: Path) -> None:
+    """Legacy labels-only rubric_json (no per_finding_resolutions) is a reviewable
+    structural gap — never backfilled, never silently skipped."""
+    root = _hydrated_sqlite_index(tmp_path)
+    import sqlite3
+    conn = sqlite3.connect(str(root / "index.db"))
+    conn.execute("UPDATE label_observations SET rubric_json = '{\"per_finding_outcomes\": [\"accepted\"]}'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(Exception, match="s1"):
+        run_materialize(root, tmp_path / "out", pin=_PIN)
