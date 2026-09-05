@@ -71,8 +71,10 @@ def _seed_run(root: Path, session_id: str) -> tuple[str, str]:
 
 
 def _seed_hydrated_archive(tmp_path: Path) -> Path:
-    """Four sessions: accepted, rejected, conflicted (two distinct dedup keys),
-    unresolved (unanswered) — each through the real archive writers, with
+    """Five sessions: accepted, rejected, conflicted (two distinct dedup keys),
+    unresolved (unanswered), and legacy (labels-only row with no trajectory
+    artifact — the state a step-3b import of a backup-root session outside the
+    curation leaves behind) — each through the real archive writers, with
     ``rubric_json`` carrying the full ``per_finding_resolutions`` (Task 2
     shape) so the SQLite materialization path can consume the index."""
     root = tmp_path / "hydrated"
@@ -94,6 +96,21 @@ def _seed_hydrated_archive(tmp_path: Path) -> Path:
     _seed_observation(root, "s-conf", "fp-conf", "accepted", "d3" * 32,
                       labels=["finding-accepted", "posterior"],
                       observed_at="2026-01-03T00:00:00+00:00")
+    # Legacy labels-only session with no trajectory anywhere (DB-only runs
+    # row, no runs/<sid> files): the exact state a step-3b import of a backup
+    # root session outside the curation leaves behind. It has no per-finding
+    # resolutions to materialize and must not brick any later
+    # preview/materialize/harvest derivation (issue #336 item 5).
+    _seed_run(root, "s-legacy")
+    append_label_observation(
+        root, "s-legacy",
+        labels=["finding-accepted"], pr_state=None,
+        labeler_version="980-rubric-r2", evidence_sha=None,
+        rubric_json=json.dumps({"per_finding_outcomes": ["accepted"]}),
+        valid_at=_OBSERVED, reply_evidence_digest=None,
+        reward_version=None, has_posterior=False, source="auto",
+        observed_at="2026-01-02T00:00:00+00:00",
+    )
     (root / "downloads" / ("a" * 40)).mkdir(parents=True)
     return root
 
@@ -117,9 +134,34 @@ def test_hydrated_to_canonical_harvest_end_to_end(tmp_path: Path) -> None:
     #    enumerated by materialize + the complete-set drift gate).
     summary = run_preview(root, tmp_path / "ledger.json")
     assert summary["item_count"] == 1
-    # 2. materialize from SQLite: one record per finding, all four classes.
+    # 2. materialize from SQLite: one record per finding across the
+    # materializable classes; the legacy labels-only session contributes
+    # nothing (record_count stays 4) instead of bricking the derivation.
     mat = run_materialize(root, tmp_path / "snapshot", pin=_PIN)
     assert mat["record_count"] == 4
+    # 2a. the conflicted finding is routed to task-only adjudication: the
+    # materialized record carries the neutralized disposition (one disposition
+    # in the bundle, never gold) while the operator queue enumerates it
+    # (issue #336 item 7).
+    from daydream.training.adjudication.queue import build_queue
+
+    snapshot_records = {
+        json.loads(line)["fingerprint"]: json.loads(line)
+        for line in (tmp_path / "snapshot" / "sessions.jsonl").read_text().splitlines()
+        if line
+    }
+    assert snapshot_records["fp-conf"]["conflicting"] is True
+    assert snapshot_records["fp-conf"]["disposition"] == "ambiguous"
+    queue = build_queue(
+        [
+            json.loads(line)
+            for line in (tmp_path / "snapshot" / "sessions.jsonl").read_text().splitlines()
+            if line
+        ]
+    )
+    assert snapshot_records["fp-conf"]["record_id"] in {
+        str(item["record_id"]) for item in queue
+    }
     # 3. import a local backup history for one session (CLI path, dry-run
     #    then real) — identical content, so the merge dedupes and the
     #    session stays non-conflicting.
@@ -141,7 +183,9 @@ def test_hydrated_to_canonical_harvest_end_to_end(tmp_path: Path) -> None:
     out = run_canonical_harvest(
         index_root=root, materialize_dir=tmp_path / "snapshot", archive_dir=root,
     )
-    # exactly-once accounting: 4 sessions in, 4 session rows out
+    # exactly-once accounting: 4 sessions in, 4 session rows out (the legacy
+    # labels-only session is evidence-only and contributes no records, and the
+    # harvest does not brick over it)
     assert out["record_count"] == 4
     rows = [r for sid in ("s-acc", "s-rej", "s-conf", "s-unres")
             for r in label_observation_history(root, sid)]

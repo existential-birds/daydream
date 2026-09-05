@@ -668,9 +668,13 @@ def test_cli_import_report_shows_mapping_summary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The import report carries a per-session mapping summary (matched_by,
-    validation outcome) so operators can audit identity resolution."""
+    validation outcome) so operators can audit identity resolution. A
+    harvest-produced row's evidence anchor is the run's ``head_sha`` (what
+    ``training/harvest.py`` stores in ``label_observations.evidence_sha``), so
+    the per-finding identity match actually fires for it (issue #336 item 4)."""
     src = tmp_path / "backup"
-    _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
+    head = hashlib.sha256("sess-1".encode()).hexdigest()
+    _seed_session(src, "sess-1", evidence_sha=head, labels=["accepted"])
     # identical derivative content on both sides -> links by session_id
     (src / "runs" / "sess-1").mkdir(parents=True)
     (src / "runs" / "sess-1" / "trajectory.json").write_text("{}", encoding="utf-8")
@@ -688,9 +692,11 @@ def test_cli_import_report_shows_mapping_summary(
     report = json.loads(capsys.readouterr().out)
     summary = report["identity_summary"]["sess-1"]
     assert summary["matched_by"] == "session_id"
-    # The run-level evidence digest does not match the projected finding's
-    # per-finding digest, so the session routes to the ambiguous bucket.
-    assert summary["validation_outcome"] == "ambiguous"
+    # The row's evidence anchor (head_sha) matches the pinned session's run
+    # anchor exactly, so the exact-identity match fires and the run-level row
+    # routes to the per-finding bucket -- ``matched``, never the stale/
+    # ambiguous fallback.
+    assert summary["validation_outcome"] == "matched"
 
 
 def test_cli_import_missing_identity_flags_exit_2() -> None:

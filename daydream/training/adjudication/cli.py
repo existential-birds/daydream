@@ -1146,13 +1146,24 @@ def _hydrated_identity_index(
 
 def _projector_findings_map(
     sessions: list[dict[str, Any]],
+    runs_by_session: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Derive the per-finding projected map from the pinned index's sessions.
 
     ``project_findings`` is the single enumeration authority; each finding
-    contributes its ``record_id``, its per-finding evidence digest (so the
-    run-level classification's exact-identity match is discriminating even
-    for multi-finding sessions), and its finding fingerprint.
+    contributes its ``record_id``, its evidence anchor, and its finding
+    fingerprint.
+
+    The anchor is the session's ``head_sha`` from the inventoried source run
+    rows when one exists: ``training/harvest.py`` stores exactly ``head_sha``
+    in ``label_observations.evidence_sha``, so the importer's exact-identity
+    match (``classify_run_level`` compares ``finding["evidence_sha"]``
+    against the imported row's ``evidence_sha`` column) can actually fire for
+    harvest-produced rows instead of always reporting ``ambiguous``. Only when
+    the session has no run anchor does the map fall back to the per-finding
+    reply digest -- a digest space no archive writer stores, so rows whose
+    anchor the pinned index cannot resolve are honestly reported ambiguous
+    (per-finding validation is informational for anchor-less sessions).
     """
     from daydream.training.corpus_v2.projector import project_findings
     from daydream.training.labeler_versions import reply_evidence_digest
@@ -1160,6 +1171,8 @@ def _projector_findings_map(
     findings_map: dict[str, list[dict[str, Any]]] = {}
     for session in sessions:
         session_id = str(session["session_id"])
+        run = (runs_by_session or {}).get(session_id) or {}
+        run_anchor = run.get("head_sha")
         rows: list[dict[str, Any]] = []
         for finding in project_findings(session):
             evidence = finding["evidence"]
@@ -1171,7 +1184,9 @@ def _projector_findings_map(
             rows.append(
                 {
                     "record_id": finding["record_id"],
-                    "evidence_sha": reply_evidence_digest(evidence),
+                    "evidence_sha": (
+                        str(run_anchor) if run_anchor else reply_evidence_digest(evidence)
+                    ),
                     "fingerprint": finding["finding_fingerprint"],
                 }
             )
@@ -1413,7 +1428,9 @@ def handle_import_local_observations(argv: list[str]) -> int:
         # projector's per-finding map for exact run-level evidence matching.
         sessions = _load_import_index_sessions(args.index_root)
         hydrated_index = _hydrated_identity_index(sessions, args.index_root)
-        projector_findings = _projector_findings_map(sessions)
+        projector_findings = _projector_findings_map(
+            sessions, inventory["runs_by_session"]
+        )
         result = run_pure_import(
             inventory["inventories"],
             hydrated_index=hydrated_index,

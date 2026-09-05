@@ -32,6 +32,7 @@ from typing import Any
 
 from daydream.archive.index import append_label_observation
 from daydream.training.adjudication.materialize import (
+    _CONFLICTED_DISPOSITION,
     _SESSIONS_OUT_FILENAME,
     _sessions_from_hydrated_stage,
 )
@@ -51,17 +52,6 @@ _ANNOTATIONS_FILENAME = "annotations.jsonl"
 _MANIFEST_FILENAME = "preview-manifest.json"
 
 _HUMAN_ROLES = frozenset({"rater", "adjudicator"})
-
-# Disposition written for a conflicted generation's corpus-v2 projection input
-# (annotations.jsonl). Corpus-v2's gold gate (``tiers.classify_tier``) keys
-# solely on disposition/evidence/evidence_after_as_of and never reads the
-# ``conflicting`` flag, so a conflicted generation that kept its decisive
-# disposition would still classify gold. A non-decisive disposition forces
-# classify_tier to ``task-only`` (routed to adjudication, never gold);
-# ``ambiguous`` is the faithful label for generations that disagree. The
-# archive ``rubric_json`` keeps the record's real decisive disposition for
-# provenance -- this value only shapes the projection-facing annotations row.
-_CONFLICTED_DISPOSITION = "ambiguous"
 
 
 def _canonical(payload: dict[str, Any]) -> str:
@@ -197,6 +187,17 @@ def run_canonical_harvest(
     fresh_by_record_id = {
         str(item["record_id"]): item for item in build_queue(sessions, include_decisive=True)
     }
+    # The fresh session derivation is the conflict authority, never the
+    # materialized snapshot's flags: a session turned conflicting *after*
+    # materialize (runbook step-3b import appending a disagreeing generation
+    # to the same index.db) passes the evidence-digest drift gate below unless
+    # the stack re-derives its ``conflicting`` verdict here and stamps it onto
+    # the merged records before the decisive-label projection.
+    fresh_conflicting_sessions = {
+        str(session.get("session_id"))
+        for session in sessions
+        if session.get("conflicting")
+    }
 
     # Fail-closed drift gate: verify BEFORE any write.
     drifted: list[str] = []
@@ -238,6 +239,12 @@ def run_canonical_harvest(
     for record in materialized:
         record = dict(record)
         record_id = str(record["record_id"])
+        if str(record.get("session_id")) in fresh_conflicting_sessions:
+            # Freshly re-derived conflict verdict (never trusted from the
+            # materialized snapshot's merge state): decisive dispositions from
+            # a session that became conflicting after materialize must not
+            # feed the ``finding-*`` labels or the annotations projection.
+            record["conflicting"] = True
         if record_id in grouped:
             resolved = effective_adjudication(grouped[record_id])
             if (
@@ -248,7 +255,23 @@ def run_canonical_harvest(
                 record["disposition"] = resolved["disposition"]
                 record["human_labeler"] = resolved["labeler"]
                 record["human_role"] = resolved["role"]
+                # A decisive human adjudication resolves the session conflict:
+                # the operator's judgment overrides the disagreeing
+                # generations, so the flag is cleared -- the resolution must
+                # not be suppressed to non-gold.
+                if record.get("conflicting"):
+                    record["conflicting"] = False
                 human_adjudicated += 1
+        if record.get("conflicting"):
+            # The materializer neutralizes a conflicted record's disposition
+            # (``_CONFLICTED_DISPOSITION``) so the operator queue routes it to
+            # task-only adjudication and the bundle carries one disposition;
+            # restore the real decisive disposition here for the archive
+            # ``rubric_json`` provenance, from the fresh complete queue that
+            # the drift gate just verified against this record's evidence.
+            fresh = fresh_by_record_id.get(record_id)
+            if fresh is not None:
+                record["disposition"] = str(fresh["disposition"])
         record["evidence_after_as_of"] = _evidence_after_as_of(record, pin.get("as_of"))
         if record["evidence_after_as_of"]:
             flagged_after_as_of.append(record_id)

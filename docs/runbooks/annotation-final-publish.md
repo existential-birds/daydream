@@ -108,7 +108,8 @@ the final bundle (steps 6–7).
 
 Before labeling (or re-harvesting on a resume), build the digest-pinned preview
 ledger over the materialized snapshot and validate the export rows it feeds —
-without writing anything:
+`--dry-run` skips only the `--out` export rows file; the ledger pin below is
+written either way:
 
 ```bash
 daydream corpus adjudicate export --index-root /tmp/snapshot --state-dir /tmp/state --dry-run
@@ -116,11 +117,13 @@ daydream corpus adjudicate export --index-root /tmp/snapshot --state-dir /tmp/st
 
 This runs the read-only preview over the snapshot's `sessions.jsonl` and pins
 `preview-ledger.json` (canonical JSON, byte-identical for an identical index)
-in `/tmp/state`. The ledger is the drift reference the canonical harvest's
-drift gate (step 5) adjudicates the queue against — a re-run of this command
-against a changed snapshot reports any drifted record ids instead of silently
-merging them, which is exactly what you want to catch before labeling or
-harvesting. Re-run it any time the snapshot or the observations change.
+in `/tmp/state` — the ledger feeds the export rows and the publish payload. The
+canonical harvest's drift gate (step 5) does not read it: it re-derives the
+fresh queue over the snapshot and compares materialized evidence digests
+against that queue directly. A re-run of this command against a changed
+snapshot reports any drifted record ids instead of silently merging them,
+which is exactly what you want to catch before labeling or harvesting. Re-run
+it any time the snapshot or the observations change.
 
 ## 3b. Import surviving local history into the hydrated archive
 

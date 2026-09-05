@@ -22,6 +22,7 @@ from typing import Any, cast, get_args
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
+from daydream.training.dispositions import DECISIVE_DISPOSITIONS
 from daydream.training.labeler_signals import (
     PerFindingDisposition,
     PerFindingResolution,
@@ -32,6 +33,17 @@ __all__ = ["run_materialize"]
 
 _SESSIONS_OUT_FILENAME = "sessions.jsonl"
 _MANIFEST_FILENAME = "preview-manifest.json"
+
+# Disposition written for a conflicted generation's materialized records
+# (sessions.jsonl). The operator queue (``queue.build_queue``'s default
+# non-decisive set) and the final bundle's sessions.jsonl must route the
+# finding to task-only adjudication -- never gold -- and the archive
+# `rubric_json` keeps the real decisive disposition for provenance (the
+# canonical harvest restores it from the fresh queue). Corpus-v2's gold gate
+# (``tiers.classify_tier``) keys solely on disposition/evidence and never
+# reads the ``conflicting`` flag, so a decisive disposition here would still
+# classify gold; a non-decisive disposition forces ``task-only``.
+_CONFLICTED_DISPOSITION = "ambiguous"
 
 
 def _canonical(payload: dict[str, Any]) -> str:
@@ -63,15 +75,24 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     the latest ``observed_at`` wins; across distinct keys the winner follows
     the archive's ``_PRECEDENCE_ORDER`` (human-first ``source='human'``, then
     ``observed_at DESC``). The session is **conflicting** only when its
-    generations disagree in disposition-relevant content (more than one
-    distinct ``labels`` set across the dedup-key groups): the archive appends
+    generations disagree in disposition-relevant content — more than one
+    distinct decision-bearing ``labels`` set across the dedup-key groups,
+    scoped to non-human rows (``_winning_observation``): the archive appends
     fresh generations with identical labels on policy-version bumps,
     edited-reply digest changes, and label-preserving observation overlays
     (``index.append_label_observation``), so a dedup-key split alone never
-    marks a session non-gold. For a conflicted session the winner still
-    supplies the resolutions and every emitted record for that session
-    carries ``"conflicting": true`` (surfaced non-gold downstream, never
-    merged away).
+    marks a session non-gold, and neither a human override row (authoritative
+    under the archive's precedence) nor a non-decisive-only generation (a
+    pre-adjudication evolution) does. For a conflicted session the winner
+    still supplies the resolutions and every emitted record for that session
+    carries ``"conflicting": true`` with the disposition neutralized to
+    ``_CONFLICTED_DISPOSITION`` (surfaced non-gold downstream, never merged
+    away). A session whose rows carry no materializable per-finding
+    resolutions (``rubric_json`` NULL — a human ``daydream label`` row — or
+    a legacy labels-only row) and no sanitized per-run trajectory contributes
+    no records at all: such sessions are evidence-only (e.g. rows a runbook
+    step-3b import admitted from a backup root outside the curation) and must
+    not fail the whole curation.
 
     The index revision is the pinned source commit (the single revision
     directory under ``downloads/``) — a full 40-hex SHA, exactly what the
@@ -82,28 +103,38 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
             f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
         )
     _raise_on_uncheckpointed_wal(index_root / "index.db")
+    rows = _query_runs_readonly(index_root / "index.db")
+    if not rows:
+        raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
     sessions: list[dict[str, Any]] = []
-    for row in _query_runs_readonly(index_root / "index.db"):
+    for row in rows:
         session_id = str(row["session_id"])
         observations = _label_observations_readonly(index_root / "index.db", session_id)
-        session: dict[str, Any]
         if observations:
             winner, conflicting = _winning_observation(observations)
-            try:
-                rubric = json.loads(winner["rubric_json"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise HubUnavailableError(
-                    f"session {session_id!r}: unreadable winning rubric_json: {exc}"
-                ) from exc
-            if not isinstance(rubric, dict):
-                raise HubUnavailableError(
-                    f"session {session_id!r}: winning rubric_json is not an object"
-                )
-            resolutions = rubric.get("per_finding_resolutions")
-            if not isinstance(resolutions, list) or not resolutions:
-                # Legacy labels-only rows (pre-#1095 ``Rubric.to_dict`` emitted
-                # only ``per_finding_outcomes``) carry no per-finding semantics
-                # to materialize, and the import path (runbook step 3b) appends
+            resolutions: list[dict[str, Any]] | None = None
+            session: dict[str, Any]
+            rubric_raw = winner.get("rubric_json")
+            if rubric_raw is not None:
+                try:
+                    rubric = json.loads(rubric_raw)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise HubUnavailableError(
+                        f"session {session_id!r}: unreadable winning rubric_json: {exc}"
+                    ) from exc
+                if not isinstance(rubric, dict):
+                    raise HubUnavailableError(
+                        f"session {session_id!r}: winning rubric_json is not an object"
+                    )
+                per_finding = rubric.get("per_finding_resolutions")
+                if isinstance(per_finding, list) and per_finding:
+                    resolutions = per_finding
+            if resolutions is None:
+                # NULL rubric_json (a human-sourced ``daydream label`` row --
+                # ``index.update_labels`` appends with no rubric) or a legacy
+                # labels-only row (pre-#1095 ``Rubric.to_dict`` emitted only
+                # ``per_finding_outcomes``) carries no per-finding semantics to
+                # materialize, and the import path (runbook step 3b) appends
                 # such rows verbatim — an imported archive therefore reaches
                 # this branch with observations present, and failing closed
                 # here would brick the session for every later
@@ -111,8 +142,13 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
                 # sanitized per-run trajectory instead (the pre-#1095
                 # materialization source), exactly like a session with no
                 # observation rows at all; a session with no trajectory either
-                # still fails closed below naming it.
+                # has no materializable content at all and contributes no
+                # records (evidence-only rows, e.g. sessions an import admitted
+                # from a backup root outside the curation), never failing the
+                # whole stage over one such session.
                 resolutions = _trajectory_resolutions_readonly(index_root, session_id)
+                if resolutions is None:
+                    continue
             session = {
                 "session_id": session_id,
                 "trajectory_id": session_id,
@@ -128,8 +164,12 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
             # guarantees (_REQUIRED_SESSION_ARTIFACTS) -- the pre-#1095
             # materialization source -- so the first preview pass over a new
             # stage still works. Once any observation row exists for the
-            # session it wins; the two sources are never mixed.
+            # session it wins; the two sources are never mixed. A session
+            # without either contributes no records (the one-session-fails-all
+            # blast radius is reserved for corrupt data, not absence).
             resolutions = _trajectory_resolutions_readonly(index_root, session_id)
+            if resolutions is None:
+                continue
             session = {
                 "session_id": session_id,
                 "trajectory_id": session_id,
@@ -137,8 +177,6 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
                 "resolutions": resolutions,
             }
         sessions.append(session)
-    if not sessions:
-        raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
     downloads = index_root / "downloads"
     if not downloads.is_dir():
         raise HubUnavailableError(f"hydrated index at {index_root} has no downloads/ revision pin")
@@ -151,24 +189,29 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     return sessions, revisions[0]
 
 
-def _trajectory_resolutions_readonly(index_root: Path, session_id: str) -> list[dict[str, Any]]:
+def _trajectory_resolutions_readonly(
+    index_root: Path, session_id: str
+) -> list[dict[str, Any]] | None:
     """Read a session's per-finding resolutions from the sanitized per-run
     trajectory (the pre-#1095 materialization source). Used when the hydrated
     staging archive has no materializable ``label_observations`` history for
     the session: no observation rows yet (freshly hydrated stage; canonical
-    harvest appends the first rows) or only legacy labels-only rows whose
-    rubric_json carries no ``per_finding_resolutions`` (pre-#1095
-    ``Rubric.to_dict``; such rows are appended verbatim by the import path,
-    runbook step 3b). Fail-closed: a missing/unreadable/empty trajectory
-    raises ``HubUnavailableError`` naming the session -- never silently
-    skipped.
+    harvest appends the first rows), a NULL ``rubric_json`` (human-sourced
+    row), or only legacy labels-only rows whose rubric_json carries no
+    ``per_finding_resolutions`` (pre-#1095 ``Rubric.to_dict``; such rows are
+    appended verbatim by the import path, runbook step 3b).
+
+    Returns ``None`` when the trajectory is absent -- the session has no
+    materializable content at all (e.g. a session a runbook step-3b import
+    admitted from a backup root outside the curation: DB-only ``runs`` row,
+    evidence-only observation rows, no ``runs/<sid>`` files) and contributes
+    no records; the caller skips it. Anything *present* but unreadable,
+    malformed, or empty still raises ``HubUnavailableError`` naming the
+    session -- corrupt data is never silently skipped.
     """
     trajectory_path = index_root / "runs" / session_id / "trajectory.json"
     if not trajectory_path.is_file():
-        raise HubUnavailableError(
-            f"hydrated index session {session_id!r} has no label_observations rows "
-            f"and no trajectory at {trajectory_path}"
-        )
+        return None
     try:
         trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -277,7 +320,46 @@ def _winning_observation(
     # labels projection), never from the full dedup tuple: two rows agreeing
     # on the disposition but split on evidence_sha / policy version / reply
     # digest / has_posterior are agreeing generations that stay gold-eligible.
-    return winner, len({o.get("labels") for o in winners}) > 1
+    # The comparison is additionally scoped (issue #336): a human override row
+    # is authoritative under the archive's precedence (``_PRECEDENCE_ORDER``,
+    # ``index.update_labels``' human-wins contract) -- never a disagreeing
+    # generation -- so it cannot contribute a distinct label set; and only
+    # decision-bearing label sets (labels claiming a decisive
+    # ``finding-<disposition>``) count, so a pre-adjudication generation
+    # (``[]`` labels, an ``unanswered``-only snapshot) that a later decisive
+    # generation resolves is an evolution -- resolved-unanswered -> accepted --
+    # not a harvester disagreement, and stays gold-eligible after
+    # re-materialization.
+    decisive_sets = {
+        o.get("labels")
+        for o in winners
+        if o.get("source") != "human" and _labels_claim_decisive(o.get("labels"))
+    }
+    return winner, len(decisive_sets) > 1
+
+
+def _labels_claim_decisive(labels: Any) -> bool:
+    """True when the archived labels projection claims at least one decisive
+    ``finding-<disposition>`` label (e.g. ``finding-accepted``). Rows store the
+    labels column as a JSON array string; non-string / non-list / unparsable
+    values claim nothing (a session with no decisive claim cannot disagree
+    about a gold disposition). Non-decisive finding labels (``finding-unanswered``)
+    and non-finding labels (``posterior``) are not claims.
+    """
+    if isinstance(labels, str):
+        try:
+            labels = json.loads(labels)
+        except ValueError:
+            return False
+    if not isinstance(labels, list):
+        return False
+    for label in labels:
+        if not isinstance(label, str):
+            continue
+        disposition = label[len("finding-"):] if label.startswith("finding-") else None
+        if disposition in DECISIVE_DISPOSITIONS:
+            return True
+    return False
 
 
 def _resolution_from_row(row: dict[str, Any]) -> PerFindingResolution:
@@ -378,7 +460,23 @@ def run_materialize(
                 # per-finding record so downstream consumers (canonical
                 # harvest) can exclude the disposition from decisive labels
                 # while the full record — flag included — lands in rubric_json.
+                # The winner's decisive disposition is neutralized to
+                # ``_CONFLICTED_DISPOSITION``: the operator queue (build_queue's
+                # default non-decisive set) and the final bundle's sessions.jsonl
+                # then route the finding to task-only adjudication — never gold,
+                # one disposition in the bundle — while the canonical harvest
+                # restores the real decisive disposition for the archive
+                # rubric_json provenance from the freshly re-derived queue.
                 record["conflicting"] = True
+                record["disposition"] = _CONFLICTED_DISPOSITION
+                # The record embeds the session-shape view (``resolutions``)
+                # that ``project_findings``/``build_queue`` consume; neutralize
+                # its disposition too, or the operator queue would still
+                # classify the finding gold (``tiers.classify_tier`` reads the
+                # resolution, never the record's top-level disposition).
+                for nested in record.get("resolutions") or []:
+                    if isinstance(nested, dict):
+                        nested["disposition"] = _CONFLICTED_DISPOSITION
             records.append(record)
     records.sort(key=lambda r: str(r["record_id"]))
 

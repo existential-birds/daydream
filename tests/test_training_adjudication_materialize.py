@@ -219,16 +219,23 @@ def test_materialize_serves_legacy_labels_only_rows_from_trajectory(tmp_path: Pa
     assert record["evidence_digest"] == "d" * 32
 
 
-def test_materialize_fails_closed_when_legacy_labels_only_rows_have_no_trajectory(
+def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(
     tmp_path: Path,
 ) -> None:
     """A legacy labels-only session with no trajectory anywhere has no
-    materializable resolutions: fail closed naming the session — never
-    silently skipped, never a partial snapshot."""
+    materializable resolutions: it contributes no records instead of failing
+    the whole curation -- the row is evidence-only (e.g. a session a runbook
+    step-3b import admitted from a backup root outside the curation: DB-only
+    runs row, labels-only observations, no runs/<sid> files), and one such
+    session must not brick every later preview/materialize/harvest pass."""
     root = _hydrated_sqlite_index(tmp_path)
     _make_labels_only_rubric(root)
-    with pytest.raises(Exception, match="s1"):
-        run_materialize(root, tmp_path / "out", pin=_PIN)
+    summary = run_materialize(root, tmp_path / "out", pin=_PIN)
+    assert summary["record_count"] == 0
+    lines = [
+        ln for ln in (tmp_path / "out" / "sessions.jsonl").read_text().splitlines() if ln
+    ]
+    assert lines == []  # the session is served nothing, never fabricated
 
 
 def _hydrated_sqlite_index_agreeing_generations(tmp_path: Path) -> Path:
@@ -267,6 +274,34 @@ def _hydrated_sqlite_index_agreeing_generations(tmp_path: Path) -> Path:
     return root
 
 
+def test_materialize_serves_human_labeled_session_from_trajectory(tmp_path: Path) -> None:
+    """A human-sourced row (``daydream label`` / ``index.update_labels``
+    appends ``source='human'`` with a NULL ``rubric_json``) wins precedence but
+    must not brick the derivation: the NULL rubric falls back to the sanitized
+    trajectory like a legacy labels-only row (issue #336 item 1), and the
+    human row -- authoritative under the archive's human-wins precedence --
+    never flags the session conflicting (issue #336 item 3)."""
+    root = _hydrated_sqlite_index(tmp_path)
+    _seed_legacy_trajectory(root)
+    from daydream.archive.index import append_label_observation
+
+    append_label_observation(
+        root,
+        "s1",
+        labels=["finding-rejected"],
+        pr_state=None,
+        labeler_version="human",
+        evidence_sha=None,
+        source="human",
+        observed_at="2026-01-04T00:00:00+00:00",
+    )
+    summary = run_materialize(root, tmp_path / "out", pin=_PIN)
+    assert summary["record_count"] == 1
+    record = json.loads((tmp_path / "out" / "sessions.jsonl").read_text().splitlines()[0])
+    assert record["disposition"] == "accepted"  # served from the trajectory
+    assert record.get("conflicting") is None  # human override is not a disagreement
+
+
 def test_agreeing_generations_are_not_conflicting(tmp_path: Path) -> None:
     """Two generations with identical dispositions (same labels) split only on
     non-disposition dedup members (evidence_sha, policy version) are agreeing
@@ -274,6 +309,56 @@ def test_agreeing_generations_are_not_conflicting(tmp_path: Path) -> None:
     canonical harvest keeps projecting its decisive finding-accepted label
     instead of suppressing it."""
     root = _hydrated_sqlite_index_agreeing_generations(tmp_path)
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    record = json.loads((tmp_path / "mat" / "sessions.jsonl").read_text().splitlines()[0])
+    assert record.get("conflicting") is None
+    assert record["disposition"] == "accepted"
+
+
+def _hydrated_sqlite_index_evolving(tmp_path: Path) -> Path:
+    """Two auto generations for ``s1``: a pre-adjudication generation whose
+    labels carry no decisive finding- label, resolved by a later decisive
+    accepted generation — distinct dedup keys, distinct label sets, but an
+    evolution (resolved-unanswered -> accepted), not a harvester
+    disagreement (issue #336 item 3)."""
+    from daydream.archive.index import _get_connection
+
+    root = tmp_path / "hydrated"
+    conn = _get_connection(root)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        "VALUES ('s1', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s1')"
+    )
+    for observed_at, labels, evidence_sha, disposition in (
+        ("2026-01-02T00:00:00+00:00", '["finding-unanswered"]', "e" * 64, "unanswered"),
+        ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "accepted"),
+    ):
+        rubric = {"posterior_source": "pr_review",
+                  "per_finding_resolutions": [{
+                      "fingerprint": "fp-1", "comment_id": 7, "disposition": disposition,
+                      "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+                      "evidence_digest": "d" * 32}]}
+        conn.execute(
+            "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
+            "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
+            "VALUES ('s1', ?, ?, 'v1', ?, ?, 0, 'auto', '980-rubric-r2')",
+            (observed_at, labels, evidence_sha, json.dumps(rubric)),
+        )
+    conn.commit()
+    conn.close()
+    (root / "downloads" / ("a" * 40)).mkdir(parents=True)
+    return root
+
+
+def test_resolved_unanswered_to_accepted_evolution_is_not_conflicting(
+    tmp_path: Path,
+) -> None:
+    """A pre-adjudication generation (no decisive finding- label) resolved by a
+    later decisive generation is an evolution, never a harvester disagreement:
+    the session stays gold-eligible after re-materialization (issue #336
+    item 3)."""
+    root = _hydrated_sqlite_index_evolving(tmp_path)
     mat = tmp_path / "mat"
     run_materialize(root, mat, pin=_PIN)
     record = json.loads((tmp_path / "mat" / "sessions.jsonl").read_text().splitlines()[0])
