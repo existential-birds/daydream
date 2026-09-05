@@ -349,7 +349,7 @@ def test_publish_then_resume_reproduces_queue_and_report(
                 src,
                 state_dir=state,
                 index_root=index_root,
-                archive_dir=state,  # publish stages the merged index from --archive-dir
+                archive_dir=tmp_path / "archive",  # distinct dir: publish stages the merged --archive-dir index
                 extra=[
                     "--json",
                     "--publish",
@@ -436,7 +436,7 @@ def test_publish_refuses_non_private_before_any_write(
                 src,
                 state_dir=state,
                 index_root=index_root,
-                archive_dir=state,  # publish stages the merged index from --archive-dir
+                archive_dir=tmp_path / "archive",  # distinct dir: publish stages the merged --archive-dir index
                 extra=["--publish", "--manifest", str(manifest), "--hub-repo", "org/public-ds"],
             ),
         ]

@@ -154,9 +154,11 @@ The real run is read-only over the sources: it appends the surviving
 the `--archive-dir` archive and writes the digest-stable import report and
 ledger beside the scan artifacts in `--state-dir`. The import never writes
 the state-dir `index.db`; the hydrated archive is the single merge target.
-To checkpoint the merged state for fresh-VM resume, add
+To checkpoint the merged state for fresh-VM resume, re-run the command with
 `--publish --manifest /tmp/snapshot/preview-manifest.json` (mutually
-exclusive with `--dry-run`) after the real run has succeeded once.
+exclusive with `--dry-run`) — the publish payload also needs the queue and
+observations that step 4's `build`/`label` produce, so run that publish
+re-run after step 4 (see the checkpoint note there).
 
 ## 4. Build, label, and publish the human queue
 
@@ -180,6 +182,17 @@ daydream corpus adjudicate publish-state --state-dir /tmp/state --manifest /tmp/
 decisive records — those are adjudicated automatically.
 `label` records provenance (who, why, when) that the final bundle carries
 forward. `publish-state` uploads additively, so it is safe to re-run.
+
+To checkpoint the step-3b import's merged history for fresh-VM resume, re-run
+the step-3b import with `--publish --manifest
+/tmp/snapshot/preview-manifest.json` (mutually exclusive with `--dry-run`);
+`build` above supplies the queue the publish payload requires, and the import
+stages the merged `--archive-dir` index into the state dir for the
+publication:
+
+```bash
+daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --publish --manifest /tmp/snapshot/preview-manifest.json
+```
 
 ## 5. Canonical harvest with the drift gate
 

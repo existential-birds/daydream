@@ -559,3 +559,39 @@ def test_conflicted_session_yields_no_decisive_label(tmp_path: Path) -> None:
     assert rubric["per_finding_resolutions"][0]["conflicting"] is True
     # and no decisive label was projected from the conflicted disposition
     assert "finding-accepted" not in history[0]["labels"]
+
+
+def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
+    """The non-gold guarantee extends to the corpus-v2 projection: a
+    conflicted session's annotations.jsonl row (full record, ``conflicting``
+    flag intact) must never classify gold with ``outcome_label`` set even
+    with a decisive disposition + evidence -- the same gate canonical.py
+    applies to the archive labels column, enforced where ``classify_tier``
+    flows into the projected record."""
+    from daydream.training.corpus_v2.projector import project_findings
+
+    root = _hydrated_sqlite_index_with_conflict(tmp_path)  # two distinct dedup keys, s1
+    mat = tmp_path / "mat"
+    run_materialize(root, mat, pin=_PIN)
+    archive = tmp_path / "archive"
+    _seed_archive(archive)
+    run_canonical_harvest(index_root=root, materialize_dir=mat, archive_dir=archive)
+    rows = [
+        json.loads(line)
+        for line in (mat / "annotations.jsonl").read_text().splitlines()
+        if line
+    ]
+    # the flag rides through the harvest into the projection input verbatim
+    assert any(row.get("conflicting") is True for row in rows)
+    # run_build_corpus_v2's snapshot assembly (session-scoped resolutions) --
+    # the boundary classify_tier reaches the corpus-v2 gold label through.
+    session = {
+        "session_id": "s1",
+        "trajectory_id": "s1",
+        "segment_id": "s1",
+        "resolutions": [row for row in rows if row.get("session_id") == "s1"],
+    }
+    records = project_findings(session)
+    assert records  # the finding is still projected -- provenance preserved
+    assert all(r["tier"] != "gold" for r in records)
+    assert all(r["outcome_label"] is None for r in records)

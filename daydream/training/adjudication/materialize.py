@@ -62,10 +62,16 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
     reply_evidence_digest, labels, has_posterior)``; within an identical key
     the latest ``observed_at`` wins; across distinct keys the winner follows
     the archive's ``_PRECEDENCE_ORDER`` (human-first ``source='human'``, then
-    ``observed_at DESC``). More than one distinct dedup key means the session
-    is **conflicting**: the winner still supplies the resolutions and every
-    emitted record for that session carries ``"conflicting": true`` (surfaced
-    non-gold downstream, never merged away).
+    ``observed_at DESC``). The session is **conflicting** only when its
+    generations disagree in disposition-relevant content (more than one
+    distinct ``labels`` set across the dedup-key groups): the archive appends
+    fresh generations with identical labels on policy-version bumps,
+    edited-reply digest changes, and label-preserving observation overlays
+    (``index.append_label_observation``), so a dedup-key split alone never
+    marks a session non-gold. For a conflicted session the winner still
+    supplies the resolutions and every emitted record for that session
+    carries ``"conflicting": true`` (surfaced non-gold downstream, never
+    merged away).
 
     The index revision is the pinned source commit (the single revision
     directory under ``downloads/``) — a full 40-hex SHA, exactly what the
@@ -75,6 +81,7 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
         raise HubUnavailableError(
             f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
         )
+    _raise_on_uncheckpointed_wal(index_root / "index.db")
     sessions: list[dict[str, Any]] = []
     for row in _query_runs_readonly(index_root / "index.db"):
         session_id = str(row["session_id"])
@@ -94,11 +101,18 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
                 )
             resolutions = rubric.get("per_finding_resolutions")
             if not isinstance(resolutions, list) or not resolutions:
-                raise HubUnavailableError(
-                    f"session {session_id!r}: winning rubric_json carries no "
-                    "per_finding_resolutions to materialize (legacy labels-only rows "
-                    "are not backfilled)"
-                )
+                # Legacy labels-only rows (pre-#1095 ``Rubric.to_dict`` emitted
+                # only ``per_finding_outcomes``) carry no per-finding semantics
+                # to materialize, and the import path (runbook step 3b) appends
+                # such rows verbatim — an imported archive therefore reaches
+                # this branch with observations present, and failing closed
+                # here would brick the session for every later
+                # preview/materialize/harvest. Serve the session from the
+                # sanitized per-run trajectory instead (the pre-#1095
+                # materialization source), exactly like a session with no
+                # observation rows at all; a session with no trajectory either
+                # still fails closed below naming it.
+                resolutions = _trajectory_resolutions_readonly(index_root, session_id)
             session = {
                 "session_id": session_id,
                 "trajectory_id": session_id,
@@ -139,11 +153,15 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
 
 def _trajectory_resolutions_readonly(index_root: Path, session_id: str) -> list[dict[str, Any]]:
     """Read a session's per-finding resolutions from the sanitized per-run
-    trajectory (the pre-#1095 materialization source). Used only when the
-    hydrated staging archive carries no ``label_observations`` history for
-    the session yet (freshly hydrated stage; canonical harvest appends the
-    first rows). Fail-closed: a missing/unreadable/empty trajectory raises
-    ``HubUnavailableError`` naming the session -- never silently skipped.
+    trajectory (the pre-#1095 materialization source). Used when the hydrated
+    staging archive has no materializable ``label_observations`` history for
+    the session: no observation rows yet (freshly hydrated stage; canonical
+    harvest appends the first rows) or only legacy labels-only rows whose
+    rubric_json carries no ``per_finding_resolutions`` (pre-#1095
+    ``Rubric.to_dict``; such rows are appended verbatim by the import path,
+    runbook step 3b). Fail-closed: a missing/unreadable/empty trajectory
+    raises ``HubUnavailableError`` naming the session -- never silently
+    skipped.
     """
     trajectory_path = index_root / "runs" / session_id / "trajectory.json"
     if not trajectory_path.is_file():
@@ -166,11 +184,33 @@ def _trajectory_resolutions_readonly(index_root: Path, session_id: str) -> list[
     return resolutions
 
 
+def _raise_on_uncheckpointed_wal(db_path: Path) -> None:
+    """Fail loudly when the hydrated index has an uncheckpointed WAL.
+
+    The archive's writer (``index._get_connection``) runs in persistent WAL
+    mode, so a crashed/interrupted writer between commit and close leaves
+    committed rows in ``index.db-wal``. The read-only adapters below open with
+    ``immutable=1``, which by design skips ``-wal``/``-shm`` entirely — such
+    rows would then be silently dropped and preview/materialize would serve
+    fewer sessions with no error and no sidecar. A surviving ``index.db-wal``
+    is therefore a loud error: the operator must checkpoint/recover the index
+    (or let an active writer finish) before the read-only guarantee holds.
+    """
+    if (db_path.with_name(db_path.name + "-wal")).is_file():
+        raise HubUnavailableError(
+            f"hydrated index {db_path} has an uncheckpointed WAL "
+            f"({db_path.name}-wal): committed rows may live only in the WAL; "
+            "checkpoint or recover the index before previewing/materializing"
+        )
+
+
 def _query_runs_readonly(db_path: Path) -> list[dict[str, Any]]:
     """Read all ``runs`` rows over a **read-only** connection (``mode=ro``
     URI — ``query_runs`` goes through ``_get_connection``, which opens
     read-write, runs ``PRAGMA journal_mode=WAL`` against the hydrated
-    staging index, and leaves ``-wal``/``-shm`` sidecars behind).
+    staging index, and leaves ``-wal``/``-shm`` sidecars behind). Callers
+    must reject an uncheckpointed ``index.db-wal`` first
+    (``_raise_on_uncheckpointed_wal``): ``immutable=1`` skips it entirely.
     """
     import sqlite3
 
@@ -207,7 +247,11 @@ def _winning_observation(
 ) -> tuple[dict[str, Any], bool]:
     """Deterministic latest-observation selection (see the module docstring for
     the rule). Returns the winning row and whether the session is conflicting
-    (more than one distinct dedup key).
+    (more than one distinct disposition-relevant ``labels`` set across the
+    dedup-key groups — see ``index.append_label_observation``; a dedup-key
+    split that preserves the labels — policy-version bump, edited-reply
+    digest change, label-preserving overlay — is agreeing generations, not a
+    conflict).
     """
     groups: dict[tuple[Any, ...], dict[str, Any]] = {}
     for obs in observations:
@@ -229,7 +273,11 @@ def _winning_observation(
             str(o.get("observed_at", "")),
         ),
     )
-    return winner, len(groups) > 1
+    # Conflict is decided from disposition-relevant content (the archived
+    # labels projection), never from the full dedup tuple: two rows agreeing
+    # on the disposition but split on evidence_sha / policy version / reply
+    # digest / has_posterior are agreeing generations that stay gold-eligible.
+    return winner, len({o.get("labels") for o in winners}) > 1
 
 
 def _resolution_from_row(row: dict[str, Any]) -> PerFindingResolution:

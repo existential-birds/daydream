@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -527,8 +528,18 @@ def handle_export(argv: list[str]) -> int:
         parser.error("--out is required unless --dry-run")
     ledger_path = args.state_dir / _PREVIEW_LEDGER_FILENAME
     try:
-        if not ledger_path.is_file():
-            run_preview(args.index_root, ledger_path)
+        # Regenerate the ledger on every run: a re-export after a snapshot
+        # re-materialization must re-pin the digest reference, or the stale
+        # ledger would fail the runbook's 3a "re-run it any time the snapshot
+        # or the observations change" path with AdjudicationDriftError instead
+        # of being the documented recovery (run_preview compares against the
+        # prior ledger and overwrites it).
+        preview = run_preview(args.index_root, ledger_path)
+        if preview["drifted_record_ids"]:
+            print(
+                f"preview drift: {len(preview['drifted_record_ids'])} record(s) changed "
+                f"evidence since the prior ledger: {preview['drifted_record_ids']}"
+            )
         rows = build_export_entries(
             args.index_root, ledger_path,
             observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
@@ -1304,14 +1315,19 @@ def _build_import_report(
     return report
 
 
-def _publish_import_state(state_dir: Path, hub_repo: str, manifest: Path) -> dict[str, Any]:
+def _publish_import_state(
+    archive_dir: Path, state_dir: Path, hub_repo: str, manifest: Path
+) -> dict[str, Any]:
     """Publish the imported adjudication state additively to the private Hub.
 
     The publish composition requires the adjudication-state payload
     (queue.json / observations.jsonl / preview-ledger.json) and the state
-    archive index (index.db — the ``--archive-dir`` merge target staged into
-    the state dir for publication) to exist; fail closed with a prerequisite
-    hint on a fresh state-dir instead of a bare ``FileNotFoundError``.
+    archive index (index.db) to exist; fail closed with a prerequisite hint
+    on a fresh state-dir instead of a bare ``FileNotFoundError``. The import
+    merges into the ``--archive-dir`` index (never the state-dir index), so
+    the merged index is staged byte-for-byte into the state dir here before
+    the gate; a fresh-VM resume from the published checkpoint then restores
+    the import's rows, not just the queue/report.
     Reuses the existing publication: the private repo hard-fail and the S1
     secret scan are ``publish_annotation_state``'s own fail-closed gates, so
     a public destination or a credential-shaped payload is refused before
@@ -1327,8 +1343,16 @@ def _publish_import_state(state_dir: Path, hub_repo: str, manifest: Path) -> dic
         _ImportPublishError: When the state archive is missing a publishable
             adjudication-state file.
         ValueError/HubUnavailableError/HydrationError/PublicDestinationError/
-        FileNotFoundError: Propagated from the publication steps.
+        OSError: Propagated from the staging copy (OSError) and the
+            publication steps.
     """
+    # Stage the merge target into the state dir for publication: the import
+    # writes only the --archive-dir index, and publish_annotation_state
+    # uploads state_dir/index.db. Identical dirs are a no-op; a missing
+    # archive index falls through to the gate's standard prerequisite hint.
+    if archive_dir.resolve() != state_dir.resolve() and (archive_dir / "index.db").is_file():
+        state_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(archive_dir / "index.db", state_dir / "index.db")
     missing = [
         name
         for name in ("queue.json", "observations.jsonl", "preview-ledger.json", "index.db")
@@ -1360,9 +1384,11 @@ def handle_import_local_observations(argv: list[str]) -> int:
     redaction-gated append-only merge into the ``--archive-dir`` archive
     (``_write_import_merge``), the digest-stable report
     (``_build_import_report``, carrying the per-session ``identity_summary``),
-    and the optional publish (``_publish_import_state``). The state-dir
-    ``index.db`` is never written by the import; ``--state-dir`` stays for
-    the scan artifacts, report/ledger, and ``--publish`` payload staging.
+    and the optional publish (``_publish_import_state`` — which stages the
+    merged ``--archive-dir`` index into the state dir for the payload). The
+    state-dir ``index.db`` is never written by the import; ``--state-dir``
+    stays for the scan artifacts, report/ledger, and ``--publish`` payload
+    staging.
     This handler owns only arg parsing, the fail-closed error surface, and
     output; ``--json`` prints the report and a real run writes it to
     ``--state-dir/import-report.json`` with the ledger in
@@ -1426,14 +1452,14 @@ def handle_import_local_observations(argv: list[str]) -> int:
     if args.publish:
         try:
             report["publish"] = _publish_import_state(
-                args.state_dir, args.hub_repo, args.manifest
+                args.archive_dir, args.state_dir, args.hub_repo, args.manifest
             )
         except _ImportPublishError as exc:
             print_error(
                 console, "adjudicate import-local-observations publish failed", exc.message
             )
             return 1
-        except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
+        except (ValueError, OSError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
             print_error(console, "adjudicate import-local-observations failed", str(exc))
             return 1
 

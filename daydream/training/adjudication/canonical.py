@@ -52,6 +52,17 @@ _MANIFEST_FILENAME = "preview-manifest.json"
 
 _HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
+# Disposition written for a conflicted generation's corpus-v2 projection input
+# (annotations.jsonl). Corpus-v2's gold gate (``tiers.classify_tier``) keys
+# solely on disposition/evidence/evidence_after_as_of and never reads the
+# ``conflicting`` flag, so a conflicted generation that kept its decisive
+# disposition would still classify gold. A non-decisive disposition forces
+# classify_tier to ``task-only`` (routed to adjudication, never gold);
+# ``ambiguous`` is the faithful label for generations that disagree. The
+# archive ``rubric_json`` keeps the record's real decisive disposition for
+# provenance -- this value only shapes the projection-facing annotations row.
+_CONFLICTED_DISPOSITION = "ambiguous"
+
 
 def _canonical(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -261,10 +272,12 @@ def run_canonical_harvest(
         # ones: a session whose harvester generations disagree is non-gold per
         # existing precedence — its dispositions never project into
         # ``finding-<disposition>`` labels. The full record (``conflicting``
-        # flag included) still lands in ``rubric_json`` and annotations.jsonl —
+        # flag included) still lands in the archive ``rubric_json`` —
         # provenance preserved, and acceptance is never inferred from merge
         # state (the flag is set by the materializer and merely carried
-        # through the merge loop above).
+        # through the merge loop above). The ``annotations.jsonl`` projection
+        # row (written below) neutralizes the conflicted disposition so the
+        # corpus-v2 gate never classifies it gold.
         labels = sorted(
             {
                 f"finding-{record['disposition']}"
@@ -311,10 +324,26 @@ def run_canonical_harvest(
             skipped_sessions += 1
 
     # annotations.jsonl from the same in-memory merged records — no second shape.
+    # The corpus-v2 gold gate (``tiers.classify_tier``) reads only
+    # disposition/evidence/evidence_after_as_of, never the ``conflicting``
+    # flag, so a conflicted record must not carry its decisive disposition
+    # here or it would project gold with ``outcome_label`` set. Emit the
+    # record (``conflicting`` rides through; provenance preserved in the
+    # archive rubric_json above) with the disposition neutralized to
+    # ``_CONFLICTED_DISPOSITION`` so the projection routes it to task-only
+    # adjudication, never gold.
+    def _annotation_row(record: dict[str, Any]) -> dict[str, Any]:
+        if record.get("conflicting"):
+            row = dict(record)
+            row["disposition"] = _CONFLICTED_DISPOSITION
+            return row
+        return record
+
     records_path = materialize_dir / _ANNOTATIONS_FILENAME
     tmp_path = records_path.with_name(records_path.name + ".tmp")
     tmp_path.write_text(
-        "".join(_canonical(record) + "\n" for record in merged_records), encoding="utf-8"
+        "".join(_canonical(_annotation_row(record)) + "\n" for record in merged_records),
+        encoding="utf-8",
     )
     tmp_path.replace(records_path)
 
