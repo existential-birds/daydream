@@ -570,9 +570,9 @@ class CodexBackend:
 
                     elif item_type == "file_change":
                         # file_change has no item.started — emit a synthetic pair.
-                        item_id = item.get("id", str(uuid.uuid4()))
                         changes = item.get("changes")
                         if isinstance(changes, dict) and changes:
+                            item_id = item.get("id", str(uuid.uuid4()))
                             # Current CLI shape: a map of path -> {type, ...}.
                             # Normalize each path against execution_cwd; keep
                             # absolute paths that fall outside it.
@@ -614,6 +614,7 @@ class CodexBackend:
                             )
                         elif "file_path" in item:
                             # Legacy scalar shape (older CLI): keep as-is.
+                            item_id = item.get("id", str(uuid.uuid4()))
                             file_path = item.get("file_path", "unknown")
                             action = item.get("action", "modified")
                             yield ToolStartEvent(
@@ -627,10 +628,29 @@ class CodexBackend:
                                 is_error=False,
                             )
                         else:
-                            _warn(
-                                "file_change item without paths",
-                                item_id=item_id,
-                                status=item.get("status", ""),
+                            # Pathless payload — neither `changes` nor `file_path`.
+                            # Never silently archive (the old behavior recorded
+                            # "modified: unknown"): emit a synthetic pair whose
+                            # ToolResult is an observable error echoing the
+                            # item's available fields.
+                            item_id = item.get("id")
+                            if not item_id:
+                                item_id = _claim_tool_id("file_change", "file_change:pathless", "")
+                            fields = {
+                                k: v for k, v in item.items()
+                                if k != "type" and v != "unknown"
+                            }
+                            echo = json.dumps(fields)
+                            yield ToolStartEvent(
+                                id=item_id,
+                                name="patch",
+                                input={"file_change": fields},
+                            )
+                            yield ToolResultEvent(
+                                id=item_id,
+                                output=f"unparseable file_change item: {echo}",
+                                is_error=True,
+                                status=item.get("status") or None,
                             )
 
                     elif item_type == "mcp_tool_call":

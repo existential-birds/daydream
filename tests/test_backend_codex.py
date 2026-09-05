@@ -155,6 +155,18 @@ async def test_file_change_changes_map_failed_is_error_with_stderr() -> None:
     assert "failed to apply hunk" in results[0].output
 
 
+@pytest.mark.asyncio
+async def test_file_change_pathless_payload_diagnostic() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_pathless.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "unparseable" in results[0].output
+    assert "file_change" in results[0].output  # echoes available fields
+    assert "unknown" not in results[0].output
+
+
 @pytest.mark.parametrize(
     ("fixture", "expected_output", "expected_text_count"),
     [
