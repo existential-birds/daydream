@@ -1136,8 +1136,59 @@ def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_pa
     )
     (exploration_dir / "dependencies.md").write_text("a -> b", encoding="utf-8")
     summary, dependencies = deep._inline_exploration_text(exploration_dir)
-    assert "[exploration truncated to fit the prompt budget]" in summary
+    assert "[exploration summary truncated]" in summary
     assert dependencies is None
+
+
+def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) -> None:
+    """Issue #336: the clone-mode inline summary must not name the sibling
+    artifacts that do not travel to the disposable clone (the
+    affected_files.md/conventions.md/dependencies.md rows and the embedded
+    blockquote the writer emits), while the prose is kept."""
+    from daydream.deep import orchestrator as deep
+    from daydream.exploration import _BOUNDARY_BLOCKQUOTE
+
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "summary.md").write_text(
+        "# Exploration Summary\n"
+        f"{_BOUNDARY_BLOCKQUOTE}\n"
+        "\n"
+        "Pre-scan exploration results for the current review.\n"
+        "| File | Contents |\n"
+        "|------|----------|\n"
+        "| `affected_files.md` | 3 files (static) |\n"
+        "| `conventions.md` | No data collected |\n"
+        "| `dependencies.md` | 2 dependency edges |\n"
+        "\n"
+        "## Additional Notes\nkeep me\n",
+        encoding="utf-8",
+    )
+    summary, _ = deep._inline_exploration_text(exploration_dir)
+    assert "affected_files.md" not in summary
+    assert "conventions.md" not in summary
+    assert "dependencies.md" not in summary
+    assert "| File | Contents |" not in summary
+    assert _BOUNDARY_BLOCKQUOTE not in summary
+    assert "Pre-scan exploration results for the current review." in summary
+    assert "keep me" in summary
+
+
+def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> None:
+    """Issue #336: the summary slice is byte-exact (mirroring the diff-block
+    truncation), so a multibyte summary cannot exceed INLINE_DIFF_BUDGET_BYTES."""
+    from daydream.deep import orchestrator as deep
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "summary.md").write_text(
+        "é" * (INLINE_DIFF_BUDGET_BYTES // 2 + 100), encoding="utf-8"
+    )
+    summary, _ = deep._inline_exploration_text(exploration_dir)
+    assert "[exploration summary truncated]" in summary
+    body = summary.split("\n[exploration summary truncated]", 1)[0]
+    assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
 
 
 def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
@@ -1146,7 +1197,8 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     """A fork override written against the documented extension contract (no
     clone-mode inline kwargs) must not receive them on a disposable-clone run:
     splatting them in would raise TypeError and degrade the kind to failed.
-    The override gets exactly the documented kwargs and the run proceeds."""
+    The override gets exactly the documented kwarg set and the run proceeds —
+    with exploration_dir=None on the clone run, never the dangling host path."""
     from types import SimpleNamespace
 
     from daydream.deep import orchestrator as deep
@@ -1172,6 +1224,7 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     )
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
     assert prompt.startswith("legacy:")
+    assert "exploration=None" in prompt  # no dangling host path on a clone run
 
 
 async def test_disposable_clone_authoring_completes_without_artifact_reads(

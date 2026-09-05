@@ -219,6 +219,7 @@ from daydream.deep.prompts import (
     build_diagram_repair_prompt,
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
 _PIPELINE_STAGE_NAMES: list[str] = [
@@ -2918,7 +2919,10 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
     ``OSError`` yields ``None`` — the block is omitted, never faked) and
     share one ``INLINE_DIFF_BUDGET_BYTES`` budget: the summary takes the
     first slice, the dependency edges fill the remainder. Each over-budget
-    piece is truncated with an explicit marker rather than dropped.
+    piece is truncated with an explicit marker rather than dropped. The
+    summary is scrubbed first (``_scrub_exploration_summary``) so the
+    standalone-artifact scaffolding the pre-scan writer emits cannot dangle
+    in the inline rendering.
     """
     if exploration_dir is None:
         return None, None
@@ -2928,14 +2932,16 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
     except OSError:
         summary = None
     if summary is not None:
+        summary = _scrub_exploration_summary(summary)
         encoded = summary.encode("utf-8")
         if len(encoded) > budget:
+            truncated = encoded[:budget].decode("utf-8", errors="ignore")
             summary = (
-                encoded[:budget].decode("utf-8", errors="ignore")
-                + "\n[exploration truncated to fit the prompt budget]\n"
+                f"{truncated}\n[exploration summary truncated]\n" if truncated else None
             )
-            encoded = summary.encode("utf-8")
-        budget = max(budget - len(encoded), 0)
+            encoded = summary.encode("utf-8") if summary is not None else b""
+        if summary is not None:
+            budget = max(budget - len(encoded), 0)
     try:
         dependencies: str | None = (exploration_dir / "dependencies.md").read_text(
             encoding="utf-8"
@@ -2950,11 +2956,37 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
             if len(encoded) > budget:
                 truncated = encoded[:budget].decode("utf-8", errors="ignore")
                 dependencies = (
-                    f"{truncated}\n[exploration truncated to fit the prompt budget]\n"
+                    f"{truncated}\n[exploration summary truncated]\n"
                     if truncated
                     else None
                 )
     return summary, dependencies
+
+
+def _scrub_exploration_summary(summary: str) -> str:
+    """Drop the standalone-artifact scaffolding ``summary.md`` carries.
+
+    The pre-scan writer emits the summary as a standalone artifact: an
+    embedded untrusted-content blockquote plus a table whose rows name the
+    sibling artifacts (``affected_files.md``, ``conventions.md``,
+    ``dependencies.md``). On a disposable clone only the summary body and the
+    dependency edges travel inline — the siblings are absent, so rows that
+    name them would dangle, and the clone-mode block builder re-emits the
+    boundary as its opening block. Strip that scaffolding and keep the prose.
+    """
+    kept: list[str] = []
+    in_artifact_table = False
+    for line in summary.splitlines():
+        if line == f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}":
+            continue  # re-emitted by the clone-mode block builder
+        if line == "| File | Contents |":
+            in_artifact_table = True
+            continue
+        if in_artifact_table and line.startswith("|"):
+            continue  # separator and every data row (each names a sibling)
+        in_artifact_table = False
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
@@ -2964,7 +2996,9 @@ def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
     ``clone_mode``/``inline_exploration``/``inline_dependencies``; splatting
     them into such a builder would raise ``TypeError`` on every
     disposable-clone run, degrading the kind to failed. The builtin builders
-    accept all three; a legacy override keeps the documented kwargs instead.
+    accept all three; a legacy override keeps the documented kwarg set, with
+    ``exploration_dir`` arriving as ``None`` on clone runs (the host path
+    would dangle in the disposable clone).
     """
     try:
         params = inspect.signature(builder).parameters
@@ -2993,7 +3027,8 @@ def _diagram_author_prompt(
     them: fork overrides written against the documented extension contract
     predate the inline kwargs, and splatting them in would raise ``TypeError``
     on every disposable-clone run, degrading the kind to failed. A legacy
-    override keeps the documented kwargs intact.
+    override keeps the documented kwarg set; on a clone run its
+    ``exploration_dir`` arrives as ``None`` rather than the dangling host path.
     """
     diff_path: Path = ctx.data["diff_path"]
     inline_diff = _ttt_diff_text(ctx)
@@ -3012,7 +3047,11 @@ def _diagram_author_prompt(
             "inline_dependencies": inline_dependencies,
         }
     else:
-        inline_kwargs = {"exploration_dir": exploration_dir}
+        # A legacy override keeps its documented kwarg set, but a clone run
+        # must not name the host-only exploration_dir: the path dangles in
+        # the disposable clone, so it arrives as ``None`` there and untouched
+        # otherwise.
+        inline_kwargs = {"exploration_dir": None if clone_mode else exploration_dir}
     if kind == "sequence":
         return str(
             builder(
