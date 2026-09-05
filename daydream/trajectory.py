@@ -1444,27 +1444,24 @@ class Invocation:
     def _emit_incomplete_call_markers(self) -> None:
         """Append a synthetic failure observation for every still-in-flight tool call.
 
-        Called from ``finish()`` after ``_close_open_step()`` so each marker
-        lands on a closed Step (via the same open-dict / closed-index two-path
-        idiom the ``ToolResultEvent`` branch uses). Popping entries as we go
+        Called from ``finish()`` after ``_close_open_step()``, and every host
+        entry's ``open_dict`` is nulled when its Step closes, so each marker
+        lands on the closed Step via ``closed_index`` (the open-dict arm is
+        unreachable by construction and omitted). Popping entries as we go
         makes this idempotent — a second ``finish()`` finds nothing. Content is
         a fixed ASCII string, never formatted with tool data, so it is
         redaction-stable; ``extra`` carries only the two fixed keys.
         """
         while self._in_flight_tools:
             tool_id, host = self._in_flight_tools.popitem()
-            result = ObservationResult(
-                source_call_id=tool_id,
-                content=INCOMPLETE_CALL_CONTENT,
-                extra={"is_error": True, "status": "interrupted"},
+            self._amend_closed_step_observation(
+                closed_index=host["closed_index"],
+                result=ObservationResult(
+                    source_call_id=tool_id,
+                    content=INCOMPLETE_CALL_CONTENT,
+                    extra={"is_error": True, "status": "interrupted"},
+                ),
             )
-            open_dict = host["open_dict"]
-            if open_dict is not None:
-                open_dict["_observation_results"].append(result)
-            else:
-                self._amend_closed_step_observation(
-                    closed_index=host["closed_index"], result=result
-                )
 
     def finish(self) -> None:
         """Close any open step, mark in-flight tool calls interrupted, and flush.
