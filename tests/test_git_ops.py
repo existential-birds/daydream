@@ -2207,3 +2207,28 @@ def test_clone_error_message_redacts_stderr_url_echo(tmp_path: Path, monkeypatch
         git_ops.clone("https://user:ghp_canaryfake123@unreachable.invalid/o/r.git", tmp_path / "t", timeout=5)
     assert "ghp_canaryfake123" not in str(excinfo.value)
     assert real_run is not None
+
+
+# --- pre-push hook detection (issue #726 task 6) -----------------------------
+
+
+def test_has_executable_pre_push_hook_default_hooks_dir(tmp_path):
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    pp = hooks / "pre-push"
+    pp.write_text("#!/bin/sh\n")
+    pp.chmod(0o755)
+    assert git_ops.has_executable_pre_push_hook(tmp_path) is True
+    pp.chmod(0o644)  # non-executable => no hook
+    assert git_ops.has_executable_pre_push_hook(tmp_path) is False
+
+
+def test_has_executable_pre_push_hook_honors_core_hooks_path(tmp_path):
+    custom = tmp_path / "myhooks"
+    custom.mkdir()
+    pp = custom / "pre-push"
+    pp.write_text("#!/bin/sh\n")
+    pp.chmod(0o755)
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.hooksPath", str(custom)], check=True)
+    assert git_ops.has_executable_pre_push_hook(tmp_path) is True

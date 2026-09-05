@@ -566,6 +566,29 @@ def head_sha(repo: Path) -> str:
     return proc.stdout.strip()
 
 
+def has_executable_pre_push_hook(repo: Path) -> bool:
+    """Return True when *repo* has an executable ``pre-push`` hook.
+
+    Honors ``core.hooksPath`` when configured; otherwise resolves the default
+    hooks directory via ``git rev-parse --git-path hooks`` (falling back to
+    ``<repo>/.git/hooks`` when *repo* is not a resolvable git repository). The hook counts
+    only when the file exists **and** is executable. Absence of the directory
+    or file is a normal ``False`` (no exception); a git failure resolving the
+    hooks path still raises :class:`GitError` like every other read query.
+    """
+    proc = _run_git(repo, ["rev-parse", "--git-path", "hooks"], timeout=5)
+    if proc.returncode != 0:
+        # Not a resolvable git repository: the canonical default location is
+        # still checked so "no executable hook" stays a plain False answer.
+        hooks_dir = repo / ".git" / "hooks"
+    else:
+        hooks_dir = Path(proc.stdout.strip())
+        if not hooks_dir.is_absolute():
+            hooks_dir = repo / hooks_dir
+    hooks_path = hooks_dir / "pre-push"
+    return hooks_path.is_file() and os.access(hooks_path, os.X_OK)
+
+
 def list_local_branches(repo: Path) -> dict[str, str]:
     """Return a snapshot of local branch names mapped to their full OIDs.
 
