@@ -27,6 +27,7 @@ from daydream.runner import RunConfig
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
+from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
@@ -909,6 +910,7 @@ class _CommitWritingBackend:
 async def test_fix_cycle_yes_commits_fixes(
     monkeypatch: pytest.MonkeyPatch,
     feature_branch_repo: Path,
+    tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
     silence_console: Callable[..., None],
 ) -> None:
@@ -922,6 +924,9 @@ async def test_fix_cycle_yes_commits_fixes(
 
     _seed_fix_resume(feature_branch_repo, [_fix_item()])
     _silence_fix_cycle_ui(silence_console)
+    # Host-native commit/push (issue #726) pushes to 'origin' for real; give
+    # the repo a bare remote so the push + ls-remote verification succeeds.
+    _git(feature_branch_repo, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
     commit_backend = _CommitWritingBackend(feature_branch_repo)
     monkeypatch.setattr(
@@ -948,7 +953,8 @@ async def test_fix_cycle_yes_commits_fixes(
 
     head_after = _git(feature_branch_repo, "rev-parse", "HEAD")
     assert head_after != head_before, "the --yes run never committed"
-    assert len(commit_backend.commit_prompts) == 1
+    # Issue #726: the commit is host-native — no agent commit turn runs.
+    assert commit_backend.commit_prompts == []
     assert "Daydream-Run:" in _git(feature_branch_repo, "log", "-1", "--format=%B")
     assert "# daydream fix" in _git(feature_branch_repo, "show", "HEAD:main.py")
 

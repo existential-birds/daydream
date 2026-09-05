@@ -5008,7 +5008,7 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark
 
 
-def test_build_commit_message_deterministic_with_trailers():
+def test_build_commit_message_deterministic_with_trailers() -> None:
     from daydream.phases import build_commit_message
 
     items = [{"file": "a.py", "description": "fix null guard"},

@@ -2212,7 +2212,7 @@ def test_clone_error_message_redacts_stderr_url_echo(tmp_path: Path, monkeypatch
 # --- pre-push hook detection (issue #726 task 6) -----------------------------
 
 
-def test_has_executable_pre_push_hook_default_hooks_dir(tmp_path):
+def test_has_executable_pre_push_hook_default_hooks_dir(tmp_path: Path) -> None:
     hooks = tmp_path / ".git" / "hooks"
     hooks.mkdir(parents=True)
     pp = hooks / "pre-push"
@@ -2223,7 +2223,7 @@ def test_has_executable_pre_push_hook_default_hooks_dir(tmp_path):
     assert git_ops.has_executable_pre_push_hook(tmp_path) is False
 
 
-def test_has_executable_pre_push_hook_honors_core_hooks_path(tmp_path):
+def test_has_executable_pre_push_hook_honors_core_hooks_path(tmp_path: Path) -> None:
     custom = tmp_path / "myhooks"
     custom.mkdir()
     pp = custom / "pre-push"
@@ -2234,7 +2234,7 @@ def test_has_executable_pre_push_hook_honors_core_hooks_path(tmp_path):
     assert git_ops.has_executable_pre_push_hook(tmp_path) is True
 
 
-def test_remote_contains_commit_true_after_push_false_before(tmp_path):
+def test_remote_contains_commit_true_after_push_false_before(tmp_path: Path) -> None:
     remote = tmp_path / "remote"
     clone = tmp_path / "clone"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)

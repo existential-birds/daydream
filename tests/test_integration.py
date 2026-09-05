@@ -23,6 +23,7 @@ from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
@@ -166,11 +167,15 @@ def target_project(tmp_path: Path) -> Path:
 @pytest.mark.asyncio
 async def test_full_fix_flow(
     target_project: Path,
+    tmp_path: Path,
     install_backend: Callable[[object], object],
     make_config: Callable[..., 'RunConfig'],
 ) -> None:
     """The shallow flow writes a report, applies a fix, tests it, and commits."""
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
+    # Host-native commit/push (issue #726) pushes to 'origin' for real; give
+    # the repo a bare remote so the push + ls-remote verification succeeds.
+    _git(target_project, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
     head_before = _git(target_project, "rev-parse", "HEAD")
     config = make_config(
         target_project,
@@ -240,6 +245,7 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
 async def test_shallow_commits_when_operator_ignores_red_suite(
     monkeypatch: pytest.MonkeyPatch,
     feature_branch_repo: Path,
+    tmp_path: Path,
     install_backend: Callable[[object], object],
     make_config: Callable[..., 'RunConfig'],
     silence_console: Callable[..., None],
@@ -264,6 +270,9 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     install_backend(
         _WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False)
     )
+    # Host-native commit/push (issue #726) pushes to 'origin' for real; give
+    # the repo a bare remote so the push + ls-remote verification succeeds.
+    _git(feature_branch_repo, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
 
     head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
 
