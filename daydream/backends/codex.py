@@ -12,7 +12,10 @@ import logging
 import os
 import re
 import shutil
+import subprocess as subprocess
+import sys as sys
 import tempfile
+import threading
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -143,6 +146,87 @@ _GIT_REDIRECT_STRIP_VARS = (
     "GIT_PREFIX",
 )
 
+# Darwin real-git resolution (issue #1122): the sandboxed read-only child that
+# runs inside the macOS Seatbelt sandbox cannot shell out to ``xcrun`` itself,
+# so the parent resolves the real git binary's directory once per process and
+# prepends it to the child PATH (see ``_isolated_child_env``). Cached
+# at-most-once per process — negative results included — mirroring the
+# ``set_gh_token_env``/``reset_gh_token_env`` singleton style in
+# :mod:`daydream.git_ops`.
+_REAL_GIT_DIR: str | None = None
+_REAL_GIT_RESOLVED = False
+# ``execute()`` builds the child env through ``asyncio.to_thread``, so a fan-out
+# of first-wave children can enter the resolver concurrently. ``_REAL_GIT_RESOLVED``
+# is set *before* the bounded xcrun subprocess completes (negative results are
+# cached too), so the check must run under the lock: a concurrent caller that
+# observed the flag early would return before ``_REAL_GIT_DIR`` is assigned and
+# silently lose the real-git PATH.
+_REAL_GIT_RESOLUTION_LOCK = threading.Lock()
+
+# Bound for the parent-side xcrun resolution, mirroring ``git_ops._run_git``'s
+# default timeout (5s): a hung ``xcrun`` must fail open, never wedge the process.
+_XCRUN_TIMEOUT_S = 5
+
+
+def _resolve_real_git_dir() -> str | None:
+    """Resolve the directory of the real (non-shim) ``git`` on macOS (issue #1122).
+
+    Runs ``xcrun --find git`` in the **parent** process — never inside the
+    sandboxed child, where ``xcrun`` itself is blocked — validates the target is
+    an existing executable file, and returns its parent directory. Resolved at
+    most once per process (negative results are cached too). On non-Darwin, or
+    whenever resolution fails (including the bounded timeout on a hung
+    ``xcrun``), returns ``None`` with a warning and the caller leaves the child
+    PATH unchanged (fail-open). The call never stalls the event loop:
+    ``execute()`` builds the child env through ``asyncio.to_thread``. Never
+    raises.
+    """
+    global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
+    with _REAL_GIT_RESOLUTION_LOCK:
+        if _REAL_GIT_RESOLVED:
+            return _REAL_GIT_DIR
+        _REAL_GIT_RESOLVED = True
+        if sys.platform != "darwin":
+            return None
+        try:
+            proc = subprocess.run(
+                ["xcrun", "--find", "git"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_XCRUN_TIMEOUT_S,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _logger.warning(
+                "codex: could not resolve real git via 'xcrun --find git' (%s); leaving child PATH unchanged",
+                exc,
+            )
+            return None
+        if proc.returncode != 0:
+            _logger.warning(
+                "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); "
+                "leaving child PATH unchanged",
+                proc.returncode, proc.stderr.strip(),
+            )
+            return None
+        git_path = proc.stdout.strip()
+        if not git_path or not Path(git_path).is_file() or not os.access(git_path, os.X_OK):
+            _logger.warning(
+                "codex: could not resolve real git via 'xcrun --find git' (invalid target %r); "
+                "leaving child PATH unchanged",
+                git_path,
+            )
+            return None
+        _REAL_GIT_DIR = str(Path(git_path).parent)
+        return _REAL_GIT_DIR
+
+
+def _reset_real_git_resolution() -> None:
+    """Restore the real-git resolver singleton to its initial state (test seam)."""
+    global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
+    _REAL_GIT_DIR = None
+    _REAL_GIT_RESOLVED = False
+
 
 class _SharedCheckout:
     """A disposable read-only checkout shared by concurrent ``execute()`` calls.
@@ -169,7 +253,10 @@ def _isolated_child_env(cwd: Path, execution_cwd: Path) -> dict[str, str] | None
     When *execution_cwd* differs from *cwd* (the disposable-clone case), the
     child must not inherit a path to the caller's repo: the returned copy of the
     parent environment strips ``$PWD``/``$OLDPWD`` and the ``GIT_*`` redirect
-    vars that could point the clone's git ops at the source. Returns ``None``
+    vars that could point the clone's git ops at the source. On Darwin only
+    (issue #1122), the directory of the parent-resolved real git binary is
+    prepended to the child PATH so the sandboxed child bypasses the xcrun shim;
+    resolution failure leaves PATH unchanged (fail-open). Returns ``None``
     when the process runs in *cwd* unchanged (nothing to strip). The isolation is
     path-hiding, not physical — a model that independently discovers the source
     path could still write to its refs.
@@ -179,6 +266,14 @@ def _isolated_child_env(cwd: Path, execution_cwd: Path) -> dict[str, str] | None
     child_env = os.environ.copy()
     for var in _GIT_REDIRECT_STRIP_VARS:
         child_env.pop(var, None)
+    # Issue #1122: on macOS the default ``git`` on PATH is an xcrun shim that
+    # sprays diagnostic noise when invoked inside the Seatbelt sandbox. Prepend
+    # the parent-resolved real git directory so the child resolves the real
+    # binary directly. Fail-open: when resolution fails, PATH is unchanged.
+    if sys.platform == "darwin":
+        real_git_dir = _resolve_real_git_dir()
+        if real_git_dir and "PATH" in child_env:
+            child_env["PATH"] = real_git_dir + os.pathsep + child_env["PATH"]
     return child_env
 
 
@@ -428,8 +523,13 @@ class CodexBackend:
             # path to the caller's repo: _isolated_child_env strips $PWD/$OLDPWD
             # and the GIT_* overrides that could redirect the clone's git ops back
             # at the source, and the child is started in the clone (below) so its
-            # own cwd is never the source path. Path-hiding, not physical.
-            child_env = _isolated_child_env(cwd, execution_cwd)
+            # own cwd is never the source path. Path-hiding, not physical. On
+            # macOS, the same isolated env also prepends the real git dir to the
+            # child PATH so sandboxed git calls bypass the xcrun shim (#1122).
+            # Built off the event loop (asyncio.to_thread, like the sibling git
+            # calls above): the env copy and the bounded xcrun resolution must
+            # never stall concurrent fan-out execute() calls.
+            child_env = await asyncio.to_thread(_isolated_child_env, cwd, execution_cwd)
 
             if execution_cwd != cwd:
                 # Rebind the prompt so no rendering of the caller's source

@@ -5,6 +5,10 @@ import asyncio
 import json
 import logging
 import subprocess
+import sys
+import threading
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -616,6 +620,10 @@ def test_rebind_source_paths_preserves_sibling_paths() -> None:
     assert "/work//inner" not in out3
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="darwin isolated-env PATH behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122)",
+)
 def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     """_isolated_child_env returns None when no isolation and strips the
     repo-redirect env vars (PWD/$GIT_*) when running in the disposable clone."""
@@ -637,6 +645,25 @@ def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch
     # Non-redirect vars are preserved (isolation is path-hiding only).
     assert env["HOME"] == "/home/exedev"
     assert env["PATH"] == "/usr/bin"
+
+
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="darwin behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122 M3)",
+)
+def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M3: non-Darwin env is strip-vars-verbatim, no xcrun."""
+    from daydream.backends import codex
+
+    monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
+    monkeypatch.setenv("GIT_DIR", "/leak")
+    monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun on Linux")))  # noqa: E501
+
+    env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+    assert env is not None
+    assert env["PATH"] == "/usr/bin:/opt/bin"  # byte-for-byte, no prepend (M3)
+    assert "GIT_DIR" not in env
 
 
 @pytest.mark.asyncio
@@ -1378,3 +1405,211 @@ async def test_codex_preserves_exit_code_and_status_on_results() -> None:
     assert ok.is_error is False
     assert ok.exit_code == 0
     assert ok.status == "completed"
+
+
+@pytest.fixture(autouse=True)
+def _reset_real_git_resolution() -> Iterator[Any]:
+    """Clear the real-git resolver cache before AND after every test (S1 cache)."""
+    from daydream.backends import codex
+
+    codex._reset_real_git_resolution()
+    yield
+    codex._reset_real_git_resolution()
+
+
+class TestResolveRealGitDir:
+    """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
+
+    def test_resolves_parent_dir_of_xcrun_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        from daydream.backends import codex
+
+        # Validation requires a real executable file, so stage one on disk.
+        git_bin = tmp_path / "usr" / "bin"
+        git_bin.mkdir(parents=True)
+        git_file = git_bin / "git"
+        git_file.write_text("#!/bin/sh\n")
+        git_file.chmod(0o755)
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
+        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
+
+        assert codex._resolve_real_git_dir() == str(git_bin)
+
+    def test_caches_at_most_once_per_process(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        from daydream.backends import codex
+
+        git_bin = tmp_path / "real" / "usr" / "bin"
+        git_bin.mkdir(parents=True)
+        git_file = git_bin / "git"
+        git_file.write_text("#!/bin/sh\n")
+        git_file.chmod(0o755)
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        calls: list[int] = []
+        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
+
+        def counting_run(*a: Any, **k: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(1)
+            return proc
+
+        monkeypatch.setattr(codex.subprocess, "run", counting_run)
+        first = codex._resolve_real_git_dir()
+        second = codex._resolve_real_git_dir()
+
+        assert first == second == str(git_bin)
+        assert len(calls) == 1  # S1: repeated execute() calls never re-shell out to xcrun
+
+    def test_concurrent_first_wave_callers_never_see_unresolved_flag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """S1: a fan-out's first wave shares one resolution; none silently get None.
+
+        execute() builds the child env through asyncio.to_thread for every
+        caller, so a fan-out of first-wave children can enter the resolver
+        concurrently. The lock must hold the check until _REAL_GIT_DIR is
+        assigned: every concurrent caller gets the resolved dir and xcrun runs
+        exactly once.
+        """
+        from daydream.backends import codex
+
+        git_bin = tmp_path / "real" / "usr" / "bin"
+        git_bin.mkdir(parents=True)
+        git_file = git_bin / "git"
+        git_file.write_text("#!/bin/sh\n")
+        git_file.chmod(0o755)
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        calls: list[int] = []
+        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
+
+        def slow_run(*a: Any, **k: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(1)
+            time.sleep(0.1)  # widen the flag-set / dir-assign window for the racers
+            return proc
+
+        monkeypatch.setattr(codex.subprocess, "run", slow_run)
+
+        barrier = threading.Barrier(8)
+        results: list[str | None] = []
+        results_lock = threading.Lock()
+
+        def racer() -> None:
+            barrier.wait()
+            resolved = codex._resolve_real_git_dir()
+            with results_lock:
+                results.append(resolved)
+
+        threads = [threading.Thread(target=racer) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert results == [str(git_bin)] * 8  # S1: no caller observes the early flag and gets None
+        assert len(calls) == 1  # S1: the cache was not thrashed into re-shelling to xcrun
+
+
+    def test_nonzero_xcrun_exit_falls_back_to_none_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="xcrun: error")
+        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
+        with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+            result = codex._resolve_real_git_dir()
+
+        assert result is None  # M2: never raises, never a hard failure
+        assert any("xcrun" in r.message.lower() or "git" in r.message.lower() for r in caplog.records)
+
+    def test_non_executable_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="/nonexistent/xx/git\n", stderr="")
+        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
+
+        assert codex._resolve_real_git_dir() is None  # M2: must be an existing executable file
+
+    @pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="darwin behavior is covered by TestResolveRealGitDir (issue #1122)",
+    )
+    def test_non_darwin_never_invokes_xcrun(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(
+            codex.subprocess, "run",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun invoked on non-Darwin")),
+        )
+
+        assert codex._resolve_real_git_dir() is None
+
+
+class TestIsolatedChildEnvDarwinPath:
+    """Darwin PATH-prepend in _isolated_child_env (issue #1122 M1/M4/M6/M7)."""
+
+    def test_darwin_prepends_real_git_dir_preserving_rest_of_path(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            codex, "_resolve_real_git_dir", lambda: "/Library/Developer/CommandLineTools/usr/bin",
+        )
+        monkeypatch.setenv("PATH", "/usr/bin:/usr/local/bin")
+
+        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+        assert env is not None
+        assert env["PATH"].startswith("/Library/Developer/CommandLineTools/usr/bin:")  # M1: precedes
+        assert env["PATH"].endswith("/usr/bin:/usr/local/bin")  # M1: remainder + order preserved
+
+    def test_darwin_still_strips_redirect_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: "/real/bin")
+        for var in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            monkeypatch.setenv(var, "/leak")
+
+        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+        assert env is not None
+        assert env["PATH"].startswith("/real/bin")
+        for var in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):  # M4
+            assert var not in env
+
+    def test_darwin_resolver_failure_leaves_path_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: None)  # M2 fail-open
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+        assert env is not None
+        assert env["PATH"] == "/usr/bin"  # fallback: unchanged PATH, no exception
+
+    def test_non_isolated_path_returns_none_even_on_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daydream.backends import codex
+
+        monkeypatch.setattr(codex.sys, "platform", "darwin")
+        called = []
+
+        def counting_resolver() -> str:
+            called.append(1)
+            return "/real/bin"
+
+        monkeypatch.setattr(codex, "_resolve_real_git_dir", counting_resolver)
+
+        assert codex._isolated_child_env(Path("/work"), Path("/work")) is None  # M7
+        assert called == []  # resolver never invoked on the non-clone path
