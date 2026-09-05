@@ -66,9 +66,21 @@ def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
     Raises:
         GitError / OSError / shutil.Error: Underlying git or filesystem
             failure; the caller wraps these in ``CodexError``.
+
+    Local branch refs are snapshotted by OID from the source so base-branch
+    names resolve and ``git diff <base>...HEAD`` works inside the clone,
+    without keeping any remote.
     """
     git_ops.clone(str(source), destination)
     git_ops.checkout_detach(destination, git_ops.head_sha(source))
+    # Snapshot every source local branch (name -> OID) into the clone before
+    # the remote is removed: after a plain clone the clone only exposes the
+    # source's checked-out branch under refs/heads/* (the rest exist only as
+    # refs/remotes/origin/*), so re-create each same-named ref by explicit OID
+    # — never a symbolic ref — with update_ref's validation as the gate. Any
+    # GitError propagates fail-closed: no half-snapshotted clone is used.
+    for name, oid in git_ops.list_local_branches(source).items():
+        git_ops.update_ref(destination, f"refs/heads/{name}", oid)
     git_ops.remove_remote(destination)
     # ls-files and ls-files --others --exclude-standard are disjoint by
     # construction, so one loop covers both. Enumerate strictly so a mid-prep

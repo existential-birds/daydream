@@ -246,6 +246,8 @@ async def test_codex_read_only_uses_read_only_sandbox(
         captured["has_notes"] = (isolated / "notes.md").exists()
         captured["notes"] = (isolated / "notes.md").read_text() if captured["has_notes"] else None
         captured["remote"] = git_ops.remote_url(isolated)
+        captured["branches"] = git_ops.list_local_branches(isolated)
+        captured["source_branches"] = git_ops.list_local_branches(source)
         captured["args"] = flat
         return mock_proc
 
@@ -267,6 +269,11 @@ async def test_codex_read_only_uses_read_only_sandbox(
     assert captured["has_notes"] is True
     assert captured["notes"] == notes.read_text()
     assert captured["remote"] is None
+    # Issue #1121: every source local branch resolves in the clone by name,
+    # to the exact OID it had on the source at snapshot time.
+    assert captured["branches"] == captured["source_branches"]
+    assert "main" in captured["branches"]
+    assert "feature" in captured["branches"]
     # Prompt rebound: isolated path present, source path absent in stdin bytes.
     written = mock_proc.stdin.write.call_args.args[0]
     assert isinstance(written, bytes)
