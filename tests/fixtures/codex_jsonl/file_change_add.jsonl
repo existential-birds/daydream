@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"th_fc_add"}
+{"type":"item.completed","item":{"type":"file_change","id":"fc_add_1","status":"completed","changes":{"/tmp/spike-repo/a.py":{"type":"add"}}}}
+{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}

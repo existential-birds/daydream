@@ -570,19 +570,133 @@ class CodexBackend:
 
                     elif item_type == "file_change":
                         # file_change has no item.started — emit a synthetic pair.
-                        item_id = item.get("id", str(uuid.uuid4()))
-                        file_path = item.get("file_path", "unknown")
-                        action = item.get("action", "modified")
-                        yield ToolStartEvent(
-                            id=item_id,
-                            name="patch",
-                            input={"file": file_path, "action": action},
-                        )
-                        yield ToolResultEvent(
-                            id=item_id,
-                            output=f"{action}: {file_path}",
-                            is_error=False,
-                        )
+                        changes = item.get("changes")
+                        if isinstance(changes, dict) or isinstance(changes, list):
+                            # Current CLI shape: a map of path -> {type, ...}.
+                            # Normalize each path against execution_cwd; keep
+                            # absolute paths that fall outside it. A
+                            # list-shaped `changes` (plausible alternate CLI
+                            # layout) is folded to the same path-keyed map;
+                            # entries without a path-ish key carry no usable
+                            # path and are dropped. An empty map is a no-op,
+                            # never an error — the old code always recorded
+                            # success for it.
+                            if isinstance(changes, list):
+                                changes = {
+                                    str(c.get("path") or c.get("file_path")): c
+                                    for c in changes
+                                    if isinstance(c, dict) and (c.get("path") or c.get("file_path"))
+                                }
+                            item_id = item.get("id", str(uuid.uuid4()))
+                            parsed = []
+                            for raw_path, entry in changes.items():
+                                kind = entry.get("type", "unknown") if isinstance(entry, dict) else "unknown"
+                                path = str(raw_path)
+                                try:
+                                    if os.path.isabs(path) and os.path.commonpath([
+                                        path,
+                                        str(execution_cwd),
+                                    ]) == str(execution_cwd):
+                                        path = os.path.relpath(path, execution_cwd)
+                                except ValueError:
+                                    pass  # disjoint drives etc. — keep absolute
+                                parsed.append({"path": path, "kind": kind})
+                            # A missing `status` means "completed": the old
+                            # code always recorded success, so an absent status
+                            # (or an explicit `null`) must never be archived as
+                            # an error.
+                            status = item.get("status") or "completed"
+                            # Cap the joined path listing with the same limit
+                            # as the stdout/stderr excerpts so a large
+                            # multi-file apply or a giant path cannot produce
+                            # an unbounded ToolResult output.
+                            joined = ", ".join(
+                                f"{c['kind']}: {c['path']}" for c in parsed
+                            )[:500]
+                            if status == "declined":
+                                # Name the affected paths and keep any
+                                # stdout/stderr so a declined change is not
+                                # silently path-free.
+                                output = f"File change declined by sandbox: {joined}"
+                            else:
+                                output = joined
+                            if status in ("failed", "declined"):
+                                for stream in ("stdout", "stderr"):
+                                    excerpt = item.get(stream, "")
+                                    if excerpt:
+                                        output += f"\n{stream}: {excerpt[:500]}"
+                            # Preserve the legacy patch-input keys for
+                            # extension tool supervisors keyed on
+                            # {"file", "action"}: exact path/kind for
+                            # single-file changes; multi-file (or empty)
+                            # keeps the pre-diff scalar fallback
+                            # ("unknown"/"modified") so the documented keys
+                            # never go silent, with the full detail
+                            # namespaced under `changes`.
+                            start_input: dict[str, Any] = {"changes": parsed}
+                            if len(parsed) == 1:
+                                start_input["file"] = parsed[0]["path"]
+                                start_input["action"] = parsed[0]["kind"]
+                            else:
+                                start_input["file"] = "unknown"
+                                start_input["action"] = "modified"
+                            yield ToolStartEvent(
+                                id=item_id,
+                                name="patch",
+                                input=start_input,
+                            )
+                            yield ToolResultEvent(
+                                id=item_id,
+                                output=output,
+                                is_error=status != "completed",
+                                status=status or None,
+                            )
+                        elif "file_path" in item:
+                            # Legacy scalar shape (older CLI): keep as-is.
+                            item_id = item.get("id", str(uuid.uuid4()))
+                            file_path = item.get("file_path", "unknown")
+                            action = item.get("action", "modified")
+                            yield ToolStartEvent(
+                                id=item_id,
+                                name="patch",
+                                input={"file": file_path, "action": action},
+                            )
+                            yield ToolResultEvent(
+                                id=item_id,
+                                output=f"{action}: {file_path}",
+                                is_error=False,
+                            )
+                        else:
+                            # Pathless payload — neither `changes` nor `file_path`.
+                            # Never silently archive (the old behavior recorded
+                            # "modified: unknown"): emit a synthetic pair whose
+                            # ToolResult is an observable error echoing the
+                            # item's available fields. Fall back to a plain
+                            # uuid, not `_claim_tool_id` — file_change never
+                            # populates the FIFO/content-key maps, so that call
+                            # could only fire a spurious "unmatched tool result"
+                            # warning for an item that is not unmatched.
+                            item_id = item.get("id", str(uuid.uuid4()))
+                            fields = {
+                                k: v for k, v in item.items()
+                                if k != "type" and v != "unknown"
+                            }
+                            # Cap the diagnostic echo with the same limit as the
+                            # stdout/stderr excerpts so a degenerate pathless item
+                            # carrying a large field cannot produce an unbounded
+                            # ToolResult output.
+                            echo = json.dumps(fields)[:500]
+                            yield ToolStartEvent(
+                                id=item_id,
+                                name="patch",
+                                input={"file_change": fields},
+                            )
+                            yield ToolResultEvent(
+                                id=item_id,
+                                output=f"unparseable file_change item: {echo}",
+                                is_error=True,
+                                status=item.get("status") or None,
+                            )
 
                     elif item_type == "mcp_tool_call":
                         item_id = item.get("id")

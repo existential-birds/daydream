@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"th_fc_pathless"}
+{"type":"item.completed","item":{"type":"file_change","id":"fc_x"}}
+{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}

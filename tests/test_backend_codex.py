@@ -96,6 +96,192 @@ async def test_tool_use_events() -> None:
     assert any(t.text == "Done!" for t in texts)
 
 
+@pytest.mark.asyncio
+async def test_file_change_legacy_scalar_payload_unchanged() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Run ls", "tool_use.jsonl")
+    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert len(starts) == 1
+    assert starts[0].input == {"file": "main.py", "action": "modified"}
+
+
+@pytest.mark.asyncio
+async def test_file_change_changes_map_single_path() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_add.jsonl")
+    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert len(starts) == 1
+    assert starts[0].input["changes"] == [{"path": "spike-repo/a.py", "kind": "add"}]
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1 and not results[0].is_error
+
+
+@pytest.mark.asyncio
+async def test_file_change_changes_map_multi_path() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_multi.jsonl")
+    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert len(starts) == 1  # exactly ONE pair for the item — no id collisions
+    # Legacy {"file", "action"} keys stay present for multi-file too (pre-diff
+    # fallback values), so tool supervisors keyed on them still see the event.
+    assert starts[0].input["file"] == "unknown"
+    assert starts[0].input["action"] == "modified"
+    assert sorted(
+        (c["path"], c["kind"]) for c in starts[0].input["changes"]
+    ) == [
+        ("spike-repo/a.py", "add"),
+        ("spike-repo/b.py", "update"),
+        ("spike-repo/c.py", "delete"),
+        ("spike-repo/d.py", "move"),
+    ]
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1 and not results[0].is_error
+
+
+@pytest.mark.asyncio
+async def test_file_change_changes_map_declined_is_error() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_declined.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].status == "declined"
+
+
+@pytest.mark.asyncio
+async def test_file_change_changes_map_failed_is_error_with_stderr() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_failed.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].status == "failed"
+    assert "failed to apply hunk" in results[0].output
+
+
+@pytest.mark.asyncio
+async def test_file_change_pathless_payload_diagnostic() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_pathless.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "unparseable" in results[0].output
+    assert "file_change" in results[0].output  # echoes available fields
+    assert "unknown" not in results[0].output
+
+
+async def _run_inline_lines(backend: Any, prompt: Any, lines: list[str]) -> list[Any]:
+    """Drive ``execute`` over inline JSONL lines (no fixture file needed)."""
+    mock_proc = make_mock_process(lines)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        return [event async for event in backend.execute(Path("/tmp"), prompt)]
+
+
+@pytest.mark.asyncio
+async def test_file_change_pathless_echo_is_bounded() -> None:
+    # A degenerate pathless item carrying a huge field must not produce an
+    # unbounded ToolResult: the diagnostic echo is capped like every other
+    # derived string in the file_change branch.
+    backend = CodexBackend(model="fixture-model")
+    big_field = "x" * 100_000
+    pathless_line = (
+        '{"type":"item.completed","item":{"type":"file_change",'
+        '"id":"x1","stderr":"%s"}}' % big_field
+    )
+    events = await _run_inline_lines(backend, "Edit", [
+        '{"type":"thread.started","thread_id":"t"}',
+        pathless_line,
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
+    ])
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "unparseable" in results[0].output
+    assert len(results[0].output) < 600
+
+
+@pytest.mark.asyncio
+async def test_file_change_missing_status_is_success() -> None:
+    # A changes-map item with no `status` key — or an explicit `"status":
+    # null` — must record success (the old code always did) instead of
+    # being archived as an error.
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_inline_lines(backend, "Edit", [
+        '{"type":"thread.started","thread_id":"t"}',
+        '{"type":"item.completed","item":{"type":"file_change","id":"x1",'
+        '"changes":{"/tmp/spike-repo/a.py":{"type":"add"}}}}',
+        '{"type":"item.completed","item":{"type":"file_change","id":"x2",'
+        '"status":null,"changes":{"/tmp/spike-repo/b.py":{"type":"update"}}}}',
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
+    ])
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 2
+    assert all(r.is_error is False for r in results)
+    assert all(r.status == "completed" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_file_change_declined_output_names_paths() -> None:
+    # A declined change must not lose its affected paths (or any stderr).
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_inline_lines(backend, "Edit", [
+        '{"type":"thread.started","thread_id":"t"}',
+        '{"type":"item.completed","item":{"type":"file_change","id":"x1",'
+        '"status":"declined","stderr":"sandbox denied write",'
+        '"changes":{"/tmp/spike-repo/b.py":{"type":"update"}}}}',
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
+    ])
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].status == "declined"
+    assert "File change declined by sandbox" in results[0].output
+    assert "b.py" in results[0].output  # names the affected path
+    assert "sandbox denied write" in results[0].output  # keeps stderr
+
+
+@pytest.mark.asyncio
+async def test_file_change_list_changes_parsed() -> None:
+    # A list-shaped `changes` payload is folded to the path-keyed map;
+    # an empty list is a no-op success, never an "unparseable" error.
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_inline_lines(backend, "Edit", [
+        '{"type":"thread.started","thread_id":"t"}',
+        '{"type":"item.completed","item":{"type":"file_change","id":"x1",'
+        '"status":"completed","changes":[{"path":"/tmp/spike-repo/a.py","type":"add"}]}}',
+        '{"type":"item.completed","item":{"type":"file_change","id":"x2",'
+        '"status":"completed","changes":[]}}',
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
+    ])
+    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert len(starts) == 2
+    assert starts[0].input["changes"] == [{"path": "spike-repo/a.py", "kind": "add"}]
+    assert starts[1].input["changes"] == []
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert all(r.is_error is False for r in results)
+
+
+@pytest.mark.asyncio
+async def test_file_change_idless_pathless_no_unmatched_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An id-less pathless item falls back to a plain uuid without the
+    # spurious "unmatched tool result" warning (_claim_tool_id can never
+    # match for file_change).
+    backend = CodexBackend(model="fixture-model")
+    with caplog.at_level("WARNING"):
+        events = await _run_inline_lines(backend, "Edit", [
+            '{"type":"thread.started","thread_id":"t"}',
+            '{"type":"item.completed","item":{"type":"file_change"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
+        ])
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert "unparseable" in results[0].output
+    assert "unmatched tool result" not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("fixture", "expected_output", "expected_text_count"),
     [
