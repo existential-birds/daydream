@@ -155,6 +155,10 @@ _GIT_REDIRECT_STRIP_VARS = (
 _REAL_GIT_DIR: str | None = None
 _REAL_GIT_RESOLVED = False
 
+# Bound for the parent-side xcrun resolution, mirroring ``git_ops._run_git``'s
+# default timeout (5s): a hung ``xcrun`` must fail open, never wedge the process.
+_XCRUN_TIMEOUT_S = 5
+
 
 def _resolve_real_git_dir() -> str | None:
     """Resolve the directory of the real (non-shim) ``git`` on macOS (issue #1122).
@@ -163,8 +167,11 @@ def _resolve_real_git_dir() -> str | None:
     sandboxed child, where ``xcrun`` itself is blocked — validates the target is
     an existing executable file, and returns its parent directory. Resolved at
     most once per process (negative results are cached too). On non-Darwin, or
-    whenever resolution fails, returns ``None`` with a warning and the caller
-    leaves the child PATH unchanged (fail-open). Never raises.
+    whenever resolution fails (including the bounded timeout on a hung
+    ``xcrun``), returns ``None`` with a warning and the caller leaves the child
+    PATH unchanged (fail-open). The call never stalls the event loop:
+    ``execute()`` builds the child env through ``asyncio.to_thread``. Never
+    raises.
     """
     global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
     if _REAL_GIT_RESOLVED:
@@ -174,7 +181,11 @@ def _resolve_real_git_dir() -> str | None:
         return None
     try:
         proc = subprocess.run(
-            ["xcrun", "--find", "git"], capture_output=True, text=True, check=False,
+            ["xcrun", "--find", "git"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_XCRUN_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         _logger.warning(
@@ -506,7 +517,10 @@ class CodexBackend:
             # own cwd is never the source path. Path-hiding, not physical. On
             # macOS, the same isolated env also prepends the real git dir to the
             # child PATH so sandboxed git calls bypass the xcrun shim (#1122).
-            child_env = _isolated_child_env(cwd, execution_cwd)
+            # Built off the event loop (asyncio.to_thread, like the sibling git
+            # calls above): the env copy and the bounded xcrun resolution must
+            # never stall concurrent fan-out execute() calls.
+            child_env = await asyncio.to_thread(_isolated_child_env, cwd, execution_cwd)
 
             if execution_cwd != cwd:
                 # Rebind the prompt so no rendering of the caller's source

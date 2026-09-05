@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -617,6 +618,10 @@ def test_rebind_source_paths_preserves_sibling_paths() -> None:
     assert "/work//inner" not in out3
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="darwin isolated-env PATH behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122)",
+)
 def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     """_isolated_child_env returns None when no isolation and strips the
     repo-redirect env vars (PWD/$GIT_*) when running in the disposable clone."""
@@ -640,11 +645,14 @@ def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch
     assert env["PATH"] == "/usr/bin"
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="darwin behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122 M3)",
+)
 def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     """M3: non-Darwin env is strip-vars-verbatim, no xcrun."""
     from daydream.backends import codex
 
-    assert codex.sys.platform != "darwin"
     monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
     monkeypatch.setenv("GIT_DIR", "/leak")
     monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun on Linux")))  # noqa: E501
@@ -1477,10 +1485,13 @@ class TestResolveRealGitDir:
 
         assert codex._resolve_real_git_dir() is None  # M2: must be an existing executable file
 
+    @pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="darwin behavior is covered by TestResolveRealGitDir (issue #1122)",
+    )
     def test_non_darwin_never_invokes_xcrun(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from daydream.backends import codex
 
-        assert codex.sys.platform != "darwin"  # the suite runs on Linux; guard the guard
         monkeypatch.setattr(
             codex.subprocess, "run",
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun invoked on non-Darwin")),
