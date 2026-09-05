@@ -311,9 +311,9 @@ def test_render_job_config_resolves_with_only_selected_provider_credential(
 ) -> None:
     """An unset *alternative* credential never aborts rendering (issue #979)."""
     import yaml
+    from harbor.utils.env import resolve_env_vars
 
     from daydream.benchmark.harbor import package as pkg
-    from harbor.utils.env import resolve_env_vars
 
     # Judge: anthropic selected -> CLAUDE_CODE_OAUTH_TOKEN must be optional.
     for var in (
@@ -344,9 +344,9 @@ def test_render_job_config_still_requires_selection_vars(
 ) -> None:
     """Selection vars stay bare: unset provider/model still abort rendering."""
     import yaml
+    from harbor.utils.env import resolve_env_vars
 
     from daydream.benchmark.harbor import package as pkg
-    from harbor.utils.env import resolve_env_vars
 
     monkeypatch.delenv("DAYDREAM_JUDGE_PROVIDER", raising=False)
     monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
