@@ -4765,3 +4765,23 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
     assert items[0]["severity_before_demotion"] == "high"  # original preserved (R2.1)
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark
+
+
+def test_build_commit_message_deterministic_with_trailers():
+    from daydream.phases import build_commit_message
+
+    items = [{"file": "a.py", "description": "fix null guard"},
+             {"file": "b.py", "description": "add retry"}]
+    msg = build_commit_message(items=items, run_id="R42", version="1.2.3")
+    lines = msg.splitlines()
+    assert lines[0].startswith("fix:"), lines[0]  # conventional, subject < 72
+    assert len(lines[0]) < 72
+    assert "a.py" in msg and "fix null guard" in msg
+    assert "b.py" in msg and "add retry" in msg
+    trailers = [ln for ln in lines if ln.startswith(("Daydream-Run:", "Daydream-Version:"))]
+    assert "Daydream-Run: R42" in trailers
+    assert "Daydream-Version: 1.2.3" in trailers
+    # deterministic
+    a = build_commit_message(items=items, run_id="R42", version="1.2.3")
+    b = build_commit_message(items=items, run_id="R42", version="1.2.3")
+    assert a == b

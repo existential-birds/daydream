@@ -5330,3 +5330,45 @@ async def phase_cross_stack_merge(
         agent_items, structural_records_path, items_path, report_path, canonical_path
     )
     return canonical_path
+
+
+def build_commit_message(
+    *,
+    items: list[dict[str, Any]],
+    run_id: str,
+    version: str,
+    staged_diff: list[Path] | None = None,
+) -> str:
+    """Build a deterministic conventional commit message from applied findings.
+
+    Pure function: no I/O, no git invocation. The subject uses the dominant
+    conventional type (``fix`` in the fix-phase context) with a concise summary
+    under 72 chars; the body lists the applied findings; the message ends with
+    the ``Daydream-Run`` / ``Daydream-Version`` trailers after a blank line.
+    """
+    del staged_diff  # accepted for future subject refinement; keeps determinism
+
+    summary = "apply automated review fixes"
+    if items:
+        first = str(items[0].get("description") or "").strip()
+        if first:
+            summary = first[0].lower() + first[1:]
+
+    subject = f"fix: {summary}"
+    if len(subject) >= 72:
+        subject = subject[:71].rstrip()
+
+    lines = [subject, ""]
+    for item in sorted(items, key=lambda i: (str(i.get("file", "")), str(i.get("description", "")))):
+        file = str(item.get("file", "")).strip()
+        desc = str(item.get("description", "")).strip()
+        if file and desc:
+            lines.append(f"- {file}: {desc}")
+        elif desc:
+            lines.append(f"- {desc}")
+        elif file:
+            lines.append(f"- {file}")
+    lines.append("")
+    lines.append(f"Daydream-Run: {run_id}")
+    lines.append(f"Daydream-Version: {version}")
+    return "\n".join(lines)
