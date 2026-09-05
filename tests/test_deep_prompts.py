@@ -1989,3 +1989,25 @@ def test_diagram_prompt_names_are_registered() -> None:
     assert "diagram_flowchart" in reg.prompt_names()
     assert reg.prompt("diagram_sequence") is build_sequence_diagram_prompt
     assert reg.prompt("diagram_flowchart") is build_flowchart_prompt
+
+
+def test_registry_diagram_prompt_override_accepts_inline_kwargs(tmp_path: Path) -> None:
+    """Issue #1123 planning spike: the builtins override of diagram_sequence must
+    pass new inline kwargs through the registry indirection unchanged."""
+    from daydream.extensions.builtins import _register_builtin_prompts
+    from daydream.extensions.registry import Registry
+
+    reg = Registry()
+    _register_builtin_prompts(reg)
+    prompt = reg.prompt("diagram_sequence")(
+        diff_path=tmp_path / "d.patch",
+        inline_diff=None,
+        inline_exploration=None,
+        inline_dependencies=None,
+        clone_mode=True,
+        files_by_module={},
+        cwd=tmp_path,
+        exploration_dir=None,
+        schema={"type": "object", "properties": {}},
+    )
+    assert isinstance(prompt, str)
