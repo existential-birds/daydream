@@ -47,6 +47,7 @@ from daydream.backends.codex import CodexBackend
 from tests.harness.codex_replay import FIXTURES_DIR, make_mock_process_from_fixture
 
 REAL_GOLDEN = "real/golden.jsonl"
+REAL_FILE_CHANGE = "real/file-change.jsonl"
 
 _logger = logging.getLogger(__name__)
 
@@ -131,6 +132,71 @@ async def test_real_golden_parses_to_expected_events() -> None:
     # Result event present (turn.completed → ResultEvent with continuation).
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert result_events, "real golden produced no ResultEvent"
+
+
+@pytest.mark.asyncio
+async def test_real_file_change_parses_to_expected_events() -> None:
+    """The committed REAL file_change capture parses to the new-shape event stream.
+
+    Mirrors ``test_real_golden_parses_to_expected_events`` but for a ``patch``
+    (file_change) item: the parser must emit a ToolStart("patch") whose
+    ``input["changes"]`` paths match the fixture's ``changes`` keys
+    (repo-relative) and a ToolResult with ``status == "completed"``.
+
+    **Blocked on a real capture** (issue #1125 Task 0 spike): the sandbox
+    environment has no OpenAI credentials, so ``codex exec`` could not
+    authenticate and no real ``file_change`` JSONL was captured. Per the plan
+    contract, a "real" fixture must never be synthesized — so the fixture is
+    simply absent and this test skips until a genuine capture lands at
+    ``tests/fixtures/codex_jsonl/real/file-change.jsonl`` (re-capture via
+    ``scripts/capture-codex-golden.sh``-style flow against an authenticated
+    CLI). The assertions below run unmodified once the fixture exists.
+    """
+    fixture_path = FIXTURES_DIR / REAL_FILE_CHANGE
+    if not fixture_path.exists():
+        pytest.skip(
+            "real file_change capture not yet available "
+            f"({fixture_path}); Task 0 spike could not capture (no OpenAI auth)"
+        )
+
+    # The fixture is genuine codex output: extract the changes keys the CLI
+    # reported so the assertion compares parser output against ground truth.
+    changes_keys: list[str] = []
+    for line in fixture_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        evt = json.loads(line)
+        item = evt.get("item") or {}
+        if item.get("type") == "file_change" or (
+            evt.get("type") == "item.completed" and item.get("item_type") == "file_change"
+        ):
+            changes = item.get("changes") or {}
+            changes_keys.extend(changes.keys())
+    assert changes_keys, "fixture has a file_change item with no changes keys"
+
+    backend = CodexBackend(model="gpt-5.5")
+    mock_proc = make_mock_process_from_fixture(REAL_FILE_CHANGE)
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events: list[Any] = []
+        async for event in backend.execute(Path("/tmp"), "apply the patch"):
+            events.append(event)
+
+    patch_starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert patch_starts, "real file_change fixture produced no patch ToolStart"
+    parsed_paths = [
+        c["path"] for start in patch_starts for c in start.input.get("changes", [])
+    ]
+    assert sorted(parsed_paths) == sorted(changes_keys), (
+        f"parsed patch paths {parsed_paths} != fixture changes keys {changes_keys}"
+    )
+
+    patch_ids = {e.id for e in patch_starts}
+    patch_results = [e for e in events if isinstance(e, ToolResultEvent) and e.id in patch_ids]
+    assert patch_results, "real file_change fixture produced no patch ToolResult"
+    assert any(r.status == "completed" for r in patch_results), (
+        f"no patch ToolResult with status 'completed': {[r.status for r in patch_results]}"
+    )
 
 
 @pytest.mark.live_codex
