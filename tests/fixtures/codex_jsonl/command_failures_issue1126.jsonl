@@ -1,4 +1,7 @@
 {"type":"thread.started","thread_id":"th_fail"}
 {"type":"item.started","item":{"type":"command_execution","id":"cmd_1","command":"false","status":"running"}}
 {"type":"item.completed","item":{"type":"command_execution","id":"cmd_1","command":"false","status":"completed","exit_code":128,"aggregated_output":"fatal: not a git repository"}}
+{"type":"item.started","item":{"type":"command_execution","id":"cmd_2","command":"true","status":"running"}}
 {"type":"item.completed","item":{"type":"command_execution","id":"cmd_2","command":"true","status":"completed","exit_code":0,"aggregated_output":"ok"}}
+{"type":"item.started","item":{"type":"command_execution","id":"item_20","command":"tail -f log","status":"running"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}
