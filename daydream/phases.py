@@ -3628,6 +3628,34 @@ async def _do_commit(
     if sha_before is not None:
         _verify_commit_scope(work, sha_before, stage)
 
+    # Hook-aware validation orchestration (issue #726): with an executable
+    # pre-push hook present, the full suite runs via the host runner exactly
+    # once per attempt, here, before the push — the hook itself still fires
+    # during ``push_branch`` (hook bypass flags are forbidden), so the win is that
+    # daydream neither re-runs the suite a second time at push time nor
+    # skips validation when the hook makes the push the last gate. A red
+    # suite blocks the push even though the local commit exists.
+    if push and git_ops.has_executable_pre_push_hook(work.repo):
+        cmd = _canonical_test_cmd(config)
+        if cmd is None:
+            print_warning(
+                console,
+                "Pre-push hook detected but no canonical test command is "
+                "configured; the push-time suite run is skipped (set "
+                "--test-command or the `test_command` config key).",
+            )
+        else:
+            result = await run_test_command(
+                cmd=cmd,
+                cwd=work.repo,
+                wall_budget_s=TEST_WALL_BUDGET_S,
+            )
+            if not result.passed:
+                raise RuntimeError(
+                    "Pre-push validation failed: the configured test command "
+                    "exited non-zero, so the commit was not pushed."
+                )
+
     if push:
         branch = git_ops.current_branch(work.repo)
         if branch is None:

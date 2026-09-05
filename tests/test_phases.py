@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -596,6 +597,124 @@ async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
     assert "notes.txt" not in committed
+
+
+def _pushable_repo(tmp_path: Path) -> Path:
+    """A real clone of a real bare remote with one baseline commit."""
+    remote = tmp_path / "remote.git"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    git(tmp_path, "init", "--bare", remote.name)
+    work_repo = tmp_path / "clone"
+    work_repo.mkdir()
+    git(work_repo, "init", "-b", "main")
+    git(work_repo, "config", "user.email", "t@example.com")
+    git(work_repo, "config", "user.name", "t")
+    (work_repo / "app.py").write_text("x = 0\n")
+    git(work_repo, "add", "app.py")
+    git_commit(work_repo, "baseline")
+    git(work_repo, "remote", "add", "origin", str(remote))
+    return work_repo
+
+
+def _install_pre_push_hook(work_repo: Path) -> None:
+    """Install a real, executable (passing) pre-push hook."""
+    hooks = work_repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    hook = hooks / "pre-push"
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    hook.chmod(0o755)
+
+
+def _hook_run_config(test_command: str = "true") -> Any:
+    """Minimal RunConfig stand-in resolving a canonical test command."""
+    return SimpleNamespace(file_config=None, test_command=test_command)
+
+
+@pytest.mark.asyncio
+async def test_hook_aware_push_runs_suite_exactly_once(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an executable pre-push hook present, the automated push path runs
+    the full suite via the host runner exactly once per attempt — and hooks are
+    never bypassed (no --no-verify; the hook still fires during push_branch).
+    Without a pre-push hook, no push-time host run happens at all: validation
+    already ran exactly once in the TEST phase."""
+    import daydream.phases
+    from daydream import git_ops
+    from daydream.phases import _do_commit
+
+    for hook_present, expected_runs in ((True, 1), (False, 0)):
+        repo = _pushable_repo(tmp_path / f"case-{int(hook_present)}")
+        if hook_present:
+            _install_pre_push_hook(repo)
+        (repo / "fix.py").write_text("fixed\n")  # the daydream change
+
+        runs: list[dict[str, Any]] = []
+
+        async def fake_run(*a: Any, _runs: list[dict[str, Any]] = runs, **k: Any) -> Any:
+            _runs.append(k)
+            from daydream.test_execution import TestExecutionResult
+
+            return TestExecutionResult(exit_status=0, timed_out=False, merged_output="")
+
+        monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
+
+        ok = await _do_commit(
+            _HostCommitBackend(repo), make_work(repo), push=True, interactive=False,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            preexisting_untracked=set(),
+            config=_hook_run_config(),
+        )
+        assert ok is True
+        assert len(runs) == expected_runs, (
+            f"hook_present={hook_present}: expected {expected_runs} host run(s), got {len(runs)}"
+        )
+        if hook_present:
+            assert runs[0]["cwd"] == repo
+            assert runs[0]["cmd"] == ["true"]
+        # The hook was never bypassed: the pushed commit really landed.
+        sha = git_ops.head_sha(repo)
+        assert git_ops.remote_contains_commit(repo, "main", sha, remote="origin") is True
+
+
+@pytest.mark.asyncio
+async def test_hook_aware_push_red_suite_blocks_push(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A red host-run suite with a pre-push hook present blocks the push (and
+    is a failure even though the local commit exists) — the hook never becomes
+    a license to push unvalidated code."""
+    import daydream.phases
+    from daydream import git_ops
+    from daydream.phases import _do_commit
+
+    repo = _pushable_repo(tmp_path)
+    _install_pre_push_hook(repo)
+    (repo / "fix.py").write_text("fixed\n")
+    remote_head_before = git(repo, "ls-remote", "origin", "refs/heads/main")
+
+    async def fake_run(*a: Any, **k: Any) -> Any:
+        from daydream.test_execution import TestExecutionResult
+
+        return TestExecutionResult(exit_status=1, timed_out=False, merged_output="1 failed")
+
+    monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
+
+    with pytest.raises(RuntimeError, match="Pre-push validation"):
+        await _do_commit(
+            _HostCommitBackend(repo), make_work(repo), push=True, interactive=False,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            preexisting_untracked=set(),
+            config=_hook_run_config(),
+        )
+    # Nothing was pushed: the remote still reports the baseline sha only.
+    assert git(repo, "ls-remote", "origin", "refs/heads/main") == remote_head_before
+    # The local commit exists but is unpushed.
+    assert git_ops.head_commit_message(repo).startswith("fix:")
 
 
 @pytest.mark.asyncio
