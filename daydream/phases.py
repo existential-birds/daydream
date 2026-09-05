@@ -60,7 +60,11 @@ from daydream.repository_paths import (
     path_is_confined,
 )
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
-from daydream.test_execution import run_test_command
+from daydream.test_execution import (
+    MissingTestCommandError,
+    canonical_test_command,
+    run_test_command,
+)
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -3129,22 +3133,53 @@ def _reject_test_healing_generated_file_edits(
     return None if restoration_failed else direct_violations
 
 
-# Tail of the test-phase prompt. The host parses this turn's final text
-# for the verdict (``detect_test_success``), so the agent must run the suite to
-# completion inside the turn and quote the runner's own summary: a
-# "still running, I'll report later" narration would be parsed as a failure and
-# fed to the fix agent as if it were test output. The Claude backend also
-# enforces the foreground rule mechanically (``_background_bash_guard``).
+# Tail of the test-phase prompt, used only by the deprecated unconfigured
+# fallback below. The host parses this turn's final text for the verdict
+# (``detect_test_success``), so the agent must run the suite to completion
+# inside the turn and quote the runner's own summary: a "still running, I'll
+# report later" narration would be parsed as a failure and fed to the fix
+# agent as if it were test output. The Claude backend also enforces the
+# foreground rule mechanically (``_background_bash_guard``).
 _TEST_RUN_INSTRUCTIONS = (
     "Run it in the foreground and wait for it to finish; never run it in the background. "
     "Report if tests pass or fail, quoting the test runner's final summary line verbatim."
 )
 
 
+def _canonical_test_cmd(config: Any) -> list[str] | None:
+    """Resolve the canonical host-side test command, or ``None`` for fallback.
+
+    Issue #726: the configured canonical test command runs host-side as a real
+    subprocess — a green run means the suite really exited 0. Precedence is
+    the CLI ``--test-command`` flag (``RunConfig.test_command``) over the
+    file-config ``test_command`` key, resolved by
+    :func:`daydream.test_execution.canonical_test_command`.
+
+    Returns ``None`` (with a warning) only when nothing is configured, so the
+    pre-#726 agent-run fallback below still operates until the configured
+    command becomes mandatory. The fallback is deprecated: an agent-reported
+    verdict is prose, not an exit status.
+    """
+    from daydream.config_file import DaydreamFileConfig
+
+    file_config = getattr(config, "file_config", None)
+    if not isinstance(file_config, DaydreamFileConfig):
+        file_config = DaydreamFileConfig()
+    try:
+        return canonical_test_command(file_config, config)
+    except MissingTestCommandError as exc:
+        print_warning(
+            console,
+            f"{exc} Falling back to agent-run tests (deprecated by issue #726).",
+        )
+        return None
+
+
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
     feedback_items: list[dict[str, Any]] | None = None,
+    config: Any = None,
 ) -> tuple[bool, int, bool]:
     """Phase 4: Run tests and prompt user on failure for action.
 
@@ -3153,6 +3188,12 @@ async def phase_test_and_heal(
         work: Workspace context for running tests; ``work.repo`` is the cwd.
         feedback_items: Optional list of feedback items from the fix phase,
             used to enrich the fix prompt with file context.
+        config: Optional ``RunConfig`` carrying the CLI ``--test-command``
+            flag and the merged file config. When a canonical test command is
+            configured it runs host-side via :func:`run_test_command` (issue
+            #726) — no TEST-phase agent turn and no prose detection. When
+            nothing is configured, the deprecated agent-run fallback applies
+            (see :func:`_canonical_test_cmd`).
 
     Returns:
         Tuple of (passed: bool, retries_used: int, proceed: bool). ``passed`` is
@@ -3219,18 +3260,40 @@ async def phase_test_and_heal(
             output, host_failure_output = host_failure_output, None
             test_passed = False
         else:
-            prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
-            output, continuation, _ = await run_agent(
-                backend,
-                work.repo,
-                prompt,
-                continuation=continuation,
-                phase=DaydreamPhase.TEST,
-                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                wall_budget_s=TEST_WALL_BUDGET_S,
-            )
+            cmd = _canonical_test_cmd(config)
+            if cmd is None:
+                # Deprecated fallback: no canonical test command is configured,
+                # so a TEST-phase agent turn runs the suite and its prose is
+                # pattern-matched for the verdict (untrusted by design).
+                prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
+                output, continuation, _ = await run_agent(
+                    backend,
+                    work.repo,
+                    prompt,
+                    continuation=continuation,
+                    phase=DaydreamPhase.TEST,
+                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                    wall_budget_s=TEST_WALL_BUDGET_S,
+                )
 
-            test_passed = detect_test_success(output)
+                test_passed = detect_test_success(output)
+            else:
+                # Issue #726: the configured canonical test command runs
+                # host-side as a real subprocess; the verdict is the exit
+                # status, never the agent's prose. No agent turn here.
+                result = await run_test_command(
+                    cmd=cmd,
+                    cwd=work.repo,
+                    wall_budget_s=TEST_WALL_BUDGET_S,
+                )
+                if result.timed_out:
+                    print_warning(
+                        console,
+                        f"Test command hit the {TEST_WALL_BUDGET_S:g}s wall budget "
+                        "and was killed.",
+                    )
+                output = result.merged_output
+                test_passed = result.passed
 
         if test_passed:
             print_success(console, "Tests passed")

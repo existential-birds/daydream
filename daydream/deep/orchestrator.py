@@ -4644,7 +4644,8 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     from daydream import git_ops
     async with phase_scope(DaydreamPhase.TEST):
         passed, retries, proceed = await phase_test_and_heal(
-            ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"]
+            ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"],
+            config=ctx.config,
         )
     # Persisted before the failure early-return so both outcomes leave a verdict.
     # ``passed`` is always the suite's own result: an operator who continues past

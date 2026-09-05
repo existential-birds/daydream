@@ -16,7 +16,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
-from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config import REVIEW_OUTPUT_FILE, TEST_WALL_BUDGET_S
 from daydream.trajectory import TrajectoryRecorder
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -3815,6 +3815,53 @@ def test_sanitize_suggested_command_strips_backticks_and_collapses_whitespace() 
     assert _sanitize_suggested_command("echo `whoami`") == "echo whoami"
     # Whitespace runs collapse to single space:
     assert _sanitize_suggested_command("a\t\tb\n c") == "a b c"
+
+
+@pytest.mark.asyncio
+async def test_normal_test_path_uses_host_runner_no_agent_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """Issue #726 task 5: the configured canonical test command runs host-side.
+
+    The normal loop iteration (no approved override) resolves the canonical
+    command and executes it through ``run_test_command(cwd=work.repo)`` — the
+    suite outcome comes from the subprocess exit status, with **no** TEST-phase
+    agent turn and no prose detection. The backend script is deliberately
+    empty: any ``run_agent`` call would fail the test by exhausting it.
+    """
+    from daydream.phases import phase_test_and_heal
+    from daydream.test_execution import TestExecutionResult
+
+    silence_console("daydream.phases")
+
+    backend = _HealBackend(script=[])
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
+        calls.append(kwargs)
+        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="")
+
+    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    monkeypatch.setattr(
+        "daydream.phases.canonical_test_command",
+        lambda config, run_config: ["uv", "run", "pytest"],
+    )
+
+    work = make_work(tmp_path)
+    passed, retries, proceed = await phase_test_and_heal(backend, work)
+
+    assert passed is True
+    assert retries == 0
+    assert proceed is True
+    assert calls == [{
+        "cmd": ["uv", "run", "pytest"],
+        "cwd": tmp_path,
+        "wall_budget_s": TEST_WALL_BUDGET_S,
+    }]
+    assert backend.call_count == 0, "no agent turn on the configured host-run happy path"
 
 
 @pytest.mark.asyncio
