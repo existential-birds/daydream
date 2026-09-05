@@ -1780,6 +1780,58 @@ _FAILURES: list[dict[str, Any]] = [
 ]
 
 
+def test_sequence_prompt_clone_mode_inlines_exploration_under_boundary(tmp_path: Path) -> None:
+    """Issue #1123: clone mode renders inline exploration + dependency content
+    inside the untrusted-content boundary and never a .daydream pointer."""
+    prompt = _sequence_prompt(
+        tmp_path,
+        inline_exploration="## Summary\n| 3 files indexed |",
+        inline_dependencies="api/handler -> core/resolve",
+        exploration_dir=None,  # clone mode suppresses pointers
+        clone_mode=True,
+    )
+    assert "## Summary" in prompt
+    assert "api/handler -> core/resolve" in prompt
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+    assert ".daydream/exploration" not in prompt
+    assert "affected_files.md" not in prompt  # no pointer names
+    assert "diff.patch" not in prompt  # inline_diff=None + clone_mode → no pointer degrade
+
+
+def test_diagram_prompts_clone_mode_truncates_oversized_diff_with_marker(tmp_path: Path) -> None:
+    """Clone mode has no on-disk diff fallback: an over-budget diff is inlined
+    truncated with the explicit marker, never a .daydream/diff.patch pointer."""
+    big = "x" * (INLINE_DIFF_BUDGET_BYTES + 1)
+    for prompt in (
+        _sequence_prompt(tmp_path, inline_diff=big, clone_mode=True),
+        _flowchart_prompt(tmp_path, inline_diff=big, clone_mode=True),
+    ):
+        assert big[:INLINE_DIFF_BUDGET_BYTES] in prompt
+        assert "[diff truncated to fit the prompt budget]" in prompt
+        assert "diff.patch" not in prompt
+
+
+def test_diagram_prompts_non_clone_keeps_pointer_behavior_byte_for_byte(tmp_path: Path) -> None:
+    """Non-disposable backends are unchanged: default kwargs (clone_mode=False)
+    render the same pointer text as today, including the over-budget degrade."""
+    prompt = _sequence_prompt(tmp_path, inline_diff="x" * (INLINE_DIFF_BUDGET_BYTES + 1))
+    assert "diff.patch" in prompt  # pointer degrade intact
+    assert "[diff truncated" not in prompt
+    assert "Pre-scan exploration results are available in" in prompt
+
+
+def test_diagram_prompts_missing_inline_exploration_omits_block(tmp_path: Path) -> None:
+    """clone_mode with no readable exploration content omits the block entirely —
+    no placeholder, no marker, boundary still present."""
+    for prompt in (
+        _sequence_prompt(tmp_path, clone_mode=True),
+        _flowchart_prompt(tmp_path, clone_mode=True),
+    ):
+        assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+        assert "truncated" not in prompt
+        assert ".daydream" not in prompt
+
+
 def test_diagram_prompts_open_with_their_role_sentence(tmp_path: Path) -> None:
     """D17: the role sentence is the prompt's opening text (the stub dispatches on it)."""
     assert _sequence_prompt(tmp_path).startswith("You are the sequence-diagram author for this pull request.")

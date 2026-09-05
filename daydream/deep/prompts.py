@@ -1371,31 +1371,65 @@ def _schema_block(schema: dict[str, Any]) -> str:
     return "Return ONLY a JSON object matching this schema:\n```json\n" + json.dumps(schema, indent=2) + "\n```"
 
 
-def _diagram_diff_block(diff_path: Path, inline_diff: str | None) -> str:
+def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode: bool = False) -> str:
     """Inline the diff when it fits the shared byte budget, else point at it.
 
     The budget check happens here rather than in the caller so an oversized
     ``inline_diff`` degrades to the on-disk pointer instead of blowing the
-    prompt past ``INLINE_DIFF_BUDGET_BYTES``.
+    prompt past ``INLINE_DIFF_BUDGET_BYTES`` — unless ``clone_mode`` is set,
+    in which case there is no on-disk fallback: an over-budget diff is inlined
+    truncated with an explicit marker, and a missing diff is omitted entirely.
     """
     if inline_diff and fits_inline_diff_budget(inline_diff):
-        return (
+        head = (
             "The PR diff (base..HEAD) is inlined below; do NOT re-Read "
             "diff.patch for it:\n\n"
-            f"{inline_diff.rstrip()}\n\n"
+            if not clone_mode
+            else "The PR diff (base..HEAD) is inlined below:\n\n"
+        )
+        return f"{head}{inline_diff.rstrip()}\n\n{_HUNK_INDEX_AUTHORITY}"
+    if clone_mode:
+        if not inline_diff:
+            return ""
+        return (
+            "The PR diff (base..HEAD) is inlined below:\n\n"
+            f"{inline_diff[:INLINE_DIFF_BUDGET_BYTES]}\n"
+            "[diff truncated to fit the prompt budget]\n\n"
             f"{_HUNK_INDEX_AUTHORITY}"
         )
     return f"{_full_diff_pointer(diff_path)}\n{_HUNK_INDEX_AUTHORITY}"
 
 
-def _diagram_exploration_block(exploration_dir: Path | None) -> str:
+def _diagram_exploration_block(
+    exploration_dir: Path | None,
+    inline_exploration: str | None = None,
+    inline_dependencies: str | None = None,
+    *,
+    clone_mode: bool = False,
+) -> str:
     """Exploration pointers for the diagram phase, or the bare content boundary.
 
     ``_exploration_pointer`` already carries
     ``UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY``; when there is no exploration
     directory the boundary is emitted on its own so the diff and the repository
     files the agent reads are always fenced as untrusted data.
+
+    In ``clone_mode`` (read-only disposable clone backends) the host-side
+    directory dangles, so instead of a pointer the exploration summary and
+    dependency edges are inlined under the boundary, with no exploration path
+    named. Missing content is omitted, never faked.
     """
+    if clone_mode:
+        blocks = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY]
+        if inline_exploration:
+            blocks.append(inline_exploration.rstrip())
+        if inline_dependencies:
+            blocks.append(
+                "Deterministic import edges between changed files (use to place component "
+                "and module boundaries, never as a substitute for reading the source):\n"
+                f"{inline_dependencies.rstrip()}"
+            )
+        return "\n\n".join(blocks)
     pointer = _exploration_pointer(exploration_dir)
     if not pointer:
         return UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
@@ -1533,7 +1567,16 @@ def build_sequence_diagram_prompt(
         files_by_module: Changed code files keyed by module/service, so the
             proposed participants align with real repository boundaries.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory, or ``None``.
+        exploration_dir: Pre-scan exploration directory, or ``None``. In
+            ``clone_mode`` it is ignored and the inline exploration kwargs are
+            rendered instead (no host path is named).
+        inline_exploration: Exploration summary text to inline under the
+            untrusted boundary (clone mode). ``None`` omits it.
+        inline_dependencies: Dependency-edge text to inline (clone mode).
+            ``None`` omits it.
+        clone_mode: True when the agent runs on a read-only disposable clone;
+            forces the diff inline (truncated with a marker if over budget)
+            and renders exploration inline instead of via host-only pointers.
         schema: The sequence-spec JSON Schema the response must match. Passed in
             rather than imported so this module stays independent of
             ``deep/diagram_schema.py``.
@@ -1542,9 +1585,11 @@ def build_sequence_diagram_prompt(
         f"{SEQUENCE_DIAGRAM_ROLE} Propose a sequence diagram of the interaction "
         "this change is about, as a structured JSON spec in which every element "
         "carries file:line evidence.",
-        _diagram_exploration_block(exploration_dir),
+        _diagram_exploration_block(
+            exploration_dir, inline_exploration, inline_dependencies, clone_mode=clone_mode
+        ),
         CWD_GROUNDING_INSTRUCTION.format(cwd=cwd),
-        _diagram_diff_block(diff_path, inline_diff),
+        _diagram_diff_block(diff_path, inline_diff, clone_mode=clone_mode),
         _files_by_module_block(files_by_module),
         _SEQUENCE_SPEC_RULES,
         DIAGRAM_GROUNDING_INSTRUCTION,
@@ -1578,16 +1623,27 @@ def build_flowchart_prompt(
             list is therefore every changed function rather than only those
             meeting the branch-point threshold.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory, or ``None``.
+        exploration_dir: Pre-scan exploration directory, or ``None``. In
+            ``clone_mode`` it is ignored and the inline exploration kwargs are
+            rendered instead (no host path is named).
+        inline_exploration: Exploration summary text to inline under the
+            untrusted boundary (clone mode). ``None`` omits it.
+        inline_dependencies: Dependency-edge text to inline (clone mode).
+            ``None`` omits it.
+        clone_mode: True when the agent runs on a read-only disposable clone;
+            forces the diff inline (truncated with a marker if over budget)
+            and renders exploration inline instead of via host-only pointers.
         schema: The flowchart-spec JSON Schema the response must match.
     """
     parts: list[str] = [
         f"{FLOWCHART_ROLE} Propose a flowchart of the control flow inside ONE "
         "changed function, as a structured JSON spec in which every element "
         "carries file:line evidence.",
-        _diagram_exploration_block(exploration_dir),
+        _diagram_exploration_block(
+            exploration_dir, inline_exploration, inline_dependencies, clone_mode=clone_mode
+        ),
         CWD_GROUNDING_INSTRUCTION.format(cwd=cwd),
-        _diagram_diff_block(diff_path, inline_diff),
+        _diagram_diff_block(diff_path, inline_diff, clone_mode=clone_mode),
         _candidate_roots_block(candidate_roots, forced=forced),
         _FLOWCHART_SPEC_RULES,
         DIAGRAM_GROUNDING_INSTRUCTION,
