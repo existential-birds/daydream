@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"th_fc_failed"}
+{"type":"item.completed","item":{"type":"file_change","id":"fc_failed_1","status":"failed","stderr":"patch: failed to apply hunk at main.py:12","changes":{"/tmp/spike-repo/main.py":{"type":"update"}}}}
+{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}

@@ -105,6 +105,56 @@ async def test_file_change_legacy_scalar_payload_unchanged() -> None:
     assert starts[0].input == {"file": "main.py", "action": "modified"}
 
 
+@pytest.mark.asyncio
+async def test_file_change_changes_map_single_path() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_add.jsonl")
+    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert len(starts) == 1
+    assert starts[0].input["changes"] == [("/tmp/spike-repo/a.py", "add")]
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1 and not results[0].is_error
+
+
+@pytest.mark.asyncio
+async def test_file_change_changes_map_multi_path() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_multi.jsonl")
+    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert len(starts) == 1  # exactly ONE pair for the item — no id collisions
+    assert sorted(
+        (c["path"], c["kind"]) for c in starts[0].input["changes"]
+    ) == [
+        ("/tmp/spike-repo/a.py", "add"),
+        ("/tmp/spike-repo/b.py", "update"),
+        ("/tmp/spike-repo/c.py", "delete"),
+        ("/tmp/spike-repo/d.py", "move"),
+    ]
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1 and not results[0].is_error
+
+
+@pytest.mark.asyncio
+async def test_file_change_changes_map_declined_is_error() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_declined.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].status == "declined"
+
+
+@pytest.mark.asyncio
+async def test_file_change_changes_map_failed_is_error_with_stderr() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_failed.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].status == "failed"
+    assert "failed to apply hunk" in results[0].output
+
+
 @pytest.mark.parametrize(
     ("fixture", "expected_output", "expected_text_count"),
     [
