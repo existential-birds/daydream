@@ -1263,3 +1263,13 @@ async def test_codex_preserves_exit_code_and_status_on_results() -> None:
     assert ok.is_error is False
     assert ok.exit_code == 0
     assert ok.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_file_change_output_names_every_path() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Edit", "file_change_multi.jsonl")
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert "a.py" in results[0].output and "b.py" in results[0].output
+    assert "c.py" in results[0].output and "d.py" in results[0].output
+    assert "unknown" not in results[0].output
