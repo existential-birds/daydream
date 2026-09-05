@@ -106,6 +106,7 @@ _PINNED_ACTION_VERSIONS = {
     "astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a": "v4.2.0",
     "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": "v4.6.2",
     "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093": "v4.3.0",
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c": "v8.0.1",
     "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349": "v2.2.2",
 }
 
