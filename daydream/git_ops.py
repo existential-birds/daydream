@@ -2401,6 +2401,26 @@ def git_ls_remote(repo: Path, url: str) -> str:
     return proc.stdout
 
 
+def remote_contains_commit(repo: Path, branch: str, sha: str, *, remote: str = "origin") -> bool:
+    """Return ``True`` iff ``remote``'s ``refs/heads/<branch>`` reports *sha*.
+
+    Uses the same authenticated ``git ls-remote`` invocation as
+    :func:`git_ls_remote` (``GIT_TERMINAL_PROMPT=0`` pinned). A git error in
+    the ls-remote itself raises :class:`GitError`; empty ref output is
+    ``False``, never ``True``.
+    """
+    proc = _run_git(
+        repo,
+        ["ls-remote", remote, f"refs/heads/{branch}"],
+        env_cmd={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if proc.returncode != 0:
+        raise GitError(
+            f"git ls-remote {remote} refs/heads/{branch} failed: {proc.stderr.strip()}"
+        )
+    return any(line.split()[0] == sha for line in proc.stdout.splitlines() if line.strip())
+
+
 def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     """Return the ``(owner, name)`` slug for the current repository.
 
