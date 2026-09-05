@@ -355,6 +355,22 @@ def _coerce_quality_threshold(raw: Any) -> float | None:
     return value
 
 
+def _coerce_positive_float(raw: Any) -> float | None:
+    """Return ``raw`` as a finite positive float, else None (degrade to default).
+
+    Wall-clock budgets must be finite and positive (issue #726): a negative or
+    zero value makes ``asyncio.wait_for`` fire ``TimeoutError`` immediately,
+    instantly group-killing the suite and misreporting it as timed out, and
+    NaN/inf disable the ceiling. Anything invalid -- negative, zero, NaN, inf,
+    bool, or non-number -- degrades to ``None`` so the ``config.py`` default
+    applies.
+    """
+    value = _coerce_float(raw)
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
 def _coerce_string(raw: Any) -> str | None:
     """Return a non-empty string, or None for absent/malformed values."""
     if not isinstance(raw, str) or not raw.strip():
@@ -516,5 +532,5 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         diagram_min_branch_points=_coerce_positive_int(diagram, "min_branch_points"),
         diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
         test_command=_coerce_string(merged.get("test_command")),
-        test_command_wall_s=_coerce_float(merged.get("test_command_wall_s")),
+        test_command_wall_s=_coerce_positive_float(merged.get("test_command_wall_s")),
     )

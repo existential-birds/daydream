@@ -4727,11 +4727,14 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
     # stage_paths can raise GitError synchronously before the agent turn;
     # _commit_push_or_stop surfaces that as a clean Stop(1) instead of
     # an unhandled traceback terminating the deep run.
+    # The applied fix items are threaded through to build_commit_message so
+    # the deterministic commit message lists them instead of static boilerplate.
     return await _commit_push_or_stop(
         phase_commit_push(
             ctx.backend_for("fix"), ctx.work,
             preexisting_untracked=ctx.data.get("pre_fix_untracked"),
             config=ctx.config,
+            items=ctx.data.get("items") or [],
         )
     )
 

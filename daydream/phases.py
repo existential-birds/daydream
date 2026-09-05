@@ -62,6 +62,7 @@ from daydream.repository_paths import (
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
 from daydream.test_execution import (
     MissingTestCommandError,
+    TestExecutionResult,
     canonical_test_command,
     run_test_command,
 )
@@ -3156,10 +3157,13 @@ def _canonical_test_cmd(config: Any) -> list[str] | None:
     file-config ``test_command`` key, resolved by
     :func:`daydream.test_execution.canonical_test_command`.
 
-    Returns ``None`` (with a warning) only when nothing is configured, so the
-    pre-#726 agent-run fallback below still operates until the configured
-    command becomes mandatory. The fallback is deprecated: an agent-reported
-    verdict is prose, not an exit status.
+    Returns ``None`` (with a warning) only when nothing is configured — or
+    when the configured value cannot be parsed as shell argv (an unbalanced
+    quote raises the same :class:`MissingTestCommandError` config-error class,
+    so the malformed-argv case takes the identical soft fallback) — so the
+    pre-#726 agent-run fallback below still operates until a valid command
+    becomes mandatory. The fallback is deprecated: an agent-reported verdict
+    is prose, not an exit status.
     """
     from daydream.config_file import DaydreamFileConfig
 
@@ -3193,6 +3197,27 @@ def _test_command_wall_budget(config: Any) -> float:
         if configured is not None:
             return configured
     return TEST_WALL_BUDGET_S
+
+
+async def _run_host_test_command(
+    cmd: list[str], work: WorkContext, config: Any
+) -> TestExecutionResult:
+    """Run *cmd* as a host-side subprocess with the resolved wall budget.
+
+    Issue #726: the four host-side test-run call sites — the TEST phase, its
+    approved-investigator retry, declined-fix validation, and the pre-push
+    hook run — share the same three-step glue: resolve the wall budget
+    (``_test_command_wall_budget``) and run the command via
+    :func:`run_test_command` with the workspace repo as cwd. Spawn errors
+    propagate unchanged; each caller applies its own failure policy (the
+    TEST-phase sites route them through the failure gate, the validate/hook
+    sites let them fail closed).
+    """
+    return await run_test_command(
+        cmd=cmd,
+        cwd=work.repo,
+        wall_budget_s=_test_command_wall_budget(config),
+    )
 
 
 async def phase_test_and_heal(
@@ -3301,13 +3326,8 @@ async def phase_test_and_heal(
                 # Issue #726: the configured canonical test command runs
                 # host-side as a real subprocess; the verdict is the exit
                 # status, never the agent's prose. No agent turn here.
-                wall_budget = _test_command_wall_budget(config)
                 try:
-                    result = await run_test_command(
-                        cmd=cmd,
-                        cwd=work.repo,
-                        wall_budget_s=wall_budget,
-                    )
+                    result = await _run_host_test_command(cmd, work, config)
                 except (OSError, ValueError) as exc:
                     # The command could not be spawned (missing binary, a
                     # shell-builtin argv, or malformed words). That is a test
@@ -3327,7 +3347,8 @@ async def phase_test_and_heal(
                     if result.timed_out:
                         print_warning(
                             console,
-                            f"Test command hit the {wall_budget:g}s wall "
+                            f"Test command hit the "
+                            f"{_test_command_wall_budget(config):g}s wall "
                             "budget and was killed.",
                         )
                     output = result.merged_output
@@ -3435,11 +3456,7 @@ async def phase_test_and_heal(
                             retries_used += 1
                             continue
                         try:
-                            result = await run_test_command(
-                                cmd=cmd,
-                                cwd=work.repo,
-                                wall_budget_s=_test_command_wall_budget(config),
-                            )
+                            result = await _run_host_test_command(cmd, work, config)
                         except (OSError, ValueError) as exc:
                             # Spawn errors (missing binary, shell builtin) and
                             # remaining argv errors must not escape into a
@@ -3574,11 +3591,7 @@ async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
     cmd = _canonical_test_cmd(config)
     if cmd is None:
         return
-    result = await run_test_command(
-        cmd=cmd,
-        cwd=work.repo,
-        wall_budget_s=_test_command_wall_budget(config),
-    )
+    result = await _run_host_test_command(cmd, work, config)
     if result.passed:
         print_success(
             console,
@@ -3610,7 +3623,7 @@ async def _do_commit(
     """Stage, commit, and optionally push — all host-side, no agent turn.
 
     Issue #726: the commit is a real subprocess with a real exit status, not
-    an agentpled turn. Staging is deterministic (``_stage_deterministic``),
+    an agent-planned turn. Staging is deterministic (``_stage_deterministic``),
     the message is built by the pure :func:`build_commit_message` (trailers
     included at commit time — no post-hoc amend), and a ``push=True`` commit
     only reports success after ``git_ops.remote_contains_commit`` confirms the
@@ -3629,7 +3642,7 @@ async def _do_commit(
             still validated by re-running the canonical host-side test
             command (:func:`_validate_declined_fixes`) — a decline no longer
             silently skips validation (issue #726).
-        config: Optional ``RunConfig`` carrying the CLI ``--test-command"
+        config: Optional ``RunConfig`` carrying the CLI ``--test-command``
             flag and the merged file config, used to resolve the canonical
             test command for the decline-path validation.
         items: Optional list of fix dicts (with ``file`` and ``description``
@@ -3726,11 +3739,7 @@ async def _do_commit(
             # addition to the test-execution events the runner itself emits
             # (issue #726 task 12).
             async with host_phase_scope(DaydreamPhase.HOOK_RUN):
-                result = await run_test_command(
-                    cmd=cmd,
-                    cwd=work.repo,
-                    wall_budget_s=_test_command_wall_budget(config),
-                )
+                result = await _run_host_test_command(cmd, work, config)
             if not result.passed:
                 raise RuntimeError(
                     "Pre-push validation failed: the configured test command "
@@ -3767,6 +3776,7 @@ async def phase_commit_push(
     *,
     preexisting_untracked: set[str] | None = None,
     config: Any = None,
+    items: list[dict[str, Any]] | None = None,
 ) -> None:
     """Prompt user to commit and push changes.
 
@@ -3774,6 +3784,12 @@ async def phase_commit_push(
     re-running the canonical host-side test command (issue #726): the phase
     only ends quietly when that validation passes, and raises (surfaced as
     ``Stop(1)`` by the orchestrator's commit guard) when it fails.
+
+    Args:
+        items: Optional list of applied fix dicts (with ``file`` and
+            ``description`` keys) threaded from the production fix cycle;
+            folded into the deterministic commit message by
+            :func:`build_commit_message`.
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
@@ -3781,6 +3797,7 @@ async def phase_commit_push(
         backend, work, push=True, interactive=True,
         preexisting_untracked=preexisting_untracked,
         config=config,
+        items=items,
     )
     if committed:
         print_success(console, "Commit and push complete")
