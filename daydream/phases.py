@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,7 @@ from daydream.repository_paths import (
     path_is_confined,
 )
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
+from daydream.test_execution import run_test_command
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -263,14 +265,13 @@ SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = {
 
 
 def _sanitize_suggested_command(raw: str) -> str:
-    """Sanitize an LLM-suggested shell command for safe inclusion in a fenced prompt.
+    """Sanitize an LLM-suggested shell command for safe execution and display.
 
     Collapses all whitespace runs to a single space and strips backticks.
-    Newlines and backticks are the two characters that can break out of a
-    triple-backtick code fence in a downstream prompt; nothing in a legitimate
-    test command requires either. The result is suitable for both the
-    next-turn ``run_agent`` prompt and for surfacing in the user-facing
-    confirmation preview.
+    Newlines and backticks are the two characters that could break command
+    boundaries or injection fences; nothing in a legitimate test command
+    requires either. The result is used for the user-facing confirmation
+    preview and is what the host runner shlex-splits and executes.
     """
     return " ".join(raw.replace("`", "").split())
 
@@ -3128,7 +3129,7 @@ def _reject_test_healing_generated_file_edits(
     return None if restoration_failed else direct_violations
 
 
-# Shared tail of both test-phase prompts. The host parses this turn's final text
+# Tail of the test-phase prompt. The host parses this turn's final text
 # for the verdict (``detect_test_success``), so the agent must run the suite to
 # completion inside the turn and quote the runner's own summary: a
 # "still running, I'll report later" narration would be parsed as a failure and
@@ -3164,7 +3165,10 @@ async def phase_test_and_heal(
 
     retries_used = 0
     continuation: ContinuationToken | None = None
-    test_command_override: str | None = None
+    # Merged (redacted) output of a host-side test-command run whose suite came
+    # back red; consumed at the top of the next iteration so it flows through
+    # the same failure gate (environmental check + heal menu) as an agent run.
+    host_failure_output: str | None = None
 
     async def _launch_fix(output: str) -> bool:
         nonlocal retries_used, continuation
@@ -3209,31 +3213,24 @@ async def phase_test_and_heal(
         else:
             print_info(console, "Running test suite...")
 
-        if test_command_override:
-            sanitized_cmd = _sanitize_suggested_command(test_command_override)
-            prompt = (
-                "Run this exact test command:\n"
-                f"```\n{sanitized_cmd}\n```\n"
-                f"{_TEST_RUN_INSTRUCTIONS}"
-            )
+        if host_failure_output is not None:
+            # A host-side run already produced this failure; skip the agent run
+            # and feed the same output through the failure gate below.
+            output, host_failure_output = host_failure_output, None
+            test_passed = False
         else:
             prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
-        # Use-once: clear after consuming above so the next iteration falls back
-        # to the default prompt. Must stay before the bottom-of-loop branches that
-        # may re-assign test_command_override (choice "1" → setup investigator).
-        test_command_override = None
+            output, continuation, _ = await run_agent(
+                backend,
+                work.repo,
+                prompt,
+                continuation=continuation,
+                phase=DaydreamPhase.TEST,
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                wall_budget_s=TEST_WALL_BUDGET_S,
+            )
 
-        output, continuation, _ = await run_agent(
-            backend,
-            work.repo,
-            prompt,
-            continuation=continuation,
-            phase=DaydreamPhase.TEST,
-            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=TEST_WALL_BUDGET_S,
-        )
-
-        test_passed = detect_test_success(output)
+            test_passed = detect_test_success(output)
 
         if test_passed:
             print_success(console, "Tests passed")
@@ -3315,7 +3312,20 @@ async def phase_test_and_heal(
                         question="Use suggested command instead?",
                         default="n",
                     ):
-                        test_command_override = sanitized_preview
+                        # Trust boundary: the approved command is executed
+                        # host-side exactly once, as a real subprocess — it is
+                        # never embedded in a later agent prompt.
+                        result = await run_test_command(
+                            cmd=shlex.split(sanitized_preview),
+                            cwd=work.repo,
+                            wall_budget_s=TEST_WALL_BUDGET_S,
+                        )
+                        if result.passed:
+                            print_success(console, "Tests passed")
+                            return True, retries_used, True
+                        print_warning(console, "Approved test command failed.")
+                        host_failure_output = result.merged_output
+                        continue
 
             retries_used += 1
             continue
