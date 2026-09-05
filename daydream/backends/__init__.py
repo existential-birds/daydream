@@ -88,12 +88,27 @@ class ToolResultEvent:
         id: Tool call identifier matching the prior ToolStartEvent.id.
         output: Tool output as a string.
         is_error: True if the tool reported an error.
+        exit_code: Exit code as reported by the backend; None when the
+            backend has no structured exit code (Claude/Pi).
+        status: Backend-native status string (e.g. Codex's
+            "completed"/"declined"); None when unavailable.
+        duration_ms: Wall-clock duration in milliseconds; None when
+            unavailable.
+        cancelled: True if the backend reported the tool call as cancelled.
+        truncated: True if the backend marked the output as truncated.
+        All five are optional; they default to None/False for backends
+        without structured metadata (Claude/Pi).
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """
 
     id: str
     output: str
     is_error: bool
+    exit_code: int | None = None
+    status: str | None = None
+    duration_ms: float | None = None
+    cancelled: bool = False
+    truncated: bool = False
     timestamp: str = field(default_factory=now_iso)
 
 
