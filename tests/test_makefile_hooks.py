@@ -118,7 +118,10 @@ def _install_recording_commands(
         "               'env': {k: os.environ.get(k) for k in\n"
         "                       ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',\n"
         "                        'GIT_COMMITTER_NAME',\n"
-        "                        'GIT_COMMITTER_EMAIL')}}, f)\n"
+        "                        'GIT_COMMITTER_EMAIL')},\n"
+        "               'git_local_env': {k: os.environ.get(k) for k in\n"
+        "                       ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',\n"
+        "                        'GIT_COMMON_DIR', 'GIT_PREFIX')}}, f)\n"
         "    f.write('\\n')\n"
     )
     real_git = shutil.which("git")
@@ -442,6 +445,14 @@ def test_pre_push_delegates_quality_gate_to_make_check(
     log = tmp_path / "command-log.jsonl"
 
     clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
+    inherited_git_env = {
+        "GIT_DIR": "/sentinel/git-dir",
+        "GIT_WORK_TREE": "/sentinel/work-tree",
+        "GIT_INDEX_FILE": "/sentinel/index",
+        "GIT_COMMON_DIR": "/sentinel/common-dir",
+        "GIT_PREFIX": "sentinel-prefix/",
+    }
+    clean_env.update(inherited_git_env)
     proc = subprocess.run(
         [str(repo_root / "scripts" / "hooks" / "pre-push")],
         cwd=repo_root,
@@ -458,3 +469,4 @@ def test_pre_push_delegates_quality_gate_to_make_check(
     assert recs[0]["command"] == "make"
     assert recs[0]["cwd"] == str(repo_root)
     assert recs[0]["args"] == ["check"]
+    assert all(recs[0]["git_local_env"][name] is None for name in inherited_git_env)
