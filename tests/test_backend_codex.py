@@ -96,6 +96,15 @@ async def test_tool_use_events() -> None:
     assert any(t.text == "Done!" for t in texts)
 
 
+@pytest.mark.asyncio
+async def test_file_change_legacy_scalar_payload_unchanged() -> None:
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Run ls", "tool_use.jsonl")
+    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
+    assert len(starts) == 1
+    assert starts[0].input == {"file": "main.py", "action": "modified"}
+
+
 @pytest.mark.parametrize(
     ("fixture", "expected_output", "expected_text_count"),
     [
