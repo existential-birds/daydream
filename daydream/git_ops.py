@@ -371,7 +371,9 @@ def _run_git(
         capture_bytes: When True, capture stdout/stderr as bytes (no decoding).
         input_text: Optional text piped to the subprocess on **stdin** (used
             for ``git update-ref --stdin`` batch transactions whose payload
-            cannot express the whole ref set on argv).
+            cannot express the whole ref set on argv). Encoded to UTF-8 when
+            *capture_bytes* is set so the binary variant never feeds ``str``
+            to the subprocess.
         retries: How many additional attempts to make after a
             :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
             Only timeouts are retried; other failures raise immediately.
@@ -404,7 +406,14 @@ def _run_git(
                 timeout=timeout,
                 shell=False,
                 check=False,
-                input=input_text,
+                # capture_bytes=True reads bytes stdout/stderr, so a str
+                # input_text must be encoded: subprocess.run raises a raw
+                # TypeError for str input with text=False.
+                input=(
+                    input_text.encode("utf-8")
+                    if capture_bytes and input_text is not None
+                    else input_text
+                ),
                 env=env_cmd,
             )
         except subprocess.TimeoutExpired as exc:
@@ -1695,6 +1704,33 @@ def remove_remote(repo: Path, remote: str = "origin") -> None:
 _OBJECT_ID_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 
+def _validate_ref_oid_pair(ref: str, oid: str) -> None:
+    """Validate one *ref* -> *oid* pair with the shared fail-closed guards.
+
+    Every ref-writing mutator runs these checks **before** any shell-out, so
+    the two mutators (:func:`update_ref` and :func:`update_refs`) can never
+    drift apart. In order: *oid* must be a full 40-hex object ID; *ref* must
+    not start with ``-`` (git would parse it as an option, never as a ref);
+    *ref*'s final component must not end in the literal lowercase ``.lock``
+    suffix — git's own rule, which accepts case-variants like
+    ``release.LOCK``/``x.lOck``, so those stay valid; and *ref* must not
+    contain whitespace or control characters (the ``check-ref-format`` rules
+    that, in the batch variant, would otherwise split a line or smuggle extra
+    ``update`` lines into the ``update-ref --stdin`` payload).
+
+    Raises:
+        GitError: If *ref* or *oid* is invalid, naming the offender.
+    """
+    if _OBJECT_ID_RE.fullmatch(oid) is None:
+        raise GitError(f"invalid OID: {oid}")
+    if ref.startswith("-"):
+        raise GitError(f"invalid ref name: {ref}")
+    if ref.rsplit("/", 1)[-1].endswith(".lock"):
+        raise GitError(f"invalid ref name: {ref}")
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in ref):
+        raise GitError(f"invalid ref name: {ref}")
+
+
 def update_ref(repo: Path, ref: str, oid: str) -> None:
     """Point *ref* at the explicit *oid* in *repo* (``git update-ref <ref> <oid>``).
 
@@ -1702,13 +1738,16 @@ def update_ref(repo: Path, ref: str, oid: str) -> None:
     never re-run. Both arguments are validated **before** any shell-out:
 
     * *ref* is checked with ``git check-ref-format`` (git's own ref-format
-      authority), plus two Python-side guards git cannot express: names
-      beginning with ``-`` (git would parse them as options, never as a ref)
-      and names whose final component ends in the literal ``.lock`` suffix
-      (case-insensitive — git forbids exactly that suffix, so ``unlock``,
-      ``block``, ``deadlock`` and ``xLock`` are valid names and snapshot
-      cleanly, while ``topic.lock``/``topic.LOCK`` stay rejected). Anything
-      invalid raises ``GitError`` without invoking ``update-ref``.
+      authority), plus the shared Python-side guards of
+      :func:`_validate_ref_oid_pair` (also used by :func:`update_refs`):
+      names beginning with ``-`` (git would parse them as options, never as a
+      ref), names whose final component ends in the literal lowercase
+      ``.lock`` suffix — git forbids exactly that, so ``unlock``, ``block``,
+      ``deadlock`` and ``xLock`` are valid names and snapshot cleanly, while
+      ``topic.lock`` stays rejected and case-variants git accepts
+      (``topic.LOCK``, ``x.lOck``, ``release.LOCK``) stay valid — and names
+      containing whitespace or control characters. Anything invalid raises
+      ``GitError`` without invoking ``update-ref``.
 
     * *oid* must be a full 40-character hex object ID (upper- or lowercase);
       anything else raises ``GitError`` and is never passed through to git.
@@ -1719,12 +1758,7 @@ def update_ref(repo: Path, ref: str, oid: str) -> None:
     Raises:
         GitError: If *ref* or *oid* is invalid or ``git update-ref`` fails.
     """
-    if _OBJECT_ID_RE.fullmatch(oid) is None:
-        raise GitError(f"invalid OID: {oid}")
-    if ref.startswith("-"):
-        raise GitError(f"invalid ref name: {ref}")
-    if ref.rsplit("/", 1)[-1].lower().endswith(".lock"):
-        raise GitError(f"invalid ref name: {ref}")
+    _validate_ref_oid_pair(ref, oid)
     # check-ref-format is a read-only query, so it inherits the retrying
     # default; only the update-ref mutation below passes retries=0.
     proc = _run_git(repo, ["check-ref-format", ref], timeout=10)
@@ -1740,13 +1774,16 @@ def update_refs(repo: Path, ref_oids: dict[str, str]) -> None:
 
     Fail-closed mutating wrapper for the branch-snapshot loop — ``retries=0``
     so a timed-out ref mutation is never re-run. Every pair is validated
-    **before** any shell-out with the same Python-side guards as
-    :func:`update_ref` (full 40-hex OID; ref must not start with ``-``; final
-    component must not end in the literal ``.lock`` suffix, case-insensitive).
-    Git's own ref-format validation — the same authority ``check-ref-format``
-    consults — then gates the whole batch as a single transaction, so either
-    every ref is written or (if any line is invalid) none are: a half-written
-    snapshot is never produced. An empty *ref_oids* is a no-op.
+    **before** any shell-out with the same shared guards as
+    :func:`update_ref` via :func:`_validate_ref_oid_pair` (full 40-hex OID;
+    ref must not start with ``-``; final component must not end in the literal
+    ``.lock`` suffix — git's own rule, which accepts case-variants like
+    ``topic.LOCK``/``x.lOck`` so those stay valid; no whitespace or control
+    characters in the ref). Git's own ref-format validation — the same authority
+    ``check-ref-format`` consults — then gates the whole batch as a single
+    transaction, so either every ref is written or (if any line is invalid)
+    none are: a half-written snapshot is never produced. An empty *ref_oids*
+    is a no-op.
 
     Raises:
         GitError: If any ref or OID is invalid or the batch fails.
@@ -1754,12 +1791,7 @@ def update_refs(repo: Path, ref_oids: dict[str, str]) -> None:
     if not ref_oids:
         return
     for ref, oid in ref_oids.items():
-        if _OBJECT_ID_RE.fullmatch(oid) is None:
-            raise GitError(f"invalid OID: {oid}")
-        if ref.startswith("-"):
-            raise GitError(f"invalid ref name: {ref}")
-        if ref.rsplit("/", 1)[-1].lower().endswith(".lock"):
-            raise GitError(f"invalid ref name: {ref}")
+        _validate_ref_oid_pair(ref, oid)
     lines = "".join(f"update {ref} {oid}\n" for ref, oid in ref_oids.items())
     proc = _run_git(
         repo, ["update-ref", "--stdin"], timeout=30, retries=0, input_text=lines
