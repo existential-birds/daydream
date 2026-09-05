@@ -640,6 +640,22 @@ def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch
     assert env["PATH"] == "/usr/bin"
 
 
+def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M3: on non-Darwin the env is exactly strip-vars-minus-PATH-verbatim, no xcrun."""
+    from daydream.backends import codex
+
+    assert codex.sys.platform != "darwin"
+    monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
+    monkeypatch.setenv("GIT_DIR", "/leak")
+    monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun on Linux")))
+
+    env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
+
+    assert env is not None
+    assert env["PATH"] == "/usr/bin:/opt/bin"  # byte-for-byte, no prepend (M3)
+    assert "GIT_DIR" not in env
+
+
 @pytest.mark.asyncio
 async def test_codex_read_only_resume_is_refused(
     tmp_path: Path, linked_worktree: tuple[Path, Path],
