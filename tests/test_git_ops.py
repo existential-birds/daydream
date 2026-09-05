@@ -2237,8 +2237,8 @@ def test_has_executable_pre_push_hook_honors_core_hooks_path(tmp_path: Path) -> 
 def test_remote_contains_commit_true_after_push_false_before(tmp_path: Path) -> None:
     remote = tmp_path / "remote"
     clone = tmp_path / "clone"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-    subprocess.run(["git", "init", str(clone)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main", str(clone)], check=True, capture_output=True)
     for k, v in {"user.email": "t@t", "user.name": "t"}.items():
         subprocess.run(["git", "-C", str(clone), "config", k, v], check=True)
     (clone / "a").write_text("x")
