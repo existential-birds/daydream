@@ -58,6 +58,8 @@ aggregation; they do not repeat attempt usage.
 
 Endpoint and field mappings follow the
 [LangSmith OpenTelemetry integration](https://docs.langchain.com/langsmith/trace-with-opentelemetry).
+Usage details use the `langsmith.usage_metadata` format emitted by
+[LangSmith's own OTLP exporter](https://github.com/langchain-ai/langsmith-sdk/blob/4792a53f807e9129fd4f5c243056d1976e2cff80/js/src/experimental/otel/exporter.ts#L219).
 
 ## HoneyHive
 

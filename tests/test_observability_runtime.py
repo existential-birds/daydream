@@ -2,7 +2,7 @@
 
 import json
 import logging
-import time
+import threading
 from collections.abc import AsyncGenerator, Sequence
 from pathlib import Path
 from typing import Any
@@ -50,7 +50,7 @@ async def test_owned_span_tree_usage_and_content() -> None:
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
         with step_scope("review", iteration=2):
             with agent_scope("review", backend="pi", model="requested") as agent:
-                async with attempt_scope(1, prompt="inspect source") as attempt:
+                async with attempt_scope(1) as attempt:
                     attempt.observe(TextEvent("response"))
                     attempt.observe(MetricsEvent("a", 10, 2, 3, 0.1, model_name="actual"))
                     attempt.observe(MetricsEvent("b", 20, 4, None, 0.2))
@@ -91,34 +91,61 @@ def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogC
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("stall_during", ["export", "shutdown"])
-async def test_shutdown_deadline_is_total_and_shutdown_once(stall_during: str) -> None:
-    class SlowExporter(InMemorySpanExporter):
-        shutdowns = 0
+async def test_shutdown_deadline_is_total_and_shutdown_once(
+    stall_during: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    release = threading.Event()
+
+    class BlockedExporter(InMemorySpanExporter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shutdowns = 0
+            self.blocked = threading.Event()
+            self.shutdown_complete = threading.Event()
 
         def shutdown(self) -> None:
             self.shutdowns += 1
             if stall_during == "shutdown":
-                time.sleep(0.15)
+                self.blocked.set()
+                release.wait()
+            super().shutdown()
+            self.shutdown_complete.set()
 
         def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
             if stall_during == "export":
-                time.sleep(0.15)
+                self.blocked.set()
+                release.wait()
             return super().export(spans)
 
-    exporters = [SlowExporter(), SlowExporter()]
+    exporters = [BlockedExporter(), BlockedExporter()]
     registry = Registry()
     registry.register_trace_exporter("first", lambda _: exporters[0])
     registry.register_trace_exporter("second", lambda _: exporters[1])
-    started = time.monotonic()
-    async with trace_run(
-        ObservabilityConfig(destinations=("first", "second")),
-        registry,
-        flow="review",
-        cleanup_timeout_s=0.03,
-    ):
-        pass
-    assert time.monotonic() - started < 0.14
-    await anyio.sleep(0.35)
+    returned = anyio.Event()
+
+    async def run() -> None:
+        async with trace_run(
+            ObservabilityConfig(destinations=("first", "second")),
+            registry,
+            flow="review",
+            cleanup_timeout_s=0.03,
+        ):
+            pass
+        returned.set()
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as group:
+            group.start_soon(run)
+            try:
+                assert await anyio.to_thread.run_sync(exporters[0].blocked.wait, 10, abandon_on_cancel=True)
+                await returned.wait()
+                assert not release.is_set()
+                assert all(not exporter.shutdown_complete.is_set() for exporter in exporters)
+                assert "Trace cleanup exceeded its deadline" in caplog.text
+            finally:
+                release.set()
+            for exporter in exporters:
+                assert await anyio.to_thread.run_sync(exporter.shutdown_complete.wait, 10, abandon_on_cancel=True)
     assert [exporter.shutdowns for exporter in exporters] == [1, 1]
 
 
@@ -338,7 +365,7 @@ async def test_concurrent_runs_and_fanout_are_isolated_from_ambient_span() -> No
 
     async def child(number: int) -> None:
         with agent_scope(f"agent-{number}", backend="pi"):
-            async with attempt_scope(1, prompt=f"prompt-{number}") as observer:
+            async with attempt_scope(1) as observer:
                 observer.observe(TextEvent(f"answer-{number}"))
                 await anyio.sleep(0)
 
@@ -377,7 +404,8 @@ async def test_hydration_ignores_ambient_length_limit_and_serialization_is_fail_
     registry.register_trace_exporter("memory", lambda _: exporter)
     text = "long source and result " * 1000
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        async with attempt_scope(1, prompt=text) as observer:
+        async with attempt_scope(1) as observer:
+            observer.observe(RequestEvent(text))
             observer.observe(TextEvent(text))
             observer.observe(ResultEvent(object(), None))
     attempt = next(
@@ -396,7 +424,7 @@ async def test_failed_tool_exports_native_error_and_sanitized_message(monkeypatc
     registry = Registry()
     registry.register_trace_exporter("memory", lambda _: exporter)
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        async with attempt_scope(1, prompt="inspect") as observer:
+        async with attempt_scope(1) as observer:
             observer.observe(ToolStartEvent("tool", "Read", {}, timestamp="2026-09-05T10:00:00Z"))
             observer.observe(
                 ToolResultEvent(

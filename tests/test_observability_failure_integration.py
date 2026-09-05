@@ -23,6 +23,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.backends.codex import CodexBackend, CodexError
 from daydream.observability.config import ObservabilityConfig
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
@@ -121,6 +122,8 @@ async def test_runner_retry_keeps_failed_billed_attempt_separate_from_success(
     assert [span["status"]["code"] for span in attempts] == ["STATUS_CODE_ERROR", "STATUS_CODE_OK"]
     assert [attributes(span)["gen_ai.usage.input_tokens"] for span in attempts] == [30, 20]
     assert [attributes(span)["gen_ai.usage.cost"] for span in attempts] == [0.03, 0.02]
+    assert json.loads(attributes(attempts[1])["traceloop.entity.input"])["prompt"] == "successful attempt request"
+    assert "inspect sample" not in attributes(attempts[1])["gen_ai.input.messages"]
     assert "failed partial response" in attributes(attempts[0])["gen_ai.output.messages"]
     assert "failed partial response" not in attributes(attempts[1])["gen_ai.output.messages"]
     agent = _kind(collector.spans, "agent")[0]
@@ -389,3 +392,34 @@ async def test_runner_attempt_duration_requires_terminal_result(
         assert not (feature_branch_repo / _RESULT_FILE).exists()
     assert attributes(_kind(collector.spans, "tool")[0])["daydream.tool.duration_ms"] == 42
     assert json.loads(metadata["daydream.message_usage"])[0]["duration_ms"] == 123
+
+
+async def test_codex_prelaunch_failure_does_not_export_an_effective_request(
+    ext_dir: ExtDir,
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _flow(ext_dir, body='''
+from daydream.backends import ContinuationToken
+await run_agent(
+    ctx.backend_for("review"), ctx.work.repo, "original logical prompt",
+    phase=DaydreamPhase.REVIEW, read_only=True,
+    continuation=ContinuationToken("codex", {"thread_id": "previous-thread"}),
+)
+''')
+    install_backend(CodexBackend(model="fixture-model"))
+    with otlp_collector() as collector:
+        with pytest.raises(CodexError, match="cannot be resumed"):
+            await runner.run(_config(make_config, feature_branch_repo, collector.base_url, monkeypatch))
+    attempt = _kind(collector.spans, "attempt")[0]
+    metadata = attributes(attempt)
+    assert attempt["status"]["code"] == "STATUS_CODE_ERROR"
+    assert metadata["error.type"] == "CodexError"
+    assert "daydream.request.timestamp" not in metadata
+    assert "gen_ai.input.messages" not in metadata
+    assert "traceloop.entity.input" not in metadata
+    agent = _kind(collector.spans, "agent")[0]
+    assert attempt["parentSpanId"] == agent["spanId"]
+    assert json.loads(attributes(agent)["traceloop.entity.input"])["prompt"] == "original logical prompt"

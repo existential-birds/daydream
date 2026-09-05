@@ -252,11 +252,9 @@ _USAGE_ATTRIBUTES = {
 class AttemptObserver:
     """Reconcile one backend invocation without inventing provider request spans."""
 
-    def __init__(self, scope: SpanScope, prompt: str, output_schema: dict[str, Any] | None) -> None:
+    def __init__(self, scope: SpanScope) -> None:
         self.scope = scope
-        self.request: dict[str, Any] = {"prompt": prompt}
-        if output_schema is not None:
-            self.request["output_schema"] = output_schema
+        self.request: dict[str, Any] | None = None
         self.messages: list[dict[str, Any]] = []
         self.reasoning: list[str] = []
         self.text: list[str] = []
@@ -502,14 +500,15 @@ class AttemptObserver:
                 self.scope.attrs({"daydream.message_usage": list(self.usage_metadata.values())})
             self.scope.attrs({"daydream.models": self.models or None, "daydream.providers": self.providers or None})
             if self.capture:
-                self.scope.content("traceloop.entity.input", self.request)
-                messages = []
-                if "system_prompt" in self.request:
-                    messages.append(
-                        {"role": "system", "parts": [{"type": "text", "content": self.request["system_prompt"]}]}
-                    )
-                messages.append({"role": "user", "parts": [{"type": "text", "content": self.request["prompt"]}]})
-                self.scope.content("gen_ai.input.messages", messages)
+                if self.request is not None:
+                    self.scope.content("traceloop.entity.input", self.request)
+                    messages = []
+                    if "system_prompt" in self.request:
+                        messages.append(
+                            {"role": "system", "parts": [{"type": "text", "content": self.request["system_prompt"]}]}
+                        )
+                    messages.append({"role": "user", "parts": [{"type": "text", "content": self.request["prompt"]}]})
+                    self.scope.content("gen_ai.input.messages", messages)
                 self.scope.content("gen_ai.output.messages", self.messages)
                 if self.reasoning:
                     self.scope.content("daydream.reasoning", "".join(self.reasoning))
@@ -521,12 +520,7 @@ class AttemptObserver:
 
 
 @asynccontextmanager
-async def attempt_scope(
-    number: int,
-    *,
-    prompt: str,
-    output_schema: dict[str, Any] | None = None,
-) -> AsyncIterator[AttemptObserver]:
+async def attempt_scope(number: int) -> AsyncIterator[AttemptObserver]:
     backend = _scope_attributes.get().get("daydream.backend", "backend")
     with SpanScope(
         current_session(),
@@ -538,7 +532,7 @@ async def attempt_scope(
             "gen_ai.operation.name": "chat",
         },
     ) as scope:
-        observer = AttemptObserver(scope, prompt, output_schema)
+        observer = AttemptObserver(scope)
         error: BaseException | None = None
         try:
             yield observer

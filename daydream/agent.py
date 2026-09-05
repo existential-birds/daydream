@@ -708,7 +708,7 @@ async def _run_agent(
                 event_stream_scope = _EventStreamScope(event_iter)
 
                 async with (
-                    attempt_scope(attempt + 1, prompt=prompt, output_schema=output_schema) as observed,
+                    attempt_scope(attempt + 1) as observed,
                     invocation_cm as inv,
                     event_stream_scope,
                 ):

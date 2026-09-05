@@ -108,6 +108,14 @@ async def test_runner_exports_complete_portable_trace(
     agent = by_id[attempt["parentSpanId"]]
     phase = by_id[agent["parentSpanId"]]
     assert phase["parentSpanId"] == roots[0]["spanId"]
+    trajectory_paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
+    assert len(trajectory_paths) == 1
+    trajectory = json.loads(trajectory_paths[0].read_text())
+    for span in (roots[0], phase, agent, attempt, tool):
+        identity = attributes(span)
+        assert identity["daydream.session.id"] == trajectory["session_id"]
+        assert identity["daydream.trajectory.id"] == trajectory["trajectory_id"]
+        assert identity["traceloop.association.properties.session_id"] == trajectory["session_id"]
     billed = attributes(attempt)
     assert billed["gen_ai.usage.input_tokens"] == 100
     assert billed["gen_ai.usage.output_tokens"] == 12
@@ -344,3 +352,22 @@ async def test_invalid_destination_setup_fails_before_agent_work(
     assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 1
     assert backend.calls == []
     assert destination in capsys.readouterr().out.lower()
+
+
+async def test_workspace_failure_exports_root_before_a_trajectory_exists(
+    tmp_path: Path,
+    make_config: Callable[..., RunConfig],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with otlp_collector() as receiver:
+        _configure(monkeypatch, receiver.base_url, "otlp")
+        assert await runner.run(make_config(tmp_path, output_mode="review")) == 1
+    assert len(receiver.spans) == 1
+    root = receiver.spans[0]
+    identity = attributes(root)
+    assert identity["daydream.span.kind"] == "run"
+    assert root["status"]["code"] == "STATUS_CODE_ERROR"
+    assert "daydream.session.id" not in identity
+    assert "daydream.trajectory.id" not in identity
+    assert "traceloop.association.properties.session_id" not in identity
+    assert not (tmp_path / ".daydream/runs").exists()

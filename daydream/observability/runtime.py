@@ -32,6 +32,17 @@ def current_session() -> TraceSession | None:
     return _active_session.get()
 
 
+def associate_run_trajectory(session_id: str) -> None:
+    """Link the early run span once its root trajectory identity is available."""
+    session = current_session()
+    if session is not None and session.root_scope is not None:
+        session.root_scope.attrs({
+            "daydream.session.id": session_id,
+            "daydream.trajectory.id": session_id,
+            "traceloop.association.properties.session_id": session_id,
+        })
+
+
 class _SafeExporter(SpanExporter):
     """Contain extension and SDK failures and sanitize their worker diagnostics."""
 
@@ -76,6 +87,7 @@ class TraceSession:
     def __init__(self, config: ObservabilityConfig, *, cleanup_timeout_s: float = 10) -> None:
         self.policy = PrivacyPolicy(config.capture_content)
         self.run_id = str(uuid.uuid4())
+        self.root_scope: SpanScope | None = None
         self.cleanup_timeout_s = cleanup_timeout_s
         self._closed = False
         self._unowned: list[_SafeExporter] = []
@@ -190,7 +202,11 @@ async def trace_run(
         token = _active_session.set(session)
         try:
             with SpanScope(session, "daydream.run", "run", {"daydream.flow": flow}) as root:
-                yield root
+                session.root_scope = root
+                try:
+                    yield root
+                finally:
+                    session.root_scope = None
         finally:
             _active_session.reset(token)
     finally:

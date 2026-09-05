@@ -51,7 +51,7 @@ from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
 from daydream.hunk_index import write_hunk_index
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
-from daydream.observability.runtime import trace_run
+from daydream.observability.runtime import associate_run_trajectory, trace_run
 from daydream.phases import (
     _detect_default_branch,
     _git_branch,
@@ -422,7 +422,7 @@ def _open_recorder(
     # per-flow phase mapping. Keep the mapping prose there so it cannot drift
     # between call sites (runner, archive manifest).
     names = _recorder_backend_names(config, flow_kind)
-    return TrajectoryRecorder(
+    recorder = TrajectoryRecorder(
         path=trajectory_path,
         run_flow=flow_kind,
         target_dir=target_dir,
@@ -437,6 +437,8 @@ def _open_recorder(
         test_backend_name=names.test,
         on_write=_make_archive_callback(config, target_dir, work),
     )
+    associate_run_trajectory(recorder.session_id)
+    return recorder
 
 
 def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
