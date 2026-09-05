@@ -147,11 +147,12 @@ class DaydreamFileConfig:
         test_command: Issue #726. Canonical shell test command run host-side
             (real subprocess, exit-status pass/fail). ``None`` falls through:
             CLI ``--test-command`` wins over this key; when both are unset the
-            run fails closed with an actionable diagnostic (the agent never
-            guesses the command).
+            host-side run is skipped and the deprecated agent-run fallback
+            applies (warned; issue #726).
         test_command_wall_s: Issue #726. Wall-clock ceiling in seconds for one
             host-side test-command run (the whole process group is killed on
-            expiry). ``None`` falls through to the orchestrator default.
+            expiry). A value overrides the orchestrator default
+            (``config.TEST_WALL_BUDGET_S``); ``None`` falls through to it.
     """
 
     model: str | None = None

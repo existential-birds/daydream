@@ -109,17 +109,28 @@ def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path
                 "time.sleep(30)",
             ],
             cwd=tmp_path,
-            wall_budget_s=0.5,
+            # Headroom for two cold interpreter startups + Popen + marker
+            # write: a tighter budget made the marker write lose the race
+            # to the group kill under CI load.
+            wall_budget_s=5.0,
         )
 
     res = asyncio.run(go())
     assert res.timed_out is True
     assert res.passed is False
-    pid = int(marker.read_text().strip())
-    # grandchild must be dead, not reparented — poll a short window
-    for _ in range(10):
-        if not _pid_alive(pid):
-            break
+    # The grandchild writes its pid before sleeping; poll until it lands
+    # instead of assuming startup beat the wall budget.
+    deadline = time.monotonic() + 5.0
+    pid: int | None = None
+    while pid is None and time.monotonic() < deadline:
+        try:
+            pid = int(marker.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    assert pid is not None
+    # grandchild must be dead, not reparented — poll a generous window
+    deadline = time.monotonic() + 5.0
+    while _pid_alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert _pid_alive(pid) is False
 
@@ -163,3 +174,47 @@ async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
     ]
     assert len(events) == 1
     assert events[0]["metadata"]["stop_reason"] == "timed_out"
+
+
+def test_runner_fails_closed_when_env_value_survives_scrub(tmp_path: Path) -> None:
+    """An env value the replacement marker itself carries (a substring of
+    "[REDACTED_ENV_VAR]") can never be scrubbed clean by replace(); the
+    fail-closed gate -- keyed off the pre-replacement buffer -- degrades the
+    whole field rather than emit a buffer that still shows the secret."""
+    async def go() -> TestExecutionResult:
+        return await run_test_command(
+            ["python", "-c", "print('REDACTED', flush=True)"],
+            cwd=tmp_path,
+            wall_budget_s=10.0,
+            env={"STUCK": "REDACTED"},
+        )
+
+    res = asyncio.run(go())
+    assert res.passed is True
+    assert res.merged_output == "[REDACTION_FAILED]"
+
+
+def test_runner_scrubs_inherited_env_when_env_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Production call sites pass no env, so the subprocess inherits the
+    parent environment; the scrub must cover exactly those inherited values
+    (the only env values that can appear in the merged output)."""
+    secret = "ENV-SECRET-8f3a"
+    monkeypatch.setenv("DAYDREAM_TEST_SECRET", secret)
+
+    async def go() -> TestExecutionResult:
+        return await run_test_command(
+            [
+                "python",
+                "-c",
+                "import os; print('value=' + os.environ['DAYDREAM_TEST_SECRET'], flush=True)",
+            ],
+            cwd=tmp_path,
+            wall_budget_s=10.0,
+        )
+
+    res = asyncio.run(go())
+    assert res.passed is True
+    assert "value=" in res.merged_output
+    assert secret not in res.merged_output

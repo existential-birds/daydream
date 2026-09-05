@@ -1045,8 +1045,9 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Canonical shell test command run host-side as a real subprocess "
              "(issue #726); its exit status is the pass/fail signal. Also "
              "settable via the test_command key in .daydream.toml or "
-             "[tool.daydream] in pyproject.toml. When neither is set the run "
-             "fails closed with an actionable diagnostic."
+             "[tool.daydream] in pyproject.toml. When neither is set the "
+             "host-side run is skipped and the deprecated agent-run fallback "
+             "applies (warned; issue #726)."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

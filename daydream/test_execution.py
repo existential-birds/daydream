@@ -8,6 +8,7 @@ status. "Green" means the subprocess exited 0 — nothing else.
 """
 
 import asyncio
+import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,13 +21,16 @@ _REDACTED_ENV_VAR = "[REDACTED_ENV_VAR]"
 
 
 class MissingTestCommandError(RuntimeError):
-    """Raised when no canonical test command is configured (fail closed).
+    """Raised when no canonical test command is configured.
 
     Issue #726: a "green" daydream run must mean the target repo's test
     command really exited 0 as a host-side subprocess — the agent never
     guesses the command. When neither the CLI flag nor a config file declares
-    one, the run stops here with an actionable diagnostic instead of silently
-    passing or falling back to an unknown command.
+    one, :func:`canonical_test_command` raises this rather than return an
+    empty or unknown command. Production call sites currently catch it in
+    :func:`daydream.phases._canonical_test_cmd` and fall back to the warned,
+    deprecated agent-run path during the #726 transition; the exception still
+    fails closed anywhere it is let through.
     """
 
 
@@ -77,14 +81,22 @@ def _redact_merged(output: str, env: dict[str, str] | None) -> str:
 
     The env vars handed to the test command are treated as sensitive: their
     values are redacted wherever they appear in the merged output, in addition
-    to the structured pattern-based scrub. If a secret value still survives,
-    the whole field degrades to ``[REDACTION_FAILED]`` (fail closed).
+    to the structured pattern-based scrub. The fail-closed gate keys off the
+    PRE-replacement buffer: the replace loop removes every occurrence, so a
+    membership test run after it could never observe a survivor. A value that
+    was present before replacement and still survives after it (the blanket
+    replace cannot clear a value the replacement marker itself carries, e.g.
+    ``REDACTED``) degrades the whole field to ``[REDACTION_FAILED]``.
     """
     redacted = redact_structured_text(output)
-    for value in (env or {}).values():
-        if value and value in redacted:
-            redacted = redacted.replace(value, _REDACTED_ENV_VAR)
-    if any(value and value in redacted for value in (env or {}).values()):
+    env_values = [value for value in (env or {}).values() if value]
+    # Membership test against the pre-replacement buffer: the loop below can
+    # only be asked to remove values that are present here.
+    found = [value for value in env_values if value in redacted]
+    for value in found:
+        redacted = redacted.replace(value, _REDACTED_ENV_VAR)
+    # Fail closed if a value the scrub was asked to remove still survives.
+    if any(value in redacted for value in found):
         return "[REDACTION_FAILED]"
     return redacted
 
@@ -104,13 +116,19 @@ async def run_test_command(
     output is redacted before it lands in the result. Spawn errors propagate —
     never a bogus default result.
 
+    With no ``env`` given, the subprocess inherits the parent environment and
+    the scrub covers exactly those inherited values (the only env values that
+    can appear in the merged output); with ``env`` given, the scrub covers
+    exactly that dict.
+
     With an active trajectory recorder, the run is bracketed by
     ``test-execution`` phase events carrying ``duration_ms`` and a
     ``stop_reason`` of ``completed`` / ``timed_out`` / ``failed`` (issue #726).
     """
+    effective_env = env if env is not None else dict(os.environ)
     async with host_phase_scope(DaydreamPhase.TEST_EXECUTION) as phase:
         return await _run_test_command_inner(cmd, cwd=cwd, wall_budget_s=wall_budget_s,
-                                             env=env, phase=phase)
+                                             env=effective_env, phase=phase)
 
 
 async def _run_test_command_inner(

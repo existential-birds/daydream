@@ -3176,6 +3176,25 @@ def _canonical_test_cmd(config: Any) -> list[str] | None:
         return None
 
 
+def _test_command_wall_budget(config: Any) -> float:
+    """Resolve the wall budget for one host-side test-command run.
+
+    Issue #726: the ``test_command_wall_s`` file-config key overrides the
+    orchestrator default (``config.TEST_WALL_BUDGET_S``) for host-side
+    ``run_test_command`` calls. ``config`` may be a ``RunConfig`` carrying the
+    merged file config, or absent/unset (legacy callers) — the default then
+    applies. ``None`` (unset) falls through to the orchestrator default.
+    """
+    from daydream.config_file import DaydreamFileConfig
+
+    file_config = getattr(config, "file_config", None)
+    if isinstance(file_config, DaydreamFileConfig):
+        configured = file_config.test_command_wall_s
+        if configured is not None:
+            return configured
+    return TEST_WALL_BUDGET_S
+
+
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
@@ -3282,19 +3301,37 @@ async def phase_test_and_heal(
                 # Issue #726: the configured canonical test command runs
                 # host-side as a real subprocess; the verdict is the exit
                 # status, never the agent's prose. No agent turn here.
-                result = await run_test_command(
-                    cmd=cmd,
-                    cwd=work.repo,
-                    wall_budget_s=TEST_WALL_BUDGET_S,
-                )
-                if result.timed_out:
+                wall_budget = _test_command_wall_budget(config)
+                try:
+                    result = await run_test_command(
+                        cmd=cmd,
+                        cwd=work.repo,
+                        wall_budget_s=wall_budget,
+                    )
+                except (OSError, ValueError) as exc:
+                    # The command could not be spawned (missing binary, a
+                    # shell-builtin argv, or malformed words). That is a test
+                    # failure, not a crash: route the diagnostic through the
+                    # same failure gate/heal menu so the run continues instead
+                    # of dying with an unhandled traceback (issue #726).
                     print_warning(
                         console,
-                        f"Test command hit the {TEST_WALL_BUDGET_S:g}s wall budget "
-                        "and was killed.",
+                        f"Configured test command could not be run: {exc}",
                     )
-                output = result.merged_output
-                test_passed = result.passed
+                    output = (
+                        "The configured test command failed to run (spawn): "
+                        f"{exc}"
+                    )
+                    test_passed = False
+                else:
+                    if result.timed_out:
+                        print_warning(
+                            console,
+                            f"Test command hit the {wall_budget:g}s wall "
+                            "budget and was killed.",
+                        )
+                    output = result.merged_output
+                    test_passed = result.passed
 
         if test_passed:
             print_success(console, "Tests passed")
@@ -3379,11 +3416,41 @@ async def phase_test_and_heal(
                         # Trust boundary: the approved command is executed
                         # host-side exactly once, as a real subprocess — it is
                         # never embedded in a later agent prompt.
-                        result = await run_test_command(
-                            cmd=shlex.split(sanitized_preview),
-                            cwd=work.repo,
-                            wall_budget_s=TEST_WALL_BUDGET_S,
-                        )
+                        try:
+                            cmd = shlex.split(sanitized_preview)
+                        except ValueError:
+                            # shlex refused it (e.g. unbalanced quotes), so
+                            # there is no argv to execute.
+                            cmd = []
+                        if not cmd:
+                            # The sanitized suggestion collapsed to an empty
+                            # argv (e.g. a backtick-only command); there is
+                            # nothing to execute, so treat it as a failed
+                            # suggestion and retry rather than crash the run.
+                            print_warning(
+                                console,
+                                "Approved test command was not executable; "
+                                "retrying with the original command.",
+                            )
+                            retries_used += 1
+                            continue
+                        try:
+                            result = await run_test_command(
+                                cmd=cmd,
+                                cwd=work.repo,
+                                wall_budget_s=_test_command_wall_budget(config),
+                            )
+                        except (OSError, ValueError) as exc:
+                            # Spawn errors (missing binary, shell builtin) and
+                            # remaining argv errors must not escape into a
+                            # traceback; surface as a failed suggestion and
+                            # re-run the original command.
+                            print_warning(
+                                console,
+                                f"Approved test command could not be run: {exc}",
+                            )
+                            retries_used += 1
+                            continue
                         if result.passed:
                             print_success(console, "Tests passed")
                             return True, retries_used, True
@@ -3510,7 +3577,7 @@ async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
     result = await run_test_command(
         cmd=cmd,
         cwd=work.repo,
-        wall_budget_s=TEST_WALL_BUDGET_S,
+        wall_budget_s=_test_command_wall_budget(config),
     )
     if result.passed:
         print_success(
@@ -3573,8 +3640,12 @@ async def _do_commit(
             ``changed_files(...) - preexisting`` is committed (never
             ``git add --all``) so a user's pre-run scratch files can never be
             swept into the daydream commit (issue #543). When ``None`` (legacy
-            callers), the set is defensively computed at commit time so
-            untracked protection never silently drops.
+            callers), the set is computed defensively at commit time. Caveat:
+            that snapshot is taken after the fix phase, so a NEW file created
+            by the fix is already untracked and, being indistinguishable from
+            user scratch via ``list_untracked``, is excluded from the commit
+            (an under-commit). In-tree callers always pass the pre-run
+            snapshot, which avoids this.
 
     Returns:
         True if a commit was performed, False if the user declined or there
@@ -3606,7 +3677,9 @@ async def _do_commit(
 
     # Defensive untracked protection: a caller without a pre-run snapshot
     # still must not sweep user scratch files into the commit, so compute the
-    # snapshot at commit time rather than dropping the protection.
+    # snapshot at commit time rather than dropping the protection. Computed
+    # post-fix, a fix-created NEW file is indistinguishable from scratch and is
+    # excluded (under-commit); see the args note on ``preexisting_untracked``.
     if preexisting_untracked is None:
         preexisting_untracked = set(git_ops.list_untracked(work.repo))
 
@@ -3656,7 +3729,7 @@ async def _do_commit(
                 result = await run_test_command(
                     cmd=cmd,
                     cwd=work.repo,
-                    wall_budget_s=TEST_WALL_BUDGET_S,
+                    wall_budget_s=_test_command_wall_budget(config),
                 )
             if not result.passed:
                 raise RuntimeError(

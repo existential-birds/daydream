@@ -599,6 +599,36 @@ async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
     assert "notes.txt" not in committed
 
 
+async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
+    git_repo: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """The legacy None-snapshot path computes untracked at commit time, so a
+    NEW file created by the fix is indistinguishable from user scratch via
+    ``list_untracked`` and is excluded (an under-commit). This codifies the
+    defensive path's documented limitation; in-tree callers pass the pre-run
+    snapshot, which avoids it."""
+    from daydream.phases import _do_commit
+
+    (git_repo / "app.py").write_text("x = 0\n")
+    git(git_repo, "add", "app.py")
+    git_commit(git_repo, "baseline app.py")
+    (git_repo / "app.py").write_text("x = 1\n")                    # daydream change
+    (git_repo / "generated.py").write_text("created by fix\n")     # fix-created NEW file
+
+    ok = await _do_commit(
+        _HostCommitBackend(git_repo), make_work(git_repo), push=False,
+        interactive=False, items=[{"file": "app.py", "description": "fix app"}],
+        preexisting_untracked=None,
+    )
+    assert ok is True
+    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert "app.py" in committed
+    # Fix-created new file is untracked at snapshot time and dropped.
+    assert "generated.py" not in committed
+
+
+
 def _pushable_repo(tmp_path: Path) -> Path:
     """A real clone of a real bare remote with one baseline commit."""
     remote = tmp_path / "remote.git"
@@ -715,6 +745,79 @@ async def test_hook_aware_push_red_suite_blocks_push(
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == remote_head_before
     # The local commit exists but is unpushed.
     assert git_ops.head_commit_message(repo).startswith("fix:")
+
+
+def test_test_command_wall_budget_resolves_file_config_override() -> None:
+    """The test_command_wall_s key overrides the orchestrator default; unset
+    (or absent/missing file config) falls through to TEST_WALL_BUDGET_S."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.phases import _test_command_wall_budget
+
+    assert _test_command_wall_budget(None) == TEST_WALL_BUDGET_S
+    assert (
+        _test_command_wall_budget(SimpleNamespace(file_config=None))
+        == TEST_WALL_BUDGET_S
+    )
+    assert (
+        _test_command_wall_budget(
+            SimpleNamespace(file_config=DaydreamFileConfig(test_command_wall_s=None))
+        )
+        == TEST_WALL_BUDGET_S
+    )
+    assert (
+        _test_command_wall_budget(
+            SimpleNamespace(file_config=DaydreamFileConfig(test_command_wall_s=1234.0))
+        )
+        == 1234.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_honors_wall_budget_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """The test_command_wall_s file-config key bounds the host-side test run.
+
+    Issue #726: without this wiring, a user-set test_command_wall_s silently
+    had no effect — every run_test_command call hard-coded TEST_WALL_BUDGET_S.
+    """
+    import daydream.phases
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.phases import phase_test_and_heal
+    from daydream.test_execution import TestExecutionResult
+
+    silence_console("daydream.phases")
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_run(*a: Any, **k: Any) -> Any:
+        captured.append(k)
+        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="ok")
+
+    monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
+
+    success, retries, _ = await phase_test_and_heal(
+        _HostCommitBackend(tmp_path), make_work(tmp_path),
+        config=SimpleNamespace(
+            test_command="true",
+            file_config=DaydreamFileConfig(test_command="true", test_command_wall_s=1234.0),
+        ),
+    )
+    assert success is True
+    assert retries == 0
+    assert captured[-1]["wall_budget_s"] == 1234.0
+
+    # Unset: falls through to the orchestrator default.
+    await phase_test_and_heal(
+        _HostCommitBackend(tmp_path), make_work(tmp_path),
+        config=SimpleNamespace(
+            test_command="true", file_config=DaydreamFileConfig(test_command="true"),
+        ),
+    )
+    assert captured[-1]["wall_budget_s"] == TEST_WALL_BUDGET_S
 
 
 @pytest.mark.asyncio
@@ -3028,6 +3131,89 @@ async def test_approved_investigator_command_runs_once_host_side(
     # the backend; the approved command is never embedded in any prompt.
     assert len(backend.prompts) == 2
     assert all("approved-ran" not in p for p in backend.prompts)
+
+
+@pytest.mark.asyncio
+async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """A backtick-only suggested command sanitizes to an empty argv and is
+    skipped with a warning rather than crashing the run with an unhandled
+    empty-subprocess / shlex exception (issues #726, #1)."""
+    from daydream.phases import phase_test_and_heal
+    from daydream.test_execution import TestExecutionResult
+
+    silence_console("daydream.phases")
+
+    backend = _HealBackend(script=[
+        _FAIL_TURN,
+        _structured_turn({
+            "verdict": "replace",
+            "suggested_command": "```",
+            "reason": "verdict reason",
+        }),
+        _PASS_TURN,
+    ])
+
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    calls: list[list[str]] = []
+
+    async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
+        calls.append(kwargs["cmd"])
+        return TestExecutionResult(
+            exit_status=0, timed_out=False, merged_output="ok",
+        )
+
+    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+
+    passed, retries, proceed = await phase_test_and_heal(
+        backend, make_work(tmp_path), feedback_items=None,
+    )
+
+    assert passed is True
+    assert retries == 1
+    assert proceed is True
+    # The backtick-only suggestion never produced an executable argv and was
+    # never handed to run_test_command; no shlex/empty-argv crash.
+    assert calls == []
+
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_spawn_error_routes_through_failure_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    silence_console: Callable[..., None],
+) -> None:
+    """A configured command that cannot be spawned (missing binary / shell
+    builtin argv) must route through the failure gate instead of crashing the
+    whole deep run with an unhandled traceback (issue #726)."""
+    from daydream.phases import phase_test_and_heal
+
+    silence_console("daydream.phases")
+
+    async def boom(*_a: Any, **_k: Any) -> None:
+        raise FileNotFoundError("no such file or directory: 'cd'")
+
+    monkeypatch.setattr("daydream.phases.run_test_command", boom)
+    # No decision to run more tests / fix: abort the heal gate immediately.
+    monkeypatch.setattr("daydream.phases.resolve_gate", lambda **_k: False)
+    config = make_config(tmp_path, test_command="cd server && npm test")
+
+    passed, retries, proceed = await phase_test_and_heal(
+        _HealBackend(script=[]), make_work(tmp_path),
+        feedback_items=None, config=config,
+    )
+
+    assert passed is False
+    assert retries == 0
+    assert proceed is False
 
 
 @pytest.mark.asyncio
