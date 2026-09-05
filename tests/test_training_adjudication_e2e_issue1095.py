@@ -30,7 +30,7 @@ _OBSERVED = "2026-01-02T00:00:00+00:00"
 _EVIDENCE = [{"reply_id": 1, "body_sha256": "abc", "created_at": "2026-01-01T00:00:00+00:00"}]
 
 
-def _resolution(fingerprint: str, disposition: str, digest: str) -> dict:
+def _resolution(fingerprint: str, disposition: str, digest: str) -> dict[str, object]:
     return {
         "fingerprint": fingerprint, "disposition": disposition,
         "evidence": _EVIDENCE, "evidence_digest": digest,
