@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 import warnings
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _PRECEDENCE_ORDER = "CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC"
 """SQL ORDER BY expression that ranks label_observations by human-first precedence then recency.
@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS runs (
     wall_clock_seconds REAL,
     erosion REAL,
     verbosity REAL,
+    location_in_hunk_rate REAL,
+    shipped_duplicate_pairs INTEGER,
     fix_quality_gate TEXT,
     recommended_patch_capture TEXT,
     total_prompt_tokens INTEGER,
@@ -159,7 +161,8 @@ INSERT OR REPLACE INTO runs (
     review_only, deep, remote_url, repo_slug, source_path, branch, base_branch,
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
-    erosion, verbosity, fix_quality_gate, recommended_patch_capture,
+    erosion, verbosity, location_in_hunk_rate, shipped_duplicate_pairs,
+    fix_quality_gate, recommended_patch_capture,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
     outcome_labels, labeled_at, composite_reward, archive_path, schema_version,
     profile_schema_version, profile_name, profile_source_kind, profile_digest
@@ -171,7 +174,8 @@ INSERT OR REPLACE INTO runs (
     :review_only, :deep, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
-    :erosion, :verbosity, :fix_quality_gate, :recommended_patch_capture,
+    :erosion, :verbosity, :location_in_hunk_rate, :shipped_duplicate_pairs,
+    :fix_quality_gate, :recommended_patch_capture,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
     :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version,
     :profile_schema_version, :profile_name, :profile_source_kind, :profile_digest
@@ -220,6 +224,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
             ("erosion", "REAL"),
             ("verbosity", "REAL"),
+            ("location_in_hunk_rate", "REAL"),
+            ("shipped_duplicate_pairs", "INTEGER"),
             ("fix_quality_gate", "TEXT"),
             ("recommended_patch_capture", "TEXT"),
             ("archive_status", "TEXT NOT NULL DEFAULT 'complete'"),

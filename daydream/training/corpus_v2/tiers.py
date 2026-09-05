@@ -8,13 +8,16 @@ imports nothing from ``daydream.training.reward``.
 
 from typing import Literal, Mapping
 
-__all__ = ["GoldGateError", "classify_tier"]
+from daydream.training.dispositions import (
+    DECISIVE_DISPOSITIONS as _DECISIVE_DISPOSITIONS,
+)
+from daydream.training.dispositions import (
+    NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
+)
+
+__all__ = ["GoldGateError", "classify_tier", "_NON_DECISIVE_DISPOSITIONS"]
 
 Tier = Literal["gold", "silver", "task-only"]
-
-_DECISIVE_DISPOSITIONS = frozenset({"accepted", "rejected"})
-_NON_DECISIVE_DISPOSITIONS = frozenset({"ambiguous", "unanswered", "missing"})
-
 
 class GoldGateError(ValueError):
     """Raised when a decisive disposition lacks human/developer evidence.
@@ -59,6 +62,11 @@ def classify_tier(resolution: Mapping[str, object], *, record_type: str = "outco
                 f"{resolution.get('fingerprint')!r} has empty evidence; "
                 "gold requires human/developer reply evidence"
             )
+        # C5/M9 temporal gate: evidence observed after the record's as_of
+        # pin cannot establish gold eligibility — keep the evidence but
+        # classify silver, never gold.
+        if resolution.get("evidence_after_as_of") is True:
+            return "silver"
         return "gold"
 
     raise TypeError(f"unknown disposition {disposition!r}")

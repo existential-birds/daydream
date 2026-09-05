@@ -1,0 +1,12 @@
+sequenceDiagram
+    participant P1 as Client
+    participant P2 as External API Proxy
+    participant P3 as Identity Resolver
+    P1->>P2: Request with Authorization
+    alt Ro-Passthrough in enabled non-production environment
+        P2->>P3: Extract client ID and patient UUID
+        P3-->>P2: Unverified identity
+    else Bearer token
+        P2->>P3: Verify JWT
+        P3-->>P2: Verified claims
+    end

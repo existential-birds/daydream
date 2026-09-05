@@ -11,24 +11,31 @@ this module re-implements no parsing.
 
 Corpus v2 adds :func:`load_dataset_v2`, an additive sibling that loads the
 frozen per-split manifests of a ``run_build_corpus_v2`` projection directory
-and refuses any record not stamped ``schema_version == "2"``. The C5/C8
-license gates are **not** enforced by any v2 code path: v2 projected records
-carry no ``repo_slug`` (no owner/repo field — the projection emits none and
-``schema/v2.json`` declares none), and the curation manifest carries no repo
-identity either, so neither the loader nor the bundle admission gates can
-evaluate the exclusion or copyleft lists. C5/C8 for v2 data is a
-curation-time responsibility: the curation process assembling the admitted
-bundle is where excluded/copyleft repos must be refused, before projection;
-no v2 consumer re-checks them. The v1 surface (``load_dataset``, its
-``legacy_policy`` stamping, and its error messages) is untouched.
+and refuses any record not stamped ``schema_version == "2"``. Every v2
+record must also carry its repo identity and immutable license decision
+under ``lineage`` (structurally required — an absent field is itself the
+failure, never a bypass), and the C5/C8 gates are re-run fail-closed over
+every loaded record: an excluded repo is refused unconditionally, and a
+copyleft-class record is refused unless its exact slug was passed via
+``allow_copyleft``. The v1 surface (``load_dataset``, its ``legacy_policy``
+stamping, and its error messages) is untouched.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
-from daydream.training.exclusion import load_copyleft_list, load_exclusion_list
+from daydream.archive.hydrate_rules import (
+    REASON_CODE_C5_EXCLUDED_REPO,
+    REASON_CODE_C8_COPYLEFT_UNOPTED,
+)
+from daydream.training.exclusion import (
+    is_copyleft,
+    load_copyleft_list,
+    load_exclusion_list,
+)
 
 __all__ = ["load_dataset", "load_dataset_v2"]
 
@@ -111,35 +118,50 @@ def _enforce_license_gates(
         )
 
 
-def load_dataset_v2(path: str | Path) -> list[dict[str, object]]:
+def load_dataset_v2(
+    path: str | Path,
+    *,
+    allow_copyleft: frozenset[str] | set[str] = frozenset(),
+) -> list[dict[str, object]]:
     """Load a projected corpus v2 directory (the frozen train/validation/
-    holdout JSONL manifests from ``run_build_corpus_v2``).
+    holdout JSONL manifests from ``run_build_corpus_v2``), enforcing repo
+    identity, the license-decision stamp, and C5/C8 fail-closed.
 
     ``holdout.jsonl``. A ``_SUCCESS`` completeness marker (written last by
     the projector, mirroring the bundle's own gate) is required: a partial
     projection left by a mid-write failure is refused, never consumed.
 
-    The C5 exclusion and C8 copyleft fail-closed gates are **not** applied by
-    this loader: v2 projected records carry no ``repo_slug`` (the record
-    shape has no owner/repo field — the projection emits none and
-    ``schema/v2.json`` declares none), so they cannot be evaluated against
-    the exclusion or copyleft lists, and no other v2 code path consults
-    those lists either. C5/C8 for v2 data lives at bundle curation time —
-    the curation process assembling the admitted bundle must refuse excluded
-    and unopted-copyleft repos before the projection is built. This loader
-    only verifies the v2 schema stamp on every record.
+    Structural gate: every record must carry ``lineage.repo_slug`` (a
+    non-empty string) and ``lineage.license_decision`` (a dict with
+    ``status`` in ``{"admitted", "rejected"}`` and a non-empty ``repo_slug``).
+    The field's absence is itself the failure — a stripped record can never
+    slip through as "not applicable".
+
+    Consumption gate (defense in depth over the recorded decisions): the
+    C5/C8 lists are re-evaluated over every loaded record. A record whose
+    ``repo_slug`` is on the exclusion list is refused unconditionally — no
+    keyword can suppress C5. A copyleft-class record (on the copyleft list,
+    or carrying a ``c8_copyleft_unopted`` decision reason) is refused unless
+    its exact slug was passed via ``allow_copyleft``.
 
     Args:
         path: The projection output directory containing ``train.jsonl``,
             ``validation.jsonl`` and ``holdout.jsonl``.
+        allow_copyleft: ``owner/repo`` slugs the caller has explicitly opted
+            in. Empty by default, so copyleft repos are always refused unless
+            explicitly admitted. Never overrides the C5 exclusion list.
 
     Returns:
         The full list of v2 training-record dicts, in split-file order.
 
     Raises:
-        ValueError: When the projection lacks its ``_SUCCESS`` marker, or
-            when any record's ``schema_version`` is not ``"2"`` (the
-            offending record id is named).
+        ValueError: When the projection lacks its ``_SUCCESS`` marker, when
+            any record's ``schema_version`` is not ``"2"``, when a record is
+            missing its repo identity or license decision (the offending
+            record id and field are named), or when any record's repo is on
+            the exclusion list (C5) or is copyleft without being in
+            ``allow_copyleft`` (C8). All offending slugs are named; no
+            records are returned.
         json.JSONDecodeError: When a line is not valid JSON — never a silent
             skip.
     """
@@ -166,4 +188,92 @@ def load_dataset_v2(path: str | Path) -> list[dict[str, object]]:
                     )
                 records.append(record)
 
+    _enforce_v2_identity_and_gates(records, projection_dir, allow_copyleft)
     return records
+
+
+_ALLOWED_V2_LICENSE_STATUSES = frozenset({"admitted", "rejected"})
+
+
+def _v2_lineages(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Validated ``lineage`` dicts (structural gate already passed)."""
+    return [
+        cast(dict[str, object], rec["lineage"])
+        for rec in records
+        if isinstance(rec.get("lineage"), dict)
+    ]
+
+
+def _enforce_v2_identity_and_gates(
+    records: list[dict[str, object]],
+    path: Path,
+    allow_copyleft: frozenset[str] | set[str],
+) -> None:
+    """Structural repo-identity requirement plus the C5/C8 fail-closed gates
+    re-run over loaded v2 records (see :func:`load_dataset_v2`)."""
+    for record in records:
+        record_id = record.get("record_id")
+        lineage_obj = record.get("lineage")
+        lineage = lineage_obj if isinstance(lineage_obj, dict) else None
+        repo_slug = lineage.get("repo_slug") if lineage else None
+        if not isinstance(repo_slug, str) or not repo_slug:
+            raise ValueError(
+                f"corpus v2 record {record_id!r} in {path}: lineage.repo_slug "
+                "missing or empty — refusing a record without repo identity"
+            )
+        decision_obj = lineage.get("license_decision") if lineage else None
+        decision = decision_obj if isinstance(decision_obj, dict) else None
+        decision_slug = decision.get("repo_slug") if decision else None
+        if (
+            not isinstance(decision, dict)
+            or decision.get("status") not in _ALLOWED_V2_LICENSE_STATUSES
+            or not isinstance(decision_slug, str)
+            or not decision_slug
+        ):
+            raise ValueError(
+                f"corpus v2 record {record_id!r} in {path}: lineage.license_decision "
+                "missing, malformed, or not a resolved admitted/rejected decision — "
+                "refusing a record without an immutable license decision"
+            )
+
+    excluded = {slug.casefold() for slug in load_exclusion_list()}
+    excluded_offenders = sorted(
+        {
+            slug
+            for lineage in _v2_lineages(records)
+            if (slug := str(lineage["repo_slug"]).casefold()) in excluded
+        }
+    )
+    if excluded_offenders:
+        raise ValueError(
+            f"C5 violation ({REASON_CODE_C5_EXCLUDED_REPO}): excluded repo(s) in "
+            f"corpus v2 projection {path}: {', '.join(excluded_offenders)}. These "
+            "repositories are the held-out benchmark and must never appear in a "
+            "training dataset, regardless of any flag."
+        )
+
+    allowed = frozenset(slug.casefold() for slug in allow_copyleft)
+    copyleft_known = frozenset(slug.casefold() for slug in load_copyleft_list())
+    copyleft_offenders = sorted(
+        {
+            slug
+            for lineage in _v2_lineages(records)
+            if (slug := str(lineage["repo_slug"]).casefold())
+            and slug not in allowed
+            and (
+                is_copyleft(slug, allowed, copyleft_list=copyleft_known)
+                or (
+                    isinstance(lineage.get("license_decision"), dict)
+                    and cast(dict[str, object], lineage["license_decision"]).get("reason_code")
+                    == REASON_CODE_C8_COPYLEFT_UNOPTED
+                )
+            )
+        }
+    )
+    if copyleft_offenders:
+        raise ValueError(
+            f"C8 violation ({REASON_CODE_C8_COPYLEFT_UNOPTED}): copyleft repo(s) "
+            f"in corpus v2 projection {path} without explicit opt-in: "
+            f"{', '.join(copyleft_offenders)}. Pass these slugs via "
+            "allow_copyleft to admit them."
+        )

@@ -1,4 +1,6 @@
 """Adjudication queue build: deterministic ordering over projector adjudication entries."""
+from pathlib import Path
+
 import pytest
 
 from daydream.training.adjudication.queue import build_queue
@@ -16,6 +18,24 @@ def _session(
             "evidence_digest": digest, "profile": "pr_review", "stack": "python",
         }],
     }
+
+def _sessions_with_accepted_and_unanswered() -> list[dict[str, object]]:  # existing-shape helper
+    return [
+        _session("s1", "fp-a", "accepted", "d-gold"),
+        _session("s2", "fp-b", "unanswered", "d2"),
+    ]
+
+
+def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> None:
+    sessions = _sessions_with_accepted_and_unanswered()
+    open_only = build_queue(sessions)
+    assert [i["disposition"] for i in open_only] == ["unanswered"]
+
+    complete = build_queue(sessions, include_decisive=True)
+    assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "unanswered"]
+    # decisive entries carry the same record_id derivation as materialize
+    assert {str(i["status"]) for i in complete} <= {"open", "reopened"}
+
 
 def test_queue_is_deterministic_and_covers_all_non_decisive_states() -> None:
     # NOTE: 'accepted' disposition with evidence would be gold — the queue must EXCLUDE it.
@@ -81,3 +101,21 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(queue_module, "project_findings", _forge_decisive)
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
+
+
+def test_disposition_sets_are_single_sourced() -> None:
+    from daydream.training.adjudication.dispositions import (
+        NON_DECISIVE_DISPOSITIONS,
+        is_decisive,
+    )
+    from daydream.training.adjudication.queue import (
+        _NON_DECISIVE_DISPOSITIONS as queue_set,
+    )
+    from daydream.training.corpus_v2.tiers import (
+        _NON_DECISIVE_DISPOSITIONS as tiers_set,
+    )
+
+    assert queue_set is NON_DECISIVE_DISPOSITIONS
+    assert tiers_set is NON_DECISIVE_DISPOSITIONS
+    assert is_decisive("accepted") and is_decisive("rejected")
+    assert not is_decisive("ambiguous")

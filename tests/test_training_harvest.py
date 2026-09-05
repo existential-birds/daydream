@@ -1982,3 +1982,58 @@ def test_hub_import_accepts_clean_bundle_in_place(tmp_path: Path) -> None:
     assert result.imported is True
     assert result.quarantined is False
     assert incoming.exists()
+
+
+def test_per_finding_resolution_round_trips_through_canonical_dict() -> None:
+    from daydream.training.labeler_signals import (
+        PerFindingResolution,
+        resolution_from_dict,
+        resolution_to_dict,
+    )
+
+    r = PerFindingResolution(
+        fingerprint="fp-1", comment_id=7, disposition="accepted",
+        evidence=[{"reply_id": 1, "body_sha256": "abc"}], evidence_digest="d" * 32,
+    )
+    restored = resolution_from_dict(resolution_to_dict(r))
+    assert restored == r  # canonical dict is the one round-trip shape
+
+def test_per_finding_resolution_from_dict_fails_closed() -> None:
+    from daydream.training.labeler_signals import resolution_from_dict
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        resolution_from_dict({"disposition": "accepted", "evidence_digest": "d" * 32})
+    with pytest.raises(ValueError, match="disposition"):
+        resolution_from_dict({"fingerprint": "fp-1", "disposition": "banana"})
+    with pytest.raises(ValueError, match="evidence_digest"):
+        resolution_from_dict({"fingerprint": "fp-1", "disposition": "accepted"})
+
+
+def test_rubric_to_dict_carries_full_per_finding_resolutions() -> None:
+    """Req 1/3: the SQLite blob must carry fingerprints + evidence + digests,
+    not labels only — the materializer's sole per-finding source."""
+    from daydream.training.labeler_signals import (
+        CommentResolutionSignal,
+        FixAppliedSignal,
+        PerFindingResolution,
+        PRMergeSignal,
+    )
+    from daydream.training.rubric import Rubric
+
+    r = PerFindingResolution(fingerprint="fp-1", comment_id=7, disposition="accepted",
+                             evidence=[{"reply_id": 1}], evidence_digest="d" * 32)
+    rubric = Rubric(
+        pr_merge=PRMergeSignal(True, None, "closed", False),
+        fix_applied=FixAppliedSignal("applied", 1, 1, []),
+        comment_resolution=CommentResolutionSignal(1, 1, 0),
+        local_commit_applied=None, posterior_source="pr_review",
+        per_finding_resolutions=[r],
+    )
+    d = rubric.to_dict()
+    stored = d["per_finding_resolutions"]
+    assert stored[0]["fingerprint"] == "fp-1"
+    assert stored[0]["disposition"] == "accepted"
+    assert stored[0]["evidence_digest"] == "d" * 32
+    assert stored[0]["evidence"] == [{"reply_id": 1}]
+    # backward-compat consumers keep their labels-only view
+    assert d["per_finding_outcomes"] == ["accepted"]

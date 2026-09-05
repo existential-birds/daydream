@@ -11,6 +11,7 @@ Assertions are on observable outcomes: exit codes, the review payloads that
 crossed the ``gh`` boundary, and the GraphQL mutations issued — never on
 in-process bookkeeping.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,8 +23,9 @@ import pytest
 
 from daydream import cli
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
-from daydream.pr_review import parse_finding_markers
+from daydream.pr_review import parse_finding_markers, validate_diagram_payload
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import commit, git
 
 
 def cli_main(argv: list[str]) -> int:
@@ -39,9 +41,20 @@ def cli_main(argv: list[str]) -> int:
     raise AssertionError("cli.main() must exit via sys.exit")
 
 
-def _post_argv(artifact: Path, *, pr: int = 7) -> list[str]:
+def _post_argv(
+    artifact: Path, *, pr: int = 7, head_sha: str | None = None
+) -> list[str]:
     """The ``post-findings`` argv for *artifact*; override only what a test varies."""
-    return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", "h" * 40, "--repo", "o/r"]
+    return [
+        "post-findings",
+        str(artifact),
+        "--pr",
+        str(pr),
+        "--head-sha",
+        head_sha or "h" * 40,
+        "--repo",
+        "o/r",
+    ]
 
 
 def _finding(
@@ -66,7 +79,14 @@ def _finding(
     }
 
 
-def _write_artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
+def _write_artifact(
+    path: Path,
+    findings: list[dict[str, Any]],
+    *,
+    run_info: str = "test run info",
+    diagrams: dict[str, Any] | None = None,
+    head_sha: str = "h" * 40,
+) -> Path:
     """Build a valid artifact via write_findings_artifact."""
     write_findings_artifact(
         path,
@@ -74,12 +94,189 @@ def _write_artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
             "schema_version": FINDINGS_SCHEMA_VERSION,
             "repo": "o/r",
             "pr_number": 7,
-            "head_sha": "h" * 40,
-            "run_info": "test run info",
+            "head_sha": head_sha,
+            "run_info": run_info,
+            "diagrams": diagrams,
             "findings": findings,
         },
     )
     return path
+
+
+def _flowchart_payload() -> dict[str, Any]:
+    def grounded(element: str, ref: str, final_index: int) -> dict[str, Any]:
+        return {
+            "element": element,
+            "ref": ref,
+            "grounded": True,
+            "reason": None,
+            "strength": "definition",
+            "snapped_line": None,
+            "in_changed_hunk": True,
+            "defined_at": "a.py:1",
+            "final_index": final_index,
+        }
+
+    return {
+        "results": {
+            "flowchart": {
+                "status": "rendered",
+                "reason": None,
+                "omit_reasons": [],
+                "spec_final": {
+                    "root": {"file": "a.py", "name": "run", "line": 1},
+                    "nodes": [
+                        {
+                            "id": "start",
+                            "kind": "start",
+                            "label": "run",
+                            "evidence": {
+                                "file": "a.py",
+                                "line": 1,
+                                "symbol": "run",
+                            },
+                        },
+                        {
+                            "id": "end",
+                            "kind": "end",
+                            "label": "return",
+                            "evidence": {
+                                "file": "a.py",
+                                "line": 2,
+                                "symbol": None,
+                            },
+                        },
+                    ],
+                    "edges": [{"from": "start", "to": "end", "label": None}],
+                },
+                "grounding": {
+                    "elements": [
+                        grounded("root", "run", 0),
+                        grounded("node", "start", 0),
+                        grounded("node", "end", 1),
+                        grounded("edge", "start->end", 0),
+                    ],
+                    "summary": {
+                        "proposed": 4,
+                        "grounded_first_pass": 4,
+                        "repaired": 0,
+                        "pruned": 0,
+                    },
+                    "capped": {},
+                    "root_range": [1, 2],
+                },
+            }
+        }
+    }
+
+
+def _sequence_payload() -> dict[str, Any]:
+    def grounded(element: str, ref: str, final_index: int) -> dict[str, Any]:
+        return {
+            "element": element,
+            "ref": ref,
+            "grounded": True,
+            "reason": None,
+            "strength": "definition",
+            "snapped_line": None,
+            "in_changed_hunk": True,
+            "defined_at": "a.py:1",
+            "final_index": final_index,
+        }
+
+    return {
+        "results": {
+            "sequence": {
+                "status": "rendered",
+                "reason": None,
+                "omit_reasons": [],
+                "spec_final": {
+                    "participants": [
+                        {
+                            "name": "api",
+                            "kind": "internal",
+                            "files": ["api.py"],
+                            "service": None,
+                        },
+                        {
+                            "name": "worker",
+                            "kind": "internal",
+                            "files": ["worker.py"],
+                            "service": None,
+                        },
+                    ],
+                    "messages": [
+                        {
+                            "from": "api",
+                            "to": "worker",
+                            "label": "call",
+                            "kind": "call",
+                            "changed": True,
+                            "evidence": {
+                                "file": "api.py",
+                                "line": 3,
+                                "symbol": "worker",
+                            },
+                        },
+                        {
+                            "from": "worker",
+                            "to": "api",
+                            "label": "reply",
+                            "kind": "reply",
+                            "changed": True,
+                            "evidence": {
+                                "file": "worker.py",
+                                "line": 2,
+                                "symbol": "worker",
+                            },
+                        },
+                        {
+                            "from": "api",
+                            "to": "worker",
+                            "label": "call again",
+                            "kind": "call",
+                            "changed": True,
+                            "evidence": {
+                                "file": "api.py",
+                                "line": 5,
+                                "symbol": "worker",
+                            },
+                        },
+                    ],
+                    "blocks": [
+                        {
+                            "kind": "opt",
+                            "branches": [
+                                {
+                                    "condition": "enabled",
+                                    "evidence": {"file": "api.py", "line": 4},
+                                    "messages": [2],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "grounding": {
+                    "elements": [
+                        grounded("participant", "api", 0),
+                        grounded("participant", "worker", 1),
+                        grounded("message", "0", 0),
+                        grounded("message", "1", 1),
+                        grounded("message", "2", 2),
+                        grounded("block", "b0", 0),
+                        grounded("branch", "b0.0", 0),
+                    ],
+                    "summary": {
+                        "proposed": 7,
+                        "grounded_first_pass": 7,
+                        "repaired": 0,
+                        "pruned": 0,
+                    },
+                    "capped": {},
+                },
+            }
+        }
+    }
 
 
 @pytest.fixture
@@ -88,8 +285,16 @@ def artifact_on_disk(tmp_path: Path) -> Path:
     return _write_artifact(
         tmp_path / "findings.json",
         [
-            _finding("a" * 64, path="a.py", line=3, placement="inline", title="Inline finding"),
-            _finding("b" * 64, path="b.py", line=None, placement="body", title="Body finding"),
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Inline finding",
+            ),
+            _finding(
+                "b" * 64, path="b.py", line=None, placement="body", title="Body finding"
+            ),
         ],
     )
 
@@ -100,12 +305,72 @@ def artifact_on_disk_v2(tmp_path: Path) -> Path:
     return _write_artifact(
         tmp_path / "findings_v2.json",
         [
-            _finding("c" * 64, path="c.py", line=5, placement="inline", title="New finding"),
+            _finding(
+                "c" * 64, path="c.py", line=5, placement="inline", title="New finding"
+            ),
         ],
     )
 
 
-def test_fresh_post_then_idempotent_repost(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
+def test_post_findings_body_names_cli_head_sha(
+    fake_gh: FakeGh, artifact_on_disk: Path
+) -> None:
+    """M3 CI path: the posted body's reviewed-commit line names the
+    --head-sha given on the CLI (validated event data), never the
+    artifact's untrusted run_info string."""
+    assert cli_main(_post_argv(artifact_on_disk)) == 0
+    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
+    assert (
+        "- **Reviewed commit:** [`hhhhhhh`]"
+        "(https://github.com/o/r/commit/" + "h" * 40 + ")"
+    ) in body
+
+
+def test_post_findings_ignores_artifact_run_info_sha(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
+    """The CLI --head-sha wins: a different 40-char SHA embedded in the
+    artifact's run_info string must never appear in the reviewed-commit
+    line — not even as a fully formatted forged line (issue 2)."""
+    artifact = _write_artifact(
+        tmp_path / "findings.json",
+        [
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Inline finding",
+            )
+        ],
+        run_info=(
+            "run from commit "
+            + "a" * 40
+            + "\n- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/"
+            + "e" * 40
+            + ")"
+        ),
+    )
+    assert cli_main(_post_argv(artifact)) == 0
+    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
+    commit_lines = [
+        line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")
+    ]
+    assert len(commit_lines) == 1
+    assert "a" * 40 not in commit_lines[0]
+    # The forged formatted line is stripped in full — its sha and slug must
+    # not survive anywhere in the posted body.
+    assert "e" * 40 not in body
+    assert "evil/widgets" not in body
+    assert (
+        "- **Reviewed commit:** [`hhhhhhh`]"
+        "(https://github.com/o/r/commit/" + "h" * 40 + ")"
+    ) in body
+
+
+def test_fresh_post_then_idempotent_repost(
+    fake_gh: FakeGh, artifact_on_disk: Path
+) -> None:
     argv = _post_argv(artifact_on_disk) + ["--bot-login", "daydream"]
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
@@ -119,22 +384,30 @@ def test_fresh_post_then_idempotent_repost(fake_gh: FakeGh, artifact_on_disk: Pa
     # not just unit-level fabricated markers.
     fake_gh.serve_prior_threads_from(posts[0], author="daydream[bot]")
     assert cli_main(argv) == 0
-    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1  # no dup review
+    assert (
+        len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
+    )  # no dup review
 
 
-def test_stale_finding_resolved_new_finding_posted(fake_gh: FakeGh, artifact_on_disk_v2: Path) -> None:
+def test_stale_finding_resolved_new_finding_posted(
+    fake_gh: FakeGh, artifact_on_disk_v2: Path
+) -> None:
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
     )
     assert cli_main(_post_argv(artifact_on_disk_v2)) == 0
     # Task 0 spike: resolveReviewThread is FORBIDDEN for the least-privilege
     # installation token; stale findings are minimized via minimizeComment.
-    assert any("minimizeComment" in c.payload.get("query", "")
-               for c in fake_gh.calls("POST", "graphql"))
+    assert any(
+        "minimizeComment" in c.payload.get("query", "")
+        for c in fake_gh.calls("POST", "graphql")
+    )
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 
-def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
+def test_event_artifact_mismatch_aborts_with_no_side_effects(
+    fake_gh: FakeGh, artifact_on_disk: Path
+) -> None:
     rc = cli_main(_post_argv(artifact_on_disk, pr=8))  # event says 8
     assert rc == 1
     assert fake_gh.calls("POST") == []  # nothing posted, nothing resolved
@@ -168,13 +441,31 @@ def test_malformed_repo_config_warns_and_still_posts(
 
 def _forged_marker_argv(artifact: Path, *extra: str) -> list[str]:
     """``post-findings`` argv for a single-finding artifact, plus extra flags."""
-    return ["post-findings", str(artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r", *extra]
+    return [
+        "post-findings",
+        str(artifact),
+        "--pr",
+        "7",
+        "--head-sha",
+        "h" * 40,
+        "--repo",
+        "o/r",
+        *extra,
+    ]
 
 
 def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
     return _write_artifact(
         path / "findings.json",
-        [_finding(fingerprint, path="src/app.py", line=10, placement="inline", title="Real finding")],
+        [
+            _finding(
+                fingerprint,
+                path="src/app.py",
+                line=10,
+                placement="inline",
+                title="Real finding",
+            )
+        ],
     )
 
 
@@ -192,7 +483,9 @@ def test_forged_marker_from_non_bot_commenter_does_not_suppress_finding(
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 
-def test_bot_authored_marker_with_bot_login_suppresses_repost(fake_gh: FakeGh, tmp_path: Path) -> None:
+def test_bot_authored_marker_with_bot_login_suppresses_repost(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
@@ -203,7 +496,9 @@ def test_bot_authored_marker_with_bot_login_suppresses_repost(fake_gh: FakeGh, t
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
 
-def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, tmp_path: Path) -> None:
+def test_bot_login_env_fallback(
+    monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, tmp_path: Path
+) -> None:
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
@@ -214,12 +509,23 @@ def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
 
-def test_post_findings_approve_when_clean_and_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
+def test_post_findings_approve_when_clean_and_flag(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
     """low-severity-only artifact + --approve-on-clean -> review event APPROVE."""
-    artifact = _write_artifact(tmp_path / "f.json", [
-        _finding("a" * 64, path="a.py", line=3, placement="inline",
-                 title="Nit", severity="low"),
-    ])
+    artifact = _write_artifact(
+        tmp_path / "f.json",
+        [
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Nit",
+                severity="low",
+            ),
+        ],
+    )
     code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
@@ -228,12 +534,18 @@ def test_post_findings_approve_when_clean_and_flag(fake_gh: FakeGh, tmp_path: Pa
     assert "no high/medium findings" in posts[0].payload["body"]
 
 
-def test_post_findings_keeps_comment_when_high_finding(fake_gh: FakeGh, tmp_path: Path) -> None:
+def test_post_findings_keeps_comment_when_high_finding(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
     """high-severity finding + --approve-on-clean -> event stays COMMENT."""
-    artifact = _write_artifact(tmp_path / "f.json", [
-        _finding("a" * 64, path="a.py", line=3, placement="inline",
-                 title="Real finding"),  # default severity="high"
-    ])
+    artifact = _write_artifact(
+        tmp_path / "f.json",
+        [
+            _finding(
+                "a" * 64, path="a.py", line=3, placement="inline", title="Real finding"
+            ),  # default severity="high"
+        ],
+    )
     code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
@@ -242,7 +554,9 @@ def test_post_findings_keeps_comment_when_high_finding(fake_gh: FakeGh, tmp_path
     assert "no high/medium findings" not in posts[0].payload["body"]
 
 
-def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
+def test_post_findings_approve_when_all_matched_and_clean_flag(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
     """F2: an all-matched clean artifact + --approve-on-clean still posts APPROVE.
 
     The post-findings spine previously returned 0 on its unconditional empty
@@ -250,14 +564,25 @@ def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, 
     approval and ``required_approving_review_count`` stayed unsatisfied — the
     headline two-phase CI use case.
     """
-    artifact = _write_artifact(tmp_path / "f.json", [
-        _finding("a" * 64, path="a.py", line=3, placement="inline",
-                 title="Nit", severity="low"),
-    ])
+    artifact = _write_artifact(
+        tmp_path / "f.json",
+        [
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Nit",
+                severity="low",
+            ),
+        ],
+    )
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
     )
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    code = cli_main(
+        _post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"]
+    )
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
@@ -265,12 +590,23 @@ def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, 
     assert "no high/medium findings" in posts[0].payload["body"]
 
 
-def test_post_findings_all_matched_no_approve_without_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
+def test_post_findings_all_matched_no_approve_without_flag(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
     """F2: without --approve-on-clean the same all-matched artifact posts nothing."""
-    artifact = _write_artifact(tmp_path / "f.json", [
-        _finding("a" * 64, path="a.py", line=3, placement="inline",
-                 title="Nit", severity="low"),
-    ])
+    artifact = _write_artifact(
+        tmp_path / "f.json",
+        [
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Nit",
+                severity="low",
+            ),
+        ],
+    )
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
     )
@@ -279,7 +615,167 @@ def test_post_findings_all_matched_no_approve_without_flag(fake_gh: FakeGh, tmp_
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 
-def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: Path) -> None:
+def test_post_findings_rejects_forged_diagram_grounding_attestation(
+    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / "a.py").write_text("def run():\n    return 1\n")
+    git(git_repo, "add", "a.py")
+    head_sha = commit(git_repo, "add flowchart source")
+    monkeypatch.chdir(git_repo)
+    payload = _flowchart_payload()
+    flowchart = payload["results"]["flowchart"]
+    flowchart["spec_final"]["nodes"] = [
+        {
+            "id": "start",
+            "kind": "start",
+            "label": "run",
+            "evidence": {"file": "a.py", "line": 1, "symbol": "run"},
+        },
+        {
+            "id": "decision",
+            "kind": "decision",
+            "label": "invented branch",
+            "evidence": {"file": "a.py", "line": 1, "symbol": None},
+        },
+        {
+            "id": "process",
+            "kind": "process",
+            "label": "invented process",
+            "evidence": {"file": "a.py", "line": 1, "symbol": None},
+        },
+        {
+            "id": "end",
+            "kind": "end",
+            "label": "return",
+            "evidence": {"file": "a.py", "line": 2, "symbol": None},
+        },
+    ]
+    flowchart["spec_final"]["edges"] = [
+        {"from": "start", "to": "decision", "label": None},
+        {"from": "decision", "to": "process", "label": "yes"},
+        {"from": "process", "to": "end", "label": None},
+    ]
+    flowchart["grounding"]["elements"] = [
+        {
+            "element": element,
+            "ref": ref,
+            "grounded": True,
+            "reason": None,
+            "strength": "definition",
+            "snapped_line": None,
+            "in_changed_hunk": True,
+            "defined_at": "a.py:1",
+            "final_index": index,
+        }
+        for element, ref, index in (
+            ("root", "run", 0),
+            ("node", "start", 0),
+            ("node", "decision", 1),
+            ("node", "process", 2),
+            ("node", "end", 3),
+            ("edge", "start->decision", 0),
+            ("edge", "decision->process", 1),
+            ("edge", "process->end", 2),
+        )
+    ]
+    flowchart["grounding"]["summary"] = {
+        "proposed": 8,
+        "grounded_first_pass": 8,
+        "repaired": 0,
+        "pruned": 0,
+    }
+    artifact = _write_artifact(
+        git_repo / "f.json",
+        [
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Already posted",
+            )
+        ],
+        diagrams=payload,
+        head_sha=head_sha,
+    )
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+
+    code = cli_main(
+        _post_argv(artifact, head_sha=head_sha) + ["--bot-login", "daydream"]
+    )
+
+    assert code == 1
+    assert fake_gh.calls("POST") == []
+
+
+def test_post_findings_rejects_forged_sequence_grounding_attestation(
+    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / "api.py").write_text(
+        "from worker import worker\n"
+        "def api():\n"
+        "    worker()\n"
+        "    if enabled:\n"
+        "        worker()\n"
+    )
+    (git_repo / "worker.py").write_text(
+        "def worker():\n"
+        "    return 1\n"
+    )
+    git(git_repo, "add", "api.py", "worker.py")
+    head_sha = commit(git_repo, "add sequence source")
+    monkeypatch.chdir(git_repo)
+    payload = _sequence_payload()
+    assert validate_diagram_payload(payload, target_dir=git_repo, head_sha=head_sha) is None
+    payload["results"]["sequence"]["spec_final"]["messages"][0]["evidence"] = {
+        "file": "api.py",
+        "line": 2,
+        "symbol": "api",
+    }
+    artifact = _write_artifact(
+        git_repo / "findings.json", [], diagrams=payload, head_sha=head_sha
+    )
+
+    code = cli_main(_post_argv(artifact, head_sha=head_sha))
+
+    assert code == 1
+    assert fake_gh.calls("POST") == []
+
+
+def test_post_findings_rejects_diagram_evidence_absent_from_immutable_head(
+    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (git_repo / "a.py").write_text("def run():\n    return 1\n")
+    git(git_repo, "add", "a.py")
+    head_sha = commit(git_repo, "add flowchart source")
+    monkeypatch.chdir(git_repo)
+
+    payload = _flowchart_payload()
+    flowchart = payload["results"]["flowchart"]
+    flowchart["spec_final"]["root"]["line"] = 100
+    flowchart["spec_final"]["nodes"][0]["evidence"]["line"] = 100
+    flowchart["spec_final"]["nodes"][1]["evidence"]["line"] = 100
+    flowchart["grounding"]["root_range"] = [100, 100]
+    artifact = _write_artifact(
+        git_repo / "findings.json",
+        [],
+        diagrams=payload,
+        head_sha=head_sha,
+    )
+
+    code = cli_main(
+        _post_argv(artifact, head_sha=head_sha) + ["--bot-login", "daydream"]
+    )
+
+    assert code == 1
+    assert fake_gh.calls("POST") == []
+
+
+def test_post_findings_matched_high_blocks_approval(
+    fake_gh: FakeGh, tmp_path: Path
+) -> None:
     """F2b: a still-live matched high finding blocks APPROVE.
 
     The approval decision must count the severities of already-posted
@@ -287,16 +783,32 @@ def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: P
     finding is low must not post APPROVE over the bot's own open high finding
     on the PR.
     """
-    artifact = _write_artifact(tmp_path / "f.json", [
-        _finding("a" * 64, path="a.py", line=3, placement="inline",
-                 title="Old high finding"),
-        _finding("b" * 64, path="b.py", line=5, placement="inline",
-                 title="New nit", severity="low"),
-    ])
+    artifact = _write_artifact(
+        tmp_path / "f.json",
+        [
+            _finding(
+                "a" * 64,
+                path="a.py",
+                line=3,
+                placement="inline",
+                title="Old high finding",
+            ),
+            _finding(
+                "b" * 64,
+                path="b.py",
+                line=5,
+                placement="inline",
+                title="New nit",
+                severity="low",
+            ),
+        ],
+    )
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
     )
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    code = cli_main(
+        _post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"]
+    )
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1

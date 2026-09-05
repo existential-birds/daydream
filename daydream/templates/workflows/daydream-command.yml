@@ -1,9 +1,10 @@
-# Daydream — `@<bot> review` gatekeeper.
+# Daydream — `@<bot>` command gatekeeper.
 #
 # Listens for PR comments, gates on author trust, and dispatches
-# daydream-review.yml. This workflow NEVER checks out code — it may therefore
-# hold App credentials without violating the locked privilege split (no job
-# ever holds both PR code and the App key).
+# daydream-review.yml with the matched command (`review`, `sequence`, or
+# `flowchart`). This workflow NEVER checks out code — it may therefore hold App
+# credentials without violating the locked privilege split (no job ever holds
+# both PR code and the App key).
 #
 # Why the App token (Task 0 spike, Step 1): a run dispatched with GITHUB_TOKEN
 # completes without ever firing the downstream `workflow_run` trigger, so
@@ -22,6 +23,10 @@
 # Setup: repo variable DAYDREAM_BOT_HANDLE (the mention handle, no `@`),
 # secrets DAYDREAM_APP_ID / DAYDREAM_APP_PRIVATE_KEY; the App must request the
 # `actions: write` and `pull_requests: write` repository permissions.
+#
+# Commands: `@<bot> review` (full review), `@<bot> add sequence diagram`
+# (alias `@<bot> add sequence`), and `@<bot> add flowchart` — the latter two
+# post a standalone grounded diagram comment bound to the approved head.
 
 name: Daydream Command
 
@@ -42,7 +47,19 @@ jobs:
       # Exact-command match. The comment body is untrusted: it enters the
       # shell via env only, never `${{ }}` interpolation (footgun 2). A
       # non-matching comment exits 0 (neutral) and the remaining steps skip.
-      - name: Match review command
+      #
+      # Three commands are recognized, in precedence order: `review`,
+      # `add sequence diagram` (alias `add sequence`), and `add flowchart`.
+      # Matching is case-sensitive (parity with the original `review`) and only
+      # the fixed token is ever read, so no comment text reaches a `run:` body
+      # or a prompt. `command` is ALWAYS written (empty on no match) so a job
+      # may expose it as an unconditional output; `matched` stays the gate.
+      #
+      # Accepted caveat: the sequence veto is evaluated over the whole body, so
+      # a body carrying BOTH a valid and a malformed sequence mention (e.g.
+      # `add sequence` plus `add sequence diagrams`) fails closed — nothing runs
+      # and the maintainer retries with a single clean command.
+      - name: Match bot command
         id: match
         env:
           BODY: ${{ github.event.comment.body }}
@@ -51,11 +68,23 @@ jobs:
           # Single-quoted sed script holds literal regex metacharacters, not shell expansions.
           # shellcheck disable=SC2016
           ESCAPED_HANDLE=$(printf '%s' "$BOT_HANDLE" | sed 's/[].[\*^$()+?{}|\\]/\\&/g')
-          if printf '%s' "$BODY" | grep -Eq "(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+review([[:space:]]|$)"; then
+          MENTION="(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+"
+          body_has() { printf '%s' "$BODY" | grep -Eq "${MENTION}$1"; }
+          COMMAND=""
+          if body_has 'review([[:space:]]|$)'; then
+            COMMAND=review
+          elif body_has 'add[[:space:]]+sequence([[:space:]]+diagram)?([[:space:]]|$)' \
+            && ! body_has 'add[[:space:]]+sequence[[:space:]]+diagram[^[:space:]]'; then
+            COMMAND=sequence
+          elif body_has 'add[[:space:]]+flowchart([[:space:]]|$)'; then
+            COMMAND=flowchart
+          fi
+          if [ -n "$COMMAND" ]; then
             echo "matched=true" >> "$GITHUB_OUTPUT"
           else
             echo "matched=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
 
       # Mint the App token BEFORE acknowledging, so the 👀 reaction is signed by
       # the bot identity rather than github-actions[bot]. The same token carries
@@ -63,7 +92,7 @@ jobs:
       - name: Mint app token
         id: token
         if: steps.match.outputs.matched == 'true'
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.DAYDREAM_APP_ID }}
           private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
@@ -81,6 +110,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.issue.number }}
           COMMENT_CREATED_AT: ${{ github.event.comment.created_at }}
+          COMMAND: ${{ steps.match.outputs.command }}
         run: |
           HEAD_SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
           if [ -z "$HEAD_SHA" ]; then
@@ -90,7 +120,8 @@ jobs:
           gh workflow run daydream-review.yml --repo "$REPO" \
             -f pr_number="$PR_NUMBER" \
             -f approved_head_sha="$HEAD_SHA" \
-            -f approved_at="$COMMENT_CREATED_AT"
+            -f approved_at="$COMMENT_CREATED_AT" \
+            -f command="$COMMAND"
 
       # Acknowledge only after the dispatch's head resolution succeeds: the
       # `gh api` above is fallible, and a transient error must not leave the

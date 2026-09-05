@@ -68,7 +68,11 @@ for a missing axis, never raise. If no credit axis is present while
 documented training-time combination weight (pending recalibration #114).
 
 Changing any default weight is a deliberate golden-update: it requires
-re-pinning the golden test values *and* bumping :data:`REWARD_VERSION`.
+re-pinning the golden test values *and* bumping :data:`REWARD_VERSION`. So does
+redefining the *meaning* of an input label without touching a weight: the stamp
+identifies the label semantics as much as the algebra, so a redefined
+``grounding_rate`` (see :data:`REWARD_VERSION`) is just as much a version event
+as a reweighting.
 
 :data:`REWARD_VERSION` fully identifies the formula *only* under
 :data:`DEFAULT_WEIGHTS`. Passing a custom :class:`RewardWeights` is an
@@ -86,8 +90,19 @@ import types
 from dataclasses import dataclass, field
 from typing import Any
 
-REWARD_VERSION = "2026.05.28-2"
+REWARD_VERSION = "2026.09.04-1"
 """Bump on any change to axis weights, verdict map, gate, or composite shape.
+
+Also bumped when an *upstream label definition* changes while the algebra holds
+still. ``2026.09.04-1`` is exactly that case (issue #1106): the weights, verdict
+map, gate, composite algebra and axis set are all **unchanged** from
+``2026.05.28-2``: the bump records that ``daydream.eval.analyzer`` tightened the
+``grounding_rate`` predicate feeding the ``grounding`` axis. It used to ask only
+whether the finding's cited *file* had been read; it now additionally requires
+the finding's cited *line* to resolve inside (or within tolerance of) a diff
+hunk, so a mis-anchored finding no longer counts as grounded. Records labeled
+under the old predicate are not comparable with records labeled under the new
+one, and without a fresh stamp both would claim the same definition.
 
 Read at call time (not captured in a default argument) so a test can
 monkeypatch ``daydream.training.reward.REWARD_VERSION`` and have

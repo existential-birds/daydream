@@ -44,10 +44,16 @@ def _add_user_step(recorder: TrajectoryRecorder) -> None:
 def _make_round_trip_fixture(
     tmp_path: Path,
     run_flow: DaydreamRunFlow,
+    *,
+    run_eval: bool = False,
 ) -> TrajectoryRecorder:
     """Build the full archive round-trip fixture: minimal .daydream/ scaffolding,
     RunConfig, archive callback, and a recorder primed with two steps spaced 8.5s
-    apart so the derived wall-clock span is deterministic."""
+    apart so the derived wall-clock span is deterministic.
+
+    ``run_eval`` turns on the real deterministic eval pass (production default),
+    so the archived bundle carries a genuine ``evaluation.json`` whose metrics
+    the manifest projection reads."""
     from daydream.runner import RunConfig, _make_archive_callback
 
     (tmp_path / ".review-output.md").write_text("# Review\nLooks good.\n")
@@ -62,7 +68,7 @@ def _make_round_trip_fixture(
         stack="python",
         backend="claude",
         archive=True,
-        run_eval=False,
+        run_eval=run_eval,
         findings_out="findings/findings.json",
     )
     callback = _make_archive_callback(config, tmp_path)
@@ -176,6 +182,52 @@ async def test_full_archive_round_trip_fix_test_backend_columns(
     _assert_round_trip_bundle(
         archive_dir, recorder, fix_backend=backend, test_backend=backend,
     )
+
+
+async def test_archive_round_trip_projects_eval_location_metrics(
+    tmp_path: Path,
+    archive_dir: Path,
+) -> None:
+    """#1106: the location/duplication eval axes reach manifest.json and index.db.
+
+    Real path: the runner's archive callback runs the deterministic eval pass,
+    writes evaluation.json, builds the manifest from it, and indexes the row.
+    The two new headline metrics must be present in the manifest metrics block
+    and in the SQL row, carrying exactly the value evaluation.json reported
+    (including ``None``/NULL when the axis is undefined for this run) — never
+    an invented 0.
+    """
+    recorder = _make_round_trip_fixture(tmp_path, DaydreamRunFlow.NORMAL, run_eval=True)
+
+    async with recorder:
+        pass
+
+    run_dir = archive_dir / "runs" / recorder.session_id
+    evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
+    expected_rate = evaluation.get("location", {}).get("in_hunk_rate")
+    expected_pairs = (
+        evaluation.get("findings", {}).get("shipped_duplication", {}).get("near_duplicate_pairs")
+    )
+
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    metrics = manifest["metrics"]
+    assert "location_in_hunk_rate" in metrics  # the axis has a surface at all
+    assert "shipped_duplicate_pairs" in metrics
+    assert metrics["location_in_hunk_rate"] == expected_rate
+    assert metrics["shipped_duplicate_pairs"] == expected_pairs
+
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT location_in_hunk_rate, shipped_duplicate_pairs FROM runs WHERE session_id = ?",
+            (recorder.session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["location_in_hunk_rate"] == expected_rate
+    assert row["shipped_duplicate_pairs"] == expected_pairs
 
 
 # on_write failure does not raise

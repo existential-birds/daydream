@@ -781,3 +781,97 @@ async def test_no_session_id_mints_no_token(monkeypatch: pytest.MonkeyPatch) -> 
     ]
 
     assert results[0].continuation is None
+
+
+@pytest.mark.asyncio
+async def test_execute_disables_cli_background_tasks_and_lifts_bash_ceiling(patch_sdk: Any) -> None:
+    """The CLI subprocess env switches background tasks off and raises the Bash timeout ceiling.
+
+    daydream reads a turn's final text as the phase result and stops consuming
+    the session when the turn ends, at which point the CLI kills its background
+    tasks -- so a backgrounded ``make test`` can never report. The ceiling is
+    lifted to the host's largest per-turn wall budget so a slow suite has no
+    reason to be backgrounded in the first place.
+    """
+    from daydream.config import TEST_WALL_BUDGET_S
+
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
+    backend = ClaudeBackend(model="opus")
+
+    async for _ in backend.execute(Path("/tmp"), "Go"):
+        pass
+
+    env = captured["options"].env
+    assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+    expected_ms = str(int(TEST_WALL_BUDGET_S * 1000))
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == expected_ms
+    assert env["BASH_MAX_TIMEOUT_MS"] == expected_ms
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only: bool) -> None:
+    """Every execute() wires an always-on PreToolUse guard denying ``Bash(run_in_background=True)``.
+
+    Drive the callbacks actually registered on the production options, in both
+    the default and the read-only profile: a backgrounded read-only command is
+    denied with a reason that tells the agent to rerun in the foreground; the
+    same command in the foreground is allowed; a non-Bash tool carrying the key
+    is not the guard's business.
+    """
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
+    backend = ClaudeBackend(model="opus")
+
+    async for _ in backend.execute(Path("/tmp"), "Go", read_only=read_only):
+        pass
+
+    matcher = captured["options"].hooks["PreToolUse"][0]
+
+    async def decide(payload: Any) -> Any:
+        for hook in matcher.hooks:
+            out = await hook(payload, None, {})
+            if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+                return out
+        return {}
+
+    deny_bg = await decide(
+        {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": True}}
+    )
+    hook_out = deny_bg["hookSpecificOutput"]
+    assert hook_out["permissionDecision"] == "deny"
+    assert "background Bash blocked" in hook_out["permissionDecisionReason"]
+    assert "foreground" in hook_out["permissionDecisionReason"]
+
+    allow_fg = await decide(
+        {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": False}}
+    )
+    assert "hookSpecificOutput" not in allow_fg
+    allow_no_key = await decide({"tool_name": "Bash", "tool_input": {"command": "git status"}})
+    assert "hookSpecificOutput" not in allow_no_key
+
+    other_tool = await decide(
+        {"tool_name": "Read", "tool_input": {"file_path": "x", "run_in_background": True}}
+    )
+    assert "background Bash blocked" not in str(other_tool)
+
+
+@pytest.mark.parametrize(
+    ("payload", "background"),
+    [
+        ({"tool_name": "Bash", "tool_input": {"command": "make test", "run_in_background": True}}, True),
+        ({"tool_name": "Bash", "tool_input": {"command": "make test", "run_in_background": False}}, False),
+        ({"tool_name": "Bash", "tool_input": {"command": "make test"}}, False),
+        ({"tool_name": "Bash", "tool_input": {"run_in_background": True}}, True),
+        ({"tool_name": "Read", "tool_input": {"run_in_background": True}}, False),
+        ({"tool_name": "Bash", "tool_input": "not-a-dict"}, False),
+        ("garbage", False),
+        (None, False),
+    ],
+)
+def test_is_background_bash(payload: Any, background: bool) -> None:
+    """Only a Bash payload with a truthy ``run_in_background`` is a background call."""
+    from daydream.backends.claude import _is_background_bash
+
+    assert _is_background_bash(payload) is background

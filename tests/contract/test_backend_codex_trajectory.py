@@ -150,7 +150,13 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
             f"ACT span on step {act_step.step_id}: observation/results missing"
         )
         call_ids = {tc.tool_call_id for tc in (act_step.tool_calls or [])}
-        result_ids = {r.source_call_id for r in observation.results}
+        # Interrupted markers deliberately carry NO source_call_id (null =
+        # "not a standard tool-call result", ATIF v1.7) so coverage consumers
+        # never derive an interrupted read as completed; only linked results
+        # must pair with a tool call.
+        result_ids = {
+            r.source_call_id for r in observation.results if r.source_call_id is not None
+        }
         # issubset, not intersection: intersection (&) would only prove at
         # least one match, letting a step with mixed matched/unmatched results
         # pass false-green. Every result id must correspond to a call id.
@@ -253,3 +259,39 @@ async def test_codex_multi_turn_final_metrics_equal_step_sum(tmp_path: Path) -> 
     )
     assert step_prompt == 34594 + 36000
     assert traj["final_metrics"]["total_prompt_tokens"] == step_prompt
+
+
+@pytest.mark.asyncio
+async def test_issue_1126_failure_status_and_incomplete_marker(tmp_path: Path) -> None:
+    """Issue #1126: nonzero-exit results carry failure metadata; a started-but-
+    never-completed call gets a schema-valid interrupted marker, and the whole
+    trajectory validates against ATIF v1.7."""
+    _, recorder = await _drive_codex_through_recorder(
+        tmp_path, fixture="command_failures_issue1126.jsonl"
+    )
+    # Mirror the golden round-trip test: filter agent steps to those actually
+    # carrying observation results, so indices pin assertion targets.
+    steps = [
+        s
+        for s in recorder.steps
+        if s.source == "agent" and s.observation and s.observation.results
+    ]
+    assert steps, "no agent steps with observation results"
+
+    failed = steps[0].observation.results[0]  # type: ignore[union-attr]  # filtered above
+    assert failed.extra == {"is_error": True, "exit_code": 128, "status": "completed"}
+    ok = steps[0].observation.results[1]  # type: ignore[union-attr]  # filtered above
+    assert ok.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
+
+    dangling = steps[-1].observation.results[-1]  # type: ignore[union-attr]  # filtered above
+    # The marker records the interruption WITHOUT source_call_id: stamping the
+    # in-flight id would let _completed_read_paths derive the interrupted call
+    # as completed and flip fail-open coverage to fail-closed.
+    assert dangling.source_call_id is None
+    assert dangling.content == "[interrupted: call did not complete before invocation ended]"
+    assert dangling.extra == {"is_error": True, "status": "interrupted"}
+
+    traj_path = tmp_path / "trajectory.json"
+    assert traj_path.exists()
+    validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
+    assert validator.validate(traj_path), validator.get_errors() or "validation failed"

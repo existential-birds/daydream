@@ -244,6 +244,121 @@ class StubBackend:
         # When True, the uncovered-file-sweep branch raises -- exercising the
         # sweep's fail-open contract.
         self.fail_sweep: bool = False
+        # Issue #1113 (grounded diagrams). Per-kind queue of specs the diagram
+        # author branch returns: index 0 answers the first turn, index 1 the
+        # repair turn (the last entry repeats if the queue is shorter). A kind
+        # with no queue entry gets the empty spec for its shape, which grounds
+        # to an omission rather than a failure.
+        self.diagram_specs: dict[str, list[dict[str, Any]]] = {}
+        # When True, the diagram branch emits a COMPLETED Read (paired start +
+        # result) for every file its returned spec cites, so the grounding
+        # pass's read receipts are satisfied. Off by default, which is the
+        # fail-closed case: every citation fails FILE_NOT_READ_BY_MODEL.
+        self.diagram_emit_reads: bool = False
+        # Explicit per-kind read paths, replacing the spec-derived list above
+        # (for tests that need a read of a file the spec does not cite).
+        self.diagram_reads: dict[str, list[str]] = {}
+        # Files to withhold a read for even when diagram_emit_reads is on --
+        # the FILE_NOT_READ_BY_MODEL knob.
+        self.diagram_unread: frozenset[str] = frozenset()
+        # When set, the diagram author branch mints a ContinuationToken with
+        # this session id, so the repair turn can resume the session. Without
+        # it there is no continuation and the repair turn never runs.
+        self.diagram_session_id: str | None = None
+        # Diagram kinds whose author turn raises (the fail-open/exit-1 knob).
+        self.diagram_fail: frozenset[str] = frozenset()
+        # Turn counter per kind, so the repair turn reads the next queued spec.
+        self.diagram_turns: dict[str, int] = {}
+
+    @staticmethod
+    def _prompt_record_uid_groups(prompt: str) -> list[list[str]]:
+        """Read the record ``uid``s the merge prompt points this turn at (#1111).
+
+        ``build_merge_prompt`` renders its records block as one ``  - <path>``
+        line per per-stack records file (structural records are deliberately
+        absent -- the host appends those items itself), so re-reading those files
+        here is exactly what the production merge agent does when it copies a
+        ``uid`` verbatim out of a record to fill ``source_uids``. Returning one
+        group PER FILE (rather than one flat list) is what lets the default
+        payload below attribute a per-stack item to a single stack and a
+        cross-stack item to several -- the real shapes ``source_uids`` exists to
+        carry.
+
+        A records file that is missing or malformed contributes nothing: the
+        phase-level merge tests point the prompt at paths that were never
+        written, and a stub that raised there would fail tests about something
+        else entirely.
+
+        Returns:
+            One list of uids per records file that had any, in prompt order.
+        """
+        from daydream.deep.records import record_uid
+
+        groups: list[list[str]] = []
+        for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
+            try:
+                loaded = json.loads(Path(path_str).read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            uids = [
+                uid
+                for rec in _records_issues_or_empty(loaded)
+                if isinstance(rec, dict) and (uid := record_uid(rec))
+            ]
+            if uids:
+                groups.append(uids)
+        return groups
+
+    @staticmethod
+    def _diagram_dispatch(pl: str) -> tuple[str, bool] | None:
+        """Classify a diagram prompt as ``(kind, is_repair)``, or None.
+
+        Keys on the role sentences the production builders open with and on the
+        repair prompt's ``Diagram repair turn (<kind>):`` opener -- the
+        deliberate discriminators (issue #1113 D17), not incidental wording.
+        """
+        for kind in ("sequence", "flowchart"):
+            if f"diagram repair turn ({kind})" in pl:
+                return kind, True
+        if "you are the sequence-diagram author for this pull request." in pl:
+            return "sequence", False
+        if "you are the flowchart author for this pull request." in pl:
+            return "flowchart", False
+        return None
+
+    @staticmethod
+    def _diagram_spec_paths(spec: dict[str, Any]) -> list[str]:
+        """Every repo-relative path the spec cites, de-duplicated, in spec order.
+
+        The paths a truthful author agent would have read. Repo-relative is
+        fine: the coverage matcher accepts an exact relative match.
+        """
+        paths: list[str] = []
+
+        def _add(value: Any) -> None:
+            if isinstance(value, str) and value and value not in paths:
+                paths.append(value)
+
+        for participant in spec.get("participants") or []:
+            if isinstance(participant, dict):
+                for path in participant.get("files") or []:
+                    _add(path)
+        for message in spec.get("messages") or []:
+            if isinstance(message, dict) and isinstance(message.get("evidence"), dict):
+                _add(message["evidence"].get("file"))
+        for block in spec.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            for branch in block.get("branches") or []:
+                if isinstance(branch, dict) and isinstance(branch.get("evidence"), dict):
+                    _add(branch["evidence"].get("file"))
+        root = spec.get("root")
+        if isinstance(root, dict):
+            _add(root.get("file"))
+        for node in spec.get("nodes") or []:
+            if isinstance(node, dict) and isinstance(node.get("evidence"), dict):
+                _add(node["evidence"].get("file"))
+        return paths
 
     @staticmethod
     def _stack_scope_files(prompt: str) -> list[str]:
@@ -387,6 +502,46 @@ class StubBackend:
                     ]
                 },
                 continuation=None,
+            )
+            return
+
+        # Issue #1113: grounded-diagram author + repair turns. Returns the
+        # queued spec as structured output, optionally with completed Reads of
+        # every file it cites and a resumable continuation token.
+        dispatch = self._diagram_dispatch(pl)
+        if dispatch is not None:
+            kind, is_repair = dispatch
+            if kind in self.diagram_fail and not is_repair:
+                raise RuntimeError(f"stub: diagram author for {kind} blew up")
+            turn = self.diagram_turns.get(kind, 0)
+            self.diagram_turns[kind] = turn + 1
+            queue = self.diagram_specs.get(kind) or []
+            if queue:
+                spec = queue[min(turn, len(queue) - 1)]
+            elif kind == "sequence":
+                spec = {"participants": [], "messages": [], "blocks": []}
+            else:
+                spec = {"root": None, "nodes": [], "edges": []}
+            if self.diagram_emit_reads:
+                read_paths = self.diagram_reads.get(kind) or self._diagram_spec_paths(spec)
+                for index, path in enumerate(read_paths):
+                    if path in self.diagram_unread:
+                        continue
+                    call_id = f"diagram-{kind}-{turn}-read-{index}"
+                    yield ToolStartEvent(id=call_id, name="Read", input={"file_path": path})
+                    # Paired result: a bare start is an INTERRUPTED read and
+                    # yields no coverage, so grounding would reject the citation.
+                    yield ToolResultEvent(id=call_id, output="file content", is_error=False)
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output=spec,
+                continuation=(
+                    ContinuationToken(
+                        backend="claude", data={"session_id": self.diagram_session_id}
+                    )
+                    if self.diagram_session_id
+                    else None
+                ),
             )
             return
 
@@ -538,9 +693,20 @@ class StubBackend:
             # Issue #745 (AC4): the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
             # structured output directly (no separate parse-<stack> fork). Build a
             # schema-valid payload with every required issue field.
+            # The structural meta-stack reads the same code through a different
+            # lens, so it words its finding differently. Emitting the language
+            # stacks' byte-identical description here would be a genuine
+            # structural/language duplicate, which the merge host now folds into
+            # a single item (issue #1103) -- erasing the structural item that
+            # every structural-lens test looks for.
+            stack_label = m.group(1)
             issue: dict[str, Any] = {
                 "id": 1,
-                "description": "Sample issue",
+                "description": (
+                    "Structural maintainability concern"
+                    if stack_label == "structure"
+                    else "Sample issue"
+                ),
                 "file": "api.py",
                 "line": 1,
                 "severity": self.parse_severity or "medium",
@@ -687,6 +853,8 @@ class StubBackend:
                 # Issue #742: fresh-run records files carry the dict shape
                 # {"issues": [...], "verdicts": [...]}; normalize to the
                 # bare issues list (legacy files stay bare lists).
+                from daydream.deep.records import record_uid
+
                 echoed: list[dict[str, Any]] = []
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
@@ -704,6 +872,14 @@ class StubBackend:
                                 "confidence": rec.get("confidence", "MEDIUM"),
                                 "rationale": rec.get("rationale", "rationale"),
                                 "evidence": rec.get("evidence", "api.py:1"),
+                                # Issue #1111: an echoed item IS one record, so
+                                # its provenance is that record's own uid. The
+                                # merge agent never emits ``uid`` (the host owns
+                                # it and re-mints nothing post-merge), so the
+                                # link is carried by ``source_uids`` only --
+                                # copied verbatim, which is what the prompt
+                                # demands and what host-side validation checks.
+                                "source_uids": [uid] if (uid := record_uid(rec)) else [],
                             }
                         )
                         next_id += 1
@@ -715,6 +891,25 @@ class StubBackend:
                     continuation=None,
                 )
                 return
+            # Issue #1111: attribute the default payload to REAL record uids
+            # read off disk, so the default multi-stack fixtures exercise the
+            # production ``source_uids`` shape rather than the "agent emitted
+            # nothing" degenerate case. The two per-stack items cite the stack
+            # they name (``Python issue`` -> a ``python:*`` record); the
+            # cross-stack item cites one record from EVERY stack, which is the
+            # consolidation the field exists to express. A run whose stacks
+            # collapsed (tiny-diff / shallow, where the only stack is
+            # ``generic``) has no python/react record to cite, so the lookup
+            # falls back to the first stack present rather than emitting ``[]``.
+            from daydream.deep.records import stack_name_from_uid
+
+            lead_uids = [group[0] for group in self._prompt_record_uid_groups(prompt)]
+            leads_by_stack = {stack_name_from_uid(uid): uid for uid in reversed(lead_uids)}
+
+            def _lead(stack: str) -> list[str]:
+                uid = leads_by_stack.get(stack) or (lead_uids[0] if lead_uids else "")
+                return [uid] if uid else []
+
             yield ResultEvent(
                 structured_output={
                     "items": [
@@ -728,6 +923,7 @@ class StubBackend:
                             "confidence": "MEDIUM",
                             "rationale": "rationale",
                             "evidence": "api.py:1",
+                            "source_uids": _lead("python"),
                         },
                         {
                             "id": 2,
@@ -739,6 +935,7 @@ class StubBackend:
                             "confidence": "MEDIUM",
                             "rationale": "rationale",
                             "evidence": "App.tsx:1",
+                            "source_uids": _lead("react"),
                         },
                         {
                             "id": 3,
@@ -750,6 +947,7 @@ class StubBackend:
                             "confidence": "HIGH",
                             "rationale": "rationale",
                             "evidence": "api.py:1",
+                            "source_uids": list(lead_uids),
                         },
                     ]
                 },

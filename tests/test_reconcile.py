@@ -172,3 +172,91 @@ def test_fetch_prior_findings_trusts_viewerDidAuthor_without_bot_login(
     monkeypatch.setattr(git_ops, "gh_api", _gh)
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None)  # misconfigured
     assert fp in prior   # viewerDidAuthor still proves authorship
+
+
+# --- Prior diagram comments (issue #1113) ------------------------------------
+
+
+def _issue_comment(
+    node_id: str, *, body: str, login: str | None = "daydream[bot]"
+) -> dict[str, Any]:
+    """One REST issue-comment object."""
+    comment: dict[str, Any] = {"id": 1, "node_id": node_id, "body": body}
+    if login is not None:
+        comment["user"] = {"login": login}
+    return comment
+
+
+def test_fetch_prior_diagram_comments_trusts_only_the_bot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Marker present AND author proven; kinds come back de-duplicated, in order."""
+    from daydream.pr_review import diagram_marker
+    from daydream.reconcile import fetch_prior_diagram_comments
+
+    sha = "a" * 40
+    comments = [
+        _issue_comment("IC_1", body=f"{diagram_marker('flowchart', sha)}\n{diagram_marker('sequence', sha)}"),
+        _issue_comment("IC_2", body=diagram_marker("sequence", sha), login="evil-attacker"),
+        _issue_comment("IC_3", body="a plain human comment"),
+        _issue_comment("IC_4", body=f"{diagram_marker('sequence', sha)} {diagram_marker('sequence', sha)}"),
+    ]
+
+    def _gh(_repo: Any, endpoint: str, **_kw: Any) -> Any:
+        assert endpoint == "repos/o/r/issues/7/comments"
+        return comments
+
+    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    prior = fetch_prior_diagram_comments(tmp_path, "o/r", 7, bot_login="daydream")
+    assert [(c.node_id, c.kinds) for c in prior] == [
+        ("IC_1", ("flowchart", "sequence")),
+        ("IC_4", ("sequence",)),
+    ]
+
+
+def test_fetch_prior_diagram_comments_harvests_nothing_without_a_bot_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """REST has no ``viewerDidAuthor``, so an unresolved login must not query at all."""
+    from daydream.reconcile import fetch_prior_diagram_comments
+
+    def _forbidden(*_args: Any, **_kw: Any) -> Any:
+        raise AssertionError("must not call GitHub with an unresolved bot login")
+
+    monkeypatch.setattr(git_ops, "gh_api", _forbidden)
+    assert fetch_prior_diagram_comments(tmp_path, "o/r", 7, bot_login=None) == []
+
+
+def test_minimize_comment_reports_failure_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every transport/shape failure is False; only a proven fold is True."""
+    from daydream.git_ops import GitError
+    from daydream.reconcile import minimize_comment
+
+    monkeypatch.setattr(
+        git_ops,
+        "gh_api",
+        lambda *_a, **_k: {
+            "data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}
+        },
+    )
+    assert minimize_comment(tmp_path, "IC_1") is True
+
+    monkeypatch.setattr(
+        git_ops,
+        "gh_api",
+        lambda *_a, **_k: {
+            "data": {"minimizeComment": {"minimizedComment": {"isMinimized": False}}}
+        },
+    )
+    assert minimize_comment(tmp_path, "IC_1") is False
+
+    monkeypatch.setattr(git_ops, "gh_api", lambda *_a, **_k: {"data": {}})
+    assert minimize_comment(tmp_path, "IC_1") is False
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise GitError("gh exploded")
+
+    monkeypatch.setattr(git_ops, "gh_api", _boom)
+    assert minimize_comment(tmp_path, "IC_1") is False

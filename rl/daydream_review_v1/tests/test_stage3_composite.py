@@ -118,7 +118,7 @@ async def test_env_scores_with_stage0_composite(
     shutil.copytree(rundir_golden, dest)
     trace = vf.Trace(
         task=vf.TraceTask(type=type(task).__name__, data=task.data),
-        state=DaydreamReviewState(),
+        agent=vf.AgentInfo(config=vf.AgentConfig()), state=DaydreamReviewState(),
     )
     trace.info["daydream_archive_root"] = str(archive_root)
     trace.info["daydream_repo_path"] = str(tmp_path / "repo")
@@ -139,7 +139,7 @@ async def test_env_scores_with_stage0_composite(
     # M13: the reward IS the rubric composite (which carries the intrinsic
     # composite as one weighted term), not the intrinsic-only value.
     assert stage0["terms"]["intrinsic_composite"] is not None
-    assert trace.rewards["intrinsic_composite"] == stage0["composite"]
+    assert trace.rewards["intrinsic_composite"].score == stage0["composite"]
 
 
 def test_stage0_composition_absent_without_model(tmp_path: Path) -> None:

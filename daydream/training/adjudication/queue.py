@@ -13,11 +13,15 @@ from daydream.training.adjudication.precedence import reopen_on_digest_change
 from daydream.training.corpus_v2.identity import record_id
 from daydream.training.corpus_v2.projector import project_findings
 from daydream.training.corpus_v2.provenance import extract_provenance
+from daydream.training.dispositions import (
+    NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
+)
+from daydream.training.dispositions import (
+    is_decisive,
+)
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
 
-__all__ = ["build_queue"]
-
-_NON_DECISIVE_DISPOSITIONS = frozenset({"ambiguous", "unanswered", "missing"})
+__all__ = ["build_queue", "_NON_DECISIVE_DISPOSITIONS"]
 
 _HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
@@ -30,12 +34,21 @@ def _profile_label(
     Uses the same authority as the projector: ``extract_provenance`` derives
     the profile from the canonical ``profile_*`` fields, and the label is the
     canonical ``profile_name`` when present, else the legacy flat ``profile``
-    string a resolution may carry. Never ``str(None)``-coerced in the export.
+    string a resolution may carry. A nested ``profile`` block (canonical
+    annotation records carry one — ``extract_provenance``'s shape) contributes
+    its ``profile_name`` too, so a resolution row stored after the #1095
+    canonical serialization resolves to the same label its provenance would.
+    Never ``str(None)``-coerced and never ``str(dict)``-coerced in the export.
     """
     profile_name = provenance["profile"].get("profile_name")
     if profile_name is not None:
         return str(profile_name)
     flat = resolution.get("profile")
+    if isinstance(flat, Mapping):
+        nested_name = flat.get("profile_name")
+        if nested_name is not None:
+            return str(nested_name)
+        return None
     return str(flat) if flat is not None else None
 
 _ITEM_KEYS = (
@@ -61,14 +74,25 @@ def build_queue(
     *,
     rubric_version: str = ADJUDICATION_LABELER_VERSION,
     prior_observations: Mapping[str, Mapping[str, Any]] | None = None,
+    include_decisive: bool = False,
 ) -> list[dict[str, object]]:
     """Build the adjudication queue items for the given segmented sessions.
 
     Each non-decisive (task-only) adjudication entry becomes one queue item
     keyed by the recomputed ``record_id``. Decisive/gold resolutions never
-    enter the queue: only the projector's adjudication set is consumed, and
-    every entry's disposition is additionally asserted to be non-decisive —
-    a violation raises ``ValueError`` naming the fingerprint (fail-closed).
+    enter the operator queue: only the projector's adjudication set is
+    consumed, and every entry's disposition is additionally asserted to be
+    non-decisive — a violation raises ``ValueError`` naming the fingerprint
+    (fail-closed).
+
+    Pass ``include_decisive=True`` to widen the queue to the complete record
+    set: decisive entries are enumerated from ``project_findings``' first
+    return value (they never appear in the adjudication set) and become queue
+    items with the same ``_ITEM_KEYS``, ``status="open"``, and their decisive
+    disposition carried verbatim. This is for the complete-set drift gate, not
+    the operator labeling path; the default (False) preserves the CLI contract
+    byte-for-byte. Re-open/digest-drift logic applies to decisive items
+    identically — they flow through the same ``prior_observations`` block.
 
     The queue is rebuilt deterministically, not immutable once built: when
     ``prior_observations`` (``record_id`` -> stored observation) contains a
@@ -85,7 +109,14 @@ def build_queue(
     """
     items: list[dict[str, object]] = []
     for session in sessions:
-        _, adjudication = project_findings(session, return_adjudication=True)
+        if include_decisive:
+            records, adjudication = project_findings(session, return_adjudication=True)
+            entries = adjudication + [
+                r for r in records if is_decisive(str(r.get("disposition")))
+            ]
+        else:
+            _, adjudication = project_findings(session, return_adjudication=True)
+            entries = adjudication
         session_id = str(session.get("session_id"))
         trajectory_id = str(session.get("trajectory_id"))
         segment_id = str(session.get("segment_id"))
@@ -94,10 +125,12 @@ def build_queue(
         for raw in resolutions if isinstance(resolutions, list) else []:
             if isinstance(raw, Mapping) and raw.get("fingerprint"):
                 by_fingerprint[str(raw["fingerprint"])] = raw
-        for entry in adjudication:
-            fingerprint = str(entry["fingerprint"])
+        for entry in entries:
+            fingerprint = str(
+                entry.get("fingerprint") or entry.get("finding_fingerprint")
+            )
             disposition = entry["disposition"]
-            if disposition not in _NON_DECISIVE_DISPOSITIONS:
+            if not include_decisive and disposition not in _NON_DECISIVE_DISPOSITIONS:
                 raise ValueError(
                     f"build_queue: adjudication entry for fingerprint {fingerprint!r} has "
                     f"non-queue disposition {disposition!r}; expected one of "

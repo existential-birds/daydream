@@ -1430,7 +1430,7 @@ def _emit_reward(reward: verifier_core.Reward) -> int:
     rejection and the completed ``run_verifier``) so the two failure/success
     emissions cannot drift. ``Reward.to_dict()`` always exists (the compiled
     verifier_core twin is byte-identical), so the payload is always the full
-    12-key typed dict.
+    24-key typed dict.
     """
     payload = reward.to_dict()
     print(json.dumps(payload))

@@ -157,17 +157,33 @@ def _optional_int(event: dict[str, Any], key: str) -> int | None:
     return value
 
 
-def _parse_cost(value: Any, *, event_name: str) -> float | None:
+def _required_non_negative_int(event: dict[str, Any], key: str) -> int:
+    value = _required_int(event, key)
+    if value < 0:
+        raise OspreyProtocolError(f"event {event.get('event')!r} has negative {key!r}")
+    return value
+
+
+def _optional_non_negative_int(event: dict[str, Any], key: str) -> int | None:
+    value = _optional_int(event, key)
+    if value is not None and value < 0:
+        raise OspreyProtocolError(f"event {event.get('event')!r} has negative {key!r}")
+    return value
+
+
+def _parse_cost(value: Any, *, event_name: str, field: str = "cost_usd") -> float | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise OspreyProtocolError(f"event {event_name!r} has non-string cost_usd")
+        raise OspreyProtocolError(f"event {event_name!r} has non-string {field!r}")
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise OspreyProtocolError(f"event {event_name!r} has invalid cost_usd") from exc
+        raise OspreyProtocolError(f"event {event_name!r} has invalid {field!r}") from exc
     if not math.isfinite(parsed):
-        raise OspreyProtocolError(f"event {event_name!r} has non-finite cost_usd")
+        raise OspreyProtocolError(f"event {event_name!r} has non-finite {field!r}")
+    if parsed < 0:
+        raise OspreyProtocolError(f"event {event_name!r} has negative {field!r}")
     return parsed
 
 
@@ -652,7 +668,7 @@ class OspreyBackend:
                     terminal_exit_code = exit_code
                     terminal_structured_output = event.get("structured_output")
                     saw_session_end = True
-                    final_cost = _parse_cost(event.get("total_cost_usd"), event_name=event_name)
+                    final_cost = _parse_cost(event.get("total_cost_usd"), event_name=event_name, field="total_cost_usd")
                     if final_cost is not None and not saw_metric_cost:
                         total_cost = final_cost
                     continue
@@ -706,18 +722,14 @@ class OspreyBackend:
                     if not isinstance(usage_reported, bool):
                         raise OspreyProtocolError("turn_end requires boolean usage_reported")
                     if usage_reported:
-                        _required_int(event, "duration_ms")
+                        _required_non_negative_int(event, "duration_ms")
                     else:
-                        _optional_int(event, "duration_ms")
+                        _optional_non_negative_int(event, "duration_ms")
                     if usage_reported:
-                        prompt_tokens = _required_int(event, "prompt_tokens")
-                        completion_tokens = _required_int(event, "completion_tokens")
-                        cached_tokens = _optional_int(event, "cached_tokens")
-                        reasoning_tokens = _optional_int(event, "thinking_tokens")
-                        if reasoning_tokens is not None and reasoning_tokens < 0:
-                            raise OspreyProtocolError(
-                                "turn_end thinking_tokens must be non-negative"
-                            )
+                        prompt_tokens = _required_non_negative_int(event, "prompt_tokens")
+                        completion_tokens = _required_non_negative_int(event, "completion_tokens")
+                        cached_tokens = _optional_non_negative_int(event, "cached_tokens")
+                        reasoning_tokens = _optional_non_negative_int(event, "thinking_tokens")
                         cost = _parse_cost(event.get("cost_usd"), event_name=event_name)
                         turn_model = event.get("model")
                         if turn_model is not None and not isinstance(turn_model, str):

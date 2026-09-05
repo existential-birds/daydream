@@ -44,9 +44,8 @@ _TASKCREATE_ID_PATTERN = re.compile(r"Task #(\d+)")
 
 # Single-line icon + primary-arg spec for the callback/parallel render path,
 # which cannot open Rich panels (concurrent agents would each fight for the
-# shared console's Live context). These mirror the per-tool choices baked into
-# ``_build_tool_header`` so a parallel-fix line names the same icon and primary
-# argument the panel header would lead with.
+# shared console's Live context). ``_PRIMARY_TOOL_ARG`` is the shared source of
+# truth for primary argument selection across single-line render surfaces.
 _CALLBACK_TOOL_ICONS = {
     "Read": "📜",
     "Write": "⛏️",
@@ -59,6 +58,7 @@ _CALLBACK_TOOL_ICONS = {
     "TodoWrite": "🔧",
     **{name: "🎠" for name in (*_BACKGROUND_TASK_TOOLS, *_TODO_TASK_TOOLS)},
 }
+_BASH_COMMAND_MAX_CHARS = 200  # Shared truncation cap for Bash command display; agent._summarize_input imports it.
 _PRIMARY_TOOL_ARG = {
     "Read": ("file_path",),
     "Write": ("file_path",),
@@ -66,8 +66,8 @@ _PRIMARY_TOOL_ARG = {
     "NotebookEdit": ("notebook_path", "file_path"),
     "Glob": ("pattern",),
     "Grep": ("pattern",),
-    "Bash": ("description", "command"),
-    "shell": ("description", "command"),
+    "Bash": ("command", "description"),
+    "shell": ("command", "description"),
     "Skill": ("skill",),
 }
 
@@ -75,11 +75,12 @@ _PRIMARY_TOOL_ARG = {
 def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | None]:
     """Return the meaningful primary-argument value for a tool's progress line.
 
-    Mirrors the per-tool choice in ``_build_tool_header`` (Read/Edit/Write →
-    ``file_path``, Grep/Glob → ``pattern``, Bash → ``description``/``command``).
-    Falls back to the first non-mechanical, non-boolean value so an unknown tool
-    still shows something meaningful rather than a stray flag — the old blind
-    ``next(iter(args.values()))`` surfaced ``replace_all=False`` as ``"False"``.
+    ``_PRIMARY_TOOL_ARG`` is the source of truth shared by the callback path
+    and the ``--log`` summary, with Bash preferring required ``command`` over
+    optional ``description``. Falls back to the first non-mechanical,
+    non-boolean value so an unknown tool still shows something meaningful
+    rather than a stray flag — the old blind ``next(iter(args.values()))``
+    surfaced ``replace_all=False`` as ``"False"``.
 
     Returns:
         ``(value, key)`` — the primary value as a string and the arg key it came
@@ -204,7 +205,7 @@ def format_callback_progress(
     name: str,
     args: dict[str, object],
     label: str | None,
-    max_len: int = 80,
+    max_len: int = _BASH_COMMAND_MAX_CHARS,
 ) -> Text:
     """Build a styled one-line progress entry for the callback render path.
 
@@ -242,8 +243,22 @@ def format_callback_progress(
 
     value, key = _primary_tool_value(name, args)
     if value:
+        # Import lazily because trajectory initializes the UI facade used to
+        # reach this renderer while the application import graph is loading.
+        from daydream.trajectory import redact_structured_text
+
+        # Redact only the Bash command — the same scope the panel header applies
+        # in _build_tool_header's Bash branch, where paths and grep patterns
+        # render raw. Redacting every primary value would rewrite the operator's
+        # own /home/<user>/ paths into [REDACTED_USER] markers on the callback
+        # line. Redact the complete value before slicing so a credential
+        # crossing the display boundary cannot be truncated into an unmatchable
+        # fragment.
+        display_value = value
+        if name in ("Bash", "shell") and key == "command":
+            display_value = redact_structured_text(value)
         line.append(" ")
-        line.append(value[:max_len], style=_primary_value_style(key))
+        line.append(display_value[:max_len], style=_primary_value_style(key))
     return line
 
 
@@ -469,12 +484,20 @@ def _build_tool_header(
             content.append("\n")
             content.append(description, style=STYLE_CYAN)
 
-        if not quiet_mode:
-            command = str(args.get("command", ""))
-            if command:
-                content.append("\n")
-                content.append("$ ", style=STYLE_DIM)
-                content.append(command, style=STYLE_DIM)
+        # Import lazily because trajectory initializes the UI facade used to
+        # reach this renderer while the application import graph is loading.
+        from daydream.trajectory import redact_structured_text
+
+        # Redact the complete command before slicing so a credential crossing
+        # the display boundary cannot be truncated into an unmatchable fragment.
+        full_command = redact_structured_text(str(args.get("command", "")))
+        command = full_command[:_BASH_COMMAND_MAX_CHARS]
+        if len(full_command) > _BASH_COMMAND_MAX_CHARS:
+            command = f"{command}..."
+        if command.strip():
+            content.append("\n")
+            content.append("$ ", style=STYLE_DIM)
+            content.append(command, style=STYLE_DIM)
 
         return content
 

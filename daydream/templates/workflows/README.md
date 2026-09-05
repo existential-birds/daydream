@@ -3,12 +3,14 @@
 Three GitHub Actions workflows that turn daydream into a self-hosted PR review
 bot: a trusted maintainer requests a review with `@<bot> review`, and the
 findings are posted as inline comments by your own GitHub App identity — no
-maintainer server, no third-party service.
+maintainer server, no third-party service. The same trusted-comment path also
+serves `@<bot> add sequence diagram` and `@<bot> add flowchart`, which post a
+single grounded diagram comment instead of a review.
 
 | File | Workflow | Role |
 |---|---|---|
 | `daydream-review.yml` | Daydream Review | Phase A — runs the reviewer over the PR head (unprivileged), uploads a `daydream-findings` artifact |
-| `daydream-command.yml` | Daydream Command | Gatekeeper — listens for `@<bot> review` PR comments and dispatches Daydream Review |
+| `daydream-command.yml` | Daydream Command | Gatekeeper — listens for `@<bot> review`, `@<bot> add sequence diagram`, and `@<bot> add flowchart` PR comments and dispatches Daydream Review with the matched command |
 | `daydream-post.yml` | Daydream Post | Phase B — fires when Daydream Review completes, validates the artifact, posts findings as your App bot |
 
 ## Install
@@ -37,11 +39,15 @@ download). The sections below document what these workflows *do* once installed.
 | Trigger | Path | Notes |
 |---|---|---|
 | `@<bot> review` PR comment | Command → Review → Post | Comment author must be OWNER / MEMBER / COLLABORATOR; bot comments are ignored; the PR head current at comment time is bound as the approved target |
-| New commit after approval | Review rejects head drift | Comment `@<bot> review` again to approve the new head |
+| `@<bot> add sequence diagram` PR comment (alias `@<bot> add sequence`) | Command → Review → Post | Same trust gate and head binding; runs a diagram-only pass that posts one standalone sequence-diagram comment bound to the approved head, and no findings |
+| `@<bot> add flowchart` PR comment | Command → Review → Post | Same trust gate and head binding; runs a diagram-only pass that posts one standalone flowchart comment bound to the approved head, and no findings |
+| New commit after approval | Review rejects head drift | Comment the same command again to approve the new head |
 | Fork PRs | Same trusted-comment path | The review remains approval-gated and checks out only the approved head |
 
 There is no automatic PR-open trigger. A credential-bearing review runs only
-after a trusted comment explicitly approves the current head.
+after a trusted comment explicitly approves the current head. Command matching
+is case-sensitive and exact: only the fixed token is read out of the comment,
+and no comment text ever reaches a `run:` step or a model prompt.
 
 **Private-repo limitation:** on private repositories GitHub may run no
 workflows for fork PRs when the "run workflows from fork pull requests" policy

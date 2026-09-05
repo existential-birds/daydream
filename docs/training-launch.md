@@ -45,6 +45,51 @@ Stage 0 freezes the split before training (M16): 40 train / 10 held-out rows
 identical to `run_identity.split_digest`, which is how resume validation
 (`validate_resume`) detects a stale or drifted split (AC4).
 
+## Corpus v2: real-corpus training from a frozen projection
+
+For real-corpus training, the input is a frozen corpus-v2 projection directory
+produced by the projector, not the v1 JSONL export. The real-corpus command
+sequence is:
+
+```bash
+daydream corpus build-v2 --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus-v2.jsonl
+```
+
+```bash
+daydream train --corpus-v2 PROJECTION_DIR --out OUT_DIR --dry-run
+```
+
+(Drop `--dry-run` for the real run. `--corpus-v2` is mutually exclusive with
+`--corpus` on the train parser; the v1 `--corpus` path below remains valid and
+unchanged.)
+
+The projection directory is the immutable input contract for the run:
+
+- **`_SUCCESS`** — the completeness marker written last by the projector; a
+  directory without it is refused before any record is read.
+- **`lineage.json`** — pins the split salt, holdout/validation rates, and
+  provenance digests the loader re-checks.
+- **Split digests** — per-split JSONL sha256s plus a deterministic
+  directory-level digest over the sorted `(relpath, sha256(file_bytes))`
+  pairs; the directory digest replaces the v1 single-file corpus digest in
+  `run_identity.corpus_digest`.
+- **`base_sha` / `head_sha`** — the per-record task-identity git SHAs, used by
+  Stage-2 RFT to rebuild replay tasks; full-SHA values are validated before
+  any task rebuild.
+- **C5/C8 re-application** — the v2 loader re-applies the C5 exclusion list
+  and the C8 copyleft opt-in gate fail-closed on every load; the projector's
+  decision is never trusted on its own.
+- **Fail-closed drift** — the split recorded on each record's `lineage.split`
+  is recomputed from the record id under the lineage's pinned salt/rates, and
+  any disagreement refuses the entire load with the offending record id
+  named. Stage 0 consumes the projector's frozen split as-is (it is never
+  re-frozen), so drift is a hard stop, never a silent re-split.
+
+Because the directory-level digest is a pure function of the directory bytes,
+the same projection always yields the same run identity — a re-run over a
+modified directory aborts at the resume guard instead of training on drifted
+data.
+
 ## Legacy traces
 
 Legacy rows — runs admitted under the reply-count / merge-presence gold policy

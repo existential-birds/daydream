@@ -6,7 +6,7 @@ These three workflows are this repository's own **repository-only Codex dogfood 
 | File | Workflow | Role |
 |---|---|---|
 | `daydream-review.yml` | Daydream Review | Phase A — runs the reviewer over the PR head (unprivileged), uploads a `daydream-findings` artifact |
-| `daydream-command.yml` | Daydream Command | Gatekeeper — listens for `@<bot> review` PR comments and dispatches Daydream Review |
+| `daydream-command.yml` | Daydream Command | Gatekeeper — listens for `@<bot> review`, `@<bot> add sequence diagram`, and `@<bot> add flowchart` PR comments and dispatches Daydream Review with the matched command |
 | `daydream-post.yml` | Daydream Post | Phase B — fires when Daydream Review completes, validates the artifact, posts findings as your App bot |
 
 ## Install
@@ -21,11 +21,15 @@ Codex CLI before review), then follow the canonical installation guide:
 | Trigger | Path | Notes |
 |---|---|---|
 | `@<bot> review` PR comment | Command → Review → Post | Comment author must be OWNER / MEMBER / COLLABORATOR; bot comments are ignored; the PR head current at comment time is bound as the approved target |
-| New commit after approval | Review rejects head drift | Comment `@<bot> review` again to approve the new head |
+| `@<bot> add sequence diagram` PR comment (alias `@<bot> add sequence`) | Command → Review → Post | Same trust gate and head binding; runs a diagram-only pass that posts one standalone sequence-diagram comment bound to the approved head, and no findings |
+| `@<bot> add flowchart` PR comment | Command → Review → Post | Same trust gate and head binding; runs a diagram-only pass that posts one standalone flowchart comment bound to the approved head, and no findings |
+| New commit after approval | Review rejects head drift | Comment the same command again to approve the new head |
 | Fork PRs | Same trusted-comment path | The review remains approval-gated and checks out only the approved head |
 
 There is no automatic PR-open trigger. A credential-bearing review runs only
-after a trusted comment explicitly approves the current head.
+after a trusted comment explicitly approves the current head. Command matching
+is case-sensitive and exact: only the fixed token is read out of the comment,
+and no comment text ever reaches a `run:` step or a model prompt.
 
 ## Security model — the privilege split
 
@@ -79,21 +83,26 @@ triggers and posting identity, not a new output format.
 ## Dependabot dependency updates
 
 `.github/dependabot.yml` keeps dependency updates arriving as small, grouped,
-reviewer-friendly PRs across four managed ecosystems:
+reviewer-friendly PRs across three managed ecosystems:
 
 | Ecosystem | Directory | Notes |
 |---|---|---|
 | `uv` | `/` | Root workspace dependencies (`pyproject.toml` / `uv.lock`) |
 | `uv` | `/rl/daydream_review_v1` | The standalone RL package's own dependencies |
-| `github-actions` | `/` | Action version bumps across `.github/workflows` |
 | `npm` | `/.github/workflows` | Deliberately points at this folder's `package.json`, which tracks the single `@openai/codex` dependency used by CI — do not "fix" the directory to `/` |
 
-**Volume bounds.** All four ecosystems run weekly on Mondays (06:00,
+**Volume bounds.** All three ecosystems run weekly on Mondays (06:00,
 `Australia/Brisbane`) with `open-pull-requests-limit: 5` per ecosystem. The
-three multi-dependency ecosystems (both `uv` blocks and `github-actions`) use
-one minor+patch group each, so at most one grouped PR per uv project and one
-for all action bumps; the npm block is ungrouped since it tracks a single
-dependency. Commit messages carry the `chore(deps)` prefix.
+two multi-dependency `uv` blocks each use one minor+patch group, so at most
+one grouped PR per uv project; the npm block is ungrouped since it tracks a
+single dependency. Commit messages carry the `chore(deps)` prefix.
+
+**Action bumps are manual.** The `github-actions` ecosystem was removed on
+purpose: every third-party action is pinned to a full commit SHA registered in
+`tests/test_workflow_templates.py::_PINNED_ACTION_VERSIONS`, which Dependabot
+cannot update — its action-bump PRs failed CI structurally. Bump actions by
+hand: update the SHA + `# vX.Y.Z` comment in the workflows (live and packaged
+templates) AND the map entry, then run `make check`.
 
 **Validation gate.** Every dependency PR must pass `make check` before merge —
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`

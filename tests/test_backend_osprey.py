@@ -28,6 +28,8 @@ from daydream.backends.osprey import (
     OspreyProtocolError,
     OspreyTerminalError,
     OspreyUnsupportedOption,
+    _optional_non_negative_int,
+    _required_non_negative_int,
     _stderr_diagnostic_sink,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -708,22 +710,62 @@ async def test_terminal_exit_code_must_match_process_status() -> None:
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 
-@pytest.mark.asyncio
-async def test_negative_thinking_tokens_are_rejected() -> None:
-    lines, _ = _stream(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "usage_reported": True,
-            "duration_ms": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "thinking_tokens": -1,
-        },
-    )
+def test_non_negative_int_helpers_reject_below_zero() -> None:
+    event = {"event": "turn_end", "k": -1}
+    with pytest.raises(OspreyProtocolError, match="has negative 'k'"):
+        _required_non_negative_int(event, "k")
+    with pytest.raises(OspreyProtocolError, match="has negative 'k'"):
+        _optional_non_negative_int(event, "k")
+    assert _optional_non_negative_int({"event": "turn_end", "k": None}, "k") is None
+    assert _required_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
+    assert _optional_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
 
-    with pytest.raises(OspreyError, match="thinking_tokens"):
+
+@pytest.mark.asyncio
+async def test_negative_session_total_cost_is_rejected() -> None:
+    lines, _ = _stream()
+    lines[-1]["total_cost_usd"] = "-0.125"
+
+    with pytest.raises(OspreyError, match="total_cost_usd"):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events, field",
+    [
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": -1, "prompt_tokens": 0, "completion_tokens": 0}], "duration_ms"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": False,
+           "duration_ms": -1}], "duration_ms"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": -1, "completion_tokens": 0}], "prompt_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": -1}], "completion_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "cached_tokens": -1}], "cached_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "thinking_tokens": -1}], "thinking_tokens"),
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "cost_usd": "-0.125"}], "cost_usd"),
+    ],
+)
+async def test_negative_osprey_telemetry_is_rejected(
+    events: list[dict[str, object]], field: str
+) -> None:
+    lines, _ = _stream(*events)
+
+    with pytest.raises(OspreyError, match=field):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 

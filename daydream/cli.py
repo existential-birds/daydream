@@ -25,7 +25,7 @@ top-level ``TARGET`` positional):
     - ``corpus hydrate-hub`` — turn a pinned private-Hub trajectory snapshot into a
       verified, sanitized, harvestable local staging archive and publish it additively
       back to the Hub under ``curated/<curation-id>/``
-    - ``corpus adjudicate <build|show|label|export|report>`` — per-finding
+    - ``corpus adjudicate <build|show|label|export|report|...|publish-final>`` — per-finding
       human-label workflow: build the deterministic adjudication queue, show
       unresolved items grouped by disposition, record provenance-complete
       human observations, export the projector-shape rows (with ``--dry-run``
@@ -44,7 +44,7 @@ import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
 from rich.console import Console
@@ -569,13 +569,48 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         "curation-manifest.json)",
     )
     parser.add_argument(
+        "--annotation-bundle-root",
+        type=Path,
+        default=None,
+        dest="annotation_bundle_dir",
+        metavar="DIR",
+        help="Annotation-bundle root (must contain _SUCCESS, SHA256SUMS, "
+        "lineage.json, annotations.jsonl); self-verified and linked to "
+        "--bundle-root before the projection runs",
+    )
+    parser.add_argument(
+        "--license-policy",
+        type=Path,
+        default=None,
+        dest="license_policy",
+        metavar="PATH",
+        help="Digest-pinned license policy JSON; every record's per-repo license "
+        "decision is resolved from it (required)",
+    )
+    parser.add_argument(
         "--annotations-snapshot",
         type=Path,
-        required=True,
+        default=None,
         dest="annotations_snapshot",
         metavar="PATH",
-        help="Side-car JSONL of per-finding resolutions keyed by fingerprint, "
-        "digest-pinned alongside the bundle",
+        help=argparse.SUPPRESS,  # deprecated: refused in the handler
+    )
+    parser.add_argument(
+        "--repo-slug",
+        type=str,
+        default=None,
+        dest="repo_slug",
+        metavar="SLUG",
+        help=argparse.SUPPRESS,  # URL-identity smuggling: refused in the handler
+    )
+    parser.add_argument(
+        "--allow-copyleft",
+        action="append",
+        default=[],
+        dest="allow_copyleft",
+        metavar="OWNER/REPO",
+        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        "owner/repo slug (case-insensitive)",
     )
     parser.add_argument(
         "--out",
@@ -591,8 +626,23 @@ def _build_build_corpus_v2_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         dest="max_stack_share",
-        help="Not supported by build-v2: the v2 projection applies per-tier caps "
-        "(BuildCorpusV2Config.caps), so passing this flag is refused",
+        help="Maximum projected share of any single detected stack, in (0, 1]",
+    )
+
+    parser.add_argument(
+        "--max-repo-share",
+        type=float,
+        default=None,
+        dest="max_repo_share",
+        help="Maximum projected share of any single repository slug, in (0, 1]",
+    )
+
+    parser.add_argument(
+        "--max-profile-share",
+        type=float,
+        default=None,
+        dest="max_profile_share",
+        help="Maximum projected share of any single native profile, in (0, 1]",
     )
 
     parser.add_argument(
@@ -620,7 +670,7 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
 
     Drives :func:`daydream.training.corpus_v2.run_build_corpus_v2` synchronously
     (no agent work, no network — a pure projection over the curated bundle plus
-    the annotations snapshot). Mirrors :func:`_handle_build_corpus_command`'s
+    the annotation bundle). Mirrors :func:`_handle_build_corpus_command`'s
     structure: returns an exit code; ``main()`` translates it into a process
     exit. Errors are fail-closed: a refused build exits non-zero with the
     exception message and writes nothing.
@@ -634,16 +684,57 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
     parser = _build_build_corpus_v2_parser()
     args = parser.parse_args(argv)
 
-    if args.max_stack_share is not None:
-        if not (0.0 < args.max_stack_share <= 1.0):
-            print_error(create_console(), "Invalid --max-stack-share", "Must be in (0, 1].")
+    for flag, value in (
+        ("--max-stack-share", args.max_stack_share),
+        ("--max-repo-share", args.max_repo_share),
+        ("--max-profile-share", args.max_profile_share),
+    ):
+        if value is not None and not (0.0 < value <= 1.0):
+            print_error(create_console(), f"Invalid {flag}", "Must be in (0, 1].")
             return 1
+
+    if args.annotations_snapshot is not None:
         print_error(
             create_console(),
-            "Unsupported --max-stack-share",
-            "corpus build-v2 applies per-tier caps (BuildCorpusV2Config.caps); "
-            "per-stack share caps are not part of the v2 projection.",
+            "Unsupported --annotations-snapshot",
+            "The side-car snapshot was replaced by the two-bundle contract; "
+            "pass the self-verified annotation bundle via --annotation-bundle-root.",
         )
+        return 1
+    if args.annotation_bundle_dir is None:
+        print_error(
+            create_console(),
+            "Missing --annotation-bundle-root",
+            "A corpus v2 build requires a pinned annotation bundle "
+            "(_SUCCESS + SHA256SUMS + lineage.json + annotations.jsonl).",
+        )
+        return 1
+    if args.repo_slug is not None:
+        print_error(
+            create_console(),
+            "Unsupported --repo-slug",
+            "A raw remote URL (or any override slug) is never a repo identity; "
+            "per-repo identity comes from the curation manifest, which the "
+            "bundle gate verifies.",
+        )
+        return 1
+    if args.license_policy is None:
+        print_error(
+            create_console(),
+            "Missing --license-policy",
+            "A corpus v2 build requires a pinned license policy file; per-repo "
+            "license decisions are resolved from it (fail-closed).",
+        )
+        return 1
+
+    # Validate the policy file before any build work (M10): a malformed or
+    # unknown-version policy must refuse without creating the output directory.
+    from daydream.training.corpus_v2.license import load_license_policy
+
+    try:
+        load_license_policy(args.license_policy)
+    except (OSError, ValueError, TypeError) as exc:
+        print_error(create_console(), "Invalid --license-policy", str(exc))
         return 1
 
     # --out names the corpus JSONL; the projector writes its canonical file set
@@ -658,8 +749,13 @@ def _handle_build_corpus_v2_command(argv: list[str]) -> int:
         config = BuildCorpusV2Config(
             out_dir=out_dir,
             bundle_dir=args.bundle_root,
-            annotations_snapshot=args.annotations_snapshot,
+            annotation_bundle_dir=args.annotation_bundle_dir,
+            license_policy_path=args.license_policy,
+            allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft),
             as_of=args.as_of,
+            max_stack_share=args.max_stack_share,
+            max_repo_share=args.max_repo_share,
+            max_profile_share=args.max_profile_share,
         )
     except ValueError as exc:
         print_error(create_console(), "Invalid --as-of", str(exc))
@@ -864,6 +960,26 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         dest="review",
         help="Review and write a report to terminal/markdown, then exit.",
     )
+    # Issue #1113. The value is REQUIRED (no ``nargs="?"``): with an optional
+    # value, ``--diagram-only /path`` would consume the target positional as
+    # the kind and then fail as an invalid choice.
+    output_group.add_argument(
+        "--diagram-only",
+        choices=["auto", "sequence", "flowchart", "both"],
+        default=None,
+        dest="diagram_only",
+        help="Run only the grounded-diagram flow and post a standalone PR comment, "
+             "then exit (auto = whatever is eligible).",
+    )
+    parser.add_argument(
+        "--diagram",
+        choices=["auto", "sequence", "flowchart", "both", "off"],
+        default=None,
+        dest="diagram",
+        help="Control grounded diagrams in the review paths (default: auto -- render "
+             "every eligible kind). Use --diagram-only for the diagram-only mode."
+        if full_help else argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--log",
         action="store_true",
@@ -929,6 +1045,16 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Approve the PR when a deep review has zero high/medium findings "
              "(issue #343): post event: 'APPROVE' instead of 'COMMENT'. Also "
              "settable via [tool.daydream] approve_on_clean in a config file."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--file-scope-issues",
+        action="store_true",
+        default=False,
+        dest="file_scope_issues",
+        help="Opt in to filing out-of-scope findings and reverted edits as GitHub "
+             "issues (issue #1056; default off). Also settable via [tool.daydream] "
+             "scope_issue_filing in a config file."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -1084,18 +1210,38 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         output_mode = "comment"
     elif args.review:
         output_mode = "review"
+    elif args.diagram_only is not None:
+        output_mode = "diagram"
 
-    # ``--yes`` answers the fix/commit gates, which --review/--comment don't run;
-    # reject rather than silently ignore.
+    # Issue #1113: the two diagram flags mean different things (one modifies the
+    # review paths, one replaces them), so combining them is a request with two
+    # incompatible answers. Reject rather than pick one.
+    if args.diagram is not None and args.diagram_only is not None:
+        parser.error("--diagram cannot be combined with --diagram-only")
+
+    # ``--yes`` answers the fix/commit gates, which --review/--comment/
+    # --diagram-only don't run; reject rather than silently ignore.
     if args.assume == "yes" and output_mode != "loop":
-        parser.error("--yes has no effect with --review/--comment (no fix phase to auto-apply)")
+        parser.error(
+            "--yes has no effect with --review/--comment/--diagram-only "
+            "(no fix phase to auto-apply)"
+        )
 
-    findings_out_allowed = output_mode == "review" or (output_mode == "loop" and not args.shallow)
+    findings_out_allowed = (
+        output_mode in ("review", "diagram")
+        or (output_mode == "loop" and not args.shallow)
+    )
     if args.findings_out is not None and not findings_out_allowed:
         parser.error(
-            "--findings-out requires --review or the default deep review flow "
-            "(not --comment/--shallow)"
+            "--findings-out requires --review, --diagram-only, or the default deep "
+            "review flow (not --comment/--shallow)"
         )
+
+    # Issue #1113: the diagram flow writes none of the artifacts a resume stage
+    # attests, so every --start-at value is meaningless for it. Reject at the
+    # CLI rather than silently accepting and ignoring it.
+    if args.diagram_only is not None and args.start_at != "review":
+        parser.error(f"--start-at {args.start_at} is not valid with --diagram-only")
 
     # ttt/per-stack/merge are deep-pipeline resume stages; not valid for shallow.
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
@@ -1115,8 +1261,8 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         )
 
     if args.flow_name is not None:
-        if args.comment or args.review:
-            parser.error("--flow cannot be combined with --review/--comment")
+        if args.comment or args.review or args.diagram_only is not None:
+            parser.error("--flow cannot be combined with --review/--comment/--diagram-only")
         if args.shallow:
             parser.error("--flow cannot be combined with --shallow")
 
@@ -1155,6 +1301,9 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         branch=args.branch,
         base=args.base,
         output_mode=output_mode,  # type: ignore[arg-type]
+        # Issue #1113: --diagram-only's value IS the run's diagram mode, so an
+        # explicit request wins over a repo file's ``mode = "off"``.
+        diagram=args.diagram_only if args.diagram_only is not None else args.diagram,
         findings_out=args.findings_out,
         dump_artifacts=args.dump_artifacts,
         trajectory_hub_repo=args.trajectory_hub_repo,
@@ -1163,6 +1312,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         flow_name=args.flow_name,
         precision_mode=args.precision,
         approve_on_clean=args.approve_on_clean,
+        scope_issue_filing=args.file_scope_issues,
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
         assume=args.assume,
@@ -1242,12 +1392,15 @@ def _handle_harvest_command(argv: list[str]) -> int:
     module attribute so test monkeypatches take effect). ``run_harvest`` is a
     coroutine in production, so it is driven through :func:`anyio.run`; a
     synchronous test double that returns a summary directly is used as-is.
-    Returns an exit code; ``main`` translates it to a process exit. Per-row
-    harvest errors do not escalate to a non-zero exit — the summary's
-    ``errors`` counter surfaces them.
+    Returns an exit code; ``main`` translates it to a process exit. An
+    aborted summary (``aborted >= 1``) or any per-row harvest errors
+    (``errors > 0``) exits ``1``; a clean partial completion with unresolved
+    findings still exits ``0`` (unresolved findings in the data are not
+    process failure).
 
     Returns:
-        ``0`` on success; ``1`` on a validation error.
+        ``0`` on success; ``1`` on a validation error or an aborted/errored
+        harvest summary.
     """
     import daydream.archive as _archive
     import daydream.training.harvest as _harvest
@@ -1284,6 +1437,8 @@ def _handle_harvest_command(argv: list[str]) -> int:
         # always async, so mypy only sees the coroutine type here.
         summary = run_harvest(config)  # type: ignore[assignment]
     print_info(console, str(summary))
+    if summary.get("aborted", 0) >= 1 or summary.get("errors", 0) > 0:
+        return 1
     return 0
 
 
@@ -1346,10 +1501,34 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         help="Opt in to a moving branch/tag source revision (output is non-canonical).",
     )
     parser.add_argument(
+        "--license-policy",
+        type=Path,
+        default=None,
+        dest="license_policy",
+        metavar="PATH",
+        help="Digest-pinned license policy JSON; REQUIRED for publication "
+        "(omitting it on a non-dry run refuses before any Hub access); the "
+        "per-repo license admission gate runs at hydration and rejected "
+        "sessions are excluded before publication; optional for --dry-run "
+        "planning (issue #1094, previously #1080)",
+    )
+    parser.add_argument(
+        "--allow-copyleft",
+        action="append",
+        default=[],
+        dest="allow_copyleft",
+        metavar="OWNER/REPO",
+        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        "owner/repo slug (case-insensitive); only meaningful with --license-policy",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         dest="dry_run",
-        help="Plan only: pin, download, ingest, and tally — no Hub publication.",
+        help=(
+            "Plan only: discover and normalize sessions, download, ingest, and tally "
+            "discovered/admitted/rejected candidates — no Hub publication."
+        ),
     )
     return parser
 
@@ -1586,10 +1765,11 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     """Handle ``daydream corpus hydrate-hub [...]``.
 
     Fail-closed, fatal semantics (unlike ``hub.py``'s warn-everything): a
-    missing ``HF_TOKEN`` or a moving-branch revision without ``--exploratory``
-    exits 1 before any Hub access. Success prints the immutable output commit
-    SHA plus a value-free summary (counts and reason-code tallies only). Any
-    ``HydrationError`` is ``redact_text``-processed before display.
+    missing ``HF_TOKEN``, ``GITHUB_TOKEN``, or a moving-branch revision without
+    ``--exploratory`` exits 1 before any Hub access. Success prints the
+    immutable output commit SHA plus a value-free summary (counts and
+    reason-code tallies only). Any ``HydrationError`` is ``redact_text``-
+    processed before display.
 
     Returns:
         ``0`` on a verified run (or a completed ``--dry-run`` plan); ``1`` on
@@ -1599,7 +1779,7 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
 
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
-    from daydream.ui import create_console
+    from daydream.ui import create_console, print_warning
 
     parser = _build_hydrate_hub_parser()
     console = create_console()
@@ -1646,6 +1826,48 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         )
         return 1
 
+    # Issue #1094: a non-dry hydrate-hub publication requires a pinned license
+    # policy; refuse before any Hub access or staging work. A dry-run may omit
+    # it (planning affordance). Mirrors build-v2's policy-required pattern.
+    if args.license_policy is None and not args.dry_run:
+        print_error(
+            console,
+            "Missing --license-policy",
+            "A hydrate-hub publication requires a pinned license policy file; "
+            "per-repo license admission decisions are resolved from it "
+            "(fail-closed). A --dry-run may omit it.",
+        )
+        return 1
+
+    # Issue #1094: license-evidence enrichment (live GitHub license API calls)
+    # is a hard runtime requirement on every non-dry publication. Fail closed
+    # before any Hub access or staging work, naming the variable and the fix —
+    # an unset token would otherwise surface only as a redacted generic 401
+    # failure after download/ingest/dedupe have run. A --dry-run may omit it
+    # (planning affordance; the resolver itself fail-fasts with this same
+    # message if a policy-driven dry run reaches enrichment without one).
+    if not args.dry_run and not os.environ.get("GITHUB_TOKEN"):
+        print_error(
+            console,
+            "GITHUB_TOKEN is not set",
+            "license evidence enrichment requires a GitHub API token for the "
+            "license endpoint. Export GITHUB_TOKEN and retry.",
+        )
+        return 1
+
+    # Pre-validate the license policy up front so a malformed or missing
+    # --license-policy is named by this handler (and redaction-processed) instead
+    # of escaping as an unredacted generic "Fatal Error" from main(). Mirrors the
+    # build-v2 handler's fail-closed validation.
+    if args.license_policy is not None:
+        from daydream.training.corpus_v2.license import load_license_policy
+
+        try:
+            load_license_policy(args.license_policy)
+        except (OSError, ValueError, TypeError) as exc:
+            print_error(console, "Invalid --license-policy", str(exc))
+            return 1
+
     stage_dir = args.stage_dir.expanduser()
     config = _hydrate.HydrateHubConfig(
         source_repo=args.source_repo,
@@ -1653,6 +1875,10 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
         destination_repo=args.destination_repo,
         stage_dir=stage_dir,
         exploratory=args.exploratory,
+        license_policy_path=(
+            str(args.license_policy) if args.license_policy is not None else None
+        ),
+        allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft),
     )
     if args.dry_run:
         return _hydrate_hub_dry_run(config, console)
@@ -1677,16 +1903,40 @@ def _handle_hydrate_hub_command(argv: list[str]) -> int:
     )
     print_info(
         console,
-        f"dry-run admitted {summary.dry_run_admitted} batch(es); "
+        f"dry-run discovered {summary.dry_run_discovered} "
+        f"candidate(s); admitted {summary.dry_run_admitted} batch(es); "
+        f"rejected {summary.dry_run_rejected} batch(es); "
         f"verify admitted {summary.verify_admitted} batch(es)",
     )
+    if summary.license_admission:
+        buckets = summary.license_admission
+        print_info(
+            console,
+            "license admission: "
+            f"admitted {buckets['admitted']}; c5-excluded {buckets['c5_excluded']}; "
+            f"copyleft-unopted {buckets['c8_copyleft_unopted']}; "
+            f"evidence-missing {buckets['license_evidence_missing']}",
+        )
+    if summary.dry_run_incomplete_manifests:
+        print_warning(
+            console,
+            "hydration yield reduced: incomplete manifest(s) discovered and "
+            "dropped: " + redact_text("; ".join(summary.dry_run_incomplete_manifests)),
+        )
     return 0
 
 
 def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
-    """Plan-only hydrate pass: pin, download, ingest, tally — no publication."""
+    """Plan-only hydrate pass: pin, download, ingest, tally — no publication.
+
+    Prints the per-code tallies plus per-repository license decision counts
+    (value-free slugs and counts, issue #1094), with a fail-closed accounting
+    invariant: every license-adjudicated candidate (imported plus license-gate
+    rejections) lands in exactly one per-repository license bucket.
+    """
     from daydream.archive import hydrate as _hydrate
     from daydream.trajectory import redact_text
+    from daydream.ui import print_warning
 
     try:
         client = _hydrate._make_client(config.source_repo)
@@ -1696,9 +1946,66 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
         _hydrate.download_snapshot(client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
         _hydrate.ingest_bundles(config.stage_dir, revision=source_commit)
         _hydrate.dedupe_admitted(config.stage_dir, revision=source_commit)
+        binding = None
+        if config.license_policy_path is not None:
+            # Issue #1094: the dry-run derives and reports the v2 candidate id
+            # from the same binding inputs the publication will use — enrich
+            # (production resolver), gate, then the post-gate binding.
+            from daydream.archive.license_enrich import (
+                _make_license_resolver,
+                enrich_license_evidence,
+            )
+
+            enrich_license_evidence(
+                config.stage_dir, revision=source_commit, resolver=_make_license_resolver(),
+            )
+            _hydrate.restamp_admitted_digests(config.stage_dir, revision=source_commit)
+            _hydrate.apply_license_gate(
+                config.stage_dir,
+                revision=source_commit,
+                license_policy_path=config.license_policy_path,
+                allow_copyleft=config.allow_copyleft,
+            )
+            binding = _hydrate.resolve_curation_identity(
+                config.stage_dir,
+                source_commit=source_commit,
+                license_policy_path=config.license_policy_path,
+                allow_copyleft=config.allow_copyleft,
+            )
         ledger = _hydrate.build_import_ledger(
-            config.stage_dir, revision=source_commit, source_commit=source_commit
+            config.stage_dir, revision=source_commit, source_commit=source_commit,
+            binding=binding,
         )
+        license_admission = (
+            _hydrate.license_admission_summary(ledger)
+            if config.license_policy_path is not None
+            else {}
+        )
+        # Issue #1094 Task 8: per-repo auditable decision counts. Value-free
+        # (slugs + counts only). License accounting is enforced here — every
+        # license-adjudicated candidate (imported sessions plus license-gate
+        # rejections; ingest/fixture rejections are never adjudicated by the
+        # license gate and are reported via the ledger's non-license rejection
+        # tallies) must land in exactly one per-repo bucket, mirroring
+        # license_admission_summary's population.
+        per_repo = (
+            _hydrate.license_admission_by_repo(config.stage_dir, ledger)
+            if config.license_policy_path is not None
+            else {}
+        )
+        if config.license_policy_path is not None:
+            per_repo_total = sum(sum(b.values()) for b in per_repo.values())
+            adjudicated_total = sum(license_admission.values())
+            if per_repo_total != adjudicated_total:
+                raise _hydrate.HydrationError(
+                    redact_text(
+                        f"per-repository accounting mismatch for revision "
+                        f"{source_commit!r}: license-adjudicated population "
+                        f"{adjudicated_total} candidate(s) (imported plus "
+                        f"license-gate rejections), per-repository buckets "
+                        f"total {per_repo_total}"
+                    )
+                )
     except _hydrate.HydrationError as exc:
         print_error(console, "Hydration dry-run failed", redact_text(str(exc)))
         return 1
@@ -1711,10 +2018,39 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
     print_info(
         console,
         f"dry-run plan for curation {ledger.get('curation_id')}: pinned {source_commit}; "
+        f"discovered {tallies.get('discovered', 0)} candidate(s) of "
+        f"{tallies.get('run_shaped_manifests', 0)} run-shaped manifest(s); "
         f"admitted {tallies.get('imported', 0)} batch(es); "
         f"rejected {len(rejections)} batch(es); "
+        f"accounted {tallies.get('accounted', 0)} candidate(s); "
         f"reason codes: {reason_tally or 'none'}; no publication performed",
     )
+    if license_admission:
+        print_info(
+            console,
+            "license admission: "
+            f"admitted {license_admission['admitted']}; "
+            f"c5-excluded {license_admission['c5_excluded']}; "
+            f"copyleft-unopted {license_admission['c8_copyleft_unopted']}; "
+            f"evidence-missing {license_admission['license_evidence_missing']}",
+        )
+    for repo_slug in sorted(per_repo):
+        buckets = per_repo[repo_slug]
+        print_info(
+            console,
+            f"license admission by repo: {repo_slug} -> "
+            f"admitted {buckets['admitted']}, "
+            f"c5-excluded {buckets['c5_excluded']}, "
+            f"copyleft-unopted {buckets['c8_copyleft_unopted']}, "
+            f"evidence-missing {buckets['license_evidence_missing']}",
+        )
+    incomplete = [str(item) for item in tallies.get("incomplete_manifests", [])]
+    if incomplete:
+        print_warning(
+            console,
+            "dry-run yield reduced: incomplete manifest(s) discovered and "
+            "dropped: " + redact_text("; ".join(incomplete)),
+        )
     return 0
 
 
@@ -1876,25 +2212,46 @@ def _handle_label_command(argv: list[str]) -> int:
     return 0
 
 
+class _TrainParser(argparse.ArgumentParser):
+    """Train parser that maps usage errors to exit code 1.
+
+    The train verb reports refusals (including conflicting inputs) as a
+    validation failure with exit 1 rather than argparse's default 2, so
+    harnesses see one failure code for "the run was refused".
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 def _build_train_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream train --corpus <path> --out <dir> [...]``.
 
     Dispatched manually from ``main()`` (verb-first) so its flags don't
     collide with the top-level ``TARGET`` positional.
     """
-    parser = argparse.ArgumentParser(
+    parser = _TrainParser(
         prog="daydream train",
         description=(
             "Run the four-stage training pipeline (stage0 gate → stage1 SFT → "
             "stage2 RFT → stage3 adapter) and write a stage manifest."
         ),
     )
-    parser.add_argument(
+    corpus_group = parser.add_mutually_exclusive_group(required=True)
+    corpus_group.add_argument(
         "--corpus",
         type=Path,
-        required=True,
         metavar="PATH",
         help="Input JSONL training corpus (one record per line; C5/C8 fail-closed)",
+    )
+    corpus_group.add_argument(
+        "--corpus-v2",
+        type=Path,
+        dest="corpus_v2",
+        metavar="DIR",
+        help="Frozen corpus-v2 projection directory; verifies _SUCCESS/lineage/"
+             "split digests and re-applies C5/C8",
     )
     parser.add_argument(
         "--out",
@@ -1952,6 +2309,7 @@ def _handle_train_command(argv: list[str]) -> int:
 
     config = PipelineConfig(
         corpus=args.corpus,
+        corpus_v2=args.corpus_v2,
         out_dir=args.out,
         stages=tuple(args.stages) if args.stages else ("stage0", "stage1", "stage2", "stage3"),
         base_model=args.base_model,
@@ -1998,11 +2356,13 @@ _CORPUS_USAGE = (
     "Data-pipeline sub-verbs:\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
     "  build     project the as-of-pinned annotations into a JSONL training corpus\n"
-    "  build-v2  project curated-bundle per-finding resolutions into corpus-v2 records\n"
+    "  build-v2  project curated-bundle resolutions into corpus-v2 records (pinned --license-policy required)\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"
     "  hydrate-hub  hydrate a pinned Hub snapshot into a sanitized, verified staging archive\n"
     "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact\n"
-    "  adjudicate  per-finding human-label workflow: build/show/label/export/report the adjudication queue"
+    "  adjudicate  per-finding human-label workflow: build/show/label/export/report, then"
+    "\n"
+    "  materialize/harvest/publish the annotation snapshot"
 )
 
 _EXT_USAGE = (

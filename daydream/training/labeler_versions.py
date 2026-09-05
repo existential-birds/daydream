@@ -1,7 +1,8 @@
 """Version constants for the reply-labeling pipeline and reply evidence digest.
 
 Independent version axes (M13): rubric schema, labeler policy, reply classifier,
-adjudication labeler, and evidence digest format each evolve separately from ``reward.REWARD_VERSION``.
+adjudication labeler, human labeler, annotation snapshot schema, and evidence
+digest format each evolve separately from ``reward.REWARD_VERSION``.
 This module imports nothing from the rest of the training package.
 """
 
@@ -15,6 +16,8 @@ RUBRIC_SCHEMA_VERSION = "980-rubric-r2"
 LABELER_POLICY_VERSION = "980-policy-r1"
 REPLY_CLASSIFIER_VERSION = "980-classifier-r1"
 ADJUDICATION_LABELER_VERSION = "984-adjudicate-r1"
+HUMAN_LABELER_VERSION = "1055-human-r1"
+ANNOTATION_SNAPSHOT_SCHEMA_VERSION = "1055-snapshot-r1"
 REPLY_EVIDENCE_DIGEST_FORMAT = "sha256/1"
 
 
