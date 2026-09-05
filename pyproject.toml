@@ -83,7 +83,7 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 # Harbor ships without py.typed; no stub package exists. Narrow per-module,
 # not blanket-library, so future typed releases are picked up automatically.
-module = ["harbor.models.*", "harbor.agents.base", "harbor.environments.docker.*", "harbor.environments.base"]
+module = ["harbor.models.*", "harbor.agents.base", "harbor.utils.env", "harbor.environments.docker.*", "harbor.environments.base"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -1818,3 +1818,15 @@ async def test_claude_cli_communicate_only_fallback(sr_module: Any) -> None:
     assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
     assert len(seen) == 1
     assert seen[0][1] == b""  # stderr is drained by communicate, never blocks
+
+
+def test_build_client_empty_string_api_key_fails_closed(sr_module: Any) -> None:
+    """The template's `${VAR:-}` fallback resolves to "" — still fail-closed (#979)."""
+    sr = sr_module
+    env = {
+        sr._ENV_PROVIDER: "anthropic",
+        sr._ENV_MODEL: "claude-x",
+        sr._ENV_API_KEY: "",  # exactly what resolve_env_vars emits for unset ${VAR:-}
+    }
+    with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_API_KEY"):
+        sr._build_client(env)
