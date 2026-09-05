@@ -174,6 +174,22 @@ async def test_real_file_change_parses_to_expected_events() -> None:
             changes_keys.extend(changes.keys())
     assert changes_keys, "fixture has a file_change item with no changes keys"
 
+    # The parser normalizes absolute paths under execution_cwd to repo-relative
+    # (codex.py file_change branch: commonpath/relpath), so the fixture's raw
+    # changes keys must undergo the same transform before comparison. Mirror the
+    # parser's guards: keys outside the cwd stay absolute, disjoint-drive
+    # ValueError keeps them absolute too.
+    execution_cwd = "/tmp"
+    normalized_keys: list[str] = []
+    for key in changes_keys:
+        try:
+            if os.path.isabs(key) and os.path.commonpath([key, execution_cwd]) == execution_cwd:
+                normalized_keys.append(os.path.relpath(key, execution_cwd))
+            else:
+                normalized_keys.append(key)
+        except ValueError:
+            normalized_keys.append(key)
+
     backend = CodexBackend(model="gpt-5.5")
     mock_proc = make_mock_process_from_fixture(REAL_FILE_CHANGE)
 
@@ -187,8 +203,10 @@ async def test_real_file_change_parses_to_expected_events() -> None:
     parsed_paths = [
         c["path"] for start in patch_starts for c in start.input.get("changes", [])
     ]
-    assert sorted(parsed_paths) == sorted(changes_keys), (
-        f"parsed patch paths {parsed_paths} != fixture changes keys {changes_keys}"
+    # Compare against the cwd-normalized keys (parser output is relativized).
+    assert sorted(parsed_paths) == sorted(normalized_keys), (
+        f"parsed patch paths {parsed_paths} != fixture changes keys "
+        f"(normalized) {normalized_keys}"
     )
 
     patch_ids = {e.id for e in patch_starts}
