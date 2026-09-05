@@ -11,6 +11,8 @@ to the single deep flow, which now carries every PR-process mode (#330)::
         other registered      -> _run_custom_flow (fork-registered custom flow)
     output_mode == "comment"  -> deep comment mode (posts inline, no fix cycle)
     output_mode == "review"   -> deep review mode (report only, no fix cycle)
+    output_mode == "diagram"  -> diagram-only mode (grounded mermaid diagrams,
+                                 posts a standalone comment, no findings)
     output_mode == "loop":
         config.shallow        -> deep shallow mode (single-stack deep)
         else                  -> deep (default)
@@ -75,8 +77,9 @@ if TYPE_CHECKING:
     from daydream.pr_review import ParsedIssue
 
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
-# comments and exits; ``review`` writes a report and exits.
-OutputMode = Literal["loop", "comment", "review"]
+# comments and exits; ``review`` writes a report and exits; ``diagram``
+# (issue #1113) runs the diagram-only flow and posts a standalone comment.
+OutputMode = Literal["loop", "comment", "review", "diagram"]
 
 
 @dataclass
@@ -136,7 +139,10 @@ class RunConfig:
         branch: Specific branch to review. If None, uses cwd's HEAD.
         base: Base ref to compare against. If None, auto-resolves.
         output_mode: ``"loop"`` (review→fix→test, default), ``"comment"``
-            (review + post inline PR comments), or ``"review"`` (review report only).
+            (review + post inline PR comments), ``"review"`` (review report only),
+            or ``"diagram"`` (issue #1113: the diagram-only flow, which runs
+            exploration plus the diagram phase and posts a standalone grounded
+            mermaid comment instead of a review).
         findings_out: Path to write the Phase A findings artifact
             (``--findings-out``; review mode only). Default None.
         dump_artifacts: Directory to copy the full assembled run bundle into
@@ -247,6 +253,14 @@ class RunConfig:
             root (R1). Flows and prompt builders read this; they never re-read
             profile files. ``None`` before resolution or when a direct caller
             skips the composition-root seam.
+        diagram: Issue #1113. Grounded-diagram mode selector — one of
+            ``"auto"``, ``"sequence"``, ``"flowchart"``, ``"both"``, ``"off"``
+            (``config.DIAGRAM_MODES``). ``None`` means "no CLI request" and
+            falls through to ``file_config.diagram_mode`` then ``"auto"``
+            (precedence CLI > file > default). Carries the ``--diagram`` value in
+            the review paths and the ``--diagram-only`` value when
+            ``output_mode == "diagram"``; an explicit ``--diagram-only`` request
+            wins over a file-config ``mode = "off"``.
 
     """
 
@@ -345,6 +359,11 @@ class RunConfig:
     # every ``FlowContext``/``run_deep`` so no consumer re-reads a file.
     review_profile_path: str | Path | None = None
     review_profile: ResolvedProfile | None = None
+    # Issue #1113: grounded mermaid diagrams. ``None`` (not ``"auto"``) is the
+    # unset marker so a file-config ``[tool.daydream.diagram] mode = "off"`` can
+    # win over the built-in default while an explicit CLI value still overrides
+    # the file. Resolved by the orchestrator's ``_resolved_diagram_mode``.
+    diagram: str | None = None
 
 
 def _make_archive_callback(
@@ -521,25 +540,33 @@ def _recorder_backend_names(
     trajectory and manifest never diverge on which backend produced the run.
     The representative backend resolves through the phase that actually governs
     the flow: deep-flow runs (DEEP/NORMAL/TTT) fan out on ``per_stack_review``;
-    improve runs on its advisory phases with ``recon`` first; other flows fall
-    back to ``review``. Per-phase fix/test are recorded only for flows that
-    statically run those phases: improve/TTT never run fix/test; PR runs fix
-    but never test; CUSTOM composition is fork-defined and unknowable at
-    recorder-open time, so labeling it unconditionally would mislabel
-    review-only forks. A flow that skips a phase yields an empty name (the key
-    is omitted on serialization) rather than a misleading label.
+    improve runs on its advisory phases with ``recon`` first; DIAGRAM runs on
+    ``diagram``, the only agent phase its two-step flow executes (issue #1113);
+    other flows fall back to ``review``. Per-phase fix/test are recorded only
+    for flows that statically run those phases: improve/TTT/DIAGRAM never run
+    fix/test; PR runs fix but never test; CUSTOM composition is fork-defined and
+    unknowable at recorder-open time, so labeling it unconditionally would
+    mislabel review-only forks. A flow that skips a phase yields an empty name
+    (the key is omitted on serialization) rather than a misleading label.
     """
     if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT):
         representative_phase = "per_stack_review"
     elif flow_kind == DaydreamRunFlow.IMPROVE:
         representative_phase = "recon"
+    elif flow_kind == DaydreamRunFlow.DIAGRAM:
+        representative_phase = "diagram"
     else:
         representative_phase = "review"
     backend = _resolved_backend_name(config, representative_phase)
     fix = (
         _resolved_backend_name(config, "fix")
         if flow_kind
-        not in (DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM)
+        not in (
+            DaydreamRunFlow.TTT,
+            DaydreamRunFlow.IMPROVE,
+            DaydreamRunFlow.CUSTOM,
+            DaydreamRunFlow.DIAGRAM,
+        )
         else ""
     )
     test = (
@@ -550,6 +577,7 @@ def _recorder_backend_names(
             DaydreamRunFlow.PR,
             DaydreamRunFlow.IMPROVE,
             DaydreamRunFlow.CUSTOM,
+            DaydreamRunFlow.DIAGRAM,
         )
         else ""
     )
@@ -753,8 +781,10 @@ def _run_posts_to_github(config: RunConfig) -> bool:
 
     This mirrors the mode dispatch's write-capable paths: an explicit
     ``--flow deep`` and the default non-shallow loop both execute deep's
-    ``post-review`` step; and ``--comment``
-    posts inline comments. Improve is write-capable only when its repository
+    ``post-review`` step; ``--comment``
+    posts inline comments; and ``--diagram-only`` (issue #1113) posts a
+    standalone grounded-diagram issue comment, which IS its deliverable.
+    Improve is write-capable only when its repository
     config enables automatic issue publication. ``--review``, shallow mode,
     and generic custom flows are report-only from the runner's perspective, so
     they retain the ambient ``gh`` identity. A custom flow that gains a GitHub
@@ -766,7 +796,7 @@ def _run_posts_to_github(config: RunConfig) -> bool:
             return _file_config_or_empty(config).improve_github_publish_issues
         return config.flow_name == "deep"
 
-    if config.output_mode == "comment":
+    if config.output_mode in ("comment", "diagram"):
         return True
 
     return config.output_mode == "loop" and not config.shallow
@@ -975,9 +1005,11 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
 
     Every PR-process mode routes to :func:`_run_loop_deep` (which delegates to
     :func:`daydream.deep.orchestrator.run_deep`): ``--review`` / ``--comment``
-    run the review spine and stop after post-review, ``--shallow`` forces
-    single-stack mode, and the default loop mode is unchanged. An explicit
-    ``flow_name`` (``--flow``) routes via :func:`_dispatch_selected_flow`.
+    run the review spine and stop after post-review, ``--diagram-only`` runs
+    the two-step ``diagram`` flow over the same preamble (issue #1113),
+    ``--shallow`` forces single-stack mode, and the default loop mode is
+    unchanged. An explicit ``flow_name`` (``--flow``) routes via
+    :func:`_dispatch_selected_flow`.
 
     ``config.pr_number`` can be auto-detected from the current branch for
     metadata (trajectory/archive) without changing dispatch.
@@ -993,7 +1025,10 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     if config.flow_name is not None:
         return await _dispatch_selected_flow(work, config)
 
-    if config.output_mode in ("comment", "review"):
+    # ``diagram`` joins comment/review in skipping ``_require_reviewable_branch``:
+    # it neither fixes nor commits, so a base-branch invocation is a legitimate
+    # (if empty) request rather than a ``WrongBranchError``.
+    if config.output_mode in ("comment", "review", "diagram"):
         return await _run_loop_deep(work, config)
 
     # output_mode == "loop" (default deep) and --shallow both fix against a
@@ -1003,8 +1038,35 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     return await _run_loop_deep(work, config)
 
 
+def _emit_diagram_findings(
+    target_dir: Path, config: RunConfig, payload: dict[str, Any],
+) -> int:
+    """Write the Phase A findings artifact for a diagram-only run (issue #1113).
+
+    A diagram artifact declares ``kind="diagram"`` and carries an EMPTY
+    ``findings`` list: there is nothing to fingerprint, dedup, or minimize, and
+    the privileged poster branches on ``kind`` long before it reaches the
+    reconcile path. Its content is the ``diagram.json`` payload with the
+    rendered mermaid stripped -- Phase B re-renders from the specs.
+
+    Args:
+        target_dir: Repo root containing the PR checkout.
+        config: Run configuration; ``config.findings_out`` must be set.
+        payload: ``{"eligibility": ..., "results": ...}`` without ``mermaid``.
+
+    Returns:
+        ``0`` on success, ``1`` when no PR is resolvable or the artifact is
+        over the size cap.
+    """
+    return _write_findings_for_parsed(target_dir, config, [], kind="diagram", diagrams=payload)
+
+
 def _emit_findings_from_items(
-    target_dir: Path, config: RunConfig, items: list[dict[str, Any]],
+    target_dir: Path,
+    config: RunConfig,
+    items: list[dict[str, Any]],
+    *,
+    diagrams: dict[str, Any] | None = None,
 ) -> int:
     """Write the Phase A findings artifact from canonical merged items.
 
@@ -1016,6 +1078,9 @@ def _emit_findings_from_items(
         target_dir: Repo root containing the PR checkout.
         config: Run configuration; ``config.findings_out`` must be set.
         items: Canonical merged finding dicts (may be empty).
+        diagrams: The run's grounded-diagram payload (issue #1113), or None.
+            Rides along on a ``kind="review"`` artifact so Phase B can render
+            the blocks into the posted review.
 
     Returns:
         ``0`` on success, ``1`` when no PR is resolvable.
@@ -1023,11 +1088,16 @@ def _emit_findings_from_items(
     from daydream import pr_review
 
     parsed = pr_review.parsed_issues_from_items(items)
-    return _write_findings_for_parsed(target_dir, config, parsed)
+    return _write_findings_for_parsed(target_dir, config, parsed, diagrams=diagrams)
 
 
 def _write_findings_for_parsed(
-    target_dir: Path, config: RunConfig, parsed: list["ParsedIssue"],
+    target_dir: Path,
+    config: RunConfig,
+    parsed: list["ParsedIssue"],
+    *,
+    kind: str = "review",
+    diagrams: dict[str, Any] | None = None,
 ) -> int:
     """Resolve the target PR and write the strict-schema findings artifact.
 
@@ -1039,11 +1109,20 @@ def _write_findings_for_parsed(
     absent artifact. An empty ``parsed`` list still writes an (empty) artifact
     so Phase B can resolve all stale comments.
 
+    Args:
+        kind: Artifact kind (issue #1113) -- ``"review"`` or ``"diagram"``.
+        diagrams: The diagram payload for a ``"diagram"`` artifact, else None.
+
     Returns:
-        ``0`` on success, ``1`` when no PR is resolvable.
+        ``0`` on success, ``1`` when no PR is resolvable or the rendered
+        artifact exceeds the size cap.
     """
     from daydream import pr_review
-    from daydream.findings import build_findings_artifact, write_findings_artifact
+    from daydream.findings import (
+        FindingsValidationError,
+        build_findings_artifact,
+        write_findings_artifact,
+    )
 
     assert config.findings_out is not None  # caller gates on findings_out
     try:
@@ -1064,10 +1143,19 @@ def _write_findings_for_parsed(
         return 1
 
     artifact = build_findings_artifact(
-        target_dir, pr, parsed, run_info=pr_review._render_review_info_block(),
+        target_dir,
+        pr,
+        parsed,
+        run_info=pr_review._render_review_info_block(),
+        kind=kind,
+        diagrams=diagrams,
     )
     out_path = Path(config.findings_out)
-    write_findings_artifact(out_path, artifact)
+    try:
+        write_findings_artifact(out_path, artifact)
+    except FindingsValidationError as exc:
+        print_error(console, "Findings Artifact", str(exc))
+        return 1
     print_success(console, f"Findings artifact written to {out_path}")
     return 0
 

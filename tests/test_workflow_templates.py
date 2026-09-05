@@ -6,10 +6,17 @@ permission dicts). They guard only the handful of properties a single file-read
 cannot verify and that a careless edit could silently break:
 
 - No untrusted event data is interpolated into a ``run:`` body (injection).
+- The bot-command match step, executed under GitHub's real ``run:`` shell,
+  recognizes exactly ``review`` / ``add sequence diagram`` (alias ``add
+  sequence``) / ``add flowchart`` and nothing adjacent, in every copy; the
+  matched command reaches the review workflow as a bounded three-option
+  ``choice`` dispatch input, and the live and packaged command workflows stay
+  byte-identical.
 - Every non-local action ``uses:`` in the live and shipped bot workflows
   resolves to a full commit SHA (never a mutable tag/branch/expression).
-- The daydream install stays pinned to an immutable release commit (cross-file
-  drift against ``pyproject.toml``), in every live and shipped workflow.
+- The daydream install stays pinned to an immutable compatible commit: review
+  workflows exposing diagram commands use the approved diagram-capable
+  revision, while posting-only workflows track the packaged release.
 - Every App-token action in the live and packaged posting workflows stays pinned to the approved v3.2.0 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
@@ -33,6 +40,7 @@ PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes i
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import tomllib
@@ -129,9 +137,11 @@ _DAYDREAM_RELEASE_COMMITS: dict[str, str] = {
     "v0.28.0": "e7741f17fc998a675ed2fe3f364d2e646cde5518",
 }
 
+_DAYDREAM_DIAGRAM_COMMIT = "8077f10ededfd9b1f6e1fcb74c47250aaa365caf"
+
 _RELEASE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
-_DAYDREAM_INSTALL_WORKFLOW_PATHS = [
+_DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS = [
     REPO_WORKFLOWS_DIR / "daydream-review.yml",
     REPO_WORKFLOWS_DIR / "daydream-post.yml",
     TEMPLATES_DIR / "daydream-review.yml",
@@ -457,6 +467,220 @@ def test_single_workflow_head_bound_gate() -> None:
     assert "APPROVED_HEAD_SHA" in review["env"]
 
 
+# --- Bot commands: `review`, `add sequence diagram`, `add flowchart` -------
+#
+# The match step is the only place an untrusted comment body is inspected, and
+# its `command` output selects which credential-bearing run the approved head
+# gets. Restating its regexes here would prove nothing, so these tests EXECUTE
+# the workflow's own step under GitHub's real `run:` shell
+# (`bash --noprofile --norc -eo pipefail`) and assert the emitted outputs. The
+# step is located by `id: match` — the step *name* is prose and may be reworded,
+# the id is the contract. All three copies (live command, packaged command,
+# packaged single-file) must agree, so every case runs against all three.
+
+_MATCH_STEP_SOURCES = [
+    pytest.param(REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch", id="live-command"),
+    pytest.param(TEMPLATES_DIR / "daydream-command.yml", "dispatch", id="template-command"),
+    pytest.param(TEMPLATES_DIR / "single" / "daydream.yml", "gate", id="single"),
+]
+
+# (body, handle, expected command). Expected "" means no command matched, i.e.
+# no run is started. The near-misses are the point: a plural, a missing space,
+# a handle that is not at a word boundary, and a different case must all match
+# nothing rather than start a review or a diagram pass.
+_MATCH_CASES = [
+    pytest.param("@bot review", "bot", "review", id="review"),
+    pytest.param("@bot add sequence diagram", "bot", "sequence", id="sequence-full"),
+    pytest.param("@bot add sequence", "bot", "sequence", id="sequence-alias"),
+    pytest.param("@bot add flowchart", "bot", "flowchart", id="flowchart"),
+    pytest.param("@bot add  flowchart", "bot", "flowchart", id="flowchart-extra-space"),
+    pytest.param("@bot add sequence\tdiagram", "bot", "sequence", id="sequence-tab"),
+    pytest.param("@bot add sequence diagram please", "bot", "sequence", id="sequence-trailing-text"),
+    pytest.param("@bot review please", "bot", "review", id="review-trailing-text"),
+    pytest.param("please @bot review", "bot", "review", id="review-leading-text"),
+    pytest.param("some context\n@bot add flowchart\nthanks", "bot", "flowchart", id="flowchart-mid-body"),
+    pytest.param("@bot add flowchart\r\n", "bot", "flowchart", id="flowchart-crlf"),
+    # grep is line-oriented, so a mention split across lines falls back to the
+    # `add sequence` alias rather than matching nothing.
+    pytest.param("@bot add sequence\ndiagram", "bot", "sequence", id="sequence-alias-across-newline"),
+    # Branch precedence is review > sequence > flowchart.
+    pytest.param("@bot review\n@bot add flowchart", "bot", "review", id="review-wins-over-flowchart"),
+    # A handle carrying regex metacharacters is escaped before it reaches grep:
+    # it matches itself literally, and `.*` matches nothing but `.*`.
+    pytest.param("@my.bot+1 review", "my.bot+1", "review", id="metachar-handle-review"),
+    pytest.param("@my.bot+1 add sequence diagram", "my.bot+1", "sequence", id="metachar-handle-sequence"),
+    pytest.param("@my.bot+1 add flowchart", "my.bot+1", "flowchart", id="metachar-handle-flowchart"),
+    pytest.param("@zzz add flowchart", ".*", "", id="metachar-handle-not-a-wildcard"),
+    pytest.param("@bot reviews", "bot", "", id="no-reviews-plural"),
+    pytest.param("@bot add flowcharts", "bot", "", id="no-flowcharts-plural"),
+    pytest.param("@bot add sequence diagrams", "bot", "", id="no-sequence-diagrams-plural"),
+    pytest.param("@bot add sequence diagrams please", "bot", "", id="no-sequence-diagrams-plural-trailing"),
+    pytest.param("@bot addflowchart", "bot", "", id="no-missing-space"),
+    pytest.param("x@bot add flowchart", "bot", "", id="no-handle-mid-word"),
+    pytest.param("@bot ADD FLOWCHART", "bot", "", id="no-uppercase"),
+    # Documented fail-closed caveat: the sequence veto is evaluated over the
+    # whole body, so a body carrying both a valid and a malformed sequence
+    # mention starts nothing and the maintainer retries.
+    pytest.param("@bot add sequence\n@bot add sequence diagrams", "bot", "", id="sequence-veto-fails-closed"),
+]
+
+
+def _run_match_step(path: Path, job: str, body: str, handle: str, out: Path) -> dict[str, str]:
+    """Execute *path*'s own `id: match` step and return the outputs it wrote."""
+    step = next(s for s in job_steps(load_workflow(path), job) if s.get("id") == "match")
+    out.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+        env={
+            "PATH": os.environ["PATH"],
+            "BODY": body,
+            "BOT_HANDLE": handle,
+            "GITHUB_OUTPUT": str(out),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    parsed: dict[str, str] = {}
+    for line in out.read_text(encoding="utf-8").splitlines():
+        if not line:
+            continue
+        key, _, value = line.partition("=")
+        parsed[key] = value
+    return parsed
+
+
+@pytest.mark.parametrize(("wf_path", "job"), _MATCH_STEP_SOURCES)
+@pytest.mark.parametrize(("body", "handle", "expected"), _MATCH_CASES)
+def test_match_step_recognizes_exactly_the_three_bot_commands(
+    wf_path: Path, job: str, body: str, handle: str, expected: str, tmp_path: Path
+) -> None:
+    outputs = _run_match_step(wf_path, job, body, handle, tmp_path / "gh-output")
+
+    # `command` is written unconditionally (empty on no match) so the single-file
+    # gate job can expose it as an unconditional job output; `matched` stays the
+    # gate every downstream `if:` reads.
+    assert outputs["command"] == expected
+    assert outputs["matched"] == ("true" if expected else "false")
+
+
+def test_command_workflow_live_and_template_stay_byte_identical() -> None:
+    """The repo's own command workflow and the packaged template are one file.
+
+    They have no legitimate difference — unlike daydream-review.yml, this
+    workflow holds no model credential and runs no backend, so a drift between
+    them means one copy was edited and the other forgotten. `daydream setup`
+    lands the template, so a divergence ships the untested copy to users.
+    """
+    live = (REPO_WORKFLOWS_DIR / "daydream-command.yml").read_text(encoding="utf-8")
+    template = (TEMPLATES_DIR / "daydream-command.yml").read_text(encoding="utf-8")
+    assert live == template
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
+    ids=["template", "live"],
+)
+def test_command_workflow_dispatches_the_matched_command(wf_path: Path) -> None:
+    """The matched command reaches the review workflow as a dispatch input.
+
+    It travels via `env:` from the match step's output — never `${{ github.event
+    … }}` in a `run:` body — so the head-binding and injection contracts are
+    untouched by the new commands.
+    """
+    wf = load_workflow(wf_path)
+    dispatch = next(
+        step
+        for step in job_steps(wf, "dispatch")
+        if "gh workflow run daydream-review.yml" in step.get("run", "")
+    )
+
+    assert dispatch["env"]["COMMAND"] == "${{ steps.match.outputs.command }}"
+    assert '-f command="$COMMAND"' in dispatch["run"]
+    assert not _EVENT_INTERP.search(dispatch["run"])
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+    ids=["template", "live"],
+)
+def test_review_workflow_command_input_is_a_bounded_choice(wf_path: Path) -> None:
+    """`command` is a three-option `choice`, not a free-form string.
+
+    The input selects which credential-bearing run the approved head gets, so a
+    `type: string` (or an extra option) would let a dispatcher name a run the
+    maintainer never approved. `bot_setup._workflow_contract_intact` enforces
+    the same bound on installed copies.
+    """
+    inputs = _wf_triggers(load_workflow(wf_path))["workflow_dispatch"]["inputs"]
+    command = inputs["command"]
+
+    assert command["type"] == "choice"
+    assert command["options"] == ["review", "sequence", "flowchart"]
+    assert command["default"] == "review"
+    assert command["required"] is False
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+    ids=["template", "live"],
+)
+def test_review_workflow_branches_on_command_and_fails_closed(wf_path: Path) -> None:
+    """The run step dispatches on `$COMMAND` and rejects anything unrecognized.
+
+    The diagram branch must carry the same approved-head binding and artifact
+    contract as the review branch; an unknown value must exit non-zero rather
+    than fall through to a different run than the one approved.
+    """
+    steps = job_steps(load_workflow(wf_path), "analyze")
+    run_step = next(step for step in steps if "daydream --review" in step.get("run", ""))
+    run = run_step["run"]
+
+    assert run_step["env"]["COMMAND"] == "${{ inputs.command }}"
+    assert 'case "$COMMAND" in' in run
+    assert 'daydream --diagram-only "$COMMAND"' in run
+    for flag in (
+        "--non-interactive",
+        '--pr-number "$PR_NUMBER"',
+        '--approved-head-sha "$APPROVED_HEAD_SHA"',
+        "--findings-out findings/findings.json",
+        '--base "origin/$BASE_REF"',
+    ):
+        assert flag in run
+    # Unrecognized command: fail closed.
+    assert "exit 1" in run
+    assert "esac" in run
+
+
+def test_single_workflow_exposes_the_matched_command_to_analyze() -> None:
+    """The single-file variant carries the command from `gate` into `analyze`.
+
+    `command` is read off the match step (not the decide step) because the
+    match snippet always writes it, so the job output is defined even for a
+    non-matching comment. The analyze run step branches on it, with the review
+    branch keeping the default deep-review pipeline (no `--review`).
+    """
+    wf = load_workflow(TEMPLATES_DIR / "single" / "daydream.yml")
+
+    assert wf["jobs"]["gate"]["outputs"]["command"] == "${{ steps.match.outputs.command }}"
+    analyze = wf["jobs"]["analyze"]
+    assert analyze["env"]["COMMAND"] == "${{ needs.gate.outputs.command }}"
+
+    run = next(
+        step["run"]
+        for step in analyze["steps"]
+        if "daydream --non-interactive" in step.get("run", "")
+    )
+    assert 'case "$COMMAND" in' in run
+    assert 'daydream --diagram-only "$COMMAND"' in run
+    # The review branch keeps the default deep flow, not --review.
+    assert "daydream --review" not in run
+    assert "exit 1" in run and "esac" in run
+
+
 @pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
 def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
     wf = load_workflow(wf_path)
@@ -505,9 +729,10 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
         )
 
 
-# Install-pin drift guard: the bot must install a pinned daydream release, never
-# the moving `main` tip, across every live and shipped workflow. Fails on
-# release until the pin is bumped in lockstep with the package version.
+# Install-pin drift guard: the bot must install a pinned daydream revision,
+# never the moving `main` tip, across every live and shipped workflow. Released
+# workflow surfaces track the package release; diagram-capable surfaces may
+# need a reviewed commit newer than the latest release.
 
 _INSTALL_RE = re.compile(r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?")
 
@@ -520,35 +745,19 @@ def _package_version() -> str:
 
 @pytest.mark.parametrize(
     "wf_path",
-    _DAYDREAM_INSTALL_WORKFLOW_PATHS,
+    _DAYDREAM_DIAGRAM_INSTALL_WORKFLOW_PATHS,
     ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
 )
-def test_daydream_install_is_pinned_to_release_commit(wf_path: Path) -> None:
+def test_diagram_workflow_installs_diagram_capable_commit(wf_path: Path) -> None:
     text = wf_path.read_text(encoding="utf-8")
     refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
     rel = wf_path.relative_to(_REPO_ROOT).as_posix()
     assert refs, f"{rel} must install daydream via `uv tool install git+…`"
-    version = _package_version()
-    key = f"v{version}"
-    commit = _DAYDREAM_RELEASE_COMMITS.get(key)
-    assert commit is not None, (
-        f"No release→commit map entry for {key}. The release process is manual: "
-        f"(1) bump project.version in pyproject.toml, (2) tag the release, "
-        f"(3) get the PEELED commit: git ls-remote origin 'refs/tags/{key}^{{}}' "
-        f"(annotated tags report a tag-object SHA on the bare ref — use the ^{{}} target), "
-        f"(4) add the entry to _DAYDREAM_RELEASE_COMMITS in tests/test_workflow_templates.py, "
-        f"(5) update all six workflow install refs in lockstep "
-        f"(.github/workflows/daydream-review.yml, .github/workflows/daydream-post.yml, "
-        f"daydream/templates/workflows/daydream-review.yml, "
-        f"daydream/templates/workflows/daydream-post.yml, "
-        f"daydream/templates/workflows/single/daydream.yml ×2)."
-    )
-    expected = f"@{commit}"
+    expected = f"@{_DAYDREAM_DIAGRAM_COMMIT}"
     for ref in refs:
         assert ref == expected, (
-            f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
-            f"the immutable release commit {expected} for {key}. Update all six install refs "
-            f"in lockstep with the _DAYDREAM_RELEASE_COMMITS entry."
+            f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but its "
+            f"diagram commands require the approved diagram-capable commit {expected}."
         )
 
 
@@ -637,35 +846,6 @@ def _release_version(tag: str) -> tuple[int, int, int] | None:
     if m is None:
         return None
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-
-
-def test_release_commit_map_entries_are_pinned_or_retained_provenance() -> None:
-    """Cross-check _DAYDREAM_RELEASE_COMMITS against the workflow install refs
-    so an entry cannot ship as dead data: every entry's commit must be referenced
-    by at least one install pin, or the entry must be a strictly older release
-    deliberately retained for provenance (the map never prunes history). A
-    malformed tag key, a pin that lost its map entry, or a stale commit that outlived
-    its installs all fail here — the provenance entries are accounted for, not
-    unnoticed.
-    """
-    current_version = _release_version(f"v{_package_version()}")
-    assert current_version is not None
-    pinned_commits = {
-        m.group("ref")[1:]
-        for wf_path in _DAYDREAM_INSTALL_WORKFLOW_PATHS
-        for m in _INSTALL_RE.finditer(wf_path.read_text(encoding="utf-8"))
-        if m.group("ref") is not None
-    }
-    assert pinned_commits, "no daydream install pins to cross-check the map against"
-    for tag, commit in _DAYDREAM_RELEASE_COMMITS.items():
-        if commit in pinned_commits:
-            continue
-        version = _release_version(tag)
-        assert version is not None and version < current_version, (
-            f"_DAYDREAM_RELEASE_COMMITS[{tag!r}] = {commit!r} is neither pinned by "
-            f"any workflow install nor an older release retained for provenance, so "
-            f"it ships as dead data: reference it with an install pin or remove it."
-        )
 
 
 # Privilege split — the security invariant the whole design exists to enforce:

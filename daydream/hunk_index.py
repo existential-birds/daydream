@@ -4,9 +4,10 @@ Every deep-review agent used to re-derive three deterministic facts -- changed
 file/line ranges, symbol definitions, and finding ``file:line`` validity -- by
 re-running ``git diff`` / ``sed`` on ``diff.patch``. This module owns the single
 unified-diff parser and the persisted ``hunk-index.json`` write/load, and
-exposes the three consumer views (``head_side_ranges``, ``added_line_numbers``,
-``change_line_count``) so ``pr_review``, ``quote_scrub``, and ``coverage`` all
-count from the same source and cannot drift.
+exposes the consumer views (``head_side_ranges``, ``head_side_ranges_by_file``,
+``added_line_numbers``, ``change_line_count``) so ``pr_review``,
+``quote_scrub``, ``coverage`` and the grounded-diagram pass all count from the
+same source and cannot drift.
 """
 
 from __future__ import annotations
@@ -201,6 +202,26 @@ def head_side_ranges(parsed: dict[str, dict[str, Any]]) -> list[tuple[int, int]]
         for hunk in info["hunks"]:
             ranges.append((hunk["new_start"], hunk["new_end"]))
     return ranges
+
+
+def head_side_ranges_by_file(parsed: dict[str, dict[str, Any]]) -> dict[str, list[tuple[int, int]]]:
+    """Group every hunk's new-side inclusive range by changed file (issue #1113).
+
+    The per-file view of :func:`head_side_ranges`, which flattens across files
+    and so cannot answer "is this line inside a changed hunk *of this file*" —
+    the question grounded-diagram eligibility and evidence checks ask. Ranges
+    stay in diff order within each file; every file in ``parsed`` is a key, so a
+    file whose only hunk was a pure deletion (dropped by ``parse_hunks``) maps
+    to ``[]`` rather than being absent.
+
+    Works on both the in-memory ``parse_hunks`` output and a loaded
+    ``hunk-index.json`` — persistence drops only ``added_lines``, never the
+    ``new_start``/``new_end`` pair this reads.
+    """
+    return {
+        path: [(hunk["new_start"], hunk["new_end"]) for hunk in info["hunks"]]
+        for path, info in parsed.items()
+    }
 
 
 def added_line_numbers(parsed: dict[str, dict[str, Any]]) -> dict[str, set[int]]:

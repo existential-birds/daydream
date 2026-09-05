@@ -39,11 +39,9 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        # Pinned to an immutable release commit (the peeled target of the release
-        # tag) so the bot runs exactly the reviewed source: a moved or compromised
-        # tag can't change it. Bump in lockstep with the package version on release
-        # (pin the peeled target: git ls-remote origin 'refs/tags/vX.Y.Z^{}').
-        run: uv tool install git+https://github.com/existential-birds/daydream@e7741f17fc998a675ed2fe3f364d2e646cde5518
+        # Pinned to the same immutable reviewed commit as analysis so this phase
+        # can validate and post the diagram artifact that analysis produces.
+        run: uv tool install git+https://github.com/existential-birds/daydream@8077f10ededfd9b1f6e1fcb74c47250aaa365caf
 
       - name: Mint posting token
         id: token

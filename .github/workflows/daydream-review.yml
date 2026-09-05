@@ -8,8 +8,11 @@
 # privilege split: no single job ever holds both PR code and the App key.
 #
 # Triggered on demand by daydream-command.yml after a trusted maintainer
-# comments `@<bot> review`. The dispatch binds both the PR number and the
-# approved head SHA; this workflow rejects drift before checking out code.
+# comments one of the bot commands. The dispatch binds the PR number, the
+# approved head SHA, and the matched `command` (`review` runs the full review;
+# `sequence` / `flowchart` run a diagram-only pass that posts one standalone
+# grounded diagram comment and produces no findings). This workflow rejects
+# head drift before checking out code.
 
 name: Daydream Review
 
@@ -28,6 +31,12 @@ on:
         description: ISO-8601 creation time of the approving review comment
         required: true
         type: string
+      command:
+        description: Which bot command to run for the approved head
+        required: false
+        type: choice
+        options: [review, sequence, flowchart]
+        default: review
 
 permissions:
   contents: read
@@ -117,11 +126,9 @@ jobs:
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
-        # Pinned to an immutable release commit (the peeled target of the release
-        # tag) so the bot runs exactly the reviewed source: a moved or compromised
-        # tag can't change it. Bump in lockstep with the package version on release
-        # (pin the peeled target: git ls-remote origin 'refs/tags/vX.Y.Z^{}').
-        run: uv tool install git+https://github.com/existential-birds/daydream@e7741f17fc998a675ed2fe3f364d2e646cde5518
+        # Pinned to an immutable reviewed commit containing the diagram CLI used
+        # below, so a moved or compromised tag cannot change the executable code.
+        run: uv tool install git+https://github.com/existential-birds/daydream@8077f10ededfd9b1f6e1fcb74c47250aaa365caf
 
       # Codex backend: daydream spawns `codex exec` as a subprocess, so the CLI
       # must be on PATH. Pinned because the backend parses `codex exec
@@ -144,17 +151,35 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: printenv OPENAI_API_KEY | codex login --with-api-key
 
-      - name: Run daydream review
+      # The dispatched `command` selects the run. `review` is the full review;
+      # `sequence` / `flowchart` are diagram-only passes over the same approved
+      # head. An unrecognized value fails closed rather than silently falling
+      # back to a different (credential-bearing) run than the one approved.
+      - name: Run daydream
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
           APPROVED_HEAD_SHA: ${{ inputs.approved_head_sha }}
+          COMMAND: ${{ inputs.command }}
         run: |
           mkdir -p findings
-          daydream --review --backend codex --non-interactive --pr-number "$PR_NUMBER" \
-            --approved-head-sha "$APPROVED_HEAD_SHA" \
-            --findings-out findings/findings.json --base "origin/$BASE_REF" .
+          case "$COMMAND" in
+            review)
+              daydream --review --backend codex --non-interactive --pr-number "$PR_NUMBER" \
+                --approved-head-sha "$APPROVED_HEAD_SHA" \
+                --findings-out findings/findings.json --base "origin/$BASE_REF" .
+              ;;
+            sequence|flowchart)
+              daydream --diagram-only "$COMMAND" --backend codex --non-interactive --pr-number "$PR_NUMBER" \
+                --approved-head-sha "$APPROVED_HEAD_SHA" \
+                --findings-out findings/findings.json --base "origin/$BASE_REF" .
+              ;;
+            *)
+              echo "Unsupported command: $COMMAND" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Clean up Codex auth
         if: always()

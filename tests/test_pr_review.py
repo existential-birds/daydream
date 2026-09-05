@@ -1120,6 +1120,44 @@ async def test_post_review_from_report_empty_items_is_nothing_to_post(
     assert status == pr_review.PostStatus.NOTHING_TO_POST
 
 
+@pytest.mark.asyncio
+async def test_post_review_from_report_empty_items_posts_diagram(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pr: PRInfo,
+) -> None:
+    merged = tmp_path / "merged-items.json"
+    merged.write_text(json.dumps({"items": []}))
+    blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(
+        pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues()
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_submit(
+        _td: Path, _pr: PRInfo, payload: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        captured["payload"] = payload
+        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
+
+    monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
+    monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
+    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+
+    status = await pr_review.post_review_to_pr_from_report(
+        tmp_path,
+        merged,
+        console=_FakeConsole(),  # type: ignore[arg-type]
+        post=True,
+        diagram_blocks=blocks,
+    )
+
+    assert status == pr_review.PostStatus.POSTED
+    assert captured["payload"]["event"] == "COMMENT"
+    assert blocks in captured["payload"]["body"]
+
+
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
     """Write *path* under *repo*, commit it, and return the new HEAD SHA."""
     file_path = repo / path
@@ -1616,3 +1654,175 @@ def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
     assert pr_review._finding_blocks_approval(
         issue.severity, issue.location_distrust, issue.severity_off_vocabulary
     ) is False
+
+
+# --- Grounded diagrams (issue #1113) ----------------------------------------
+
+
+def test_diagram_marker_round_trip() -> None:
+    """The hidden marker is invisible in rendered markdown and parses back exactly."""
+    from daydream.pr_review import diagram_marker, parse_diagram_markers
+
+    body = "\n\n".join(
+        [
+            diagram_marker("sequence", "a" * 40),
+            diagram_marker("flowchart", "a" * 40),
+            "<details>the diagrams</details>",
+        ]
+    )
+    assert parse_diagram_markers(body) == [
+        ("sequence", "a" * 40),
+        ("flowchart", "a" * 40),
+    ]
+    # A finding marker is a different namespace and must not cross-parse.
+    assert parse_diagram_markers(pr_review.finding_marker("f" * 64)) == []
+    assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
+
+
+def test_diagram_replacement_post_failure_keeps_prior_comment(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from daydream.git_ops import GitError
+    from daydream.reconcile import PriorDiagramComment
+
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "daydream.reconcile.fetch_prior_diagram_comments",
+        lambda *_a, **_k: [PriorDiagramComment("IC_prior", ("sequence",))],
+    )
+
+    def minimize(_target: Path, node_id: str) -> bool:
+        calls.append(("minimize", node_id))
+        return True
+
+    monkeypatch.setattr(
+        "daydream.reconcile.minimize_comment",
+        minimize,
+    )
+
+    def fail_post(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(("post", None))
+        raise GitError("simulated POST failure")
+
+    monkeypatch.setattr(git_ops, "gh_api", fail_post)
+
+    result = pr_review.post_diagram_comment_to_pr(
+        tmp_path,
+        pr,
+        body="diagram",
+        kinds=["sequence"],
+        bot_login="daydream",
+    )
+
+    assert result == (None, "simulated POST failure")
+    assert calls == [("post", None)]
+
+
+def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from daydream.reconcile import PriorDiagramComment
+
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "daydream.reconcile.fetch_prior_diagram_comments",
+        lambda *_a, **_k: [
+            PriorDiagramComment("IC_matching", ("sequence",)),
+            PriorDiagramComment("IC_other_kind", ("flowchart",)),
+        ],
+    )
+
+    def minimize(_target: Path, node_id: str) -> bool:
+        calls.append(("minimize", node_id))
+        return True
+
+    monkeypatch.setattr(
+        "daydream.reconcile.minimize_comment",
+        minimize,
+    )
+
+    def post(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        calls.append(("post", None))
+        return {"html_url": "https://github.com/acme/widgets/issues/42#issuecomment-1"}
+
+    monkeypatch.setattr(git_ops, "gh_api", post)
+
+    result = pr_review.post_diagram_comment_to_pr(
+        tmp_path,
+        pr,
+        body="diagram",
+        kinds=["sequence"],
+        bot_login="daydream",
+    )
+
+    assert result == (
+        "https://github.com/acme/widgets/issues/42#issuecomment-1",
+        None,
+    )
+    assert calls == [("post", None), ("minimize", "IC_matching")]
+
+
+def test_build_payload_places_diagram_blocks_under_the_header(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``diagram_blocks`` lands directly under ``**Code Review Summary**``."""
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+    classified = pr_review._ClassifiedIssues(
+        body_only=[
+            ParsedIssue(
+                path="b.py", line=None, title="File note", body="desc",
+                fingerprint="b" * 64,
+            )
+        ]
+    )
+    blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
+
+    payload = pr_review.build_payload(pr, classified, diagram_blocks=blocks)
+    body = payload["body"]
+    header = "**Code Review Summary**"
+    assert body[body.index(header) + len(header) :].lstrip().startswith(blocks)
+    # Absent (the default) is byte-identical to the pre-#1113 body.
+    assert pr_review.build_payload(pr, classified)["body"] == body.replace(
+        f"{header}\n\n{blocks}", header
+    )
+
+
+def test_custom_summary_renderer_receives_and_may_drop_diagrams(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec test 16: ``ctx.diagrams`` reaches a fork renderer, which owns it.
+
+    The host cannot inject the blocks around a custom renderer's output (they
+    belong inside the summary body), so a renderer that ignores ``ctx.diagrams``
+    drops them -- which is exactly what docs/extensions.md warns about.
+    """
+    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+    seen: list[str | None] = []
+
+    def keeps(ctx: Any) -> str:
+        seen.append(ctx.diagrams)
+        return f"**Custom**\n\n{ctx.diagrams}"
+
+    def drops(ctx: Any) -> str:
+        seen.append(ctx.diagrams)
+        return "**Custom**"
+
+    classified = pr_review._ClassifiedIssues()
+    blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
+    prev = get_registry()
+    try:
+        for renderer, expect_present in ((keeps, True), (drops, False)):
+            reg = Registry()
+            register_builtins(reg)
+            reg.override_renderer("summary", renderer)
+            set_registry(reg)
+            body = pr_review.build_payload(
+                pr, classified, diagram_blocks=blocks
+            )["body"]
+            assert (blocks in body) is expect_present
+    finally:
+        set_registry(prev)
+    assert seen == [blocks, blocks]

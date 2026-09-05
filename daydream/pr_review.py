@@ -35,9 +35,12 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import jsonschema
+
 import daydream
 from daydream import git_ops
 from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
+from daydream.config import DIAGRAM_KINDS
 from daydream.extensions import (
     CommentFinding,
     FindingRenderContext,
@@ -54,7 +57,7 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from daydream.findings import ArtifactFinding
+    from daydream.findings import ArtifactFinding, FindingsArtifact
 
 
 _logger = logging.getLogger(__name__)
@@ -199,6 +202,7 @@ async def post_review_to_pr_from_report(
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
+    diagram_blocks: str | None = None,
 ) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -216,6 +220,9 @@ async def post_review_to_pr_from_report(
     ``gh pr view`` (redrive) instead of the current branch's open PR;
     a failing explicit lookup returns :attr:`PostStatus.NO_PR` with no
     fallback to current-branch discovery.
+
+    ``diagram_blocks`` (issue #1113): host-rendered grounded-diagram markdown,
+    threaded through to :func:`build_payload`.
 
     Returns:
         A :class:`PostStatus` describing the outcome so the caller can decide
@@ -236,7 +243,7 @@ async def post_review_to_pr_from_report(
         )
         return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
-    if not issues and not approve_on_clean:
+    if not issues and not approve_on_clean and not (diagram_blocks and diagram_blocks.strip()):
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return PostStatus.NOTHING_TO_POST
     return await _post(
@@ -246,6 +253,7 @@ async def post_review_to_pr_from_report(
         post=post,
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
+        diagram_blocks=diagram_blocks,
     )
 
 
@@ -271,6 +279,22 @@ def finding_marker(fingerprint: str) -> str:
 def parse_finding_markers(text: str) -> list[str]:
     """Return all finding fingerprints embedded in ``text``, in order."""
     return FINDING_MARKER_RE.findall(text)
+
+
+# Hidden marker for a standalone grounded-diagram comment (issue #1113). One
+# per rendered kind, so a later diagram-only run of the SAME kind can find and
+# minimize its own prior comment without touching the other kind's.
+DIAGRAM_MARKER_RE = re.compile(r"<!-- daydream-diagram: ([a-z]+) ([0-9a-f]{7,40}) -->")
+
+
+def diagram_marker(kind: str, head_sha: str) -> str:
+    """Render the hidden diagram marker comment for one kind at one head."""
+    return f"<!-- daydream-diagram: {kind} {head_sha} -->"
+
+
+def parse_diagram_markers(text: str) -> list[tuple[str, str]]:
+    """Return all ``(kind, head_sha)`` diagram markers in ``text``, in order."""
+    return [(kind, sha) for kind, sha in DIAGRAM_MARKER_RE.findall(text)]
 
 
 def _normalize_severity(raw: dict[str, Any]) -> str | None:
@@ -1136,12 +1160,15 @@ def default_render_summary(ctx: SummaryContext) -> str:
     """Render the summary body between the approval line and the footer.
 
     Reproduces today's markdown byte-for-byte: ``**Code Review Summary**``, the
+    grounded-diagram blocks (issue #1113, when the run rendered any), the
     by-file non-inline findings section, the consolidated agent prompt (when
     non-empty), then the fully-wrapped review-info block. Never emits the
     approval line, the ``event`` decision, or :data:`DAYDREAM_FOOTER` — those
     stay host-owned in :func:`build_payload`.
     """
     chunks: list[str] = ["**Code Review Summary**"]
+    if ctx.diagrams:
+        chunks.append(ctx.diagrams)
     section = _render_body_section(ctx.findings)
     if section:
         chunks.append(section)
@@ -1391,6 +1418,7 @@ def build_payload(
     *,
     run_info_override: str | None = None,
     approve_on_clean: bool = False,
+    diagram_blocks: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
@@ -1413,6 +1441,10 @@ def build_payload(
             ``"APPROVE"`` with a prepended approval line; otherwise the event
             stays ``"COMMENT"`` and the body is byte-identical to the
             non-approve path.
+        diagram_blocks: Host-rendered grounded-diagram markdown (issue #1113),
+            handed to the ``"summary"`` renderer as ``ctx.diagrams`` so it
+            lands directly under the summary header. ``None`` (the default)
+            renders a byte-identical no-diagram body.
     """
     all_issues_with_inline_meta = classified.all_issues()
 
@@ -1464,6 +1496,7 @@ def build_payload(
         findings=_summary_findings(classified.body_only),
         agent_prompt=agent_prompt,
         review_info=review_info_block,
+        diagrams=diagram_blocks or None,
     )
     summary_body = _render_summary(summary_ctx)
 
@@ -1541,13 +1574,18 @@ async def _post(
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
+    diagram_blocks: str | None = None,
 ) -> PostStatus:
     pr = _resolve_pr(target_dir, console, pr_number)
     if pr is None:
         return PostStatus.NO_PR
 
     classified = classify(target_dir, pr, issues)
-    if classified.is_empty() and not approve_on_clean:
+    if (
+        classified.is_empty()
+        and not approve_on_clean
+        and not (diagram_blocks and diagram_blocks.strip())
+    ):
         print_info(
             console, "No postable issues after classification; skipping PR post."
         )
@@ -1589,7 +1627,9 @@ async def _post(
             f"{len(failed)} file-level comment(s) failed to post; folded into the review body.",
         )
 
-    payload = build_payload(pr, classified, approve_on_clean=approve_on_clean)
+    payload = build_payload(
+        pr, classified, approve_on_clean=approve_on_clean, diagram_blocks=diagram_blocks
+    )
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
         # ``error_msg`` carries the GitError text from git_ops, which includes
@@ -1667,6 +1707,587 @@ def _submit_review(
     return (str(url) if url else None), None
 
 
+def post_diagram_comment_to_pr(
+    target_dir: Path,
+    pr: PRInfo,
+    *,
+    body: str,
+    kinds: list[str],
+    bot_login: str | None,
+) -> tuple[str | None, str | None]:
+    """Post a standalone grounded-diagram issue comment on a PR (issue #1113).
+
+    A diagram is not a finding: it has no line anchor, no severity, and no
+    thread to resolve, so it posts as a plain issue comment rather than a
+    review. The body carries one hidden ``daydream-diagram`` marker per kind
+    plus :data:`DAYDREAM_FOOTER`, which is how the *next* diagram-only run of
+    the same kind recognises and minimizes this comment.
+
+    Prior comments are minimized only after the new one posts successfully, so
+    a failed replacement cannot remove the PR's only live diagram.
+    Minimization is best-effort: an unresolved ``bot_login`` skips it with a
+    warning (mirroring ``BOT_LOGIN_UNRESOLVED``) rather than trusting an
+    unattributed comment, and a failed mutation warns and continues — a stale
+    fold is a cosmetic problem, a missing diagram is the run's deliverable.
+
+    Args:
+        target_dir: Repository directory the ``gh`` calls run in.
+        pr: Resolved target PR.
+        body: Rendered markdown (diagram blocks and/or omission notices).
+        kinds: The diagram kinds this comment speaks for; markers are written
+            for exactly these, and only prior comments carrying one of them are
+            minimized.
+        bot_login: Bot login for author attribution, or None.
+
+    Returns:
+        ``(html_url, None)`` on success, ``(None, error_message)`` on failure.
+    """
+    from daydream.agent import console
+    from daydream.reconcile import fetch_prior_diagram_comments, minimize_comment
+
+    repo_slug = f"{pr.owner}/{pr.repo}"
+    prior = []
+    if bot_login is None:
+        print_warning(
+            console,
+            "BOT_LOGIN_UNRESOLVED: no bot login resolvable; skipping minimization of "
+            "prior diagram comments (a stale diagram may stay unfolded, but no "
+            "comment is ever minimized on an unproven author).",
+        )
+    else:
+        try:
+            prior = fetch_prior_diagram_comments(
+                target_dir, repo_slug, pr.number, bot_login=bot_login
+            )
+        except GitError as exc:
+            print_warning(console, f"Could not inventory prior diagram comments: {exc}")
+            prior = []
+
+    markers = "\n".join(diagram_marker(kind, pr.head_sha) for kind in kinds)
+    chunks = [chunk for chunk in (markers, body.strip(), DAYDREAM_FOOTER) if chunk]
+    endpoint = f"/repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments"
+    try:
+        data = git_ops.gh_api(
+            target_dir, endpoint, method="POST", input_data={"body": "\n\n".join(chunks)}
+        )
+    except GitError as exc:
+        return None, str(exc)
+    if not isinstance(data, dict):
+        return None, None
+    url = data.get("html_url")
+    if not url:
+        return None, None
+
+    current_kinds = set(kinds)
+    for comment in prior:
+        if not set(comment.kinds) & current_kinds:
+            continue
+        if not minimize_comment(target_dir, comment.node_id):
+            print_warning(
+                console,
+                f"Failed to minimize prior diagram comment {comment.node_id}",
+            )
+    return str(url), None
+
+
+def diagram_comment_kinds(payload: dict[str, Any]) -> list[str]:
+    """Return the diagram kinds a standalone comment speaks for (issue #1113).
+
+    A comment speaks for the kinds the run's eligibility decision marked
+    eligible -- the kinds it actually attempted -- in render order. That is the
+    right marker set: a ``--diagram-only flowchart`` run must never minimize a
+    prior sequence-diagram comment, and a run whose requested kind ended up
+    omitted must still supersede its own prior comment for that kind.
+
+    Args:
+        payload: The ``diagram.json`` payload (``{"eligibility", "results"}``).
+
+    Returns:
+        A subset of :data:`~daydream.config.DIAGRAM_KINDS`, sequence first.
+    """
+    eligibility = payload.get("eligibility")
+    if not isinstance(eligibility, dict):
+        return []
+    kinds: list[str] = []
+    for kind in DIAGRAM_KINDS:
+        decision = eligibility.get(kind)
+        if isinstance(decision, dict) and decision.get("eligible"):
+            kinds.append(kind)
+    return kinds
+
+
+def _diagram_results(payload: dict[str, Any]) -> dict[str, dict[str, Any] | None]:
+    """Extract the per-kind result dicts from a ``diagram.json`` payload.
+
+    Total: a missing or malformed ``results`` object yields ``None`` for every
+    kind, which the renderer reads as "no block", never as an error.
+    """
+    raw = payload.get("results")
+    results: dict[str, dict[str, Any] | None] = {}
+    for kind in DIAGRAM_KINDS:
+        value = raw.get(kind) if isinstance(raw, dict) else None
+        results[kind] = value if isinstance(value, dict) else None
+    return results
+
+
+def render_diagram_blocks_from_payload(payload: dict[str, Any]) -> str:
+    """Render just the folded diagram blocks from a ``diagram.json`` payload.
+
+    Used for the review-comment slot, which carries blocks only: an omission
+    notice belongs on an explicit request (``--diagram-only`` / a mention
+    command), where silence would be ambiguous, not on every deep review.
+    """
+    from daydream.deep.diagram_render import render_diagram_blocks
+
+    return render_diagram_blocks(_diagram_results(payload))
+
+
+def render_diagram_comment_body(payload: dict[str, Any]) -> str:
+    """Render the standalone diagram comment body from a ``diagram.json`` payload.
+
+    The single renderer for both phases: the diagram-only run posts through it
+    directly, and ``post-findings`` re-renders through it from the artifact, so
+    the two produce identical markdown for identical specs. Mermaid is always
+    re-derived from ``spec_final`` -- a stored ``mermaid`` string is never read.
+
+    Rendered kinds contribute their folded block; a requested kind that was
+    skipped, failed, or fell below its grounding floor contributes its omission
+    notice, because on an explicit request silence is indistinguishable from a
+    broken run.
+
+    Args:
+        payload: The ``diagram.json`` payload.
+
+    Returns:
+        The comment body, or a short "nothing was eligible" line when the run
+        requested no kind at all.
+    """
+    from daydream.deep.diagram_render import render_omission_notice
+
+    results = _diagram_results(payload)
+    chunks: list[str] = []
+    blocks = render_diagram_blocks_from_payload(payload)
+    if blocks:
+        chunks.append(blocks)
+    for kind in diagram_comment_kinds(payload):
+        result = results.get(kind)
+        if result is None or result.get("status") == "rendered":
+            continue
+        notice = render_omission_notice(kind, result)
+        if notice:
+            chunks.append(notice)
+    if not chunks:
+        chunks.append(
+            "No grounded diagram was eligible for this pull request: the change "
+            "does not cross a module or service boundary and no changed function "
+            "gained enough branch points to be worth charting."
+        )
+    return "\n\n".join(chunks)
+
+
+def _diagram_grounding_problem(
+    kind: str, spec: dict[str, Any], grounding: Any
+) -> str | None:
+    """Validate the host-produced grounding report attached to a rendered spec."""
+    from daydream.deep.diagram_grounding import REASON_CODES
+
+    if not isinstance(grounding, dict):
+        return f"{kind} rendered result has no grounding attestation"
+    elements = grounding.get("elements")
+    summary = grounding.get("summary")
+    capped = grounding.get("capped")
+    if not isinstance(elements, list):
+        return f"{kind} grounding attestation has no 'elements' array"
+    if not isinstance(summary, dict):
+        return f"{kind} grounding attestation has no 'summary' object"
+    if not isinstance(capped, dict):
+        return f"{kind} grounding attestation has no 'capped' object"
+
+    allowed_elements = (
+        {"participant", "message", "block", "branch"}
+        if kind == "sequence"
+        else {"root", "node", "edge"}
+    )
+    allowed_caps = (
+        {"participants", "messages", "blocks"}
+        if kind == "sequence"
+        else {"nodes", "edges"}
+    )
+    checks: list[dict[str, Any]] = []
+    seen_refs: set[tuple[str, str]] = set()
+    for index, raw in enumerate(elements):
+        if not isinstance(raw, dict):
+            return f"{kind} grounding attestation element {index} is not an object"
+        element = raw.get("element")
+        ref = raw.get("ref")
+        grounded = raw.get("grounded")
+        reason = raw.get("reason")
+        final_index = raw.get("final_index")
+        if element not in allowed_elements or not isinstance(ref, str) or not ref:
+            return f"{kind} grounding attestation element {index} has an invalid identity"
+        identity = (element, ref)
+        if identity in seen_refs:
+            return f"{kind} grounding attestation repeats {element} reference {ref!r}"
+        seen_refs.add(identity)
+        if not isinstance(grounded, bool):
+            return f"{kind} grounding attestation for {element} {ref!r} has no boolean verdict"
+        if grounded and reason is not None:
+            return f"{kind} grounding attestation for {element} {ref!r} is contradictory"
+        if not grounded and reason not in REASON_CODES:
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid reason"
+        if final_index is not None and (
+            isinstance(final_index, bool) or not isinstance(final_index, int) or final_index < 0
+        ):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid final index"
+        if final_index is not None and not grounded:
+            return f"{kind} grounding attestation publishes ungrounded {element} {ref!r}"
+        strength = raw.get("strength")
+        snapped_line = raw.get("snapped_line")
+        if strength not in (None, "definition", "token"):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid strength"
+        if snapped_line is not None and (
+            isinstance(snapped_line, bool)
+            or not isinstance(snapped_line, int)
+            or snapped_line < 1
+        ):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid snapped line"
+        if not isinstance(raw.get("in_changed_hunk"), bool):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid hunk verdict"
+        defined_at = raw.get("defined_at")
+        if defined_at is not None and (not isinstance(defined_at, str) or not defined_at):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid definition"
+        checks.append(raw)
+
+    for count_name in ("proposed", "grounded_first_pass", "repaired", "pruned"):
+        value = summary.get(count_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return (
+                f"{kind} grounding attestation summary has an invalid "
+                f"{count_name!r} count"
+            )
+    if summary["proposed"] != len(checks):
+        return f"{kind} grounding attestation summary does not match its elements"
+    if summary["pruned"] != sum(not check["grounded"] for check in checks):
+        return f"{kind} grounding attestation pruned count does not match its verdicts"
+    for collection, count in capped.items():
+        if (
+            collection not in allowed_caps
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            return f"{kind} grounding attestation has an invalid {collection!r} cap count"
+
+    claimed: set[int] = set()
+
+    def claim(element: str, final_index: int, ref: str | None = None) -> dict[str, Any] | None:
+        matches = [
+            (index, check)
+            for index, check in enumerate(checks)
+            if check["element"] == element
+            and check["final_index"] == final_index
+            and (ref is None or check["ref"] == ref)
+        ]
+        if len(matches) != 1:
+            return None
+        index, check = matches[0]
+        claimed.add(index)
+        return check
+
+    if kind == "sequence":
+        participants = spec["participants"]
+        messages = spec["messages"]
+        blocks = spec["blocks"]
+        names = {participant["name"] for participant in participants}
+        if len(names) != len(participants):
+            return "sequence spec_final has duplicate participant names"
+        for index, participant in enumerate(participants):
+            if claim("participant", index, participant["name"]) is None:
+                return f"sequence grounding attestation does not cover participant at final index {index}"
+        for index, message in enumerate(messages):
+            if message["from"] not in names or message["to"] not in names:
+                return f"sequence spec_final message {index} has an unknown participant"
+            if claim("message", index) is None:
+                return f"sequence grounding attestation does not cover message at final index {index}"
+        for block_index, block in enumerate(blocks):
+            block_check = claim("block", block_index)
+            if block_check is None:
+                return f"sequence grounding attestation does not cover block at final index {block_index}"
+            prefix = f"{block_check['ref']}."
+            for branch_index, branch in enumerate(block["branches"]):
+                if any(
+                    isinstance(message_index, bool)
+                    or message_index >= len(messages)
+                    for message_index in branch["messages"]
+                ):
+                    return f"sequence spec_final block {block_index} cites an unknown message"
+                matches = [
+                    (index, check)
+                    for index, check in enumerate(checks)
+                    if check["element"] == "branch"
+                    and check["final_index"] == branch_index
+                    and check["ref"].startswith(prefix)
+                ]
+                if len(matches) != 1:
+                    return (
+                        "sequence grounding attestation does not cover branch at "
+                        f"final index {block_index}.{branch_index}"
+                    )
+                claimed.add(matches[0][0])
+        if grounding.get("root_range") is not None:
+            return "sequence grounding attestation has an unexpected root range"
+    else:
+        root = spec["root"]
+        nodes = spec["nodes"]
+        edges = spec["edges"]
+        root_range = grounding.get("root_range")
+        if (
+            not isinstance(root_range, list)
+            or len(root_range) != 2
+            or any(isinstance(line, bool) or not isinstance(line, int) for line in root_range)
+            or root_range[0] != root["line"]
+            or root_range[1] < root_range[0]
+        ):
+            return "flowchart grounding attestation has an invalid root range"
+        if claim("root", 0, root["name"]) is None:
+            return "flowchart grounding attestation does not cover root at final index 0"
+        node_ids = {node["id"] for node in nodes}
+        if len(node_ids) != len(nodes):
+            return "flowchart spec_final has duplicate node ids"
+        for index, node in enumerate(nodes):
+            evidence = node["evidence"]
+            if evidence["file"] != root["file"] or not (
+                root_range[0] <= evidence["line"] <= root_range[1]
+            ):
+                return f"flowchart spec_final node {index} lies outside its root"
+            if claim("node", index, node["id"]) is None:
+                return f"flowchart grounding attestation does not cover node at final index {index}"
+        for index, edge in enumerate(edges):
+            if edge["from"] not in node_ids or edge["to"] not in node_ids:
+                return f"flowchart spec_final edge {index} has an unknown endpoint"
+            if claim("edge", index, f"{edge['from']}->{edge['to']}") is None:
+                return f"flowchart grounding attestation does not cover edge at final index {index}"
+    if any(
+        check["final_index"] is not None and index not in claimed
+        for index, check in enumerate(checks)
+    ):
+        return f"{kind} grounding attestation contains an unmatched published element"
+    return None
+
+
+def _diagram_head_evidence_problem(
+    kind: str,
+    spec: dict[str, Any],
+    target_dir: Path,
+    head_sha: str,
+    sources: dict[str, list[str]],
+) -> str | None:
+    """Return a problem when a rendered diagram citation is absent at ``head_sha``."""
+    from daydream.tree_sitter_index import (
+        is_branch_line,
+        is_executable_statement_line,
+        is_terminal_line,
+        language_for_path,
+    )
+
+    def check(evidence: dict[str, Any]) -> str | None:
+        path = evidence["file"]
+        lines = sources.get(path)
+        if lines is None:
+            try:
+                lines = git_ops.show(target_dir, head_sha, path).decode(
+                    errors="replace"
+                ).splitlines()
+            except GitError:
+                return f"{kind} diagram evidence is missing from immutable head: {path}"
+            sources[path] = lines
+        if evidence["line"] > len(lines):
+            return (
+                f"{kind} diagram evidence line {evidence['line']} is missing from "
+                f"immutable head: {path}"
+            )
+        return None
+
+    if kind == "sequence":
+        paths = {
+            path
+            for participant in spec["participants"]
+            for path in participant["files"]
+        }
+        paths.update(message["evidence"]["file"] for message in spec["messages"])
+        paths.update(
+            branch["evidence"]["file"]
+            for block in spec["blocks"]
+            for branch in block["branches"]
+        )
+        with tempfile.TemporaryDirectory() as snapshot_dir:
+            snapshot_root = Path(snapshot_dir)
+            for path in paths:
+                try:
+                    source = git_ops.show(target_dir, head_sha, path)
+                except GitError:
+                    return f"sequence diagram evidence is missing from immutable head: {path}"
+                snapshot_path = snapshot_root / path
+                snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_path.write_bytes(source)
+
+            from daydream.deep.diagram_grounding import RepoSymbols, ground_sequence
+
+            report = ground_sequence(
+                spec,
+                repo_root=snapshot_root,
+                hunk_ranges={},
+                read_paths=paths,
+                symbols=RepoSymbols(snapshot_root),
+            )
+        if report.spec_final != spec:
+            return "sequence diagram evidence is not grounded in immutable head"
+    else:
+        problem = check(spec["root"])
+        if problem is not None:
+            return problem
+        for node in spec["nodes"]:
+            evidence = node["evidence"]
+            problem = check(evidence)
+            if problem is not None:
+                return problem
+            source = "\n".join(sources[evidence["file"]]).encode()
+            language = language_for_path(evidence["file"])
+            line = evidence["line"]
+            try:
+                grounded = (
+                    is_terminal_line(language, source, line)
+                    if node["kind"] == "end"
+                    else is_branch_line(language, source, line)
+                    if node["kind"] == "decision"
+                    else is_executable_statement_line(language, source, line)
+                )
+            except Exception:
+                grounded = False
+            if not grounded:
+                return (
+                    f"flowchart diagram evidence line {line} is not a valid "
+                    f"{node['kind']} node in immutable head: {evidence['file']}"
+                )
+    return None
+
+
+def validate_diagram_payload(
+    payload: dict[str, Any],
+    *,
+    target_dir: Path | None = None,
+    head_sha: str | None = None,
+) -> str | None:
+    """Validate each rendered spec and its grounding attestation before posting.
+
+    The privileged poster re-renders mermaid from model-derived specs, so those
+    specs are re-validated here -- against the same hand-written schema the
+    author agent answered -- before a single character reaches GitHub.
+    ``FINDINGS_SCHEMA`` deliberately keeps ``diagrams`` permissive (it must not
+    couple to four modules' ``to_dict`` shapes), and this is the check that
+    makes that safe.
+
+    Args:
+        payload: The artifact's ``diagrams`` payload.
+        target_dir: Repository used to read immutable source evidence, when posting.
+        head_sha: Event-derived commit used to read immutable source evidence.
+
+    Returns:
+        None when every rendered kind validates, else a human error message.
+    """
+    from daydream.config import (
+        DIAGRAM_MAX_BLOCKS,
+        DIAGRAM_MAX_EDGES,
+        DIAGRAM_MAX_MESSAGES,
+        DIAGRAM_MAX_NODES,
+        DIAGRAM_MAX_PARTICIPANTS,
+    )
+    from daydream.deep.diagram_schema import FLOWCHART_SPEC_SCHEMA, SEQUENCE_SPEC_SCHEMA
+
+    schemas = {"sequence": SEQUENCE_SPEC_SCHEMA, "flowchart": FLOWCHART_SPEC_SCHEMA}
+    caps = {
+        "sequence": {
+            "participants": DIAGRAM_MAX_PARTICIPANTS,
+            "messages": DIAGRAM_MAX_MESSAGES,
+            "blocks": DIAGRAM_MAX_BLOCKS,
+        },
+        "flowchart": {"nodes": DIAGRAM_MAX_NODES, "edges": DIAGRAM_MAX_EDGES},
+    }
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        return "diagrams payload has no 'results' object"
+    sources: dict[str, list[str]] = {}
+    for kind in DIAGRAM_KINDS:
+        result = results.get(kind)
+        if not isinstance(result, dict) or result.get("status") != "rendered":
+            continue
+        try:
+            jsonschema.validate(result.get("spec_final"), schemas[kind])
+        except jsonschema.ValidationError as exc:
+            return f"{kind} spec_final failed schema validation: {exc.message}"
+        spec = result["spec_final"]
+        for collection, cap in caps[kind].items():
+            size = len(spec[collection])
+            if size > cap:
+                return f"{kind} spec_final exceeds {collection} render cap: {size} > {cap}"
+        if result.get("reason") is not None or result.get("omit_reasons") not in (None, []):
+            return f"{kind} rendered result contradicts its status"
+        problem = _diagram_grounding_problem(kind, spec, result.get("grounding"))
+        if problem is not None:
+            return problem
+        if target_dir is not None and head_sha is not None:
+            problem = _diagram_head_evidence_problem(
+                kind, spec, target_dir, head_sha, sources
+            )
+            if problem is not None:
+                return problem
+    return None
+
+
+def _post_diagram_artifact(
+    artifact: "FindingsArtifact",
+    pr: PRInfo,
+    target_dir: Path,
+    *,
+    console: Console,
+    bot_login: str | None,
+) -> int:
+    """Post a ``kind == "diagram"`` artifact as a standalone PR comment.
+
+    The Phase B half of the diagram-only flow. Validates the model-derived
+    specs, re-renders the mermaid from them, then posts one issue comment --
+    never a review, and never through ``build_payload``.
+
+    Returns:
+        ``0`` on success, ``1`` on a rejected payload or a failed POST.
+    """
+    payload = artifact.diagrams
+    if not isinstance(payload, dict):
+        print_error(
+            console,
+            "Diagram Artifact Rejected",
+            "artifact declares kind 'diagram' but carries no 'diagrams' payload",
+        )
+        return 1
+    problem = validate_diagram_payload(
+        payload, target_dir=target_dir, head_sha=pr.head_sha
+    )
+    if problem is not None:
+        print_error(console, "Diagram Artifact Rejected", problem)
+        return 1
+    body = render_diagram_comment_body(payload)
+    kinds = diagram_comment_kinds(payload)
+    url, error = post_diagram_comment_to_pr(
+        target_dir, pr, body=body, kinds=kinds, bot_login=bot_login
+    )
+    if url is None:
+        suffix = f" ({error})" if error else ""
+        print_error(console, "Diagram Comment Post Failed", f"No comment was posted.{suffix}")
+        return 1
+    print_success(console, f"Posted diagram comment: {url}")
+    return 0
+
+
 def post_findings_from_artifact(
     artifact_path: Path,
     *,
@@ -1739,6 +2360,38 @@ def post_findings_from_artifact(
         print_error(console, "Findings Artifact Rejected", str(exc))
         return 1
 
+    # The synthetic PRInfo depends only on this function's own arguments, so it
+    # is built once here -- above the diagram branch, which needs it too.
+    owner, repo_name = repo.split("/", 1)
+    pr = PRInfo(
+        number=pr_number,
+        head_sha=head_sha,
+        base_sha="",
+        base_ref="",
+        owner=owner,
+        repo=repo_name,
+        url="",
+    )
+
+    # Issue #1113: a diagram artifact carries no fingerprints, so it must never
+    # reach the reconcile path below -- ``partition([], prior)`` would classify
+    # EVERY prior review finding as stale and ``resolve_threads`` would minimize
+    # the bot's real open findings. Branch before ``fetch_prior_findings``.
+    if artifact.kind == "diagram":
+        return _post_diagram_artifact(
+            artifact, pr, target_dir, console=console, bot_login=effective_login
+        )
+
+    diagram_blocks: str | None = None
+    if isinstance(artifact.diagrams, dict):
+        problem = validate_diagram_payload(
+            artifact.diagrams, target_dir=target_dir, head_sha=pr.head_sha
+        )
+        if problem is not None:
+            print_error(console, "Diagram Payload Rejected", problem)
+            return 1
+        diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
+
     try:
         prior = fetch_prior_findings(target_dir, repo, pr_number, bot_login=effective_login)
     except GitError as exc:
@@ -1781,23 +2434,13 @@ def post_findings_from_artifact(
         for finding in artifact.findings
     )
 
-    if classified.is_empty() and not can_approve:
+    if classified.is_empty() and not can_approve and diagram_blocks is None:
         print_info(
             console,
             f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
         )
         return 0
 
-    owner, repo_name = repo.split("/", 1)
-    pr = PRInfo(
-        number=pr_number,
-        head_sha=head_sha,
-        base_sha="",
-        base_ref="",
-        owner=owner,
-        repo=repo_name,
-        url="",
-    )
     posted_files, failed_files = _submit_file_level_comments(target_dir, pr, classified.file_level)
     if failed_files:
         classified.file_level = posted_files
@@ -1808,7 +2451,11 @@ def post_findings_from_artifact(
         )
 
     payload = build_payload(
-        pr, classified, run_info_override=artifact.run_info, approve_on_clean=can_approve
+        pr,
+        classified,
+        run_info_override=artifact.run_info,
+        approve_on_clean=can_approve,
+        diagram_blocks=diagram_blocks,
     )
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:

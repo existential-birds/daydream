@@ -135,6 +135,15 @@ def test_comment_contract_types_are_frozen_and_public() -> None:
         review_info="I",
     )
     assert ctx.placement == "summary" and sc.findings[0].body_block == "X"
+    # Issue #1113: ``diagrams`` is appended with a default, so this pre-existing
+    # construction keeps working and an unaware fork sees None.
+    assert sc.diagrams is None
+    with_diagrams = ext.SummaryContext(
+        findings=(), agent_prompt="P", review_info="I", diagrams="<details>D</details>"
+    )
+    assert with_diagrams.diagrams == "<details>D</details>"
+    with pytest.raises(FrozenInstanceError):
+        with_diagrams.diagrams = "x"  # type: ignore[misc]
     for name in ("CommentFinding", "FindingRenderContext", "SummaryFinding", "SummaryContext"):
         assert name in ext.__all__
 

@@ -590,6 +590,33 @@ def _check_permissions(repo_dir: Path, creds: AppCredentials | None) -> Check:
     )
 
 
+#: The exact vocabulary of the review workflow's optional ``command`` dispatch
+#: input. Mirrors ``options: [review, sequence, flowchart]`` in the packaged
+#: ``daydream-review.yml``: `review` is the full review, the other two are
+#: diagram-only passes over the same approved head.
+_WORKFLOW_COMMAND_OPTIONS = ("review", "sequence", "flowchart")
+
+
+def _command_input_intact(spec: Any) -> bool:
+    """True when a review workflow's ``command`` dispatch input is safely bounded.
+
+    Absent is fine — the input is optional, and a workflow predating the bot
+    commands simply has no selector. Present means it must be a ``choice``
+    whose options are exactly :data:`_WORKFLOW_COMMAND_OPTIONS`, so the value
+    that selects which run the approved head gets cannot be widened (a
+    ``type: string`` selector, or an extra option, would let a dispatcher pick
+    a run the maintainer never approved).
+    """
+    if spec is None:
+        return True
+    if not isinstance(spec, dict) or spec.get("type") != "choice":
+        return False
+    options = spec.get("options")
+    if not isinstance(options, list):
+        return False
+    return sorted(str(option) for option in options) == sorted(_WORKFLOW_COMMAND_OPTIONS)
+
+
 def _workflow_contract_intact(name: str, content: str) -> bool:
     """True when *content* still satisfies the approval-gate security contract.
 
@@ -599,7 +626,11 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
 
     - ``daydream-review.yml`` must require the ``approved_head_sha`` dispatch
       input and must not auto-trigger on ``pull_request`` (a pre-gate workflow
-      triggers on PR open, re-opening the unapproved-review hole).
+      triggers on PR open, re-opening the unapproved-review hole). If it also
+      declares the optional ``command`` input (the bot-command selector added
+      for the diagram commands), that input must be a ``choice`` restricted to
+      exactly ``review``/``sequence``/``flowchart``: a free-form ``string``
+      would let a dispatcher name a run the maintainer never approved.
     - ``daydream-command.yml`` must pass ``approved_head_sha`` — it is the
       single approval point.
     - ``daydream-post.yml`` must run off the review's ``workflow_run``
@@ -641,7 +672,9 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
             return False
         dispatch = triggers.get("workflow_dispatch")
         inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
-        return isinstance(inputs, dict) and "approved_head_sha" in inputs
+        if not isinstance(inputs, dict) or "approved_head_sha" not in inputs:
+            return False
+        return _command_input_intact(inputs.get("command"))
     if name == "daydream-command.yml":
         # The single approval point: every review dispatch must bind the live
         # PR head to the approved_head_sha input. Require the binding itself —

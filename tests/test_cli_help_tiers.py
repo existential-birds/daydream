@@ -13,6 +13,12 @@ def test_default_help_hides_advanced(capsys: pytest.CaptureFixture[str]) -> None
     assert "--findings-out" not in out and "--pr-number" not in out
     assert "--precision" not in out  # #232: opt-in precision mode is an advanced flag
     assert "--approve-on-clean" not in out  # #343: opt-in auto-approval is an advanced flag
+    # #1113: the diagram-only OUTPUT MODE is a default-tier flag; the
+    # review-path modifier is advanced. Assert on the choice brace so the two
+    # flags cannot be confused for one another (``"--diagram" not in out`` is
+    # unsatisfiable once ``--diagram-only`` is shown).
+    assert "--diagram-only {" in out
+    assert "--diagram {" not in out
 
 
 def test_help_all_shows_advanced(capsys: pytest.CaptureFixture[str]) -> None:
@@ -23,6 +29,8 @@ def test_help_all_shows_advanced(capsys: pytest.CaptureFixture[str]) -> None:
     assert "--findings-out" in out and "--pr-number" in out
     assert "--precision" in out  # #232: reachable from --help-all
     assert "--approve-on-clean" in out  # #343: reachable from --help-all
+    assert "--diagram {" in out          # #1113: reachable from --help-all
+    assert "--diagram-only {" in out     # #1113: shown in both tiers
     assert "--log" in out                # #438: --log is an advanced flag
     assert "redacted agent events" in out   # #438: exact phrase
     assert "raw agent events" not in out    # #438: raw wording removed
@@ -41,3 +49,11 @@ def test_precision_flag_activates_precision_mode() -> None:
     """
     assert _parse_args(["/t"]).precision_mode is False
     assert _parse_args(["--precision", "/t"]).precision_mode is True
+
+
+def test_diagram_flags_parse_from_both_tiers() -> None:
+    """#1113: both flags reach ``RunConfig`` through the production parser."""
+    assert _parse_args(["--diagram", "off", "/t"]).diagram == "off"
+    only = _parse_args(["--diagram-only", "both", "/t"])
+    assert only.diagram == "both"
+    assert only.output_mode == "diagram"

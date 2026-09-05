@@ -48,12 +48,15 @@ def _runtime_flow_name(flow: DaydreamRunFlow, flow_name: str | None) -> str | No
     The deep family (NORMAL/DEEP/TTT/PR — four mode labels of the single
     registered ``deep`` flow, #330) always resolves to ``"deep"`` regardless
     of ``config.flow_name``; ``IMPROVE`` resolves ``"improve"``; ``CUSTOM`` is
-    the literal ``--flow`` name. Builtins are seeded before the session's
+    the literal ``--flow`` name; ``DIAGRAM`` (issue #1113) resolves the
+    two-step ``diagram`` flow. Builtins are seeded before the session's
     registry loads, so a fork registering a built-in name is resolved exactly
     as it runs (issue #648).
     """
     if flow is DaydreamRunFlow.IMPROVE:
         return "improve"
+    if flow is DaydreamRunFlow.DIAGRAM:
+        return "diagram"
     if flow is DaydreamRunFlow.CUSTOM:
         return flow_name
     return "deep"
@@ -98,9 +101,10 @@ def _flow_fix_test_steps(flow: DaydreamRunFlow, flow_name: str | None) -> tuple[
     - The legacy PR compatibility mode runs its fix phase but never the test
       step, so it records a fix backend only.
 
-    ``NORMAL``/``DEEP``/``IMPROVE``/``CUSTOM`` are classified by the registered
-    pipeline (``NORMAL``/``DEEP`` → the ``deep`` flow; ``IMPROVE`` → ``improve``;
-    ``CUSTOM`` → the literal ``--flow`` name).
+    ``NORMAL``/``DEEP``/``IMPROVE``/``DIAGRAM``/``CUSTOM`` are classified by the
+    registered pipeline (``NORMAL``/``DEEP`` → the ``deep`` flow; ``IMPROVE`` →
+    ``improve``; ``DIAGRAM`` → the ``diagram`` flow, whose two steps run neither
+    fix nor test; ``CUSTOM`` → the literal ``--flow`` name).
     """
     if flow is DaydreamRunFlow.TTT:
         return False, False
@@ -461,17 +465,18 @@ def build_manifest(
         cwd: The repository directory daydream operated on (``work.repo``), used
             to mirror PiBackend's cwd-configured default model resolution.
         fix_failures: Map of dropped fix file-group -> reason, or ``None`` when
-            every fix applied. Recorded verbatim on the manifest.
+            every fix applied. Ignored when the resolved flow has no fix phase.
         fix_leftover_untracked: Sorted list of untracked paths left behind by a
-            failed fix pass, or ``None``. Recorded verbatim on the manifest.
+            failed fix pass, or ``None``. Ignored when the resolved flow has no
+            fix phase.
         fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
-            (issue #315), or ``None`` when the artifact is absent. Recorded
-            verbatim on the manifest.
+            (issue #315), or ``None`` when the artifact is absent. Ignored when
+            the resolved flow has no fix phase.
         recommended_capture: Which tree produced the archived ``recommended.patch``
             (``"pre_test"`` = fix-phase fallback, ``"post_test"`` = post-heal
             re-capture), or ``None`` on legacy runs. On fix-bearing flows an
             absent sidecar defaults ``recommended_patch_capture`` to ``"pre_test"``;
-            flows with no fix phase (review-only / improve) leave it
+            flows with no fix phase leave it
             ``None`` since they never produce a fix-phase fallback capture.
         pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
             cancelled/unknown) derived from per-phase terminal states; distinct
@@ -513,12 +518,15 @@ def build_manifest(
     # those runs leave both fields None (and to_dict() omits them). The deep-flow
     # alias set is runner._DEEP_FLOW_ALIASES — the same list _dispatch_selected_flow
     # routes — so the gate cannot drift from the actual flow routing.
+    # A diagram-only run (issue #1113) reuses the deep preamble but its flow is
+    # exploration -> diagram -> post-diagram, so it has no per-stack fan-out.
     # start_at defaults to "review" on the real RunConfig; getattr keeps the
     # gate robust to lighter config fakes that omit the field.
     _start_at = getattr(config, "start_at", "review")
     per_stack_reviews_ran = (
         (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
         and _start_at not in ("merge", "fix")
+        and recorder.run_flow is not DaydreamRunFlow.DIAGRAM
     )
     per_stack_review_backend: str | None = None
     per_stack_review_model: str | None = None
@@ -568,9 +576,9 @@ def build_manifest(
         daydream=provenance,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
-        fix_failures=fix_failures or None,
-        fix_leftover_untracked=fix_leftover_untracked or None,
-        fix_quality_gate=fix_quality_gate or None,
+        fix_failures=(fix_failures or None) if runs_fix else None,
+        fix_leftover_untracked=(fix_leftover_untracked or None) if runs_fix else None,
+        fix_quality_gate=(fix_quality_gate or None) if runs_fix else None,
         recommended_patch_capture=(
             recommended_capture
             if recommended_capture

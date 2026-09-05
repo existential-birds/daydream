@@ -345,3 +345,86 @@ def test_quality_gate_thresholds_accept_finite_non_negative(tmp_path: Path) -> N
     assert cfg.quality_gate_verbosity_delta == 0.25
     assert cfg.quality_gate_erosion_absolute == 0.5
     assert cfg.quality_gate_verbosity_absolute == 0.75
+
+
+def test_diagram_table_parses_from_pyproject(tmp_path: Path) -> None:
+    """#1113: every ``[tool.daydream.diagram]`` key lands on its flat field."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream.diagram]\n"
+        'mode = "off"\n'
+        "min_code_files = 5\n"
+        "min_modules = 3\n"
+        "min_branch_points = 6\n"
+        'service_roots = ["apps/*", "services/*"]\n'
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.diagram_mode == "off"
+    assert cfg.diagram_min_code_files == 5
+    assert cfg.diagram_min_modules == 3
+    assert cfg.diagram_min_branch_points == 6
+    assert cfg.diagram_service_roots == ["apps/*", "services/*"]
+
+
+def test_diagram_table_parses_from_dotfile_and_merges_per_key(tmp_path: Path) -> None:
+    """#1113: the dotfile's ``[diagram]`` table is merged per-key, so it can set
+    ``mode`` without discarding thresholds declared in ``pyproject.toml``."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream.diagram]\nmin_branch_points = 6\nmode = \"auto\"\n"
+    )
+    (tmp_path / ".daydream.toml").write_text('[diagram]\nmode = "off"\n')
+    cfg = load_file_config(tmp_path)
+    assert cfg.diagram_mode == "off"
+    assert cfg.diagram_min_branch_points == 6
+
+
+def test_diagram_config_absent_defaults_to_unset(tmp_path: Path) -> None:
+    """#1113: absent means unset (``None``/``[]``), never a materialized default
+    — the orchestrator owns the fallback so CLI > file > default holds."""
+    cfg = load_file_config(tmp_path)
+    assert cfg.diagram_mode is None
+    assert cfg.diagram_min_code_files is None
+    assert cfg.diagram_min_modules is None
+    assert cfg.diagram_min_branch_points is None
+    assert cfg.diagram_service_roots == []
+
+
+def test_diagram_junk_values_degrade_to_unset(tmp_path: Path) -> None:
+    """#1113: a bad key degrades to unset rather than crashing the loader. A
+    file may not force a kind: ``mode = "both"`` is not accepted."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream.diagram]\n"
+        'mode = "both"\n'
+        "min_code_files = 0\n"
+        'min_modules = "two"\n'
+        "min_branch_points = -1\n"
+        'service_roots = "apps/*"\n'
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.diagram_mode is None
+    assert cfg.diagram_min_code_files is None
+    assert cfg.diagram_min_modules is None
+    assert cfg.diagram_min_branch_points is None
+    assert cfg.diagram_service_roots == []
+
+
+def test_diagram_junk_table_degrades_to_unset(tmp_path: Path) -> None:
+    """#1113: even a non-table ``diagram`` value leaves every field unset."""
+    (tmp_path / "pyproject.toml").write_text('[tool.daydream]\ndiagram = "on"\n')
+    cfg = load_file_config(tmp_path)
+    assert cfg.diagram_mode is None
+    assert cfg.diagram_min_branch_points is None
+
+
+def test_diagram_threshold_keys_accept_hyphenated_spellings(tmp_path: Path) -> None:
+    """#1113: the positive-int coercer accepts the hyphenated TOML spelling, as
+    it already does for the improve partition bounds."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream.diagram]\n"
+        "min-code-files = 4\n"
+        "min-modules = 5\n"
+        "min-branch-points = 7\n"
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.diagram_min_code_files == 4
+    assert cfg.diagram_min_modules == 5
+    assert cfg.diagram_min_branch_points == 7

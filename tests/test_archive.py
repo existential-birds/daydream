@@ -237,7 +237,9 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
     step, so it keeps a fix backend and drops only test. IMPROVE's built-in
     pipeline defines no fix/test phase, so it drops both. CUSTOM is classified
     by its registered pipeline; with no fork flow configured here it cannot
-    prove a fix/test phase, so it drops both.
+    prove a fix/test phase, so it drops both. DIAGRAM (issue #1113) runs
+    exploration -> diagram -> post-diagram and no fix/test phase, so it drops
+    both as well.
     """
     recorder = _MockRecorder(run_flow=flow)
     config = _MockConfig(fix_backend="codex", test_backend="codex")
@@ -253,6 +255,7 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
         DaydreamRunFlow.IMPROVE,
         DaydreamRunFlow.TTT,
         DaydreamRunFlow.CUSTOM,
+        DaydreamRunFlow.DIAGRAM,
     ):
         assert m.fix_backend is None
         assert m.test_backend is None
@@ -263,6 +266,21 @@ def test_build_manifest_fix_test_backend_gated_per_flow(
         assert m.test_backend == "codex"
         assert run["fix_backend"] == "codex"
         assert run["test_backend"] == "codex"
+
+
+def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> None:
+    recorder = _MockRecorder(run_flow=DaydreamRunFlow.DIAGRAM)
+    m = _build(
+        tmp_path,
+        recorder=recorder,
+        fix_failures={"src/old.py": "reverted"},
+        fix_leftover_untracked=["src/leftover.py"],
+        fix_quality_gate={"enabled": True, "rounds": []},
+    )
+
+    assert m.fix_failures is None
+    assert m.fix_leftover_untracked is None
+    assert m.fix_quality_gate is None
 
 
 def test_build_manifest_classifies_custom_flow_by_registered_pipeline(
@@ -335,9 +353,10 @@ def test_fix_cycle_classification_covers_every_run_flow() -> None:
     """Every ``DaydreamRunFlow`` member is explicitly classified: TTT
     (review/comment) is mode-gated never to reach the fix cycle, PR (feedback)
     runs its own fix-items phase (fix yes, test no), and every other label is
-    classified by its registered pipeline (issue #648). A future enum member
-    fails this exhaustiveness check instead of silently changing which backend
-    fields the manifest emits.
+    classified by its registered pipeline (issue #648). DIAGRAM (issue #1113)
+    is classified by its own two-step registered pipeline, which runs neither
+    fix nor test. A future enum member fails this exhaustiveness check instead
+    of silently changing which backend fields the manifest emits.
     """
     mode_gated_labels = {DaydreamRunFlow.TTT}
     fix_only_labels = {DaydreamRunFlow.PR}
@@ -349,7 +368,11 @@ def test_fix_cycle_classification_covers_every_run_flow() -> None:
         mode_gated_labels
         | fix_only_labels
         | fix_cycle_builtins
-        | {DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM}
+        | {
+            DaydreamRunFlow.IMPROVE,
+            DaydreamRunFlow.CUSTOM,
+            DaydreamRunFlow.DIAGRAM,
+        }
     )
 
 
@@ -1281,6 +1304,27 @@ def test_copy_bundle_deep_directory(tmp_path: Path) -> None:
     _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
+
+
+def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path) -> None:
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    recorder.run_flow = DaydreamRunFlow.DIAGRAM
+    deep_dir = target / ".daydream" / "deep"
+    (deep_dir / "merged-items.json").write_text('{"items": []}')
+    (deep_dir / "fix-failures.json").write_text('{"src/old.py": "reverted"}')
+    (deep_dir / "diagram.json").write_text('{"results": {}}')
+    (deep_dir / "diagram.md").write_text("current diagram")
+    (target / ".daydream" / "recommended.patch").write_text("stale recommendation")
+
+    _copy_bundle(target, run_dir, recorder, RunConfig())
+
+    assert sorted(path.name for path in (run_dir / "deep").iterdir()) == [
+        "diagram.json",
+        "diagram.md",
+    ]
+    assert (run_dir / "deep" / "diagram.md").read_text() == "current diagram"
+    assert not (run_dir / "review-output.md").exists()
+    assert not (run_dir / "recommended.patch").exists()
 
 
 def test_copy_bundle_sub_trajectories_copied(tmp_path: Path) -> None:
@@ -2718,3 +2762,67 @@ def test_delete_runs_is_exported() -> None:
 
     assert "delete_runs" in index_module.__all__
     assert "delete_runs:" in index_module.__doc__
+
+
+def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
+    tmp_path: Path, make_config: MakeConfig,
+) -> None:
+    """#1113 (D21/D22): a diagram-only run deliberately leaves the previous deep
+    review's ``.daydream/deep/`` artifacts on disk, so its own flow label must
+    answer "runs no merge/fix/test" — otherwise it archives that run's
+    ``merged-items.json`` as its own pipeline state."""
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
+
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
+    config = make_config(tmp_path, archive=False)
+    _archive_run_inner(
+        recorder=recorder, target_dir=tmp_path, config=config,
+        status="complete", run_eval=False, work=None, upload=False,
+    )
+
+    manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
+    m = json.loads(manifest_path.read_text())
+    assert m["run"]["flow"] == "diagram"
+    assert m["status"] == "complete"
+    assert m["archive_status"] == "complete"
+    assert m["pipeline_status"] == "unknown"
+    # None of the deep phases are claimed, so no stale artifact is adopted.
+    assert m["phase_states"]["merge"] == {"ran": False, "status": "absent"}
+    assert m["phase_states"]["fix"] == {"ran": False, "status": "absent"}
+    assert m["phase_states"]["test"] == {"ran": False, "status": "absent"}
+    # A two-step flow runs neither fix nor test, so neither backend is labeled.
+    assert "fix_backend" not in m["run"]
+    assert "test_backend" not in m["run"]
+    # No per-stack fan-out either: the diagram flow has no per-stack reviewers.
+    assert "per_stack_review_backend" not in m["run"]
+
+
+def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
+    tmp_path: Path, make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    _write_deep(
+        tmp_path,
+        "merged-items.json",
+        {"items": [{"file": "src/old.py", "line": 1, "confidence": "HIGH"}]},
+    )
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
+    config = make_config(tmp_path, archive=False)
+
+    _archive_run_inner(
+        recorder=recorder, target_dir=tmp_path, config=config,
+        status="complete", run_eval=True, work=None, upload=False,
+    )
+
+    run_dir = get_archive_dir() / "runs" / recorder.session_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert not (run_dir / "evaluation.json").exists()
+    assert manifest["metrics"]["total_findings"] is None

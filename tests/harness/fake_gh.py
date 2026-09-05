@@ -282,6 +282,16 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
         return 0, _emit([], jq), ""
     if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
         return 0, json.dumps({"html_url": "https://github.test/fake/pull/7#pullrequestreview-1"}) + "\n", ""
+    if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/issues/\d+/comments", endpoint):
+        # Issue-comment creation (issue #1113: the standalone diagram comment).
+        # ``node_id`` is present because minimization is keyed on it.
+        seq = _next_comment_seq(state)
+        reply = {
+            "id": 7000 + seq,
+            "node_id": f"IC_fake{seq}",
+            "html_url": f"https://github.test/fake/pull/7#issuecomment-{7000 + seq}",
+        }
+        return 0, json.dumps(reply) + "\n", ""
     if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/comments", endpoint):
         # Real GitHub 422s a file-level comment whose path is not in the PR
         # diff; `diff-paths`, when configured, reproduces that rejection.
@@ -493,6 +503,28 @@ class FakeGh:
         doctor's App-installed check can confirm the target owner appears.
         """
         self.set_response("GET", "/app/installations", value=installations)
+
+    def serve_prior_issue_comments(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        repo: str = "acme/widgets",
+        number: int = 7,
+    ) -> None:
+        """Serve ``GET /repos/<repo>/issues/<number>/comments`` (issue #1113).
+
+        The prior-diagram-comment inventory reads this endpoint over REST. The
+        canned-response lookup precedes the hardcoded empty-list fallback, so a
+        configured value simply wins.
+
+        Args:
+            comments: Comment objects; a diagram comment needs at least
+                ``node_id``, ``body`` (carrying the hidden marker) and
+                ``user.login``.
+            repo: ``owner/repo`` slug (defaults to the fixture repo).
+            number: PR number to key on.
+        """
+        self.set_response("GET", f"repos/{repo}/issues/{number}/comments", value=comments)
 
     def serve_prior_threads(
         self,

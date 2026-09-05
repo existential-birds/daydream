@@ -4,7 +4,10 @@
 (`daydream-review.yml` + `daydream-command.yml` + `daydream-post.yml`) in the
 parent directory. It does exactly the same thing — review on demand via `@<bot> review`
 after a trusted comment approves the current head, then post findings as your
-App bot — in a single workflow file.
+App bot — in a single workflow file. It serves the same three commands:
+`@<bot> review`, `@<bot> add sequence diagram` (alias `@<bot> add sequence`),
+and `@<bot> add flowchart`; the two diagram commands post a single standalone
+grounded diagram comment bound to the approved head, and no findings.
 
 Pick this variant if you want a smaller install and an App that does **not** need
 the `Actions: read & write` permission.
