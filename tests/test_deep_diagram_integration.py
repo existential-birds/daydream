@@ -1136,6 +1136,7 @@ def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_pa
     )
     (exploration_dir / "dependencies.md").write_text("a -> b", encoding="utf-8")
     summary, dependencies = deep._inline_exploration_text(exploration_dir)
+    assert summary is not None
     assert "[exploration summary truncated]" in summary
     assert dependencies is None
 
@@ -1165,6 +1166,7 @@ def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) 
         encoding="utf-8",
     )
     summary, _ = deep._inline_exploration_text(exploration_dir)
+    assert summary is not None
     assert "affected_files.md" not in summary
     assert "conventions.md" not in summary
     assert "dependencies.md" not in summary
@@ -1186,6 +1188,7 @@ def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> 
         "é" * (INLINE_DIFF_BUDGET_BYTES // 2 + 100), encoding="utf-8"
     )
     summary, _ = deep._inline_exploration_text(exploration_dir)
+    assert summary is not None
     assert "[exploration summary truncated]" in summary
     body = summary.split("\n[exploration summary truncated]", 1)[0]
     assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
@@ -1233,9 +1236,8 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
     """Issue #1123 acceptance: the full author turn on a disposable-clone backend
     completes with no read of .daydream/exploration or diff.patch — the prompt
     names neither path, so the clone cannot be asked to read them."""
-    from types import SimpleNamespace
-
     from daydream.deep import orchestrator as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
 
     class _Wall:
         """Fake disposable-clone backend."""
@@ -1256,7 +1258,7 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
         kind="sequence",
         eligibility=_clone_test_eligibility(),
         hunk_ranges={},
-        symbols=SimpleNamespace(),
+        symbols=RepoSymbols(tmp_path),
         recorder=None,
         backend=_Wall(),
     )
@@ -1268,9 +1270,8 @@ async def test_disposable_clone_flowchart_authoring_completes_without_artifact_r
 ) -> None:
     """Same wall for the flowchart branch: no clone-branch special-casing may
     leak a host-only artifact path into the flowchart author prompt."""
-    from types import SimpleNamespace
-
     from daydream.deep import orchestrator as deep
+    from daydream.deep.diagram_grounding import RepoSymbols
 
     class _Wall:
         """Fake disposable-clone backend."""
@@ -1291,7 +1292,7 @@ async def test_disposable_clone_flowchart_authoring_completes_without_artifact_r
         kind="flowchart",
         eligibility=_clone_test_eligibility(),
         hunk_ranges={},
-        symbols=SimpleNamespace(),
+        symbols=RepoSymbols(tmp_path),
         recorder=None,
         backend=_Wall(),
     )

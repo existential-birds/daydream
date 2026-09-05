@@ -56,6 +56,7 @@ from daydream.agent import (
 )
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 from daydream.phases import UnconfinedFindingError
 from daydream.runner import RunConfig, run
 from daydream.trajectory import get_signal_recorder
@@ -221,6 +222,21 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
             They still parse and populate ``RunConfig`` unchanged; ``--help-all``
             re-builds the parser with ``full_help=True`` to surface them.
     """
+    tracing = parser.add_mutually_exclusive_group()
+    tracing.add_argument(
+        "--trace-to", action="append", default=None, metavar="NAME",
+        help="Export OpenLLMetry traces to a destination (langsmith, honeyhive, otlp, or an extension); repeatable"
+        if full_help else argparse.SUPPRESS,
+    )
+    tracing.add_argument(
+        "--no-tracing", action="store_true",
+        help="Disable tracing, including DAYDREAM_TRACE_TO" if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--trace-content", choices=("full", "metadata"), default=None,
+        help="Trace content: full captures redacted messages and tools; metadata omits content"
+        if full_help else argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--trajectory",
         default=None,
@@ -325,6 +341,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
              "Orthogonal to --non-interactive: --yes pre-decides the answer, "
              "--non-interactive controls whether we may block on stdin.",
     )
+
+
+def _resolve_cli_observability(parser: argparse.ArgumentParser, args: argparse.Namespace) -> ObservabilityConfig:
+    """Turn invalid operator settings into the same actionable CLI errors as invalid flags."""
+    try:
+        return resolve_observability_config(
+            destinations=args.trace_to, disabled=args.no_tracing, content=args.trace_content,
+        )
+    except ObservabilityError as exc:
+        parser.error(str(exc))
 
 
 def _build_summarize_parser() -> argparse.ArgumentParser:
@@ -847,10 +873,13 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
     )
     if subverb is not None:
         improve_argv = improve_argv[1:]
-    args = _build_improve_parser(subverb).parse_args(improve_argv)
+    parser = _build_improve_parser(subverb)
+    args = parser.parse_args(improve_argv)
+    observability = _resolve_cli_observability(parser, args)
     _, pr_repo, file_config = _resolve_target_provenance(args.target)
     return RunConfig(
         target=args.target,
+        observability=observability,
         backend=args.backend,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
@@ -1279,6 +1308,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         if args.shallow:
             parser.error("--flow cannot be combined with --shallow")
 
+    observability = _resolve_cli_observability(parser, args)
     target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
     # Explicit --pr-number pins the target PR; otherwise auto-detect from branch.
     pr_number = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
@@ -1286,6 +1316,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     return RunConfig(
         target=args.target,
         stack=args.stack,
+        observability=observability,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         file_config=file_config,
@@ -2506,6 +2537,7 @@ def _handle_ext_validate_command() -> int:
     )
     supervisor_status = "registered" if registry.tool_supervisor_if_registered() is not None else "none"
     console.print(f"tool supervisor: {supervisor_status}")
+    console.print(f"trace exporters: {', '.join(registry.trace_exporter_names()) or 'none'}")
 
     failure = _ext_resolve_failure(registry)
     if failure is not None:

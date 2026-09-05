@@ -98,6 +98,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
 | `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |
 | `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
+| `observability/` | Operator trace settings, exporter factories, per-run OTel lifecycle, backend-event hydration and export privacy |
 | `backends/` | `Backend` protocol, Claude/Codex/Pi/Osprey, `AgentEvent` union, `create_backend()` |
 | `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
 | `config.py`, `config_file.py` | Per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
@@ -117,9 +118,19 @@ Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.
 ### Backend protocol
 
 `Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()`.
-`execute()` yields the 8-member `AgentEvent` union (`Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
-`Metrics`, `TurnEnd`, `Result`). Adding a backend means producing that stream correctly — phases and the
+`execute()` yields the 9-member `AgentEvent` union (`Request`, `Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
+`Metrics`, `TurnEnd`, `Result`). `Request` exposes the effective Daydream-sent request after adapter
+transformations. Adding a backend means producing that stream correctly — phases and the
 recorder are backend-agnostic.
+
+Observability is activated only by operator CLI/environment settings. The target's file config never
+selects destinations or credentials. A run owns its OTel provider and OpenLLMetry 0.62.3 processors;
+never install a global provider or call `Traceloop.init()`. Span ownership is run → executed flow step →
+logical agent → backend attempt → tool. Only attempts carry billed usage. Native turn boundaries
+differ by backend, so do not infer per-provider-call usage from `TurnEndEvent`. Preserve available
+terminal metrics before raising a backend error. Exporters register through
+`Registry.register_trace_exporter`; registration/validation must not construct exporters.
+Full contract and operator recipes: `docs/observability.md` and `docs/extensions.md`.
 
 The Claude backend enforces two always-on `PreToolUse` guards in every phase and profile: the
 dangerous-command guard (root-anchored scans, `rm -rf /`) and the background-Bash guard. The host reads a

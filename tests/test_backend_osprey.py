@@ -13,7 +13,9 @@ import pytest
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
+    CostEvent,
     MetricsEvent,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -186,8 +188,8 @@ async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes
         stdout_reader=stdout,
     )
 
-    assert isinstance(events[0], TextEvent)
-    assert events[0].text == "x\ufffd"
+    text = next(event for event in events if isinstance(event, TextEvent))
+    assert text.text == "x\ufffd"
     assert type(events[-1]) is ResultEvent
 
 
@@ -202,7 +204,7 @@ async def test_oversized_stderr_diagnostic_does_not_fail_successful_run() -> Non
         stderr_reader=stderr,
     )
 
-    assert [type(event) for event in events] == [ResultEvent]
+    assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
 
 
 @pytest.mark.asyncio
@@ -248,7 +250,7 @@ async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
         ],
     )
 
-    assert [type(event) for event in events] == [ResultEvent]
+    assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
     assert spawner.kwargs[0]["stderr"] is asyncio.subprocess.PIPE
 
 
@@ -265,7 +267,7 @@ async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof(
         timeout=0.5,
     )
 
-    assert [type(event) for event in events] == [ResultEvent]
+    assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
 
 
 def test_factory_builds_verified_osprey_jsonl_command() -> None:
@@ -326,11 +328,13 @@ async def test_translates_text_thinking_tool_identity_metrics_and_result() -> No
     events, _ = await _collect(OspreyBackend(model="custom-model", osprey_binary="fake"), lines)
 
     assert [type(event) for event in events] == [
+        RequestEvent,
         ThinkingEvent,
         TextEvent,
         ToolStartEvent,
         ToolResultEvent,
         TurnEndEvent,
+        CostEvent,
         ResultEvent,
     ]
     tool_start = next(event for event in events if isinstance(event, ToolStartEvent))
@@ -361,9 +365,11 @@ async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
     events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
     assert [type(event) for event in events] == [
+        RequestEvent,
         ThinkingEvent,
         TextEvent,
         TurnEndEvent,
+        CostEvent,
         ResultEvent,
     ]
     assert [event.text for event in events if isinstance(event, ThinkingEvent)] == [

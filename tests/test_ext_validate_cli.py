@@ -124,3 +124,18 @@ def test_bare_ext_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> Non
     rc = _run_main(["ext"])
     assert rc == 2
     assert "validate" in strip_ansi(capsys.readouterr().out)
+
+
+def test_ext_validate_lists_exporters_without_initializing(
+    ext_dir: ExtDir, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("HH_API_KEY", raising=False)
+    ext_dir.write_module(
+        "def exporter(config):\n"
+        "    raise AssertionError('must not instantiate during validation')\n"
+        "def register(r): r.register_trace_exporter('custom', exporter)\n"
+    )
+    assert _run_main(["ext", "validate"]) == 0
+    out = strip_ansi(capsys.readouterr().out)
+    assert "trace exporters: langsmith, honeyhive, otlp, custom" in out

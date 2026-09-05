@@ -27,6 +27,7 @@ from daydream.backends import (
     ContinuationToken,
     CostEvent,
     MetricsEvent,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -413,6 +414,8 @@ class CodexBackend:
             schema_path = self._write_temp_schema(output_schema)
 
         thread_id: str | None = None
+        provider_name: str | None = None
+        model_name = self.model
         last_agent_text: str | None = None
         structured_result: Any = None
 
@@ -535,6 +538,13 @@ class CodexBackend:
                 # Rebind the prompt so no rendering of the caller's source
                 # path appears in the bytes written to the isolated subprocess.
                 prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
+
+            yield RequestEvent(
+                prompt=prompt, model_name=model_name, output_schema=output_schema,
+                reasoning_effort=self.reasoning_effort,
+                session_id=(continuation.data.get("thread_id")
+                            if continuation is not None and continuation.backend == "codex" else None),
+            )
 
             transport = CliTransport(
                 "codex",
@@ -818,6 +828,12 @@ class CodexBackend:
 
                 elif event_type == "turn.completed":
                     usage = event.get("usage", {})
+                    native_model = event.get("model")
+                    native_provider = event.get("provider")
+                    if isinstance(native_model, str) and native_model:
+                        model_name = native_model
+                    if isinstance(native_provider, str) and native_provider:
+                        provider_name = native_provider
                     # EVNT-07: MetricsEvent per turn (empty message_id — Codex has no
                     # per-message id). #194 reverses D-16: the CLI emits no cost field,
                     # so we now synthesize from tokens via the #61 user-overridable price
@@ -838,7 +854,7 @@ class CodexBackend:
                     in_tok = usage.get("input_tokens")
                     out_tok = usage.get("output_tokens")
                     synth_cost = compute_cost_from_totals(
-                        self.model,
+                        model_name,
                         total_input_tokens=in_tok or 0,
                         cached_input_tokens=cached_tokens or 0,
                         output_tokens=out_tok or 0,
@@ -852,7 +868,9 @@ class CodexBackend:
                             cached_tokens=cached_tokens,
                             cost_usd=synth_cost,
                             reasoning_tokens=reasoning_tokens,
-                            model_name=self.model,
+                            model_name=model_name,
+                            provider_name=provider_name,
+                            usage_scope="invocation",
                         )
                     yield CostEvent(
                         cost_usd=synth_cost,
@@ -860,7 +878,8 @@ class CodexBackend:
                         output_tokens=out_tok,
                         cached_tokens=cached_tokens,
                         reasoning_tokens=reasoning_tokens,
-                        model_name=self.model,
+                        model_name=model_name,
+                        provider_name=provider_name,
                     )
 
                     if output_schema and last_agent_text:
@@ -904,6 +923,10 @@ class CodexBackend:
                     _pending_result = ResultEvent(
                         structured_output=structured_result,
                         continuation=continuation_token,
+                        model_name=model_name,
+                        provider_name=provider_name,
+                        session_id=thread_id,
+                        finish_reason=event.get("finish_reason"),
                     )
 
                 elif event_type == "turn.failed":

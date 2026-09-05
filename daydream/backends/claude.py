@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from collections.abc import AsyncGenerator
@@ -28,6 +29,8 @@ from daydream.backends import (
     ContinuationToken,
     CostEvent,
     MetricsEvent,
+    ModelUsageTotals,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -422,6 +425,28 @@ def _claude_effort(value: str | None) -> EffortLevel | None:
     return cast(EffortLevel, value)
 
 
+def _model_usage_totals(raw: dict[str, Any] | None) -> dict[str, ModelUsageTotals] | None:
+    """Select public billing fields instead of exporting the SDK's raw payload."""
+    if not raw:
+        return None
+    return {
+        model: ModelUsageTotals(
+            model_name=usage.get("canonicalModel") or model,
+            provider_name=usage.get("provider"),
+            input_tokens=_total_input_tokens({
+                "input_tokens": usage.get("inputTokens"),
+                "cache_read_input_tokens": usage.get("cacheReadInputTokens"),
+                "cache_creation_input_tokens": usage.get("cacheCreationInputTokens"),
+            }),
+            output_tokens=usage.get("outputTokens"),
+            cached_tokens=usage.get("cacheReadInputTokens"),
+            cache_creation_tokens=usage.get("cacheCreationInputTokens"),
+            cost_usd=usage.get("costUSD"),
+        )
+        for model, usage in raw.items()
+    }
+
+
 class ClaudeBackend:
     """Backend that wraps the Claude Agent SDK.
 
@@ -528,10 +553,20 @@ class ClaudeBackend:
         # Latest AssistantMessage.model, stamped on the trailing CostEvent so the
         # recorder can upgrade the generic ``"claude"`` label to the real SDK id.
         last_assistant_model: str | None = None
+        last_stop_reason: str | None = None
         # StructuredOutput ToolUseBlocks are skipped (result comes via
         # ResultMessage.structured_output); track their IDs so the matching
         # ToolResultBlocks aren't logged as unmatched_tool_results.
         skipped_tool_ids: set[str] = set()
+        terminal_result: ResultEvent | None = None
+
+        yield RequestEvent(
+            prompt=prompt,
+            model_name=self.model,
+            session_id=options.resume,
+            reasoning_effort=self.reasoning_effort,
+            output_schema=output_schema,
+        )
 
         async with ClaudeSDKClient(options=options) as client:
             self._active_clients.add(client)
@@ -544,6 +579,8 @@ class ClaudeBackend:
                         msg_model = getattr(msg, "model", None)
                         if isinstance(msg_model, str) and msg_model:
                             last_assistant_model = msg_model
+                        last_stop_reason = getattr(msg, "stop_reason", None) or last_stop_reason
+                        session_id = getattr(msg, "session_id", None) or session_id
                         for block in msg.content:
                             if isinstance(block, TextBlock) and block.text:
                                 yield TextEvent(text=block.text)
@@ -583,6 +620,7 @@ class ClaudeBackend:
                                 cached_tokens=msg_usage.get("cache_read_input_tokens"),
                                 cost_usd=None,
                                 model_name=last_assistant_model,
+                                cache_creation_tokens=msg_usage.get("cache_creation_input_tokens"),
                             )
                         yield TurnEndEvent(message_id=getattr(msg, "message_id", "") or "")
 
@@ -592,7 +630,10 @@ class ClaudeBackend:
                                 if user_block.tool_use_id in skipped_tool_ids:
                                     skipped_tool_ids.discard(user_block.tool_use_id)
                                     continue
-                                content_str = str(user_block.content) if user_block.content else ""
+                                content = user_block.content
+                                content_str = content if isinstance(content, str) else (
+                                    json.dumps(content, ensure_ascii=False) if content is not None else ""
+                                )
                                 yield ToolResultEvent(
                                     id=user_block.tool_use_id,
                                     output=content_str,
@@ -601,15 +642,13 @@ class ClaudeBackend:
 
                     elif isinstance(msg, ResultMessage):
                         response_terminated = True
-                        session_id = getattr(msg, "session_id", None)
-                        if msg.is_error:
-                            detail = msg.result or msg.subtype or "unknown error"
-                            if msg.subtype == "error_max_turns":
-                                raise MaxTurnsError(
-                                    f"Claude agent run failed: {detail}",
-                                    subtype="error_max_turns",
-                                )
-                            raise ClaudeAgentError(f"Claude agent run failed: {detail}")
+                        session_id = getattr(msg, "session_id", None) or session_id
+                        model_usage = _model_usage_totals(getattr(msg, "model_usage", None))
+                        if last_assistant_model is None and model_usage and len(model_usage) == 1:
+                            last_assistant_model = next(iter(model_usage.values())).model_name
+                        providers = {entry.provider_name for entry in (model_usage or {}).values()
+                                     if entry.provider_name is not None}
+                        provider = next(iter(providers)) if len(providers) == 1 else None
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output
                         # EVNT-04/05: emit CostEvent when cost OR usage is available.
@@ -619,7 +658,7 @@ class ClaudeBackend:
                         # true total input, matching ATIF Metrics.prompt_tokens. cached_tokens
                         # stays the cache-read hit subset of that total.
                         result_usage = getattr(msg, "usage", None)
-                        if msg.total_cost_usd is not None or result_usage is not None:
+                        if msg.total_cost_usd is not None or result_usage is not None or model_usage:
                             usage = result_usage or {}
                             yield CostEvent(
                                 cost_usd=msg.total_cost_usd,
@@ -627,10 +666,37 @@ class ClaudeBackend:
                                 output_tokens=usage.get("output_tokens"),
                                 cached_tokens=usage.get("cache_read_input_tokens"),
                                 model_name=last_assistant_model,
+                                provider_name=provider,
+                                cache_creation_tokens=usage.get("cache_creation_input_tokens"),
+                                model_usage=model_usage,
                             )
+                        terminal_result = ResultEvent(
+                            structured_output=structured_result,
+                            continuation=(
+                                ContinuationToken(backend="claude", data={"session_id": session_id})
+                                if persist_session and session_id and not msg.is_error else None
+                            ),
+                            model_name=last_assistant_model,
+                            provider_name=provider,
+                            session_id=session_id,
+                            finish_reason=getattr(msg, "stop_reason", None) or last_stop_reason or msg.subtype,
+                            duration_ms=getattr(msg, "duration_ms", None),
+                            duration_api_ms=getattr(msg, "duration_api_ms", None),
+                        )
+                        if msg.is_error:
+                            yield terminal_result
+                            detail = msg.result or msg.subtype or "unknown error"
+                            if msg.subtype == "error_max_turns":
+                                raise MaxTurnsError(
+                                    f"Claude agent run failed: {detail}", subtype="error_max_turns",
+                                )
+                            raise ClaudeAgentError(f"Claude agent run failed: {detail}")
 
-                yield ResultEvent(
+                yield terminal_result or ResultEvent(
                     structured_output=structured_result,
+                    model_name=last_assistant_model,
+                    session_id=session_id,
+                    finish_reason=last_stop_reason,
                     continuation=(
                         ContinuationToken(
                             backend="claude",

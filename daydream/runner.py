@@ -50,6 +50,8 @@ from daydream.extensions import ExtensionError, build_registry, get_registry, se
 from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
 from daydream.hunk_index import write_hunk_index
+from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
+from daydream.observability.runtime import trace_run
 from daydream.phases import (
     _detect_default_branch,
     _git_branch,
@@ -265,6 +267,7 @@ class RunConfig:
     """
 
     target: str | None = None
+    observability: ObservabilityConfig | None = None
     stack: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
     cleanup: bool | None = None
     quiet: bool = True
@@ -899,6 +902,22 @@ async def run(config: RunConfig | None = None) -> int:
         or config.flow_name == "improve"
     )
 
+    try:
+        observability = config.observability if config.observability is not None else resolve_observability_config()
+        async with trace_run(
+            observability, registry, flow=config.flow_name or ("shallow" if config.shallow else "deep"),
+        ) as observed:
+            observed.attrs({"daydream.output_mode": config.output_mode})
+            result = await _run_workspace(config, target_dir, skip_tests=skip_tests)
+            observed.finish(result)
+            return result
+    except ObservabilityError as exc:
+        print_error(console, "Observability Error", str(exc))
+        return 1
+
+
+async def _run_workspace(config: RunConfig, target_dir: Path, *, skip_tests: bool) -> int:
+    """Keep workspace errors inside the run span so returned failures are recorded."""
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
     # ``NotAWorktreeError`` (a ``GitError``) caught below — a loud error instead of
     # a confusing "no diff found". ``WrongBranchError`` is raised in ``_dispatch``.

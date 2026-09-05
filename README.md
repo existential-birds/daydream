@@ -93,6 +93,26 @@ The profile selects analysis settings, but backend, provider, model, reasoning e
 
 Run `daydream --help` to see the common flags. Run `daydream --help-all` to see the full advanced surface.
 
+## Observability
+
+Send Daydream traces to LangSmith, HoneyHive, or any OTLP-compatible platform:
+
+```bash
+export LANGSMITH_API_KEY="your-key"
+export LANGSMITH_PROJECT="daydream"
+daydream /path/to/project --trace-to langsmith
+```
+
+Tracing uses OpenLLMetry 0.62.3 and captures runs, phases, agent attempts, tool calls,
+prompts, responses, and available token/cost metadata across all four backends.
+It is off by default. Use `--trace-content metadata` to omit conversation and tool
+content, or `--no-tracing` to override tracing enabled in your environment.
+
+Repeat `--trace-to` to send the same trace to several destinations. Extensions can
+register additional exporters through the existing `daydream_ext` seam.
+See [observability setup](docs/observability.md) for provider recipes, content handling,
+and the scope of captured data.
+
 ## Audit a repository and write implementation plans
 
 The `improve` command audits a whole repository. It verifies each candidate finding, prioritizes the findings by impact, and writes self-contained implementation plans. Every agent call uses a read-only backend profile. Daydream writes only run artifacts under `.daydream/` and advisory plans under `daydream_plans/`. It does not modify tracked source files.

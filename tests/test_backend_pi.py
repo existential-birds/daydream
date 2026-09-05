@@ -22,6 +22,7 @@ from daydream.backends import (
     ContinuationToken,
     CostEvent,
     MetricsEvent,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -96,7 +97,7 @@ async def test_simple_text_events() -> None:
     assert text_events[0].text == "Hello from Pi"
 
     assert len(metrics_events) == 1
-    assert metrics_events[0].prompt_tokens == 100
+    assert metrics_events[0].prompt_tokens == 110  # uncached input plus cache-read subset
     assert metrics_events[0].completion_tokens == 50
     assert metrics_events[0].cached_tokens == 10
     assert metrics_events[0].cost_usd == 0.0003
@@ -104,10 +105,10 @@ async def test_simple_text_events() -> None:
 
     assert len(cost_events) == 1
     assert cost_events[0].cost_usd == 0.0003
-    assert cost_events[0].input_tokens == 100
+    assert cost_events[0].input_tokens == 110
     assert cost_events[0].output_tokens == 50
     assert cost_events[0].cached_tokens == 10
-    assert cost_events[0].model_name == "glm-5.2"
+    assert cost_events[0].model_name == "glm-4.6"  # actual response model from the recorded stream
 
     assert len(result_events) == 1
     assert result_events[0].continuation is not None
@@ -554,7 +555,7 @@ async def test_missing_usage_skips_metrics_but_keeps_turn_end() -> None:
     assert len(turn_ends) == 1
     assert len(cost_events) == 1
     assert cost_events[0].cost_usd is None
-    assert cost_events[0].input_tokens == 0
+    assert cost_events[0].input_tokens is None
 
 
 @pytest.mark.asyncio
@@ -660,6 +661,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         first_iter = backend.execute(Path("/tmp"), "first")
+        assert isinstance(await anext(first_iter), RequestEvent)
         first_event = await anext(first_iter)
         assert isinstance(first_event, TextEvent)
 
@@ -681,7 +683,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     [
         ({"content": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}, "line1line2"),
         ({"content": "raw"}, "raw"),
-        ({"details": {"note": "x"}}, "{'note': 'x'}"),
+        ({"details": {"note": "x"}}, '{"details": {"note": "x"}}'),
         ("plain", "plain"),
         (None, ""),
     ],

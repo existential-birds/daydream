@@ -18,6 +18,13 @@ dependencies = [
     "tree-sitter-go==0.25.0",
     "tree-sitter-rust==0.24.2",
     "pyyaml>=6.0",
+    "traceloop-sdk==0.62.3",
+    "opentelemetry-api>=1.42,<2",
+    "opentelemetry-sdk>=1.42,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.42,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.42,<2",
+    "opentelemetry-semantic-conventions-ai==0.5.1",
+    "requests>=2.32,<3",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +33,9 @@ hub = ["huggingface_hub>=1.29.0"]
 
 [dependency-groups]
 dev = [
+    "grpcio>=1.63",
+    "grpc-stubs>=1.53",
+    "opentelemetry-proto>=1.42,<2",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
@@ -33,6 +43,8 @@ dev = [
     "ruff>=0.16.5",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0.12.20260815",
+    "types-requests>=2.32",
+    "types-protobuf>=6.32",
     "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
     "vulture>=2.13",
 ]

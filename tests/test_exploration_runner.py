@@ -333,6 +333,8 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path: Path) -> None:
     call_count = 0
 
     class _FailingPatternScanner:
+        model = "mock-model"
+
         async def execute(
             self,
             cwd: Any,

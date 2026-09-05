@@ -181,7 +181,7 @@ async def test_execute_structured_output(patch_sdk: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any) -> None:
-    """An is_error ResultMessage must raise, never yield a normal ResultEvent.
+    """An is_error ResultMessage must raise after exposing terminal metadata.
 
     Regression guard for the sandbox acceptance failure: an invalid API key
     run streamed the error text and a ResultMessage(is_error=True), and the
@@ -205,8 +205,9 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any)
     with pytest.raises(ClaudeAgentError, match="Invalid API key"):
         async for event in backend.execute(Path("/tmp"), "Review this"):
             events.append(event)
-    # The error text still streamed as agent text, but no ResultEvent escaped.
-    assert not [e for e in events if isinstance(e, ResultEvent)]
+    # A terminal metadata event does not turn the failed stream into success.
+    result = next(e for e in events if isinstance(e, ResultEvent))
+    assert result.continuation is None
 
 
 @pytest.mark.asyncio

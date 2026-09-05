@@ -1,7 +1,7 @@
 # Extension contract (`daydream_ext`)
 
 Daydream's extension seam lets a fork customize which phases run, prompts,
-stack routing, tool supervision, and the canonical findings surface — entirely
+stack routing, tool supervision, trace destinations, and the canonical findings surface — entirely
 from a top-level `daydream_ext` package, without editing any file under
 `daydream/`. This document is the versioned
 contract: the module shape daydream loads, the exact name inventories a fork
@@ -49,6 +49,7 @@ The `daydream.extensions` package exports these contract symbols:
 | `FindingRenderContext` | Placement context (`"inline"`/`"file_level"`/`"summary"`) passed with a finding |
 | `FlowStep` | Named async flow step |
 | `LoopGroup` | Repeated ordered group of flow steps |
+| `ObservabilityConfig` | Immutable operator-selected trace destinations, content policy, and service name |
 | `Registry` | Per-run extension registry |
 | `StackRule` | Fork-defined changed-file-to-stack routing metadata |
 | `Stop` | End a flow with an exit code |
@@ -56,6 +57,7 @@ The `daydream.extensions` package exports these contract symbols:
 | `SummaryFinding` | One finding in a `SummaryContext` (public finding plus host-rendered `body_block`) |
 | `ToolDecision` | Continue or veto a tool invocation |
 | `ToolSupervisor` | Callable protocol for tool supervision |
+| `TraceExporterFactory` | Synchronous factory for a per-run OpenTelemetry span exporter |
 | `UnresolvedExtensionError` | Error for a missing registered name |
 | `build_registry` | Seed and load a per-run registry |
 | `get_registry` | Read the current async context's registry |
@@ -224,6 +226,57 @@ Only one tool supervisor may be registered per run. If an extension registers a
 tool supervisor while `tool_supervisor = "rules"` enables the built-in one, the
 run fails at registry construction with a conflict error. Choose the extension
 policy or the built-in policy.
+
+## Trace exporters
+
+Register a named destination through the same seam used by the built-in `otlp`,
+`langsmith`, and `honeyhive` exporters:
+
+```python
+import os
+
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace.export import SpanExporter
+
+from daydream.extensions import ObservabilityConfig, Registry
+
+DAYDREAM_EXT_API = 6
+
+def company_exporter(config: ObservabilityConfig) -> SpanExporter:
+    return OTLPSpanExporter(
+        endpoint=os.environ["COMPANY_OTLP_TRACES_ENDPOINT"],
+        headers={"Authorization": "Bearer " + os.environ["COMPANY_OTLP_TOKEN"]},
+        timeout=5,
+    )
+
+def register(registry: Registry) -> None:
+    registry.register_trace_exporter("company", company_exporter)
+```
+
+Select it with `daydream . --trace-to company` or `DAYDREAM_TRACE_TO=company`.
+`TraceExporterFactory` has the signature
+`(config: ObservabilityConfig) -> SpanExporter`. Its configuration fields are
+`destinations: tuple[str, ...]`, `capture_content: bool`, and `service_name: str`.
+Factories resolve their own transport settings from the operator environment.
+Do not read destinations or credentials from the repository being reviewed.
+
+`register_trace_exporter(name, factory, replace=False)` requires a synchronous
+callable and a unique lowercase name starting with a letter. Names may contain
+digits, dots, underscores, and hyphens and are at most 64 characters long.
+Use `replace=True` to replace an existing destination. `trace_exporter(name)`
+returns its factory; `trace_exporter_names()` returns the registered inventory.
+
+Registration and `daydream ext validate` do not instantiate exporters, require
+credentials, or contact providers. The runtime resolves all selected names
+before calling factories, then owns each returned exporter's flush and shutdown.
+Return a fresh exporter for each call. Exporters must use finite transport
+timeouts and implement shutdown without unbounded blocking.
+
+The host owns span creation, task context, content policy, and redaction. An
+exporter receives the same portable spans as other destinations; provider-specific
+compatibility attributes may be added to a copy without mutating the shared span.
+Export failures produce sanitized diagnostics and preserve the review outcome.
+See [observability](observability.md) for the lifecycle and content contract.
 
 ## Inventories
 

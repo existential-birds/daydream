@@ -24,6 +24,7 @@ from daydream.extensions.api import (
 )
 from daydream.extensions.loader import build_registry, get_registry, set_registry
 from daydream.extensions.registry import Registry
+from daydream.observability.config import ObservabilityConfig, TraceExporterFactory
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -35,6 +36,7 @@ __all__ = [
     "FindingRenderContext",
     "FlowStep",
     "LoopGroup",
+    "ObservabilityConfig",
     "Registry",
     "StackRule",
     "Stop",
@@ -42,6 +44,7 @@ __all__ = [
     "SummaryFinding",
     "ToolDecision",
     "ToolSupervisor",
+    "TraceExporterFactory",
     "UnresolvedExtensionError",
     "build_registry",
     "get_registry",
