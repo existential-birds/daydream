@@ -69,6 +69,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
     get_current_recorder,
+    host_phase_scope,
     maybe_fork,
 )
 from daydream.workspace import WorkContext
@@ -3621,7 +3622,10 @@ async def _do_commit(
     message = build_commit_message(
         items=items or [], run_id=work.run_id, version=daydream.__version__,
     )
-    git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
+    # Issue #726 task 12: the commit is its own trajectory phase, so the
+    # manifest can time it and tell it apart from test/hook/push phases.
+    async with host_phase_scope(DaydreamPhase.COMMIT):
+        git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
 
     # Deterministic-staging invariant check (issue #562): the committed tree
     # must match the pre-staged daydream set in both directions.
@@ -3645,11 +3649,15 @@ async def _do_commit(
                 "--test-command or the `test_command` config key).",
             )
         else:
-            result = await run_test_command(
-                cmd=cmd,
-                cwd=work.repo,
-                wall_budget_s=TEST_WALL_BUDGET_S,
-            )
+            # The hook-run suite execution is its own trajectory phase, in
+            # addition to the test-execution events the runner itself emits
+            # (issue #726 task 12).
+            async with host_phase_scope(DaydreamPhase.HOOK_RUN):
+                result = await run_test_command(
+                    cmd=cmd,
+                    cwd=work.repo,
+                    wall_budget_s=TEST_WALL_BUDGET_S,
+                )
             if not result.passed:
                 raise RuntimeError(
                     "Pre-push validation failed: the configured test command "
@@ -3657,22 +3665,25 @@ async def _do_commit(
                 )
 
     if push:
-        branch = git_ops.current_branch(work.repo)
-        if branch is None:
-            raise GitError(
-                f"Cannot push: {work.repo} is in a detached-HEAD state "
-                "with no current branch"
-            )
-        git_ops.push_branch(work.repo, branch)
-        sha = git_ops.head_sha(work.repo)
-        # Success requires the remote to actually hold the pushed HEAD — a
-        # push that "succeeded" without landing the commit is still a failure
-        # (issue #726: "green" means really on the remote).
-        if not git_ops.remote_contains_commit(work.repo, branch, sha):
-            raise GitError(
-                f"Push verification failed: remote 'origin' does not report "
-                f"refs/heads/{branch} at {sha} after the push"
-            )
+        # The push + remote verification is its own trajectory phase
+        # (issue #726 task 12).
+        async with host_phase_scope(DaydreamPhase.PUSH):
+            branch = git_ops.current_branch(work.repo)
+            if branch is None:
+                raise GitError(
+                    f"Cannot push: {work.repo} is in a detached-HEAD state "
+                    "with no current branch"
+                )
+            git_ops.push_branch(work.repo, branch)
+            sha = git_ops.head_sha(work.repo)
+            # Success requires the remote to actually hold the pushed HEAD — a
+            # push that "succeeded" without landing the commit is still a failure
+            # (issue #726: "green" means really on the remote).
+            if not git_ops.remote_contains_commit(work.repo, branch, sha):
+                raise GitError(
+                    f"Push verification failed: remote 'origin' does not report "
+                    f"refs/heads/{branch} at {sha} after the push"
+                )
 
     return True
 

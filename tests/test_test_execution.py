@@ -122,3 +122,44 @@ def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path
             break
         time.sleep(0.1)
     assert _pid_alive(pid) is False
+
+
+async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
+    """Issue #726 task 12: with a trajectory recorder active, the host runner
+    emits phase events distinguishable as ``test-execution``, carrying a
+    ``duration_ms`` and a ``stop_reason`` in {completed, timed_out}."""
+    from daydream.trajectory import DaydreamPhase
+    from tests.harness.trajectory import make_recorder
+
+    rec = make_recorder(tmp_path)
+    async with rec:
+        await run_test_command(["python", "-c", "pass"], cwd=tmp_path, wall_budget_s=10.0)
+
+    events = [
+        e
+        for e in rec.phase_event_dicts()
+        if e["phase"] == DaydreamPhase.TEST_EXECUTION.value and e["event"] == "phase_end"
+    ]
+    assert len(events) == 1
+    md = events[0]["metadata"]
+    assert md["stop_reason"] in {"completed", "timed_out"}
+    assert md["duration_ms"] >= 0
+
+
+async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
+    from daydream.trajectory import DaydreamPhase
+    from tests.harness.trajectory import make_recorder
+
+    rec = make_recorder(tmp_path)
+    async with rec:
+        await run_test_command(
+            ["python", "-c", "import time; time.sleep(30)"], cwd=tmp_path, wall_budget_s=0.3
+        )
+
+    events = [
+        e
+        for e in rec.phase_event_dicts()
+        if e["phase"] == DaydreamPhase.TEST_EXECUTION.value and e["event"] == "phase_end"
+    ]
+    assert len(events) == 1
+    assert events[0]["metadata"]["stop_reason"] == "timed_out"

@@ -11,9 +11,10 @@ import asyncio
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from daydream.backends._subprocess import terminate_process
-from daydream.trajectory import redact_structured_text
+from daydream.trajectory import DaydreamPhase, host_phase_scope, redact_structured_text
 
 _REDACTED_ENV_VAR = "[REDACTED_ENV_VAR]"
 
@@ -102,7 +103,24 @@ async def run_test_command(
     Both pipes are streamed concurrently into one merged buffer; the merged
     output is redacted before it lands in the result. Spawn errors propagate —
     never a bogus default result.
+
+    With an active trajectory recorder, the run is bracketed by
+    ``test-execution`` phase events carrying ``duration_ms`` and a
+    ``stop_reason`` of ``completed`` / ``timed_out`` / ``failed`` (issue #726).
     """
+    async with host_phase_scope(DaydreamPhase.TEST_EXECUTION) as phase:
+        return await _run_test_command_inner(cmd, cwd=cwd, wall_budget_s=wall_budget_s,
+                                             env=env, phase=phase)
+
+
+async def _run_test_command_inner(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    wall_budget_s: float,
+    env: dict[str, str] | None,
+    phase: Any,
+) -> TestExecutionResult:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(cwd),
@@ -142,6 +160,8 @@ async def run_test_command(
         exit_status = proc.returncode if proc.returncode is not None else -1
     else:
         await asyncio.gather(pump_stdout, pump_stderr)
+    if timed_out:
+        phase.stop_reason = "timed_out"
     return TestExecutionResult(
         exit_status=exit_status,
         timed_out=timed_out,

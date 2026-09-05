@@ -1634,3 +1634,99 @@ async def test_fork_child_inherits_backend_identity(tmp_path: Path) -> None:
     assert child_extra["review_backend"] == "codex"
     assert child_extra["fix_backend"] == "pi"
     assert child_extra["test_backend"] == "codex"
+
+
+# Issue #726 task 12: host-side phases (test-execution / hook-run / commit /
+# push) are bracketed by phase events carrying duration_ms + stop_reason.
+
+
+async def test_host_phase_scope_records_duration_and_stop_reason(tmp_path: Path) -> None:
+    from daydream.trajectory import DaydreamPhase, host_phase_scope
+
+    rec = make_recorder(tmp_path)
+    async with rec:
+        async with host_phase_scope(DaydreamPhase.COMMIT) as handle:
+            handle.stop_reason = "timed_out"
+        with pytest.raises(RuntimeError):
+            async with host_phase_scope(DaydreamPhase.PUSH):
+                raise RuntimeError("push failed")
+        async with host_phase_scope(DaydreamPhase.HOOK_RUN):
+            pass
+
+    events = rec.phase_event_dicts()
+    ends = {(e["phase"], e["event"]): e for e in events if e["event"] == "phase_end"}
+    commit = ends[(DaydreamPhase.COMMIT.value, "phase_end")]
+    assert commit["metadata"]["stop_reason"] == "timed_out"
+    assert commit["metadata"]["duration_ms"] >= 0
+    push = ends[(DaydreamPhase.PUSH.value, "phase_end")]
+    assert push["metadata"]["stop_reason"] == "failed"
+    assert push["metadata"]["duration_ms"] >= 0
+    hook = ends[(DaydreamPhase.HOOK_RUN.value, "phase_end")]
+    assert hook["metadata"]["stop_reason"] == "completed"
+    # All four host phases are distinct DaydreamPhase values, so the manifest
+    # can tell test-execution, hook-run, commit, and push apart.
+    assert {p.value for p in (
+        DaydreamPhase.TEST_EXECUTION,
+        DaydreamPhase.HOOK_RUN,
+        DaydreamPhase.COMMIT,
+        DaydreamPhase.PUSH,
+    )} == {"test-execution", "hook-run", "commit", "push"}
+
+
+async def test_host_phase_scope_noop_without_recorder() -> None:
+    from daydream.trajectory import DaydreamPhase, _reset_recorder_for_tests, host_phase_scope
+
+    _reset_recorder_for_tests()
+    async with host_phase_scope(DaydreamPhase.COMMIT):
+        pass  # must not raise when no recorder is active
+
+
+async def test_do_commit_records_commit_phase_event(
+    git_repo: Path,
+    make_work: Any,
+) -> None:
+    """Real-path: _do_commit's host-native commit emits a distinct ``commit``
+    phase event with duration_ms + stop_reason (issue #726 task 12)."""
+    from collections.abc import AsyncGenerator
+
+    from daydream.backends import ResultEvent, TextEvent
+    from daydream.phases import _do_commit
+
+    class _Backend:
+        model = "mock-model"
+
+        async def cancel(self) -> None:
+            return None
+
+        async def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+            yield TextEvent(text="unused on the host commit path")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+    work = make_work(git_repo)
+    (git_repo / "app.py").write_text("x = 0\n")
+    _git_add_commit(git_repo)
+    (git_repo / "app.py").write_text("x = 1\n")
+
+    rec = make_recorder(git_repo)
+    async with rec:
+        ok = await _do_commit(_Backend(), work, push=False, preexisting_untracked=set())
+    assert ok is True
+
+    commit_ends = [
+        e
+        for e in rec.phase_event_dicts()
+        if e["phase"] == "commit" and e["event"] == "phase_end"
+    ]
+    assert len(commit_ends) == 1
+    assert commit_ends[0]["metadata"]["stop_reason"] == "completed"
+    assert commit_ends[0]["metadata"]["duration_ms"] >= 0
+
+
+def _git_add_commit(repo: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"],
+        cwd=repo, check=True,
+    )

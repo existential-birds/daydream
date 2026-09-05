@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -344,6 +345,14 @@ class DaydreamPhase(str, Enum):
     VET = "vet"
     PLAN_WRITE = "plan_write"
     DIAGRAM = "diagram"
+    # Host-side (non-agent) operations (issue #726): each is bracketed by
+    # phase events carrying ``duration_ms`` and ``stop_reason`` so the
+    # trajectory can tell test execution, hook runs, commits, and pushes
+    # apart without inferring from step timestamps.
+    TEST_EXECUTION = "test-execution"
+    HOOK_RUN = "hook-run"
+    COMMIT = "commit"
+    PUSH = "push"
 
 
 class DaydreamRunFlow(str, Enum):
@@ -1585,6 +1594,47 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
 
 
 @dataclass
+class HostPhaseHandle:
+    """Mutable stop-reason handle yielded by :func:`host_phase_scope`.
+
+    Defaults to ``"completed"``; the body sets ``"timed_out"`` / ``"failed"``
+    (or any domain reason) before returning/raising so the closing phase_end
+    event records why the host-side operation ended.
+    """
+
+    stop_reason: str = "completed"
+
+
+@asynccontextmanager
+async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
+    """Bracket a host-side (non-agent) operation with phase events.
+
+    Like :func:`phase_scope`, but the closing ``phase_end`` event always
+    carries ``duration_ms`` (wall clock of the scope) and ``stop_reason``
+    (from the yielded :class:`HostPhaseHandle`, "failed" when the body
+    raised). A no-op when no recorder is active.
+    """
+    recorder = get_current_recorder()
+    handle = HostPhaseHandle()
+    started = time.monotonic()
+    if recorder is not None:
+        recorder.emit_phase_start(phase, **metadata)
+    try:
+        yield handle
+    except BaseException:
+        handle.stop_reason = "failed"
+        raise
+    finally:
+        if recorder is not None:
+            recorder.emit_phase_end(
+                phase,
+                duration_ms=max(0, round((time.monotonic() - started) * 1000)),
+                stop_reason=handle.stop_reason,
+                **metadata,
+            )
+
+
+@dataclass
 class TrajectoryRecorder:
     """Owns the per-run ATIF Trajectory and writes it to disk on clean exit.
 
@@ -1764,6 +1814,15 @@ class TrajectoryRecorder:
                 for the deep orchestrator's DEEP sub-stages).
         """
         self._emit_phase_event(phase, "phase_start", **metadata)
+
+    def phase_event_dicts(self) -> list[dict[str, Any]]:
+        """JSON-serializable copies of the phase events emitted so far.
+
+        Read seam for tests/diagnostics: the recorder skips writing an empty
+        trajectory (``steps`` min_length=1), so phase events emitted without
+        any agent invocation are only observable in memory.
+        """
+        return [e.to_dict() for e in self._phase_events]
 
     def emit_phase_end(self, phase: DaydreamPhase, **metadata: Any) -> None:
         """Record a ``phase_end`` boundary event (issue #203).
