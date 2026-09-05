@@ -4,11 +4,11 @@ version = "0.28.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.12.13"
 dependencies = [
-    "claude-agent-sdk==0.2.116",
-    "anyio>=4.0",
-    "rich>=13.0",
+    "claude-agent-sdk==0.2.147",
+    "anyio>=4.14.2",
+    "rich>=15.0.0",
     "pyfiglet>=1.0",
-    "pydantic>=2.11.7",
+    "pydantic>=2.13.4",
     "httpx>=0.28",
     "PyJWT>=2.0",
     "jsonschema>=4.0",
@@ -22,17 +22,17 @@ dependencies = [
 
 [project.optional-dependencies]
 benchmark = ["harbor>=0.22,<0.23"]
-hub = ["huggingface_hub>=0.26"]
+hub = ["huggingface_hub>=1.29.0"]
 
 [dependency-groups]
 dev = [
-    "mypy>=1.14",
-    "pytest>=9.0.3",
-    "pytest-asyncio>=0.24",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "pytest-xdist>=3.6",
-    "ruff>=0.9",
+    "ruff>=0.16.5",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
-    "types-pyyaml>=6.0",
+    "types-pyyaml>=6.0.12.20260815",
     "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
     "vulture>=2.13",
 ]

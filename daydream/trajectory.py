@@ -52,7 +52,7 @@ _TRAJECTORIES_SUBDIR = "trajectories"
 _DAYDREAM_DIRNAME = ".daydream"
 
 if TYPE_CHECKING:
-    from daydream.backends import AgentEvent, CostEvent
+    from daydream.backends import AgentEvent, CostEvent, ToolResultEvent
 
 _console = create_console()
 _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
@@ -197,6 +197,11 @@ _PEM_KEY_PATTERN = re.compile(
 #: Replacement marker for PEM private-key blocks. Shared (imported) by the
 #: benchmark's buffering anchors so every redaction site emits one marker.
 _PEM_KEY_REDACTED_MARKER = "[REDACTED_PEM_KEY]"
+
+# Fixed-ASCII synthetic content for the incomplete-call marker emitted by
+# ``Invocation.finish()`` for tool calls still in flight. Never formatted with
+# tool data, so it is redaction-stable.
+INCOMPLETE_CALL_CONTENT = "[interrupted: call did not complete before invocation ended]"
 #: Replacement marker for credential values under sensitive keys (issue #455).
 #: Distinct from every existing [REDACTED_*] marker so consumers can tell a
 #: key-aware credential redaction from a flat regex hit.
@@ -338,6 +343,7 @@ class DaydreamPhase(str, Enum):
     AUDIT = "audit"
     VET = "vet"
     PLAN_WRITE = "plan_write"
+    DIAGRAM = "diagram"
 
 
 class DaydreamRunFlow(str, Enum):
@@ -352,6 +358,7 @@ class DaydreamRunFlow(str, Enum):
     DEEP = "deep"
     CUSTOM = "custom"
     IMPROVE = "improve"
+    DIAGRAM = "diagram"
 
 
 # Sensitive-key detection (issue #455): segment-aware, casing-agnostic.
@@ -847,6 +854,28 @@ def _reset_recorder_for_tests() -> None:
     _ACTIVE_RECORDERS.clear()
 
 
+def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
+    """Build ``ObservationResult.extra`` from a ToolResultEvent (issue #1126).
+
+    Deterministic scalar-only metadata: ``is_error`` always, then each
+    structured field only when the backend supplied it. Values are bool/int/
+    float/fixed-ASCII strings — never tool output or arguments — so nothing
+    free-text ever enters ``extra`` and redaction needs no special casing.
+    """
+    extra: dict[str, Any] = {"is_error": event.is_error}
+    if event.exit_code is not None:
+        extra["exit_code"] = event.exit_code
+    if event.status:
+        extra["status"] = event.status
+    if event.duration_ms is not None:
+        extra["duration_ms"] = event.duration_ms
+    if event.cancelled:
+        extra["cancelled"] = True
+    if event.truncated:
+        extra["truncated"] = True
+    return extra
+
+
 @dataclass
 class Invocation:
     """Per-``run_agent()`` recording scope for one model conversation.
@@ -1124,8 +1153,15 @@ class Invocation:
             open_dict = host["open_dict"]
             if open_dict is not None:
                 # Host Step is still open — append to its observation buffer.
+                # Failure metadata (is_error/exit_code/status, issue #1126)
+                # rides ObservationResult.extra alongside source_call_id and
+                # content.
                 open_dict["_observation_results"].append(
-                    ObservationResult(source_call_id=event.id, content=event.output)
+                    ObservationResult(
+                        source_call_id=event.id,
+                        content=event.output,
+                        extra=_result_extra(event),
+                    )
                 )
             else:
                 # Host Step was closed by an intervening TurnEndEvent. Patch the
@@ -1133,7 +1169,11 @@ class Invocation:
                 # bound to its originating turn.
                 self._amend_closed_step_observation(
                     closed_index=host["closed_index"],
-                    result=ObservationResult(source_call_id=event.id, content=event.output),
+                    result=ObservationResult(
+                        source_call_id=event.id,
+                        content=event.output,
+                        extra=_result_extra(event),
+                    ),
                 )
         elif isinstance(event, MetricsEvent):
             # EVNT-02 attribute names verbatim. prompt_tokens is the total
@@ -1391,19 +1431,102 @@ class Invocation:
         Args:
             snapshot_step_id: Pre-allocated step ID for the partial step. When multiple
                 invocations are active, the caller allocates unique IDs to avoid duplicates.
+
+        In-flight tool calls carry the same interrupted markers ``finish()``
+        emits, so a partial flush and the final record agree about in-flight
+        tool outcomes. Unlike ``finish()`` this never mutates: ``_in_flight_tools``
+        stays populated (a later ``finish()`` still marks the same calls) and no
+        Step is replaced in place.
         """
+        in_flight = list(self._in_flight_tools.values())
         if self._open_step_dict is None:
-            return list(self.steps)
-        d = self._open_step_dict
-        extra_overrides: dict[str, Any] = {"partial_step": True}
-        if d["_unmatched_tool_results"]:
-            extra_overrides["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
-        step_id = snapshot_step_id if snapshot_step_id is not None else self.recorder._step_id_counter + 1
-        return [*self.steps, self._materialize_agent_step(d, step_id=step_id, extra_overrides=extra_overrides)]
+            steps = list(self.steps)
+        else:
+            d = self._open_step_dict
+            extra_overrides: dict[str, Any] = {"partial_step": True}
+            if d["_unmatched_tool_results"]:
+                extra_overrides["unmatched_tool_results"] = list(d["_unmatched_tool_results"])
+            step_id = snapshot_step_id if snapshot_step_id is not None else self.recorder._step_id_counter + 1
+            steps = [
+                *self.steps,
+                self._materialize_agent_step(d, step_id=step_id, extra_overrides=extra_overrides),
+            ]
+        # Markers land per host Step in the same LIFO order finish()'s popitem loop uses.
+        for host in reversed(in_flight):
+            if host["closed_index"] is not None:
+                steps[host["closed_index"]] = self._with_observation_result(
+                    steps[host["closed_index"]], self._interrupted_marker()
+                )
+            elif self._open_step_dict is not None and host["open_dict"] is self._open_step_dict:
+                steps[-1] = self._with_observation_result(steps[-1], self._interrupted_marker())
+        return steps
+
+    @staticmethod
+    def _interrupted_marker() -> ObservationResult:
+        """Synthetic terminal outcome for a tool call still in flight.
+
+        Deliberately carries NO ``source_call_id``: consumers derive completed
+        tool calls from an observation result's string ``source_call_id``
+        (``deep/coverage._completed_read_paths``, shared by the uncovered-file
+        sweep, per-stack verdict evidence and diagram-grounding receipts), so
+        stamping the in-flight tool's id here would make an interrupted read
+        derive as completed and flip their fail-open invariant ("an interrupted
+        read must NOT count as coverage") to fail-closed. Null ``source_call_id``
+        is the ATIF v1.7 encoding for "not a standard tool-call result" and
+        keeps the marker schema-valid. Content is fixed ASCII and ``extra``
+        carries only the two fixed keys, so the marker is redaction-stable.
+        """
+        return ObservationResult(
+            source_call_id=None,
+            content=INCOMPLETE_CALL_CONTENT,
+            extra={"is_error": True, "status": "interrupted"},
+        )
+
+    @staticmethod
+    def _with_observation_result(step: Step, result: ObservationResult) -> Step:
+        """Return a copy of *step* with *result* appended to its observation.
+
+        Non-mutating twin of ``_amend_closed_step_observation`` for the
+        signal-safe snapshot path. No re-redaction pass needed: the Step is
+        already a redacted copy and the marker content is fixed ASCII.
+        """
+        if step.observation is None:
+            observation = Observation(results=[result])
+        else:
+            observation = step.observation.model_copy(
+                update={"results": [*step.observation.results, result]}
+            )
+        return step.model_copy(update={"observation": observation})
+
+    def _emit_incomplete_call_markers(self) -> None:
+        """Append a synthetic failure observation for every still-in-flight tool call.
+
+        Called from ``finish()`` after ``_close_open_step()``, and every host
+        entry's ``open_dict`` is nulled when its Step closes, so each marker
+        lands on the closed Step via ``closed_index`` (the open-dict arm is
+        unreachable by construction and omitted). Popping entries as we go
+        makes this idempotent — a second ``finish()`` finds nothing. Each
+        marker is ``_interrupted_marker()``: fixed ASCII content, the two fixed
+        ``extra`` keys, and no ``source_call_id`` so no consumer derives an
+        interrupted call as completed (see ``_interrupted_marker``).
+        """
+        while self._in_flight_tools:
+            _, host = self._in_flight_tools.popitem()
+            self._amend_closed_step_observation(
+                closed_index=host["closed_index"],
+                result=self._interrupted_marker(),
+            )
 
     def finish(self) -> None:
-        """Close any open step and flush all steps to the parent recorder."""
+        """Close any open step, mark in-flight tool calls interrupted, and flush.
+
+        After the final step close, every tool call still in flight (no
+        matching ``ToolResultEvent`` arrived) gets a synthetic
+        ``ObservationResult`` marker appended to its host Step so no tool call
+        dangles without a terminal outcome.
+        """
         self._close_open_step()
+        self._emit_incomplete_call_markers()
         self.recorder._extend_steps(self.steps)
 
 

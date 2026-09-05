@@ -145,11 +145,17 @@ class SummaryFinding:
 
 @dataclass(frozen=True)
 class SummaryContext:
-    """Input to the ``"summary"`` renderer."""
+    """Input to the ``"summary"`` renderer.
+
+    ``diagrams`` (issue #1113) carries the host-rendered grounded-diagram
+    blocks, or None when the run produced none. It is appended last so the
+    field is additive: an existing positional construction keeps working.
+    """
 
     findings: tuple[SummaryFinding, ...]
     agent_prompt: str
     review_info: str
+    diagrams: str | None = None
 
 
 @dataclass(frozen=True)

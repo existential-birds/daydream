@@ -25,7 +25,9 @@ stamps every breakdown; scoring under a non-default :class:`RubricV2Weights`
 appends a ``+custom-{fingerprint}`` suffix so an analysis-time override can
 never be mistaken for the canonical rubric score. Changing any default weight
 is a deliberate golden-update: re-pin the golden values and bump
-:data:`REWARD_VERSION_RUBRIC`.
+:data:`REWARD_VERSION_RUBRIC`. So is redefining what an input label *means*
+while the weights hold still — the stamp identifies the label semantics as much
+as the algebra.
 
 Pure module: no filesystem, network, or subprocess access.
 """
@@ -40,8 +42,19 @@ from typing import Any
 
 from daydream.training.reward import DEFAULT_WEIGHTS, ScoringInputs, score_trajectory
 
-REWARD_VERSION_RUBRIC = "2026.05.28-rubric-1"
+REWARD_VERSION_RUBRIC = "2026.09.04-rubric-1"
 """Bump on any change to rubric weights, penalty semantics, or composite shape.
+
+``2026.09.04-rubric-1`` is **not** a weight change: :class:`RubricV2Weights`
+defaults, the penalty semantics and the composite shape are all identical to
+``2026.05.28-rubric-1``. The bump records an upstream *label* redefinition
+(issue #1106): ``daydream.eval.analyzer.analyze_grounding`` tightened its
+grounding predicate from "the finding's cited file was read" to that plus "the
+finding's cited line resolves inside (or within tolerance of) a diff hunk". That
+predicate produces the ``grounded`` count this rubric divides by
+``total_findings`` for the localization term, and the ``grounding_rate`` it hands
+to :func:`~daydream.training.reward.score_trajectory`, so scores stamped before
+and after are not comparable and must not share a stamp.
 
 Read at call time so a test can monkeypatch
 ``daydream.training.rubric_v2.REWARD_VERSION_RUBRIC`` and have

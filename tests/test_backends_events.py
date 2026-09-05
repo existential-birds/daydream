@@ -194,3 +194,18 @@ def test_turn_end_event_is_in_agent_event_union() -> None:
     assert isinstance(ev.timestamp, str) and ev.timestamp.endswith("Z")
     # Runtime confirmation that TurnEndEvent is part of the AgentEvent union.
     assert isinstance(ev, AgentEvent)
+
+
+def test_tool_result_event_status_fields_default_to_none() -> None:
+    ev = ToolResultEvent(id="t1", output="ok", is_error=False)
+    assert ev.exit_code is None
+    assert ev.status is None
+    assert ev.duration_ms is None
+    assert ev.cancelled is False
+    assert ev.truncated is False
+
+
+def test_tool_result_event_accepts_status_metadata() -> None:
+    ev = ToolResultEvent(id="t2", output="boom", is_error=True, exit_code=128, status="completed")
+    assert ev.exit_code == 128
+    assert ev.status == "completed"

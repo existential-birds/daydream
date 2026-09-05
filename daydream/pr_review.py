@@ -35,9 +35,12 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import jsonschema
+
 import daydream
 from daydream import git_ops
 from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
+from daydream.config import DIAGRAM_KINDS
 from daydream.extensions import (
     CommentFinding,
     FindingRenderContext,
@@ -54,7 +57,7 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from daydream.findings import ArtifactFinding
+    from daydream.findings import ArtifactFinding, FindingsArtifact
 
 
 _logger = logging.getLogger(__name__)
@@ -131,6 +134,11 @@ class PRInfo:
     owner: str
     repo: str
     url: str
+    # Slug of the PR's head repository (``owner/repo``) — the fork when the
+    # PR head lives in a fork. Used ONLY for the reviewed-commit link, which
+    # must point at the repo that actually holds the head commit; comments
+    # always post to the base repo via ``owner``/``repo``.
+    head_repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +202,7 @@ async def post_review_to_pr_from_report(
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
+    diagram_blocks: str | None = None,
 ) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -211,6 +220,9 @@ async def post_review_to_pr_from_report(
     ``gh pr view`` (redrive) instead of the current branch's open PR;
     a failing explicit lookup returns :attr:`PostStatus.NO_PR` with no
     fallback to current-branch discovery.
+
+    ``diagram_blocks`` (issue #1113): host-rendered grounded-diagram markdown,
+    threaded through to :func:`build_payload`.
 
     Returns:
         A :class:`PostStatus` describing the outcome so the caller can decide
@@ -231,7 +243,7 @@ async def post_review_to_pr_from_report(
         )
         return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
-    if not issues and not approve_on_clean:
+    if not issues and not approve_on_clean and not (diagram_blocks and diagram_blocks.strip()):
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return PostStatus.NOTHING_TO_POST
     return await _post(
@@ -241,6 +253,7 @@ async def post_review_to_pr_from_report(
         post=post,
         approve_on_clean=approve_on_clean,
         pr_number=pr_number,
+        diagram_blocks=diagram_blocks,
     )
 
 
@@ -266,6 +279,22 @@ def finding_marker(fingerprint: str) -> str:
 def parse_finding_markers(text: str) -> list[str]:
     """Return all finding fingerprints embedded in ``text``, in order."""
     return FINDING_MARKER_RE.findall(text)
+
+
+# Hidden marker for a standalone grounded-diagram comment (issue #1113). One
+# per rendered kind, so a later diagram-only run of the SAME kind can find and
+# minimize its own prior comment without touching the other kind's.
+DIAGRAM_MARKER_RE = re.compile(r"<!-- daydream-diagram: ([a-z]+) ([0-9a-f]{7,40}) -->")
+
+
+def diagram_marker(kind: str, head_sha: str) -> str:
+    """Render the hidden diagram marker comment for one kind at one head."""
+    return f"<!-- daydream-diagram: {kind} {head_sha} -->"
+
+
+def parse_diagram_markers(text: str) -> list[tuple[str, str]]:
+    """Return all ``(kind, head_sha)`` diagram markers in ``text``, in order."""
+    return [(kind, sha) for kind, sha in DIAGRAM_MARKER_RE.findall(text)]
 
 
 def _normalize_severity(raw: dict[str, Any]) -> str | None:
@@ -451,12 +480,41 @@ def _current_branch(target_dir: Path) -> str | None:
         return None
 
 
+def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
+    """The ``owner/repo`` slug that holds the PR's head commit, or ``None``.
+
+    ``gh pr list --json headRepository,headRepositoryOwner`` rows carry the
+    head repository — the fork for fork-head PRs, where the head commit
+    actually exists. ``gh pr view`` rows carry neither key, so callers fall
+    back to the base-repo slug for those.
+    """
+    head_repo = row.get("headRepository")
+    if not isinstance(head_repo, dict):
+        return None
+    name_with_owner = head_repo.get("nameWithOwner")
+    if isinstance(name_with_owner, str) and "/" in name_with_owner:
+        return name_with_owner
+    head_owner = row.get("headRepositoryOwner")
+    if (
+        isinstance(head_owner, dict)
+        and isinstance(head_owner.get("login"), str)
+        and isinstance(head_repo.get("name"), str)
+    ):
+        return f"{head_owner['login']}/{head_repo['name']}"
+    return None
+
+
 def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo | None:
     """Build :class:`PRInfo` from a ``gh`` PR row, resolving the owner/repo slug.
 
+    ``owner``/``repo`` (the posting target) come from ``gh repo view`` — the
+    base repository, which hosts the PR's comments. ``head_repo`` (the
+    reviewed-commit link target) comes from the row's head-repository entry
+    when present, so fork-head PRs link to the fork that holds the commit.
+
     Returns None when the owner/repo slug cannot be resolved.
     """
-    # Owner/repo lookup via `gh repo view` (handles fork cases cleanly).
+    # Owner/repo lookup via `gh repo view` — the base repo hosts the PR.
     slug = git_ops.gh_repo_view(target_dir)
     if slug is None:
         return None
@@ -469,6 +527,7 @@ def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo | None:
         owner=owner,
         repo=repo,
         url=row.get("url", ""),
+        head_repo=_head_repo_slug_from_row(row),
     )
 
 
@@ -505,20 +564,41 @@ def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
 _ANCHOR_TOKEN = re.compile(r"`([^`\n]{3,80})`|\b([A-Za-z_][A-Za-z0-9_]{4,})\b")
 
 
-def extract_anchors(text: str) -> list[str]:
-    """Pull candidate anchor tokens from issue text (longest first).
+def extract_anchors(text: str, *, prefer_quoted: bool = False) -> list[str]:
+    """Pull candidate anchor tokens from issue text, capped at the first 8.
 
-    Prefers backtick-quoted identifiers (e.g. `foo_bar`) since those are
-    the most specific signals of code the reviewer cited. Falls back to
-    any alphanumeric word of length >=5.
+    Two orderings share one extraction pass:
+
+    ``prefer_quoted=False`` (default) sorts every token longest-first.
+    :func:`compute_fingerprint` hashes this selection, so which 8 tokens
+    survive the cap is part of a finding's cross-run identity -- changing it
+    would re-fingerprint every open finding and defeat the reconcile dedup.
+    This ordering is therefore frozen.
+
+    ``prefer_quoted=True`` puts backtick-quoted tokens first (longest-first
+    within each group), then bare words. Longest-first alone does the opposite
+    of what it claims once a rationale carries ordinary English words: prose
+    like ``environment``/``immediately`` outranks a short backticked
+    identifier such as ``ttl`` and pushes it past the cap, so the one token
+    that actually appears on the cited line never reaches line resolution
+    (issue #1102). :func:`resolve_line` asks for this ordering.
     """
     seen: list[str] = []
+    quoted: set[str] = set()
     for m in _ANCHOR_TOKEN.finditer(text):
         token = m.group(1) or m.group(2)
-        if token and token not in seen:
+        if not token:
+            continue
+        if m.group(1):
+            quoted.add(token)
+        if token not in seen:
             seen.append(token)
-    # Longest-first improves hit quality (generic words lose to identifiers).
-    seen.sort(key=len, reverse=True)
+    if prefer_quoted:
+        # Stable sort, so first-appearance order still breaks length ties.
+        seen.sort(key=lambda t: (t not in quoted, -len(t)))
+    else:
+        # Longest-first improves hit quality (generic words lose to identifiers).
+        seen.sort(key=len, reverse=True)
     return seen[:8]
 
 
@@ -547,13 +627,38 @@ def compute_fingerprint(path: str, description: str, rationale: str) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | None:
+def _in_hunk(line: int, hunks: list[tuple[int, int]]) -> bool:
+    """Whether ``line`` falls inside any head-side ``(start, end)`` hunk range."""
+    return any(start <= line <= end for start, end in hunks)
+
+
+def resolve_line(
+    target_dir: Path,
+    head_sha: str,
+    issue: ParsedIssue,
+    hunks: list[tuple[int, int]] | None = None,
+) -> int | None:
     """Resolve the true line in the head commit for an issue.
 
+    ``hunks`` are the head-side ``(start, end)`` diff ranges for ``issue.path``
+    (see :func:`file_hunks`). They are what makes this path the
+    no-op-on-valid backstop ``daydream.deep.location_validator`` documents it
+    as: without them a correct, already-validated in-hunk line was re-derived
+    from prose tokens and could be relocated to the first anchor hit anywhere
+    in the file, after which :func:`snap_to_hunk` dropped the finding off the
+    diff entirely (issue #1102).
+
     Tries (in order):
-      1. If the issue has a line hint, verify the anchor appears within
-         +/-5 lines; trust it on match.
-      2. Otherwise search the whole file at head for the first anchor hit.
+      1. Line hint inside a hunk: return it unchanged. The merge-time
+         validator already confirmed it against the persisted hunk index, so
+         anchor verification could only move a line that is known good.
+      2. Line hint outside every hunk (or no ``hunks`` supplied): trust it
+         only when an anchor appears within +/-5 lines.
+      3. Whole-file anchor search, preferring the first hit that lands inside
+         a hunk. An out-of-hunk hit is returned only when no anchor hits any
+         hunk, so a comment is never relocated onto unchanged code while a
+         changed-line candidate exists.
+
     Returns None if the file doesn't exist at head or no anchor matches.
     """
     try:
@@ -564,24 +669,36 @@ def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | N
     if not lines:
         return None
 
-    anchors = extract_anchors(f"{issue.title}\n{issue.body}")
+    ranges = hunks or []
 
-    # Step 1: verify hint.
+    # Step 1: an in-hunk hint is authoritative -- pass it straight through.
+    if issue.line is not None and 1 <= issue.line <= len(lines) and _in_hunk(issue.line, ranges):
+        return issue.line
+
+    anchors = extract_anchors(f"{issue.title}\n{issue.body}", prefer_quoted=True)
+
+    # Step 2: verify an out-of-hunk hint against nearby anchors.
     if issue.line is not None and 1 <= issue.line <= len(lines):
+        lo = max(1, issue.line - 5)
+        hi = min(len(lines), issue.line + 5)
         for anchor in anchors:
-            lo = max(1, issue.line - 5)
-            hi = min(len(lines), issue.line + 5)
             if any(anchor in lines[i - 1] for i in range(lo, hi + 1)):
                 return issue.line
         # Hint didn't verify; fall through to full-file search.
 
-    # Step 2: full-file search.
+    # Step 3: full-file search, in-hunk hits first.
+    out_of_hunk: int | None = None
     for anchor in anchors:
         for i, line in enumerate(lines, start=1):
-            if anchor in line:
+            if anchor not in line:
+                continue
+            if _in_hunk(i, ranges):
                 return i
+            if out_of_hunk is None:
+                out_of_hunk = i
 
-    return None
+    return out_of_hunk
+
 
 # Splits a unified diff on each `diff --git` header so we can pick out the
 # block for a single file from a full-PR diff.
@@ -737,6 +854,12 @@ def classify(
     ``/pulls/{n}/comments`` endpoint the labeler reads back, so body-only is
     the placement of last resort — used only when GitHub could not accept a
     comment for that path at all.
+
+    Side effect: for issues placed inline, this mutates the caller-owned
+    ``ParsedIssue.body`` of the objects in ``issues`` in place, via
+    ``_note_relocation``, whenever the posted line differs from the line the
+    issue cited. Callers should not rely on ``issue.body`` remaining
+    unchanged after this call.
     """
     out = _ClassifiedIssues()
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
@@ -752,10 +875,20 @@ def classify(
         if issue.is_cross_stack:
             _unplaced(issue)
             continue
-        line = resolve_line(target_dir, pr.head_sha, issue)
-        if line is None:
+        # Skip the file_hunks() diff lookup -- a git-diff subprocess call with
+        # a gh-pr-diff network fallback on GitError -- for a path that cannot
+        # resolve at head_sha at all (e.g. deleted or renamed away in this
+        # PR). resolve_line would reject such a path via this same git show
+        # regardless of what hunks it was handed, so there is nothing for the
+        # hunk lookup to buy here.
+        try:
+            git_ops.show(target_dir, pr.head_sha, issue.path)
+        except GitError:
             _unplaced(issue)
             continue
+        # The hunk ranges are resolved BEFORE line resolution, not after: they
+        # are what lets `resolve_line` pass an already-valid in-hunk line
+        # through untouched instead of re-deriving it from prose (issue #1102).
         if issue.path not in hunks_cache:
             hunks_cache[issue.path] = file_hunks(
                 target_dir,
@@ -764,13 +897,48 @@ def classify(
                 issue.path,
                 pr_number=pr.number,
             )
-        snapped = snap_to_hunk(line, hunks_cache[issue.path])
+        hunks = hunks_cache[issue.path]
+        line = resolve_line(target_dir, pr.head_sha, issue, hunks)
+        if line is None:
+            _unplaced(issue)
+            continue
+        snapped = snap_to_hunk(line, hunks)
         if snapped is None:
             _unplaced(issue)
             continue
+        _note_relocation(issue, snapped)
         out.inline.append(_inline_comment(issue, snapped))
         out.inline_issues.append(issue)
     return out
+
+
+# Marks the posting-time relocation annotation so it is appended at most once
+# even if a caller classifies the same issue objects twice.
+_PLACEMENT_NOTE_PREFIX = "**Placement:** posted on line "
+
+
+def _note_relocation(issue: ParsedIssue, posted_line: int) -> None:
+    """Annotate ``issue`` when it is posted on a line it did not cite.
+
+    Anchor resolution and hunk snapping can both move a finding off its
+    reported line. Overwriting it silently leaves the run's own artifacts
+    showing a citation the posted comment does not use (issue #1102), so the
+    relocation is recorded in the body -- the same in-place, non-destructive
+    annotation the pre-report ``deep.location_validator`` writes for its
+    demotions. The note reaches the findings artifact too, because
+    ``findings._finding_dict`` serialises ``body``. Fingerprints are computed
+    from description/rationale and never the body, so annotating cannot change
+    a finding's cross-run identity.
+
+    ``issue.line <= 0`` (including the ``0`` whole-file sentinel used by
+    structural findings) is not a cited line and is never reported as one.
+    """
+    if issue.line is None or issue.line <= 0 or issue.line == posted_line:
+        return
+    if _PLACEMENT_NOTE_PREFIX in issue.body:
+        return
+    note = f"{_PLACEMENT_NOTE_PREFIX}{posted_line}; reviewer cited line {issue.line}."
+    issue.body = f"{issue.body}\n\n{note}" if issue.body else note
 
 
 def _inline_comment(issue: ParsedIssue, line: int) -> dict[str, Any]:
@@ -992,12 +1160,15 @@ def default_render_summary(ctx: SummaryContext) -> str:
     """Render the summary body between the approval line and the footer.
 
     Reproduces today's markdown byte-for-byte: ``**Code Review Summary**``, the
+    grounded-diagram blocks (issue #1113, when the run rendered any), the
     by-file non-inline findings section, the consolidated agent prompt (when
     non-empty), then the fully-wrapped review-info block. Never emits the
     approval line, the ``event`` decision, or :data:`DAYDREAM_FOOTER` — those
     stay host-owned in :func:`build_payload`.
     """
     chunks: list[str] = ["**Code Review Summary**"]
+    if ctx.diagrams:
+        chunks.append(ctx.diagrams)
     section = _render_body_section(ctx.findings)
     if section:
         chunks.append(section)
@@ -1131,6 +1302,25 @@ def _resolve_trajectory_paths(
     return paths, tmpdir
 
 
+_REVIEWED_COMMIT_MARKER = "- **Reviewed commit:**"
+
+
+def _strip_forged_reviewed_commit_lines(run_info: str) -> str:
+    """Drop forged reviewed-commit lines from run-info text (issue 2).
+
+    The reviewed-commit line is the single source of truth for which commit
+    was reviewed, built solely from validated ``PRInfo.head_sha``. The
+    untrusted artifact ``run_info`` string must never render a second,
+    forged line, so any line (optionally indented) starting with the marker
+    is removed from the run-info block before composition.
+    """
+    return "\n".join(
+        line
+        for line in run_info.splitlines()
+        if not line.lstrip().startswith(_REVIEWED_COMMIT_MARKER)
+    )
+
+
 def _render_review_info_block() -> str:
     """Render the enriched run-info block, falling back to a brief note.
 
@@ -1228,6 +1418,7 @@ def build_payload(
     *,
     run_info_override: str | None = None,
     approve_on_clean: bool = False,
+    diagram_blocks: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
@@ -1235,7 +1426,7 @@ def build_payload(
         **Code Review Summary**
         <details> Non-inline findings grouped by file
         <details> Consolidated AI agent prompt
-        <details> Review info (enriched run-info + version footer)
+        <details> Review info (reviewed commit + enriched run-info + version footer)
         Footer (🧙 Posted by daydream vX.Y.Z)
 
     Args:
@@ -1250,6 +1441,10 @@ def build_payload(
             ``"APPROVE"`` with a prepended approval line; otherwise the event
             stays ``"COMMENT"`` and the body is byte-identical to the
             non-approve path.
+        diagram_blocks: Host-rendered grounded-diagram markdown (issue #1113),
+            handed to the ``"summary"`` renderer as ``ctx.diagrams`` so it
+            lands directly under the summary header. ``None`` (the default)
+            renders a byte-identical no-diagram body.
     """
     all_issues_with_inline_meta = classified.all_issues()
 
@@ -1260,11 +1455,22 @@ def build_payload(
         _build_consolidated_prompt(classified, pr) if not classified.is_empty() else ""
     )
 
-    # Collapsible review info: enriched run-info (rollup + per-phase
-    # breakdown + version footer, owned by the renderer) followed by the
-    # existing severity/confidence breakdown. The renderer emits its own
+    # Collapsible review info: a linked reviewed-commit line (from
+    # ``pr.head_sha``, so readers can tell whether findings apply to the
+    # PR's current head), then enriched run-info (rollup + per-phase
+    # breakdown + version footer, owned by the renderer), then the
+    # conditional severity/confidence breakdown. The renderer emits its own
     # ``<sub>Generated by daydream...</sub>`` footer, so don't double it.
     enriched_run_info = run_info_override if run_info_override is not None else _render_review_info_block()
+    # The commit link targets the repo that holds the head commit: the fork
+    # for fork-head PRs (``head_repo``), else the base repo from
+    # ``owner``/``repo``. ``owner``/``repo`` themselves stay the base repo —
+    # that is where the review comment posts.
+    commit_slug = pr.head_repo or f"{pr.owner}/{pr.repo}"
+    commit_line = (
+        f"{_REVIEWED_COMMIT_MARKER} [`{pr.head_sha[:7]}`]"
+        f"(https://github.com/{commit_slug}/commit/{pr.head_sha})"
+    )
     extra_info_lines: list[str] = []
     severity_parts = _count_labels(
         all_issues_with_inline_meta, "severity", ("high", "medium", "low")
@@ -1276,7 +1482,7 @@ def build_payload(
     )
     if confidence_parts:
         extra_info_lines.append("- **Confidence:** " + ", ".join(confidence_parts))
-    review_info = enriched_run_info
+    review_info = f"{commit_line}\n\n{_strip_forged_reviewed_commit_lines(enriched_run_info)}"
     if extra_info_lines:
         review_info = f"{review_info}\n\n" + "\n".join(extra_info_lines)
     review_info_block = (
@@ -1290,6 +1496,7 @@ def build_payload(
         findings=_summary_findings(classified.body_only),
         agent_prompt=agent_prompt,
         review_info=review_info_block,
+        diagrams=diagram_blocks or None,
     )
     summary_body = _render_summary(summary_ctx)
 
@@ -1367,13 +1574,18 @@ async def _post(
     post: bool = False,
     approve_on_clean: bool = False,
     pr_number: int | None = None,
+    diagram_blocks: str | None = None,
 ) -> PostStatus:
     pr = _resolve_pr(target_dir, console, pr_number)
     if pr is None:
         return PostStatus.NO_PR
 
     classified = classify(target_dir, pr, issues)
-    if classified.is_empty() and not approve_on_clean:
+    if (
+        classified.is_empty()
+        and not approve_on_clean
+        and not (diagram_blocks and diagram_blocks.strip())
+    ):
         print_info(
             console, "No postable issues after classification; skipping PR post."
         )
@@ -1415,7 +1627,9 @@ async def _post(
             f"{len(failed)} file-level comment(s) failed to post; folded into the review body.",
         )
 
-    payload = build_payload(pr, classified, approve_on_clean=approve_on_clean)
+    payload = build_payload(
+        pr, classified, approve_on_clean=approve_on_clean, diagram_blocks=diagram_blocks
+    )
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
         # ``error_msg`` carries the GitError text from git_ops, which includes
@@ -1493,6 +1707,587 @@ def _submit_review(
     return (str(url) if url else None), None
 
 
+def post_diagram_comment_to_pr(
+    target_dir: Path,
+    pr: PRInfo,
+    *,
+    body: str,
+    kinds: list[str],
+    bot_login: str | None,
+) -> tuple[str | None, str | None]:
+    """Post a standalone grounded-diagram issue comment on a PR (issue #1113).
+
+    A diagram is not a finding: it has no line anchor, no severity, and no
+    thread to resolve, so it posts as a plain issue comment rather than a
+    review. The body carries one hidden ``daydream-diagram`` marker per kind
+    plus :data:`DAYDREAM_FOOTER`, which is how the *next* diagram-only run of
+    the same kind recognises and minimizes this comment.
+
+    Prior comments are minimized only after the new one posts successfully, so
+    a failed replacement cannot remove the PR's only live diagram.
+    Minimization is best-effort: an unresolved ``bot_login`` skips it with a
+    warning (mirroring ``BOT_LOGIN_UNRESOLVED``) rather than trusting an
+    unattributed comment, and a failed mutation warns and continues — a stale
+    fold is a cosmetic problem, a missing diagram is the run's deliverable.
+
+    Args:
+        target_dir: Repository directory the ``gh`` calls run in.
+        pr: Resolved target PR.
+        body: Rendered markdown (diagram blocks and/or omission notices).
+        kinds: The diagram kinds this comment speaks for; markers are written
+            for exactly these, and only prior comments carrying one of them are
+            minimized.
+        bot_login: Bot login for author attribution, or None.
+
+    Returns:
+        ``(html_url, None)`` on success, ``(None, error_message)`` on failure.
+    """
+    from daydream.agent import console
+    from daydream.reconcile import fetch_prior_diagram_comments, minimize_comment
+
+    repo_slug = f"{pr.owner}/{pr.repo}"
+    prior = []
+    if bot_login is None:
+        print_warning(
+            console,
+            "BOT_LOGIN_UNRESOLVED: no bot login resolvable; skipping minimization of "
+            "prior diagram comments (a stale diagram may stay unfolded, but no "
+            "comment is ever minimized on an unproven author).",
+        )
+    else:
+        try:
+            prior = fetch_prior_diagram_comments(
+                target_dir, repo_slug, pr.number, bot_login=bot_login
+            )
+        except GitError as exc:
+            print_warning(console, f"Could not inventory prior diagram comments: {exc}")
+            prior = []
+
+    markers = "\n".join(diagram_marker(kind, pr.head_sha) for kind in kinds)
+    chunks = [chunk for chunk in (markers, body.strip(), DAYDREAM_FOOTER) if chunk]
+    endpoint = f"/repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments"
+    try:
+        data = git_ops.gh_api(
+            target_dir, endpoint, method="POST", input_data={"body": "\n\n".join(chunks)}
+        )
+    except GitError as exc:
+        return None, str(exc)
+    if not isinstance(data, dict):
+        return None, None
+    url = data.get("html_url")
+    if not url:
+        return None, None
+
+    current_kinds = set(kinds)
+    for comment in prior:
+        if not set(comment.kinds) & current_kinds:
+            continue
+        if not minimize_comment(target_dir, comment.node_id):
+            print_warning(
+                console,
+                f"Failed to minimize prior diagram comment {comment.node_id}",
+            )
+    return str(url), None
+
+
+def diagram_comment_kinds(payload: dict[str, Any]) -> list[str]:
+    """Return the diagram kinds a standalone comment speaks for (issue #1113).
+
+    A comment speaks for the kinds the run's eligibility decision marked
+    eligible -- the kinds it actually attempted -- in render order. That is the
+    right marker set: a ``--diagram-only flowchart`` run must never minimize a
+    prior sequence-diagram comment, and a run whose requested kind ended up
+    omitted must still supersede its own prior comment for that kind.
+
+    Args:
+        payload: The ``diagram.json`` payload (``{"eligibility", "results"}``).
+
+    Returns:
+        A subset of :data:`~daydream.config.DIAGRAM_KINDS`, sequence first.
+    """
+    eligibility = payload.get("eligibility")
+    if not isinstance(eligibility, dict):
+        return []
+    kinds: list[str] = []
+    for kind in DIAGRAM_KINDS:
+        decision = eligibility.get(kind)
+        if isinstance(decision, dict) and decision.get("eligible"):
+            kinds.append(kind)
+    return kinds
+
+
+def _diagram_results(payload: dict[str, Any]) -> dict[str, dict[str, Any] | None]:
+    """Extract the per-kind result dicts from a ``diagram.json`` payload.
+
+    Total: a missing or malformed ``results`` object yields ``None`` for every
+    kind, which the renderer reads as "no block", never as an error.
+    """
+    raw = payload.get("results")
+    results: dict[str, dict[str, Any] | None] = {}
+    for kind in DIAGRAM_KINDS:
+        value = raw.get(kind) if isinstance(raw, dict) else None
+        results[kind] = value if isinstance(value, dict) else None
+    return results
+
+
+def render_diagram_blocks_from_payload(payload: dict[str, Any]) -> str:
+    """Render just the folded diagram blocks from a ``diagram.json`` payload.
+
+    Used for the review-comment slot, which carries blocks only: an omission
+    notice belongs on an explicit request (``--diagram-only`` / a mention
+    command), where silence would be ambiguous, not on every deep review.
+    """
+    from daydream.deep.diagram_render import render_diagram_blocks
+
+    return render_diagram_blocks(_diagram_results(payload))
+
+
+def render_diagram_comment_body(payload: dict[str, Any]) -> str:
+    """Render the standalone diagram comment body from a ``diagram.json`` payload.
+
+    The single renderer for both phases: the diagram-only run posts through it
+    directly, and ``post-findings`` re-renders through it from the artifact, so
+    the two produce identical markdown for identical specs. Mermaid is always
+    re-derived from ``spec_final`` -- a stored ``mermaid`` string is never read.
+
+    Rendered kinds contribute their folded block; a requested kind that was
+    skipped, failed, or fell below its grounding floor contributes its omission
+    notice, because on an explicit request silence is indistinguishable from a
+    broken run.
+
+    Args:
+        payload: The ``diagram.json`` payload.
+
+    Returns:
+        The comment body, or a short "nothing was eligible" line when the run
+        requested no kind at all.
+    """
+    from daydream.deep.diagram_render import render_omission_notice
+
+    results = _diagram_results(payload)
+    chunks: list[str] = []
+    blocks = render_diagram_blocks_from_payload(payload)
+    if blocks:
+        chunks.append(blocks)
+    for kind in diagram_comment_kinds(payload):
+        result = results.get(kind)
+        if result is None or result.get("status") == "rendered":
+            continue
+        notice = render_omission_notice(kind, result)
+        if notice:
+            chunks.append(notice)
+    if not chunks:
+        chunks.append(
+            "No grounded diagram was eligible for this pull request: the change "
+            "does not cross a module or service boundary and no changed function "
+            "gained enough branch points to be worth charting."
+        )
+    return "\n\n".join(chunks)
+
+
+def _diagram_grounding_problem(
+    kind: str, spec: dict[str, Any], grounding: Any
+) -> str | None:
+    """Validate the host-produced grounding report attached to a rendered spec."""
+    from daydream.deep.diagram_grounding import REASON_CODES
+
+    if not isinstance(grounding, dict):
+        return f"{kind} rendered result has no grounding attestation"
+    elements = grounding.get("elements")
+    summary = grounding.get("summary")
+    capped = grounding.get("capped")
+    if not isinstance(elements, list):
+        return f"{kind} grounding attestation has no 'elements' array"
+    if not isinstance(summary, dict):
+        return f"{kind} grounding attestation has no 'summary' object"
+    if not isinstance(capped, dict):
+        return f"{kind} grounding attestation has no 'capped' object"
+
+    allowed_elements = (
+        {"participant", "message", "block", "branch"}
+        if kind == "sequence"
+        else {"root", "node", "edge"}
+    )
+    allowed_caps = (
+        {"participants", "messages", "blocks"}
+        if kind == "sequence"
+        else {"nodes", "edges"}
+    )
+    checks: list[dict[str, Any]] = []
+    seen_refs: set[tuple[str, str]] = set()
+    for index, raw in enumerate(elements):
+        if not isinstance(raw, dict):
+            return f"{kind} grounding attestation element {index} is not an object"
+        element = raw.get("element")
+        ref = raw.get("ref")
+        grounded = raw.get("grounded")
+        reason = raw.get("reason")
+        final_index = raw.get("final_index")
+        if element not in allowed_elements or not isinstance(ref, str) or not ref:
+            return f"{kind} grounding attestation element {index} has an invalid identity"
+        identity = (element, ref)
+        if identity in seen_refs:
+            return f"{kind} grounding attestation repeats {element} reference {ref!r}"
+        seen_refs.add(identity)
+        if not isinstance(grounded, bool):
+            return f"{kind} grounding attestation for {element} {ref!r} has no boolean verdict"
+        if grounded and reason is not None:
+            return f"{kind} grounding attestation for {element} {ref!r} is contradictory"
+        if not grounded and reason not in REASON_CODES:
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid reason"
+        if final_index is not None and (
+            isinstance(final_index, bool) or not isinstance(final_index, int) or final_index < 0
+        ):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid final index"
+        if final_index is not None and not grounded:
+            return f"{kind} grounding attestation publishes ungrounded {element} {ref!r}"
+        strength = raw.get("strength")
+        snapped_line = raw.get("snapped_line")
+        if strength not in (None, "definition", "token"):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid strength"
+        if snapped_line is not None and (
+            isinstance(snapped_line, bool)
+            or not isinstance(snapped_line, int)
+            or snapped_line < 1
+        ):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid snapped line"
+        if not isinstance(raw.get("in_changed_hunk"), bool):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid hunk verdict"
+        defined_at = raw.get("defined_at")
+        if defined_at is not None and (not isinstance(defined_at, str) or not defined_at):
+            return f"{kind} grounding attestation for {element} {ref!r} has an invalid definition"
+        checks.append(raw)
+
+    for count_name in ("proposed", "grounded_first_pass", "repaired", "pruned"):
+        value = summary.get(count_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return (
+                f"{kind} grounding attestation summary has an invalid "
+                f"{count_name!r} count"
+            )
+    if summary["proposed"] != len(checks):
+        return f"{kind} grounding attestation summary does not match its elements"
+    if summary["pruned"] != sum(not check["grounded"] for check in checks):
+        return f"{kind} grounding attestation pruned count does not match its verdicts"
+    for collection, count in capped.items():
+        if (
+            collection not in allowed_caps
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            return f"{kind} grounding attestation has an invalid {collection!r} cap count"
+
+    claimed: set[int] = set()
+
+    def claim(element: str, final_index: int, ref: str | None = None) -> dict[str, Any] | None:
+        matches = [
+            (index, check)
+            for index, check in enumerate(checks)
+            if check["element"] == element
+            and check["final_index"] == final_index
+            and (ref is None or check["ref"] == ref)
+        ]
+        if len(matches) != 1:
+            return None
+        index, check = matches[0]
+        claimed.add(index)
+        return check
+
+    if kind == "sequence":
+        participants = spec["participants"]
+        messages = spec["messages"]
+        blocks = spec["blocks"]
+        names = {participant["name"] for participant in participants}
+        if len(names) != len(participants):
+            return "sequence spec_final has duplicate participant names"
+        for index, participant in enumerate(participants):
+            if claim("participant", index, participant["name"]) is None:
+                return f"sequence grounding attestation does not cover participant at final index {index}"
+        for index, message in enumerate(messages):
+            if message["from"] not in names or message["to"] not in names:
+                return f"sequence spec_final message {index} has an unknown participant"
+            if claim("message", index) is None:
+                return f"sequence grounding attestation does not cover message at final index {index}"
+        for block_index, block in enumerate(blocks):
+            block_check = claim("block", block_index)
+            if block_check is None:
+                return f"sequence grounding attestation does not cover block at final index {block_index}"
+            prefix = f"{block_check['ref']}."
+            for branch_index, branch in enumerate(block["branches"]):
+                if any(
+                    isinstance(message_index, bool)
+                    or message_index >= len(messages)
+                    for message_index in branch["messages"]
+                ):
+                    return f"sequence spec_final block {block_index} cites an unknown message"
+                matches = [
+                    (index, check)
+                    for index, check in enumerate(checks)
+                    if check["element"] == "branch"
+                    and check["final_index"] == branch_index
+                    and check["ref"].startswith(prefix)
+                ]
+                if len(matches) != 1:
+                    return (
+                        "sequence grounding attestation does not cover branch at "
+                        f"final index {block_index}.{branch_index}"
+                    )
+                claimed.add(matches[0][0])
+        if grounding.get("root_range") is not None:
+            return "sequence grounding attestation has an unexpected root range"
+    else:
+        root = spec["root"]
+        nodes = spec["nodes"]
+        edges = spec["edges"]
+        root_range = grounding.get("root_range")
+        if (
+            not isinstance(root_range, list)
+            or len(root_range) != 2
+            or any(isinstance(line, bool) or not isinstance(line, int) for line in root_range)
+            or root_range[0] != root["line"]
+            or root_range[1] < root_range[0]
+        ):
+            return "flowchart grounding attestation has an invalid root range"
+        if claim("root", 0, root["name"]) is None:
+            return "flowchart grounding attestation does not cover root at final index 0"
+        node_ids = {node["id"] for node in nodes}
+        if len(node_ids) != len(nodes):
+            return "flowchart spec_final has duplicate node ids"
+        for index, node in enumerate(nodes):
+            evidence = node["evidence"]
+            if evidence["file"] != root["file"] or not (
+                root_range[0] <= evidence["line"] <= root_range[1]
+            ):
+                return f"flowchart spec_final node {index} lies outside its root"
+            if claim("node", index, node["id"]) is None:
+                return f"flowchart grounding attestation does not cover node at final index {index}"
+        for index, edge in enumerate(edges):
+            if edge["from"] not in node_ids or edge["to"] not in node_ids:
+                return f"flowchart spec_final edge {index} has an unknown endpoint"
+            if claim("edge", index, f"{edge['from']}->{edge['to']}") is None:
+                return f"flowchart grounding attestation does not cover edge at final index {index}"
+    if any(
+        check["final_index"] is not None and index not in claimed
+        for index, check in enumerate(checks)
+    ):
+        return f"{kind} grounding attestation contains an unmatched published element"
+    return None
+
+
+def _diagram_head_evidence_problem(
+    kind: str,
+    spec: dict[str, Any],
+    target_dir: Path,
+    head_sha: str,
+    sources: dict[str, list[str]],
+) -> str | None:
+    """Return a problem when a rendered diagram citation is absent at ``head_sha``."""
+    from daydream.tree_sitter_index import (
+        is_branch_line,
+        is_executable_statement_line,
+        is_terminal_line,
+        language_for_path,
+    )
+
+    def check(evidence: dict[str, Any]) -> str | None:
+        path = evidence["file"]
+        lines = sources.get(path)
+        if lines is None:
+            try:
+                lines = git_ops.show(target_dir, head_sha, path).decode(
+                    errors="replace"
+                ).splitlines()
+            except GitError:
+                return f"{kind} diagram evidence is missing from immutable head: {path}"
+            sources[path] = lines
+        if evidence["line"] > len(lines):
+            return (
+                f"{kind} diagram evidence line {evidence['line']} is missing from "
+                f"immutable head: {path}"
+            )
+        return None
+
+    if kind == "sequence":
+        paths = {
+            path
+            for participant in spec["participants"]
+            for path in participant["files"]
+        }
+        paths.update(message["evidence"]["file"] for message in spec["messages"])
+        paths.update(
+            branch["evidence"]["file"]
+            for block in spec["blocks"]
+            for branch in block["branches"]
+        )
+        with tempfile.TemporaryDirectory() as snapshot_dir:
+            snapshot_root = Path(snapshot_dir)
+            for path in paths:
+                try:
+                    source = git_ops.show(target_dir, head_sha, path)
+                except GitError:
+                    return f"sequence diagram evidence is missing from immutable head: {path}"
+                snapshot_path = snapshot_root / path
+                snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_path.write_bytes(source)
+
+            from daydream.deep.diagram_grounding import RepoSymbols, ground_sequence
+
+            report = ground_sequence(
+                spec,
+                repo_root=snapshot_root,
+                hunk_ranges={},
+                read_paths=paths,
+                symbols=RepoSymbols(snapshot_root),
+            )
+        if report.spec_final != spec:
+            return "sequence diagram evidence is not grounded in immutable head"
+    else:
+        problem = check(spec["root"])
+        if problem is not None:
+            return problem
+        for node in spec["nodes"]:
+            evidence = node["evidence"]
+            problem = check(evidence)
+            if problem is not None:
+                return problem
+            source = "\n".join(sources[evidence["file"]]).encode()
+            language = language_for_path(evidence["file"])
+            line = evidence["line"]
+            try:
+                grounded = (
+                    is_terminal_line(language, source, line)
+                    if node["kind"] == "end"
+                    else is_branch_line(language, source, line)
+                    if node["kind"] == "decision"
+                    else is_executable_statement_line(language, source, line)
+                )
+            except Exception:
+                grounded = False
+            if not grounded:
+                return (
+                    f"flowchart diagram evidence line {line} is not a valid "
+                    f"{node['kind']} node in immutable head: {evidence['file']}"
+                )
+    return None
+
+
+def validate_diagram_payload(
+    payload: dict[str, Any],
+    *,
+    target_dir: Path | None = None,
+    head_sha: str | None = None,
+) -> str | None:
+    """Validate each rendered spec and its grounding attestation before posting.
+
+    The privileged poster re-renders mermaid from model-derived specs, so those
+    specs are re-validated here -- against the same hand-written schema the
+    author agent answered -- before a single character reaches GitHub.
+    ``FINDINGS_SCHEMA`` deliberately keeps ``diagrams`` permissive (it must not
+    couple to four modules' ``to_dict`` shapes), and this is the check that
+    makes that safe.
+
+    Args:
+        payload: The artifact's ``diagrams`` payload.
+        target_dir: Repository used to read immutable source evidence, when posting.
+        head_sha: Event-derived commit used to read immutable source evidence.
+
+    Returns:
+        None when every rendered kind validates, else a human error message.
+    """
+    from daydream.config import (
+        DIAGRAM_MAX_BLOCKS,
+        DIAGRAM_MAX_EDGES,
+        DIAGRAM_MAX_MESSAGES,
+        DIAGRAM_MAX_NODES,
+        DIAGRAM_MAX_PARTICIPANTS,
+    )
+    from daydream.deep.diagram_schema import FLOWCHART_SPEC_SCHEMA, SEQUENCE_SPEC_SCHEMA
+
+    schemas = {"sequence": SEQUENCE_SPEC_SCHEMA, "flowchart": FLOWCHART_SPEC_SCHEMA}
+    caps = {
+        "sequence": {
+            "participants": DIAGRAM_MAX_PARTICIPANTS,
+            "messages": DIAGRAM_MAX_MESSAGES,
+            "blocks": DIAGRAM_MAX_BLOCKS,
+        },
+        "flowchart": {"nodes": DIAGRAM_MAX_NODES, "edges": DIAGRAM_MAX_EDGES},
+    }
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        return "diagrams payload has no 'results' object"
+    sources: dict[str, list[str]] = {}
+    for kind in DIAGRAM_KINDS:
+        result = results.get(kind)
+        if not isinstance(result, dict) or result.get("status") != "rendered":
+            continue
+        try:
+            jsonschema.validate(result.get("spec_final"), schemas[kind])
+        except jsonschema.ValidationError as exc:
+            return f"{kind} spec_final failed schema validation: {exc.message}"
+        spec = result["spec_final"]
+        for collection, cap in caps[kind].items():
+            size = len(spec[collection])
+            if size > cap:
+                return f"{kind} spec_final exceeds {collection} render cap: {size} > {cap}"
+        if result.get("reason") is not None or result.get("omit_reasons") not in (None, []):
+            return f"{kind} rendered result contradicts its status"
+        problem = _diagram_grounding_problem(kind, spec, result.get("grounding"))
+        if problem is not None:
+            return problem
+        if target_dir is not None and head_sha is not None:
+            problem = _diagram_head_evidence_problem(
+                kind, spec, target_dir, head_sha, sources
+            )
+            if problem is not None:
+                return problem
+    return None
+
+
+def _post_diagram_artifact(
+    artifact: "FindingsArtifact",
+    pr: PRInfo,
+    target_dir: Path,
+    *,
+    console: Console,
+    bot_login: str | None,
+) -> int:
+    """Post a ``kind == "diagram"`` artifact as a standalone PR comment.
+
+    The Phase B half of the diagram-only flow. Validates the model-derived
+    specs, re-renders the mermaid from them, then posts one issue comment --
+    never a review, and never through ``build_payload``.
+
+    Returns:
+        ``0`` on success, ``1`` on a rejected payload or a failed POST.
+    """
+    payload = artifact.diagrams
+    if not isinstance(payload, dict):
+        print_error(
+            console,
+            "Diagram Artifact Rejected",
+            "artifact declares kind 'diagram' but carries no 'diagrams' payload",
+        )
+        return 1
+    problem = validate_diagram_payload(
+        payload, target_dir=target_dir, head_sha=pr.head_sha
+    )
+    if problem is not None:
+        print_error(console, "Diagram Artifact Rejected", problem)
+        return 1
+    body = render_diagram_comment_body(payload)
+    kinds = diagram_comment_kinds(payload)
+    url, error = post_diagram_comment_to_pr(
+        target_dir, pr, body=body, kinds=kinds, bot_login=bot_login
+    )
+    if url is None:
+        suffix = f" ({error})" if error else ""
+        print_error(console, "Diagram Comment Post Failed", f"No comment was posted.{suffix}")
+        return 1
+    print_success(console, f"Posted diagram comment: {url}")
+    return 0
+
+
 def post_findings_from_artifact(
     artifact_path: Path,
     *,
@@ -1565,6 +2360,38 @@ def post_findings_from_artifact(
         print_error(console, "Findings Artifact Rejected", str(exc))
         return 1
 
+    # The synthetic PRInfo depends only on this function's own arguments, so it
+    # is built once here -- above the diagram branch, which needs it too.
+    owner, repo_name = repo.split("/", 1)
+    pr = PRInfo(
+        number=pr_number,
+        head_sha=head_sha,
+        base_sha="",
+        base_ref="",
+        owner=owner,
+        repo=repo_name,
+        url="",
+    )
+
+    # Issue #1113: a diagram artifact carries no fingerprints, so it must never
+    # reach the reconcile path below -- ``partition([], prior)`` would classify
+    # EVERY prior review finding as stale and ``resolve_threads`` would minimize
+    # the bot's real open findings. Branch before ``fetch_prior_findings``.
+    if artifact.kind == "diagram":
+        return _post_diagram_artifact(
+            artifact, pr, target_dir, console=console, bot_login=effective_login
+        )
+
+    diagram_blocks: str | None = None
+    if isinstance(artifact.diagrams, dict):
+        problem = validate_diagram_payload(
+            artifact.diagrams, target_dir=target_dir, head_sha=pr.head_sha
+        )
+        if problem is not None:
+            print_error(console, "Diagram Payload Rejected", problem)
+            return 1
+        diagram_blocks = render_diagram_blocks_from_payload(artifact.diagrams) or None
+
     try:
         prior = fetch_prior_findings(target_dir, repo, pr_number, bot_login=effective_login)
     except GitError as exc:
@@ -1607,23 +2434,13 @@ def post_findings_from_artifact(
         for finding in artifact.findings
     )
 
-    if classified.is_empty() and not can_approve:
+    if classified.is_empty() and not can_approve and diagram_blocks is None:
         print_info(
             console,
             f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
         )
         return 0
 
-    owner, repo_name = repo.split("/", 1)
-    pr = PRInfo(
-        number=pr_number,
-        head_sha=head_sha,
-        base_sha="",
-        base_ref="",
-        owner=owner,
-        repo=repo_name,
-        url="",
-    )
     posted_files, failed_files = _submit_file_level_comments(target_dir, pr, classified.file_level)
     if failed_files:
         classified.file_level = posted_files
@@ -1634,7 +2451,11 @@ def post_findings_from_artifact(
         )
 
     payload = build_payload(
-        pr, classified, run_info_override=artifact.run_info, approve_on_clean=can_approve
+        pr,
+        classified,
+        run_info_override=artifact.run_info,
+        approve_on_clean=can_approve,
+        diagram_blocks=diagram_blocks,
     )
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:

@@ -45,6 +45,14 @@ done
 
 echo "All commits carry a valid signature."
 
+# Git exports repository-local variables such as GIT_DIR and GIT_WORK_TREE to
+# hooks. Clear them after the signature check so quality-gate subprocesses that
+# create their own repositories honor `git -C <repo>` instead of mutating the
+# worktree that invoked this hook.
+while IFS= read -r git_env_var; do
+    unset "$git_env_var"
+done < <(git rev-parse --local-env-vars)
+
 echo "→ Running all CI checks..."
 make check
 

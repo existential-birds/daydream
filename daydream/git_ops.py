@@ -335,6 +335,7 @@ def _run_git(
     timeout: int = 5,
     capture_bytes: Literal[True],
     retries: int = _GIT_TIMEOUT_RETRIES,
+    input_text: str | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Binary-capture variant: ``capture_bytes=True`` reads bytes stdout."""
@@ -348,6 +349,7 @@ def _run_git(
     timeout: int = 5,
     capture_bytes: Literal[False] = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
+    input_text: str | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Text-capture variant (the default): decoded ``str`` stdout."""
@@ -360,12 +362,18 @@ def _run_git(
     timeout: int = 5,
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
+    input_text: str | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` in *repo* with hardened defaults.
 
     Args:
         capture_bytes: When True, capture stdout/stderr as bytes (no decoding).
+        input_text: Optional text piped to the subprocess on **stdin** (used
+            for ``git update-ref --stdin`` batch transactions whose payload
+            cannot express the whole ref set on argv). Encoded to UTF-8 when
+            *capture_bytes* is set so the binary variant never feeds ``str``
+            to the subprocess.
         retries: How many additional attempts to make after a
             :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
             Only timeouts are retried; other failures raise immediately.
@@ -398,6 +406,14 @@ def _run_git(
                 timeout=timeout,
                 shell=False,
                 check=False,
+                # capture_bytes=True reads bytes stdout/stderr, so a str
+                # input_text must be encoded: subprocess.run raises a raw
+                # TypeError for str input with text=False.
+                input=(
+                    input_text.encode("utf-8")
+                    if capture_bytes and input_text is not None
+                    else input_text
+                ),
                 env=env_cmd,
             )
         except subprocess.TimeoutExpired as exc:
@@ -548,6 +564,36 @@ def head_sha(repo: Path) -> str:
     if proc.returncode != 0:
         raise GitError(f"cannot resolve HEAD in {repo}: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def list_local_branches(repo: Path) -> dict[str, str]:
+    """Return a snapshot of local branch names mapped to their full OIDs.
+
+    Read-only. Runs ``git for-each-ref refs/heads`` and parses each output
+    line into ``short_name -> full OID``. An empty dict is returned only when
+    the repository genuinely has zero local branches and git exits 0; any
+    non-zero return code raises.
+
+    Raises:
+        GitError: If ``git for-each-ref`` fails (e.g. *repo* is not a
+            repository).
+    """
+    proc = _run_git(
+        repo,
+        ["for-each-ref", "refs/heads", "--format=%(refname:short) %(objectname)"],
+        timeout=10,
+    )
+    if proc.returncode != 0:
+        raise GitError(
+            f"cannot list local branches in {repo}: {proc.stderr.strip()}",
+        )
+    branches: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        name, _, oid = line.strip().partition(" ")
+        branches[name] = oid
+    return branches
 
 
 def head_commit_message(repo: Path) -> str:
@@ -1653,6 +1699,105 @@ def remove_remote(repo: Path, remote: str = "origin") -> None:
     proc = _run_git(repo, ["remote", "remove", remote], timeout=10, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git remote remove {remote} failed in {repo}: {proc.stderr.strip()}")
+
+
+_OBJECT_ID_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def _validate_ref_oid_pair(ref: str, oid: str) -> None:
+    """Validate one *ref* -> *oid* pair with the shared fail-closed guards.
+
+    Every ref-writing mutator runs these checks **before** any shell-out, so
+    the two mutators (:func:`update_ref` and :func:`update_refs`) can never
+    drift apart. In order: *oid* must be a full 40-hex object ID; *ref* must
+    not start with ``-`` (git would parse it as an option, never as a ref);
+    *ref*'s final component must not end in the literal lowercase ``.lock``
+    suffix — git's own rule, which accepts case-variants like
+    ``release.LOCK``/``x.lOck``, so those stay valid; and *ref* must not
+    contain whitespace or control characters (the ``check-ref-format`` rules
+    that, in the batch variant, would otherwise split a line or smuggle extra
+    ``update`` lines into the ``update-ref --stdin`` payload).
+
+    Raises:
+        GitError: If *ref* or *oid* is invalid, naming the offender.
+    """
+    if _OBJECT_ID_RE.fullmatch(oid) is None:
+        raise GitError(f"invalid OID: {oid}")
+    if ref.startswith("-"):
+        raise GitError(f"invalid ref name: {ref}")
+    if ref.rsplit("/", 1)[-1].endswith(".lock"):
+        raise GitError(f"invalid ref name: {ref}")
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in ref):
+        raise GitError(f"invalid ref name: {ref}")
+
+
+def update_ref(repo: Path, ref: str, oid: str) -> None:
+    """Point *ref* at the explicit *oid* in *repo* (``git update-ref <ref> <oid>``).
+
+    Fail-closed mutating wrapper — ``retries=0`` so a timed-out ref mutation is
+    never re-run. Both arguments are validated **before** any shell-out:
+
+    * *ref* is checked with ``git check-ref-format`` (git's own ref-format
+      authority), plus the shared Python-side guards of
+      :func:`_validate_ref_oid_pair` (also used by :func:`update_refs`):
+      names beginning with ``-`` (git would parse them as options, never as a
+      ref), names whose final component ends in the literal lowercase
+      ``.lock`` suffix — git forbids exactly that, so ``unlock``, ``block``,
+      ``deadlock`` and ``xLock`` are valid names and snapshot cleanly, while
+      ``topic.lock`` stays rejected and case-variants git accepts
+      (``topic.LOCK``, ``x.lOck``, ``release.LOCK``) stay valid — and names
+      containing whitespace or control characters. Anything invalid raises
+      ``GitError`` without invoking ``update-ref``.
+
+    * *oid* must be a full 40-character hex object ID (upper- or lowercase);
+      anything else raises ``GitError`` and is never passed through to git.
+
+    The ``update-ref`` subprocess never substitutes a fallback value: a
+    non-zero exit raises ``GitError`` with git's stderr.
+
+    Raises:
+        GitError: If *ref* or *oid* is invalid or ``git update-ref`` fails.
+    """
+    _validate_ref_oid_pair(ref, oid)
+    # check-ref-format is a read-only query, so it inherits the retrying
+    # default; only the update-ref mutation below passes retries=0.
+    proc = _run_git(repo, ["check-ref-format", ref], timeout=10)
+    if proc.returncode != 0:
+        raise GitError(f"invalid ref name: {ref}")
+    proc = _run_git(repo, ["update-ref", ref, oid], timeout=10, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git update-ref {ref} failed in {repo}: {proc.stderr.strip()}")
+
+
+def update_refs(repo: Path, ref_oids: dict[str, str]) -> None:
+    """Point many *ref* -> *oid* pairs at once (``git update-ref --stdin``).
+
+    Fail-closed mutating wrapper for the branch-snapshot loop — ``retries=0``
+    so a timed-out ref mutation is never re-run. Every pair is validated
+    **before** any shell-out with the same shared guards as
+    :func:`update_ref` via :func:`_validate_ref_oid_pair` (full 40-hex OID;
+    ref must not start with ``-``; final component must not end in the literal
+    ``.lock`` suffix — git's own rule, which accepts case-variants like
+    ``topic.LOCK``/``x.lOck`` so those stay valid; no whitespace or control
+    characters in the ref). Git's own ref-format validation — the same authority
+    ``check-ref-format`` consults — then gates the whole batch as a single
+    transaction, so either every ref is written or (if any line is invalid)
+    none are: a half-written snapshot is never produced. An empty *ref_oids*
+    is a no-op.
+
+    Raises:
+        GitError: If any ref or OID is invalid or the batch fails.
+    """
+    if not ref_oids:
+        return
+    for ref, oid in ref_oids.items():
+        _validate_ref_oid_pair(ref, oid)
+    lines = "".join(f"update {ref} {oid}\n" for ref, oid in ref_oids.items())
+    proc = _run_git(
+        repo, ["update-ref", "--stdin"], timeout=30, retries=0, input_text=lines
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git update-ref --stdin failed in {repo}: {proc.stderr.strip()}")
 
 
 def apply_staged_patch(repo: Path, patch: bytes) -> None:

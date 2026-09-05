@@ -14,6 +14,7 @@ from daydream.extensions import (
     ToolSupervisor,
     UnresolvedExtensionError,
 )
+from daydream.trajectory import DaydreamPhase
 
 
 async def _noop(ctx: Any) -> None:
@@ -78,14 +79,14 @@ def test_remove_loop_internal_step_raises_descriptive_error() -> None:
 def test_tool_supervisor_registration_is_exclusive() -> None:
     reg = Registry()
 
-    def supervisor(name: str, tool_input: Any, *, phase: Any) -> Any:
+    def supervisor(name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
         return ToolDecision(veto=name == "Write", reason="protected path")
 
     reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
     assert reg.tool_supervisor_if_registered() is supervisor
-    assert supervisor("Write", {}, phase="fix").veto is True
+    assert supervisor("Write", {}, phase=DaydreamPhase.FIX).veto is True
     with pytest.raises(ExtensionError, match="tool supervisor.*already registered"):
-        reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
+        reg.register_tool_supervisor(supervisor)
     with pytest.raises(ValueError, match="veto.*reason"):
         ToolDecision(veto=True, reason="")
 
@@ -134,6 +135,15 @@ def test_comment_contract_types_are_frozen_and_public() -> None:
         review_info="I",
     )
     assert ctx.placement == "summary" and sc.findings[0].body_block == "X"
+    # Issue #1113: ``diagrams`` is appended with a default, so this pre-existing
+    # construction keeps working and an unaware fork sees None.
+    assert sc.diagrams is None
+    with_diagrams = ext.SummaryContext(
+        findings=(), agent_prompt="P", review_info="I", diagrams="<details>D</details>"
+    )
+    assert with_diagrams.diagrams == "<details>D</details>"
+    with pytest.raises(FrozenInstanceError):
+        with_diagrams.diagrams = "x"  # type: ignore[misc]
     for name in ("CommentFinding", "FindingRenderContext", "SummaryFinding", "SummaryContext"):
         assert name in ext.__all__
 

@@ -48,6 +48,10 @@ class DaydreamFileConfig:
             ``None`` falls through to the RunConfig field / orchestrator default;
             ``True`` posts ``event: "APPROVE"`` when a deep review has zero
             high/medium findings. Explicit opt-in: never coerced from a non-bool.
+        scope_issue_filing: Opt-in for out-of-scope issue filing (issue #1056).
+            ``None`` falls through to the RunConfig field / orchestrator default;
+            ``True`` re-enables filing GitHub issues for findings and edits
+            outside the reviewed diff. Never coerced from a non-bool.
         review_profile: Repo-committed review-profile path (R9). A lenient path
             read only — the strict profile parse + validation stays in
             ``review_profile.py``. ``None`` (absent or non-str) means the key is
@@ -121,6 +125,25 @@ class DaydreamFileConfig:
             local plan as a GitHub issue. This is an explicit repository-level
             opt-in under ``[tool.daydream.improve.github]``; absent or malformed
             values leave publishing disabled.
+        diagram_mode: Issue #1113. Grounded-diagram mode from
+            ``[tool.daydream.diagram] mode`` — ``"auto"`` or ``"off"`` only. A
+            repo file may enable or suppress diagrams but never force a kind on
+            every run (that is a per-invocation decision, so ``sequence`` /
+            ``flowchart`` / ``both`` are CLI-only). ``None`` when unset or
+            invalid; the orchestrator then applies ``"auto"``.
+        diagram_min_code_files: Issue #1113. Override for the sequence
+            cross-module rule's changed-code-file floor. ``None`` falls through
+            to ``config.DEFAULT_DIAGRAM_MIN_CODE_FILES`` (3).
+        diagram_min_modules: Issue #1113. Override for the sequence cross-module
+            rule's distinct-module floor. ``None`` falls through to
+            ``config.DEFAULT_DIAGRAM_MIN_MODULES`` (2).
+        diagram_min_branch_points: Issue #1113. Override for the flowchart
+            rule's changed-branch-point floor. ``None`` falls through to
+            ``config.DEFAULT_DIAGRAM_MIN_BRANCH_POINTS`` (3).
+        diagram_service_roots: Issue #1113. Repository-relative glob patterns
+            identifying service roots for diagram participant grouping. Empty
+            falls back to ``improve_service_roots``, then to layout inference,
+            so a repo that already declared its services need not repeat them.
     """
 
     model: str | None = None
@@ -130,6 +153,7 @@ class DaydreamFileConfig:
     shallow_fanout_threshold: int | None = None
     precision_mode: bool | None = None
     approve_on_clean: bool | None = None
+    scope_issue_filing: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
     uncovered_sweep: bool | None = None
@@ -155,6 +179,11 @@ class DaydreamFileConfig:
     improve_max_partition_groups: int | None = None
     improve_github_publish_issues: bool = False
     review_profile: Path | None = None
+    diagram_mode: str | None = None
+    diagram_min_code_files: int | None = None
+    diagram_min_modules: int | None = None
+    diagram_min_branch_points: int | None = None
+    diagram_service_roots: list[str] = field(default_factory=list)
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -213,8 +242,10 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
 
     Scalar keys (``model``, ``backend``) from ``override`` replace ``base``.
     The ``phases`` sub-table is merged per-phase so an override phase table
-    does not discard phases declared only in ``base``. The ``improve``
-    sub-table is likewise merged per-key.
+    does not discard phases declared only in ``base``. The ``improve`` and
+    ``diagram`` sub-tables are likewise merged per-key, so a dotfile that sets
+    only ``[diagram] mode`` does not discard thresholds declared in
+    ``pyproject.toml``.
     """
     merged: dict[str, Any] = dict(base)
     for key, value in override.items():
@@ -228,6 +259,8 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
             merged["phases"] = phases
         elif key == "improve" and isinstance(value, dict) and isinstance(merged.get("improve"), dict):
             merged["improve"] = {**merged["improve"], **value}
+        elif key == "diagram" and isinstance(value, dict) and isinstance(merged.get("diagram"), dict):
+            merged["diagram"] = {**merged["diagram"], **value}
         else:
             merged[key] = value
     return merged
@@ -378,6 +411,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # an accidental ``approve_on_clean = 1`` is treated as unset, not enabled.
     raw_approve = merged.get("approve_on_clean")
     approve_on_clean: bool | None = raw_approve if isinstance(raw_approve, bool) else None
+    # scope_issue_filing: bool only, same degrade-to-None rule so an accidental
+    # ``scope_issue_filing = 1`` is treated as unset, not enabled.
+    raw_scope = merged.get("scope_issue_filing")
+    scope_issue_filing: bool | None = raw_scope if isinstance(raw_scope, bool) else None
     # uncovered_sweep: bool only, same degrade-to-None rule as precision_mode so
     # an accidental ``uncovered_sweep = 1`` is treated as unset, not enabled.
     raw_uncovered_sweep = merged.get("uncovered_sweep")
@@ -399,6 +436,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     quality_gate_enabled: bool | None = (
         raw_quality_gate_enabled if isinstance(raw_quality_gate_enabled, bool) else None
     )
+    # Grounded diagrams (#1113): the sub-table degrades to empty on junk, so
+    # every key falls through to its config.py default rather than raising.
+    diagram = merged.get("diagram")
+    diagram = diagram if isinstance(diagram, dict) else {}
     improve = merged.get("improve")
     improve = improve if isinstance(improve, dict) else {}
     service_groups = improve.get("service_groups")
@@ -422,6 +463,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         shallow_fanout_threshold=threshold,
         precision_mode=precision,
         approve_on_clean=approve_on_clean,
+        scope_issue_filing=scope_issue_filing,
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
@@ -450,4 +492,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         improve_partition_max_files=_coerce_positive_int(improve, "partition_max_files"),
         improve_max_partition_groups=_coerce_positive_int(improve, "max_partition_groups"),
         improve_github_publish_issues=improve_github_publish_issues,
+        diagram_mode=_coerce_choice(diagram.get("mode"), {"auto", "off"}),
+        diagram_min_code_files=_coerce_positive_int(diagram, "min_code_files"),
+        diagram_min_modules=_coerce_positive_int(diagram, "min_modules"),
+        diagram_min_branch_points=_coerce_positive_int(diagram, "min_branch_points"),
+        diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
     )

@@ -30,13 +30,40 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 from daydream.training.reward import RewardBreakdown, ScoringInputs, score_trajectory
 
-__all__ = ["RftConfig", "RftWinner", "RftResult", "run_rft"]
+__all__ = ["RftConfig", "RftWinner", "RftResult", "run_rft", "validate_full_sha"]
+
+# Full-SHA contract: RFT rebuilds every task from full-length hex commit
+# SHAs (Req 7, the #714 rebase target). A short, empty, or non-hex value is
+# refused with a ValueError naming the record id and field — shared with the
+# coordinator's ``_rft_rows`` so Stage 2 and the replay fail closed alike.
+# Longer sha256-style content-address stamps are tolerated, matching the
+# coordinator's pre-existing acceptance.
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40,}")
+
+
+def validate_full_sha(record_id: str, field: str, value: object) -> str:
+    """Validate one task-identity SHA as a full-length hex SHA (at least a full
+    40-char git commit SHA; longer sha256-style content-address stamps are
+    tolerated).
+
+    Raises:
+        ValueError: When ``value`` is absent, truncated, or non-hex — naming
+            the record id and field. Never returns a fabricated fallback.
+    """
+    if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
+        raise ValueError(
+            f"record {record_id!r} carries an invalid {field} {value!r}: "
+            "RFT rebuilds every task from a full 40-hex commit sha and never "
+            "replays against a truncated or non-hex identity"
+        )
+    return value
 
 # Breakdown axes the winner spec may constrain: exactly the attribute names of
 # ``score_trajectory``'s ``RewardBreakdown`` (reward.py:316). Anything else is a
@@ -125,18 +152,30 @@ def _record_sort_key(rec: Mapping[str, Any]) -> str:
 
 
 def _reconstruct_task(rec: Mapping[str, Any]) -> tuple[str, str, str]:
-    """Return (record_id, base_sha, diff), failing closed on missing identity."""
+    """Return (record_id, base_sha, diff), failing closed on malformed identity.
+
+    ``repo_slug``, ``base_sha``, and ``head_sha`` are validated (including the
+    full 40-hex contract via :func:`validate_full_sha`) *before* any task or
+    image work — a truncated or non-hex SHA raises like a missing one.
+    """
     rid = str(rec.get("id", ""))
+    repo_slug = rec.get("repo_slug")
     base_sha = rec.get("base_sha")
     head_sha = rec.get("head_sha")
     diff = rec.get("diff")
-    missing = [name for name, value in (("base_sha", base_sha), ("head_sha", head_sha), ("diff", diff)) if not value]
+    missing = [
+        name
+        for name, value in (("repo_slug", repo_slug), ("base_sha", base_sha), ("head_sha", head_sha), ("diff", diff))
+        if not value
+    ]
     if missing:
         raise ValueError(
             f"record {rid!r} is missing frozen task identity field(s) {missing}; "
-            "RFT rebuilds every task from base/head/diff identity (M16) and never skips a "
+            "RFT rebuilds every task from repo/base/head/diff identity (M16) and never skips a "
             "record silently."
         )
+    for sha_field in ("base_sha", "head_sha"):
+        validate_full_sha(rid, sha_field, rec.get(sha_field))
     assert isinstance(base_sha, str) and isinstance(diff, str)
     return rid, base_sha, diff
 
@@ -227,14 +266,16 @@ def _fixed(value: Any) -> Any:
 def run_rft(config: RftConfig) -> RftResult:
     """Run one deterministic Stage-2 RFT replay over the frozen inputs.
 
-    Reconstructs each task from its recorded base/head/diff identity, samples
-    deterministic candidates, scores every candidate through
-    :func:`score_trajectory`, filters winners by the breakdown-shaped spec,
-    and writes a byte-identical-on-rerun winners JSON file.
+    Reconstructs each task from its recorded repo/base/head/diff identity —
+    validating ``repo_slug`` and full-length hex ``base_sha``/``head_sha``
+    (:func:`validate_full_sha`) before any task/image work (Req 7, the #714
+    rebase target) — samples deterministic candidates, scores every candidate
+    through :func:`score_trajectory`, filters winners by the breakdown-shaped
+    spec, and writes a byte-identical-on-rerun winners JSON file.
 
     Raises:
-        ValueError: When any record lacks base/head/diff identity (named by
-            record id) — never skipped silently.
+        ValueError: When any record lacks or carries malformed base/head/diff
+            identity (named by record id and field) — never skipped silently.
     """
     inputs_path = Path(config.inputs)
     raw = inputs_path.read_text(encoding="utf-8")

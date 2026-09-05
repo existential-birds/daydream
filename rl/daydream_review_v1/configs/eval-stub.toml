@@ -26,7 +26,7 @@ push = false
 base_url = "http://127.0.0.1:8399/v1"
 api_key_var = "DAYDREAM_RL_STUB_KEY"
 
-[taskset]
+[env.taskset]
 id = "daydream-review-v1"
 corpus_dir = "tests/fixtures/corpus-mini"
 manifest_path = "images/manifest.toml"
@@ -37,10 +37,12 @@ gate_report_path = "tests/fixtures/stage0-gate.json"
 # Subprocess runtime only: a task carrying an image may not run there at all.
 use_images = false
 
-[harness]
+[env.agent]
+runtime = { type = "subprocess" }
+
+[env.agent.harness]
 id = "daydream-review-v1"
 backend = "claude"
-runtime = { type = "subprocess" }
 home = "/tmp/daydream-rl-smoke/home"
 repo_path = "/tmp/daydream-rl-smoke/repo"
 archive_root = "/tmp/daydream-rl-smoke/archive"

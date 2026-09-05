@@ -53,11 +53,11 @@ def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None) -> su
         "--no-rich",
         "-o",
         str(paths["out"]),
-        "--harness.repo-path",
+        "--env.agent.harness.repo-path",
         str(paths["repo"]),
-        "--harness.archive-root",
+        "--env.agent.harness.archive-root",
         str(paths["archive"]),
-        "--harness.home",
+        "--env.agent.harness.home",
         str(paths["home"]),
     ]
     if base_url is not None:
@@ -66,7 +66,11 @@ def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None) -> su
 
 
 def _sole_trace(paths: dict[str, Path]) -> dict[str, Any]:
-    lines = (paths["out"] / "traces.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    # verifiers 0.3.1 groups runs: traces land at output_dir/run.dir/traces.jsonl
+    out = paths["out"]
+    traces = sorted(out.rglob("traces.jsonl"))
+    assert traces, f"no traces.jsonl under {out}"
+    lines = traces[0].read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1, f"expected one rollout, got {len(lines)}"
     # json.loads yields Any; we only need a shallow dict view.
     return dict(json.loads(lines[0]))
@@ -79,9 +83,11 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     result = _run_eval(paths, model="stub/canned", base_url=stub_upstream)
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
 
-    trace = _sole_trace(paths)
-    assert trace["stop_condition"] == "agent_completed"
-    assert trace["errors"] == []
+    episode = _sole_trace(paths)
+    # 0.3.1 wraps traces in an Episode: episode.ok, episode.errors, one trace inside
+    assert episode["ok"] is True, episode.get("errors")
+    assert episode["errors"] == []
+    trace = episode["traces"][0]
     # Sampled assistant nodes exist only when a model turn went through the
     # interception server AND the dialect parsed the reply. A harness that
     # reached a provider directly records nothing; a stub whose payload fails the
@@ -90,7 +96,9 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     sampled = [node for node in trace["nodes"] if node.get("sampled")]
     assert sampled, "no sampled assistant turns — endpoint injection or the dialect did not work"
     assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
-    assert 0.0 <= trace["rewards"]["intrinsic_composite"] <= 1.0, trace["rewards"]
+    rw = trace["rewards"]["intrinsic_composite"]
+    rw = rw["score"] if isinstance(rw, dict) else rw
+    assert 0.0 <= rw <= 1.0, trace["rewards"]
     assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0), trace["metrics"]
     assert trace["info"]["daydream_backend"] == "claude"
     assert trace["info"]["daydream_exit_code"] == 0
@@ -117,14 +125,14 @@ def test_live_rollout(tmp_path: Path) -> None:
     base_url = os.environ.get("DAYDREAM_RL_LIVE_BASE_URL")
     backend = os.environ.get("DAYDREAM_RL_LIVE_BACKEND", "claude")
 
-    argv_extra = ["--harness.backend", backend]
+    argv_extra = ["--env.agent.harness.backend", backend]
     result = subprocess.run(
         [
             "uv", "run", "eval", "@", "configs/eval-stub.toml",
             "-m", model, "--no-rich", "-o", str(paths["out"]),
-            "--harness.repo-path", str(paths["repo"]),
-            "--harness.archive-root", str(paths["archive"]),
-            "--harness.home", str(paths["home"]),
+            "--env.agent.harness.repo-path", str(paths["repo"]),
+            "--env.agent.harness.archive-root", str(paths["archive"]),
+            "--env.agent.harness.home", str(paths["home"]),
             *(["--client.base-url", base_url] if base_url else []),
             *argv_extra,
         ],
@@ -137,6 +145,8 @@ def test_live_rollout(tmp_path: Path) -> None:
 
     trace = _sole_trace(paths)
     assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
-    assert 0.0 <= trace["rewards"]["intrinsic_composite"] <= 1.0
+    rw2 = trace["rewards"]["intrinsic_composite"]
+    rw2 = rw2["score"] if isinstance(rw2, dict) else rw2
+    assert 0.0 <= rw2 <= 1.0
     assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0)
     assert trace["info"]["daydream_backend"] == backend

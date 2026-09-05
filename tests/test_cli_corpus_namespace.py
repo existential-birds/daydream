@@ -12,6 +12,7 @@ These tests drive ``cli.main`` through ``sys.argv`` (the production
 entrypoint), mocking only the handler/backend seam, and assert on the exit
 code and on whether the handler was actually invoked — not on mere dispatch.
 """
+import json
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,32 @@ def _run_main(argv: list[str]) -> int:
     finally:
         sys.argv = saved
     return 0
+
+
+def test_corpus_harvest_exits_nonzero_on_aborted_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_run_harvest(_config: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 0, "aborted": 1}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
+
+
+def test_corpus_harvest_exits_nonzero_on_row_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_run_harvest(_config: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 0, "errors": 2, "aborted": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 1
+
+
+def test_corpus_harvest_still_exits_zero_on_clean_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unresolved findings in the data are not process failure (spec KD)."""
+
+    def _fake_run_harvest(_config: Any) -> dict[str, Any]:
+        return {"considered": 3, "annotated": 1, "skipped": 2, "errors": 0, "aborted": 0}
+
+    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    assert _run_main(["corpus", "harvest", "--dry-run"]) == 0
 
 
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,6 +106,83 @@ def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> 
     assert "build-v2" in captured.out
     assert "label" in captured.out
     assert "calibrate-reward" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Task 8 (#1080): build-v2 operator inputs — pinned license policy, exact-slug
+# copyleft opt-ins, and refusal of URL-shaped identities. Real-path: the
+# handler runs the real projector over a real fixture bundle pair; only the
+# policy file is authored by the test.
+# ---------------------------------------------------------------------------
+
+
+def _run_build_v2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra_args: list[str]
+) -> tuple[int, str]:
+    """Drive ``daydream corpus build-v2`` through ``cli.main`` over the
+    standard fixture bundle pair (from tests.test_corpus_v2) and return
+    (exit code, captured stdout+stderr)."""
+    from tests.test_corpus_v2 import _write_annotations_snapshot, _write_bundle
+
+    bundle_dir = _write_bundle(tmp_path)
+    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
+    out_dir = tmp_path / "corpus-out"
+    rc = _run_main([
+        "corpus", "build-v2",
+        "--bundle-root", str(bundle_dir),
+        "--annotation-bundle-root", str(snap.parent),
+        "--out", str(out_dir / "corpus-v2.jsonl"),
+        *extra_args,
+    ])
+    captured = capsys.readouterr()
+    return rc, captured.out + captured.err
+
+
+def test_build_v2_accepts_license_policy_and_repeatable_opt_in(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy = tmp_path / "license-policy.json"
+    policy.write_text(json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}))
+    rc, _out = _run_build_v2(tmp_path, capsys, [
+        "--license-policy", str(policy),
+        "--allow-copyleft", "a/b", "--allow-copyleft", "c/d",
+    ])
+    assert rc == 0
+    lineage = json.loads((tmp_path / "corpus-out" / "lineage.json").read_text())
+    assert lineage["license_policy"]["policy_version"] == "1"
+    assert lineage["copyleft_opt_ins"] == ["a/b", "c/d"]
+
+
+def test_build_v2_requires_license_policy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc, out = _run_build_v2(tmp_path, capsys, [])
+    assert rc == 1
+    assert "license-policy" in out
+
+
+def test_build_v2_refuses_unknown_policy_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Refused before any build work: no output directory is created.
+    policy_path = tmp_path / "bad-policy.json"
+    policy_path.write_text(json.dumps({"policy_version": "", "spdx_decisions": {}}))
+    rc, out = _run_build_v2(tmp_path, capsys, ["--license-policy", str(policy_path)])
+    assert rc == 1
+    assert "policy_version" in out
+    assert not (tmp_path / "corpus-out").exists()
+
+
+def test_build_v2_refuses_raw_authenticated_url_as_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A raw remote URL is never a repo identity: any URL-shaped --repo-slug
+    # value is refused before it can reach BuildCorpusV2Config.
+    rc, out = _run_build_v2(tmp_path, capsys, [
+        "--repo-slug", "https://user:token@github.com/owner/repo",
+    ])
+    assert rc == 1
+    assert "Unsupported --repo-slug" in out
 
 
 def test_bare_harvest_is_unknown_verb_treated_as_review_target(

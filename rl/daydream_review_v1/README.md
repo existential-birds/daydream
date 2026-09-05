@@ -193,6 +193,15 @@ eval-docker; the explicit `--client.base-url` is in `configs/eval-stub.toml`
   `trace.info["reward_breakdown"]["axes_present"]` records which axes were live.
 - **Never pass `--no-eval` or `--no-archive`.** The grounding axis comes from the
   archive-time eval pass; without it the axis is silently null.
+- **Grounding is location-aware, not just file-aware.** A finding counts as
+  grounded only when the agent actually read the file it cites *and* the line it
+  cites resolves inside (or within tolerance of) a diff hunk. A finding pinned to
+  a real file at a line the diff never touched is ungrounded, so the axis can drop
+  without the policy having invented a filename. `grounding_rate` therefore has
+  its own version stamp discipline: it is part of what
+  `daydream/training/reward.py`'s `REWARD_VERSION` identifies, and the pin in
+  `tests/test_rewards.py::test_reward_version_is_pinned` is what fails when the
+  predicate moves under a run.
 - **`golden_overlap` is a crude localisation proxy**, not a reward. It feeds
   #91's rubric design and is deliberately never summed.
 - **Scoring trusts only sealed state.** The supervisor seals the archived run

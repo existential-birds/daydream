@@ -193,6 +193,25 @@ def test_preview_and_harvest_identity_digest_stability_gate(tmp_path: Path) -> N
         assert e["record_id"] == rid(e["session_id"], e["trajectory_id"], e["segment_id"], e["fingerprint"])
 
 
+def test_preview_never_mutates_the_hydrated_index(tmp_path: Path) -> None:
+    """Req 5: preview opens the SQLite index read-only, never appends
+    label_observations, never writes resume-cache/complete markers."""
+    import hashlib
+
+    from tests.test_training_adjudication_materialize import _hydrated_sqlite_index
+
+    root = _hydrated_sqlite_index(tmp_path)
+    before = hashlib.sha256((root / "index.db").read_bytes()).hexdigest()
+    before_tree = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+
+    run_preview(root, tmp_path / "ledger.json")
+
+    after = hashlib.sha256((root / "index.db").read_bytes()).hexdigest()
+    after_tree = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+    assert after == before  # index.db bytes untouched (no WAL checkpoint either)
+    assert after_tree == before_tree  # no marker/cache files added anywhere
+
+
 def test_posterior_feed_is_pr_review_only(tmp_path: Path) -> None:
     root = _hydrated_index(tmp_path, profiles=["pr_review", "task"])
     ledger = tmp_path / "ledger.json"

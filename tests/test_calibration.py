@@ -23,6 +23,7 @@ from daydream.training.calibration import (
     assign_split,
     run_calibration,
 )
+from daydream.training.reward import REWARD_VERSION as _PRODUCTION_REWARD_VERSION
 
 AS_OF = "2026-01-01T00:00:00+00:00"
 VALID_AT = "2025-12-01T00:00:00+00:00"
@@ -35,7 +36,11 @@ LABEL_STAMPS = {
     "reply_classifier_version": "980-classifier-r1",
     "rubric_schema_version": "980-rubric-r2",
 }
-REWARD_VERSION = "2026.05.28-2"
+#: Imported, never duplicated as a literal: ``build_fixture.py`` stamps the
+#: committed corpora from this same production constant, so a local copy
+#: would silently break every gate on a legitimate bump. Drift is caught by
+#: ``test_build_fixture_replays_byte_identical``, not by a second literal.
+REWARD_VERSION = _PRODUCTION_REWARD_VERSION
 
 # Corruption flags the fixture understands; these are test seams, never CLI surface.
 CORRUPTION_FLAGS = frozenset(

@@ -104,6 +104,28 @@ def dedup_candidates_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "dedup-candidates.json"
 
 
+def diagram_path(deep_dir_path: Path) -> Path:
+    """Grounded-diagram decision + result artifact (issue #1113).
+
+    ``{"eligibility": ..., "results": {"sequence": ..., "flowchart": ...}}`` —
+    the deterministic eligibility signals plus, per kind, the model's proposed
+    spec, the pruned final spec, every element's grounding verdict and the
+    rendered mermaid. Written whenever the diagram step runs, including when
+    every kind is skipped, so the decision is auditable either way.
+    """
+    return deep_dir_path / "diagram.json"
+
+
+def diagram_markdown_path(deep_dir_path: Path) -> Path:
+    """Rendered grounded-diagram markdown blocks (issue #1113).
+
+    The same folded ``<details>`` blocks the PR summary carries, rendered from
+    ``diagram.json``'s final specs by the pure renderer. Empty-file/absent when
+    no kind rendered.
+    """
+    return deep_dir_path / "diagram.md"
+
+
 def merged_report_path(deep_dir_path: Path) -> Path:
     """Rendered human review report inside the deep artifact directory.
 

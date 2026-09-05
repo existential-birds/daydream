@@ -200,6 +200,9 @@ class FakeRuntime(vf.Runtime):
     async def read(self, path: str) -> bytes:
         return self.files[path]
 
+    async def _read(self, path: str) -> bytes:
+        return await self.read(path)
+
     async def write(self, path: str, data: bytes) -> None:
         self.writes[path] = data
 

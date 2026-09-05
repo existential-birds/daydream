@@ -153,7 +153,9 @@ async def test_post_review_uses_published_items_path(
     posted_paths: list[Path] = []
     monkeypatch.setattr(
         "daydream.pr_review.post_review_to_pr_from_report",
-        lambda repo, path, *, console, post, approve_on_clean=False: _record_path(posted_paths, path),
+        lambda repo, path, *, console, post, approve_on_clean=False, diagram_blocks=None: (
+            _record_path(posted_paths, path)
+        ),
     )
 
     await _step_post_review(ctx)
@@ -428,6 +430,7 @@ async def test_fork_disables_arbiter_in_deep(
         console: Any,
         post: bool = False,
         approve_on_clean: bool = False,
+        diagram_blocks: str | None = None,
     ) -> None:
         return None
 
@@ -745,6 +748,7 @@ async def test_custom_phase_full_stack(
         console: Any,
         post: bool = False,
         approve_on_clean: bool = False,
+        diagram_blocks: str | None = None,
     ) -> None:
         return None
 
@@ -780,6 +784,7 @@ async def test_flow_deep_routes_to_deep_helper(
         console: Any,
         post: bool = False,
         approve_on_clean: bool = False,
+        diagram_blocks: str | None = None,
     ) -> None:
         return None
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
