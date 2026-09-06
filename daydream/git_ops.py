@@ -27,7 +27,7 @@ Error-handling patterns:
     **Soft failure (return sentinel)**: Used when "data not available" is a
     valid, expected outcome the caller can handle inline. These return
     ``None``, ``False``, ``0``, or ``[]`` on non-zero exit instead of raising.
-    Examples: :func:`remote_url`, :func:`merge_base`, :func:`gh_pr_view`.
+    Examples: :func:`remote_url`, :func:`merge_base`, :func:`gh_repo_view`.
 
     Each function's docstring specifies which pattern it follows under its
     **Raises** or **Returns** section.
@@ -165,6 +165,12 @@ _SENSITIVE_HEADER_PREFIXES = ("authorization:",)
 # rendered diagnostic so the code never leaks verbatim, while preserving the
 # route for debuggability.
 _APP_MANIFEST_CONVERSION_CODE_RE = re.compile(r"(/app-manifests/)[^/\s]+(/conversions)")
+_GITHUB_TOKEN_RE = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+)
+# Start at the fixed authority delimiter. Searching for an arbitrary-length
+# scheme at every input character makes long non-URL diagnostics quadratic.
+_URL_USERINFO_RE = re.compile(r"://[^/@\s]+@")
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -177,7 +183,14 @@ def _redact_sensitive_text(text: str) -> str:
     list passed to :func:`subprocess.run`, which keeps the original endpoint so
     GitHub still receives the real credential.
     """
-    return _APP_MANIFEST_CONVERSION_CODE_RE.sub(r"\1***\2", text)
+    redacted = _APP_MANIFEST_CONVERSION_CODE_RE.sub(r"\1***\2", text)
+    redacted = _GITHUB_TOKEN_RE.sub("***", redacted)
+    redacted = _URL_USERINFO_RE.sub("://***@", redacted)
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(key)
+        if token and len(token) >= 8:
+            redacted = redacted.replace(token, "***")
+    return redacted
 
 
 def _redact_args(args: list[str]) -> list[str]:
@@ -691,6 +704,43 @@ def remote_url(repo: Path, remote: str = "origin") -> str | None:
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+def remote_urls(repo: Path) -> dict[str, str]:
+    """Return every configured remote's nonempty fetch URL.
+
+    An empty repository remote set is valid. Any enumeration or per-remote URL
+    failure is hard because PR base selection must not silently ignore a
+    partially readable remote configuration.
+    """
+    proc = _run_git(
+        repo,
+        ["config", "--null", "--name-only", "--get-regexp", r"^remote\..*\."],
+        timeout=5,
+    )
+    if proc.returncode not in (0, 1):
+        raise GitError(f"cannot enumerate remotes in {repo}: {proc.stderr.strip()}")
+    names: set[str] = set()
+    for key in proc.stdout.split("\0"):
+        match = re.fullmatch(r"remote\.(.+)\.[^.]+", key)
+        if match is not None:
+            names.add(match.group(1))
+    result: dict[str, str] = {}
+    for name in sorted(names):
+        url_proc = _run_git(repo, ["config", "--get", f"remote.{name}.url"], timeout=5)
+        url = url_proc.stdout.strip() if url_proc.returncode == 0 else ""
+        if not url:
+            raise GitError(f"remote {name!r} has no readable fetch URL in {repo}")
+        result[name] = url
+    return result
+
+
+def validate_branch_name(repo: Path, name: str) -> None:
+    """Raise when *name* is not a literal Git branch name."""
+    proc = _run_git(repo, ["check-ref-format", "--branch", name], timeout=5)
+    if proc.returncode != 0:
+        display = name[:120] + ("..." if len(name) > 120 else "")
+        raise GitError(f"invalid PR base branch name {display!r} in {repo}")
 
 
 def current_branch(repo: Path) -> str | None:
@@ -2031,6 +2081,80 @@ def stash_create(repo: Path) -> str | None:
     return proc.stdout.strip() or None
 
 
+_FULL_OBJECT_ID_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+
+
+def _validate_pr_base_ref(repo: Path, ref: str, *, prefix: str) -> None:
+    if not ref.startswith(prefix):
+        raise GitError(f"invalid PR base ref {ref[:120]!r} in {repo}")
+    proc = _run_git(repo, ["check-ref-format", ref], timeout=5)
+    if proc.returncode != 0:
+        raise GitError(f"invalid PR base ref {ref[:120]!r} in {repo}")
+
+
+def _merge_base_strict(repo: Path, base_ref: str, head_sha: str) -> str:
+    proc = _run_git(repo, ["merge-base", base_ref, head_sha], timeout=10)
+    merge_sha = proc.stdout.strip()
+    if proc.returncode != 0 or _FULL_OBJECT_ID_RE.fullmatch(merge_sha) is None:
+        raise GitError(
+            f"no merge-base for PR head {head_sha} and base {base_ref} in {repo}"
+        )
+    return merge_sha.lower()
+
+
+def resolve_pr_merge_base(
+    repo: Path,
+    remote_base_refs: Sequence[str],
+    local_base_ref: str,
+    head_sha: str,
+) -> str:
+    """Resolve the exact PR head's merge-base against authoritative local refs."""
+    if _FULL_OBJECT_ID_RE.fullmatch(head_sha) is None:
+        raise GitError(f"exact PR head {head_sha[:120]!r} is not a full object ID in {repo}")
+    head_proc = _run_git(repo, ["rev-parse", "--verify", f"{head_sha}^{{commit}}"], timeout=5)
+    resolved_head = head_proc.stdout.strip()
+    if (
+        head_proc.returncode != 0
+        or _FULL_OBJECT_ID_RE.fullmatch(resolved_head) is None
+        or resolved_head.lower() != head_sha.lower()
+    ):
+        raise GitError(f"exact PR head {head_sha} is not a local commit in {repo}")
+
+    _validate_pr_base_ref(repo, local_base_ref, prefix="refs/heads/")
+    unique_remote_refs = sorted(set(remote_base_refs))
+    for ref in unique_remote_refs:
+        _validate_pr_base_ref(repo, ref, prefix="refs/remotes/")
+
+    present_remote_refs: list[str] = []
+    for ref in unique_remote_refs:
+        check = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5)
+        if check.returncode == 0:
+            present_remote_refs.append(ref)
+
+    if present_remote_refs:
+        bases = {
+            ref: _merge_base_strict(repo, ref, head_sha)
+            for ref in present_remote_refs
+        }
+        distinct = set(bases.values())
+        if len(distinct) != 1:
+            refs = ", ".join(present_remote_refs)
+            raise GitError(
+                f"matching PR base remotes disagree ({refs}) in {repo}; "
+                "fetch/align the base remote refs"
+            )
+        return next(iter(distinct))
+
+    local_check = _run_git(
+        repo, ["rev-parse", "--verify", f"{local_base_ref}^{{commit}}"], timeout=5
+    )
+    if local_check.returncode != 0:
+        raise GitError(
+            f"PR base {local_base_ref} is unavailable for head {head_sha} in {repo}"
+        )
+    return _merge_base_strict(repo, local_base_ref, head_sha)
+
+
 def upstream_ahead_count(repo: Path, branch: str) -> int:
     """Return the number of commits ``<branch>@{upstream}`` is ahead of *branch*.
 
@@ -2882,15 +3006,61 @@ def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
 # --- gh wrappers -------------------------------------------------------------
 
 
+GH_PR_VIEW_FIELDS: tuple[str, ...] = (
+    "number",
+    "title",
+    "body",
+    "state",
+    "headRefName",
+    "baseRefName",
+    "headRefOid",
+    "url",
+    "headRepository",
+    "headRepositoryOwner",
+)
+GH_PR_LIST_FIELDS: tuple[str, ...] = (
+    "number",
+    "headRefOid",
+    "baseRefName",
+    "url",
+    "headRepository",
+    "headRepositoryOwner",
+)
+_GH_DIAGNOSTIC_LIMIT = 2_000
+_MISSING_BRANCH_PR_RE = re.compile(r'^no pull requests found for branch "[^"\r\n]+"$')
+
+
+def _safe_gh_diagnostic(stderr: str) -> str:
+    """Return a redacted, bounded one-command diagnostic."""
+    redacted = _redact_sensitive_text(stderr.strip())
+    if len(redacted) <= _GH_DIAGNOSTIC_LIMIT:
+        return redacted
+    return redacted[:_GH_DIAGNOSTIC_LIMIT] + "...[truncated]"
+
+
+def _pr_view_is_absent(stderr: str, pr: int | None) -> bool:
+    """Recognize only gh's two established PR-absence diagnostics."""
+    diagnostic = stderr.strip()
+    if pr is None:
+        return _MISSING_BRANCH_PR_RE.fullmatch(diagnostic) is not None
+    return diagnostic == (
+        f"GraphQL: Could not resolve to a PullRequest with the number of {pr}. "
+        "(repository.pullRequest)"
+    )
+
+
 def gh_pr_view(repo: Path, pr: int | None = None) -> dict[str, Any] | None:
-    """Return ``gh pr view`` output as a dict, or ``None`` on failure.
+    """Return ``gh pr view`` output, or ``None`` only when the PR is absent.
 
     When *pr* is ``None``, ``gh pr view`` infers the PR from the currently
     checked-out branch. This mirrors the auto-detection flow used by the CLI
     when the user does not pass an explicit PR number.
 
     Returns:
-        Parsed JSON dict, or ``None`` when no PR is found / the call fails.
+        Parsed JSON dict, or ``None`` for a recognized missing PR diagnostic.
+
+    Raises:
+        GitError: If gh fails for any other reason or returns malformed output.
     """
     args = ["pr", "view"]
     if pr is not None:
@@ -2898,28 +3068,32 @@ def gh_pr_view(repo: Path, pr: int | None = None) -> dict[str, Any] | None:
     args.extend(
         [
             "--json",
-            "number,title,body,state,headRefName,baseRefName,headRefOid,baseRefOid,url",
+            ",".join(GH_PR_VIEW_FIELDS),
         ]
     )
-    try:
-        proc = _run_gh(repo, args, retries=_gh_retries())
-    except GitError as exc:
-        _logger.warning("gh pr view failed (%s, returning None): %s", type(exc).__name__, exc)
-        return None
+    proc = _run_gh(repo, args, retries=_gh_retries())
     if proc.returncode != 0:
-        return None
+        if _pr_view_is_absent(proc.stderr, pr):
+            return None
+        diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
+        raise _gh_error_for(f"gh pr view failed: {diagnostic}", proc.stderr)
     try:
         data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    except json.JSONDecodeError as exc:
+        raise GitError("gh pr view returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise GitError("gh pr view expected a JSON object")
+    return data
 
 
 def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict[str, Any]]:
     """List open PRs whose head ref is *branch*.
 
     Returns:
-        List of PR dicts (empty when no PRs match or the call fails).
+        List of PR dicts. An empty list means the successful query had no rows.
+
+    Raises:
+        GitError: If gh fails or returns malformed output.
     """
     proc = _run_gh(
         repo,
@@ -2931,17 +3105,22 @@ def gh_pr_list_for_branch(repo: Path, branch: str) -> list[dict[str, Any]]:
             "--state",
             "open",
             "--json",
-            "number,headRefOid,baseRefOid,baseRefName,url,headRepository,headRepositoryOwner",
+            ",".join(GH_PR_LIST_FIELDS),
         ],
         retries=_gh_retries(),
     )
     if proc.returncode != 0:
-        return []
+        diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
+        raise _gh_error_for(f"gh pr list failed: {diagnostic}", proc.stderr)
     try:
-        rows = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
-    return rows if isinstance(rows, list) else []
+        rows = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise GitError("gh pr list returned invalid JSON") from exc
+    if not isinstance(rows, list):
+        raise GitError("gh pr list expected a JSON list")
+    if any(not isinstance(row, dict) for row in rows):
+        raise GitError("gh pr list returned a non-object row")
+    return rows
 
 
 def gh_pr_diff(repo: Path, pr: int) -> str:
@@ -2963,10 +3142,10 @@ def split_owner_repo(slug: str) -> tuple[str, str] | None:
         A ``(owner, repo)`` tuple when *slug* contains exactly one ``"/"``
         and both parts are non-empty, or ``None`` otherwise.
     """
-    if "/" not in slug:
+    if slug.count("/") != 1:
         return None
     owner, _, repo = slug.partition("/")
-    if not owner or not repo:
+    if not owner or not repo or any(char.isspace() for char in owner + repo):
         return None
     return owner, repo
 
@@ -3035,6 +3214,23 @@ def gh_repo_view(repo: Path) -> tuple[str, str] | None:
     if proc.returncode != 0:
         return None
     return split_owner_repo(proc.stdout.strip())
+
+
+def gh_repo_view_required(repo: Path) -> tuple[str, str]:
+    """Return the current repository slug, raising on command or shape failure."""
+    proc = _run_gh(
+        repo,
+        ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        retries=_gh_retries(),
+    )
+    if proc.returncode != 0:
+        diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
+        raise _gh_error_for(f"gh repo view failed: {diagnostic}", proc.stderr)
+    raw_slug = proc.stdout.rstrip("\r\n")
+    slug = split_owner_repo(raw_slug)
+    if slug is None:
+        raise GitError("gh repo view returned an invalid repository slug")
+    return slug
 
 
 def _gh_error_for(message: str, stderr: str) -> GitError:

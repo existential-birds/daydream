@@ -59,7 +59,7 @@ from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 from daydream.phases import UnconfinedFindingError
 from daydream.runner import RunConfig, run
-from daydream.trajectory import get_signal_recorder
+from daydream.trajectory import flush_active_signal_recorders
 from daydream.ui import (
     ShutdownPanel,
     create_console,
@@ -119,18 +119,14 @@ def _signal_handler(signum: int, _frame: object) -> None:
     D-07: SIGINT/SIGTERM flushes a ``<path>.partial`` trajectory with
     ``extra.partial=true`` so consumers know the run was interrupted.
 
-    Uses :func:`get_signal_recorder` (a module-level stack) rather than the
-    ContextVar. Signal handlers fire in the main thread at bytecode boundaries
-    and are not synced with the asyncio task context where the ContextVar was
-    set, so ContextVar reads from here are non-deterministic.
+    The recorder-owned run registry snapshots every active sibling without
+    consulting task-local ContextVar routing.
     """
     signal_name = signal.Signals(signum).name
 
-    # Flush partial trajectory before tearing down (D-07); write_partial is sync
-    # and exception-safe, so it can't crash the shutdown path.
-    recorder = get_signal_recorder()
-    if recorder is not None:
-        recorder.write_partial()
+    # Flush every active recorder before tearing down (D-07). The registry
+    # isolates ordinary write failures per recorder and never awaits.
+    flush_active_signal_recorders()
 
     panel = ShutdownPanel(console)
     set_shutdown_panel(panel)
@@ -2591,6 +2587,13 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
         help="Path to the findings artifact written by --findings-out.",
     )
     parser.add_argument(
+        "--target",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Checkout directory for configuration, diagram evidence, and GitHub operations (default: cwd).",
+    )
+    parser.add_argument(
         "--pr",
         type=int,
         required=True,
@@ -2656,16 +2659,21 @@ def _handle_post_findings_command(argv: list[str]) -> int:
     if "/" not in args.repo:
         parser.error(f"--repo must be an OWNER/REPO slug, got {args.repo!r}")
 
+    target_dir = (args.target if args.target is not None else Path.cwd()).resolve()
+    if not target_dir.is_dir():
+        parser.error(f"--target must be an existing directory: {target_dir}")
+
     console = create_console()
     # Best-effort config read: the poster previously never consulted the repo
     # config, so a malformed .daydream.toml/pyproject.toml in the CI checkout
     # must not abort the unattended post — warn and fall back to the CLI flag.
     approve = args.approve_on_clean
     try:
-        approve = approve or bool(load_file_config(Path.cwd()).approve_on_clean)
+        approve = approve or bool(load_file_config(target_dir).approve_on_clean)
     except ValueError as exc:
         print_warning(console, f"Ignoring malformed repo config: {exc}")
     return pr_review.post_findings_from_artifact(
+        target_dir,
         args.artifact,
         pr_number=args.pr_number,
         head_sha=args.head_sha,

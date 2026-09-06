@@ -3139,6 +3139,37 @@ async def test_no_pr_body_degrades_cleanly(
     _assert_authoritative_rule_gated(stub, expect_present=False)
 
 
+async def test_pr_lookup_failure_warns_and_degrades_intent_cleanly(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """An advisory PR-body lookup failure cannot abort the review pipeline."""
+    from daydream.git_ops import GitError
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+
+    def fail_view(_repo: Path, _pr: int | None = None) -> dict[str, Any] | None:
+        raise GitError("gh pr view failed: authentication required")
+
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", fail_view)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda _console, message: warnings.append(message),
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+
+    rc = await run(make_config(multi_stack_target, pr_number=7))
+
+    assert rc == 0
+    assert "pull request description" not in _intent_prompt(stub).lower()
+    assert any("authentication required" in warning for warning in warnings)
+    _assert_authoritative_rule_gated(stub, expect_present=False)
+
+
 async def test_whitespace_only_pr_body_is_not_authoritative(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -569,7 +569,11 @@ def _resolve_base(source: Path, branch: str | None, base: str | None) -> str:
         return base
 
     if branch is not None and shutil.which("gh") is not None:
-        prs = git_ops.gh_pr_list_for_branch(source, branch)
+        try:
+            prs = git_ops.gh_pr_list_for_branch(source, branch)
+        except GitError as exc:
+            _logger.debug("PR base lookup failed for branch %r: %s", branch, exc)
+            prs = []
         if not prs:
             _logger.debug("gh_pr_list_for_branch returned empty for branch %r", branch)
         for pr in prs:
