@@ -327,8 +327,34 @@ def test_load_manifest_rejects_missing_or_empty_protected_test_paths(
 
 @pytest.mark.parametrize(
     "entry",
-    ["", ":(exclude)tests", "tests/*", "tests/?", "tests/[x]"],
-    ids=["empty", "leading-colon-magic", "glob-star", "glob-question", "glob-bracket"],
+    [
+        "",
+        ":(exclude)tests",
+        "tests/*",
+        "tests/?",
+        "tests/[x]",
+        "/tests",
+        "tests/./unit",
+        "docs/../missing",
+        "./tests",
+        "tests/.",
+        "../tests",
+        "tests/..",
+    ],
+    ids=[
+        "empty",
+        "leading-colon-magic",
+        "glob-star",
+        "glob-question",
+        "glob-bracket",
+        "absolute",
+        "dot-component",
+        "dotdot-component",
+        "leading-dot-component",
+        "trailing-dot-component",
+        "leading-dotdot-component",
+        "trailing-dotdot-component",
+    ],
 )
 def test_load_manifest_rejects_non_literal_protected_test_paths(
     tmp_path: Path, entry: str
@@ -357,6 +383,24 @@ def test_load_manifest_rejects_non_literal_protected_test_paths(
         load_manifest(manifest)
     assert ("value_error", ("protected_test_paths",)) in [
         (err["type"], err["loc"]) for err in excinfo.value.errors()
+    ]
+
+
+def test_load_manifest_accepts_canonical_protected_test_paths(tmp_path: Path) -> None:
+    """Canonical nested paths and dotfiles load unchanged through the loader."""
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(
+        '[repos."acme/widgets"]\n'
+        'clone_url = "https://github.com/acme/widgets"\n'
+        'image = "daydream-rl/widgets"\n'
+        'test_command = "pytest -q"\n'
+        'setup_cmds = []\n'
+        'protected_test_paths = ["tests/unit", "tests/unit/test_api.py", ".pytest.ini", "tests/.hidden"]\n',
+        encoding="utf-8",
+    )
+    loaded = load_manifest(manifest)
+    assert loaded["acme/widgets"].protected_test_paths == [
+        "tests/unit", "tests/unit/test_api.py", ".pytest.ini", "tests/.hidden"
     ]
 
 
