@@ -536,8 +536,9 @@ def _start_remote_ci_fake_after_push(
                 "repos/base-user/project/rules/branches/main?per_page=100&page=1",
                 [],
             )
+            required_name = "Build [matrix]" if outcome == "failed" else "Build"
             pinned_checks = (
-                [{"context": "Build", "app_id": 10}]
+                [{"context": required_name, "app_id": 10}]
                 if outcome in {"failed", "delayed", "merge-delayed"}
                 else []
             )
@@ -556,12 +557,16 @@ def _start_remote_ci_fake_after_push(
                 checks.append(
                     {
                         "id": 1,
-                        "name": "Build",
+                        "name": required_name,
                         "head_sha": sha,
                         "app": {"id": 10},
                         "status": "completed",
                         "conclusion": "failure" if outcome == "failed" else "success",
-                        "details_url": "https://github.com/base-user/project/actions/runs/7",
+                        "details_url": (
+                            "https://github.com/base-user/project/actions/runs/[matrix]/7"
+                            if outcome == "failed"
+                            else "https://github.com/base-user/project/actions/runs/7"
+                        ),
                         "output": {
                             "title": "Build failed",
                             "summary": "secret=top-secret build failed",
@@ -573,12 +578,12 @@ def _start_remote_ci_fake_after_push(
                 checks.append(
                     {
                         "id": 2,
-                        "name": "Lint",
+                        "name": "Lint [optional]",
                         "head_sha": sha,
                         "app": {"id": 20},
                         "status": "completed",
                         "conclusion": "failure",
-                        "details_url": "https://github.com/base-user/project/actions/runs/8",
+                        "details_url": "https://github.com/base-user/project/actions/runs/[optional]/8",
                         "output": {
                             "title": "Advisory lint failed",
                             "summary": "advisory failure",
@@ -711,11 +716,11 @@ async def _wait_for_process_group_exit(pgid: int) -> None:
 @pytest.mark.asyncio
 async def test_runner_remote_ci_red_fails_after_real_push(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     install_backend: Callable[[object], object],
     make_config: Callable[..., "RunConfig"],
     fake_gh: FakeGh,
     archive_dir: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A locally green real push cannot complete without exact remote CI."""
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
@@ -723,6 +728,11 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
     seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome="failed"
+    )
+    rendered = StringIO()
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.console",
+        Console(file=rendered, width=160),
     )
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
 
@@ -755,11 +765,13 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     assert verdict["status"] == "failed"
     assert verdict["target"]["pushed_sha"] == new_sha
     assert verdict["evidence_sha"] == new_sha
-    assert verdict["failing_contexts"] == ["Build (app 10)"]
-    assert [item["context"] for item in verdict["advisory_observations"]] == ["Lint"]
+    assert verdict["failing_contexts"] == ["Build [matrix] (app 10)"]
+    assert [item["context"] for item in verdict["advisory_observations"]] == [
+        "Lint [optional]"
+    ]
     assert verdict["urls"] == [
-        "https://github.com/base-user/project/actions/runs/7",
-        "https://github.com/base-user/project/actions/runs/8",
+        "https://github.com/base-user/project/actions/runs/[matrix]/7",
+        "https://github.com/base-user/project/actions/runs/[optional]/8",
     ]
     assert "top-secret" not in verdict_path.read_text()
     handoff = json.loads(
@@ -767,8 +779,13 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     )
     assert handoff["status"] == "failed"
     assert handoff["target"]["pushed_sha"] == new_sha
-    output = capsys.readouterr().out
-    assert "Advisory CI not green: Lint" in output
+    output = rendered.getvalue()
+    assert "Failing CI: Build [matrix] (app 10)" in output
+    assert "Advisory CI not green: Lint [optional]" in output
+    assert "https://github.com/base-user/project/actions/runs/[matrix]/7" in output
+    assert "https://github.com/base-user/project/actions/runs/[optional]/8" in output
+    assert "\\[matrix]" not in output
+    assert "\\[optional]" not in output
     assert "Commit and push complete" not in output
     assert "Exact pushed-SHA remote CI passed" not in output
 
@@ -865,6 +882,98 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
     assert manifest["phase_states"]["push"]["status"] == "succeeded"
     assert manifest["phase_states"]["remote_ci"]["status"] == "succeeded"
     assert manifest["pipeline_status"] == "succeeded"
+    trajectory = json.loads((manifests[0].parent / "trajectory.json").read_text())
+    remote_ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
+    ]
+    assert len(remote_ends) == 1
+    assert remote_ends[0]["status"] == "succeeded"
+    assert "reason_code" not in remote_ends[0]
+    assert remote_ends[0]["metadata"]["stop_reason"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
+    make_config: Callable[..., "RunConfig"],
+    fake_gh: FakeGh,
+) -> None:
+    """A host interrupt stays distinct after its cancelled handoff is persisted."""
+    from daydream import remote_ci
+
+    project, remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
+    old_sha = _git(project, "rev-parse", "HEAD")
+    _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
+    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
+        project, fake_gh, hook_marker, outcome="delayed"
+    )
+
+    async def interrupt_fetch(
+        _self: remote_ci.GitHubRemoteCIFetcher,
+        _target: remote_ci.RemoteCITarget,
+        *,
+        budget: Any,
+    ) -> remote_ci.RemoteCISnapshot:
+        del budget
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(remote_ci.GitHubRemoteCIFetcher, "fetch", interrupt_fetch)
+    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            await run(
+                make_config(
+                    project,
+                    stack="python",
+                    quiet=True,
+                    shallow=True,
+                    assume="yes",
+                    archive=False,
+                    test_command="true",
+                    pr_number=7,
+                    pr_repo="base-user/project",
+                )
+            )
+    finally:
+        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+
+    new_sha = _git(project, "rev-parse", "HEAD")
+    assert new_sha != old_sha
+    assert _git(remote, "rev-parse", "refs/heads/feature") == new_sha
+    assert hook_marker.read_text() == "ran\n"
+    deep = project / ".daydream" / "deep"
+    verdict = json.loads((deep / "remote-ci-verdict.json").read_text())
+    handoff = json.loads((deep / "remote-ci-handoff.json").read_text())
+    assert verdict["status"] == "cancelled"
+    assert verdict["target"]["pushed_sha"] == new_sha
+    assert handoff["status"] == "cancelled"
+    assert handoff["target"]["pushed_sha"] == new_sha
+    verdict_bytes = (deep / "remote-ci-verdict.json").read_bytes()
+    await asyncio.sleep(0.05)
+    assert (deep / "remote-ci-verdict.json").read_bytes() == verdict_bytes
+    trajectory = json.loads(
+        (
+            project
+            / ".daydream"
+            / "runs"
+            / verdict["session_id"]
+            / "trajectory.json"
+        ).read_text()
+    )
+    remote_ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
+    ]
+    assert len(remote_ends) == 1
+    assert remote_ends[0]["status"] == "cancelled"
+    assert remote_ends[0]["reason_code"] == "cancelled"
+    assert remote_ends[0]["metadata"]["stop_reason"] == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -966,6 +1075,25 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     await asyncio.sleep(0.05)
     assert verdict_path.read_bytes() == verdict_bytes
     assert len(fake_gh.process_calls()) == calls
+    trajectory = json.loads(
+        (
+            project
+            / ".daydream"
+            / "runs"
+            / verdict["session_id"]
+            / "trajectory.json"
+        ).read_text()
+    )
+    assert trajectory["session_id"] == verdict["session_id"]
+    remote_ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "remote-ci" and event["event"] == "phase_end"
+    ]
+    assert len(remote_ends) == 1
+    assert remote_ends[0]["status"] == "cancelled"
+    assert remote_ends[0]["reason_code"] == "cancelled"
+    assert remote_ends[0]["metadata"]["stop_reason"] == "cancelled"
 
 
 @pytest.mark.asyncio

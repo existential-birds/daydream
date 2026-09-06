@@ -223,6 +223,33 @@ configured model pricing because its stream reports tokens rather than monetary 
 
 Set `OTEL_SERVICE_NAME` to change the service label from `daydream`.
 
+## Trajectory timing
+
+Trajectory timing is recorded even when trace export is off. Identified phase
+events pair a start and terminal event by session, scope and phase. Terminal
+states distinguish success, partial results, failure, cancellation, timeout and
+intentional skips. MERGE and DIAGRAM have their own scopes; a tiny, host-only
+merge does not fabricate an agent invocation.
+
+A parallel dispatch records its start before its children begin and its completion
+after they join. Its planned, attempted and completed counts describe that dispatch,
+and its references identify the child documents actually written. Each backend
+invocation has a document-qualified identity; a fork wrapper is not another call.
+
+The archive manifest's `metrics.timing_coverage` reports attributed and unattributed
+wall time, coverage ratio, agent completeness and bounded diagnostics. Repeated and
+overlapping intervals are unioned, so adding individual phase durations is not a
+valid way to reconstruct run duration. Unpaired or malformed evidence is diagnosed,
+not silently counted as complete. Evaluation and manifest totals use the same
+frozen trajectory input.
+
+A signal flush freezes the root and active children at one `snapshot_at` cutoff.
+Open invocations remain incomplete, without invented end times. If children have
+started before the root has a step, the partial root contains a system snapshot
+event, not an agent call. A later final write has a new cutoff and does not alter
+the earlier snapshot's bytes. Current-session MERGE events also govern archived
+merge state; a stale successful report cannot override a current failed merge.
+
 ## Lifecycle and failures
 
 Each run owns its tracer provider and selected exporters. Daydream does not replace

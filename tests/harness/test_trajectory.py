@@ -38,7 +38,8 @@ async def test_make_recorder_forwards_on_write(tmp_path: Path) -> None:
     """The on_write callback reaches the recorder and fires on a completed write."""
     calls: list[tuple[str, str]] = []
     recorder = make_recorder(
-        tmp_path, on_write=lambda rec, status: calls.append((rec.session_id, status))
+        tmp_path,
+        on_write=lambda rec, snapshot: calls.append((rec.session_id, snapshot.status)),
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:

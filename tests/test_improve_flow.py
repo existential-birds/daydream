@@ -700,6 +700,78 @@ async def test_unborn_improve_cancellation_cleans_snapshot(
 
 
 @pytest.mark.anyio
+async def test_audit_dispatch_interval_cancelling_two_blocked_auditors(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """Cancellation retains one closed interval for two real child attempts."""
+    two_started = anyio.Event()
+
+    class BlockingAuditBackend(ImproveStubBackend):
+        def __init__(self) -> None:
+            super().__init__(
+                improve_monorepo_target,
+                n_findings=0,
+                fanout_concurrency=2,
+            )
+            self.blocked = 0
+
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncIterator[AgentEvent]:
+            if "read-only improve audit specialist" in prompt:
+                self.blocked += 1
+                if self.blocked == 2:
+                    two_started.set()
+                yield TextEvent(text="blocked audit child started")
+                await anyio.sleep_forever()
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+                persist_session=persist_session,
+            ):
+                yield event
+
+    backend = install_capable_improve_backend(monkeypatch, BlockingAuditBackend())
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(
+            run,
+            make_config(improve_monorepo_target, flow_name="improve"),
+        )
+        await two_started.wait()
+        tasks.cancel_scope.cancel()
+
+    assert backend.blocked == 2
+    trajectory = _root_run_trajectory(improve_monorepo_target)
+    dispatch = _dispatch_for_phase(trajectory, "audit")
+    assert dispatch["extra"]["dispatch_status"] == "cancelled"
+    assert dispatch["extra"]["reason_code"] == "cancelled"
+    assert dispatch["extra"]["attempted_count"] == 2
+    ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["event"] == "phase_end" and event["phase"] == "audit"
+    ]
+    assert len(ends) == 1
+    assert ends[0]["status"] == "cancelled"
+    assert ends[0]["reason_code"] == "cancelled"
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("config_fields", "message"),
     [
@@ -997,6 +1069,97 @@ def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
             if value:
                 values.append(value)
     return values
+
+
+def _root_run_trajectory(repo: Path) -> dict[str, Any]:
+    paths = list((repo / ".daydream" / "runs").glob("*/trajectory.json"))
+    assert len(paths) == 1
+    payload = json.loads(paths[0].read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _dispatch_for_phase(trajectory: dict[str, Any], phase: str) -> dict[str, Any]:
+    steps = [
+        step
+        for step in trajectory["steps"]
+        if step.get("extra", {}).get("daydream_phase") == phase
+        and "dispatch_id" in step.get("extra", {})
+    ]
+    assert len(steps) == 1
+    return cast(dict[str, Any], steps[0])
+
+
+def _assert_complete_phase_dispatch(
+    repo: Path,
+    trajectory: dict[str, Any],
+    phase: str,
+    descriptors: list[str],
+) -> None:
+    """Prove dispatch enclosure and one real invocation per exact child ref."""
+    dispatch = _dispatch_for_phase(trajectory, phase)
+    expected_count = len(descriptors)
+    assert dispatch["extra"]["dispatch_status"] == "succeeded"
+    assert dispatch["extra"]["planned_count"] == expected_count
+    assert dispatch["extra"]["attempted_count"] == expected_count
+    assert dispatch["extra"]["completed_count"] == expected_count
+
+    results = dispatch["observation"]["results"]
+    assert [result["content"] for result in results] == [
+        f"Dispatched to {descriptor}" for descriptor in descriptors
+    ]
+    assert all(len(result["subagent_trajectory_ref"]) == 1 for result in results)
+    refs = [result["subagent_trajectory_ref"][0] for result in results]
+    assert len({ref["trajectory_id"] for ref in refs}) == expected_count
+    assert {ref["session_id"] for ref in refs} == {trajectory["session_id"]}
+
+    summaries = [
+        summary
+        for summary in trajectory["extra"]["subtrajectories"]
+        if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
+    ]
+    assert [summary["descriptor"] for summary in summaries] == descriptors
+    assert all("invocation_id" not in summary for summary in summaries)
+
+    children: list[dict[str, Any]] = []
+    identities: set[tuple[str, str]] = set()
+    for descriptor, ref, summary in zip(descriptors, refs, summaries, strict=True):
+        assert Path(ref["trajectory_path"]).name.startswith(f"{descriptor}--")
+        child = cast(
+            dict[str, Any],
+            json.loads(
+                (repo / ".daydream" / ref["trajectory_path"]).read_text(
+                    encoding="utf-8"
+                )
+            ),
+        )
+        assert child["trajectory_id"] == ref["trajectory_id"]
+        assert child["session_id"] == trajectory["session_id"]
+        assert summary["trajectory_id"] == ref["trajectory_id"]
+        assert summary["sibling_trajectory_ref"] == ref["trajectory_path"]
+        assert summary["fork_id"] == ref["trajectory_id"]
+        assert summary["phase"] == phase
+        assert summary["invocations"] == child["extra"]["subtrajectories"]
+        assert len(summary["invocations"]) == 1
+        invocation = summary["invocations"][0]
+        assert invocation["phase"] == phase
+        assert invocation["trajectory_id"] == child["trajectory_id"]
+        assert (
+            child["extra"]["run_started_at"]
+            <= invocation["started_at"]
+            <= invocation["ended_at"]
+            <= child["extra"]["run_ended_at"]
+        )
+        identities.add((invocation["trajectory_id"], invocation["invocation_id"]))
+        children.append(child)
+
+    assert len(identities) == expected_count
+    assert dispatch["timestamp"] <= min(
+        child["extra"]["run_started_at"] for child in children
+    )
+    assert dispatch["extra"]["dispatch_completed_at"] >= max(
+        child["extra"]["run_ended_at"] for child in children
+    )
 
 
 def _improve_observable_texts(repo: Path) -> list[str]:
@@ -1388,7 +1551,7 @@ async def test_quick_tier_audits_whole_repo_in_one_group(
 
 
 @pytest.mark.anyio
-async def test_all_audit_assignments_failing_exits_nonzero(
+async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
@@ -1400,6 +1563,25 @@ async def test_all_audit_assignments_failing_exits_nonzero(
 
     assert code == 1
     assert not improve_artifact(improve_monorepo_target, "report.md").exists()
+    audit_cwds = {
+        call["cwd"] for call in stub.calls if call["marker"] == "audit"
+    }
+    assert len(audit_cwds) == 1
+    assert improve_monorepo_target not in audit_cwds
+    assert all(cwd != improve_monorepo_target for cwd in audit_cwds)
+    assert all(not cwd.exists() for cwd in audit_cwds)
+    trajectory = _root_run_trajectory(improve_monorepo_target)
+    dispatch = _dispatch_for_phase(trajectory, "audit")
+    assert dispatch["extra"]["dispatch_status"] == "failed"
+    assert dispatch["extra"]["reason_code"] == "all_children_failed"
+    ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["event"] == "phase_end" and event["phase"] == "audit"
+    ]
+    assert len(ends) == 1
+    assert ends[0]["status"] == "failed"
+    assert ends[0]["reason_code"] == "all_children_failed"
 
 
 @pytest.mark.anyio
@@ -1591,7 +1773,7 @@ async def test_vet_batches_are_bounded_and_parallel(
 
 
 @pytest.mark.anyio
-async def test_vet_batch_failure_fails_closed_per_batch(
+async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1624,6 +1806,18 @@ async def test_vet_batch_failure_fails_closed_per_batch(
     assert len(vetted["findings"]) == 8
     assert "Security finding 41" not in titles
     assert "Security finding 01" in titles and "Security finding 40" in titles
+    trajectory = _root_run_trajectory(improve_monorepo_target)
+    dispatch = _dispatch_for_phase(trajectory, "vet")
+    assert dispatch["extra"]["dispatch_status"] == "partial"
+    assert dispatch["extra"]["reason_code"] == "some_children_failed"
+    ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["event"] == "phase_end" and event["phase"] == "vet"
+    ]
+    assert len(ends) == 1
+    assert ends[0]["status"] == "partial"
+    assert ends[0]["reason_code"] == "some_children_failed"
 
 
 @pytest.mark.anyio
@@ -3977,6 +4171,107 @@ async def test_trajectory_records_improve_flow_and_phases(
     )
     assert flows and set(flows) == {"improve"}
     assert {"recon", "audit", "vet", "plan_write"} <= set(phases)
+    payload = _root_run_trajectory(improve_monorepo_target)
+    events = payload["extra"]["phase_events"]
+    recon_start = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "phase_start" and event["phase"] == "recon"
+    )
+    survey_start = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "phase_start"
+        and event["phase"] == "exploration"
+        and event["metadata"] == {"stage": "repo-survey"}
+    )
+    survey_end = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "phase_end"
+        and event["phase"] == "exploration"
+        and event["metadata"] == {"stage": "repo-survey"}
+    )
+    recon_end = next(
+        index
+        for index, event in enumerate(events)
+        if event["event"] == "phase_end" and event["phase"] == "recon"
+    )
+    assert recon_start < survey_start < survey_end < recon_end
+
+    for phase in ("audit", "vet"):
+        dispatch = _dispatch_for_phase(payload, phase)
+        assert dispatch["extra"]["dispatch_status"] == "succeeded"
+        assert dispatch["extra"]["planned_count"] > 0
+        assert dispatch["extra"]["attempted_count"] == dispatch["extra"][
+            "planned_count"
+        ]
+        assert dispatch["extra"]["completed_count"] == dispatch["extra"][
+            "attempted_count"
+        ]
+        assert all(
+            result["content"].startswith(f"Dispatched to {phase}-")
+            for result in dispatch["observation"]["results"]
+        )
+
+
+@pytest.mark.anyio
+async def test_improve_timing_completeness_preserves_p09_audit_isolation(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: MakeConfig,
+) -> None:
+    """One real run proves multi-audit/vet timing and source Git isolation."""
+    repo = improve_monorepo_target
+    _pin_stack_availability(monkeypatch, tmp_path)
+    stub = install_improve_stub(monkeypatch, repo)
+    before_head = git(repo, "rev-parse", "HEAD")
+    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    before_index = git(repo, "ls-files", "--stage")
+    before_status = _git_status_porcelain(repo)
+    source_config = repo / ".git" / "config"
+    config_before = source_config.read_bytes()
+
+    code = await run(make_config(repo, flow_name="improve"))
+
+    assert code == 0
+    trajectory = _root_run_trajectory(repo)
+    audit_descriptors = [
+        f"audit-{category}-group-{group:02d}"
+        for category in AUDIT_CATEGORIES
+        for group in range(1, 4)
+    ]
+    vet_descriptors = [
+        "vet-security-00",
+        "vet-correctness-01",
+        "vet-performance-02",
+        "vet-tests-03",
+        "vet-tech-debt-04",
+        "vet-dependencies-05",
+        "vet-dx-06",
+        "vet-docs-07",
+    ]
+    _assert_complete_phase_dispatch(repo, trajectory, "audit", audit_descriptors)
+    _assert_complete_phase_dispatch(repo, trajectory, "vet", vet_descriptors)
+
+    audit_cwds = {Path(call["cwd"]) for call in stub.calls}
+    assert len(audit_cwds) == 1
+    assert stub.calls and all(call["read_only"] for call in stub.calls)
+    audit_root = next(iter(audit_cwds))
+    assert stub.audit_root == audit_root
+    assert audit_root != repo
+    assert not audit_root.is_relative_to(repo)
+    assert not repo.is_relative_to(audit_root)
+    assert audit_root.name == "repo"
+    assert audit_root.parent.name.startswith("daydream-audit-")
+    assert not audit_root.exists()
+
+    assert git(repo, "rev-parse", "HEAD") == before_head
+    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    assert git(repo, "ls-files", "--stage") == before_index
+    assert _git_status_porcelain(repo) == before_status
+    assert source_config.read_bytes() == config_before
 
 
 _VET_FINDINGS = [

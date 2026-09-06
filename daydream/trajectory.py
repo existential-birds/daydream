@@ -18,17 +18,26 @@ values before trajectory data is persisted.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 import time
-from contextlib import asynccontextmanager, nullcontext, suppress
+from collections.abc import AsyncIterator, Sequence
+from contextlib import (
+    AbstractAsyncContextManager,
+    asynccontextmanager,
+    nullcontext,
+    suppress,
+)
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypedDict
+
+import anyio
 
 import daydream
 from daydream.atif import (
@@ -54,19 +63,28 @@ _TRAJECTORIES_SUBDIR = "trajectories"
 _DAYDREAM_DIRNAME = ".daydream"
 
 if TYPE_CHECKING:
-    from daydream.backends import AgentEvent, CostEvent, DiagnosticEvent, ToolResultEvent
+    from daydream.backends import (
+        AgentEvent,
+        CostEvent,
+        DiagnosticEvent,
+        ToolResultEvent,
+    )
 
 _console = create_console()
-_INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
+_INITIAL_TOTALS: dict[str, Any] = {
+    "prompt": 0,
+    "completion": 0,
+    "cached": 0,
+    "cost": 0.0,
+    "any_cost_seen": False,
+}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
 
 # Generic backend labels that should be replaced as soon as a real SDK
 # model id arrives via MetricsEvent, CostEvent, or ResultEvent. Runner stamps
 # the recorder
 # with one of these (or empty) at init since the real model id isn't known
 # until the first agent turn streams back.
-_GENERIC_MODEL_LABELS: frozenset[str] = frozenset(
-    {"claude", "codex", "osprey", "unknown", ""}
-)
+_GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", "osprey", "unknown", ""})
 
 
 def _reasoning_extra(reasoning_tokens: int | None) -> dict[str, Any] | None:
@@ -100,13 +118,15 @@ def _merge_metrics(existing: "Metrics", incoming: "Metrics") -> "Metrics":
         )
         if reasoning is not None:
             merged_extra["reasoning_tokens"] = reasoning
-    return existing.model_copy(update={
-        "prompt_tokens": _add(existing.prompt_tokens, incoming.prompt_tokens),
-        "completion_tokens": _add(existing.completion_tokens, incoming.completion_tokens),
-        "cached_tokens": _add(existing.cached_tokens, incoming.cached_tokens),
-        "cost_usd": _add(existing.cost_usd, incoming.cost_usd),
-        "extra": merged_extra,
-    })
+    return existing.model_copy(
+        update={
+            "prompt_tokens": _add(existing.prompt_tokens, incoming.prompt_tokens),
+            "completion_tokens": _add(existing.completion_tokens, incoming.completion_tokens),
+            "cached_tokens": _add(existing.cached_tokens, incoming.cached_tokens),
+            "cost_usd": _add(existing.cost_usd, incoming.cost_usd),
+            "extra": merged_extra,
+        }
+    )
 
 
 class _InvMetricsSum(TypedDict):
@@ -153,11 +173,7 @@ class _CostDelta:
         carried only when it does not exceed this step's completion.
         """
         reasoning = None
-        if (
-            include_reasoning
-            and self.reasoning is not None
-            and self.reasoning <= self.completion
-        ):
+        if include_reasoning and self.reasoning is not None and self.reasoning <= self.completion:
             reasoning = _reasoning_extra(self.reasoning)
         return Metrics(
             prompt_tokens=self.prompt,
@@ -181,9 +197,7 @@ _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)([^:@/\s]+):([^@/\s]+)@")
 _API_KEY_PATTERN = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|ghs_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
 )
-_JWT_PATTERN = re.compile(
-    r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b"
-)
+_JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b")
 _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+)")
 # PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA).
 # Multi-line body collapsed before the bare API-key rule scans it. CERTIFICATE
@@ -192,8 +206,7 @@ _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+
 # anchors, so a variant addition needs one edit here, not four.
 _PEM_HEADER = r"(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY"
 _PEM_KEY_PATTERN = re.compile(
-    rf"-----BEGIN {_PEM_HEADER}-----"
-    rf".*?-----END {_PEM_HEADER}-----",
+    rf"-----BEGIN {_PEM_HEADER}-----" rf".*?-----END {_PEM_HEADER}-----",
     re.DOTALL,
 )
 #: Replacement marker for PEM private-key blocks. Shared (imported) by the
@@ -301,9 +314,7 @@ def _normalize_diagnostic_record(event: "DiagnosticEvent") -> dict[str, Any]:
     one fixed marker so evidence is not silently lost.
     """
     try:
-        normalized = _diagnostic_json_value(
-            {"code": event.code, "message": event.message, "metadata": event.metadata}
-        )
+        normalized = _diagnostic_json_value({"code": event.code, "message": event.message, "metadata": event.metadata})
         redacted = redact_value(normalized)
         if not isinstance(redacted, dict):
             raise TypeError("diagnostic redactor returned a non-object")
@@ -337,19 +348,18 @@ def default_trajectory_path(target_dir: Path, session_id: str) -> Path:
     The session_id segment guarantees uniqueness per run; the recorder
     creates the directory before its first write.
     """
-    return (
-        target_dir
-        / _DAYDREAM_DIRNAME
-        / _RUNS_SUBDIR
-        / session_id
-        / "trajectory.json"
-    )
+    return target_dir / _DAYDREAM_DIRNAME / _RUNS_SUBDIR / session_id / "trajectory.json"
 
 
-def maybe_fork(recorder: "TrajectoryRecorder | None", descriptor: str) -> Any:
+def maybe_fork(
+    recorder: "TrajectoryRecorder | None",
+    descriptor: str,
+    *,
+    dispatch: "DispatchHandle | None" = None,
+) -> AbstractAsyncContextManager[Any]:
     """Return a fork CM if *recorder* is set, otherwise a no-op context manager."""
     if recorder is not None:
-        return recorder.fork(descriptor)
+        return recorder.fork(descriptor, dispatch=dispatch)
     return nullcontext()
 
 
@@ -394,6 +404,7 @@ class DaydreamPhase(str, Enum):
     VET = "vet"
     PLAN_WRITE = "plan_write"
     DIAGRAM = "diagram"
+    MERGE = "merge"
     # Host-side (non-agent) operations (issue #726): each is bracketed by
     # phase events carrying ``duration_ms`` and ``stop_reason`` so the
     # trajectory can tell test execution, hook runs, commits, pushes, and
@@ -421,6 +432,390 @@ class DaydreamRunFlow(str, Enum):
     DIAGRAM = "diagram"
 
 
+class LifecycleStatus(str, Enum):
+    """Closed terminal states for phase and dispatch lifecycle evidence."""
+
+    SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    SKIPPED = "skipped"
+
+
+class LifecycleReasonCode(str, Enum):
+    """Low-cardinality reasons safe to persist across trajectory surfaces."""
+
+    NO_ELIGIBLE_WORK = "no_eligible_work"
+    SOME_CHILDREN_FAILED = "some_children_failed"
+    ALL_CHILDREN_FAILED = "all_children_failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+    DOMAIN_FAILURE = "domain_failure"
+    UNCAUGHT_EXCEPTION = "uncaught_exception"
+
+
+@dataclass(frozen=True)
+class TrajectoryDocumentSnapshot:
+    """One canonical prepared trajectory payload for a single write cutoff."""
+
+    trajectory_id: str
+    path: Path
+    json_bytes: bytes
+
+
+@dataclass(frozen=True)
+class RunWriteSnapshot:
+    """Immutable run-wide write input consumed by the Task 5 callback boundary."""
+
+    status: Literal["complete", "partial"]
+    cutoff_at: str
+    root_trajectory_id: str
+    documents: tuple[TrajectoryDocumentSnapshot, ...]
+
+
+TrajectoryWriteCallback = Callable[["TrajectoryRecorder", RunWriteSnapshot], None]
+
+
+@dataclass(frozen=True)
+class TimingSummary:
+    """Overlap-aware timing and invocation coverage for one frozen run."""
+
+    wall_clock_seconds: float
+    phase_timings: dict[str, dict[str, int | float]]
+    attributed_wall_clock_seconds: float
+    unattributed_wall_clock_seconds: float
+    coverage_ratio: float | None
+    agent_completeness: dict[str, int]
+    diagnostics: dict[str, int]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stable JSON projection used by eval and manifests."""
+        return {
+            "total_wall_clock_seconds": self.wall_clock_seconds,
+            "phase_timings": self.phase_timings,
+            "attributed_wall_clock_seconds": self.attributed_wall_clock_seconds,
+            "unattributed_wall_clock_seconds": self.unattributed_wall_clock_seconds,
+            "coverage_ratio": self.coverage_ratio,
+            "agent_completeness": self.agent_completeness,
+            "diagnostics": self.diagnostics,
+        }
+
+
+_TIMING_DIAGNOSTIC_KEYS = (
+    "malformed_interval",
+    "duplicate_interval",
+    "orphaned_interval",
+    "malformed_invocation",
+    "duplicate_invocation",
+    "legacy_fork_proxy_used",
+)
+
+
+def _timing_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return parse_iso_timestamp(value)
+    except ValueError:
+        return None
+
+
+def _timing_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _union_intervals(
+    intervals: Sequence[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in sorted(intervals, key=lambda pair: (pair[0], pair[1])):
+        if merged and start <= merged[-1][1]:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _interval_seconds(intervals: Sequence[tuple[datetime, datetime]]) -> float:
+    return sum((end - start).total_seconds() for start, end in intervals)
+
+
+def _clip_intervals(
+    intervals: Sequence[tuple[datetime, datetime]],
+    wall: tuple[datetime, datetime],
+) -> list[tuple[datetime, datetime]]:
+    wall_start, wall_end = wall
+    return [
+        (max(start, wall_start), min(end, wall_end))
+        for start, end in intervals
+        if max(start, wall_start) < min(end, wall_end)
+    ]
+
+
+def _snapshot_payloads(write_snapshot: RunWriteSnapshot) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for document in write_snapshot.documents:
+        try:
+            value = json.loads(document.json_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            payloads.append(value)
+    return payloads
+
+
+def snapshot_trajectories(write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
+    """Return analyzer-shaped trajectory data from immutable document bytes."""
+    main: dict[str, Any] | None = None
+    forked: list[dict[str, Any]] = []
+    for document in write_snapshot.documents:
+        try:
+            payload = json.loads(document.json_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid frozen trajectory JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("frozen trajectory document must be an object")
+        if payload.get("trajectory_id") != document.trajectory_id:
+            raise ValueError("frozen trajectory identity mismatch")
+        copied = dict(payload)
+        copied["_source_file"] = (
+            "trajectory.json"
+            if document.trajectory_id == write_snapshot.root_trajectory_id
+            else document.path.name.removesuffix(".partial")
+        )
+        if document.trajectory_id == write_snapshot.root_trajectory_id:
+            if main is not None:
+                raise ValueError("duplicate frozen root trajectory")
+            main = copied
+        else:
+            forked.append(copied)
+    if main is None and write_snapshot.documents:
+        raise ValueError("frozen root trajectory is missing")
+    return {"main": main, "forked": forked}
+
+
+def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | None:
+    """Reduce one immutable run snapshot without reading live recorder state."""
+    payloads = _snapshot_payloads(write_snapshot)
+    root = next(
+        (payload for payload in payloads if payload.get("trajectory_id") == write_snapshot.root_trajectory_id),
+        None,
+    )
+    if root is None:
+        return None
+    diagnostics = {key: 0 for key in _TIMING_DIAGNOSTIC_KEYS}
+    root_extra = _timing_mapping(root.get("extra"))
+    wall_start = _timing_timestamp(root_extra.get("run_started_at"))
+    wall_end_key = "snapshot_at" if write_snapshot.status == "partial" else "run_ended_at"
+    if write_snapshot.status == "partial" and root_extra.get("snapshot_at") != write_snapshot.cutoff_at:
+        return None
+    if (
+        write_snapshot.status == "complete"
+        and write_snapshot.cutoff_at
+        and root_extra.get("run_ended_at") != write_snapshot.cutoff_at
+    ):
+        return None
+    wall_end = _timing_timestamp(root_extra.get(wall_end_key))
+    wall: tuple[datetime, datetime] | None = None
+    if wall_start is not None and wall_end is not None and wall_start <= wall_end:
+        wall = (wall_start, wall_end)
+    elif "run_started_at" not in root_extra:
+        legacy_times: list[datetime] = []
+        for payload in payloads:
+            for step in payload.get("steps", []):
+                if isinstance(step, dict):
+                    timestamp = _timing_timestamp(step.get("timestamp"))
+                    if timestamp is not None:
+                        legacy_times.append(timestamp)
+        if len(legacy_times) >= 2:
+            wall = (min(legacy_times), max(legacy_times))
+    if wall is None:
+        return None
+
+    identified: dict[tuple[str, str, str], dict[str, list[datetime]]] = {}
+    legacy_intervals: list[tuple[str, datetime, datetime]] = []
+    for payload in payloads:
+        extra = _timing_mapping(payload.get("extra"))
+        pending_legacy: dict[str, list[datetime]] = {}
+        events = extra.get("phase_events")
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            phase = event.get("phase")
+            kind = event.get("event")
+            timestamp = _timing_timestamp(event.get("timestamp"))
+            if not isinstance(phase, str) or kind not in {"phase_start", "phase_end"}:
+                continue
+            session_id = event.get("session_id")
+            scope_id = event.get("scope_id")
+            if session_id is not None or scope_id is not None:
+                if not isinstance(session_id, str) or not session_id or not isinstance(scope_id, str) or not scope_id:
+                    diagnostics["malformed_interval"] += 1
+                    continue
+                if kind == "phase_end" and event.get("status") not in {status.value for status in LifecycleStatus}:
+                    diagnostics["malformed_interval"] += 1
+                    continue
+                key = (session_id, scope_id, phase)
+                bucket = identified.setdefault(key, {"phase_start": [], "phase_end": []})
+                if timestamp is None:
+                    diagnostics["malformed_interval"] += 1
+                else:
+                    bucket[kind].append(timestamp)
+                continue
+            if timestamp is None:
+                diagnostics["malformed_interval"] += 1
+                continue
+            stack = pending_legacy.setdefault(phase, [])
+            if kind == "phase_start":
+                stack.append(timestamp)
+            elif stack:
+                legacy_intervals.append((phase, stack.pop(), timestamp))
+            else:
+                diagnostics["orphaned_interval"] += 1
+        diagnostics["orphaned_interval"] += sum(len(stack) for stack in pending_legacy.values())
+
+    phase_intervals: dict[str, list[tuple[datetime, datetime]]] = {}
+    for (_session_id, _scope_id, phase), pair in identified.items():
+        starts = pair["phase_start"]
+        ends = pair["phase_end"]
+        if len(starts) != 1 or len(ends) != 1:
+            if len(starts) > 1 or len(ends) > 1:
+                diagnostics["duplicate_interval"] += 1
+            else:
+                diagnostics["orphaned_interval"] += 1
+            continue
+        start, end = starts[0], ends[0]
+        if end < start:
+            diagnostics["malformed_interval"] += 1
+            continue
+        phase_intervals.setdefault(phase, []).append((start, end))
+    for phase, start, end in legacy_intervals:
+        if end < start:
+            diagnostics["malformed_interval"] += 1
+        else:
+            phase_intervals.setdefault(phase, []).append((start, end))
+
+    clipped_by_phase = {
+        phase: _union_intervals(_clip_intervals(intervals, wall)) for phase, intervals in phase_intervals.items()
+    }
+    phase_timings = {
+        phase: {
+            "wall_clock_seconds": round(_interval_seconds(intervals), 3),
+            "occurrences": len(phase_intervals[phase]),
+        }
+        for phase, intervals in clipped_by_phase.items()
+        if intervals
+    }
+    all_intervals = _union_intervals([interval for intervals in clipped_by_phase.values() for interval in intervals])
+    wall_seconds = max(0.0, (wall[1] - wall[0]).total_seconds())
+    attributed_seconds = _interval_seconds(all_intervals)
+
+    invocation_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    malformed_invocations = 0
+    for payload in payloads:
+        trajectory_id = payload.get("trajectory_id")
+        extra = _timing_mapping(payload.get("extra"))
+        summaries = extra.get("subtrajectories")
+        direct_invocations = (
+            [
+                item
+                for item in summaries
+                if isinstance(summaries, list) and isinstance(item, dict) and "invocation_id" in item
+            ]
+            if isinstance(summaries, list)
+            else []
+        )
+        if isinstance(summaries, list):
+            malformed_invocations += sum(
+                1
+                for item in summaries
+                if isinstance(item, dict)
+                and "invocation_id" not in item
+                and "invocations" not in item
+                and "started_at" in item
+                and "ended_at" in item
+            )
+        for invocation in direct_invocations:
+            invocation_id = invocation.get("invocation_id")
+            row_trajectory_id = invocation.get("trajectory_id")
+            if not isinstance(row_trajectory_id, str) or not isinstance(invocation_id, str):
+                malformed_invocations += 1
+                continue
+            invocation_rows.setdefault((row_trajectory_id, invocation_id), []).append(invocation)
+        if payload is root or direct_invocations or "run_started_at" in extra:
+            continue
+        legacy_start: datetime | None = None
+        legacy_end: datetime | None = _timing_timestamp(extra.get("run_ended_at") or extra.get("snapshot_at"))
+        if legacy_start is None or legacy_end is None or legacy_end < legacy_start:
+            step_times = [
+                parsed
+                for step in payload.get("steps", [])
+                if isinstance(step, dict)
+                if (parsed := _timing_timestamp(step.get("timestamp"))) is not None
+            ]
+            if len(step_times) >= 2:
+                legacy_start, legacy_end = min(step_times), max(step_times)
+        if legacy_start is not None and legacy_end is not None and legacy_start <= legacy_end:
+            phase = next(
+                (
+                    str((step.get("extra") or {}).get("daydream_phase"))
+                    for step in payload.get("steps", [])
+                    if isinstance(step, dict) and (step.get("extra") or {}).get("daydream_phase")
+                ),
+                "unknown",
+            )
+            invocation_rows[(str(trajectory_id), "legacy_fork_proxy")] = [
+                {
+                    "phase": phase,
+                    "started_at": legacy_start.isoformat(),
+                    "ended_at": legacy_end.isoformat(),
+                }
+            ]
+            diagnostics["legacy_fork_proxy_used"] += 1
+
+    diagnostics["malformed_invocation"] += malformed_invocations
+    attributed_invocations = 0
+    unattributed_invocations = malformed_invocations
+    for rows in invocation_rows.values():
+        if len(rows) != 1:
+            diagnostics["duplicate_invocation"] += 1
+            unattributed_invocations += 1
+            continue
+        invocation = rows[0]
+        phase = invocation.get("phase")
+        invocation_start = _timing_timestamp(invocation.get("started_at"))
+        invocation_end = _timing_timestamp(invocation.get("ended_at"))
+        intervals = clipped_by_phase.get(phase, []) if isinstance(phase, str) else []
+        if invocation_start is None or invocation_end is None or invocation_end < invocation_start:
+            diagnostics["malformed_invocation"] += 1
+            unattributed_invocations += 1
+        elif any(
+            interval_start <= invocation_start and invocation_end <= interval_end
+            for interval_start, interval_end in intervals
+        ):
+            attributed_invocations += 1
+        else:
+            unattributed_invocations += 1
+
+    return TimingSummary(
+        wall_clock_seconds=round(wall_seconds, 3),
+        phase_timings=phase_timings,
+        attributed_wall_clock_seconds=round(attributed_seconds, 3),
+        unattributed_wall_clock_seconds=round(max(0.0, wall_seconds - attributed_seconds), 3),
+        coverage_ratio=(round(attributed_seconds / wall_seconds, 4) if wall_seconds > 0 else None),
+        agent_completeness={
+            "total": attributed_invocations + unattributed_invocations,
+            "attributed": attributed_invocations,
+            "unattributed": unattributed_invocations,
+        },
+        diagnostics=diagnostics,
+    )
+
+
 # Sensitive-key detection (issue #455): segment-aware, casing-agnostic.
 # A key is sensitive when the whole normalized key is a member of
 # _SENSITIVE_KEY_SUFFIXES, when it ends with "_" + member (compound members
@@ -428,11 +823,25 @@ class DaydreamRunFlow(str, Enum):
 # segment is a member. Bare `key` is deliberately absent so keyStore/key_store
 # stay clean (WR-03), and a secret term must appear as a full segment — never
 # as a substring (tokenizer/passwordless pass through).
-_SENSITIVE_KEY_SUFFIXES: frozenset[str] = frozenset({
-    "api_key", "apikey", "auth", "authorization", "client_secret", "cookie",
-    "credential", "credentials", "password", "passwd", "private_key",
-    "secret", "secret_access_key", "set_cookie", "token",
-})
+_SENSITIVE_KEY_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "auth",
+        "authorization",
+        "client_secret",
+        "cookie",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "private_key",
+        "secret",
+        "secret_access_key",
+        "set_cookie",
+        "token",
+    }
+)
 # Insert a separator before an uppercase letter that follows a lowercase/digit
 # (camelCase → snake_case boundary): apiKey → api_Key, dbPassword → db_Password.
 _CAMEL_CASE_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -450,11 +859,7 @@ def _normalize_sensitive_key(key: str) -> str:
     ``dbPassword`` → ``db_password``, ``AUTHORIZATION`` → ``authorization``,
     ``awsSecretAccessKey`` → ``aws_secret_access_key``.
     """
-    return (
-        _NON_ALPHANUMERIC_KEY_PATTERN.sub("_", _CAMEL_CASE_BOUNDARY_PATTERN.sub("_", key))
-        .lower()
-        .strip("_")
-    )
+    return _NON_ALPHANUMERIC_KEY_PATTERN.sub("_", _CAMEL_CASE_BOUNDARY_PATTERN.sub("_", key)).lower().strip("_")
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -589,11 +994,11 @@ def _redact_structured_pairs(text: str) -> str:
         if match is None:
             break
         if _is_sensitive_key(match.group(2)):
-            out.append(text[pos:match.start()])
+            out.append(text[pos : match.start()])
             out.append(_redact_structured_key_value(match, text))
             pos = match.end()
         else:
-            out.append(text[pos:match.start() + 1])
+            out.append(text[pos : match.start() + 1])
             pos = match.start() + 1
     out.append(text[pos:])
     return "".join(out)
@@ -623,18 +1028,18 @@ def _redact_structured_blocks(text: str) -> str:
                 break
             key = match.group(2)
             if not _is_sensitive_key(key):
-                out.append(text[pos:match.start() + 1])
+                out.append(text[pos : match.start() + 1])
                 pos = match.start() + 1
                 continue
             block_end = _block_value_end(text, match.end())
             if block_end == match.end():
                 # no indented block follows (empty value): skip and re-scan
-                out.append(text[pos:match.start() + 1])
+                out.append(text[pos : match.start() + 1])
                 pos = match.start() + 1
                 continue
-            out.append(text[pos:match.start()])
+            out.append(text[pos : match.start()])
             quote = match.group(1) or ""
-            out.append(f"{quote}{key}{quote}{match.group(3)}\"{_REDACTED_CREDENTIAL}\"")
+            out.append(f'{quote}{key}{quote}{match.group(3)}"{_REDACTED_CREDENTIAL}"')
             pos = block_end
         out.append(text[pos:])
         return "".join(out)
@@ -760,9 +1165,7 @@ class Redactor:
         out: dict[str, Any] = {}
         for key, val in arguments.items():
             try:
-                out[key] = redact_value(
-                    val, _is_sensitive_key(key) if isinstance(key, str) else False
-                )
+                out[key] = redact_value(val, _is_sensitive_key(key) if isinstance(key, str) else False)
             except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                 out[key] = "[REDACTION_FAILED]"
         return out
@@ -781,9 +1184,11 @@ class Redactor:
                     new_content = "[REDACTION_FAILED]"
             elif isinstance(r.content, list):
                 new_content = [
-                    part.model_copy(update={"text": self._redact_optional_text(part.text)})
-                    if part.type == "text"
-                    else part
+                    (
+                        part.model_copy(update={"text": self._redact_optional_text(part.text)})
+                        if part.type == "text"
+                        else part
+                    )
                     for part in r.content
                 ]
             new_results.append(r.model_copy(update={"content": new_content}))
@@ -808,17 +1213,18 @@ class Redactor:
                 updates["message"] = self._redact_optional_text(step.message)
             elif isinstance(step.message, list):
                 updates["message"] = [
-                    part.model_copy(update={"text": self._redact_optional_text(part.text)})
-                    if part.type == "text"
-                    else part
+                    (
+                        part.model_copy(update={"text": self._redact_optional_text(part.text)})
+                        if part.type == "text"
+                        else part
+                    )
                     for part in step.message
                 ]
             if step.reasoning_content is not None:
                 updates["reasoning_content"] = self._redact_optional_text(step.reasoning_content)
             if step.tool_calls is not None:
                 redacted_calls = [
-                    tc.model_copy(update={"arguments": self._redact_arguments(tc.arguments)})
-                    for tc in step.tool_calls
+                    tc.model_copy(update={"arguments": self._redact_arguments(tc.arguments)}) for tc in step.tool_calls
                 ]
                 updates["tool_calls"] = redacted_calls
             if step.observation is not None:
@@ -835,15 +1241,13 @@ class Redactor:
                 safe_updates["reasoning_content"] = "[REDACTION_FAILED]"
             if step.tool_calls is not None:
                 safe_updates["tool_calls"] = [
-                    tc.model_copy(update={"arguments": {"_redaction": "[REDACTION_FAILED]"}})
-                    for tc in step.tool_calls
+                    tc.model_copy(update={"arguments": {"_redaction": "[REDACTION_FAILED]"}}) for tc in step.tool_calls
                 ]
             if step.observation is not None:
                 safe_updates["observation"] = step.observation.model_copy(
                     update={
                         "results": [
-                            r.model_copy(update={"content": "[REDACTION_FAILED]"})
-                            for r in step.observation.results
+                            r.model_copy(update={"content": "[REDACTION_FAILED]"}) for r in step.observation.results
                         ]
                     }
                 )
@@ -855,14 +1259,54 @@ class Redactor:
 # get_current_recorder() ONLY; never import _RECORDER_VAR directly. Test isolation
 # goes through _reset_recorder_for_tests() (CORE-10 / D-17).
 _RECORDER_VAR: ContextVar["TrajectoryRecorder | None"] = ContextVar(
-    "_RECORDER_VAR", default=None,
+    "_RECORDER_VAR",
+    default=None,
 )
+
+
+def _digest_partial_state(
+    recorder: TrajectoryRecorder,
+    snapshot_steps: Sequence[Step],
+) -> str:
+    """Hash one recorder's caller-selected serializable partial state."""
+    state = {
+        "steps": [step.model_dump(mode="json") for step in snapshot_steps],
+        "phase_events": [event.to_dict() for event in recorder._phase_events],
+        "subtrajectories": recorder._subtrajectories,
+        "active_invocations": [
+            {
+                "invocation_id": invocation.invocation_id,
+                "phase": invocation.phase.value,
+                "started_at": invocation.started_at,
+            }
+            for invocation in recorder._active_invocations
+        ],
+        "aborted": recorder._aborted,
+    }
+    encoded = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _reuse_or_advance_partial_cutoff(
+    *,
+    state_digest: str,
+    previous_digest: str,
+    previous_cutoff: str,
+) -> tuple[str, str]:
+    """Return an unchanged cutoff for identical state or timestamp new state."""
+    if state_digest == previous_digest:
+        return previous_digest, previous_cutoff
+    return state_digest, now_iso()
+
 
 class _SignalFlushRegistry:
     """Identity membership for every active recorder owned by one run."""
 
     def __init__(self) -> None:
         self._active: dict[int, TrajectoryRecorder] = {}
+        self._completed: dict[str, TrajectoryDocumentSnapshot] = {}
+        self._partial_state_digest = ""
+        self._partial_cutoff_at = ""
 
     def register(self, recorder: TrajectoryRecorder) -> None:
         """Register *recorder* once by object identity."""
@@ -873,16 +1317,134 @@ class _SignalFlushRegistry:
         if self._active.get(id(recorder)) is recorder:
             self._active.pop(id(recorder), None)
 
-    def flush_active(self) -> None:
-        """Write one non-cascading partial for each recorder in one snapshot."""
-        for recorder in tuple(self._active.values()):
+    def retain(self, document: TrajectoryDocumentSnapshot) -> None:
+        """Retain the exact bytes of a completed child until root archival."""
+        self._completed[document.trajectory_id] = document
+
+    def _partial_cutoff(self, recorders: Sequence[TrajectoryRecorder]) -> str:
+        state = [(recorder.trajectory_id, recorder._partial_state_key()) for recorder in recorders]
+        state.extend(
+            (trajectory_id, hashlib.sha256(document.json_bytes).hexdigest())
+            for trajectory_id, document in sorted(self._completed.items())
+        )
+        digest = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self._partial_state_digest, self._partial_cutoff_at = _reuse_or_advance_partial_cutoff(
+            state_digest=digest,
+            previous_digest=self._partial_state_digest,
+            previous_cutoff=self._partial_cutoff_at,
+        )
+        return self._partial_cutoff_at
+
+    def _root(self) -> TrajectoryRecorder | None:
+        return next(
+            (recorder for recorder in self._active.values() if recorder.parent is None),
+            None,
+        )
+
+    def _write_snapshot(
+        self,
+        *,
+        status: Literal["complete", "partial"],
+        root: TrajectoryRecorder,
+        prepared: Sequence[TrajectoryDocumentSnapshot],
+        cutoff_at: str,
+    ) -> RunWriteSnapshot:
+        documents = dict(self._completed)
+        documents.update((document.trajectory_id, document) for document in prepared)
+        ordered = tuple(
+            sorted(
+                documents.values(),
+                key=lambda document: (
+                    document.trajectory_id != root.trajectory_id,
+                    document.trajectory_id,
+                ),
+            )
+        )
+        snapshot = RunWriteSnapshot(
+            status=status,
+            cutoff_at=cutoff_at,
+            root_trajectory_id=root.trajectory_id,
+            documents=ordered,
+        )
+        for document in prepared:
+            if status == "complete":
+                atomic_write_json(document.path, json.loads(document.json_bytes))
+                continue
             try:
-                recorder._write_partial_self()
+                document.path.parent.mkdir(parents=True, exist_ok=True)
+                document.path.write_text(document.json_bytes.decode("utf-8"), encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001 - isolate every recorder write
+                print_warning(
+                    _console,
+                    f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
+                )
+        if root.on_write is not None:
+            try:
+                root.on_write(root, snapshot)
+            except Exception:  # noqa: BLE001 - archive failure never affects recording
+                pass
+        return snapshot
+
+    def flush_active(self) -> None:
+        """Freeze every active recorder, write all, then call the root once."""
+        recorders = tuple(self._active.values())
+        root = self._root()
+        if root is None:
+            return
+        cutoff = self._partial_cutoff(recorders)
+        prepared: list[TrajectoryDocumentSnapshot] = []
+        for recorder in recorders:
+            if recorder is root:
+                continue
+            try:
+                document = recorder._prepare_document(status="partial", cutoff_at=cutoff)
+                if document is not None:
+                    prepared.append(document)
             except Exception as exc:  # noqa: BLE001 - isolate each signal write
                 print_warning(
                     _console,
                     f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
                 )
+        child_evidence = bool(prepared or self._completed)
+        try:
+            root_document = root._prepare_document(
+                status="partial",
+                cutoff_at=cutoff,
+                allow_empty_root=child_evidence,
+            )
+            if root_document is not None:
+                prepared.insert(0, root_document)
+        except Exception as exc:  # noqa: BLE001 - isolate each signal write
+            print_warning(
+                _console,
+                f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
+            )
+            return
+        if child_evidence and root_document is None:
+            return
+        if prepared or self._completed:
+            self._write_snapshot(
+                status="partial",
+                root=root,
+                prepared=prepared,
+                cutoff_at=cutoff,
+            )
+
+    def write_final(self, root: TrajectoryRecorder) -> None:
+        """Write the final root document and publish one retained run snapshot."""
+        cutoff_at = root._run_ended_at or now_iso()
+        document = root._prepare_document(
+            status="complete",
+            cutoff_at=cutoff_at,
+        )
+        if document is None:
+            return
+        self._write_snapshot(
+            status="complete",
+            root=root,
+            prepared=(document,),
+            cutoff_at=cutoff_at,
+        )
 
 
 # Independently nested roots temporarily select their own run registry. The
@@ -970,6 +1532,7 @@ class Invocation:
     Attributes:
         recorder: Owning TrajectoryRecorder (shares step_id counter, Redactor).
         phase: DaydreamPhase label stamped on every Step (MAP-08, D-05).
+        invocation_id: Unique document-qualified identity for this invocation.
         steps: Steps accumulated; flushed to ``recorder.steps`` at scope exit.
         _open_step_dict: In-progress agent-step state before flush.
         _in_flight_tools: tool_call_id -> ``{open_dict, closed_index}`` entry.
@@ -981,6 +1544,7 @@ class Invocation:
 
     recorder: "TrajectoryRecorder"
     phase: DaydreamPhase
+    invocation_id: str = ""
     steps: list[Step] = field(default_factory=list)
     # Per-invocation timing boundaries (issue #203). Set in _InvocationCM;
     # surfaced via Trajectory.extra["subtrajectories"].
@@ -1087,9 +1651,7 @@ class Invocation:
         """
         return _CostDelta(
             prompt=max(0, (event.input_tokens or 0) - self._inv_metrics_sum["prompt"]),
-            completion=max(
-                0, (event.output_tokens or 0) - self._inv_metrics_sum["completion"]
-            ),
+            completion=max(0, (event.output_tokens or 0) - self._inv_metrics_sum["completion"]),
             cached=max(0, (event.cached_tokens or 0) - self._inv_metrics_sum["cached"]),
             cost=max(0.0, (event.cost_usd or 0.0) - self._inv_metrics_sum["cost"]),
             reasoning=event.reasoning_tokens,
@@ -1110,9 +1672,7 @@ class Invocation:
         double-counts. Never negative, never subtraction.
         """
         delta = self._reconcile_cost_delta(event)
-        existing = (
-            self._open_step_dict["_metrics"] if self._open_step_dict is not None else None
-        )
+        existing = self._open_step_dict["_metrics"] if self._open_step_dict is not None else None
         if existing is not None:
             # A MetricsEvent already populated this step. Fold the residual
             # delta onto it (previously only the recorder-level tally absorbed
@@ -1123,18 +1683,15 @@ class Invocation:
             if delta.nonzero:
                 existing = _merge_metrics(
                     existing,
-                    delta.residual_metrics(
-                        cost_usd=event.cost_usd, include_reasoning=False
-                    ),
+                    delta.residual_metrics(cost_usd=event.cost_usd, include_reasoning=False),
                 )
             updates: dict[str, Any] = {}
             if existing.cost_usd is None and event.cost_usd is not None:
                 updates["cost_usd"] = event.cost_usd
             # #192: backfill reasoning_tokens via Metrics.extra when the
             # MetricsEvent path didn't carry it (mirrors cost_usd backfill).
-            if (
-                event.reasoning_tokens is not None
-                and (existing.extra is None or "reasoning_tokens" not in existing.extra)
+            if event.reasoning_tokens is not None and (
+                existing.extra is None or "reasoning_tokens" not in existing.extra
             ):
                 merged_extra = dict(existing.extra or {})
                 merged_extra["reasoning_tokens"] = event.reasoning_tokens
@@ -1151,9 +1708,7 @@ class Invocation:
             # subset of completion_tokens and rides in Metrics.extra (D-03).
             self._ensure_open_step()
             assert self._open_step_dict is not None
-            self._open_step_dict["_metrics"] = delta.residual_metrics(
-                cost_usd=event.cost_usd, include_reasoning=True
-            )
+            self._open_step_dict["_metrics"] = delta.residual_metrics(cost_usd=event.cost_usd, include_reasoning=True)
         # else: a delta-0 restatement (codex/pi) with no metrics-bearing step
         # open has nothing to fold — do NOT mint a phantom all-zero Metrics Step
         # that would inflate total_steps and per-step lists in archived
@@ -1191,9 +1746,7 @@ class Invocation:
         if isinstance(event, DiagnosticEvent):
             self._ensure_open_step()
             assert self._open_step_dict is not None
-            self._open_step_dict["_backend_diagnostics"].append(
-                _normalize_diagnostic_record(event)
-            )
+            self._open_step_dict["_backend_diagnostics"].append(_normalize_diagnostic_record(event))
         elif isinstance(event, TextEvent):
             self._ensure_open_step()
             assert self._open_step_dict is not None
@@ -1206,7 +1759,11 @@ class Invocation:
             self._ensure_open_step()
             assert self._open_step_dict is not None
             self._open_step_dict["_tool_calls"].append(
-                ToolCall(tool_call_id=event.id, function_name=event.name, arguments=event.input or {})
+                ToolCall(
+                    tool_call_id=event.id,
+                    function_name=event.name,
+                    arguments=event.input or {},
+                )
             )
             # Map tool_call_id -> THIS open step so paired ToolResultEvent lands
             # on the SAME step (CORE-06, Pitfall 3). The closed_index slot is
@@ -1295,9 +1852,7 @@ class Invocation:
                 # Open Step still in flight (Claude/Pi — usage arrives while the
                 # turn Step is open). Fold the per-turn metrics onto it.
                 prior = target["_metrics"]
-                target["_metrics"] = (
-                    incoming if prior is None else _merge_metrics(prior, incoming)
-                )
+                target["_metrics"] = incoming if prior is None else _merge_metrics(prior, incoming)
                 if event.model_name:
                     target["_model_name"] = event.model_name
             else:
@@ -1342,10 +1897,7 @@ class Invocation:
                     self._open_step_dict["_model_name"] = event.model_name
                 else:
                     for index, step in enumerate(self.steps):
-                        if (
-                            step.source == "agent"
-                            and (step.model_name or "") in _GENERIC_MODEL_LABELS
-                        ):
+                        if step.source == "agent" and (step.model_name or "") in _GENERIC_MODEL_LABELS:
                             self.steps[index] = self.recorder.redactor.redact_step(
                                 step.model_copy(update={"model_name": event.model_name})
                             )
@@ -1372,18 +1924,12 @@ class Invocation:
             "_backend_diagnostics": [],
         }
 
-    def _materialize_agent_step(
-        self, d: dict[str, Any], *, step_id: int, extra_overrides: dict[str, Any]
-    ) -> Step:
+    def _materialize_agent_step(self, d: dict[str, Any], *, step_id: int, extra_overrides: dict[str, Any]) -> Step:
         """Materialize the open-step dict *d* into a redacted agent Step."""
         message_text = "".join(d["_text_chunks"])
         reasoning = "\n".join(d["_thinking_chunks"]) if d["_thinking_chunks"] else None
         tool_calls = list(d["_tool_calls"]) or None
-        observation = (
-            Observation(results=list(d["_observation_results"]))
-            if d["_observation_results"]
-            else None
-        )
+        observation = Observation(results=list(d["_observation_results"])) if d["_observation_results"] else None
         extra: dict[str, Any] = {
             "daydream_phase": self.phase.value,
             "daydream_run_flow": self.recorder.run_flow.value,
@@ -1432,7 +1978,9 @@ class Invocation:
 
         self.steps.append(
             self._materialize_agent_step(
-                d, step_id=self.recorder._next_step_id(), extra_overrides=extra_overrides
+                d,
+                step_id=self.recorder._next_step_id(),
+                extra_overrides=extra_overrides,
             )
         )
         closed_index = len(self.steps) - 1
@@ -1443,9 +1991,7 @@ class Invocation:
                 entry["open_dict"] = None
                 entry["closed_index"] = closed_index
 
-    def _amend_closed_step_observation(
-        self, *, closed_index: int, result: ObservationResult
-    ) -> None:
+    def _amend_closed_step_observation(self, *, closed_index: int, result: ObservationResult) -> None:
         """Attach *result* to a closed Step via ``model_copy``.
 
         Used when a ToolResultEvent arrives after a ``TurnEndEvent`` closed
@@ -1462,9 +2008,7 @@ class Invocation:
         updated = existing.model_copy(update={"observation": new_observation})
         self.steps[closed_index] = self.recorder.redactor.redact_step(updated)
 
-    def _fold_metrics_into_closed_last_step(
-        self, event: Any, incoming: Metrics
-    ) -> None:
+    def _fold_metrics_into_closed_last_step(self, event: Any, incoming: Metrics) -> None:
         """Fold a terminal ``MetricsEvent`` onto the last closed agent Step.
 
         Codex emits each turn's usage on ``turn.completed``, which arrives AFTER
@@ -1481,17 +2025,11 @@ class Invocation:
             step = self.steps[idx]
             if step.source != "agent":
                 continue
-            metrics = (
-                incoming
-                if step.metrics is None
-                else _merge_metrics(step.metrics, incoming)
-            )
+            metrics = incoming if step.metrics is None else _merge_metrics(step.metrics, incoming)
             updates: dict[str, Any] = {"metrics": metrics}
             if event.model_name:
                 updates["model_name"] = event.model_name
-            self.steps[idx] = self.recorder.redactor.redact_step(
-                step.model_copy(update=updates)
-            )
+            self.steps[idx] = self.recorder.redactor.redact_step(step.model_copy(update=updates))
             return
         # No closed agent Step exists to fold onto (self.steps is non-empty but
         # every step is non-agent, e.g. only user/context steps recorded). Mint a
@@ -1572,9 +2110,7 @@ class Invocation:
         if step.observation is None:
             observation = Observation(results=[result])
         else:
-            observation = step.observation.model_copy(
-                update={"results": [*step.observation.results, result]}
-            )
+            observation = step.observation.model_copy(update={"results": [*step.observation.results, result]})
         return step.model_copy(update={"observation": observation})
 
     def _emit_incomplete_call_markers(self) -> None:
@@ -1623,6 +2159,10 @@ class PhaseEvent:
         phase: The :class:`DaydreamPhase` this event brackets.
         event: ``"phase_start"`` or ``"phase_end"``.
         timestamp: ISO 8601 UTC timestamp (via :func:`now_iso`).
+        session_id: Run identity for new lifecycle events.
+        scope_id: Unique identity pairing one start with one terminal event.
+        status: Closed terminal status, present on identified end events.
+        reason_code: Optional closed, low-cardinality terminal reason.
         metadata: Optional structured metadata (e.g. ``{"stage": "review"}``
             for the deep orchestrator's sub-stages).
     """
@@ -1630,22 +2170,111 @@ class PhaseEvent:
     phase: DaydreamPhase
     event: str
     timestamp: str
+    session_id: str | None = None
+    scope_id: str | None = None
+    status: LifecycleStatus | None = None
+    reason_code: LifecycleReasonCode | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the JSON-serializable representation."""
+        """Return a fail-closed, JSON-serializable representation."""
         d: dict[str, Any] = {
             "phase": self.phase.value,
             "event": self.event,
             "timestamp": self.timestamp,
         }
+        if self.session_id is not None:
+            d["session_id"] = self.session_id
+        if self.scope_id is not None:
+            d["scope_id"] = self.scope_id
+        if self.status is not None:
+            d["status"] = self.status.value
+        if self.reason_code is not None:
+            d["reason_code"] = self.reason_code.value
         if self.metadata:
-            d["metadata"] = dict(self.metadata)
+            try:
+                metadata = redact_value(dict(self.metadata))
+                if not isinstance(metadata, dict):
+                    raise TypeError("phase metadata redaction returned a non-object")
+                json.dumps(metadata, allow_nan=False)
+                d["metadata"] = metadata
+            except Exception:  # noqa: BLE001 - omit metadata rather than leak or mask
+                pass
         return d
 
 
+@dataclass
+class PhaseScopeHandle:
+    """One identified phase occurrence with a single caller terminal decision."""
+
+    scope_id: str
+    status: LifecycleStatus = LifecycleStatus.SUCCEEDED
+    reason_code: LifecycleReasonCode | None = None
+    _decision_made: bool = field(default=False, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def finish(
+        self,
+        status: LifecycleStatus,
+        reason_code: LifecycleReasonCode | None = None,
+    ) -> None:
+        """Select one explicit terminal state before this scope closes."""
+        if self._closed:
+            raise RuntimeError("phase scope is closed")
+        if self._decision_made:
+            raise RuntimeError("phase scope terminal decision already made")
+        if not isinstance(status, LifecycleStatus):
+            raise TypeError("phase status must be LifecycleStatus")
+        if reason_code is not None and not isinstance(reason_code, LifecycleReasonCode):
+            raise TypeError("phase reason_code must be LifecycleReasonCode")
+        self.status = status
+        self.reason_code = reason_code
+        self._decision_made = True
+
+    def _override(
+        self,
+        status: LifecycleStatus,
+        reason_code: LifecycleReasonCode,
+    ) -> None:
+        self.status = status
+        self.reason_code = reason_code
+
+    def _close(self) -> None:
+        self._closed = True
+
+
+def _lifecycle_exception_terminal(
+    exc: BaseException,
+) -> tuple[LifecycleStatus, LifecycleReasonCode]:
+    """Classify an escaping body exception without retaining its text."""
+    if isinstance(exc, anyio.get_cancelled_exc_class()):
+        return LifecycleStatus.CANCELLED, LifecycleReasonCode.CANCELLED
+    return LifecycleStatus.FAILED, LifecycleReasonCode.UNCAUGHT_EXCEPTION
+
+
+def _host_lifecycle_terminal(
+    stop_reason: str,
+) -> tuple[LifecycleStatus, LifecycleReasonCode | None]:
+    """Project one closed host stop reason onto lifecycle status evidence."""
+    if stop_reason in {"completed", "passed", "no_ci"}:
+        return LifecycleStatus.SUCCEEDED, None
+    if stop_reason == "timed_out":
+        return LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT
+    if stop_reason in {"cancelled", "interrupted"}:
+        return LifecycleStatus.CANCELLED, LifecycleReasonCode.CANCELLED
+    return LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE
+
+
+def _phase_scope_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Admit only the fixed lifecycle metadata surface used by phase scopes."""
+    stage = metadata.get("stage")
+    if not isinstance(stage, str) or re.fullmatch(r"[a-z0-9-]{1,64}", stage) is None:
+        return {}
+    return {"stage": stage}
+
+
 @asynccontextmanager
-async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
+async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[PhaseScopeHandle]:
     """Async context manager that emits ``phase_start``/``phase_end`` events.
 
     Reads the active recorder via :func:`get_current_recorder`; a no-op when no
@@ -1654,13 +2283,39 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
     the trajectory JSON carries explicit timing events (issue #203).
     """
     recorder = get_current_recorder()
+    safe_metadata = _phase_scope_metadata(metadata)
+    handle = PhaseScopeHandle(scope_id=recorder._next_phase_scope_id() if recorder is not None else "")
     if recorder is not None:
-        recorder.emit_phase_start(phase, **metadata)
+        recorder._emit_phase_event(
+            phase,
+            "phase_start",
+            session_id=recorder.session_id,
+            scope_id=handle.scope_id,
+            **safe_metadata,
+        )
     try:
-        yield
+        yield handle
+    except BaseException as exc:
+        handle._override(*_lifecycle_exception_terminal(exc))
+        raise
     finally:
+        handle._close()
         if recorder is not None:
-            recorder.emit_phase_end(phase, **metadata)
+            try:
+                recorder._emit_phase_event(
+                    phase,
+                    "phase_end",
+                    session_id=recorder.session_id,
+                    scope_id=handle.scope_id,
+                    status=handle.status,
+                    reason_code=handle.reason_code,
+                    **safe_metadata,
+                )
+            except Exception as exc:  # noqa: BLE001 - recording never masks the body
+                print_warning(
+                    _console,
+                    f"Trajectory phase recording failed: {type(exc).__name__}",
+                )
 
 
 @dataclass
@@ -1676,7 +2331,7 @@ class HostPhaseHandle:
 
 
 @asynccontextmanager
-async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
+async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[HostPhaseHandle]:
     """Bracket a host-side (non-agent) operation with phase events.
 
     Like :func:`phase_scope`, but the closing ``phase_end`` event always
@@ -1686,21 +2341,235 @@ async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> Any:
     """
     recorder = get_current_recorder()
     handle = HostPhaseHandle()
+    lifecycle = PhaseScopeHandle(scope_id=recorder._next_phase_scope_id() if recorder is not None else "")
+    safe_metadata = _phase_scope_metadata(metadata)
     started = time.monotonic()
     if recorder is not None:
-        recorder.emit_phase_start(phase, **metadata)
+        recorder._emit_phase_event(
+            phase,
+            "phase_start",
+            session_id=recorder.session_id,
+            scope_id=lifecycle.scope_id,
+            **safe_metadata,
+        )
     try:
         yield handle
-    except BaseException:
+    except BaseException as exc:
         handle.stop_reason = "failed"
+        lifecycle._override(*_lifecycle_exception_terminal(exc))
         raise
     finally:
+        if lifecycle.status is LifecycleStatus.SUCCEEDED:
+            status, reason_code = _host_lifecycle_terminal(handle.stop_reason)
+            lifecycle.status = status
+            lifecycle.reason_code = reason_code
+        lifecycle._close()
         if recorder is not None:
-            recorder.emit_phase_end(
-                phase,
-                duration_ms=max(0, round((time.monotonic() - started) * 1000)),
-                stop_reason=handle.stop_reason,
-                **metadata,
+            try:
+                recorder._emit_phase_event(
+                    phase,
+                    "phase_end",
+                    session_id=recorder.session_id,
+                    scope_id=lifecycle.scope_id,
+                    status=lifecycle.status,
+                    reason_code=lifecycle.reason_code,
+                    duration_ms=max(0, round((time.monotonic() - started) * 1000)),
+                    stop_reason=handle.stop_reason,
+                    **safe_metadata,
+                )
+            except Exception as exc:  # noqa: BLE001 - recording never masks the body
+                print_warning(
+                    _console,
+                    f"Trajectory phase recording failed: {type(exc).__name__}",
+                )
+
+
+@dataclass(frozen=True)
+class ForkIdentity:
+    """Unique identity for one attempted fork within one dispatch."""
+
+    fork_id: str
+    descriptor: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
+class _CompletedFork:
+    identity: ForkIdentity
+    path: Path
+    trajectory_id: str
+
+
+@dataclass
+class DispatchHandle:
+    """Own fork attempts and terminal evidence for one causal fan-out."""
+
+    dispatch_id: str
+    phase: DaydreamPhase
+    descriptors: tuple[str, ...]
+    _recorder: "TrajectoryRecorder" = field(repr=False)
+    _started_at: str = field(repr=False)
+    status: LifecycleStatus = LifecycleStatus.SUCCEEDED
+    reason_code: LifecycleReasonCode | None = None
+    _decision_made: bool = field(default=False, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    _forks: list[ForkIdentity] = field(default_factory=list, init=False, repr=False)
+    _primary_index: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _dynamic_count: int = field(default=0, init=False, repr=False)
+    _completed: dict[str, _CompletedFork] = field(default_factory=dict, init=False, repr=False)
+    _write_failures: int = field(default=0, init=False, repr=False)
+    _completed_at: str = field(default="", init=False, repr=False)
+
+    @property
+    def started_at(self) -> str:
+        return self._started_at
+
+    @property
+    def completed_at(self) -> str:
+        return self._completed_at
+
+    @property
+    def planned_count(self) -> int:
+        return len(self.descriptors) + self._dynamic_count
+
+    @property
+    def attempted_count(self) -> int:
+        return len(self._forks)
+
+    @property
+    def completed_count(self) -> int:
+        return len(self._completed)
+
+    def register_fork(self, descriptor: str) -> ForkIdentity:
+        """Register one actual attempt and return its unique fork identity."""
+        if self._closed:
+            raise RuntimeError("dispatch scope is closed")
+        ordinal = len(self._forks) + 1
+        identity = ForkIdentity(
+            fork_id=f"{self.dispatch_id}:fork:{ordinal}",
+            descriptor=descriptor,
+            ordinal=ordinal,
+        )
+        assigned = set(self._primary_index.values())
+        primary_index = next(
+            (
+                index
+                for index, planned in enumerate(self.descriptors)
+                if planned == descriptor and index not in assigned
+            ),
+            None,
+        )
+        if primary_index is None:
+            self._dynamic_count += 1
+        else:
+            self._primary_index[identity.fork_id] = primary_index
+        self._forks.append(identity)
+        return identity
+
+    def finish(
+        self,
+        status: LifecycleStatus,
+        reason_code: LifecycleReasonCode | None = None,
+    ) -> None:
+        """Select one explicit terminal state before this dispatch closes."""
+        if self._closed:
+            raise RuntimeError("dispatch scope is closed")
+        if self._decision_made:
+            raise RuntimeError("dispatch terminal decision already made")
+        if not isinstance(status, LifecycleStatus):
+            raise TypeError("dispatch status must be LifecycleStatus")
+        if reason_code is not None and not isinstance(reason_code, LifecycleReasonCode):
+            raise TypeError("dispatch reason_code must be LifecycleReasonCode")
+        self.status = status
+        self.reason_code = reason_code
+        self._decision_made = True
+
+    def _record_completed(self, completed: _CompletedFork) -> None:
+        if completed.identity.fork_id not in {fork.fork_id for fork in self._forks}:
+            raise RuntimeError("fork does not belong to this dispatch")
+        self._completed[completed.identity.fork_id] = completed
+
+    def _record_write_failure(self) -> None:
+        self._write_failures += 1
+
+    def _override(
+        self,
+        status: LifecycleStatus,
+        reason_code: LifecycleReasonCode,
+    ) -> None:
+        self.status = status
+        self.reason_code = reason_code
+
+    def _override_terminal(
+        self,
+        status: LifecycleStatus,
+        reason_code: LifecycleReasonCode,
+    ) -> None:
+        """Make an escaping scope terminal authoritative over defaults."""
+        self._override(status, reason_code)
+        self._decision_made = True
+
+    def _finalize_default(self) -> None:
+        if self._decision_made or self._write_failures == 0:
+            return
+        if self.completed_count:
+            self._override(
+                LifecycleStatus.PARTIAL,
+                LifecycleReasonCode.SOME_CHILDREN_FAILED,
+            )
+        else:
+            self._override(
+                LifecycleStatus.FAILED,
+                LifecycleReasonCode.ALL_CHILDREN_FAILED,
+            )
+
+    def _ordered_completed(self) -> list[_CompletedFork]:
+        def order(item: _CompletedFork) -> tuple[Any, ...]:
+            primary = self._primary_index.get(item.identity.fork_id)
+            if primary is not None:
+                return (0, primary)
+            return (1, item.identity.descriptor, item.identity.fork_id)
+
+        return sorted(self._completed.values(), key=order)
+
+    def _close(self, completed_at: str) -> None:
+        self._completed_at = completed_at
+        self._closed = True
+
+
+@asynccontextmanager
+async def dispatch_scope(
+    recorder: "TrajectoryRecorder | None",
+    *,
+    phase: DaydreamPhase,
+    descriptors: Sequence[str],
+) -> AsyncIterator[DispatchHandle | None]:
+    """Bracket one explicit fan-out and materialize its deterministic step."""
+    planned = tuple(descriptors)
+    if recorder is None or not planned:
+        yield None
+        return
+    handle = DispatchHandle(
+        dispatch_id=recorder._next_dispatch_id(),
+        phase=phase,
+        descriptors=planned,
+        _recorder=recorder,
+        _started_at=now_iso(),
+    )
+    try:
+        yield handle
+    except BaseException as exc:
+        handle._override_terminal(*_lifecycle_exception_terminal(exc))
+        raise
+    finally:
+        handle._finalize_default()
+        handle._close(now_iso())
+        try:
+            recorder._create_dispatch_step(handle)
+        except Exception as exc:  # noqa: BLE001 - recording never masks the body
+            print_warning(
+                _console,
+                f"Trajectory dispatch recording failed: {type(exc).__name__}",
             )
 
 
@@ -1761,10 +2630,12 @@ class TrajectoryRecorder:
     fix_backend_name: str = ""
     test_backend_name: str = ""
     _step_id_counter: int = 0
+    _phase_scope_counter: int = 0
+    _dispatch_counter: int = 0
+    _invocation_counter: int = 0
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _folded_fork_totals: bool = False
     _previous_token: Any = None
-    _registered_siblings: list[tuple[Path, str]] = field(default_factory=list)
     # Active invocations whose in-flight steps haven't been flushed yet.
     # write_partial reads this so SIGINT mid-run_agent() captures partial
     # work rather than dropping it.
@@ -1782,12 +2653,17 @@ class TrajectoryRecorder:
     # Serialized into Trajectory.extra["profile_*"] when set (new runs).
     _profile: dict[str, Any] | None = None
     _aborted: bool = False
-    on_write: Callable[[TrajectoryRecorder, str], None] | None = None
-    _signal_registry: _SignalFlushRegistry | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    on_write: TrajectoryWriteCallback | None = None
+    _trajectory_id: str = ""
+    _run_started_at: str = ""
+    _run_ended_at: str = ""
+    _partial_state_digest: str = ""
+    _partial_cutoff_at: str = ""
+    _signal_registry: _SignalFlushRegistry | None = field(default=None, init=False, repr=False, compare=False)
 
     async def __aenter__(self) -> "TrajectoryRecorder":
+        self._run_started_at = now_iso()
+        self._run_ended_at = ""
         registry = _SignalFlushRegistry()
         self._signal_registry = registry
         registry.register(self)
@@ -1799,6 +2675,7 @@ class TrajectoryRecorder:
         try:
             if exc_type is not None:
                 self._aborted = True
+            self._run_ended_at = now_iso()
             self._write()
         except Exception as exc:  # noqa: BLE001 - branch on explicit_path per D-06
             if self.explicit_path:
@@ -1836,6 +2713,15 @@ class TrajectoryRecorder:
         """
         return _InvocationCM(self, phase)
 
+    @property
+    def trajectory_id(self) -> str:
+        """Return this recorder's stable, document-qualified identity."""
+        if self._trajectory_id:
+            return self._trajectory_id
+        if self.descriptor:
+            return f"{self.session_id}:{self.descriptor}"
+        return self.session_id
+
     def current_phase(self) -> DaydreamPhase | None:
         """Return the firing :class:`DaydreamPhase`, or None if no invocation is active.
 
@@ -1854,15 +2740,32 @@ class TrajectoryRecorder:
         """
         return self._active_invocations[-1].phase if self._active_invocations else None
 
-    def _emit_phase_event(self, phase: DaydreamPhase, event: str, **metadata: Any) -> None:
+    def _emit_phase_event(
+        self,
+        phase: DaydreamPhase,
+        event: str,
+        *,
+        session_id: str | None = None,
+        scope_id: str | None = None,
+        status: LifecycleStatus | None = None,
+        reason_code: LifecycleReasonCode | None = None,
+        **metadata: Any,
+    ) -> None:
         """Append a :class:`PhaseEvent` stamped with ``now_iso()``."""
         self._phase_events.append(
-            PhaseEvent(phase=phase, event=event, timestamp=now_iso(), metadata=metadata)
+            PhaseEvent(
+                phase=phase,
+                event=event,
+                timestamp=now_iso(),
+                session_id=session_id,
+                scope_id=scope_id,
+                status=status,
+                reason_code=reason_code,
+                metadata=metadata,
+            )
         )
 
-    def record_profile(
-        self, *, schema_version: int, name: str, source_kind: str, digest: str
-    ) -> None:
+    def record_profile(self, *, schema_version: int, name: str, source_kind: str, digest: str) -> None:
         """Record the resolved review-profile provenance for this run (R12).
 
         Called exactly once at the runner composition root (issue #885) with
@@ -1941,12 +2844,14 @@ class TrajectoryRecorder:
     def emit_supervisor_verdict(self, finding_id: int, action: str, reason: str) -> None:
         """Record a findings supervisor verdict in the deep phase."""
         self._emit_phase_event(
-            DaydreamPhase.DEEP, "supervisor_verdict", finding_id=finding_id, action=action, reason=reason
+            DaydreamPhase.DEEP,
+            "supervisor_verdict",
+            finding_id=finding_id,
+            action=action,
+            reason=reason,
         )
 
-    def emit_tool_veto(
-        self, tool_name: str, reason: str, *, phase: DaydreamPhase = DaydreamPhase.FIX
-    ) -> None:
+    def emit_tool_veto(self, tool_name: str, reason: str, *, phase: DaydreamPhase = DaydreamPhase.FIX) -> None:
         """Record a tool-supervisor veto in the firing phase."""
         self._emit_phase_event(phase, "tool_veto", tool_name=tool_name, reason=reason)
 
@@ -1982,6 +2887,8 @@ class TrajectoryRecorder:
         """
         self._subtrajectories.append(
             {
+                "trajectory_id": self.trajectory_id,
+                "invocation_id": inv.invocation_id,
                 "phase": inv.phase.value,
                 "started_at": inv.started_at,
                 "ended_at": inv.ended_at,
@@ -1989,29 +2896,71 @@ class TrajectoryRecorder:
             }
         )
 
+    def _recursive_invocation_summaries(self) -> list[dict[str, Any]]:
+        """Flatten document-qualified invocation evidence through nested forks."""
+        summaries: list[dict[str, Any]] = []
+        for summary in self._subtrajectories:
+            if isinstance(summary.get("invocation_id"), str):
+                summaries.append(dict(summary))
+            nested = summary.get("invocations")
+            if isinstance(nested, list):
+                summaries.extend(dict(item) for item in nested if isinstance(item, dict))
+        return summaries
+
+    def _recursive_phase_event_summaries(self) -> list[dict[str, Any]]:
+        """Flatten identified phase evidence while retaining document identity."""
+        summaries = [
+            {**event.to_dict(), "trajectory_id": self.trajectory_id}
+            for event in self._phase_events
+            if event.scope_id is not None
+        ]
+        for summary in self._subtrajectories:
+            nested = summary.get("phase_events")
+            if isinstance(nested, list):
+                summaries.extend(dict(item) for item in nested if isinstance(item, dict))
+        return summaries
+
     def _register_fork_subtrajectory(
         self,
         *,
+        child: "TrajectoryRecorder",
         phase: str,
-        descriptor: str,
+        identity: ForkIdentity | None,
         started_at: str,
         ended_at: str,
         sibling_trajectory_ref: str,
     ) -> None:
         """Register a per-fork timing summary on the parent trajectory."""
-        self._subtrajectories.append(
-            {
-                "phase": phase,
-                "descriptor": descriptor,
-                "started_at": started_at,
-                "ended_at": ended_at,
-                "sibling_trajectory_ref": sibling_trajectory_ref,
-            }
-        )
+        summary: dict[str, Any] = {
+            "trajectory_id": child.trajectory_id,
+            "phase": phase,
+            "descriptor": child.descriptor,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "sibling_trajectory_ref": sibling_trajectory_ref,
+            "phase_events": child._recursive_phase_event_summaries(),
+            "invocations": child._recursive_invocation_summaries(),
+        }
+        if identity is not None:
+            summary["fork_id"] = identity.fork_id
+            summary["dispatch_id"] = identity.fork_id.rsplit(":fork:", 1)[0]
+        self._subtrajectories.append(summary)
 
     def _next_step_id(self) -> int:
         self._step_id_counter += 1
         return self._step_id_counter
+
+    def _next_phase_scope_id(self) -> str:
+        self._phase_scope_counter += 1
+        return f"{self.trajectory_id}:phase:{self._phase_scope_counter}"
+
+    def _next_dispatch_id(self) -> str:
+        self._dispatch_counter += 1
+        return f"{self.trajectory_id}:dispatch:{self._dispatch_counter}"
+
+    def _next_invocation_id(self) -> str:
+        self._invocation_counter += 1
+        return f"{self.trajectory_id}:invocation:{self._invocation_counter}"
 
     def _extend_steps(self, steps: list[Step]) -> None:
         """Merge a finished Invocation's steps back in ``step_id`` order.
@@ -2019,8 +2968,8 @@ class TrajectoryRecorder:
         ``step_id`` is allocated when a step opens but flushed here when its
         Invocation closes, so append-order only equals id-order while at most
         one Invocation is open. Concurrent siblings on one recorder (wonder
-        alongside the per-stack fan-out, whose ``create_dispatch_step`` appends
-        straight to ``self.steps``) break that: the run then dies at write time
+        alongside a per-stack dispatch materialized after its children join)
+        break that: the run then dies at write time
         on ATIF's "sequential from 1" check. Sorting on insert keeps the
         documented ``steps: step_id 1..N`` invariant true by construction.
         """
@@ -2044,13 +2993,8 @@ class TrajectoryRecorder:
         if candidate and (self.agent_model_name or "") in _GENERIC_MODEL_LABELS:
             self.agent_model_name = candidate
             for index, step in enumerate(self.steps):
-                if (
-                    step.source == "agent"
-                    and (step.model_name or "") in _GENERIC_MODEL_LABELS
-                ):
-                    self.steps[index] = self.redactor.redact_step(
-                        step.model_copy(update={"model_name": candidate})
-                    )
+                if step.source == "agent" and (step.model_name or "") in _GENERIC_MODEL_LABELS:
+                    self.steps[index] = self.redactor.redact_step(step.model_copy(update={"model_name": candidate}))
 
     def _accumulate_metrics(
         self,
@@ -2071,19 +3015,16 @@ class TrajectoryRecorder:
             self._final_totals["any_cost_seen"] = True
 
     def compute_wall_clock_seconds(self) -> float | None:
-        """Total wall-clock seconds spanned by recorded step timestamps.
+        """Legacy local-step wall-clock span retained until lifecycle reduction.
 
         Derived from the earliest and latest ``Step.timestamp`` across the
         recorder's steps. Returns ``None`` when fewer than two timestamped
         steps exist (no measurable span).
 
-        Independent of the eval pass: this mirrors the timestamp-span derivation
-        in :func:`daydream.eval.analyzer.analyze_timing`, but reads in-memory
-        steps so every archived run captures duration even when ``--no-eval``
-        skips the deterministic evaluation pass. Fork-only steps live in sibling
-        recorders and are not
-        included here; the main flow's span bounds them because forks are
-        dispatched and merged within it.
+        New trajectory documents carry explicit ``run_started_at`` and either
+        final ``run_ended_at`` or partial ``snapshot_at`` lifecycle bounds.
+        Task 5 migrates timing consumers to those authoritative bounds and keeps
+        this local-step calculation only as the documented legacy fallback.
 
         Returns:
             Rounded duration in seconds, or ``None`` when unmeasurable —
@@ -2097,12 +3038,22 @@ class TrajectoryRecorder:
             return None
         return round((max(timestamps) - min(timestamps)).total_seconds(), 1)
 
-    def compute_phase_timings(self) -> dict[str, Any] | None:
-        """Per-phase wall-clock breakdown derived from ``phase_start``/``phase_end`` events.
+    def compute_timing_summary(
+        self,
+        write_snapshot: RunWriteSnapshot,
+    ) -> TimingSummary | None:
+        """Delegate timing projection to the immutable run-wide reducer."""
+        if write_snapshot.root_trajectory_id != self.trajectory_id:
+            raise ValueError("timing snapshot belongs to a different root trajectory")
+        return compute_timing_summary(write_snapshot)
 
-        Pairs each ``phase_start`` with its matching ``phase_end`` (LIFO within a
-        phase value) and sums the durations. Returns ``None`` when no phase
-        events exist (backward compat for runs that predate issue #203).
+    def compute_phase_timings(self) -> dict[str, Any] | None:
+        """Legacy per-phase timing for unidentified phase events only.
+
+        New identified lifecycle events are reduced only through
+        :func:`compute_timing_summary`, which pairs by session/scope identity
+        and unions overlaps. This compatibility seam retains phase-name LIFO
+        solely for callers holding pre-identity events.
 
         Each phase entry: ``{"wall_clock_seconds": float, "occurrences": int}``.
         Phases with the same :class:`DaydreamPhase` value (e.g. the deep
@@ -2115,11 +3066,12 @@ class TrajectoryRecorder:
             Mapping of phase value → timing summary, or ``None`` when there are
             no phase events.
         """
-        if not self._phase_events:
+        legacy_events = [event for event in self._phase_events if event.session_id is None and event.scope_id is None]
+        if not legacy_events:
             return None
         by_phase: dict[str, dict[str, Any]] = {}
         pending_starts: dict[str, list[str]] = {}
-        for ev in self._phase_events:
+        for ev in legacy_events:
             key = ev.phase.value
             if ev.event == "phase_start":
                 pending_starts.setdefault(key, []).append(ev.timestamp)
@@ -2147,87 +3099,94 @@ class TrajectoryRecorder:
             if val["occurrences"] > 0  # drop orphaned starts (start with no matching end)
         }
 
-    def _sibling_path_for(self, descriptor: str) -> Path:
+    def _sibling_path_for(
+        self,
+        descriptor: str,
+        identity: ForkIdentity | None = None,
+    ) -> Path:
         """Return the sibling trajectory file path for *descriptor*.
 
-        Layout: ``<target>/.daydream/runs/<session_id>/trajectories/<slug>.json``.
-        Sibling files live under the same per-run directory as the parent
-        trajectory, so every fork in the run dir belongs to this run by
-        construction (no prefix filtering required).
+        Legacy unscoped forks retain ``<slug>.json``. Identified dispatch forks
+        append a digest of their unique fork identity so repeated semantic
+        descriptors cannot overwrite one another. All sibling files live under
+        the same per-run directory as the parent trajectory.
         """
         slug = _safe_descriptor(descriptor)
+        if identity is not None:
+            identity_digest = hashlib.sha256(identity.fork_id.encode("utf-8")).hexdigest()
+            slug = f"{slug[:80]}--{identity_digest}"
         return (
-            self.target_dir
-            / _DAYDREAM_DIRNAME
-            / _RUNS_SUBDIR
-            / self.session_id
-            / _TRAJECTORIES_SUBDIR
-            / f"{slug}.json"
+            self.target_dir / _DAYDREAM_DIRNAME / _RUNS_SUBDIR / self.session_id / _TRAJECTORIES_SUBDIR / f"{slug}.json"
         )
 
-    def fork(self, descriptor: str) -> "_ForkCM":
+    def fork(
+        self,
+        descriptor: str,
+        *,
+        dispatch: DispatchHandle | None = None,
+    ) -> "_ForkCM":
         """Create a child recorder for a parallel task group.
 
         Args:
             descriptor: Semantic label for the sibling (e.g. ``"fix-0"``).
         """
-        return _ForkCM(parent=self, descriptor=descriptor)
+        return _ForkCM(parent=self, descriptor=descriptor, dispatch=dispatch)
 
-    def _register_sibling(self, path: Path, descriptor: str) -> None:
-        """Register a completed sibling trajectory (synchronous, no await)."""
-        self._registered_siblings.append((path, descriptor))
-
-    def create_dispatch_step(self, *, phase: DaydreamPhase) -> None:
-        """Create an agent Step referencing all registered sibling trajectories.
-
-        No-op when ``_registered_siblings`` is empty.
-        """
-        if not self._registered_siblings:
-            return
+    def _create_dispatch_step(self, dispatch: DispatchHandle) -> None:
+        """Materialize one identified, start-stamped deterministic dispatch."""
         results: list[ObservationResult] = []
-        for sibling_path, desc in self._registered_siblings:
+        for completed in dispatch._ordered_completed():
             try:
-                rel = str(sibling_path.relative_to(self.target_dir / ".daydream"))
+                relative_path = str(completed.path.relative_to(self.target_dir / _DAYDREAM_DIRNAME))
             except ValueError:
-                rel = sibling_path.name
-            # trajectory_id is the sibling's canonical per-document id (mirrors
-            # the fork's build_trajectory: session_id qualified by descriptor).
-            # v1.7 makes it the resolution key for the ref; session_id stays as
-            # informational run identity only (shared across siblings, not a
-            # matching key), and trajectory_path remains the external file ref.
+                relative_path = completed.path.name
             results.append(
                 ObservationResult(
-                    content=f"Dispatched to {desc}",
+                    content=f"Dispatched to {completed.identity.descriptor}",
                     subagent_trajectory_ref=[
                         SubagentTrajectoryRef(
-                            trajectory_id=f"{self.session_id}:{desc}",
+                            trajectory_id=completed.trajectory_id,
                             session_id=self.session_id,
-                            trajectory_path=rel,
-                        ),
+                            trajectory_path=relative_path,
+                        )
                     ],
                 )
             )
-        count = len(self._registered_siblings)
+        extra: dict[str, Any] = {
+            "daydream_phase": dispatch.phase.value,
+            "daydream_run_flow": self.run_flow.value,
+            "dispatch_id": dispatch.dispatch_id,
+            "dispatch_started_at": dispatch.started_at,
+            "dispatch_completed_at": dispatch.completed_at,
+            "planned_count": dispatch.planned_count,
+            "attempted_count": dispatch.attempted_count,
+            "completed_count": dispatch.completed_count,
+            "dispatch_status": dispatch.status.value,
+        }
+        if dispatch.reason_code is not None:
+            extra["reason_code"] = dispatch.reason_code.value
+        redacted_extra = redact_value(extra)
+        if not isinstance(redacted_extra, dict):
+            raise TypeError("dispatch redaction returned a non-object")
+        json.dumps(redacted_extra, allow_nan=False)
         step = Step(
             step_id=self._next_step_id(),
-            timestamp=now_iso(),
+            timestamp=dispatch.started_at,
             source="agent",
             model_name=self.agent_model_name,
-            message=f"Dispatching {count} parallel {phase.value} tasks",
+            message=f"Dispatching {dispatch.attempted_count} parallel {dispatch.phase.value} tasks",
             observation=Observation(results=results),
-            # Deterministic (non-LLM) fan-out dispatch: no inference is made
-            # here, so per the ATIF v1.7 no-LLM-orchestration rule this step
-            # carries llm_call_count=0 and omits metrics / reasoning_content.
             llm_call_count=0,
-            extra={
-                "daydream_phase": phase.value,
-                "daydream_run_flow": self.run_flow.value,
-            },
+            extra=redacted_extra,
         )
-        self.steps.append(self.redactor.redact_step(step))
-        self._registered_siblings.clear()
+        self._extend_steps([self.redactor.redact_step(step)])
 
-    def build_trajectory(self, steps: list[Step] | None = None) -> Trajectory:
+    def build_trajectory(
+        self,
+        steps: list[Step] | None = None,
+        *,
+        snapshot_at: str | None = None,
+    ) -> Trajectory:
         if steps is None:
             steps = self.steps
         version = daydream.__version__
@@ -2245,13 +3204,17 @@ class TrajectoryRecorder:
             total_prompt_tokens=self._final_totals["prompt"] or None,
             total_completion_tokens=self._final_totals["completion"] or None,
             total_cached_tokens=self._final_totals["cached"] or None,
-            total_cost_usd=(
-                self._final_totals["cost"] if self._final_totals["any_cost_seen"] else None
-            ),
+            total_cost_usd=(self._final_totals["cost"] if self._final_totals["any_cost_seen"] else None),
             total_steps=len(steps),
             extra=final_metrics_extra,
         )
         extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
+        if self._run_started_at:
+            extra["run_started_at"] = self._run_started_at
+        if snapshot_at is not None:
+            extra["snapshot_at"] = snapshot_at
+        elif self._run_ended_at:
+            extra["run_ended_at"] = self._run_ended_at
         if self.backend_name:
             # Backend identity mirrors archive/manifest.py's record: a
             # representative ``backend`` (resolved via the phase that governs the
@@ -2275,16 +3238,17 @@ class TrajectoryRecorder:
         if self._phase_events:
             extra["phase_events"] = [e.to_dict() for e in self._phase_events]
         if self._subtrajectories:
-            extra["subtrajectories"] = [dict(s) for s in self._subtrajectories]
+            summaries = redact_value([dict(s) for s in self._subtrajectories])
+            if isinstance(summaries, list):
+                extra["subtrajectories"] = summaries
         # trajectory_id is the per-document identifier (distinct from the
         # run-scoped session_id): the root uses session_id directly; a fork
         # qualifies it with its descriptor so sibling documents stay unique
         # within the run (ATIF v1.7).
-        trajectory_id = self.session_id if not self.descriptor else f"{self.session_id}:{self.descriptor}"
         return Trajectory(
             schema_version="ATIF-v1.7",
             session_id=self.session_id,
-            trajectory_id=trajectory_id,
+            trajectory_id=self.trajectory_id,
             agent=Agent(name="daydream", version=version, model_name=self.agent_model_name),
             steps=list(steps),
             final_metrics=final_metrics,
@@ -2292,21 +3256,84 @@ class TrajectoryRecorder:
         )
 
     def _write(self) -> None:
-        # Empty trajectory: skip — Pydantic Trajectory.steps has min_length=1.
-        # Phase 4 may revisit if empty runs need a stub file on disk.
-        if not self.steps:
+        registry = self._signal_registry
+        if self.parent is None and registry is not None:
+            registry.write_final(self)
             return
-        trajectory = self.build_trajectory()
-        trajectory_dict = trajectory.to_json_dict()
-        if self._aborted:
-            extra = trajectory_dict.setdefault("extra", {})
-            extra["partial"] = True
-        atomic_write_json(self.path, trajectory_dict)
-        if self.on_write is not None:
-            try:
-                self.on_write(self, "complete")
-            except Exception:  # noqa: BLE001 - archive failure must never affect the run
-                pass
+        document = self._prepare_document(
+            status="complete",
+            cutoff_at=self._run_ended_at or now_iso(),
+        )
+        if document is None:
+            return
+        atomic_write_json(document.path, json.loads(document.json_bytes))
+        if registry is not None:
+            registry.retain(document)
+
+    def _partial_state_key(self) -> str:
+        """Return a stable digest of this recorder's current partial state."""
+        snapshot_steps = self._snapshot_in_flight_steps()
+        return _digest_partial_state(self, snapshot_steps)
+
+    def _prepare_document(
+        self,
+        *,
+        status: Literal["complete", "partial"],
+        cutoff_at: str,
+        allow_empty_root: bool = False,
+    ) -> TrajectoryDocumentSnapshot | None:
+        """Freeze one canonical document without performing any filesystem write."""
+        steps = self.steps if status == "complete" else self._snapshot_in_flight_steps()
+        if not steps:
+            if status != "partial" or self.parent is not None or not allow_empty_root:
+                return None
+            # ATIF requires at least one Step. An early signal can arrive while
+            # child agents are already running but before the root has emitted a
+            # dispatch or agent Step. Represent the real host snapshot event as
+            # a system Step in the immutable partial only; do not mutate the live
+            # recorder or fabricate an agent invocation.
+            steps = [
+                Step(
+                    step_id=1,
+                    timestamp=cutoff_at,
+                    source="system",
+                    message="Daydream run snapshot",
+                    extra={
+                        "daydream_run_flow": self.run_flow.value,
+                        "host_event": "partial_snapshot",
+                    },
+                )
+            ]
+        trajectory = self.build_trajectory(
+            steps=list(steps),
+            snapshot_at=cutoff_at if status == "partial" else None,
+        )
+        payload = trajectory.to_json_dict()
+        if status == "partial" and self._active_invocations:
+            extra = payload.setdefault("extra", {})
+            summaries = list(extra.get("subtrajectories", []))
+            summaries.extend(
+                {
+                    "trajectory_id": self.trajectory_id,
+                    "invocation_id": invocation.invocation_id,
+                    "phase": invocation.phase.value,
+                    "started_at": invocation.started_at,
+                    "ended_at": None,
+                    "step_ids": [step.step_id for step in invocation.steps],
+                }
+                for invocation in self._active_invocations
+            )
+            extra["subtrajectories"] = summaries
+        if self._aborted or status == "partial":
+            payload.setdefault("extra", {})["partial"] = True
+        path = self.path
+        if status == "partial":
+            path = path.with_suffix(path.suffix + ".partial")
+        return TrajectoryDocumentSnapshot(
+            trajectory_id=self.trajectory_id,
+            path=path,
+            json_bytes=json.dumps(payload, indent=2).encode("utf-8"),
+        )
 
     def _snapshot_in_flight_steps(self) -> list[Step]:
         """Concatenate flushed steps with steps from any active invocations.
@@ -2331,6 +3358,16 @@ class TrajectoryRecorder:
         snapshot.sort(key=lambda s: s.step_id)
         return snapshot
 
+    def _partial_cutoff_for(self, snapshot_steps: list[Step]) -> str:
+        """Reuse a cutoff only while the recorder's serializable state is unchanged."""
+        digest = _digest_partial_state(self, snapshot_steps)
+        self._partial_state_digest, self._partial_cutoff_at = _reuse_or_advance_partial_cutoff(
+            state_digest=digest,
+            previous_digest=self._partial_state_digest,
+            previous_cutoff=self._partial_cutoff_at,
+        )
+        return self._partial_cutoff_at
+
     def _write_partial_self(self) -> bool:
         """Write only this recorder's in-flight state to ``<path>.partial``.
 
@@ -2349,22 +3386,30 @@ class TrajectoryRecorder:
         if not snapshot_steps:
             return False
         try:
-            trajectory = self.build_trajectory(steps=snapshot_steps)
-            partial_path = self.path.with_suffix(self.path.suffix + ".partial")
-            partial_path.parent.mkdir(parents=True, exist_ok=True)
-            json_dict = trajectory.to_json_dict()
-            extra = json_dict.setdefault("extra", {})
-            extra["partial"] = True
-            partial_path.write_text(json.dumps(json_dict, indent=2), encoding="utf-8")
+            document = self._prepare_document(
+                status="partial",
+                cutoff_at=self._partial_cutoff_for(snapshot_steps),
+            )
+            if document is None:
+                return False
+            document.path.parent.mkdir(parents=True, exist_ok=True)
+            document.path.write_text(document.json_bytes.decode("utf-8"), encoding="utf-8")
             if self.on_write is not None:
+                snapshot = RunWriteSnapshot(
+                    status="partial",
+                    cutoff_at=self._partial_cutoff_at,
+                    root_trajectory_id=self.trajectory_id,
+                    documents=(document,),
+                )
                 try:
-                    self.on_write(self, "partial")
-                except Exception:  # noqa: BLE001 - archive failure must never crash shutdown
+                    self.on_write(self, snapshot)
+                except Exception:  # noqa: BLE001 - archive failure never blocks shutdown
                     pass
             return True
         except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
             print_warning(
-                _console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}"
+                _console,
+                f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
             )
             return False
 
@@ -2376,23 +3421,36 @@ class TrajectoryRecorder:
         self-only primitive so a parent shared by several live children is written
         exactly once.
         """
-        if self._write_partial_self() and self.parent is not None:
+        if self._signal_registry is not None:
+            self._signal_registry.flush_active()
+        elif self._write_partial_self() and self.parent is not None:
             self.parent.write_partial()
 
 
 class _ForkCM:
     """Async context manager for forking a child recorder (D-01, D-02, D-03)."""
 
-    def __init__(self, parent: TrajectoryRecorder, descriptor: str) -> None:
+    def __init__(
+        self,
+        parent: TrajectoryRecorder,
+        descriptor: str,
+        dispatch: DispatchHandle | None = None,
+    ) -> None:
         self._parent = parent
         self._descriptor = descriptor
+        self._dispatch = dispatch
+        self._identity: ForkIdentity | None = None
         self._child: TrajectoryRecorder | None = None
         self._entered_at: str | None = None
         self._exited_at: str | None = None
 
     async def __aenter__(self) -> TrajectoryRecorder:
+        if self._dispatch is not None:
+            if self._dispatch._recorder is not self._parent:
+                raise RuntimeError("dispatch belongs to a different recorder")
+            self._identity = self._dispatch.register_fork(self._descriptor)
         child = TrajectoryRecorder(
-            path=self._parent._sibling_path_for(self._descriptor),
+            path=self._parent._sibling_path_for(self._descriptor, self._identity),
             run_flow=self._parent.run_flow,
             target_dir=self._parent.target_dir,
             agent_model_name=self._parent.agent_model_name,
@@ -2407,6 +3465,8 @@ class _ForkCM:
         )
         child.parent = self._parent
         child.descriptor = self._descriptor
+        if self._identity is not None:
+            child._trajectory_id = self._identity.fork_id
         registry = self._parent._signal_registry
         if registry is None:
             raise RuntimeError("cannot enter a fork without an active parent recorder")
@@ -2415,6 +3475,7 @@ class _ForkCM:
         child._previous_token = _RECORDER_VAR.set(child)
         self._child = child
         self._entered_at = now_iso()
+        child._run_started_at = self._entered_at
         return child
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, _exc_tb: Any) -> None:
@@ -2425,6 +3486,8 @@ class _ForkCM:
             child._aborted = True
         write_ok = False
         try:
+            self._exited_at = now_iso()
+            child._run_ended_at = self._exited_at
             try:
                 child._write()
                 write_ok = bool(child.steps)
@@ -2433,7 +3496,6 @@ class _ForkCM:
                     _console,
                     f"Sibling trajectory write failed: {type(exc).__name__}: {exc}",
                 )
-            self._exited_at = now_iso()
             if write_ok and child.parent is not None:
                 # The root trajectory's final_metrics is whole-run truth: fold the
                 # fork's totals in so manifest/eval consumers read one number
@@ -2444,18 +3506,11 @@ class _ForkCM:
                     prompt_tokens=child._final_totals["prompt"],
                     completion_tokens=child._final_totals["completion"],
                     cached_tokens=child._final_totals["cached"],
-                    cost_usd=(
-                        child._final_totals["cost"]
-                        if child._final_totals["any_cost_seen"]
-                        else None
-                    ),
+                    cost_usd=(child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None),
                 )
                 child.parent._folded_fork_totals = True
-                child.parent._register_sibling(child.path, self._descriptor)
                 try:
-                    sibling_ref = str(
-                        child.path.relative_to(child.parent.target_dir / ".daydream")
-                    )
+                    sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))
                 except ValueError:
                     sibling_ref = child.path.name
                 phase = DaydreamPhase.FIX.value
@@ -2467,12 +3522,23 @@ class _ForkCM:
                         phase = candidate
                         break
                 child.parent._register_fork_subtrajectory(
+                    child=child,
                     phase=phase,
-                    descriptor=self._descriptor,
+                    identity=self._identity,
                     started_at=self._entered_at or now_iso(),
                     ended_at=self._exited_at or now_iso(),
                     sibling_trajectory_ref=sibling_ref,
                 )
+                if self._dispatch is not None and self._identity is not None:
+                    self._dispatch._record_completed(
+                        _CompletedFork(
+                            identity=self._identity,
+                            path=child.path,
+                            trajectory_id=child.trajectory_id,
+                        )
+                    )
+            elif self._dispatch is not None:
+                self._dispatch._record_write_failure()
         finally:
             registry = child._signal_registry
             if registry is not None:
@@ -2492,7 +3558,11 @@ class _InvocationCM:
         self._invocation: Invocation | None = None
 
     async def __aenter__(self) -> Invocation:
-        self._invocation = Invocation(recorder=self._recorder, phase=self._phase)
+        self._invocation = Invocation(
+            recorder=self._recorder,
+            phase=self._phase,
+            invocation_id=self._recorder._next_invocation_id(),
+        )
         self._invocation.started_at = now_iso()
         # Register with recorder so write_partial can capture in-flight steps
         # if SIGINT fires mid-invocation.

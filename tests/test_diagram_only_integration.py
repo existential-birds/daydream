@@ -114,6 +114,21 @@ def _artifact(target: Path) -> dict[str, Any]:
     return data
 
 
+def _diagram_phase_end(target: Path) -> dict[str, Any]:
+    paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
+    assert len(paths) == 1
+    trajectory = json.loads(paths[0].read_text(encoding="utf-8"))
+    ends = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["event"] == "phase_end" and event["phase"] == "diagram"
+    ]
+    assert len(ends) == 1
+    end = ends[0]
+    assert isinstance(end, dict)
+    return end
+
+
 def _cli_main(argv: list[str]) -> int:
     """Drive ``cli.main`` with ``argv`` and return its exit code."""
     saved = sys.argv
@@ -267,6 +282,9 @@ async def test_omitted_kind_posts_an_omission_notice(
     assert "No sequence diagram was rendered for this pull request." in body
     assert "Grounding floor not met: TOO_FEW_MESSAGES." in body
     assert "5 elements proposed, 5 grounded on the first pass" in body
+    end = _diagram_phase_end(target)
+    assert end["status"] == "succeeded"
+    assert "reason_code" not in end
 
 
 async def test_nothing_eligible_posts_an_explanatory_comment(
@@ -550,6 +568,53 @@ async def test_agent_error_in_diagram_only_mode_exits_one(
     assert failed["status"] == "failed"
     assert "RuntimeError" in failed["reason"]
     assert _issue_comments(fake_gh) == []
+    end = _diagram_phase_end(target)
+    assert end["status"] == "failed"
+    assert end["reason_code"] == "all_children_failed"
+
+
+def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public CLI records the successful diagram it actually delivers."""
+    target = dr.build_cross_module_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, target)
+    stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
+    stub.diagram_emit_reads = True
+
+    exit_code = _cli_main(["--diagram-only", "sequence", str(target)])
+
+    assert exit_code == 0
+    assert _artifact(target)["results"]["sequence"]["status"] == "rendered"
+    assert len(_issue_comments(fake_gh)) == 1
+    assert SEQUENCE_HEADING in _issue_comments(fake_gh)[0]["body"]
+    assert fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews") == []
+    assert _diagram_phase_end(target)["status"] == "succeeded"
+
+
+def test_actual_cli_diagram_only_timing_failure_persists_failed_lifecycle(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public CLI preserves failure telemetry before returning one."""
+    target = dr.build_cross_module_repo(tmp_path)
+    _serve_pr(fake_gh, target)
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, target)
+    stub.diagram_fail = frozenset({"sequence"})
+
+    exit_code = _cli_main(["--diagram-only", "sequence", str(target)])
+
+    assert exit_code == 1
+    assert _artifact(target)["results"]["sequence"]["status"] == "failed"
+    end = _diagram_phase_end(target)
+    assert end["status"] == "failed"
+    assert end["reason_code"] == "all_children_failed"
 
 
 async def test_returned_failure_in_diagram_only_mode_exits_one(
@@ -700,8 +765,9 @@ async def test_diagram_run_flow_label_and_manifest_backends(
     assert {step["extra"]["daydream_run_flow"] for step in main["steps"]} == {"diagram"}
     assert "diagram" in {step["extra"]["daydream_phase"] for step in main["steps"]}
     # The fork holding the author turn is named for its kind.
-    fork = runs[0] / "trajectories" / "diagram-sequence.json"
-    assert fork.is_file()
+    forks = list((runs[0] / "trajectories").glob("diagram-sequence--*.json"))
+    assert len(forks) == 1
+    fork = forks[0]
     fork_data = json.loads(fork.read_text(encoding="utf-8"))
     assert {step["extra"]["daydream_phase"] for step in fork_data["steps"]} == {"diagram"}
 

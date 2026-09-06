@@ -14,7 +14,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from daydream.archive import _copy_bundle, _read_fix_quality_gate, archive_run, get_archive_dir
+from daydream.archive import (
+    _copy_bundle,
+    _read_fix_quality_gate,
+    archive_run,
+    get_archive_dir,
+)
 from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
     append_label_observation,
@@ -43,11 +48,51 @@ from daydream.remote_ci import (
     write_remote_ci_verdict,
 )
 from daydream.runner import RunConfig
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, PhaseEvent, TrajectoryRecorder
+from daydream.trajectory import (
+    DaydreamPhase,
+    DaydreamRunFlow,
+    PhaseEvent,
+    RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
+    TrajectoryRecorder,
+)
 from tests.harness.trajectory import make_manifest
 
 MakeConfig = Callable[..., RunConfig]
 InstallBackend = Callable[[object], object]
+
+
+def _write_snapshot(
+    recorder: Any,
+    *,
+    status: str = "complete",
+    phase_events: list[dict[str, Any]] | None = None,
+) -> RunWriteSnapshot:
+    path = Path(recorder.path)
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        loaded = json.loads(path.read_text())
+        if isinstance(loaded, dict):
+            payload = loaded
+    trajectory_id = str(getattr(recorder, "session_id"))
+    payload.setdefault("session_id", trajectory_id)
+    payload.setdefault("trajectory_id", trajectory_id)
+    payload.setdefault("steps", [])
+    payload.setdefault("extra", {})
+    if phase_events is not None:
+        payload["extra"]["phase_events"] = phase_events
+    payload.setdefault("final_metrics", {})
+    document = TrajectoryDocumentSnapshot(
+        trajectory_id=trajectory_id,
+        path=path,
+        json_bytes=json.dumps(payload).encode(),
+    )
+    return RunWriteSnapshot(
+        status=cast(Any, status),
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id=trajectory_id,
+        documents=(document,),
+    )
 
 
 @dataclass
@@ -148,7 +193,9 @@ def test_capture_git_context_no_repo(tmp_path: Path) -> None:
     assert ctx.changed_files == []
 
 
-def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path) -> None:
+def test_capture_git_context_populates_base_sha_and_changed_files(
+    tmp_path: Path,
+) -> None:
     """Real repo with a feature branch surfaces merge-base SHA + diff paths."""
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
     subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
@@ -522,7 +569,9 @@ def test_build_manifest_per_stack_review_tier(
     assert run["review_backend"] == "claude"
 
 
-def test_build_manifest_per_stack_review_gate_tracks_runner_aliases(tmp_path: Path) -> None:
+def test_build_manifest_per_stack_review_gate_tracks_runner_aliases(
+    tmp_path: Path,
+) -> None:
     """Issue #646 finding 3: the per-stack gate derives from the same alias list
     ``runner._dispatch_selected_flow`` routes (no third inline copy), so adding
     or renaming a deep-flow alias surfaces here instead of silently misstating
@@ -674,8 +723,10 @@ def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
     assert m.total_findings is None
 
 
-def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path) -> None:
-    """When --eval runs, its fork-inclusive timing takes precedence over the recorder span."""
+def test_build_manifest_legacy_eval_wall_clock_overrides_recorder(
+    tmp_path: Path,
+) -> None:
+    """Without a frozen snapshot, legacy eval timing may fill the recorder span."""
     m = _build(
         tmp_path,
         recorder=_MockRecorder(_wall_clock_seconds=12.3),
@@ -683,6 +734,76 @@ def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path) -> No
     )
 
     assert m.wall_clock_seconds == 42.5
+
+
+def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(
+    tmp_path: Path,
+) -> None:
+    recorder = _MockRecorder(session_id="snapshot-session", _wall_clock_seconds=12.3)
+    payload = {
+        "session_id": recorder.session_id,
+        "trajectory_id": recorder.session_id,
+        "steps": [],
+        "final_metrics": {"total_prompt_tokens": 7, "total_steps": 0},
+        "extra": {
+            "run_started_at": "2026-01-01T00:00:00Z",
+            "run_ended_at": "2026-01-01T00:00:10Z",
+            "phase_events": [
+                {
+                    "phase": "review",
+                    "event": "phase_start",
+                    "timestamp": "2026-01-01T00:00:02Z",
+                    "session_id": recorder.session_id,
+                    "scope_id": "review",
+                },
+                {
+                    "phase": "review",
+                    "event": "phase_end",
+                    "timestamp": "2026-01-01T00:00:08Z",
+                    "session_id": recorder.session_id,
+                    "scope_id": "review",
+                    "status": "succeeded",
+                },
+            ],
+        },
+    }
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:10Z",
+        root_trajectory_id=recorder.session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(
+                recorder.session_id,
+                recorder.path,
+                json.dumps(payload).encode(),
+            ),
+        ),
+    )
+
+    manifest = _build(
+        tmp_path,
+        recorder=recorder,
+        write_snapshot=snapshot,
+        evaluation={"timing": {"total_wall_clock_seconds": 42.5}},
+    )
+
+    assert manifest.wall_clock_seconds == 10.0
+    assert manifest.phase_timings == {"review": {"wall_clock_seconds": 6.0, "occurrences": 1}}
+    assert manifest.timing_coverage == {
+        "attributed_wall_clock_seconds": 6.0,
+        "unattributed_wall_clock_seconds": 4.0,
+        "coverage_ratio": 0.6,
+        "agent_completeness": {"total": 0, "attributed": 0, "unattributed": 0},
+        "diagnostics": {
+            "malformed_interval": 0,
+            "duplicate_interval": 0,
+            "orphaned_interval": 0,
+            "malformed_invocation": 0,
+            "duplicate_invocation": 0,
+            "legacy_fork_proxy_used": 0,
+        },
+    }
+    assert manifest.total_prompt_tokens == 7
 
 
 def test_upsert_run_creates_db(tmp_path: Path) -> None:
@@ -757,8 +878,14 @@ def test_set_run_pr_link_backfills_pr_columns(tmp_path: Path) -> None:
 
 def test_query_runs_with_where(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s1", repo_slug="org/a"))
-    upsert_run(tmp_path, make_manifest(session_id="s2", repo_slug="org/b", archive_path="/tmp/s2"))
-    upsert_run(tmp_path, make_manifest(session_id="s3", repo_slug="org/a", archive_path="/tmp/s3"))
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s2", repo_slug="org/b", archive_path="/tmp/s2"),
+    )
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s3", repo_slug="org/a", archive_path="/tmp/s3"),
+    )
 
     rows = query_runs(tmp_path, where="repo_slug = ?", params=("org/a",))
     assert len(rows) == 2
@@ -822,7 +949,9 @@ def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path) -> N
     assert row["verbosity"] == pytest.approx(0.08)
 
 
-def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path) -> None:
+def test_build_manifest_projects_location_and_duplication_metrics(
+    tmp_path: Path,
+) -> None:
     """#1106: the location-accuracy and escaped-duplication axes reach the manifest.
 
     The eval pass computes a location verdict per shipped finding and a
@@ -836,8 +965,12 @@ def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path
                 "hunk_source": "hunk-index.json",
                 "scored_items": 4,
                 "in_hunk_rate": 0.75,
-                "tiers": {"in_hunk": 3, "within_tolerance": 1,
-                          "beyond_tolerance": 0, "file_absent": 0},
+                "tiers": {
+                    "in_hunk": 3,
+                    "within_tolerance": 1,
+                    "beyond_tolerance": 0,
+                    "file_absent": 0,
+                },
             },
             "findings": {
                 "total": 6,
@@ -895,8 +1028,15 @@ def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> N
     m = _build(
         tmp_path,
         evaluation={
-            "location": {"hunk_source": "none", "scored_items": 0, "in_hunk_rate": None},
-            "findings": {"total": 0, "shipped_duplication": {"near_duplicate_pairs": 0}},
+            "location": {
+                "hunk_source": "none",
+                "scored_items": 0,
+                "in_hunk_rate": None,
+            },
+            "findings": {
+                "total": 0,
+                "shipped_duplication": {"near_duplicate_pairs": 0},
+            },
         },
     )
     assert m.location_in_hunk_rate is None
@@ -949,9 +1089,14 @@ def test_runs_location_duplication_columns_migrate_existing_db(tmp_path: Path) -
     conn = sqlite3.connect(str(db_path))
     conn.execute(legacy_ddl)
     conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path, erosion) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("legacy-loc-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-loc-run"), 0.5),
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path, erosion) VALUES (?, ?, ?, ?, ?)",
+        (
+            "legacy-loc-run",
+            "2026-01-01T00:00:00Z",
+            "normal",
+            str(tmp_path / "legacy-loc-run"),
+            0.5,
+        ),
     )
     conn.execute("PRAGMA user_version = 7")
     conn.commit()
@@ -960,8 +1105,11 @@ def test_runs_location_duplication_columns_migrate_existing_db(tmp_path: Path) -
     # The production write path must ALTER-ADD both columns non-destructively.
     upsert_run(
         tmp_path,
-        make_manifest(session_id="s-mig-loc", location_in_hunk_rate=0.25,
-                      shipped_duplicate_pairs=4),
+        make_manifest(
+            session_id="s-mig-loc",
+            location_in_hunk_rate=0.25,
+            shipped_duplicate_pairs=4,
+        ),
     )
 
     conn = sqlite3.connect(str(db_path))
@@ -1014,8 +1162,11 @@ def test_runs_per_stack_review_columns_migrate_existing_db(tmp_path: Path) -> No
 
     upsert_run(
         tmp_path,
-        make_manifest(session_id="s-psr-mig", per_stack_review_backend="codex",
-                      per_stack_review_model="gpt-psr"),
+        make_manifest(
+            session_id="s-psr-mig",
+            per_stack_review_backend="codex",
+            per_stack_review_model="gpt-psr",
+        ),
     )
     legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-psr",))[0]
     assert legacy["per_stack_review_backend"] is None   # pre-existing row preserved, nullable
@@ -1063,7 +1214,10 @@ def test_manifest_fix_quality_gate_none_when_absent(tmp_path: Path) -> None:
 
 def test_upsert_run_persists_fix_quality_gate(tmp_path: Path) -> None:
     """Issue #315: fix_quality_gate JSON round-trips through upsert_run -> query_runs."""
-    gate = {"enabled": True, "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}]}
+    gate = {
+        "enabled": True,
+        "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],
+    }
     upsert_run(tmp_path, make_manifest(session_id="s-gate", fix_quality_gate=gate))
     row = query_runs(tmp_path, where="session_id = ?", params=("s-gate",))[0]
     assert json.loads(row["fix_quality_gate"]) == gate
@@ -1084,7 +1238,12 @@ def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path) -> No
     conn.execute(legacy_ddl)
     conn.execute(
         "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-        ("legacy-gate-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-gate-run")),
+        (
+            "legacy-gate-run",
+            "2026-01-01T00:00:00Z",
+            "normal",
+            str(tmp_path / "legacy-gate-run"),
+        ),
     )
     conn.commit()
     conn.close()
@@ -1099,12 +1258,17 @@ def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path) -> No
 
 
 def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s-cap", recommended_patch_capture="post_test"))
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s-cap", recommended_patch_capture="post_test"),
+    )
     row = query_runs(tmp_path, where="session_id = ?", params=("s-cap",))[0]
     assert row["recommended_patch_capture"] == "post_test"
 
 
-def test_runs_recommended_patch_capture_column_migrates_existing_db(tmp_path: Path) -> None:
+def test_runs_recommended_patch_capture_column_migrates_existing_db(
+    tmp_path: Path,
+) -> None:
     from daydream.archive.index import _CREATE_TABLE
 
     legacy_ddl = _CREATE_TABLE.replace("    recommended_patch_capture TEXT,\n", "")
@@ -1113,12 +1277,20 @@ def test_runs_recommended_patch_capture_column_migrates_existing_db(tmp_path: Pa
     conn.execute(legacy_ddl)
     conn.execute(
         "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-        ("legacy-cap-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-cap-run")),
+        (
+            "legacy-cap-run",
+            "2026-01-01T00:00:00Z",
+            "normal",
+            str(tmp_path / "legacy-cap-run"),
+        ),
     )
     conn.commit()
     conn.close()
 
-    upsert_run(tmp_path, make_manifest(session_id="s-mig-cap", recommended_patch_capture="pre_test"))
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s-mig-cap", recommended_patch_capture="pre_test"),
+    )
 
     legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-cap-run",))[0]
     assert legacy["recommended_patch_capture"] is None  # pre-existing row preserved, column nullable
@@ -1278,6 +1450,25 @@ def test_copy_bundle_trajectory(tmp_path: Path) -> None:
     assert json.loads((run_dir / "trajectory.json").read_text())["session_id"] == "test"
 
 
+def test_copy_bundle_projects_only_frozen_snapshot_trajectory_bytes(
+    tmp_path: Path,
+) -> None:
+    target, run_dir, recorder = _setup_bundle(tmp_path)
+    live = target / ".daydream" / "runs" / recorder.session_id / "trajectory.json"
+    live.write_text('{"trajectory_id":"root","marker":"MUTATED_LIVE"}')
+    frozen = b'{"trajectory_id":"root","marker":"FROZEN"}'
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id="root",
+        documents=(TrajectoryDocumentSnapshot("root", live, frozen),),
+    )
+
+    _copy_bundle(target, run_dir, recorder, RunConfig(), write_snapshot=snapshot)
+
+    assert (run_dir / "trajectory.json").read_bytes() == frozen
+
+
 def test_copy_bundle_partial_trajectory(tmp_path: Path) -> None:
     """Partial trajectory file inside the live run dir is copied too."""
     session_id = "abcd1234-0000-0000-0000-000000000000"
@@ -1315,7 +1506,9 @@ def test_copy_bundle_deep_directory(tmp_path: Path) -> None:
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
 
 
-def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path) -> None:
+def test_copy_bundle_diagram_flow_excludes_stale_review_artifacts(
+    tmp_path: Path,
+) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
     recorder.run_flow = DaydreamRunFlow.DIAGRAM
     deep_dir = target / ".daydream" / "deep"
@@ -1396,7 +1589,9 @@ def test_copy_bundle_archives_findings_artifact(tmp_path: Path) -> None:
     assert json.loads(archived.read_text())["findings"][0]["fingerprint"] == "abc"
 
 
-def test_copy_bundle_findings_artifact_skipped_without_findings_out(tmp_path: Path) -> None:
+def test_copy_bundle_findings_artifact_skipped_without_findings_out(
+    tmp_path: Path,
+) -> None:
     """No findings_out means no findings.json is archived (no source to copy)."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
@@ -1422,13 +1617,13 @@ def test_dump_artifacts_refuses_credential_bearing_bundle(
     traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
     traj_path.write_text(json.dumps(traj))
 
-    recorder = _MockRecorder(session_id=session_id)
+    recorder = _MockRecorder(session_id=session_id, path=traj_path)
 
     archive_run(
         recorder=cast(TrajectoryRecorder, recorder),
+        write_snapshot=_write_snapshot(recorder),
         target_dir=target,
         config=cast(RunConfig, config),
-        status="complete",
     )
 
     # The run itself is still archived (the gate is dump-path-only), but the
@@ -1454,9 +1649,9 @@ def test_dump_artifacts_copies_clean_bundle(
 
     archive_run(
         recorder=cast(TrajectoryRecorder, recorder),
+        write_snapshot=_write_snapshot(recorder),
         target_dir=target,
         config=cast(RunConfig, config),
-        status="complete",
     )
 
     dest = tmp_path / "dump"
@@ -1475,9 +1670,9 @@ def test_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
 
     archive_run(
         recorder=cast(TrajectoryRecorder, recorder),
+        write_snapshot=_write_snapshot(recorder),
         target_dir=target,
         config=cast(RunConfig, config),
-        status="complete",
     )
 
     run_dir = archive_dir / "runs" / session_id
@@ -1667,7 +1862,14 @@ def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, "2026-01-01T00:00:00+00:00", '["accepted"]', "merged", "v1", "sha1"),
+            (
+                session_id,
+                "2026-01-01T00:00:00+00:00",
+                '["accepted"]',
+                "merged",
+                "v1",
+                "sha1",
+            ),
         )
         conn.commit()
     finally:
@@ -1773,10 +1975,24 @@ def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path) -> 
 
 def test_human_append_never_dedups(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-h"))
-    append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
-                             labeler_version="human", evidence_sha=None, source="human")
-    append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
-                             labeler_version="human", evidence_sha=None, source="human")
+    append_label_observation(
+        tmp_path,
+        "s-h",
+        labels=["accepted"],
+        pr_state=None,
+        labeler_version="human",
+        evidence_sha=None,
+        source="human",
+    )
+    append_label_observation(
+        tmp_path,
+        "s-h",
+        labels=["accepted"],
+        pr_state=None,
+        labeler_version="human",
+        evidence_sha=None,
+        source="human",
+    )
     assert len(label_observation_history(tmp_path, "s-h")) == 2
 
 
@@ -1797,8 +2013,15 @@ def test_append_observation_persists_valid_at_and_reward(tmp_path: Path) -> None
 
 def test_append_observation_defaults_valid_at_to_observed_at(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s2"))
-    append_label_observation(tmp_path, "s2", labels=[], pr_state=None,
-                             labeler_version="v1", evidence_sha=None, valid_at=None)
+    append_label_observation(
+        tmp_path,
+        "s2",
+        labels=[],
+        pr_state=None,
+        labeler_version="v1",
+        evidence_sha=None,
+        valid_at=None,
+    )
     obs = latest_label_observation(tmp_path, "s2")
     assert obs is not None
     assert obs["valid_at"] == obs["observed_at"]   # Q2 collapse for local runs
@@ -1938,7 +2161,9 @@ def test_same_microsecond_collision_keeps_clean_iso_timestamps(
     assert json.loads(pinned["labels"]) == ["unknown"]  # boundary row included
 
 
-def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path: Path) -> None:
+def test_append_label_observation_persists_reviewer_and_posterior_flag(
+    tmp_path: Path,
+) -> None:
     """reviewer_logins + has_posterior persist on the observation row and mirror onto runs."""
     _seed_one_run(tmp_path, "s1")
     append_label_observation(
@@ -2052,7 +2277,9 @@ def _seed_reviewed_outcomes(archive_dir: Path) -> None:
     )
 
 
-def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp_path: Path) -> None:
+def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(
+    tmp_path: Path,
+) -> None:
     # Current reviewers={alice}, valid_at==t3 -> pool = alice-sharing runs, valid_at < t3:
     # only s_a (s_c @ t3 excluded by strict <; bob's run shares no reviewer).
     _seed_reviewed_outcomes(tmp_path)
@@ -2194,7 +2421,9 @@ def test_normalize_as_of_is_strict_utc_only() -> None:
         normalize_as_of("yesterday")
 
 
-def test_append_label_observation_canonicalizes_valid_at_spelling(tmp_path: Path) -> None:
+def test_append_label_observation_canonicalizes_valid_at_spelling(
+    tmp_path: Path,
+) -> None:
     """The write chokepoint converges every caller (GitHub 'Z' merge timestamps
     included) on the '+00:00' isoformat spelling."""
     _seed_one_run(tmp_path, "sess-z")
@@ -2236,12 +2465,18 @@ def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path) -> None:
         reviewer_logins=["alice"], has_posterior=True,
     )
     prior, n = reviewer_set_penalty_prior(
-        tmp_path, ["alice"], before_valid_at="2026-03-01T00:00:00Z", exclude_session="cur"
+        tmp_path,
+        ["alice"],
+        before_valid_at="2026-03-01T00:00:00Z",
+        exclude_session="cur",
     )
     assert (prior, n) == (None, 0)
     # And a bound safely after the row still pools it, regardless of spelling.
     prior2, n2 = reviewer_set_penalty_prior(
-        tmp_path, ["alice"], before_valid_at="2026-03-01T00:00:01Z", exclude_session="cur"
+        tmp_path,
+        ["alice"],
+        before_valid_at="2026-03-01T00:00:01Z",
+        exclude_session="cur",
     )
     assert prior2 == pytest.approx(1.0) and n2 == 1
 
@@ -2265,7 +2500,9 @@ def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path) -> None:
     assert [r["valid_at"] for r in hist] == ["2026-01-01T00:00:00Z"]
 
 
-def test_manifest_backend_is_general_default_not_review_override(tmp_path: Path) -> None:
+def test_manifest_backend_is_general_default_not_review_override(
+    tmp_path: Path,
+) -> None:
     """#647: backend records the general default even when review differs."""
     m = _build(tmp_path, config=_MockConfig(backend="claude", review_backend="codex"))
     assert m.backend == "claude"
@@ -2293,7 +2530,10 @@ def test_manifest_review_backend_from_file_config_phase(tmp_path: Path) -> None:
     """#647: a file-config review-phase override stamps review_backend only."""
     m = _build(
         tmp_path,
-        config=_MockConfig(backend="claude", file_config=DaydreamFileConfig(phases={"review": {"backend": "codex"}})),
+        config=_MockConfig(
+            backend="claude",
+            file_config=DaydreamFileConfig(phases={"review": {"backend": "codex"}}),
+        ),
     )
     assert m.backend == "claude"
     assert m.review_backend == "codex"
@@ -2307,9 +2547,9 @@ def test_archive_run_records_general_backend_and_override(tmp_path: Path, archiv
     recorder = _MockRecorder(session_id=session_id)
     archive_run(
         recorder=cast(TrajectoryRecorder, recorder),
+        write_snapshot=_write_snapshot(recorder),
         target_dir=target,
         config=cast(RunConfig, config),
-        status="complete",
     )
     manifest_data = json.loads((archive_dir / "runs" / session_id / "manifest.json").read_text())
     assert manifest_data["run"]["backend"] == "claude"
@@ -2392,7 +2632,9 @@ def test_build_manifest_pi_records_cwd_configured_default_model(tmp_path: Path) 
     assert m.to_dict()["run"]["per_stack_review_model"] == "gpt-psr-configured"
 
 
-def test_build_manifest_pi_falls_back_to_default_when_no_cwd_config(tmp_path: Path) -> None:
+def test_build_manifest_pi_falls_back_to_default_when_no_cwd_config(
+    tmp_path: Path,
+) -> None:
     """Issue #646 finding 1: with no cwd-configured Pi default (and no cwd passed),
     the manifest records DEFAULT_PI_MODEL as before — the fallback path is intact."""
     from daydream.config import DEFAULT_PI_MODEL
@@ -2407,7 +2649,9 @@ def test_build_manifest_pi_falls_back_to_default_when_no_cwd_config(tmp_path: Pa
     assert m.per_stack_review_model == DEFAULT_PI_MODEL
 
 
-def test_build_manifest_omits_per_stack_review_on_merge_fix_resume(tmp_path: Path) -> None:
+def test_build_manifest_omits_per_stack_review_on_merge_fix_resume(
+    tmp_path: Path,
+) -> None:
     """Issue #646 finding 2: a --start-at merge/fix resume skips
     phase_per_stack_reviews (orchestrator.py:1132), so the manifest must not
     attribute the resume config's per-stack tier to the prior run's artifacts."""
@@ -2437,9 +2681,13 @@ def test_manifest_splits_status_from_pipeline() -> None:
             "fix": {"ran": False, "status": "absent"},
             "test": {"ran": False, "status": "absent"},
         },
-        daydream=ExecutableProvenance(version="0.27.0", install_source="git",
-                                      commit="abc", dirty=False,
-                                      container_digest="unknown"),
+        daydream=ExecutableProvenance(
+            version="0.27.0",
+            install_source="git",
+            commit="abc",
+            dirty=False,
+            container_digest="unknown",
+        ),
     )
     d = m.to_dict()
     assert d["status"] == "complete"
@@ -2634,8 +2882,6 @@ def test_current_session_test_push_and_remote_success_are_distinct(
         None,
         states,
         runs_test=True,
-        runs_push=True,
-        runs_remote_ci=True,
     ) == "succeeded"
 
 
@@ -2649,9 +2895,7 @@ def test_current_session_remote_required_failure_fails_pipeline(tmp_path: Path) 
     states = _derive_push_remote_states(tmp_path)
 
     assert states["remote_ci"]["status"] == "failed"
-    assert pipeline.derive_pipeline_status(
-        "complete", None, states, runs_push=True, runs_remote_ci=True
-    ) == "failed"
+    assert pipeline.derive_pipeline_status("complete", None, states) == "failed"
 
 
 def test_archive_cancellation_precedes_remote_failure(tmp_path: Path) -> None:
@@ -2661,9 +2905,7 @@ def test_archive_cancellation_precedes_remote_failure(tmp_path: Path) -> None:
     _write_remote_verdict(tmp_path, status="failed")
     states = _derive_push_remote_states(tmp_path)
 
-    assert pipeline.derive_pipeline_status(
-        "partial", None, states, runs_push=True, runs_remote_ci=True
-    ) == "cancelled"
+    assert pipeline.derive_pipeline_status("partial", None, states) == "cancelled"
 
 
 @pytest.mark.parametrize(
@@ -2679,9 +2921,7 @@ def test_incomplete_remote_statuses_are_partial(tmp_path: Path, remote_status: s
     states = _derive_push_remote_states(tmp_path)
 
     assert states["remote_ci"]["status"] == "partial"
-    assert pipeline.derive_pipeline_status(
-        "complete", None, states, runs_push=True, runs_remote_ci=True
-    ) == "partial"
+    assert pipeline.derive_pipeline_status("complete", None, states) == "partial"
 
 
 @pytest.mark.parametrize(
@@ -2799,6 +3039,116 @@ def test_persisted_repository_identities_remain_canonical_lowercase(
         assert states["remote_ci"]["status"] == "partial"
 
 
+def test_archive_rejects_repository_identity_the_producer_cannot_create(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    """Archive success cannot admit a slug rejected by the verdict producer."""
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    oversized = f"{'a' * 100}/{'b' * 102}"
+    with pytest.raises(ValueError, match="repository"):
+        RemoteCITarget(
+            target_dir=tmp_path,
+            base_repository=oversized,
+            base_ref="main",
+            head_repository=oversized,
+            head_ref="feature/remote-ci",
+            pr_number=42,
+            pr_url="https://github.com/example/project/pull/42",
+            remote="origin",
+            pushed_sha=_PUSHED_SHA,
+        )
+
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.NORMAL)
+    _write_deep(
+        tmp_path,
+        "test-verdict.json",
+        {"session_id": recorder.session_id, "passed": True},
+    )
+    _write_push_verdict(tmp_path, session_id=recorder.session_id)
+    _write_remote_verdict(tmp_path, session_id=recorder.session_id)
+    push_path = tmp_path / ".daydream" / "deep" / "push-verdict.json"
+    push = json.loads(push_path.read_text())
+    push["pushed_repository"] = oversized
+    push_path.write_text(json.dumps(push))
+    remote_path = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    remote = json.loads(remote_path.read_text())
+    for identity in (remote["target"], remote["binding"]):
+        identity["base_repository"] = oversized
+        identity["head_repository"] = oversized
+    remote_path.write_text(json.dumps(remote))
+
+    _archive_run_inner(
+        recorder=recorder,
+        write_snapshot=_write_snapshot(
+            recorder,
+            phase_events=[
+                *_merge_events(recorder.session_id, "succeeded"),
+                {
+                    "phase": "fix",
+                    "event": "phase_start",
+                    "timestamp": "2026-09-06T12:00:00Z",
+                    "session_id": recorder.session_id,
+                    "scope_id": "fix-scope",
+                },
+                *[
+                    {
+                        "phase": phase.value,
+                        "event": "phase_start",
+                        "timestamp": "2026-09-06T12:00:00Z",
+                        "session_id": recorder.session_id,
+                        "scope_id": f"{phase.value}-scope",
+                    }
+                    for phase in (DaydreamPhase.PUSH, DaydreamPhase.REMOTE_CI)
+                ],
+            ],
+        ),
+        target_dir=tmp_path,
+        config=make_config(
+            tmp_path,
+            archive=False,
+            pr_repo=oversized,
+            pr_number=42,
+        ),
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / recorder.session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["remote_ci"] == {
+        "ran": True,
+        "status": "partial",
+    }
+    assert manifest["pipeline_status"] == "partial"
+
+
+@pytest.mark.parametrize("malformed_sha", ["A" * 40, "a" * 39, "a" * 41])
+def test_remote_archive_rejects_noncanonical_commit_sha(
+    tmp_path: Path,
+    malformed_sha: str,
+) -> None:
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path)
+    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    payload = json.loads(artifact.read_text())
+    payload["target"]["pushed_sha"] = malformed_sha
+    payload["binding"]["head_sha"] = malformed_sha
+    payload["head_sha"] = malformed_sha
+    payload["evidence_sha"] = malformed_sha
+    artifact.write_text(json.dumps(payload))
+
+    assert _derive_push_remote_states(tmp_path)["remote_ci"] == {
+        "ran": True,
+        "status": "partial",
+    }
+
+
 def test_push_failure_is_failed_and_no_receipt_fabricates_no_remote(tmp_path: Path) -> None:
     from daydream.archive import pipeline
 
@@ -2807,9 +3157,7 @@ def test_push_failure_is_failed_and_no_receipt_fabricates_no_remote(tmp_path: Pa
     states = _derive_push_remote_states(tmp_path, events=events)
     assert states["push"]["status"] == "failed"
     assert states["remote_ci"] == {"ran": False, "status": "absent"}
-    assert pipeline.derive_pipeline_status(
-        "complete", None, states, runs_push=True, runs_remote_ci=True
-    ) == "failed"
+    assert pipeline.derive_pipeline_status("complete", None, states) == "failed"
 
     (tmp_path / ".daydream" / "deep" / "push-verdict.json").unlink()
     states = _derive_push_remote_states(tmp_path, events=[])
@@ -2824,9 +3172,7 @@ def test_successful_push_without_current_remote_terminal_is_partial(tmp_path: Pa
     states = _derive_push_remote_states(tmp_path)
 
     assert states["remote_ci"] == {"ran": True, "status": "partial"}
-    assert pipeline.derive_pipeline_status(
-        "complete", None, states, runs_push=True, runs_remote_ci=True
-    ) == "partial"
+    assert pipeline.derive_pipeline_status("complete", None, states) == "partial"
 
 
 def test_phase_start_without_terminal_artifact_is_partial(tmp_path: Path) -> None:
@@ -2922,9 +3268,21 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
 
     _archive_run_inner(
         recorder=recorder,
+        write_snapshot=_write_snapshot(
+            recorder,
+            phase_events=[
+                *_merge_events(recorder.session_id, "succeeded"),
+                {
+                    "phase": "fix",
+                    "event": "phase_start",
+                    "timestamp": "2026-09-06T12:00:00Z",
+                    "session_id": recorder.session_id,
+                    "scope_id": "fix-scope",
+                },
+            ],
+        ),
         target_dir=tmp_path,
         config=config,
-        status="complete",
         run_eval=False,
         work=None,
         upload=False,
@@ -3219,9 +3577,21 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
 
     _archive_run_inner(
         recorder=recorder,
+        write_snapshot=_write_snapshot(
+            recorder,
+            phase_events=[
+                *_merge_events(recorder.session_id, "succeeded"),
+                {
+                    "phase": "fix",
+                    "event": "phase_start",
+                    "timestamp": "2026-09-06T12:00:00Z",
+                    "session_id": recorder.session_id,
+                    "scope_id": "fix-scope",
+                },
+            ],
+        ),
         target_dir=tmp_path,
         config=config,
-        status="complete",
         run_eval=False,
         work=None,
         upload=False,
@@ -3234,6 +3604,365 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
     assert manifest["phase_states"]["push"]["status"] == "succeeded"
     assert manifest["phase_states"]["remote_ci"]["status"] == expected_status
     assert manifest["pipeline_status"] == expected_status
+
+
+def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifacts(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    """Archived mapping rows, rather than live recorder state, drive phase starts."""
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.NORMAL)
+    phase_events = [
+        {
+            "phase": phase.value,
+            "event": "phase_start",
+            "timestamp": "2026-09-06T12:00:00Z",
+            "session_id": recorder.session_id,
+            "scope_id": f"{phase.value}-scope",
+        }
+        for phase in (DaydreamPhase.PUSH, DaydreamPhase.REMOTE_CI)
+    ]
+    assert recorder.phase_event_dicts() == []
+
+    _archive_run_inner(
+        recorder=recorder,
+        write_snapshot=_write_snapshot(recorder, phase_events=phase_events),
+        target_dir=tmp_path,
+        config=make_config(
+            tmp_path,
+            archive=False,
+            pr_repo="example/project",
+            pr_number=42,
+        ),
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / recorder.session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["push"] == {"ran": True, "status": "partial"}
+    assert manifest["phase_states"]["remote_ci"] == {
+        "ran": True,
+        "status": "partial",
+    }
+    assert manifest["pipeline_status"] == "partial"
+
+
+def _merge_events(
+    session_id: str,
+    status: str,
+    *,
+    scope_id: str = "merge-scope",
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "phase": "merge",
+            "event": "phase_start",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_id": session_id,
+            "scope_id": scope_id,
+        },
+        {
+            "phase": "merge",
+            "event": "phase_end",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "session_id": session_id,
+            "scope_id": scope_id,
+            "status": status,
+        },
+    ]
+
+
+def test_current_merge_event_succeeds_despite_stale_failure_artifact(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("current", "succeeded"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "succeeded"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "succeeded"
+
+
+def test_current_merge_event_failure_beats_stale_success_artifact(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("current", "failed"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "failed"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "failed"
+
+
+def test_current_merge_event_partial_produces_partial_pipeline(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("current", "partial"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "partial"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "partial"
+
+
+def test_stale_merge_event_failure_does_not_override_current_success(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=[
+            *_merge_events("prior", "failed", scope_id="prior-merge"),
+            *_merge_events("current", "succeeded"),
+        ],
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "succeeded"}
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [_merge_events("current", "succeeded")[1]],
+        [*_merge_events("current", "succeeded"), _merge_events("current", "succeeded")[1]],
+        [
+            {**_merge_events("current", "succeeded")[0], "timestamp": "2026-01-01T00:00:02Z"},
+            _merge_events("current", "succeeded")[1],
+        ],
+        [
+            {**_merge_events("current", "succeeded")[0], "timestamp": "2026-01-01T00:00:00"},
+            _merge_events("current", "succeeded")[1],
+        ],
+        [
+            {**_merge_events("current", "succeeded")[0], "session_id": None},
+            _merge_events("current", "succeeded")[1],
+        ],
+        [
+            _merge_events("current", "succeeded")[0],
+            {**_merge_events("current", "succeeded")[1], "status": "not-a-status"},
+        ],
+    ],
+    ids=(
+        "orphan",
+        "duplicate",
+        "reversed",
+        "incomparable-timestamps",
+        "missing-session",
+        "invalid-terminal",
+    ),
+)
+def test_malformed_current_merge_event_is_unknown(
+    tmp_path: Path,
+    events: list[dict[str, Any]],
+) -> None:
+    from daydream.archive import pipeline
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=events,
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "unknown"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "unknown"
+
+
+@pytest.mark.parametrize("malformed_kind", [[], {}], ids=["list", "mapping"])
+def test_current_merge_event_rejects_non_scalar_kind(
+    tmp_path: Path, malformed_kind: Any,
+) -> None:
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+
+    events = _merge_events("current", "succeeded")
+    events[1]["event"] = malformed_kind
+    states = derive_phase_states(
+        tmp_path, phase_events=events, session_id="current",
+        runs_merge=True, runs_fix=False, runs_test=False,
+    )
+    assert states["merge"] == {"ran": True, "status": "unknown"}
+    assert derive_pipeline_status("complete", None, states, runs_merge=True) == "unknown"
+
+
+def test_missing_current_merge_event_never_uses_stale_success_artifact(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("prior", "succeeded"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": False, "status": "absent"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "partial"
+
+
+@pytest.mark.parametrize(
+    ("failure_payload", "items_payload", "expected"),
+    [
+        (None, {"items": []}, {"ran": True, "status": "succeeded"}),
+        ({"__merge__": {"message": "failed"}}, {"items": []}, {"ran": True, "status": "failed"}),
+        ({"__merge__": "corrupt"}, {"items": []}, {"ran": True, "status": "unknown"}),
+        (None, {"items": "corrupt"}, {"ran": True, "status": "unknown"}),
+    ],
+    ids=("success", "failure", "malformed-failure", "malformed-items"),
+)
+def test_legacy_merge_artifact_fallback_is_strict(
+    tmp_path: Path,
+    failure_payload: Any,
+    items_payload: Any,
+    expected: dict[str, Any],
+) -> None:
+    from daydream.archive import pipeline
+
+    if failure_payload is not None:
+        _write_deep(tmp_path, "per-stack-failures.json", failure_payload)
+    _write_deep(tmp_path, "merged-items.json", items_payload)
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=[],
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id=None,
+    )
+
+    assert states["merge"] == expected
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ["per-stack-failures.json", "merged-items.json"],
+)
+def test_legacy_merge_invalid_utf8_is_unknown(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    from daydream.archive import pipeline
+
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    (deep / artifact_name).write_bytes(b"\xff")
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=[],
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id=None,
+    )
+
+    assert states["merge"] == {"ran": True, "status": "unknown"}
+
+
+def test_current_archive_survives_invalid_utf8_fix_failures(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    session_id = "current-corrupt-fix-sidecar"
+    recorder = _MockRecorder(session_id=session_id)
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "fix-failures.json").write_bytes(b"\xff")
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(
+        tmp_path,
+        "test-verdict.json",
+        {"session_id": session_id, "passed": True},
+    )
+    phase_events = [
+        *_merge_events(session_id, "succeeded"),
+        {
+            "phase": "fix",
+            "event": "phase_start",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_id": session_id,
+            "scope_id": "fix-scope",
+        },
+    ]
+
+    _archive_run_inner(
+        recorder=cast(Any, recorder),
+        write_snapshot=_write_snapshot(recorder, phase_events=phase_events),
+        target_dir=tmp_path,
+        config=make_config(tmp_path, archive=False),
+        run_eval=True,
+        work=None,
+        upload=False,
+    )
+
+    run_dir = archive_dir / "runs" / session_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert (run_dir / "evaluation.json").is_file()
+    assert manifest["phase_states"] == {
+        "merge": {"ran": True, "status": "succeeded"},
+        "fix": {"ran": True, "status": "succeeded"},
+        "test": {"ran": True, "status": "succeeded"},
+        "push": {"ran": False, "status": "absent"},
+        "remote_ci": {"ran": False, "status": "absent"},
+    }
+    assert manifest["pipeline_status"] == "succeeded"
+    assert [row["session_id"] for row in query_runs(archive_dir)] == [session_id]
 
 
 @pytest.mark.parametrize(
@@ -3267,9 +3996,16 @@ def test_nonpublishing_runtime_flows_ignore_matching_push_and_remote_artifacts(
 
     _archive_run_inner(
         recorder=recorder,
+        write_snapshot=_write_snapshot(
+            recorder,
+            phase_events=(
+                _merge_events(recorder.session_id, "succeeded")
+                if flow is DaydreamRunFlow.TTT
+                else []
+            ),
+        ),
         target_dir=tmp_path,
         config=config,
-        status="complete",
         run_eval=False,
         work=None,
         upload=False,
@@ -3286,7 +4022,122 @@ def test_nonpublishing_runtime_flows_ignore_matching_push_and_remote_artifacts(
     assert manifest["pipeline_status"] == expected_pipeline
 
 
-def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path: Path) -> None:
+def test_start_at_fix_archive_does_not_require_or_inherit_merge(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    session_id = "fix-resume-session"
+    recorder = _MockRecorder(session_id=session_id)
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
+    _write_deep(tmp_path, "test-verdict.json", {"session_id": session_id, "passed": True})
+    fix_start = {
+        "phase": "fix",
+        "event": "phase_start",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "session_id": session_id,
+        "scope_id": "fix-scope",
+    }
+
+    _archive_run_inner(
+        recorder=cast(Any, recorder),
+        write_snapshot=_write_snapshot(recorder, phase_events=[fix_start]),
+        target_dir=tmp_path,
+        config=make_config(tmp_path, archive=False, start_at="fix"),
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["merge"] == {"ran": False, "status": "absent"}
+    assert manifest["phase_states"]["fix"] == {"ran": True, "status": "succeeded"}
+    assert manifest["phase_states"]["test"] == {"ran": True, "status": "succeeded"}
+    assert manifest["phase_states"]["push"] == {"ran": False, "status": "absent"}
+    assert manifest["phase_states"]["remote_ci"] == {"ran": False, "status": "absent"}
+    assert manifest["pipeline_status"] == "succeeded"
+
+
+def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    session_id = "malformed-merge-session"
+    recorder = _MockRecorder(session_id=session_id)
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    events = _merge_events(session_id, "not-a-status")
+
+    _archive_run_inner(
+        recorder=cast(Any, recorder),
+        write_snapshot=_write_snapshot(recorder, phase_events=events),
+        target_dir=tmp_path,
+        config=make_config(tmp_path, archive=False),
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "unknown"}
+    assert manifest["pipeline_status"] == "partial"
+
+
+def test_archive_rejects_frozen_root_from_another_session(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    recorder = _MockRecorder(session_id="current-session")
+    payload = {
+        "session_id": "other-session",
+        "trajectory_id": recorder.session_id,
+        "steps": [],
+        "extra": {},
+        "final_metrics": {},
+    }
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id=recorder.session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(
+                trajectory_id=recorder.session_id,
+                path=recorder.path,
+                json_bytes=json.dumps(payload).encode(),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="archive session"):
+        _archive_run_inner(
+            recorder=cast(Any, recorder),
+            write_snapshot=snapshot,
+            target_dir=tmp_path,
+            config=make_config(tmp_path, archive=False),
+            run_eval=False,
+            work=None,
+            upload=False,
+        )
+    assert not (
+        archive_dir / "runs" / recorder.session_id / "trajectory.json"
+    ).exists()
+
+
+def test_merge_failed_discriminates_on_merge_key_not_merged_items(
+    tmp_path: Path,
+) -> None:
     from daydream.archive import pipeline
     _write_deep(tmp_path, "merged-items.json", {"items": []})
     _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
@@ -3316,7 +4167,9 @@ def test_test_failed_from_verdict(tmp_path: Path) -> None:
     assert states["test"]["status"] == "failed"
 
 
-def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(tmp_path: Path) -> None:
+def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(
+    tmp_path: Path,
+) -> None:
     from daydream.archive import pipeline
 
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "prior", "passed": True})
@@ -3329,7 +4182,9 @@ def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(tmp_path: P
     ) == "partial"
 
 
-def test_matching_stabilization_failure_overrides_green_test_pipeline(tmp_path: Path) -> None:
+def test_matching_stabilization_failure_overrides_green_test_pipeline(
+    tmp_path: Path,
+) -> None:
     from daydream.archive import pipeline
 
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
@@ -3392,9 +4247,9 @@ def test_archive_manifest_fails_matching_stabilization_session(
 
     _archive_run_inner(
         recorder=cast(Any, recorder),
+        write_snapshot=_write_snapshot(recorder),
         target_dir=tmp_path,
         config=make_config(tmp_path, archive=False),
-        status="complete",
         run_eval=False,
         work=None,
         upload=False,
@@ -3495,8 +4350,18 @@ def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: Make
     _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
     recorder = make_recorder(tmp_path)  # run_flow NORMAL; fake config with archive=False
     config = make_config(tmp_path, archive=False)
-    _archive_run_inner(recorder=recorder, target_dir=tmp_path, config=config,
-                       status="complete", run_eval=False, work=None, upload=False)
+    _archive_run_inner(
+        recorder=recorder,
+        write_snapshot=_write_snapshot(
+            recorder,
+            phase_events=_merge_events(recorder.session_id, "failed"),
+        ),
+        target_dir=tmp_path,
+        config=config,
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
     manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
     m = json.loads(manifest_path.read_text())
     assert m["archive_status"] == "complete"   # cleanly archived...
@@ -3524,10 +4389,21 @@ def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
     from daydream.archive import index
     from daydream.archive.manifest import Manifest
     from daydream.archive.provenance import ExecutableProvenance
-    m = Manifest(session_id="s-2", status="complete", archive_status="complete",
-                 pipeline_status="failed", phase_states={"merge": {"ran": True, "status": "failed"}},
-                 daydream=ExecutableProvenance(version="0.27.0", install_source="git",
-                                               commit="abc", dirty=False, container_digest="unknown"))
+
+    m = Manifest(
+        session_id="s-2",
+        status="complete",
+        archive_status="complete",
+        pipeline_status="failed",
+        phase_states={"merge": {"ran": True, "status": "failed"}},
+        daydream=ExecutableProvenance(
+            version="0.27.0",
+            install_source="git",
+            commit="abc",
+            dirty=False,
+            container_digest="unknown",
+        ),
+    )
     index.upsert_run(tmp_path, m)
     row = index.query_runs(tmp_path, "session_id = ?", ("s-2",))[0]
     assert row["archive_status"] == "complete"
@@ -3573,7 +4449,14 @@ def _seed_pre_reply_label_row(archive_dir: Path, session_id: str) -> None:
             "INSERT INTO label_observations "
             "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, _LEGACY_ROW_OBSERVED_AT_SNAPSHOT, '["accepted"]', "merged", "v1", "sha1"),
+            (
+                session_id,
+                _LEGACY_ROW_OBSERVED_AT_SNAPSHOT,
+                '["accepted"]',
+                "merged",
+                "v1",
+                "sha1",
+            ),
         )
         conn.commit()
     finally:
@@ -3657,7 +4540,9 @@ def test_append_label_observation_preserves_observed_at(tmp_path: Path) -> None:
     assert row["observed_at"] == "2025-06-01T12:00:00+00:00"
 
 
-def test_append_label_observation_observed_at_none_uses_wall_clock(tmp_path: Path) -> None:
+def test_append_label_observation_observed_at_none_uses_wall_clock(
+    tmp_path: Path,
+) -> None:
     """Default (``observed_at=None``) keeps the existing now() behavior."""
     _seed_one_run(tmp_path, "sess-now")
     appended = append_label_observation(
@@ -3705,8 +4590,13 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM)
     config = make_config(tmp_path, archive=False)
     _archive_run_inner(
-        recorder=recorder, target_dir=tmp_path, config=config,
-        status="complete", run_eval=False, work=None, upload=False,
+        recorder=recorder,
+        target_dir=tmp_path,
+        config=config,
+        write_snapshot=_write_snapshot(recorder),
+        run_eval=False,
+        work=None,
+        upload=False,
     )
 
     manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
@@ -3746,8 +4636,13 @@ def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
     config = make_config(tmp_path, archive=False)
 
     _archive_run_inner(
-        recorder=recorder, target_dir=tmp_path, config=config,
-        status="complete", run_eval=True, work=None, upload=False,
+        recorder=recorder,
+        target_dir=tmp_path,
+        config=config,
+        write_snapshot=_write_snapshot(recorder),
+        run_eval=True,
+        work=None,
+        upload=False,
     )
 
     run_dir = get_archive_dir() / "runs" / recorder.session_id

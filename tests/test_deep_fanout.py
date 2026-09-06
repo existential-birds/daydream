@@ -14,6 +14,7 @@ from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 # The minimal turn a per-stack review agent has to emit to satisfy run_agent.
 # Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
@@ -56,6 +57,69 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     alts = tmp_path / "alts.json"
     alts.write_text("[]")
     return diff, intent, alts
+
+
+def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
+    steps = [
+        step
+        for step in trajectory["steps"]
+        if step.get("llm_call_count") == 0
+        and step.get("extra", {}).get("daydream_phase") == "deep"
+        and "dispatch_id" in step.get("extra", {})
+    ]
+    assert len(steps) == 1
+    step = steps[0]
+    assert isinstance(step, dict)
+    return step
+
+
+def _dispatch_descriptors(step: dict[str, Any]) -> list[str]:
+    return [
+        result["content"].removeprefix("Dispatched to ")
+        for result in step["observation"]["results"]
+    ]
+
+
+def _dispatch_encloses_children(step: dict[str, Any], target_dir: Path) -> bool:
+    children = [
+        read_trajectory(target_dir / ".daydream" / ref["trajectory_path"])
+        for result in step["observation"]["results"]
+        for ref in result["subagent_trajectory_ref"]
+    ]
+    return bool(children) and all(
+        step["timestamp"] <= child["extra"]["run_started_at"]
+        and step["extra"]["dispatch_completed_at"] >= child["extra"]["run_ended_at"]
+        for child in children
+    )
+
+
+async def test_phase_per_stack_reviews_dispatch_interval_success(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """Successful per-stack reviews retain declared order and enclosure."""
+    diff, intent, alts = _mk_context_files(tmp_path)
+    recorder = make_recorder(tmp_path)
+
+    async with recorder:
+        results, failures = await phase_per_stack_reviews(
+            cast(Backend, _review_backend()),
+            make_work(tmp_path),
+            _mk_stacks(),
+            diff_path=diff,
+            intent_path=intent,
+            alternatives_path=alts,
+        )
+
+    assert set(results) == {"python", "react", "generic"}
+    assert failures == {}
+    step = _deep_dispatch(read_trajectory(recorder.path))
+    assert _dispatch_descriptors(step) == ["deep-python", "deep-react", "deep-generic"]
+    assert _dispatch_encloses_children(step, recorder.target_dir)
+    assert step["extra"]["dispatch_status"] == "succeeded"
+    assert step["extra"]["planned_count"] == 3
+    assert step["extra"]["attempted_count"] == 3
+    assert step["extra"]["completed_count"] == 3
 
 
 async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
@@ -161,7 +225,10 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert per_stack_calls[0]["stack_name"] == "python"
 
 
-async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
+async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_failure(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
     """A single stack failure does not abort the whole fan-out, and is reported."""
 
     # Prompt-conditional, so it stays a dispatch fake: ScriptedBackend scripts by
@@ -186,15 +253,17 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work: Ca
 
     backend = _FlakyBackend(events=_REVIEW_TURN)
     diff, intent, alts = _mk_context_files(tmp_path)
+    recorder = make_recorder(tmp_path)
 
-    results, failures = await phase_per_stack_reviews(
-        cast(Backend, backend),
-        make_work(tmp_path),
-        _mk_stacks(),
-        diff_path=diff,
-        intent_path=intent,
-        alternatives_path=alts,
-    )
+    async with recorder:
+        results, failures = await phase_per_stack_reviews(
+            cast(Backend, backend),
+            make_work(tmp_path),
+            _mk_stacks(),
+            diff_path=diff,
+            intent_path=intent,
+            alternatives_path=alts,
+        )
 
     assert "python" in results
     assert "generic" in results
@@ -202,6 +271,16 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work: Ca
     # Failure surfaces in the returned failures dict with the exception reason.
     assert "react" in failures
     assert "simulated react failure" in failures["react"]
+    step = _deep_dispatch(read_trajectory(recorder.path))
+    # The failed backend still writes a bounded child error trajectory, so its
+    # ref remains part of the exact attempted fan-out evidence.
+    assert _dispatch_descriptors(step) == ["deep-python", "deep-react", "deep-generic"]
+    assert _dispatch_encloses_children(step, recorder.target_dir)
+    assert step["extra"]["dispatch_status"] == "partial"
+    assert step["extra"]["reason_code"] == "some_children_failed"
+    assert step["extra"]["planned_count"] == 3
+    assert step["extra"]["attempted_count"] == 3
+    assert step["extra"]["completed_count"] == 3
 
 
 async def test_per_stack_prompts_are_skill_free(

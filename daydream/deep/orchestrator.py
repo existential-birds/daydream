@@ -177,7 +177,10 @@ from daydream.supervision import (
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
+    LifecycleReasonCode,
+    LifecycleStatus,
     _safe_descriptor,
+    dispatch_scope,
     get_current_recorder,
     host_phase_scope,
     maybe_fork,
@@ -205,7 +208,7 @@ from daydream.workspace import WorkContext
 if TYPE_CHECKING:
     from daydream.remote_ci import RemoteCITarget, RemoteCIVerdict
     from daydream.runner import RunConfig
-    from daydream.trajectory import TrajectoryRecorder
+    from daydream.trajectory import DispatchHandle, PhaseScopeHandle, TrajectoryRecorder
 
 # Exploration infrastructure import guard. Deep mode still runs without
 # grounding context when the optional exploration modules are unavailable.
@@ -1621,13 +1624,15 @@ async def _step_uncovered_sweep(ctx: FlowContext) -> None:
         # Resume: records are already finalized on disk; a sweep would
         # re-review stale coverage against a diff that already ran.
         return None
-    try:
-        await _run_uncovered_sweep(ctx)
-    except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
-        print_warning(
-            console,
-            f"Uncovered-file sweep failed (fail-open): {type(exc).__name__}: {exc}",
-        )
+    async with phase_scope(DaydreamPhase.DEEP, stage="uncovered") as phase:
+        try:
+            await _run_uncovered_sweep(ctx, phase=phase)
+        except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
+            phase.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
+            print_warning(
+                console,
+                f"Uncovered-file sweep failed (fail-open): {type(exc).__name__}: {exc}",
+            )
 
 
 def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
@@ -1646,7 +1651,9 @@ def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
         return None
 
 
-async def _run_uncovered_sweep(ctx: FlowContext) -> None:
+async def _run_uncovered_sweep(
+    ctx: FlowContext, *, phase: "PhaseScopeHandle | None" = None
+) -> None:
     """Run the uncovered-file sweep body (issue #309)."""
     from daydream.hunk_index import load_hunk_index
 
@@ -1725,6 +1732,10 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         if config.start_at == "per-stack":
             per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
         stats_p.write_text(json.dumps(stats, indent=2))
+        if phase is not None:
+            phase.finish(
+                LifecycleStatus.SKIPPED, LifecycleReasonCode.NO_ELIGIBLE_WORK
+            )
         return
 
     # Cheap-tier dispatch (parse tier), parallel, in diff order. Each sweep
@@ -1738,66 +1749,92 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     sweep_failures: dict[str, str] = {}
     sweep_records_by_file: dict[str, list[dict[str, Any]]] = {}
 
-    async with anyio.create_task_group() as tg:
-        for n, file in enumerate(swept_files):
-            output_path = dd / f"uncovered-{n}-review.md"
-            prompt = build_uncovered_sweep_prompt(
-                strategy=ctx.strategy("uncovered_review"),
-                file=file,
-                hunks=diff_block_for_file(full_diff, file) or "",
-                intent_path=ctx.data["intent_path"],
-                cwd=ctx.work.repo,
-                output_path=output_path,
-                exploration_dir=ctx.data["exploration_dir"],
+    descriptors = tuple(
+        f"deep-uncovered-{n}" for n, _file in enumerate(swept_files)
+    )
+    async with dispatch_scope(
+        recorder, phase=DaydreamPhase.DEEP, descriptors=descriptors
+    ) as dispatch:
+        async with anyio.create_task_group() as tg:
+            for n, file in enumerate(swept_files):
+                output_path = dd / f"uncovered-{n}-review.md"
+                prompt = build_uncovered_sweep_prompt(
+                    strategy=ctx.strategy("uncovered_review"),
+                    file=file,
+                    hunks=diff_block_for_file(full_diff, file) or "",
+                    intent_path=ctx.data["intent_path"],
+                    cwd=ctx.work.repo,
+                    output_path=output_path,
+                    exploration_dir=ctx.data["exploration_dir"],
+                )
+
+                async def _sweep_one(
+                    file: str = file,
+                    task_prompt: str = prompt,
+                    n: int = n,
+                ) -> None:
+                    async with limiter:
+                        try:
+                            async with maybe_fork(
+                                recorder,
+                                f"deep-uncovered-{n}",
+                                dispatch=dispatch,
+                            ):
+                                structured, _, budget_reason = await run_agent(
+                                    parse_backend,
+                                    ctx.work.repo,
+                                    task_prompt,
+                                    phase=DaydreamPhase.DEEP,
+                                    output_schema=UNCOVERED_SWEEP_SCHEMA,
+                                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                                )
+                            if budget_reason:
+                                sweep_failures[file] = (
+                                    f"budget exhausted: {budget_reason}"
+                                )
+                            elif not isinstance(structured, dict):
+                                sweep_failures[file] = "no structured output produced"
+                            else:
+                                issues = structured.get("issues")
+                                # Schema validation guarantees ``issues`` is a list
+                                # but not that each entry is a dict (nested item
+                                # validity is deliberately the consumers' salvage
+                                # domain -- see ``agent.py``); a non-dict entry
+                                # would otherwise crash ``stamp_record_uids`` below
+                                # and discard this whole fail-open sweep.
+                                issues = (
+                                    [
+                                        item
+                                        for item in issues
+                                        if isinstance(item, dict)
+                                    ]
+                                    if isinstance(issues, list)
+                                    else []
+                                )
+                                sweep_records_by_file[file] = issues
+                                # Structured records are the authoritative sweep
+                                # output. Markdown review files are optional backend
+                                # byproducts and cannot gate persistence. Coverage is
+                                # still computed independently from verified Reads.
+                                completed_reviews.add(file)
+                        except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
+                            sweep_failures[file] = f"{type(exc).__name__}: {exc}"
+
+                tg.start_soon(_sweep_one)
+        if sweep_failures:
+            status = (
+                LifecycleStatus.PARTIAL
+                if completed_reviews
+                else LifecycleStatus.FAILED
             )
-
-            async def _sweep_one(
-                file: str = file,
-                task_prompt: str = prompt,
-                n: int = n,
-            ) -> None:
-                async with limiter:
-                    try:
-                        async with maybe_fork(recorder, f"deep-uncovered-{n}"):
-                            structured, _, budget_reason = await run_agent(
-                                parse_backend,
-                                ctx.work.repo,
-                                task_prompt,
-                                phase=DaydreamPhase.DEEP,
-                                output_schema=UNCOVERED_SWEEP_SCHEMA,
-                                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                                wall_budget_s=DEFAULT_WALL_BUDGET_S,
-                            )
-                        if budget_reason:
-                            sweep_failures[file] = f"budget exhausted: {budget_reason}"
-                        elif not isinstance(structured, dict):
-                            sweep_failures[file] = "no structured output produced"
-                        else:
-                            issues = structured.get("issues")
-                            # Schema validation guarantees ``issues`` is a list
-                            # but not that each entry is a dict (nested item
-                            # validity is deliberately the consumers' salvage
-                            # domain -- see ``agent.py``); a non-dict entry
-                            # would otherwise crash ``stamp_record_uids`` below
-                            # and discard this whole fail-open sweep.
-                            issues = (
-                                [item for item in issues if isinstance(item, dict)]
-                                if isinstance(issues, list)
-                                else []
-                            )
-                            sweep_records_by_file[file] = issues
-                            # Structured records are the authoritative sweep
-                            # output. Markdown review files are optional backend
-                            # byproducts and cannot gate persistence. Coverage is
-                            # still computed independently from verified Reads.
-                            completed_reviews.add(file)
-                    except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
-                        sweep_failures[file] = f"{type(exc).__name__}: {exc}"
-
-            tg.start_soon(_sweep_one)
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
+            reason = (
+                LifecycleReasonCode.SOME_CHILDREN_FAILED
+                if completed_reviews
+                else LifecycleReasonCode.ALL_CHILDREN_FAILED
+            )
+            if dispatch is not None:
+                dispatch.finish(status, reason)
 
     # Recompute coverage AFTER the sweep so the report shows the ratio the
     # sweep actually achieved (the ``deep-uncovered-*`` forks' completed reads
@@ -1872,6 +1909,15 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         if config.start_at == "per-stack":
             per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
     stats_p.write_text(json.dumps(stats, indent=2))
+    if sweep_failures and phase is not None:
+        phase.finish(
+            LifecycleStatus.PARTIAL
+            if completed_reviews
+            else LifecycleStatus.FAILED,
+            LifecycleReasonCode.SOME_CHILDREN_FAILED
+            if completed_reviews
+            else LifecycleReasonCode.ALL_CHILDREN_FAILED,
+        )
 
 
 def _rejoin_structural_records(
@@ -2317,47 +2363,55 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
     all_records: list[dict[str, Any]] = ctx.data["records"]
     failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
 
-    # Dedup pre-filter (D-27).
-    alt_issues_for_dedup: list[dict[str, Any]] = (
-        json.loads(alts_p.read_text()) if alts_p.exists() else []
-    )
-    pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
-    record_pairs = build_record_dedup_candidates(all_records, sources=ctx.data["record_sources"])
-    dedup_p = dedup_candidates_path(dd)
-    dedup_p.write_text(
-        json.dumps(
-            {
-                "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
-                "record_duplicate_pairs": [_candidate_pair_to_json(p) for p in record_pairs],
-            },
-            indent=2,
+    async with phase_scope(
+        DaydreamPhase.MERGE, stage="cross-stack-agent"
+    ) as phase:
+        # Dedup pre-filter (D-27).
+        alt_issues_for_dedup: list[dict[str, Any]] = (
+            json.loads(alts_p.read_text()) if alts_p.exists() else []
         )
-    )
+        pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
+        record_pairs = build_record_dedup_candidates(
+            all_records, sources=ctx.data["record_sources"]
+        )
+        dedup_p = dedup_candidates_path(dd)
+        dedup_p.write_text(
+            json.dumps(
+                {
+                    "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
+                    "record_duplicate_pairs": [
+                        _candidate_pair_to_json(p) for p in record_pairs
+                    ],
+                },
+                indent=2,
+            )
+        )
 
-    # Cross-stack merge (D-23..D-26).
-    try:
-        await phase_cross_stack_merge(
-            ctx.backend_for("merge"),
-            ctx.work,
-            per_stack_records_paths=ctx.data["records_paths"],
-            intent_path=ctx.data["intent_path"],
-            alternatives_path=alts_p,
-            dedup_candidates_path=dedup_p,
-            exploration_dir=ctx.data["exploration_dir"],
-            failed_stacks=failed_stacks or None,
-            structural_records_path=ctx.data["structural_records_path"],
-            intent_authoritative=ctx.data.get("intent_authoritative", False),
-            continuation=ctx.data.get("arbiter_continuation"),
-            strategy=ctx.strategy("merge"),
-        )
-    except CrossStackMergeError as exc:
-        _salvage_merge_failure(ctx, exc)
-        return Stop(1)
-    # Issue #361: a successful re-merge supersedes any stale salvage record, so
-    # the structured ``MERGE_FAILURE_KEY`` entry is cleared here -- otherwise a
-    # later ``--start-at merge``/``fix`` resume still warns 'merged results are
-    # PARTIAL' even though the cross-stack merge has since succeeded.
-    _clear_merge_failure(dd)
+        # Cross-stack merge (D-23..D-26).
+        try:
+            await phase_cross_stack_merge(
+                ctx.backend_for("merge"),
+                ctx.work,
+                per_stack_records_paths=ctx.data["records_paths"],
+                intent_path=ctx.data["intent_path"],
+                alternatives_path=alts_p,
+                dedup_candidates_path=dedup_p,
+                exploration_dir=ctx.data["exploration_dir"],
+                failed_stacks=failed_stacks or None,
+                structural_records_path=ctx.data["structural_records_path"],
+                intent_authoritative=ctx.data.get("intent_authoritative", False),
+                continuation=ctx.data.get("arbiter_continuation"),
+                strategy=ctx.strategy("merge"),
+            )
+        except CrossStackMergeError as exc:
+            phase.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
+            _salvage_merge_failure(ctx, exc)
+            return Stop(1)
+        # Issue #361: a successful re-merge supersedes any stale salvage record, so
+        # the structured ``MERGE_FAILURE_KEY`` entry is cleared here -- otherwise a
+        # later ``--start-at merge``/``fix`` resume still warns 'merged results are
+        # PARTIAL' even though the cross-stack merge has since succeeded.
+        _clear_merge_failure(dd)
     return None
 
 
@@ -2433,10 +2487,14 @@ async def _step_single_stack_merge(ctx: FlowContext) -> None:
     # from ``phase_cross_stack_merge``. No arbiter, no dedup, no
     # merge agent. Downstream consumers (fix gate, verifier, PR
     # posting) read the canonical JSON unchanged (AC6).
-    _write_single_stack_merged_items(
-        ctx.work.repo, ctx.data["dd"], ctx.data["records"], ctx.data["structural_records_path"],
-        failed_stacks=failed_stacks or None,
-    )
+    async with phase_scope(DaydreamPhase.MERGE, stage="single-stack-host"):
+        _write_single_stack_merged_items(
+            ctx.work.repo,
+            ctx.data["dd"],
+            ctx.data["records"],
+            ctx.data["structural_records_path"],
+            failed_stacks=failed_stacks or None,
+        )
 
 
 async def _step_load_items(ctx: FlowContext) -> Stop | None:
@@ -2915,6 +2973,7 @@ async def _run_diagram_kind(
     symbols: RepoSymbols,
     recorder: "TrajectoryRecorder | None",
     backend: Any,
+    dispatch: "DispatchHandle | None" = None,
 ) -> DiagramResult:
     """Author, ground, repair once, prune and render one diagram kind.
 
@@ -2952,7 +3011,9 @@ async def _run_diagram_kind(
     coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
     read_paths: set[str] = set()
 
-    async with maybe_fork(recorder, f"diagram-{kind}") as fork:
+    async with maybe_fork(
+        recorder, f"diagram-{kind}", dispatch=dispatch
+    ) as fork:
         structured, continuation, budget_reason = await run_agent(
             backend,
             ctx.work.repo,
@@ -2990,7 +3051,9 @@ async def _run_diagram_kind(
             ),
             schema=schema,
         )
-        async with maybe_fork(recorder, f"diagram-{kind}-repair") as repair_fork:
+        async with maybe_fork(
+            recorder, f"diagram-{kind}-repair", dispatch=dispatch
+        ) as repair_fork:
             repaired_output, _, repair_budget = await run_agent(
                 backend,
                 ctx.work.repo,
@@ -3092,6 +3155,14 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
     ``--diagram-only`` mode the diagram IS the deliverable, so a failure exits
     1 (after the artifact is written, so the evidence survives).
     """
+    async with phase_scope(DaydreamPhase.DIAGRAM, stage="diagram") as phase:
+        return await _run_diagram_step(ctx, phase=phase)
+
+
+async def _run_diagram_step(
+    ctx: FlowContext, *, phase: "PhaseScopeHandle"
+) -> Stop | None:
+    """Run the durable diagram step inside its identified phase scope."""
     settings = _diagram_settings(ctx)
     mode = _mode_of(ctx)
     target_dir = ctx.work.repo
@@ -3139,29 +3210,49 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
         # tasks cannot interleave inside one lookup.
         symbols = RepoSymbols(target_dir)
         limiter = anyio.CapacityLimiter(effective_fanout_concurrency(2, backend))
-        async with anyio.create_task_group() as tg:
-            for kind in kinds:
+        descriptors = tuple(f"diagram-{kind}" for kind in kinds)
+        async with dispatch_scope(
+            recorder, phase=DaydreamPhase.DIAGRAM, descriptors=descriptors
+        ) as dispatch:
+            async with anyio.create_task_group() as tg:
+                for kind in kinds:
                 # Default-arg capture -- prevents the late-binding closure bug.
-                async def _task(kind_name: str = kind) -> None:
-                    async with limiter:
-                        try:
-                            results[kind_name] = await _run_diagram_kind(
-                                ctx,
-                                kind=kind_name,
-                                eligibility=eligibility,
-                                hunk_ranges=hunk_ranges,
-                                symbols=symbols,
-                                recorder=recorder,
-                                backend=backend,
-                            )
-                        except Exception as exc:  # noqa: BLE001 -- parallel isolation
-                            detail = f"{type(exc).__name__}: {exc}"
-                            failures[kind_name] = detail
-                            results[kind_name] = _diagram_result("failed", detail)
+                    async def _task(kind_name: str = kind) -> None:
+                        async with limiter:
+                            try:
+                                results[kind_name] = await _run_diagram_kind(
+                                    ctx,
+                                    kind=kind_name,
+                                    eligibility=eligibility,
+                                    hunk_ranges=hunk_ranges,
+                                    symbols=symbols,
+                                    recorder=recorder,
+                                    backend=backend,
+                                    dispatch=dispatch,
+                                )
+                            except Exception as exc:  # noqa: BLE001 -- parallel isolation
+                                detail = f"{type(exc).__name__}: {exc}"
+                                failures[kind_name] = detail
+                                results[kind_name] = _diagram_result("failed", detail)
 
-                tg.start_soon(_task)
-        if recorder is not None:
-            recorder.create_dispatch_step(phase=DaydreamPhase.DIAGRAM)
+                    tg.start_soon(_task)
+            returned_failures = sum(
+                result is not None and result.get("status") == "failed"
+                for result in results.values()
+            )
+            if returned_failures:
+                status = (
+                    LifecycleStatus.FAILED
+                    if returned_failures == len(kinds)
+                    else LifecycleStatus.PARTIAL
+                )
+                reason = (
+                    LifecycleReasonCode.ALL_CHILDREN_FAILED
+                    if returned_failures == len(kinds)
+                    else LifecycleReasonCode.SOME_CHILDREN_FAILED
+                )
+                if dispatch is not None:
+                    dispatch.finish(status, reason)
 
     for kind, result in results.items():
         if result is not None and result.get("status") == "failed":
@@ -3179,6 +3270,17 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
         "payload": _diagram_payload_without_mermaid(payload),
         "results": ordered,
     }
+
+    if not kinds:
+        phase.finish(LifecycleStatus.SKIPPED, LifecycleReasonCode.NO_ELIGIBLE_WORK)
+    elif failures:
+        all_failed = len(failures) == len(kinds)
+        phase.finish(
+            LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL,
+            LifecycleReasonCode.ALL_CHILDREN_FAILED
+            if all_failed
+            else LifecycleReasonCode.SOME_CHILDREN_FAILED,
+        )
 
     consequence = "the run fails" if mode == "diagram" else "the review continues"
     for kind, detail in sorted(failures.items()):
@@ -3553,7 +3655,8 @@ def _stack_review_reads(
     # disk, so match the slug -- not the raw descriptor (#742 finding 1).
     lookup = _safe_descriptor(f"deep-{stack_name}")
     for fork in _loaded_review_forks(daydream_dir, recorder.session_id):
-        if _agent_label(fork["_source_file"]) == lookup:
+        label = _agent_label(fork["_source_file"])
+        if label == lookup or label.startswith(f"{lookup}--"):
             return _completed_read_paths(fork)
     return set()
 
@@ -4420,13 +4523,14 @@ async def verify_retained_tree(
     """Verify all canonical findings and join numeric wire ids to durable uids."""
     from daydream.phases import phase_fix_verify
 
-    verdicts = await phase_fix_verify(
-        ctx.backend_for("verify"),
-        ctx.work,
-        items,
-        snapshot.verifier_patch,
-        round_number=pass_number,
-    )
+    async with phase_scope(DaydreamPhase.VERIFY):
+        verdicts = await phase_fix_verify(
+            ctx.backend_for("verify"),
+            ctx.work,
+            items,
+            snapshot.verifier_patch,
+            round_number=pass_number,
+        )
     by_id = {
         item.get("id"): item
         for item in items
@@ -4964,12 +5068,20 @@ def _print_remote_ci_result(verdict: RemoteCIVerdict) -> None:
     if target is not None:
         print_info(
             console,
-            f"Remote CI target: {target.base_repository} PR #{target.pr_number} "
-            f"at {target.pushed_sha}",
+            escape_markup(
+                f"Remote CI target: {target.base_repository} PR #{target.pr_number} "
+                f"at {target.pushed_sha}"
+            ),
         )
-    print_info(console, f"Remote CI result: {verdict.status} — {verdict.reason}")
+    print_info(
+        console,
+        escape_markup(f"Remote CI result: {verdict.status} — {verdict.reason}"),
+    )
     if verdict.evidence_sha is not None:
-        print_info(console, f"Remote CI evidence SHA: {verdict.evidence_sha}")
+        print_info(
+            console,
+            escape_markup(f"Remote CI evidence SHA: {verdict.evidence_sha}"),
+        )
     if verdict.failing_contexts:
         print_warning(console, f"Failing CI: {', '.join(verdict.failing_contexts)}")
     if verdict.pending_contexts:
@@ -4984,7 +5096,7 @@ def _print_remote_ci_result(verdict: RemoteCIVerdict) -> None:
     if advisory:
         print_warning(console, f"Advisory CI not green: {', '.join(advisory)}")
     for url in verdict.urls:
-        print_info(console, f"CI details: {url}")
+        print_info(console, escape_markup(f"CI details: {url}"))
 
 
 async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
@@ -5093,7 +5205,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                     caught = exc
                 else:
                     phase.stop_reason = verdict.status
-            if verdict is not None:
+            if caught is None and verdict is not None:
                 phase.stop_reason = verdict.status
     except Exception as exc:
         print_error(console, "Remote CI verification failed", str(exc))

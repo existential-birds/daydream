@@ -284,9 +284,10 @@ See [observability](observability.md) for the lifecycle and content contract.
 
 Three flows are registered: `deep` (the single PR-process flow), `improve`, and
 `diagram` (the `--diagram-only` grounded-diagram flow).
-Each step's *config key* is its `[tool.daydream.phases.<key>]` key
-(`FlowStep.config_phase`, defaulting to the step name) — the key per-phase
-model/backend overrides resolve against.
+Each step's *registered step key* is its `FlowStep.phase_key`
+(`FlowStep.config_phase`, defaulting to the step name). The registry and flow
+lifecycle use this key. A composite step can deliberately resolve a different
+backend key inside its body.
 
 **Naming convention:** phase names are one global registry namespace. The `deep`
 flow owns the plain names. The `review` and `shallow` flows were collapsed
@@ -297,7 +298,7 @@ follow the same convention: pick globally unique step names, and use
 
 #### `deep` (the single PR-process flow, #330)
 
-| # | Step | Config key |
+| # | Step | Registered step key |
 |---|------|------------|
 | 1 | `exploration` | `exploration` |
 | 2 | `intent` | `intent` |
@@ -333,8 +334,10 @@ after `run_flow` returns, tied to a successful outcome, an applicable mode, and
 (`fix-verify-loop`) capped at 3 rounds: each round dispatches findings, a
 read-only `fix-verify` step audits the round's changed hunks and returns one
 verdict per finding, and actionable verdicts re-dispatch in the next round
-until none remain (or the budget is spent). `fix-verify` uses the `verify`
-phase config key and its own registered `fix-verify` prompt.
+until none remain (or the budget is spent). `fix-verify` has registered step
+key `fix-verify`; its retained-tree verifier resolves model and backend
+overrides from `[tool.daydream.phases.verify]` and uses the separately
+registered `fix-verify` prompt.
 
 `per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
 multi-stack run the two are siblings in one task group, so wonder has no step of
@@ -357,7 +360,7 @@ reach the PR summary through `ctx.diagrams` and `review-output.md` through a
 
 #### `diagram` (`daydream --diagram-only KIND <target>`)
 
-| # | Step | Config key |
+| # | Step | Registered step key |
 |---|------|------------|
 | 1 | `exploration` | `exploration` |
 | 2 | `diagram` | `diagram` |
@@ -377,7 +380,7 @@ review's resumable artifacts.
 
 #### `improve` (`daydream improve <target>`)
 
-| # | Step | Config key |
+| # | Step | Registered step key |
 |---|------|------------|
 | 1 | `recon` | `recon` |
 | 2 | `audit` | `audit` |

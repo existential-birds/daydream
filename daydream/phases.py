@@ -72,7 +72,10 @@ from daydream.test_execution import (
 )
 from daydream.trajectory import (
     DaydreamPhase,
+    LifecycleReasonCode,
+    LifecycleStatus,
     TrajectoryRecorder,
+    dispatch_scope,
     get_current_recorder,
     host_phase_scope,
     maybe_fork,
@@ -2851,6 +2854,7 @@ async def phase_fix_parallel(
 
     recorder = get_current_recorder()
     failures: dict[str, str] = {}
+    successful_groups: set[str] = set()
     _failures_lock = anyio.Lock()
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(limiter_size, backend)
@@ -2912,95 +2916,121 @@ async def phase_fix_parallel(
                 test_map=test_map,
             )
             budget.record_item()
+            successful_groups.add(fkey)
 
-    async with _restore_round_index_after_fanout(
-        work.repo, round_snapshot.index
-    ), anyio.create_task_group() as tg:
-        for file_key, numbered_items in groups_numbered:
-            # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
-            async def _task(
-                fkey: str = file_key,
-                grp: list[tuple[dict[str, Any], int]] = numbered_items,
-            ) -> None:
-                _fkey_slug = fkey.replace("/", "-").replace("\\", "-")
-                async with limiter:
-                    async with maybe_fork(recorder, f"fix-{_fkey_slug}"):
-                        budget = FileGroupBudget(
-                            max_wall_seconds=group_max_wall_s,
-                            max_serial_items=group_max_serial_items,
-                        )
-                        try:
-                            grp_items = [item for item, _ in grp]
-                            grp_nums = [num for _, num in grp]
-                            edit_scope = footprint.group_paths(grp_items)
-                            is_real_batch = len(grp_items) > 1 and fkey != "<no-file>"
-                            if not is_real_batch:
-                                # Single-item or <no-file> groups: go straight to
-                                # per-finding phase_fix (no batched prompt to build,
-                                # no fallback retry on failure).
-                                await _fix_group_serially(fkey, grp, budget, edit_scope)
-                            else:
-                                # Design-checkpoint #1: consult the group budget
-                                # BEFORE the batched call too, mirroring the serial
-                                # path, so a ceiling configured to 0/tiny skips the
-                                # file entirely instead of always burning one batched
-                                # turn first (keeps batched + fallback consistent).
-                                pre_batch_reason = budget.check()
-                                if pre_batch_reason is not None:
-                                    await _record_budget_stop(fkey, pre_batch_reason, len(grp), budget)
-                                    return
-                                try:
-                                    await phase_fix_batched(
-                                        backend, work, grp_items, grp_nums, total,
-                                        edit_scope=edit_scope,
-                                        read_scope=footprint.run_allowed_paths,
-                                        console_lock=_console_lock,
-                                        intent_path=intent_path,
-                                        exploration_dir=exploration_dir,
-                                        test_map=test_map,
-                                    )
-                                    budget.record_item()
-                                except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
-                                    # Restore the file to HEAD before falling back so
-                                    # per-finding fixes don't re-apply partial edits
-                                    # that the batched turn may have already written.
-                                    try:
-                                        git_ops.restore_group_worktree_from_snapshot(
-                                            work.repo, round_snapshot, edit_scope
-                                        )
-                                    except Exception as restore_err:  # noqa: BLE001
-                                        raise RuntimeError(
-                                            "failed to restore the complete fix group before fallback"
-                                        ) from restore_err
-                                    await _fix_group_serially(fkey, grp, budget, edit_scope)
-                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                            failure: BaseException = e
+    dispatch_descriptors = tuple(
+        "fix-" + file_key.replace("/", "-").replace("\\", "-")
+        for file_key, _ in groups_numbered
+    )
+    async with dispatch_scope(
+        recorder,
+        phase=DaydreamPhase.FIX,
+        descriptors=dispatch_descriptors,
+    ) as dispatch:
+        async with _restore_round_index_after_fanout(
+            work.repo, round_snapshot.index
+        ), anyio.create_task_group() as tg:
+            for file_key, numbered_items in groups_numbered:
+                # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+                async def _task(
+                    fkey: str = file_key,
+                    grp: list[tuple[dict[str, Any], int]] = numbered_items,
+                ) -> None:
+                    _fkey_slug = fkey.replace("/", "-").replace("\\", "-")
+                    async with limiter:
+                        async with maybe_fork(
+                            recorder, f"fix-{_fkey_slug}", dispatch=dispatch,
+                        ):
+                            budget = FileGroupBudget(
+                                max_wall_seconds=group_max_wall_s,
+                                max_serial_items=group_max_serial_items,
+                            )
                             try:
                                 grp_items = [item for item, _ in grp]
-                                git_ops.restore_group_worktree_from_snapshot(
-                                    work.repo,
-                                    round_snapshot,
-                                    footprint.group_paths(grp_items),
-                                )
-                            except Exception as restore_err:  # noqa: BLE001
-                                failure = RuntimeError(
-                                    "failed to restore the complete failed fix group"
-                                )
-                                failure.__cause__ = restore_err
-                            reason = f"{type(failure).__name__}: {failure}"
-                            async with _failures_lock:
-                                failures[fkey] = reason
-                            async with _console_lock:
-                                print_warning(
-                                    console,
-                                    f"Fixes for '{fkey}' failed ({reason}); its complete group was "
-                                    "restored and successful sibling-group edits were preserved.",
-                                )
+                                grp_nums = [num for _, num in grp]
+                                edit_scope = footprint.group_paths(grp_items)
+                                is_real_batch = len(grp_items) > 1 and fkey != "<no-file>"
+                                if not is_real_batch:
+                                    # Single-item or <no-file> groups: go straight to
+                                    # per-finding phase_fix (no batched prompt to build,
+                                    # no fallback retry on failure).
+                                    await _fix_group_serially(fkey, grp, budget, edit_scope)
+                                else:
+                                    # Design-checkpoint #1: consult the group budget
+                                    # BEFORE the batched call too, mirroring the serial
+                                    # path, so a ceiling configured to 0/tiny skips the
+                                    # file entirely instead of always burning one batched
+                                    # turn first (keeps batched + fallback consistent).
+                                    pre_batch_reason = budget.check()
+                                    if pre_batch_reason is not None:
+                                        await _record_budget_stop(fkey, pre_batch_reason, len(grp), budget)
+                                        return
+                                    try:
+                                        await phase_fix_batched(
+                                            backend, work, grp_items, grp_nums, total,
+                                            edit_scope=edit_scope,
+                                            read_scope=footprint.run_allowed_paths,
+                                            console_lock=_console_lock,
+                                            intent_path=intent_path,
+                                            exploration_dir=exploration_dir,
+                                            test_map=test_map,
+                                        )
+                                        budget.record_item()
+                                        successful_groups.add(fkey)
+                                    except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
+                                        # Restore the file to HEAD before falling back so
+                                        # per-finding fixes don't re-apply partial edits
+                                        # that the batched turn may have already written.
+                                        try:
+                                            git_ops.restore_group_worktree_from_snapshot(
+                                                work.repo, round_snapshot, edit_scope
+                                            )
+                                        except Exception as restore_err:  # noqa: BLE001
+                                            raise RuntimeError(
+                                                "failed to restore the complete fix group before fallback"
+                                            ) from restore_err
+                                        await _fix_group_serially(fkey, grp, budget, edit_scope)
+                            except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                                # Recovery restores the complete group, so earlier
+                                # serial progress cannot justify a partial status.
+                                successful_groups.discard(fkey)
+                                failure: BaseException = e
+                                try:
+                                    grp_items = [item for item, _ in grp]
+                                    git_ops.restore_group_worktree_from_snapshot(
+                                        work.repo,
+                                        round_snapshot,
+                                        footprint.group_paths(grp_items),
+                                    )
+                                except Exception as restore_err:  # noqa: BLE001
+                                    failure = RuntimeError(
+                                        "failed to restore the complete failed fix group"
+                                    )
+                                    failure.__cause__ = restore_err
+                                reason = f"{type(failure).__name__}: {failure}"
+                                async with _failures_lock:
+                                    failures[fkey] = reason
+                                async with _console_lock:
+                                    print_warning(
+                                        console,
+                                        f"Fixes for '{fkey}' failed ({reason}); its complete group was "
+                                        "restored and successful sibling-group edits were preserved.",
+                                    )
 
-            tg.start_soon(_task)
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
+                tg.start_soon(_task)
+        if dispatch is not None and failures:
+            dispatch.finish(
+                (
+                    LifecycleStatus.PARTIAL
+                    if successful_groups
+                    else LifecycleStatus.FAILED
+                ),
+                (
+                    LifecycleReasonCode.SOME_CHILDREN_FAILED
+                    if successful_groups
+                    else LifecycleReasonCode.ALL_CHILDREN_FAILED
+                ),
+            )
 
     return failures
 
@@ -4520,41 +4550,22 @@ async def phase_per_stack_reviews(
             }
         _write_coverage_receipts(deep_dir_path, receipts)
 
-    async with anyio.create_task_group() as tg:
-        for stack in stacks:
-            output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
-            if stack.stack_name == STRUCTURE_STACK_NAME:
-                # Structural is a first-class stack scope (not a skill): its
-                # prompt is not inlined — the lens legitimately roams beyond
-                # the diff, so it keeps its diff_path pointer and repo-wide
-                # Read/Grep/Bash freedom. No skill invocation is emitted.
-                prompt = get_registry().prompt("structural")(
-                    strategy=strategies["discovery.structural"],
-                    files=stack.files,
-                    diff_path=diff_path,
-                    intent_path=intent_path,
-                    alternatives_path=alternatives_path,
-                    output_path=output_path,
-                    cwd=work.repo,
-                    exploration_dir=exploration_dir,
-                    prior_commits=prior_commits,
-                    intent_authoritative=intent_authoritative,
-                    include_alternatives=include_alternatives,
-                )
-            else:
-                # Issue #172 Fix B: inline the relevant diff hunks for this
-                # stack when diff_text is supplied AND the blocks fit the byte
-                # budget. ``None`` falls back to the diff_path pointer.
-                inline_diff = (
-                    _diff_blocks_for_files(diff_text, stack.files)
-                    if diff_text is not None
-                    else None
-                )
-                from daydream.deep.detection import GENERIC_STACK
-
-                if stack.stack_name == GENERIC_STACK:
-                    prompt = get_registry().prompt("generic-fallback")(
-                        strategy=strategies["discovery.generic_fallback"],
+    dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in stacks)
+    async with dispatch_scope(
+        recorder,
+        phase=DaydreamPhase.DEEP,
+        descriptors=dispatch_descriptors,
+    ) as dispatch:
+        async with anyio.create_task_group() as tg:
+            for stack in stacks:
+                output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+                if stack.stack_name == STRUCTURE_STACK_NAME:
+                    # Structural is a first-class stack scope (not a skill): its
+                    # prompt is not inlined — the lens legitimately roams beyond
+                    # the diff, so it keeps its diff_path pointer and repo-wide
+                    # Read/Grep/Bash freedom. No skill invocation is emitted.
+                    prompt = get_registry().prompt("structural")(
+                        strategy=strategies["discovery.structural"],
                         files=stack.files,
                         diff_path=diff_path,
                         intent_path=intent_path,
@@ -4562,118 +4573,154 @@ async def phase_per_stack_reviews(
                         output_path=output_path,
                         cwd=work.repo,
                         exploration_dir=exploration_dir,
-                        is_docs_only=stack.is_docs_only,
                         prior_commits=prior_commits,
-                        inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
                         include_alternatives=include_alternatives,
-                        frontier_files=stack.frontier_files,
                     )
                 else:
-                    # Per-stack reviewer for language + fork stacks. The review
-                    # judgment policy is the profile-owned per-stack strategy;
-                    # built-in stacks carry no skill (M2).
-                    prompt = get_registry().prompt("per-stack")(
-                        strategy=strategies["discovery.per_stack"],
-                        stack_name=stack.stack_name,
-                        files=stack.files,
-                        diff_path=diff_path,
-                        intent_path=intent_path,
-                        alternatives_path=alternatives_path,
-                        output_path=output_path,
-                        cwd=work.repo,
-                        exploration_dir=exploration_dir,
-                        prior_commits=prior_commits,
-                        inline_diff=inline_diff,
-                        intent_authoritative=intent_authoritative,
-                        include_alternatives=include_alternatives,
-                        frontier_files=stack.frontier_files,
+                    # Issue #172 Fix B: inline the relevant diff hunks for this
+                    # stack when diff_text is supplied AND the blocks fit the byte
+                    # budget. ``None`` falls back to the diff_path pointer.
+                    inline_diff = (
+                        _diff_blocks_for_files(diff_text, stack.files)
+                        if diff_text is not None
+                        else None
                     )
+                    from daydream.deep.detection import GENERIC_STACK
 
-            # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
-            async def _task(
-                stack_name: str = stack.stack_name,
-                task_prompt: str = prompt,
-                task_output: Path = output_path,
-            ) -> None:
-                structured: Any = None
-                budget_reason: str | None = None
-                async with limiter:
-                    try:
-                        async with maybe_fork(recorder, f"deep-{stack_name}"):
-                            # Issue #745 (AC4): the reviewer emits
-                            # PER_STACK_RECORD_SCHEMA structured output directly --
-                            # no separate ``parse-<stack>`` fork. The fork is
-                            # finalized on exit so verdict reconciliation below
-                            # can read its completed reads from disk.
-                            structured, _, budget_reason = await run_agent(
-                                backend,
-                                work.repo,
-                                task_prompt,
-                                phase=DaydreamPhase.DEEP,
-                                output_schema=PER_STACK_RECORD_SCHEMA,
-                                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                                wall_budget_s=DEFAULT_WALL_BUDGET_S,
-                            )
-                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                        failures[stack_name] = f"{type(e).__name__}: {e}"
-                        return
-                    if budget_reason:
-                        # A truncated stack did not really pass: route it
-                        # into failures so merge lists it under
-                        # "Uncovered stacks" instead of silently shipping
-                        # a partial review as a complete one.
-                        failures[stack_name] = f"budget exhausted: {budget_reason}"
-                        return
-                    if not isinstance(structured, dict):
-                        failures[stack_name] = "no structured output produced"
-                        return
-                    raw_issues = structured.get("issues")
-                    raw_issues = raw_issues if isinstance(raw_issues, list) else []
-                    # ``run_agent``'s structured-output gate is salvage-tolerant
-                    # (``agent._salvageable``: "nested item validity is
-                    # deliberately not checked here"), so a schema-shaped
-                    # payload can still carry a non-dict entry in ``issues``.
-                    # Drop those here rather than at each consumer: a non-dict
-                    # record has no field any downstream stage can read
-                    # (``_index_records`` would raise on ``rec.get``), and
-                    # dropping it at birth keeps every record's position in the
-                    # on-disk list equal to its ``uid`` ordinal, which is what
-                    # makes ``stamp_record_uids`` re-derivable on a resume.
-                    #
-                    # Each surviving record is shallow-copied because the stamp
-                    # below mutates in place: ``structured`` is the backend's
-                    # payload, still referenced by the trajectory recorder, and
-                    # writing a host-owned field back into it would both edit
-                    # what gets recorded and let one stack's uid leak into
-                    # another's records whenever the two calls happen to share a
-                    # record object. The copy makes the stamped list this
-                    # phase's own, so per-stack uid minting stays independent.
-                    issues = [dict(issue) for issue in raw_issues if isinstance(issue, dict)]
-                    # Mint each record's referential identity (issue #1111). This
-                    # is post-validation and host-side: ``run_agent`` already
-                    # validated ``structured`` against PER_STACK_RECORD_SCHEMA
-                    # before returning, and nothing re-validates a record dict
-                    # afterwards, so a host-added key can never be
-                    # schema-rejected. The schema is deliberately NOT widened to
-                    # declare ``uid`` -- every declared property must also sit in
-                    # ``required`` (tests/test_output_schema_strict.py), so
-                    # declaring it would force the *model* to emit a field the
-                    # host owns. Stamping before the write makes the artifact
-                    # self-describing when debugging.
-                    stamp_record_uids(issues, stack_name)
-                    declared_verdicts = structured.get("verdicts")
-                    declared = declared_verdicts if isinstance(declared_verdicts, list) else []
-                    # Persist the records file with the DECLARED verdicts for
-                    # now; final verdict reconciliation happens in
-                    # ``_step_per_stack_parse`` AFTER the fan-out completes and
-                    # every review fork is finalized on disk (issue #745).
-                    per_stack_records_path(deep_dir_path, stack_name).write_text(
-                        json.dumps({"issues": issues, "verdicts": declared}, indent=2)
-                    )
-                    results[stack_name] = task_output
+                    if stack.stack_name == GENERIC_STACK:
+                        prompt = get_registry().prompt("generic-fallback")(
+                            strategy=strategies["discovery.generic_fallback"],
+                            files=stack.files,
+                            diff_path=diff_path,
+                            intent_path=intent_path,
+                            alternatives_path=alternatives_path,
+                            output_path=output_path,
+                            cwd=work.repo,
+                            exploration_dir=exploration_dir,
+                            is_docs_only=stack.is_docs_only,
+                            prior_commits=prior_commits,
+                            inline_diff=inline_diff,
+                            intent_authoritative=intent_authoritative,
+                            include_alternatives=include_alternatives,
+                            frontier_files=stack.frontier_files,
+                        )
+                    else:
+                        # Per-stack reviewer for language + fork stacks. The review
+                        # judgment policy is the profile-owned per-stack strategy;
+                        # built-in stacks carry no skill (M2).
+                        prompt = get_registry().prompt("per-stack")(
+                            strategy=strategies["discovery.per_stack"],
+                            stack_name=stack.stack_name,
+                            files=stack.files,
+                            diff_path=diff_path,
+                            intent_path=intent_path,
+                            alternatives_path=alternatives_path,
+                            output_path=output_path,
+                            cwd=work.repo,
+                            exploration_dir=exploration_dir,
+                            prior_commits=prior_commits,
+                            inline_diff=inline_diff,
+                            intent_authoritative=intent_authoritative,
+                            include_alternatives=include_alternatives,
+                            frontier_files=stack.frontier_files,
+                        )
 
-            tg.start_soon(_task)
+                # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+                async def _task(
+                    stack_name: str = stack.stack_name,
+                    task_prompt: str = prompt,
+                    task_output: Path = output_path,
+                ) -> None:
+                    structured: Any = None
+                    budget_reason: str | None = None
+                    async with limiter:
+                        try:
+                            async with maybe_fork(
+                                recorder, f"deep-{stack_name}", dispatch=dispatch,
+                            ):
+                                # Issue #745 (AC4): the reviewer emits
+                                # PER_STACK_RECORD_SCHEMA structured output directly --
+                                # no separate ``parse-<stack>`` fork. The fork is
+                                # finalized on exit so verdict reconciliation below
+                                # can read its completed reads from disk.
+                                structured, _, budget_reason = await run_agent(
+                                    backend,
+                                    work.repo,
+                                    task_prompt,
+                                    phase=DaydreamPhase.DEEP,
+                                    output_schema=PER_STACK_RECORD_SCHEMA,
+                                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                                )
+                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                            failures[stack_name] = f"{type(e).__name__}: {e}"
+                            return
+                        if budget_reason:
+                            # A truncated stack did not really pass: route it
+                            # into failures so merge lists it under
+                            # "Uncovered stacks" instead of silently shipping
+                            # a partial review as a complete one.
+                            failures[stack_name] = f"budget exhausted: {budget_reason}"
+                            return
+                        if not isinstance(structured, dict):
+                            failures[stack_name] = "no structured output produced"
+                            return
+                        raw_issues = structured.get("issues")
+                        raw_issues = raw_issues if isinstance(raw_issues, list) else []
+                        # ``run_agent``'s structured-output gate is salvage-tolerant
+                        # (``agent._salvageable``: "nested item validity is
+                        # deliberately not checked here"), so a schema-shaped
+                        # payload can still carry a non-dict entry in ``issues``.
+                        # Drop those here rather than at each consumer: a non-dict
+                        # record has no field any downstream stage can read
+                        # (``_index_records`` would raise on ``rec.get``), and
+                        # dropping it at birth keeps every record's position in the
+                        # on-disk list equal to its ``uid`` ordinal, which is what
+                        # makes ``stamp_record_uids`` re-derivable on a resume.
+                        #
+                        # Each surviving record is shallow-copied because the stamp
+                        # below mutates in place: ``structured`` is the backend's
+                        # payload, still referenced by the trajectory recorder, and
+                        # writing a host-owned field back into it would both edit
+                        # what gets recorded and let one stack's uid leak into
+                        # another's records whenever the two calls happen to share a
+                        # record object. The copy makes the stamped list this
+                        # phase's own, so per-stack uid minting stays independent.
+                        issues = [dict(issue) for issue in raw_issues if isinstance(issue, dict)]
+                        # Mint each record's referential identity (issue #1111). This
+                        # is post-validation and host-side: ``run_agent`` already
+                        # validated ``structured`` against PER_STACK_RECORD_SCHEMA
+                        # before returning, and nothing re-validates a record dict
+                        # afterwards, so a host-added key can never be
+                        # schema-rejected. The schema is deliberately NOT widened to
+                        # declare ``uid`` -- every declared property must also sit in
+                        # ``required`` (tests/test_output_schema_strict.py), so
+                        # declaring it would force the *model* to emit a field the
+                        # host owns. Stamping before the write makes the artifact
+                        # self-describing when debugging.
+                        stamp_record_uids(issues, stack_name)
+                        declared_verdicts = structured.get("verdicts")
+                        declared = declared_verdicts if isinstance(declared_verdicts, list) else []
+                        # Persist the records file with the DECLARED verdicts for
+                        # now; final verdict reconciliation happens in
+                        # ``_step_per_stack_parse`` AFTER the fan-out completes and
+                        # every review fork is finalized on disk (issue #745).
+                        per_stack_records_path(deep_dir_path, stack_name).write_text(
+                            json.dumps({"issues": issues, "verdicts": declared}, indent=2)
+                        )
+                        results[stack_name] = task_output
+
+                tg.start_soon(_task)
+        if dispatch is not None and failures:
+            dispatch.finish(
+                LifecycleStatus.PARTIAL if results else LifecycleStatus.FAILED,
+                (
+                    LifecycleReasonCode.SOME_CHILDREN_FAILED
+                    if results
+                    else LifecycleReasonCode.ALL_CHILDREN_FAILED
+                ),
+            )
 
     if failures:
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
@@ -4682,9 +4729,6 @@ async def phase_per_stack_reviews(
             f"Per-stack reviews failed for {len(failures)} stack(s); "
             "failures will be passed to the merge step.\n" + lines,
         )
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
 
     return results, failures
 
@@ -5784,7 +5828,7 @@ async def phase_cross_stack_merge(
         work.repo,
         prompt,
         output_schema=MERGED_ITEMS_SCHEMA,
-        phase=DaydreamPhase.DEEP,
+        phase=DaydreamPhase.MERGE,
         continuation=continuation,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -175,6 +176,211 @@ def test_run_config_exploration_context_defaults_to_none() -> None:
     explicit = ExplorationContext()
     cfg2 = RunConfig(exploration_context=explicit)
     assert cfg2.exploration_context is explicit
+
+
+async def test_signal_flush_immutable_cutoff_before_first_root_step(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    make_config: Callable[..., RunConfig],
+) -> None:
+    """Initial exploration fan-out archives a rooted immutable T1 snapshot."""
+    from daydream.atif import validate as atif_validate
+    from daydream.cli import _signal_handler
+    from daydream.ui import get_shutdown_panel, set_shutdown_panel
+    from tests.harness.stub_backend import StubBackend, silence
+
+    class InitialExplorationBarrierBackend(StubBackend):
+        fanout_concurrency = 2
+
+        def __init__(self, target: Path) -> None:
+            super().__init__(target)
+            self.entered = anyio.Event()
+            self.release = anyio.Event()
+            self.entered_count = 0
+            self.active_count = 0
+
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+        ) -> AsyncIterator[AgentEvent]:
+            is_initial_specialist = "specialist" in prompt.lower() and self.entered_count < 2
+            if is_initial_specialist:
+                self.entered_count += 1
+                self.active_count += 1
+                if self.entered_count == 2:
+                    self.entered.set()
+                try:
+                    await self.release.wait()
+                finally:
+                    self.active_count -= 1
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+            ):
+                yield event
+
+    # Four changed files select pre_scan's parallel tier; the backend's real
+    # fan-out capacity admits exactly two children while the third waits.
+    (multi_stack_target / "extra.py").write_text("EXTRA = 1\n", encoding="utf-8")
+    _git(multi_stack_target, "add", "extra.py")
+    _commit(multi_stack_target, "add fourth changed file")
+
+    fake_bin = multi_stack_target.parent / "signal-bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$*\" = \"api /user\" ]; then\n"
+        "  printf '%s\\n' '{\"login\":\"signal-runner\"}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' \"unexpected gh call: $*\" >&2\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(fake_bin), os.environ.get("PATH", ""))))
+
+    backend = InitialExplorationBarrierBackend(multi_stack_target)
+    silence(monkeypatch)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", True)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    clock_tick = 0
+
+    def deterministic_now() -> str:
+        nonlocal clock_tick
+        clock_tick += 1
+        return f"2026-01-01T00:00:00.{clock_tick:06d}Z"
+
+    monkeypatch.setattr("daydream.trajectory.now_iso", deterministic_now)
+    outcome: dict[str, int] = {}
+    finished = anyio.Event()
+
+    async def run_review() -> None:
+        try:
+            outcome["exit_code"] = await runner.run(
+                make_config(
+                    multi_stack_target,
+                    flow_name="review",
+                    archive=True,
+                    run_eval=True,
+                    diagram="off",
+                )
+            )
+        finally:
+            finished.set()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_review)
+        with anyio.fail_after(10):
+            await backend.entered.wait()
+        assert backend.active_count == 2
+
+        with pytest.raises(KeyboardInterrupt):
+            _signal_handler(signal.SIGINT, None)
+        panel = get_shutdown_panel()
+        if panel is not None:
+            panel.finish()
+            set_shutdown_panel(None)
+
+        live_runs = [path for path in (multi_stack_target / ".daydream" / "runs").iterdir() if path.is_dir()]
+        assert len(live_runs) == 1
+        live_run = live_runs[0]
+        partial_paths = sorted(live_run.rglob("*.partial"))
+        assert len(partial_paths) == 3
+        partial_bytes = {path.relative_to(live_run): path.read_bytes() for path in partial_paths}
+        partial_payloads = [json.loads(value) for value in partial_bytes.values()]
+        assert all(atif_validate(payload, validate_images=False) for payload in partial_payloads)
+        t1_values = {payload["extra"]["snapshot_at"] for payload in partial_payloads}
+        assert len(t1_values) == 1
+        t1 = t1_values.pop()
+
+        root_partial = json.loads(partial_bytes[Path("trajectory.json.partial")])
+        assert root_partial["trajectory_id"] == live_run.name
+        assert root_partial["steps"] == [
+            {
+                "step_id": 1,
+                "timestamp": t1,
+                "source": "system",
+                "message": "Daydream run snapshot",
+                "extra": {
+                    "daydream_run_flow": "ttt",
+                    "host_event": "partial_snapshot",
+                },
+            }
+        ]
+        assert all("run_ended_at" not in payload["extra"] for payload in partial_payloads)
+        partial_merge_events = [
+            event
+            for event in root_partial["extra"]["phase_events"]
+            if event["phase"] == "exploration"
+        ]
+        assert [event["event"] for event in partial_merge_events] == ["phase_start"]
+
+        archived_run = archive_dir / "runs" / live_run.name
+        assert (archived_run / "trajectory.json").read_bytes() == partial_bytes[
+            Path("trajectory.json.partial")
+        ]
+        archived_children = {
+            json.loads(path.read_bytes())["trajectory_id"]: path.read_bytes()
+            for path in (archived_run / "trajectories").glob("*.json")
+        }
+        live_children = {
+            payload["trajectory_id"]: raw
+            for raw in partial_bytes.values()
+            if (payload := json.loads(raw))["trajectory_id"] != live_run.name
+        }
+        assert archived_children == live_children
+        partial_evaluation = json.loads((archived_run / "evaluation.json").read_text())
+        partial_manifest = json.loads((archived_run / "manifest.json").read_text())
+        assert partial_manifest["archive_status"] == "partial"
+        assert partial_evaluation["timing"]["agent_completeness"] == {
+            "total": 2,
+            "attributed": 0,
+            "unattributed": 2,
+        }
+        assert partial_evaluation["timing"]["diagnostics"]["malformed_invocation"] == 2
+        assert partial_evaluation["timing"]["diagnostics"]["orphaned_interval"] == 1
+        assert partial_manifest["metrics"]["timing_coverage"]["agent_completeness"] == partial_evaluation[
+            "timing"
+        ]["agent_completeness"]
+
+        backend.release.set()
+        with anyio.fail_after(20):
+            await finished.wait()
+
+    assert outcome == {"exit_code": 0}
+    assert backend.active_count == 0
+    assert all((live_run / relative).read_bytes() == value for relative, value in partial_bytes.items())
+    final_root = json.loads((live_run / "trajectory.json").read_text())
+    assert final_root["extra"]["run_ended_at"] > t1
+    assert all(step["message"] != "Daydream run snapshot" for step in final_root["steps"])
+    exploration_events = [
+        event for event in final_root["extra"]["phase_events"] if event["phase"] == "exploration"
+    ]
+    assert [event["event"] for event in exploration_events] == ["phase_start", "phase_end"]
+    assert exploration_events[0]["scope_id"] == exploration_events[1]["scope_id"]
+    assert exploration_events[1]["status"] == "succeeded"
+    assert exploration_events[1]["timestamp"] > t1
+    assert any(
+        step.get("extra", {}).get("dispatch_status") == "succeeded"
+        and step.get("extra", {}).get("daydream_phase") == "exploration"
+        for step in final_root["steps"]
+    )
+    final_manifest = json.loads((archive_dir / "runs" / live_run.name / "manifest.json").read_text())
+    assert final_manifest["archive_status"] == "complete"
 
 
 # --- Stage 4.1b dispatch tests ---------------------------------------------

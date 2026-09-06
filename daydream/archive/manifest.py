@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from daydream.runner import RunConfig
-    from daydream.trajectory import TrajectoryRecorder
+    from daydream.trajectory import RunWriteSnapshot, TrajectoryRecorder
 
 MANIFEST_SCHEMA_VERSION = "1.0"
 
@@ -334,6 +334,7 @@ class Manifest:
     # which runs by default (skipped only with --no-eval).
     wall_clock_seconds: float | None = None
     phase_timings: dict[str, Any] | None = None
+    timing_coverage: dict[str, Any] | None = None
     total_findings: int | None = None
     grounding_rate: float | None = None
     coverage_ratio: float | None = None
@@ -416,6 +417,7 @@ class Manifest:
                 "total_cached_tokens": self.total_cached_tokens,
                 "wall_clock_seconds": self.wall_clock_seconds,
                 "phase_timings": self.phase_timings,
+                **_omit_falsy(timing_coverage=self.timing_coverage),
                 "total_findings": self.total_findings,
                 "grounding_rate": self.grounding_rate,
                 "coverage_ratio": self.coverage_ratio,
@@ -437,6 +439,7 @@ class Manifest:
 def build_manifest(
     *,
     recorder: TrajectoryRecorder,
+    write_snapshot: RunWriteSnapshot | None = None,
     config: RunConfig,
     git_ctx: GitContext,
     status: str,
@@ -490,7 +493,25 @@ def build_manifest(
     Returns:
         A fully populated Manifest.
     """
-    totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
+    timing_summary = None
+    totals: dict[str, Any]
+    if write_snapshot is not None:
+        from daydream.trajectory import compute_timing_summary, snapshot_trajectories
+
+        frozen = snapshot_trajectories(write_snapshot)
+        frozen_root = frozen.get("main")
+        raw_final_metrics = frozen_root.get("final_metrics") if isinstance(frozen_root, dict) else None
+        final_metrics: dict[str, Any] = raw_final_metrics if isinstance(raw_final_metrics, dict) else {}
+        totals = {
+            "prompt": final_metrics.get("total_prompt_tokens") or 0,
+            "completion": final_metrics.get("total_completion_tokens") or 0,
+            "cached": final_metrics.get("total_cached_tokens") or 0,
+            "cost": final_metrics.get("total_cost_usd") or 0.0,
+            "any_cost_seen": final_metrics.get("total_cost_usd") is not None,
+        }
+        timing_summary = compute_timing_summary(write_snapshot)
+    else:
+        totals = recorder._final_totals  # noqa: SLF001 - legacy direct-builder seam
 
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
     from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
@@ -617,16 +638,26 @@ def build_manifest(
         m.profile_source_kind = resolved_profile.source_kind
         m.profile_digest = resolved_profile.digest
 
-    # Derivable from step timestamps, so populated for every run; the eval pass's
-    # fork-inclusive value (eval.analyzer.analyze_timing) takes precedence below.
-    m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
-    # Per-phase breakdown from explicit phase_start/phase_end events (#203).
-    m.phase_timings = recorder.compute_phase_timings()
+    # New runs use lifecycle timing from the immutable write snapshot. Legacy
+    # direct builders retain the local-step fallback, which evaluation may fill.
+    if timing_summary is not None:
+        m.wall_clock_seconds = timing_summary.wall_clock_seconds
+        m.phase_timings = timing_summary.phase_timings
+        m.timing_coverage = {
+            "attributed_wall_clock_seconds": timing_summary.attributed_wall_clock_seconds,
+            "unattributed_wall_clock_seconds": timing_summary.unattributed_wall_clock_seconds,
+            "coverage_ratio": timing_summary.coverage_ratio,
+            "agent_completeness": timing_summary.agent_completeness,
+            "diagnostics": timing_summary.diagnostics,
+        }
+    elif write_snapshot is None:
+        m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
+        m.phase_timings = recorder.compute_phase_timings()
 
     if evaluation:
         timing = evaluation.get("timing", {})
         eval_wall_clock = timing.get("total_wall_clock_seconds")
-        if eval_wall_clock is not None:
+        if eval_wall_clock is not None and timing_summary is None:
             m.wall_clock_seconds = eval_wall_clock
 
         findings = evaluation.get("findings", {})

@@ -3908,13 +3908,13 @@ async def gh_api_bounded_pages(
         if len(rows) > limits.per_page:
             raise GitError(f"gh api {endpoint} returned an invalid page shape")
         collected.extend(rows)
-        if page == limits.max_pages and len(rows) == limits.per_page:
-            raise GitError(f"gh api {endpoint} exceeded pagination limit")
         if total_count is not None:
             if len(collected) > total_count:
                 raise GitError(f"gh api {endpoint} returned an invalid page shape")
             if len(collected) == total_count:
                 return collected
+        if page == limits.max_pages and len(rows) == limits.per_page:
+            raise GitError(f"gh api {endpoint} exceeded pagination limit")
         if len(rows) < limits.per_page:
             if total_count is not None and len(collected) != total_count:
                 raise GitError(f"gh api {endpoint} returned an incomplete page")

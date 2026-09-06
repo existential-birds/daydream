@@ -9,20 +9,100 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.atif import Step
+from daydream.backends import AgentEvent
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
+    RunWriteSnapshot,
     TrajectoryRecorder,
     now_iso,
 )
 from tests.harness.config import TARGET_HUB_KEY_CONFIG
+from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
+
+
+class _SecretFailureBackend(StubBackend):
+    """External backend failure containing synthetic, intentionally private data."""
+
+    secrets = (
+        "sk-abcdefghijklmnopqrstuvwxyz1234567890",
+        "https://private-user:private-password@example.invalid/model",
+        "/Users/private-lifecycle-user/work/client-private.py",
+    )
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target)
+        self.failures = 0
+
+    async def execute(
+        self, cwd: Path, prompt: str, output_schema: Any = None,
+        continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        if "you are the **dependency-tracer** specialist" in prompt.lower():
+            self.failures += 1
+            raise RuntimeError("backend rejected " + " ".join(self.secrets))
+        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+            yield event
+
+
+async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
+    shard_many_python_target: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real caught backend failure emits closed codes, not its private message."""
+    from daydream.runner import RunConfig, run
+    from daydream.trajectory import LifecycleReasonCode
+
+    target = shard_many_python_target
+    backend = _SecretFailureBackend(target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
+    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True)) == 0
+    assert backend.failures == 1
+    roots = list((target / ".daydream/runs").glob("*/trajectory.json"))
+    assert len(roots) == 1
+    root = json.loads(roots[0].read_bytes())
+    dispatches = [step for step in root["steps"] if "dispatch_id" in step.get("extra", {})]
+    partials = [step for step in dispatches if step["extra"]["dispatch_status"] == "partial"]
+    assert len(partials) == 1
+    assert partials[0]["extra"]["reason_code"] == "some_children_failed"
+    refs = [ref for step in dispatches for result in step["observation"]["results"]
+            for ref in result["subagent_trajectory_ref"]]
+    assert refs
+    live_paths = [roots[0], *(target / ".daydream" / ref["trajectory_path"] for ref in refs)]
+    archive = archive_dir / "runs" / root["session_id"]
+    manifest = archive / "manifest.json"
+    evaluation = archive / "evaluation.json"
+    assert manifest.is_file() and evaluation.is_file()
+    archived_paths = list(archive.rglob("*.json"))
+    assert len(archived_paths) >= len(live_paths) + 2
+    reason_codes: list[str] = []
+
+    def collect_reasons(value: Any) -> None:
+        if isinstance(value, dict):
+            if "reason_code" in value and value["reason_code"] is not None:
+                reason_codes.append(value["reason_code"])
+            for child in value.values():
+                collect_reasons(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_reasons(child)
+
+    for path in [*live_paths, *archived_paths]:
+        text = path.read_text(encoding="utf-8")
+        for secret in backend.secrets:
+            assert secret not in text, f"private exception text leaked to {path.name}"
+        collect_reasons(json.loads(text))
+    assert "some_children_failed" in reason_codes
+    assert set(reason_codes) <= {reason.value for reason in LifecycleReasonCode}
 
 
 def _add_user_step(recorder: TrajectoryRecorder) -> None:
@@ -38,6 +118,22 @@ def _add_user_step(recorder: TrajectoryRecorder) -> None:
         },
     )
     recorder.steps.append(step)
+
+
+async def _hold_archive_fork(
+    parent: TrajectoryRecorder,
+    name: str,
+    entered: anyio.Event,
+    release: anyio.Event,
+) -> None:
+    async with parent.fork(name) as child:
+        for call in ("first", "second"):
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                invocation.observe_user_step(prompt=f"{name}-{call}")
+        async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step(prompt=f"{name}-blocked")
+            entered.set()
+            await release.wait()
 
 
 # --- shared round-trip setup for the archive on_write tests ---
@@ -152,8 +248,8 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
     """Empty trajectories skip _write entirely, so on_write must not be called."""
     callback_calls: list[tuple[str, str]] = []
 
-    def on_write(recorder: TrajectoryRecorder, status: str) -> None:
-        callback_calls.append((recorder.session_id, status))
+    def on_write(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
+        callback_calls.append((recorder.session_id, snapshot.status))
 
     recorder = make_recorder(tmp_path, on_write=on_write)
     async with recorder:
@@ -168,10 +264,13 @@ async def test_full_archive_round_trip_fix_test_backend_columns(
     tmp_path: Path,
     archive_dir: Path,
     run_flow: DaydreamRunFlow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path round-trip: IMPROVE omits fix/test_backend (keys + NULL SQL
     columns); NORMAL (deep-family) records both (keys present + non-NULL)."""
     recorder = _make_round_trip_fixture(tmp_path, run_flow)
+    lifecycle_times = iter(("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"))
+    monkeypatch.setattr("daydream.trajectory.now_iso", lambda: next(lifecycle_times))
 
     async with recorder:
         pass
@@ -234,7 +333,10 @@ async def test_archive_round_trip_projects_eval_location_metrics(
 async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     """If on_write raises, the context manager exits cleanly and trajectory is still written."""
 
-    def on_write_boom(recorder: TrajectoryRecorder, status: str) -> None:
+    def on_write_boom(
+        recorder: TrajectoryRecorder,
+        snapshot: RunWriteSnapshot,
+    ) -> None:
         raise RuntimeError("archive exploded")
 
     recorder = make_recorder(tmp_path, on_write=on_write_boom)
@@ -417,18 +519,91 @@ async def test_archive_callback_partial_status_skips_hf_upload(
     recorder = make_recorder(tmp_path, on_write=cb)
     _add_user_step(recorder)
 
-    # Signal flush fires on_write("partial") synchronously; the blocking HF
+    # Signal flush publishes a partial snapshot synchronously; the blocking HF
     # upload must be skipped so Ctrl-C/Ctrl-\ shutdown never hangs on a network call.
     recorder.write_partial()
     assert uploaded == []
 
-    # Normal completion fires on_write("complete"); the upload must run.
+    # Normal completion publishes a complete snapshot; the upload must run.
     async with recorder:
         pass
 
     assert len(uploaded) == 1
     assert uploaded[0][1] == "acme/dd-trajectories"
     assert uploaded[0][2] == recorder.session_id
+
+
+async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
+    tmp_path: Path,
+    archive_dir: Path,
+) -> None:
+    from daydream.runner import RunConfig, _make_archive_callback
+
+    config = RunConfig(target=str(tmp_path), archive=True, run_eval=True)
+    archive_callback = _make_archive_callback(config, tmp_path)
+    assert archive_callback is not None
+    snapshots: list[RunWriteSnapshot] = []
+
+    def callback(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
+        snapshots.append(snapshot)
+        archive_callback(recorder, snapshot)
+
+    recorder = make_recorder(tmp_path, on_write=callback)
+    entered = {name: anyio.Event() for name in ("a", "b")}
+    release = {name: anyio.Event() for name in entered}
+    async with recorder:
+        _add_user_step(recorder)
+        async with anyio.create_task_group() as task_group:
+            for name in entered:
+                task_group.start_soon(
+                    _hold_archive_fork,
+                    recorder,
+                    name,
+                    entered[name],
+                    release[name],
+                )
+                await entered[name].wait()
+            recorder.write_partial()
+            partial = snapshots[-1]
+            assert partial.status == "partial"
+            assert len(partial.documents) == 3
+            assert {json.loads(document.json_bytes)["extra"]["snapshot_at"] for document in partial.documents} == {
+                partial.cutoff_at
+            }
+            frozen = tuple(document.json_bytes for document in partial.documents)
+
+            run_dir = archive_dir / "runs" / recorder.session_id
+            manifest = json.loads((run_dir / "manifest.json").read_text())
+            evaluation = json.loads((run_dir / "evaluation.json").read_text())
+            assert manifest["metrics"]["wall_clock_seconds"] == evaluation["timing"]["total_wall_clock_seconds"]
+            assert evaluation["timing"]["agent_completeness"] == {
+                "total": 6,
+                "attributed": 0,
+                "unattributed": 6,
+            }
+            assert evaluation["timing"]["diagnostics"]["malformed_invocation"] == 2
+            assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == evaluation["timing"][
+                "agent_completeness"
+            ]
+            assert len(list((run_dir / "trajectories").glob("*.json"))) == 2
+            for event in release.values():
+                event.set()
+
+        assert tuple(document.json_bytes for document in partial.documents) == frozen
+
+    complete = snapshots[-1]
+    assert complete.status == "complete"
+    assert complete.cutoff_at > partial.cutoff_at
+    assert all("run_ended_at" in json.loads(document.json_bytes)["extra"] for document in complete.documents)
+    final_evaluation = json.loads(
+        (archive_dir / "runs" / recorder.session_id / "evaluation.json").read_text()
+    )
+    assert final_evaluation["timing"]["agent_completeness"] == {
+        "total": 6,
+        "attributed": 0,
+        "unattributed": 6,
+    }
+    assert final_evaluation["timing"]["diagnostics"]["malformed_invocation"] == 0
 
 
 # --no-archive + --dump-artifacts: bundle still dumped, upload never fires
@@ -495,18 +670,25 @@ async def test_runner_archive_round_trip_redacts_structured_tool_credentials(
     target_dir = tmp_path / "project"
     target_dir.mkdir()
 
-    backend = ScriptedBackend(events=(
-        ToolStartEvent(
-            id="t1", name="ListDir",
-            input={"dir": "/tmp", "apiKey": {"nested": sentinel}, "displayName": "visible"},
-        ),
-        ToolResultEvent(
-            id="t1",
-            output='{"status": "ok", "token": "opaque-test-only-sentinel"}',
-            is_error=False,
-        ),
-        ResultEvent(structured_output=None, continuation=None),
-    ))
+    backend = ScriptedBackend(
+        events=(
+            ToolStartEvent(
+                id="t1",
+                name="ListDir",
+                input={
+                    "dir": "/tmp",
+                    "apiKey": {"nested": sentinel},
+                    "displayName": "visible",
+                },
+            ),
+            ToolResultEvent(
+                id="t1",
+                output='{"status": "ok", "token": "opaque-test-only-sentinel"}',
+                is_error=False,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        )
+    )
 
     config = RunConfig(target=str(target_dir), archive=True, run_eval=False)
     recorder = _open_recorder(

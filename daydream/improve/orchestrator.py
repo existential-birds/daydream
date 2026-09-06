@@ -90,6 +90,9 @@ from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.trajectory import (
     DaydreamPhase,
+    LifecycleReasonCode,
+    LifecycleStatus,
+    dispatch_scope,
     get_current_recorder,
     maybe_fork,
     phase_scope,
@@ -99,6 +102,7 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
+    from daydream.trajectory import DispatchHandle, TrajectoryRecorder
 
 
 RECON_SCHEMA: dict[str, Any] = {
@@ -447,7 +451,10 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
 
     backend = ctx.backend_for("recon")
     async with phase_scope(DaydreamPhase.RECON):
-        exploration = await repo_scan(backend, target)
+        async with phase_scope(
+            DaydreamPhase.EXPLORATION, stage="repo-survey"
+        ):
+            exploration = await repo_scan(backend, target)
         recon, _, _ = await run_agent(
             backend,
             target,
@@ -935,24 +942,23 @@ def _schema_with_provenance(
     return extended
 
 
-async def _step_audit(ctx: FlowContext) -> Stop | None:
-    """Run tier-driven category audits and persist grounded findings."""
-    directory: Path = ctx.data["improve_dir"]
+async def _run_audit_assignments(
+    ctx: FlowContext,
+    *,
+    assignments: list[_AuditAssignment],
+    branch_focus: bool,
+    backend: Any,
+    recorder: "TrajectoryRecorder | None",
+    limiter: anyio.CapacityLimiter,
+    dispatch: "DispatchHandle | None",
+) -> tuple[
+    dict[str, tuple[_AuditAssignment, list[dict[str, Any]]]],
+    dict[str, str],
+]:
+    """Run audit siblings while binding every attempted fork to one dispatch."""
     tier: EffortTier = ctx.data["effort_tier"]
-    services: list[Service] = ctx.data["services"]
-    partitions: list[Partition] = ctx.data["partitions"]
-    groups: list[PartitionGroup] = ctx.data["partition_groups"]
-    categories = resolve_categories(tier, ctx.config.improve_focus)
-    branch_focus = ctx.config.improve_focus == "branch"
-    assignments = _audit_assignments(categories, groups)
-    backend = ctx.backend_for("audit")
-    recorder = get_current_recorder()
-    limiter = anyio.CapacityLimiter(
-        effective_fanout_concurrency(tier.max_concurrency, backend)
-    )
     results: dict[str, tuple[_AuditAssignment, list[dict[str, Any]]]] = {}
     failures: dict[str, str] = {}
-
     async with anyio.create_task_group() as task_group:
         for assignment in assignments:
             scope_note = (
@@ -1000,7 +1006,9 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
             ) -> None:
                 descriptor = f"audit-{current.category}-{current.group.name}"
                 async with limiter:
-                    async with maybe_fork(recorder, descriptor):
+                    async with maybe_fork(
+                        recorder, descriptor, dispatch=dispatch
+                    ):
                         try:
                             output, _, _ = await run_agent(
                                 backend,
@@ -1008,9 +1016,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                                 task_prompt,
                                 phase=DaydreamPhase.AUDIT,
                                 output_schema=(
-                                    _schema_with_provenance(
-                                        AUDIT_FINDINGS_SCHEMA,
-                                    )
+                                    _schema_with_provenance(AUDIT_FINDINGS_SCHEMA)
                                     if branch_focus
                                     else AUDIT_FINDINGS_SCHEMA
                                 ),
@@ -1034,9 +1040,59 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                             )
 
             task_group.start_soon(_task)
+    return results, failures
 
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.AUDIT)
+
+async def _step_audit(ctx: FlowContext) -> Stop | None:
+    """Run tier-driven category audits and persist grounded findings."""
+    directory: Path = ctx.data["improve_dir"]
+    tier: EffortTier = ctx.data["effort_tier"]
+    services: list[Service] = ctx.data["services"]
+    partitions: list[Partition] = ctx.data["partitions"]
+    groups: list[PartitionGroup] = ctx.data["partition_groups"]
+    categories = resolve_categories(tier, ctx.config.improve_focus)
+    branch_focus = ctx.config.improve_focus == "branch"
+    assignments = _audit_assignments(categories, groups)
+    backend = ctx.backend_for("audit")
+    recorder = get_current_recorder()
+    limiter = anyio.CapacityLimiter(
+        effective_fanout_concurrency(tier.max_concurrency, backend)
+    )
+    descriptors = tuple(
+        f"audit-{assignment.category}-{assignment.group.name}"
+        for assignment in assignments
+    )
+    async with phase_scope(DaydreamPhase.AUDIT) as phase:
+        async with dispatch_scope(
+            recorder, phase=DaydreamPhase.AUDIT, descriptors=descriptors
+        ) as dispatch:
+            results, failures = await _run_audit_assignments(
+                ctx,
+                assignments=assignments,
+                branch_focus=branch_focus,
+                backend=backend,
+                recorder=recorder,
+                limiter=limiter,
+                dispatch=dispatch,
+            )
+            if failures:
+                all_failed = len(failures) == len(assignments)
+                status = (
+                    LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL
+                )
+                reason = (
+                    LifecycleReasonCode.ALL_CHILDREN_FAILED
+                    if all_failed
+                    else LifecycleReasonCode.SOME_CHILDREN_FAILED
+                )
+                if dispatch is not None:
+                    dispatch.finish(status, reason)
+                phase.finish(status, reason)
+            elif not assignments:
+                phase.finish(
+                    LifecycleStatus.SKIPPED,
+                    LifecycleReasonCode.NO_ELIGIBLE_WORK,
+                )
 
     if assignments and len(failures) == len(assignments):
         print_error(
@@ -1297,74 +1353,111 @@ async def _step_vet(ctx: FlowContext) -> None:
     results: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = [
         ([], []) for _ in batches
     ]
+    failed_slots: set[int] = set()
 
-    async with anyio.create_task_group() as task_group:
-        for index, (category, batch) in enumerate(batches):
-            indexed = [
-                {**finding, "vet_id": vet_id}
-                for vet_id, finding in enumerate(batch, start=1)
-            ]
-            prompt = ctx.registry.prompt("vet")(
-                strategy=ctx.strategy("improve.vetting"),
-                findings=indexed,
-                cwd=_audit_repo(ctx),
-            )
-            if branch_focus:
-                prompt += (
-                    "\nConfirm each candidate's branch provenance against this "
-                    "merge-base diff. Return `provenance` as `introduced` only "
-                    "when the diff supports that conclusion; otherwise return "
-                    "`inherited`.\n```diff\n"
-                    f"{ctx.data['branch_diff']}\n```"
+    descriptors = tuple(
+        f"vet-{category}-{index:02d}"
+        for index, (category, _batch) in enumerate(batches)
+    )
+    async with phase_scope(DaydreamPhase.VET) as phase:
+        async with dispatch_scope(
+            recorder, phase=DaydreamPhase.VET, descriptors=descriptors
+        ) as dispatch:
+            async with anyio.create_task_group() as task_group:
+                for index, (category, batch) in enumerate(batches):
+                    indexed = [
+                        {**finding, "vet_id": vet_id}
+                        for vet_id, finding in enumerate(batch, start=1)
+                    ]
+                    prompt = ctx.registry.prompt("vet")(
+                        strategy=ctx.strategy("improve.vetting"),
+                        findings=indexed,
+                        cwd=_audit_repo(ctx),
+                    )
+                    if branch_focus:
+                        prompt += (
+                            "\nConfirm each candidate's branch provenance against this "
+                            "merge-base diff. Return `provenance` as `introduced` only "
+                            "when the diff supports that conclusion; otherwise return "
+                            "`inherited`.\n```diff\n"
+                            f"{ctx.data['branch_diff']}\n```"
+                        )
+
+                    async def _task(
+                        slot: int = index,
+                        descriptor: str = f"vet-{category}-{index:02d}",
+                        batch_findings: list[dict[str, Any]] = batch,
+                        task_prompt: str = prompt,
+                    ) -> None:
+                        async with limiter:
+                            async with maybe_fork(
+                                recorder, descriptor, dispatch=dispatch
+                            ):
+                                try:
+                                    output, _, _ = await run_agent(
+                                        backend,
+                                        _audit_repo(ctx),
+                                        task_prompt,
+                                        phase=DaydreamPhase.VET,
+                                        output_schema=(
+                                            _schema_with_provenance(VET_SCHEMA)
+                                            if branch_focus
+                                            else VET_SCHEMA
+                                        ),
+                                        read_only=True,
+                                        persist_session=False,
+                                    )
+                                except Exception:  # noqa: BLE001 - no verdict fails closed
+                                    output = {}
+                                    failed_slots.add(slot)
+                                safe_output = _redact_model_value(output)
+                                verdicts = (
+                                    safe_output.get("verdicts", [])
+                                    if isinstance(safe_output, dict)
+                                    and isinstance(safe_output.get("verdicts"), list)
+                                    else []
+                                )
+                                verdict_ids = {
+                                    verdict.get("vet_id")
+                                    for verdict in verdicts
+                                    if isinstance(verdict, dict)
+                                    and type(verdict.get("vet_id")) is int
+                                }
+                                if verdict_ids != set(
+                                    range(1, len(batch_findings) + 1)
+                                ):
+                                    failed_slots.add(slot)
+                                results[slot] = _apply_vet_verdicts(
+                                    batch_findings,
+                                    verdicts,
+                                    rejected_at_sha=ctx.work.head_sha,
+                                    repo=_audit_repo(ctx),
+                                    default_provenance=(
+                                        "inherited" if branch_focus else None
+                                    ),
+                                    services=ctx.data["services"],
+                                    partitions=ctx.data["partitions"],
+                                )
+
+                    task_group.start_soon(_task)
+            if failed_slots:
+                all_failed = len(failed_slots) == len(batches)
+                status = (
+                    LifecycleStatus.FAILED if all_failed else LifecycleStatus.PARTIAL
                 )
-
-            async def _task(
-                slot: int = index,
-                descriptor: str = f"vet-{category}-{index:02d}",
-                batch_findings: list[dict[str, Any]] = batch,
-                task_prompt: str = prompt,
-            ) -> None:
-                async with limiter:
-                    async with maybe_fork(recorder, descriptor):
-                        try:
-                            output, _, _ = await run_agent(
-                                backend,
-                                _audit_repo(ctx),
-                                task_prompt,
-                                phase=DaydreamPhase.VET,
-                                output_schema=(
-                                    _schema_with_provenance(VET_SCHEMA)
-                                    if branch_focus
-                                    else VET_SCHEMA
-                                ),
-                                read_only=True,
-                                persist_session=False,
-                            )
-                        except Exception:  # noqa: BLE001 - no verdict fails closed
-                            output = {}
-                        safe_output = _redact_model_value(output)
-                        verdicts = (
-                            safe_output.get("verdicts", [])
-                            if isinstance(safe_output, dict)
-                            and isinstance(safe_output.get("verdicts"), list)
-                            else []
-                        )
-                        results[slot] = _apply_vet_verdicts(
-                            batch_findings,
-                            verdicts,
-                            rejected_at_sha=ctx.work.head_sha,
-                            repo=_audit_repo(ctx),
-                            default_provenance=(
-                                "inherited" if branch_focus else None
-                            ),
-                            services=ctx.data["services"],
-                            partitions=ctx.data["partitions"],
-                        )
-
-            task_group.start_soon(_task)
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.VET)
+                reason = (
+                    LifecycleReasonCode.ALL_CHILDREN_FAILED
+                    if all_failed
+                    else LifecycleReasonCode.SOME_CHILDREN_FAILED
+                )
+                if dispatch is not None:
+                    dispatch.finish(status, reason)
+                phase.finish(status, reason)
+            elif not batches:
+                phase.finish(
+                    LifecycleStatus.SKIPPED,
+                    LifecycleReasonCode.NO_ELIGIBLE_WORK,
+                )
 
     kept = [finding for batch_kept, _ in results for finding in batch_kept]
     rejected = [
