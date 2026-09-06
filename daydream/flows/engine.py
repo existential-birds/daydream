@@ -27,6 +27,7 @@ from daydream.extensions.api import (
 from daydream.observability.spans import step_scope
 
 if TYPE_CHECKING:
+    from daydream.artifact_visibility import ArtifactSession, PrivateWorkspaceOwner
     from daydream.backends import Backend
     from daydream.extensions.registry import FlowEntry, Registry
     from daydream.review_profile import Pipeline, ResolvedProfile
@@ -55,6 +56,8 @@ class FlowContext:
     data: dict[str, Any] = field(default_factory=dict)
     review_profile: ResolvedProfile | None = None
     audit_workspace: AuditWorkspace | None = None
+    private_workspace_owner: PrivateWorkspaceOwner | None = None
+    artifacts: ArtifactSession | None = None
     _backend_cache: dict[
         tuple[str, str | None, str | None, Path | None], Backend
     ] = field(

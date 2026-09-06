@@ -24,14 +24,17 @@ and run the phase sequence through :func:`daydream.flows.run_flow` against the
 registered flow definition.
 """
 
+import json
 import os
 import sys
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+import anyio
 from rich.markup import escape as escape_markup
 
 from daydream import git_ops, github_app
@@ -42,13 +45,32 @@ from daydream.agent import (
     set_non_interactive,
     set_quiet_mode,
 )
+from daydream.artifact_visibility import (
+    ArtifactDisposition,
+    ArtifactSession,
+    ArtifactVisibilityError,
+    OutputLabel,
+    PrivateRootLocations,
+    PrivateWorkspaceOwner,
+    RoutedDestination,
+    TrajectoryOutputRoute,
+    artifact_dir_for,
+    open_artifact_session,
+    private_root_locations,
+    resolve_private_workspace_owner,
+)
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION_V1,
     AuditIsolationError,
     Backend,
     create_backend,
 )
-from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
+from daydream.config import (
+    EFFORT_TIERS,
+    PHASE_DEFAULT_EFFORT,
+    PHASE_DEFAULT_MODELS,
+    REVIEW_OUTPUT_FILE,
+)
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
 from daydream.extensions import (
@@ -75,6 +97,7 @@ from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     default_trajectory_path,
     get_current_recorder,
@@ -390,6 +413,99 @@ class RunConfig:
     test_command: str | None = None
 
 
+class _RunSnapshotCaptureError(RuntimeError):
+    """A recorder callback supplied malformed run-wide immutable evidence."""
+
+
+@dataclass
+class _RunWriteCapture:
+    """Synchronous, non-raising retention boundary for P07 write snapshots."""
+
+    session_id: str
+    run_flow: DaydreamRunFlow | None = None
+    partial: RunWriteSnapshot | None = None
+    final: RunWriteSnapshot | None = None
+    validation_error: _RunSnapshotCaptureError | None = None
+
+    def retain(
+        self,
+        recorder: TrajectoryRecorder,
+        snapshot: RunWriteSnapshot,
+    ) -> None:
+        try:
+            if recorder.session_id != self.session_id:
+                raise _RunSnapshotCaptureError("recorder session identity mismatch")
+            if self.run_flow is not None and recorder.run_flow is not self.run_flow:
+                raise _RunSnapshotCaptureError("recorder run flow identity mismatch")
+            if snapshot.root_trajectory_id != self.session_id:
+                raise _RunSnapshotCaptureError("snapshot root identity mismatch")
+            if snapshot.status not in ("complete", "partial"):
+                raise _RunSnapshotCaptureError("snapshot write mode is malformed")
+            if type(snapshot.cutoff_at) is not str or not snapshot.cutoff_at:
+                raise _RunSnapshotCaptureError("snapshot cutoff is malformed")
+            roots = 0
+            identities: set[str] = set()
+            for document in snapshot.documents:
+                if (
+                    type(document.trajectory_id) is not str
+                    or not document.trajectory_id
+                    or type(document.json_bytes) is not bytes
+                    or document.trajectory_id in identities
+                ):
+                    raise _RunSnapshotCaptureError("snapshot document is malformed")
+                identities.add(document.trajectory_id)
+                roots += document.trajectory_id == self.session_id
+                payload = json.loads(document.json_bytes)
+                if not isinstance(payload, dict) or (
+                    payload.get("trajectory_id") != document.trajectory_id
+                    or payload.get("session_id") != self.session_id
+                ):
+                    raise _RunSnapshotCaptureError("snapshot document identity is malformed")
+            if roots != 1:
+                raise _RunSnapshotCaptureError("snapshot must contain exactly one root")
+            if snapshot.status == "complete":
+                self.run_flow = recorder.run_flow
+                self.final = snapshot
+                self.validation_error = None
+            else:
+                self.run_flow = recorder.run_flow
+                self.partial = snapshot
+        except Exception as exc:
+            self.validation_error = (
+                exc
+                if isinstance(exc, _RunSnapshotCaptureError)
+                else _RunSnapshotCaptureError(
+                    f"snapshot validation failed ({type(exc).__name__})"
+                )
+            )
+
+
+@dataclass(frozen=True)
+class _RunArtifacts:
+    """One outer host session and its pre-model registered output routes."""
+
+    session: ArtifactSession
+    owner: PrivateWorkspaceOwner
+    trajectory: TrajectoryOutputRoute
+    capture: _RunWriteCapture
+    findings: RoutedDestination | None
+    dump: RoutedDestination | None
+
+    def write_trajectory_document(
+        self,
+        document: TrajectoryDocumentSnapshot,
+        status: Literal["complete", "partial"],
+    ) -> None:
+        """Write through the host sink and retain a closed failure disposition."""
+        try:
+            self.session.write_trajectory_document(self.trajectory, document, status)
+        except Exception as exc:
+            self.capture.validation_error = _RunSnapshotCaptureError(
+                f"trajectory {status} output failed ({type(exc).__name__})"
+            )
+            raise
+
+
 def _make_archive_callback(
     config: RunConfig,
     target_dir: Path,
@@ -426,6 +542,7 @@ def _open_recorder(
     target_dir: Path,
     work: WorkContext | None,
     flow_kind: DaydreamRunFlow,
+    run_artifacts: _RunArtifacts | None = None,
 ) -> TrajectoryRecorder:
     """Construct the run's ``TrajectoryRecorder`` with archival + dump wired in.
 
@@ -437,8 +554,29 @@ def _open_recorder(
     never be silently dropped. Session id and trajectory path are resolved here
     identically for all flows.
     """
-    session_id = str(uuid.uuid4())
-    trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
+    session_id = (
+        str(uuid.uuid4())
+        if run_artifacts is None
+        else run_artifacts.session.layout.session_id
+    )
+    recorder_target = target_dir
+    if run_artifacts is not None:
+        if (
+            work is None
+            or work.source != run_artifacts.owner.source
+            or work.source != run_artifacts.session.provenance.public_source
+            or session_id != run_artifacts.capture.session_id
+            or session_id != run_artifacts.session.provenance.session_id
+        ):
+            raise ArtifactVisibilityError("recorder artifact identity mismatch")
+        recorder_target = work.source
+    trajectory_path = (
+        config.trajectory_path or default_trajectory_path(target_dir, session_id)
+        if run_artifacts is None
+        else run_artifacts.trajectory.full.write_path
+    )
+    if trajectory_path is None:
+        raise ArtifactVisibilityError("trajectory route has no writable destination")
     # Backend identity is resolved in exactly one place,
     # ``_recorder_backend_names`` — see its docstring for the authoritative
     # per-flow phase mapping. Keep the mapping prose there so it cannot drift
@@ -447,7 +585,15 @@ def _open_recorder(
     recorder = TrajectoryRecorder(
         path=trajectory_path,
         run_flow=flow_kind,
-        target_dir=target_dir,
+        target_dir=recorder_target,
+        artifact_run_dir=(
+            run_artifacts.trajectory.run_dir if run_artifacts is not None else None
+        ),
+        document_writer=(
+            run_artifacts.write_trajectory_document
+            if run_artifacts is not None
+            else None
+        ),
         agent_model_name="",
         session_id=session_id,
         explicit_path=config.trajectory_path is not None,
@@ -457,7 +603,11 @@ def _open_recorder(
         review_backend_name=names.backend,
         fix_backend_name=names.fix,
         test_backend_name=names.test,
-        on_write=_make_archive_callback(config, target_dir, work),
+        on_write=(
+            run_artifacts.capture.retain
+            if run_artifacts is not None
+            else _make_archive_callback(config, target_dir, work)
+        ),
     )
     associate_run_trajectory(recorder.session_id)
     return recorder
@@ -912,7 +1062,11 @@ def _run_posts_to_github(config: RunConfig) -> bool:
 # Public entry points
 
 
-async def run(config: RunConfig | None = None) -> int:
+async def run(
+    config: RunConfig | None = None,
+    *,
+    private_roots: PrivateRootLocations | None = None,
+) -> int:
     """Execute a daydream run end-to-end.
 
     Opens the workspace via :func:`open_workspace` and dispatches to the single
@@ -984,6 +1138,14 @@ async def run(config: RunConfig | None = None) -> int:
         print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
         return 1
 
+    invocation_cwd = Path.cwd()
+    try:
+        locations = private_root_locations() if private_roots is None else private_roots
+        private_owner = resolve_private_workspace_owner(target_dir, locations=locations)
+    except ArtifactVisibilityError as exc:
+        print_error(console, "Artifact Storage", str(exc))
+        return 1
+
     # Resolve the active GitHub identity once onto config.identity. Under App
     # credentials this also mints + injects the installation token into every ``gh``
     # subprocess when the selected flow posts; every hard-abort case surfaces as
@@ -1011,7 +1173,13 @@ async def run(config: RunConfig | None = None) -> int:
             observability, registry, flow=config.flow_name or ("shallow" if config.shallow else "deep"),
         ) as observed:
             observed.attrs({"daydream.output_mode": config.output_mode})
-            result = await _run_workspace(config, target_dir, skip_tests=skip_tests)
+            result = await _run_workspace(
+                config,
+                target_dir,
+                skip_tests=skip_tests,
+                private_owner=private_owner,
+                invocation_cwd=invocation_cwd,
+            )
             observed.finish(result)
             return result
     except ObservabilityError as exc:
@@ -1019,7 +1187,79 @@ async def run(config: RunConfig | None = None) -> int:
         return 1
 
 
-async def _run_workspace(config: RunConfig, target_dir: Path, *, skip_tests: bool) -> int:
+def _absolute_output_path(path: str | Path, *, invocation_cwd: Path) -> Path:
+    requested = Path(path)
+    if requested.is_absolute():
+        return requested
+    return Path(os.path.abspath(invocation_cwd / requested))
+
+
+def _finalize_run_artifacts(
+    run_artifacts: _RunArtifacts,
+    *,
+    selected: RunWriteSnapshot,
+    config: RunConfig,
+    work: WorkContext,
+    successful: bool,
+) -> Exception | None:
+    """Freeze, strictly archive, and publish one joined run on a worker thread."""
+    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
+
+    if run_artifacts.capture.run_flow is None:
+        raise ArtifactVisibilityError("run flow provenance was not retained")
+    snapshot = run_artifacts.session.freeze(selected)
+    recorder_provenance = archive_recorder_provenance_from_snapshot(
+        write_snapshot=selected,
+        run_flow=run_artifacts.capture.run_flow,
+    )
+    dump_path = (
+        run_artifacts.session.finalization_merge_path(
+            run_artifacts.dump,
+            snapshot=snapshot,
+        )
+        if run_artifacts.dump is not None
+        else None
+    )
+    archive_error: Exception | None = None
+    try:
+        finalize_archive_run(
+            recorder_provenance=recorder_provenance,
+            artifacts=snapshot,
+            artifact_provenance=run_artifacts.session.provenance,
+            config=config,
+            write_snapshot=selected,
+            work=work,
+            upload=successful,
+            dump_path=dump_path,
+        )
+    except ArchiveFinalizationError as exc:
+        archive_error = exc
+    if archive_error is not None:
+        disposition = ArtifactDisposition.ROLLBACK
+    elif successful:
+        disposition = ArtifactDisposition.COMPLETE
+    else:
+        disposition = ArtifactDisposition.PARTIAL_EVIDENCE
+    try:
+        run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
+    except Exception as exc:
+        if archive_error is not None:
+            exc.add_note(
+                f"strict archive finalization also failed ({type(archive_error).__name__})"
+            )
+        raise
+    return archive_error
+
+
+async def _run_workspace(
+    config: RunConfig,
+    target_dir: Path,
+    *,
+    skip_tests: bool,
+    private_owner: PrivateWorkspaceOwner,
+    invocation_cwd: Path,
+) -> int:
     """Keep workspace errors inside the run span so returned failures are recorded."""
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
     # ``NotAWorktreeError`` (a ``GitError``) caught below — a loud error instead of
@@ -1033,13 +1273,135 @@ async def _run_workspace(config: RunConfig, target_dir: Path, *, skip_tests: boo
             extra_copy=config.extra_copy,
             skip_tests=skip_tests,
             allow_unborn=config.flow_name == "improve",
+            private_owner=private_owner,
         ) as work:
-            return await _dispatch(work, config)
+            session_id = str(uuid.uuid4())
+            async with open_artifact_session(
+                work,
+                session_id=session_id,
+                owner=private_owner,
+            ) as artifacts:
+                artifacts.register_destination(
+                    work.source / ".daydream",
+                    label=OutputLabel.PUBLIC_DAYDREAM,
+                )
+                artifacts.register_destination(
+                    work.source / REVIEW_OUTPUT_FILE,
+                    label=OutputLabel.PUBLIC_REVIEW_OUTPUT,
+                )
+                trajectory = artifacts.register_trajectory_output(
+                    None
+                    if config.trajectory_path is None
+                    else _absolute_output_path(
+                        config.trajectory_path,
+                        invocation_cwd=invocation_cwd,
+                    )
+                )
+                findings = (
+                    artifacts.register_destination(
+                        _absolute_output_path(
+                            config.findings_out,
+                            invocation_cwd=invocation_cwd,
+                        ),
+                        label=OutputLabel.FINDINGS_OUTPUT,
+                    )
+                    if config.findings_out is not None
+                    else None
+                )
+                dump = (
+                    artifacts.register_destination(
+                        _absolute_output_path(
+                            config.dump_artifacts,
+                            invocation_cwd=invocation_cwd,
+                        ),
+                        label=OutputLabel.DUMP_DIRECTORY,
+                    )
+                    if config.dump_artifacts is not None
+                    else None
+                )
+                capture = _RunWriteCapture(session_id=session_id)
+                run_artifacts = _RunArtifacts(
+                    session=artifacts,
+                    owner=private_owner,
+                    trajectory=trajectory,
+                    capture=capture,
+                    findings=findings,
+                    dump=dump,
+                )
+                dispatch_config = (
+                    replace(config, findings_out=str(findings.write_path))
+                    if findings is not None
+                    else config
+                )
+                primary: BaseException | None = None
+                primary_traceback = None
+                result = 1
+                try:
+                    result = await _dispatch(work, dispatch_config, run_artifacts)
+                except BaseException as exc:
+                    primary = exc
+                    primary_traceback = exc.__traceback__
+
+                selected = (
+                    capture.final
+                    if capture.validation_error is None and capture.final is not None
+                    else capture.partial
+                )
+                finalization_error: Exception | None = capture.validation_error
+                if selected is not None:
+                    successful = primary is None and result == 0 and finalization_error is None
+                    try:
+                        with anyio.CancelScope(shield=True):
+                            archive_error = await anyio.to_thread.run_sync(
+                                partial(
+                                    _finalize_run_artifacts,
+                                    run_artifacts,
+                                    selected=selected,
+                                    config=dispatch_config,
+                                    work=work,
+                                    successful=successful,
+                                )
+                            )
+                        if archive_error is not None:
+                            finalization_error = archive_error
+                    except BaseException as exc:
+                        if primary is None:
+                            raise
+                        primary.add_note(
+                            "artifact finalization retained a secondary base failure "
+                            f"({type(exc).__name__})"
+                        )
+
+                if primary is not None:
+                    if (
+                        isinstance(primary, SystemExit)
+                        and primary.code == 2
+                        and capture.validation_error is not None
+                    ):
+                        print_error(
+                            console,
+                            "Artifact Finalization",
+                            str(capture.validation_error),
+                        )
+                        return 1
+                    if finalization_error is not None:
+                        primary.add_note(
+                            "artifact finalization retained a closed failure "
+                            f"({type(finalization_error).__name__})"
+                        )
+                    raise primary.with_traceback(primary_traceback)
+                if finalization_error is not None:
+                    print_error(console, "Artifact Finalization", str(finalization_error))
+                    return 1
+                return result
     except git_ops.WrongBranchError:
         # Propagate to ``cli.main`` for the actionable error panel.
         raise
     except git_ops.GitError as exc:
         print_error(console, "Workspace Error", str(exc))
+        return 1
+    except ArtifactVisibilityError as exc:
+        print_error(console, "Artifact Storage", str(exc))
         return 1
     except ExtensionError as exc:
         # ``run_flow``'s pre-flight resolve pass raises ``UnresolvedExtensionError``
@@ -1082,7 +1444,11 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
 _DEEP_FLOW_ALIASES = ("review", "shallow", "deep")
 
 
-async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
+async def _dispatch_selected_flow(
+    work: WorkContext,
+    config: RunConfig,
+    run_artifacts: _RunArtifacts | None = None,
+) -> int:
     """Route an explicit ``--flow <name>`` selection.
 
     ``review`` / ``shallow`` / ``deep`` route to the single deep flow (as
@@ -1101,14 +1467,14 @@ async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
     if name in _DEEP_FLOW_ALIASES:
         if name in ("shallow", "deep"):
             _require_reviewable_branch(work, config)
-        return await _run_loop_deep(work, config)
+        return await _run_loop_deep(work, config, run_artifacts)
     if name == "improve":
-        return await _run_improve(work, config)
+        return await _run_improve(work, config, run_artifacts)
 
     # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
     # by run()'s Extension Error panel (exit 1). Do not swallow it here.
     get_registry().flow(name)
-    return await _run_custom_flow(work, config)
+    return await _run_custom_flow(work, config, run_artifacts)
 
 
 def _verify_approved_head(work: WorkContext, config: RunConfig) -> int:
@@ -1124,7 +1490,11 @@ def _verify_approved_head(work: WorkContext, config: RunConfig) -> int:
     return 1
 
 
-async def _dispatch(work: WorkContext, config: RunConfig) -> int:
+async def _dispatch(
+    work: WorkContext,
+    config: RunConfig,
+    run_artifacts: _RunArtifacts | None = None,
+) -> int:
     """Verify the approved head, then route to the resolved flow.
 
     Every PR-process mode routes to :func:`_run_loop_deep` (which delegates to
@@ -1145,25 +1515,25 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
     if work.is_unborn:
         if config.flow_name != "improve" or config.approved_head_sha is not None:
             raise GitError("unborn checkout cannot satisfy a commit-anchored review")
-        return await _run_improve(work, config)
+        return await _run_improve(work, config, run_artifacts)
     head_status = _verify_approved_head(work, config)
     if head_status != 0:
         return head_status
 
     if config.flow_name is not None:
-        return await _dispatch_selected_flow(work, config)
+        return await _dispatch_selected_flow(work, config, run_artifacts)
 
     # ``diagram`` joins comment/review in skipping ``_require_reviewable_branch``:
     # it neither fixes nor commits, so a base-branch invocation is a legitimate
     # (if empty) request rather than a ``WrongBranchError``.
     if config.output_mode in ("comment", "review", "diagram"):
-        return await _run_loop_deep(work, config)
+        return await _run_loop_deep(work, config, run_artifacts)
 
     # output_mode == "loop" (default deep) and --shallow both fix against a
     # base branch, so both must refuse to review the base branch against
     # itself (the guard was shared by loop + shallow pre-collapse, #330).
     _require_reviewable_branch(work, config)
-    return await _run_loop_deep(work, config)
+    return await _run_loop_deep(work, config, run_artifacts)
 
 
 def _emit_diagram_findings(
@@ -1284,7 +1654,7 @@ def _write_findings_for_parsed(
     except FindingsValidationError as exc:
         print_error(console, "Findings Artifact", str(exc))
         return 1
-    print_success(console, f"Findings artifact written to {out_path}")
+    print_success(console, "Findings artifact prepared.")
     return 0
 
 
@@ -1305,7 +1675,11 @@ def _gather_diff_seed(work: WorkContext, config: RunConfig) -> tuple[str | None,
 # Helper: generic custom flow (--flow <name>)
 
 
-async def _run_improve(work: WorkContext, config: RunConfig) -> int:
+async def _run_improve(
+    work: WorkContext,
+    config: RunConfig,
+    run_artifacts: _RunArtifacts | None = None,
+) -> int:
     """Preamble for the registered repository-wide improve flow."""
     from daydream.improve.artifacts import improve_dir
 
@@ -1335,6 +1709,7 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         target_dir=target_dir,
         work=work,
         flow_kind=DaydreamRunFlow.IMPROVE,
+        run_artifacts=run_artifacts,
     ):
         _resolve_review_profile(config)
         # The standalone snapshot gives improve independent Git storage. The
@@ -1356,6 +1731,10 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
                 registry=get_registry(),
                 review_profile=config.review_profile,
                 audit_workspace=audit,
+                private_workspace_owner=(
+                    run_artifacts.owner if run_artifacts is not None else None
+                ),
+                artifacts=run_artifacts.session if run_artifacts is not None else None,
             )
             ctx.data["audit_repo"] = audit.repo
             ctx.data["improve_dir"] = directory
@@ -1397,7 +1776,11 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
             return await run_flow(ctx.registry, "improve", ctx)
 
 
-async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
+async def _run_custom_flow(
+    work: WorkContext,
+    config: RunConfig,
+    run_artifacts: _RunArtifacts | None = None,
+) -> int:
     """Generic preamble for a fork-registered flow selected via ``--flow``.
 
     Mirrors :func:`_run_review_or_comment`'s diff seed so custom flows composed
@@ -1415,7 +1798,7 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
         print_dim(console, "No diff found — custom flow will run without a diff seed.")
         diff = ""
 
-    daydream_dir = target_dir / ".daydream"
+    daydream_dir = artifact_dir_for(target_dir)
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
@@ -1425,6 +1808,7 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
 
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,
+        run_artifacts=run_artifacts,
     ):
         _resolve_review_profile(config)
         ctx = FlowContext(
@@ -1432,6 +1816,10 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
             work=work,
             registry=get_registry(),
             review_profile=config.review_profile,
+            private_workspace_owner=(
+                run_artifacts.owner if run_artifacts is not None else None
+            ),
+            artifacts=run_artifacts.session if run_artifacts is not None else None,
         )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
         ctx.data["diff"] = diff
@@ -1454,9 +1842,22 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
 # Helper: deep (single-flow dispatch)
 
 
-async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
+async def _run_loop_deep(
+    work: WorkContext,
+    config: RunConfig,
+    run_artifacts: _RunArtifacts | None = None,
+) -> int:
     """Delegate to the deep-mode orchestrator (the only PR-process flow, #330)."""
     from daydream.deep.orchestrator import run_deep
 
     _resolve_review_profile(config)
-    return await run_deep(config, work)
+    if run_artifacts is None:
+        return await run_deep(config, work)
+    return await run_deep(
+        config,
+        work,
+        artifacts=run_artifacts.session,
+        private_owner=run_artifacts.owner,
+        trajectory_route=run_artifacts.trajectory,
+        capture=run_artifacts.capture,
+    )

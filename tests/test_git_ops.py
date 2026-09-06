@@ -1631,6 +1631,36 @@ def test_worktree_add_and_remove_round_trip(tmp_path: Path) -> None:
     assert not wt.exists()
 
 
+def test_worktree_move_preserves_registered_worktree_with_spaces(
+    tmp_path: Path,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    source = tmp_path / "legacy worktree"
+    destination = tmp_path / "private workspaces" / "moved worktree"
+    destination.parent.mkdir()
+    git_ops.worktree_add(repo, source, "main", detach=True)
+
+    git_ops.worktree_move(repo, source, destination)
+
+    assert not source.exists()
+    assert destination.is_dir()
+    assert git_ops.git_common_dir(destination) == git_ops.git_common_dir(repo)
+    porcelain = _git(repo, "worktree", "list", "--porcelain")
+    assert str(destination) in porcelain
+    assert str(source) not in porcelain
+
+
+def test_worktree_move_propagates_git_failure(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    missing = tmp_path / "missing worktree"
+    destination = tmp_path / "destination"
+
+    with pytest.raises(GitError, match="git worktree move"):
+        git_ops.worktree_move(repo, missing, destination)
+
+    assert not destination.exists()
+
+
 # --- branch / commit / push primitives (Task 3) -----------------------------
 
 
@@ -3240,6 +3270,37 @@ def test_worktree_lock_and_lock_mtime_roundtrip(tmp_path: Path) -> None:
 
     git_ops.worktree_unlock(repo, wt)
     assert git_ops.worktree_lock_mtime(repo, wt) is None  # released
+
+
+def test_worktree_lock_mtime_fails_closed_when_exact_worktree_disappears(
+    tmp_path: Path,
+) -> None:
+    """A missing exact worktree is not silently classified as unlocked."""
+    repo = _make_repo_with_main(tmp_path)
+    wt = tmp_path / "linked" / "same"
+    git_ops.worktree_add(repo, wt, "main", detach=True)
+    retained = tmp_path / "moved-outside-git"
+    wt.rename(retained)
+
+    with pytest.raises(GitError, match="Git directory"):
+        git_ops.worktree_lock_mtime(repo, wt)
+
+    assert retained.is_dir()
+    assert (retained / ".git").is_file()
+
+
+def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    wt = tmp_path / "linked" / "same"
+    git_ops.worktree_add(repo, wt, "main", detach=True)
+    locked = git_ops.git_dir(wt) / "locked"
+    locked.mkdir()
+
+    with pytest.raises(GitError, match="lock metadata is unsafe"):
+        git_ops.worktree_lock_mtime(repo, wt)
+
+    assert wt.is_dir()
+    assert locked.is_dir()
 
 
 def test_worktree_remove_unlocked_unlocks_before_removing(tmp_path: Path) -> None:

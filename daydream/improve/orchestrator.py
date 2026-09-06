@@ -1747,7 +1747,10 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         ctx.data["plan_exit_code"] = 1 if selected else 0
         return
     assert ctx.work.head_sha is not None
-    prune_stale_reanchor_worktrees(ctx.work.repo)
+    prune_stale_reanchor_worktrees(
+        ctx.work.repo,
+        private_workspace_owner=ctx.private_workspace_owner,
+    )
     backend = ctx.backend_for("plan_write")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
@@ -1766,6 +1769,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         planned_at=planned_at,
         non_interactive_default=(ctx.data["selection_mode"] in {"non-interactive-default", "automatic-publishing"}),
         run_session_id=_run_session_id(),
+        private_workspace_owner=ctx.private_workspace_owner,
     )
     # Numbers are claimed here, in selection order, before any writer runs, so
     # a plan's number never depends on which writer finishes first.

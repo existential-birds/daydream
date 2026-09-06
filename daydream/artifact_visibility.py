@@ -22,8 +22,11 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
+
+import anyio
 
 from daydream import git_ops
 
@@ -4746,6 +4749,28 @@ def _open_layout(
         raise
 
 
+def _close_artifact_session(session: ArtifactSession) -> None:
+    """Reconcile and close one acquired session on a blocking worker thread."""
+    primary: BaseException | None = None
+    try:
+        if session._state == "publishing":
+            _recover_transactions(session.layout.state_root, session.layout.source)
+        elif session._state not in ("published", "closed"):
+            session._restore_prior()
+    except BaseException as exc:
+        primary = exc
+    try:
+        session._close()
+    except BaseException as close_error:
+        if primary is None:
+            raise
+        primary.add_note(
+            f"artifact session close failed ({type(close_error).__name__})"
+        )
+    if primary is not None:
+        raise primary
+
+
 @asynccontextmanager
 async def open_artifact_session(
     work: WorkContext,
@@ -4753,19 +4778,19 @@ async def open_artifact_session(
     session_id: str,
     owner: PrivateWorkspaceOwner,
 ) -> AsyncIterator[ArtifactSession]:
-    layout, lock_fd, repo_fd, source_fd, canonical_entries, detach_transaction = _open_layout(
-        work,
-        session_id,
-        owner,
-    )
-    session = ArtifactSession(
-        layout,
-        lock_fd=lock_fd,
-        repo_fd=repo_fd,
-        source_fd=source_fd,
-        canonical_entries=canonical_entries,
-        detach_transaction=detach_transaction,
-    )
+    with anyio.CancelScope(shield=True):
+        acquired = await anyio.to_thread.run_sync(
+            partial(_open_layout, work, session_id, owner),
+        )
+        layout, lock_fd, repo_fd, source_fd, canonical_entries, detach_transaction = acquired
+        session = ArtifactSession(
+            layout,
+            lock_fd=lock_fd,
+            repo_fd=repo_fd,
+            source_fd=source_fd,
+            canonical_entries=canonical_entries,
+            detach_transaction=detach_transaction,
+        )
     token = _SESSION.set(session)
     primary: BaseException | None = None
     try:
@@ -4775,11 +4800,9 @@ async def open_artifact_session(
         raise
     finally:
         try:
-            if session._state == "publishing":
-                _recover_transactions(session.layout.state_root, session.layout.source)
-            elif session._state not in ("published", "closed"):
-                session._restore_prior()
-        except Exception as recovery_error:
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(_close_artifact_session, session)
+        except BaseException as recovery_error:
             if primary is None:
                 raise
             primary.add_note(
@@ -4787,11 +4810,3 @@ async def open_artifact_session(
             )
         finally:
             _SESSION.reset(token)
-            try:
-                session._close()
-            except Exception as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    f"artifact session close failed ({type(close_error).__name__})"
-                )

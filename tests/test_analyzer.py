@@ -1119,6 +1119,51 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(
     assert quality["erosion"] == pytest.approx(expected)
 
 
+def test_analyze_session_reads_quality_from_explicit_code_workspace(
+    tmp_path: Path,
+) -> None:
+    """Frozen artifact inputs and post-fix source quality use distinct roots."""
+    from daydream.artifact_visibility import ArtifactEvidenceProvenance
+
+    artifacts = tmp_path / "frozen"
+    daydream_dir = artifacts / ".daydream"
+    run_dir = daydream_dir / "runs" / "quality-split"
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.6",
+                "session_id": "quality-split",
+                "agent": {"name": "daydream", "model_name": "test"},
+                "steps": [],
+            }
+        )
+    )
+    code_workspace = _quality_workspace(
+        tmp_path,
+        {"app.py": "def changed(x):\n    return x + 1\n"},
+        name="operational",
+    )
+    public_source = tmp_path / "public-source"
+    provenance = ArtifactEvidenceProvenance(
+        workspace_key="workspace",
+        session_id="quality-split",
+        public_source=public_source,
+        live_components=tuple((tmp_path / "live").parts),
+    )
+
+    result = analyze_session(
+        daydream_dir,
+        session_id="quality-split",
+        artifact_provenance=provenance,
+        code_workspace=code_workspace,
+    )
+
+    assert result["quality"]["scoped_files"] == 1
+    assert list(result["quality"]["per_file"]) == ["app.py"]
+    assert result["daydream_dir"] == str(public_source / ".daydream")
+
+
 # --- review round 1 fix regressions (#316) ---
 
 

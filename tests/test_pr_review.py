@@ -38,6 +38,36 @@ gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed
 SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
 
 
+def test_resolve_trajectory_paths_uses_private_artifact_run_for_siblings(
+    tmp_path: Path,
+) -> None:
+    """Renderer discovery follows the recorder route, not the model checkout."""
+    from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
+
+    private_run = tmp_path / "private" / "runs" / "session"
+    sibling_dir = private_run / "trajectories"
+    sibling_dir.mkdir(parents=True)
+    sibling = sibling_dir / "review.json"
+    sibling.write_text("{}", encoding="utf-8")
+    public_decoy = tmp_path / "source" / ".daydream" / "runs" / "session" / "trajectories"
+    public_decoy.mkdir(parents=True)
+    (public_decoy / "decoy.json").write_text("{}", encoding="utf-8")
+    recorder = TrajectoryRecorder(
+        path=private_run / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path / "source",
+        artifact_run_dir=private_run,
+        agent_model_name="test",
+        session_id="session",
+    )
+
+    paths, cleanup = pr_review._resolve_trajectory_paths(recorder)
+
+    assert cleanup is None
+    assert paths == [sibling]
+    assert all("decoy" not in path.name for path in paths)
+
+
 def test_finding_and_summary_markdown_is_byte_stable() -> None:
     i = ParsedIssue(path="a.py", line=3, title="T", body="B rationale",
                     severity="high", confidence="HIGH", fingerprint="a" * 64)

@@ -11,6 +11,8 @@ Usage::
     report = analyze_session(Path("/path/to/.daydream"))
 """
 
+from __future__ import annotations
+
 import json
 import math
 import re
@@ -19,7 +21,7 @@ from collections import Counter
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal
 
 from daydream._tree_sitter_safety import (
     TreeSitterBadVersionError,
@@ -28,6 +30,9 @@ from daydream._tree_sitter_safety import (
 from daydream.generated_files import is_generated_file
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.timeutil import parse_iso_timestamp
+
+if TYPE_CHECKING:
+    from daydream.artifact_visibility import ArtifactEvidenceProvenance
 
 # Trajectory loading
 
@@ -2445,17 +2450,21 @@ def _aggregate_per_file(
 
 
 def analyze_quality(
-    daydream_dir: str | Path, candidate_paths: set[str] | None = None
+    daydream_dir: str | Path,
+    candidate_paths: set[str] | None = None,
+    *,
+    code_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Structural erosion and verbosity of the post-fix workspace (issue #316).
 
     Computes SlopCodeBench-style metrics (arXiv:2603.24755) over every scoped
-    ``*.py`` file in ``daydream_dir.parent`` — the live reviewed tree at eval
-    time, after daydream's fix phase ran. Pure and deterministic: no backend,
-    no network, no randomness. A file whose tree-sitter parse fails is counted
-    in ``scoped_files`` but excluded from the aggregates and from the
-    cross-file clone index, so malformed source never shifts valid files'
-    verbosity (Finding #1).
+    ``*.py`` file in ``code_workspace`` when supplied, otherwise over the
+    legacy ``daydream_dir.parent`` workspace. The explicit root keeps immutable
+    artifact inputs separate from the live post-fix code tree. Pure and
+    deterministic: no backend, no network, no randomness. A file whose
+    tree-sitter parse fails is counted in ``scoped_files`` but excluded from
+    the aggregates and from the cross-file clone index, so malformed source
+    never shifts valid files' verbosity (Finding #1).
 
     *candidate_paths* (issue #457) opt-in scopes the parse, per-file metrics,
     totals, and scoped-file count to the exact workspace-relative ``*.py``
@@ -2485,7 +2494,7 @@ def analyze_quality(
             even when no file would be parsed.
     """
     daydream_dir = Path(daydream_dir)
-    workspace = daydream_dir.parent
+    workspace = daydream_dir.parent if code_workspace is None else code_workspace
 
     # Single shared choke point for every native-analysis entry point (mirrors
     # ``detect_affected_files``): a known-bad installed tree-sitter raises
@@ -2581,6 +2590,8 @@ def analyze_session(
     session_id: str | None = None,
     *,
     frozen_trajectories: dict[str, Any] | None = None,
+    artifact_provenance: ArtifactEvidenceProvenance | None = None,
+    code_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Run full quantitative analysis on a .daydream directory.
 
@@ -2594,8 +2605,20 @@ def analyze_session(
         daydream_dir: Path to the ``.daydream`` directory from a completed run.
         session_id: Optional session ID (or prefix) to analyze. Defaults to the
             most recent session.
+        frozen_trajectories: Optional immutable trajectory payloads supplied by
+            strict host finalization instead of loading mutable files.
+        artifact_provenance: Optional trusted source identity. When present,
+            the result displays its public ``.daydream`` path without exposing
+            the private frozen artifact root.
+        code_workspace: Optional live post-fix workspace used only by structural
+            quality analysis. Other analyzer inputs remain under ``daydream_dir``.
     """
     daydream_dir = Path(daydream_dir)
+    display_daydream_dir = (
+        daydream_dir
+        if artifact_provenance is None
+        else artifact_provenance.public_source / ".daydream"
+    )
     trajectories = (
         frozen_trajectories
         if frozen_trajectories is not None
@@ -2627,7 +2650,7 @@ def analyze_session(
         trajectories, findings_data["findings"], grounding,
     )
     try:
-        quality = analyze_quality(daydream_dir)
+        quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
     except TreeSitterBadVersionError as exc:
         # issue #1087: a known-bad tree-sitter install refuses native analysis
         # (assert_tree_sitter_safe at analyze_quality entry). Degrade only the
@@ -2656,7 +2679,7 @@ def analyze_session(
     result: dict[str, Any] = {
         "session_id": session_id,
         "agent": agent_info,
-        "daydream_dir": str(daydream_dir),
+        "daydream_dir": str(display_daydream_dir),
         "trajectory_count": len(_all_trajectories(trajectories)),
         "cost": costs,
         "timing": timing,

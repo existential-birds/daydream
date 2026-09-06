@@ -206,8 +206,13 @@ from daydream.ui import (
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
+    from daydream.artifact_visibility import (
+        ArtifactSession,
+        PrivateWorkspaceOwner,
+        TrajectoryOutputRoute,
+    )
     from daydream.remote_ci import RemoteCITarget, RemoteCIVerdict
-    from daydream.runner import RunConfig
+    from daydream.runner import RunConfig, _RunWriteCapture
     from daydream.trajectory import DispatchHandle, PhaseScopeHandle, TrajectoryRecorder
 
 # Exploration infrastructure import guard. Deep mode still runs without
@@ -5468,7 +5473,15 @@ DIAGRAM_STEPS: tuple[FlowStep, ...] = (
 )
 
 
-async def run_deep(config: RunConfig, work: WorkContext) -> int:
+async def run_deep(
+    config: RunConfig,
+    work: WorkContext,
+    *,
+    artifacts: ArtifactSession | None = None,
+    private_owner: PrivateWorkspaceOwner | None = None,
+    trajectory_route: TrajectoryOutputRoute | None = None,
+    capture: _RunWriteCapture | None = None,
+) -> int:
     """Execute the deep-review pipeline (D-07) across every PR-process mode.
 
     The single ``deep`` flow (#330) handles ``review`` and ``comment`` through
@@ -5491,7 +5504,20 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         Exit code (0 on success, 1 on failure).
     """
     mode = _resolve_mode(config)
-    return await _run_review_spine(config, work, mode)
+    supplied = (artifacts, private_owner, trajectory_route, capture)
+    if any(value is not None for value in supplied) and any(
+        value is None for value in supplied
+    ):
+        raise ValueError("deep artifact composition must be supplied as one unit")
+    return await _run_review_spine(
+        config,
+        work,
+        mode,
+        artifacts=artifacts,
+        private_owner=private_owner,
+        trajectory_route=trajectory_route,
+        capture=capture,
+    )
 
 
 def _collapse_stacks_for_shallow(
@@ -5550,7 +5576,16 @@ def _collapse_stacks_for_shallow(
     return [*structural, combined], True
 
 
-async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> int:
+async def _run_review_spine(
+    config: RunConfig,
+    work: WorkContext,
+    mode: str,
+    *,
+    artifacts: ArtifactSession | None,
+    private_owner: PrivateWorkspaceOwner | None,
+    trajectory_route: TrajectoryOutputRoute | None,
+    capture: _RunWriteCapture | None,
+) -> int:
     """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
@@ -5562,6 +5597,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         _default_backend_name,
         _open_recorder,
         _resolve_review_profile,
+        _RunArtifacts,
     )
 
     # Cache one Backend instance per (backend_name, resolved_model, resolved_effort)
@@ -5622,8 +5658,27 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         dd.mkdir(parents=True, exist_ok=True)
         diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
 
+    run_artifacts = (
+        _RunArtifacts(
+            session=artifacts,
+            owner=private_owner,
+            trajectory=trajectory_route,
+            capture=capture,
+            findings=None,
+            dump=None,
+        )
+        if artifacts is not None
+        and private_owner is not None
+        and trajectory_route is not None
+        and capture is not None
+        else None
+    )
     async with _open_recorder(
-        config=config, target_dir=target_dir, work=work, flow_kind=_flow_kind_for_mode(mode),
+        config=config,
+        target_dir=target_dir,
+        work=work,
+        flow_kind=_flow_kind_for_mode(mode),
+        run_artifacts=run_artifacts,
     ):
         # Composition-root re-entry: resolution already happened in
         # ``_run_loop_deep`` before this recorder existed; this no-op resolve
@@ -5800,6 +5855,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
             work=work,
             registry=get_registry(),
             review_profile=config.review_profile,
+            private_workspace_owner=private_owner,
+            artifacts=artifacts,
             data={
                 "mode": mode,
                 "diff": bounded_diff,

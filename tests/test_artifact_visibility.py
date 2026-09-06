@@ -1086,6 +1086,45 @@ async def test_artifact_session_resets_binding_after_error_or_cancellation(
     assert artifact_dir_for(work.repo) == source / ".daydream"
 
 
+async def test_artifact_session_open_and_recovery_run_off_async_owner_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocking Git/copy/fsync lifecycle work is awaited outside the event loop."""
+    source = tmp_path / "source"
+    _init_repo(source)
+    owner_thread = threading.get_ident()
+    open_threads: list[int] = []
+    restore_threads: list[int] = []
+    original_open = artifact_visibility._open_layout
+    original_restore = artifact_visibility.ArtifactSession._restore_prior
+
+    def observed_open(*args: Any, **kwargs: Any) -> Any:
+        open_threads.append(threading.get_ident())
+        return original_open(*args, **kwargs)
+
+    def observed_restore(session: Any) -> None:
+        restore_threads.append(threading.get_ident())
+        original_restore(session)
+
+    monkeypatch.setattr(artifact_visibility, "_open_layout", observed_open)
+    monkeypatch.setattr(
+        artifact_visibility.ArtifactSession,
+        "_restore_prior",
+        observed_restore,
+    )
+
+    async with open_artifact_session(
+        _work(source),
+        session_id="threaded-lifecycle",
+    ):
+        assert artifact_dir_for(source) != source / ".daydream"
+
+    assert open_threads and all(thread != owner_thread for thread in open_threads)
+    assert restore_threads and all(thread != owner_thread for thread in restore_threads)
+    assert artifact_dir_for(source) == source / ".daydream"
+
+
 @pytest.mark.parametrize("tracked", [".daydream/tracked.txt", ".review-output.md"])
 async def test_artifact_session_rejects_tracked_public_collision_untouched(
     tmp_path: Path,

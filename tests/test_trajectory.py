@@ -2677,6 +2677,117 @@ async def test_remote_ci_host_phases_record_exact_terminal_reasons(
     assert all(event["metadata"]["duration_ms"] >= 0 for event in ends)
 
 
+async def test_artifact_document_writer_precedes_root_capture_and_is_inherited_by_fork(
+    tmp_path: Path,
+) -> None:
+    """The host sink owns root/child bytes while P07 keeps one pure root callback."""
+    private_run = tmp_path / "private" / "runs" / "test"
+    writes: list[tuple[str, str, Path, bytes]] = []
+    callbacks: list[Any] = []
+    callback_contexts: list[TrajectoryRecorder | None] = []
+
+    def writer(document: Any, status: str) -> None:
+        writes.append((document.trajectory_id, status, document.path, document.json_bytes))
+
+    def capture(recorder: TrajectoryRecorder, snapshot: Any) -> None:
+        callback_contexts.append(get_current_recorder())
+        callbacks.append((recorder, snapshot, tuple(writes)))
+
+    recorder = TrajectoryRecorder(
+        path=private_run / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        artifact_run_dir=private_run,
+        document_writer=writer,
+        agent_model_name="test",
+        session_id="test",
+        on_write=capture,
+    )
+    async with recorder:
+        async with recorder.fork("child") as child:
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                observe_text_and_result(invocation, "child")
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            observe_text_and_result(invocation, "root")
+
+    assert [item[:2] for item in writes] == [
+        ("test:child", "complete"),
+        ("test", "complete"),
+    ]
+    assert writes[0][2].parent == private_run / "trajectories"
+    assert callbacks and callbacks[0][0] is recorder
+    assert callback_contexts == [recorder]
+    assert get_current_recorder() is None
+    snapshot = callbacks[0][1]
+    assert snapshot.status == "complete"
+    assert [document.trajectory_id for document in snapshot.documents] == [
+        "test",
+        "test:child",
+    ]
+    assert [item[0] for item in callbacks[0][2]] == ["test:child", "test"]
+    assert not recorder.path.exists()
+
+
+async def test_artifact_partial_writer_failure_still_delivers_immutable_capture(
+    tmp_path: Path,
+) -> None:
+    """A failed live partial write cannot erase the already prepared P07 bytes."""
+    captured: list[Any] = []
+
+    def fail_writer(_document: Any, status: str) -> None:
+        assert status == "partial"
+        raise OSError("injected partial output failure")
+
+    recorder = TrajectoryRecorder(
+        path=tmp_path / "private" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        artifact_run_dir=tmp_path / "private",
+        document_writer=fail_writer,
+        agent_model_name="test",
+        session_id="test",
+        on_write=lambda _recorder, snapshot: captured.append(snapshot),
+    )
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            observe_text_and_result(invocation, "partial")
+        recorder.write_partial()
+        recorder.document_writer = None
+
+    assert len(captured) == 2
+    assert captured[0].status == "partial"
+    assert json.loads(captured[0].documents[0].json_bytes)["extra"]["partial"] is True
+
+
+async def test_artifact_final_writer_failure_preserves_existing_primary_exception(
+    tmp_path: Path,
+) -> None:
+    """A secondary explicit-output failure cannot replace the active body error."""
+    primary = RuntimeError("authoritative body failure")
+
+    def fail_writer(_document: Any, _status: str) -> None:
+        raise OSError("secondary output failure")
+
+    recorder = TrajectoryRecorder(
+        path=tmp_path / "explicit.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        document_writer=fail_writer,
+        agent_model_name="test",
+        session_id="test",
+        explicit_path=True,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        async with recorder:
+            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                observe_text_and_result(invocation, "body")
+            raise primary
+
+    assert raised.value is primary
+    assert any("trajectory finalization" in note for note in primary.__notes__)
+
+
 def test_remote_ci_artifact_paths_are_named_under_deep_dir(tmp_path: Path) -> None:
     from daydream.deep.artifacts import (
         push_verdict_path,

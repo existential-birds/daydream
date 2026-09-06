@@ -4,8 +4,8 @@ This module is the single entry point daydream uses to *open* the directory
 it operates on for a single run.  Two modes are supported:
 
 * **In-place** -- daydream operates on the user's checked-out worktree.
-* **Ephemeral** -- daydream creates a detached worktree under
-  ``<source>/.daydream/worktrees/<run_id>`` and removes it on exit.
+* **Ephemeral** -- daydream creates a detached worktree in the source-owned
+  private operational namespace and removes it on exit.
 
 The resolution rules and ordering live in :func:`open_workspace` and are
 deliberately fixed.
@@ -16,8 +16,10 @@ The module shells out via :mod:`daydream.git_ops` only.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import shutil
+import stat
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -27,6 +29,13 @@ from pathlib import Path
 from typing import AsyncIterator, Iterable
 
 from daydream import git_ops
+from daydream.artifact_visibility import (
+    ArtifactVisibilityError,
+    PrivateWorkspaceOwner,
+    private_root_locations,
+    resolve_private_workspace_owner,
+    validate_private_workspace_owner,
+)
 from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
 
@@ -38,6 +47,9 @@ _logger = logging.getLogger(__name__)
 # worktree checkout itself.
 _DEFAULT_COPY_PATHS: tuple[str, ...] = (".env", ".env.local")
 _DEFAULT_COPY_GLOB = ".env.*"
+_LEGACY_REANCHOR_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}-reanchor$")
+_LEGACY_AUDIT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_OPERATIONAL_LOCK_STALE_AFTER_S = 24 * 3600
 
 
 # --- Public types ------------------------------------------------------------
@@ -114,6 +126,7 @@ async def open_workspace(
     extra_copy: list[Path] | None = None,
     skip_tests: bool,
     allow_unborn: bool = False,
+    private_owner: PrivateWorkspaceOwner | None = None,
 ) -> AsyncIterator[WorkContext]:
     """Open a workspace for a daydream run, yielding a :class:`WorkContext`.
 
@@ -138,6 +151,9 @@ async def open_workspace(
             ephemeral worktree (used by ``--comment`` / ``--review`` flows).
         allow_unborn: Improve-only opt-in to an in-place unborn context with
             both SHA anchors absent. Other modes keep their born-HEAD requirement.
+        private_owner: Pre-resolved source owner for private operational
+            worktrees. Standalone callers may omit it to resolve the default
+            private locations once from *source*.
 
     Yields:
         A :class:`WorkContext` describing the resolved working environment.
@@ -157,6 +173,15 @@ async def open_workspace(
         function is deliberately mode-agnostic.
     """
     git_ops.assert_is_worktree(source)
+    if private_owner is None:
+        private_owner = resolve_private_workspace_owner(
+            source,
+            locations=private_root_locations(),
+        )
+    else:
+        validate_private_workspace_owner(private_owner, source=source)
+    source = private_owner.source
+    _retire_legacy_operational_worktrees(source, private_owner)
 
     if allow_unborn and git_ops.is_unborn_head(source):
         if branch is not None or base is not None or force_ephemeral:
@@ -171,6 +196,9 @@ async def open_workspace(
         return
 
     is_ephemeral = force_ephemeral or branch is not None
+    operational_root = (
+        _private_operational_root(private_owner) if is_ephemeral else None
+    )
 
     if is_ephemeral:
         # Fetch from the source -- the ephemeral worktree does not exist yet.
@@ -185,8 +213,8 @@ async def open_workspace(
     try:
         if is_ephemeral:
             assert resolved_ref is not None  # narrows for the type-checker
-            worktree_path = source / ".daydream" / "worktrees" / run_id
-            worktree_path.parent.mkdir(parents=True, exist_ok=True)
+            assert operational_root is not None
+            worktree_path = operational_root / run_id
             git_ops.worktree_add(source, worktree_path, resolved_ref, detach=True)
             copy_files_into_ephemeral(
                 source,
@@ -509,6 +537,118 @@ def _make_run_id() -> str:
     """Return a unique ``<UTC YYYYMMDDHHMMSS>-<hex8>`` identifier."""
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     return f"{timestamp}-{secrets.token_hex(4)}"
+
+
+def _private_operational_root(owner: PrivateWorkspaceOwner) -> Path:
+    """Create and validate the already-owned operational worktree directory."""
+    root = owner.operational_state_root / "operational"
+    try:
+        root.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    try:
+        metadata = root.lstat()
+    except OSError as exc:
+        raise ArtifactVisibilityError("operational worktree root is not accessible") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ArtifactVisibilityError("operational worktree root must be a real directory")
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise ArtifactVisibilityError("operational worktree root must have mode 0700")
+    return root
+
+
+def _legacy_operational_root(
+    source: Path,
+    name: str,
+    *,
+    label: str = "legacy operational namespace",
+) -> Path:
+    """Return one legacy root after no-follow lexical directory validation."""
+    if name not in {"worktrees", "audit"}:
+        raise ArtifactVisibilityError(f"{label} name is invalid")
+    ancestor = source / ".daydream"
+    root = ancestor / name
+    try:
+        ancestor_metadata = ancestor.lstat()
+    except FileNotFoundError:
+        return root
+    except OSError as exc:
+        raise ArtifactVisibilityError(f"{label} is inaccessible") from exc
+    if stat.S_ISLNK(ancestor_metadata.st_mode) or not stat.S_ISDIR(
+        ancestor_metadata.st_mode
+    ):
+        raise ArtifactVisibilityError(f"{label} ancestor must be a real directory")
+    try:
+        root_metadata = root.lstat()
+    except FileNotFoundError:
+        return root
+    except OSError as exc:
+        raise ArtifactVisibilityError(f"{label} is inaccessible") from exc
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise ArtifactVisibilityError(f"{label} must be a real directory")
+    return root
+
+
+def _retire_legacy_operational_worktrees(
+    source: Path,
+    owner: PrivateWorkspaceOwner,
+) -> None:
+    """Move or retire exact legacy Git worktrees before model-visible work."""
+    actions: list[tuple[str, Path, Path | None]] = []
+    destinations: set[Path] = set()
+    for root, kind in (
+        (_legacy_operational_root(source, "worktrees"), "reanchor"),
+        (_legacy_operational_root(source, "audit"), "audit"),
+    ):
+        if not root.exists():
+            continue
+        try:
+            entries = tuple(root.iterdir())
+        except OSError as exc:
+            raise ArtifactVisibilityError("legacy operational namespace is inaccessible") from exc
+        for entry in entries:
+            pattern = _LEGACY_REANCHOR_NAME if kind == "reanchor" else _LEGACY_AUDIT_NAME
+            try:
+                metadata = entry.lstat()
+            except OSError as exc:
+                raise ArtifactVisibilityError("legacy operational entry is inaccessible") from exc
+            if pattern.fullmatch(entry.name) is None or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
+                metadata.st_mode
+            ):
+                raise ArtifactVisibilityError("legacy operational entry is unknown or unsafe")
+            try:
+                git_ops.assert_is_worktree(entry)
+                if git_ops.git_common_dir(entry) != owner.git_common_dir:
+                    raise ArtifactVisibilityError("legacy operational worktree has different Git ownership")
+                locked_at = git_ops.worktree_lock_mtime(source, entry)
+            except ArtifactVisibilityError:
+                raise
+            except git_ops.GitError as exc:
+                raise ArtifactVisibilityError("legacy operational entry is not a registered worktree") from exc
+            if locked_at is not None and time.time() - locked_at <= _OPERATIONAL_LOCK_STALE_AFTER_S:
+                raise ArtifactVisibilityError("legacy operational worktree is live and locked")
+            if kind == "reanchor" and locked_at is None:
+                target = owner.operational_state_root / "operational" / entry.name
+                if target in destinations or target.exists() or target.is_symlink():
+                    raise ArtifactVisibilityError("legacy operational migration destination is occupied")
+                destinations.add(target)
+                actions.append(("move", entry, target))
+            else:
+                actions.append(("retire", entry, None))
+
+    if any(action == "move" for action, _, _ in actions):
+        _private_operational_root(owner)
+    retired = [entry for action, entry, _ in actions if action == "retire"]
+    if retired and _prune_stale_locked_worktrees(
+        source,
+        retired,
+        stale_after_s=_OPERATIONAL_LOCK_STALE_AFTER_S,
+    ) != len(retired):
+        raise ArtifactVisibilityError("legacy operational worktree could not be retired")
+    for action, entry, action_destination in actions:
+        if action == "move":
+            assert action_destination is not None
+            git_ops.worktree_move(source, entry, action_destination)
 
 
 def _resolve_ref(source: Path, branch: str | None) -> str:
