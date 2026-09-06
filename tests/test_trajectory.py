@@ -851,6 +851,63 @@ async def test_dispatch_cancellation_overrides_optimistic_terminal(
     assert step["extra"]["reason_code"] == "cancelled"
 
 
+async def test_dispatch_cancellation_overrides_empty_child_write_failure(
+    tmp_path: Path,
+) -> None:
+    """Cancellation remains authoritative when an empty child cannot be written."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        with anyio.CancelScope() as cancel_scope:
+            async with trajectory_module.dispatch_scope(
+                recorder,
+                phase=DaydreamPhase.FIX,
+                descriptors=("empty-child",),
+            ) as dispatch:
+                assert dispatch is not None
+                async with trajectory_module.maybe_fork(
+                    recorder,
+                    "empty-child",
+                    dispatch=dispatch,
+                ):
+                    pass
+                cancel_scope.cancel()
+                await anyio.sleep_forever()
+
+    step = only_dispatch(read_trajectory(recorder.path))
+    assert step["extra"]["dispatch_status"] == "cancelled"
+    assert step["extra"]["reason_code"] == "cancelled"
+    assert step["extra"]["attempted_count"] == 1
+    assert step["extra"]["completed_count"] == 0
+
+
+async def test_dispatch_exception_overrides_empty_child_write_failure(
+    tmp_path: Path,
+) -> None:
+    """An escaping exception retains its cause when an empty child also failed."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        with pytest.raises(RuntimeError, match="dispatch body failed"):
+            async with trajectory_module.dispatch_scope(
+                recorder,
+                phase=DaydreamPhase.FIX,
+                descriptors=("empty-child",),
+            ) as dispatch:
+                assert dispatch is not None
+                async with trajectory_module.maybe_fork(
+                    recorder,
+                    "empty-child",
+                    dispatch=dispatch,
+                ):
+                    pass
+                raise RuntimeError("dispatch body failed")
+
+    step = only_dispatch(read_trajectory(recorder.path))
+    assert step["extra"]["dispatch_status"] == "failed"
+    assert step["extra"]["reason_code"] == "uncaught_exception"
+    assert step["extra"]["attempted_count"] == 1
+    assert step["extra"]["completed_count"] == 0
+
+
 async def test_recursive_invocation_identity_has_no_fork_wrapper_call(
     tmp_path: Path,
 ) -> None:
@@ -1826,6 +1883,102 @@ async def test_signal_flush_with_child_evidence_freezes_schema_valid_empty_root(
             assert root.steps == []
             assert root.compute_timing_summary(snapshot) is not None
             release.set()
+
+
+async def test_signal_flush_reuses_cutoff_until_any_document_state_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchanged run snapshot reuses bytes; child progress advances its cutoff."""
+    from daydream.trajectory import RunWriteSnapshot, flush_active_signal_recorders
+
+    ticks = iter(f"2026-09-06T00:00:{second:02d}.000000Z" for second in range(60))
+    monkeypatch.setattr(trajectory_module, "now_iso", lambda: next(ticks))
+    snapshots: list[RunWriteSnapshot] = []
+    root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+
+    async with root:
+        async with trajectory_module.maybe_fork(root, "active-child") as child:
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                inv.observe(TextEvent(text="first state"))
+                inv.observe(ResultEvent(structured_output=None, continuation=None))
+                flush_active_signal_recorders()
+                first = snapshots[-1]
+                first_bytes = tuple(document.json_bytes for document in first.documents)
+
+                flush_active_signal_recorders()
+                second = snapshots[-1]
+                assert second.cutoff_at == first.cutoff_at
+                assert tuple(document.json_bytes for document in second.documents) == first_bytes
+
+                inv.observe_user_step(prompt="later context")
+                flush_active_signal_recorders()
+                third = snapshots[-1]
+                assert third.cutoff_at != first.cutoff_at
+                third_bytes = tuple(document.json_bytes for document in third.documents)
+                assert third_bytes != first_bytes
+                assert {
+                    json.loads(document.json_bytes)["extra"]["snapshot_at"]
+                    for document in third.documents
+                } == {third.cutoff_at}
+                assert tuple(document.json_bytes for document in first.documents) == first_bytes
+
+
+async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root freeze failure writes no child-only snapshot and a retry recovers."""
+    from daydream.trajectory import RunWriteSnapshot, flush_active_signal_recorders
+
+    snapshots: list[RunWriteSnapshot] = []
+    warnings: list[str] = []
+    root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    original_prepare = root._prepare_document
+    failed_once = False
+
+    def fail_first_root_prepare(**kwargs: Any) -> Any:
+        nonlocal failed_once
+        if kwargs["status"] == "partial" and not failed_once:
+            failed_once = True
+            raise RuntimeError("root preparation failed")
+        return original_prepare(**kwargs)
+
+    monkeypatch.setattr(root, "_prepare_document", fail_first_root_prepare)
+    monkeypatch.setattr(
+        trajectory_module,
+        "print_warning",
+        lambda _console, message: warnings.append(message),
+    )
+
+    async with root:
+        async with root.fork("active-child") as child:
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                inv.observe(TextEvent(text="child evidence"))
+
+                flush_active_signal_recorders()
+                assert len(warnings) == 1
+                assert snapshots == []
+                assert not _partial_path(root).exists()
+                assert not _partial_path(child).exists()
+
+                flush_active_signal_recorders()
+                assert len(warnings) == 1
+                assert len(snapshots) == 1
+                snapshot = snapshots[0]
+                assert [document.trajectory_id for document in snapshot.documents] == [
+                    root.trajectory_id,
+                    child.trajectory_id,
+                ]
+                assert all(
+                    atif_validate(json.loads(document.json_bytes), validate_images=False)
+                    for document in snapshot.documents
+                )
+                assert {
+                    json.loads(document.json_bytes)["extra"]["snapshot_at"]
+                    for document in snapshot.documents
+                } == {snapshot.cutoff_at}
+                assert all(document.path.exists() for document in snapshot.documents)
 
 
 @pytest.mark.parametrize("exit_kind", ["normal", "runtime", "cancel", "system-exit"])

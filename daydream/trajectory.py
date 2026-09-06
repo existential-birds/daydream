@@ -746,7 +746,7 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
             invocation_rows.setdefault((row_trajectory_id, invocation_id), []).append(invocation)
         if payload is root or direct_invocations or "run_started_at" in extra:
             continue
-        legacy_start: datetime | None = _timing_timestamp(extra.get("run_started_at"))
+        legacy_start: datetime | None = None
         legacy_end: datetime | None = _timing_timestamp(extra.get("run_ended_at") or extra.get("snapshot_at"))
         if legacy_start is None or legacy_end is None or legacy_end < legacy_start:
             step_times = [
@@ -1262,6 +1262,41 @@ _RECORDER_VAR: ContextVar["TrajectoryRecorder | None"] = ContextVar(
 )
 
 
+def _digest_partial_state(
+    recorder: TrajectoryRecorder,
+    snapshot_steps: Sequence[Step],
+) -> str:
+    """Hash one recorder's caller-selected serializable partial state."""
+    state = {
+        "steps": [step.model_dump(mode="json") for step in snapshot_steps],
+        "phase_events": [event.to_dict() for event in recorder._phase_events],
+        "subtrajectories": recorder._subtrajectories,
+        "active_invocations": [
+            {
+                "invocation_id": invocation.invocation_id,
+                "phase": invocation.phase.value,
+                "started_at": invocation.started_at,
+            }
+            for invocation in recorder._active_invocations
+        ],
+        "aborted": recorder._aborted,
+    }
+    encoded = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _reuse_or_advance_partial_cutoff(
+    *,
+    state_digest: str,
+    previous_digest: str,
+    previous_cutoff: str,
+) -> tuple[str, str]:
+    """Return an unchanged cutoff for identical state or timestamp new state."""
+    if state_digest == previous_digest:
+        return previous_digest, previous_cutoff
+    return state_digest, now_iso()
+
+
 class _SignalFlushRegistry:
     """Identity membership for every active recorder owned by one run."""
 
@@ -1291,9 +1326,11 @@ class _SignalFlushRegistry:
             for trajectory_id, document in sorted(self._completed.items())
         )
         digest = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        if digest != self._partial_state_digest:
-            self._partial_state_digest = digest
-            self._partial_cutoff_at = now_iso()
+        self._partial_state_digest, self._partial_cutoff_at = _reuse_or_advance_partial_cutoff(
+            state_digest=digest,
+            previous_digest=self._partial_state_digest,
+            previous_cutoff=self._partial_cutoff_at,
+        )
         return self._partial_cutoff_at
 
     def _root(self) -> TrajectoryRecorder | None:
@@ -2455,6 +2492,15 @@ class DispatchHandle:
         self.status = status
         self.reason_code = reason_code
 
+    def _override_terminal(
+        self,
+        status: LifecycleStatus,
+        reason_code: LifecycleReasonCode,
+    ) -> None:
+        """Make an escaping scope terminal authoritative over defaults."""
+        self._override(status, reason_code)
+        self._decision_made = True
+
     def _finalize_default(self) -> None:
         if self._decision_made or self._write_failures == 0:
             return
@@ -2505,7 +2551,7 @@ async def dispatch_scope(
     try:
         yield handle
     except BaseException as exc:
-        handle._override(*_lifecycle_exception_terminal(exc))
+        handle._override_terminal(*_lifecycle_exception_terminal(exc))
         raise
     finally:
         handle._finalize_default()
@@ -3219,21 +3265,7 @@ class TrajectoryRecorder:
     def _partial_state_key(self) -> str:
         """Return a stable digest of this recorder's current partial state."""
         snapshot_steps = self._snapshot_in_flight_steps()
-        state = {
-            "steps": [step.model_dump(mode="json") for step in snapshot_steps],
-            "phase_events": [event.to_dict() for event in self._phase_events],
-            "subtrajectories": self._subtrajectories,
-            "active_invocations": [
-                {
-                    "invocation_id": invocation.invocation_id,
-                    "phase": invocation.phase.value,
-                    "started_at": invocation.started_at,
-                }
-                for invocation in self._active_invocations
-            ],
-            "aborted": self._aborted,
-        }
-        return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return _digest_partial_state(self, snapshot_steps)
 
     def _prepare_document(
         self,
@@ -3320,24 +3352,12 @@ class TrajectoryRecorder:
 
     def _partial_cutoff_for(self, snapshot_steps: list[Step]) -> str:
         """Reuse a cutoff only while the recorder's serializable state is unchanged."""
-        state = {
-            "steps": [step.model_dump(mode="json") for step in snapshot_steps],
-            "phase_events": [event.to_dict() for event in self._phase_events],
-            "subtrajectories": self._subtrajectories,
-            "active_invocations": [
-                {
-                    "invocation_id": invocation.invocation_id,
-                    "phase": invocation.phase.value,
-                    "started_at": invocation.started_at,
-                }
-                for invocation in self._active_invocations
-            ],
-            "aborted": self._aborted,
-        }
-        digest = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-        if digest != self._partial_state_digest:
-            self._partial_state_digest = digest
-            self._partial_cutoff_at = now_iso()
+        digest = _digest_partial_state(self, snapshot_steps)
+        self._partial_state_digest, self._partial_cutoff_at = _reuse_or_advance_partial_cutoff(
+            state_digest=digest,
+            previous_digest=self._partial_state_digest,
+            previous_cutoff=self._partial_cutoff_at,
+        )
         return self._partial_cutoff_at
 
     def _write_partial_self(self) -> bool:
