@@ -11004,11 +11004,16 @@ def test_final_red_override_requires_fresh_interactive_prompt(
     from daydream.deep.orchestrator import _authorize_final_red_override
 
     prompts: list[dict[str, Any]] = []
+
+    def accept_prompt(**kwargs: Any) -> bool:
+        prompts.append(kwargs)
+        return True
+
     monkeypatch.setattr("daydream.deep.orchestrator.get_assume", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.get_non_interactive", lambda: False)
     monkeypatch.setattr(
         "daydream.deep.orchestrator.resolve_or_prompt",
-        lambda **kwargs: prompts.append(kwargs) or True,
+        accept_prompt,
     )
 
     assert _authorize_final_red_override() is True
