@@ -606,6 +606,51 @@ def _project_from_anchor(
     return gi._project_one(rec, head_sha=head_sha)
 
 
+@pytest.mark.parametrize("outdated", [False, True])
+@pytest.mark.parametrize(
+    ("raw_template", "expected_title", "expected_body"),
+    [
+        ("\n{marker}\r\n## Cache race\r\nDetails.\r\n", "Cache race", "\n\n## Cache race\nDetails."),
+        ("Before {marker} after\n{marker}\n", "Before after", "Before  after"),
+        ("{marker}", "", ""),
+        ("<!-- daydream-finding: ab -->", "<!-- daydream-finding: ab -->", "<!-- daydream-finding: ab -->"),
+    ],
+)
+def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(
+    raw_template: str, expected_title: str, expected_body: str, outdated: bool,
+) -> None:
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import schema
+    from daydream.pr_review import FINDING_MARKER_RE, finding_marker
+
+    raw_body = raw_template.format(marker=finding_marker("f" * 64))
+    rec = schema.EvidenceRecord(
+        source_id="github:inline_comment:1", kind="inline_comment", database_id=1,
+        node_id="DIFF_1", author=schema._EvidenceAuthor(login="alice", type="User"),
+        body=raw_body, body_sha256=hashlib.sha256(raw_body.encode()).hexdigest(),
+        created_at=_TS, updated_at=_TS, commit_id="a" * 40, original_commit_id="a" * 40,
+        path="feature.py", line=2, original_line=2, subject_type="line", side="RIGHT",
+        authoring_anchor=schema.AuthoringAnchor(
+            version=1, status="derived", commit_id="a" * 40,
+            path="feature.py", start_line=2, end_line=2,
+        ),
+        outdated=outdated, is_bot=False,
+        url="https://github.com/o/r/pull/101#discussion_r1",
+    )
+    before = rec.model_dump()
+
+    candidate = gi._project_one(rec, head_sha="a" * 40)
+
+    assert candidate.title == expected_title
+    assert candidate.body == expected_body
+    assert not FINDING_MARKER_RE.search(candidate.title + "\n" + candidate.body)
+    assert candidate.source_id == rec.source_id
+    assert candidate.location == schema.Location(path="feature.py", start_line=2, end_line=2)
+    assert candidate.exact_acceptable is (bool(expected_title) and not outdated)
+    assert candidate.not_exact_reason == ("outdated" if outdated else "title" if not expected_title else None)
+    assert rec.model_dump() == before
+
+
 def test_exact_acceptance_from_authoring_anchor_matches_head(fake_gh: FakeGh) -> None:
     """A comment GitHub re-anchored onto the head (``commit_id == head`` but
     originally authored elsewhere) is denied exact acceptance: the anchor's

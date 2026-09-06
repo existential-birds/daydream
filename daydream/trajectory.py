@@ -856,12 +856,37 @@ _RECORDER_VAR: ContextVar["TrajectoryRecorder | None"] = ContextVar(
     "_RECORDER_VAR", default=None,
 )
 
-# Signal-handler-safe stack of active recorders (root + forks). Python signal
-# handlers fire in the main thread at bytecode boundaries — ContextVar.get()
-# from that handler returns whatever context the interpreter happened to be
-# in, which is non-deterministic relative to async tasks. The signal-handler
-# path reads the top of this stack instead so SIGINT-flush is reliable.
-_ACTIVE_RECORDERS: list["TrajectoryRecorder"] = []
+class _SignalFlushRegistry:
+    """Identity membership for every active recorder owned by one run."""
+
+    def __init__(self) -> None:
+        self._active: dict[int, TrajectoryRecorder] = {}
+
+    def register(self, recorder: TrajectoryRecorder) -> None:
+        """Register *recorder* once by object identity."""
+        self._active[id(recorder)] = recorder
+
+    def unregister(self, recorder: TrajectoryRecorder) -> None:
+        """Remove *recorder* when the same identity is still registered."""
+        if self._active.get(id(recorder)) is recorder:
+            self._active.pop(id(recorder), None)
+
+    def flush_active(self) -> None:
+        """Write one non-cascading partial for each recorder in one snapshot."""
+        for recorder in tuple(self._active.values()):
+            try:
+                recorder._write_partial_self()
+            except Exception as exc:  # noqa: BLE001 - isolate each signal write
+                print_warning(
+                    _console,
+                    f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
+                )
+
+
+# Independently nested roots temporarily select their own run registry. The
+# registries themselves hold sibling membership; sibling entry order never
+# chooses which recorder a signal flushes.
+_ACTIVE_SIGNAL_RUNS: list[_SignalFlushRegistry] = []
 
 
 def get_current_recorder() -> "TrajectoryRecorder | None":
@@ -872,10 +897,6 @@ def get_current_recorder() -> "TrajectoryRecorder | None":
     when None — direct test invocation of ``run_agent()`` without an active
     recorder is therefore a clean no-op (CORE-09).
 
-    Signal handlers MUST use :func:`get_signal_recorder` instead — ContextVar
-    reads inside a signal handler are not deterministic with respect to the
-    async context where the recorder was set.
-
     Returns:
         The active ``TrajectoryRecorder`` instance, or ``None`` if no
         ``async with TrajectoryRecorder(...)`` block is on the stack.
@@ -883,33 +904,21 @@ def get_current_recorder() -> "TrajectoryRecorder | None":
     return _RECORDER_VAR.get()
 
 
-def get_signal_recorder() -> "TrajectoryRecorder | None":
-    """Return the most recently entered recorder for signal-handler use.
-
-    Signal handlers run in the main thread outside the asyncio task context,
-    so ``ContextVar.get()`` returns non-deterministic values depending on
-    where the interpreter was when the signal fired. This accessor reads
-    from a module-level stack populated by ``TrajectoryRecorder.__aenter__``,
-    which is set synchronously and remains valid across the entire run.
-
-    Returns:
-        The most recently entered (top-of-stack) ``TrajectoryRecorder``, or
-        ``None`` if no recorder is active. For nested forks, the innermost
-        recorder is returned — partial flushes cascade to ancestors via
-        each recorder's own ``write_partial``.
-    """
-    return _ACTIVE_RECORDERS[-1] if _ACTIVE_RECORDERS else None
+def flush_active_signal_recorders() -> None:
+    """Synchronously flush every active recorder in the selected run."""
+    if _ACTIVE_SIGNAL_RUNS:
+        _ACTIVE_SIGNAL_RUNS[-1].flush_active()
 
 
 def _reset_recorder_for_tests() -> None:
-    """Test-only: clear the recorder ContextVar and signal-handler stack.
+    """Test-only: clear the recorder ContextVar and active run registries.
 
     Use exclusively from the autouse ``_reset_trajectory_recorder`` fixture
     in ``tests/conftest.py`` (CORE-10, D-17). Production code MUST go through
     ``TrajectoryRecorder.__aenter__`` / ``__aexit__``.
     """
     _RECORDER_VAR.set(None)
-    _ACTIVE_RECORDERS.clear()
+    _ACTIVE_SIGNAL_RUNS.clear()
 
 
 def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
@@ -1772,10 +1781,16 @@ class TrajectoryRecorder:
     _profile: dict[str, Any] | None = None
     _aborted: bool = False
     on_write: Callable[[TrajectoryRecorder, str], None] | None = None
+    _signal_registry: _SignalFlushRegistry | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     async def __aenter__(self) -> "TrajectoryRecorder":
+        registry = _SignalFlushRegistry()
+        self._signal_registry = registry
+        registry.register(self)
+        _ACTIVE_SIGNAL_RUNS.append(registry)
         self._previous_token = _RECORDER_VAR.set(self)
-        _ACTIVE_RECORDERS.append(self)
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, _exc_tb: Any) -> None:
@@ -1798,13 +1813,17 @@ class TrajectoryRecorder:
                 f"Trajectory write failed: {type(exc).__name__}: {exc}",
             )
         finally:
+            registry = self._signal_registry
+            if registry is not None:
+                registry.unregister(self)
+                self._signal_registry = None
+                for index in range(len(_ACTIVE_SIGNAL_RUNS) - 1, -1, -1):
+                    if _ACTIVE_SIGNAL_RUNS[index] is registry:
+                        del _ACTIVE_SIGNAL_RUNS[index]
+                        break
             if self._previous_token is not None:
                 _RECORDER_VAR.reset(self._previous_token)
                 self._previous_token = None
-            try:
-                _ACTIVE_RECORDERS.remove(self)
-            except ValueError:
-                pass  # already removed by reset_recorder_for_tests or never registered
 
     def invocation(self, *, phase: DaydreamPhase) -> "_InvocationCM":
         """Open an Invocation scope for one ``run_agent()`` call.
@@ -2310,8 +2329,8 @@ class TrajectoryRecorder:
         snapshot.sort(key=lambda s: s.step_id)
         return snapshot
 
-    def write_partial(self) -> None:
-        """SIGINT/SIGTERM flush path — write in-flight steps to ``<path>.partial``.
+    def _write_partial_self(self) -> bool:
+        """Write only this recorder's in-flight state to ``<path>.partial``.
 
         Per D-07 the partial trajectory lives at a sibling path with the
         ``.partial`` suffix appended to the full filename (e.g.
@@ -2321,14 +2340,12 @@ class TrajectoryRecorder:
         included so SIGINT mid-``run_agent()`` does not lose work; empty
         trajectories are skipped (matches ``_write``).
 
-        Idempotent: callable from a signal handler synchronously without
-        awaiting ``__aexit__``; safe to invoke from outside the async context.
-        Disk-write failures degrade with a warning per D-11 — partial flush
-        must never crash shutdown.
+        Returns ``True`` only when a nonempty snapshot was written. Disk-write
+        failures degrade with the established warning and return ``False``.
         """
         snapshot_steps = self._snapshot_in_flight_steps()
         if not snapshot_steps:
-            return
+            return False
         try:
             trajectory = self.build_trajectory(steps=snapshot_steps)
             partial_path = self.path.with_suffix(self.path.suffix + ".partial")
@@ -2342,12 +2359,23 @@ class TrajectoryRecorder:
                     self.on_write(self, "partial")
                 except Exception:  # noqa: BLE001 - archive failure must never crash shutdown
                     pass
-            if self.parent is not None:
-                self.parent.write_partial()
+            return True
         except Exception as exc:  # noqa: BLE001 - partial flush must never crash shutdown
             print_warning(
                 _console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}"
             )
+            return False
+
+    def write_partial(self) -> None:
+        """Write this recorder's partial and cascade to its parent on success.
+
+        This compatibility-preserving public path remains idempotent and safe
+        for ordinary synchronous callers. Signal handling uses the run registry's
+        self-only primitive so a parent shared by several live children is written
+        exactly once.
+        """
+        if self._write_partial_self() and self.parent is not None:
+            self.parent.write_partial()
 
 
 class _ForkCM:
@@ -2377,8 +2405,12 @@ class _ForkCM:
         )
         child.parent = self._parent
         child.descriptor = self._descriptor
+        registry = self._parent._signal_registry
+        if registry is None:
+            raise RuntimeError("cannot enter a fork without an active parent recorder")
+        child._signal_registry = registry
+        registry.register(child)
         child._previous_token = _RECORDER_VAR.set(child)
-        _ACTIVE_RECORDERS.append(child)
         self._child = child
         self._entered_at = now_iso()
         return child
@@ -2391,52 +2423,62 @@ class _ForkCM:
             child._aborted = True
         write_ok = False
         try:
-            child._write()
-            write_ok = bool(child.steps)
-        except Exception as exc:  # noqa: BLE001 - recording must never crash a run
-            print_warning(_console, f"Sibling trajectory write failed: {type(exc).__name__}: {exc}")
+            try:
+                child._write()
+                write_ok = bool(child.steps)
+            except Exception as exc:  # noqa: BLE001 - recording must never crash a run
+                print_warning(
+                    _console,
+                    f"Sibling trajectory write failed: {type(exc).__name__}: {exc}",
+                )
+            self._exited_at = now_iso()
+            if write_ok and child.parent is not None:
+                # The root trajectory's final_metrics is whole-run truth: fold the
+                # fork's totals in so manifest/eval consumers read one number
+                # instead of re-summing sibling files. The fork file keeps its own
+                # share. A failed child write folds nothing (the error already
+                # degrades the record, D-11).
+                child.parent._accumulate_metrics(
+                    prompt_tokens=child._final_totals["prompt"],
+                    completion_tokens=child._final_totals["completion"],
+                    cached_tokens=child._final_totals["cached"],
+                    cost_usd=(
+                        child._final_totals["cost"]
+                        if child._final_totals["any_cost_seen"]
+                        else None
+                    ),
+                )
+                child.parent._folded_fork_totals = True
+                child.parent._register_sibling(child.path, self._descriptor)
+                try:
+                    sibling_ref = str(
+                        child.path.relative_to(child.parent.target_dir / ".daydream")
+                    )
+                except ValueError:
+                    sibling_ref = child.path.name
+                phase = DaydreamPhase.FIX.value
+                for step in child.steps:
+                    if step.extra is None:
+                        continue
+                    candidate = step.extra.get("daydream_phase")
+                    if isinstance(candidate, str):
+                        phase = candidate
+                        break
+                child.parent._register_fork_subtrajectory(
+                    phase=phase,
+                    descriptor=self._descriptor,
+                    started_at=self._entered_at or now_iso(),
+                    ended_at=self._exited_at or now_iso(),
+                    sibling_trajectory_ref=sibling_ref,
+                )
         finally:
+            registry = child._signal_registry
+            if registry is not None:
+                registry.unregister(child)
+                child._signal_registry = None
             if child._previous_token is not None:
                 _RECORDER_VAR.reset(child._previous_token)
                 child._previous_token = None
-        try:
-            _ACTIVE_RECORDERS.remove(child)
-        except ValueError:
-            pass
-        self._exited_at = now_iso()
-        if write_ok and child.parent is not None:
-            # The root trajectory's final_metrics is whole-run truth: fold the
-            # fork's totals in so manifest/eval consumers read one number
-            # instead of re-summing sibling files. The fork file keeps its own
-            # share. A failed child write folds nothing (the error already
-            # degrades the record, D-11).
-            child.parent._accumulate_metrics(
-                prompt_tokens=child._final_totals["prompt"],
-                completion_tokens=child._final_totals["completion"],
-                cached_tokens=child._final_totals["cached"],
-                cost_usd=child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None,
-            )
-            child.parent._folded_fork_totals = True
-            child.parent._register_sibling(child.path, self._descriptor)
-            try:
-                sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))
-            except ValueError:
-                sibling_ref = child.path.name
-            phase = DaydreamPhase.FIX.value
-            for step in child.steps:
-                if step.extra is None:
-                    continue
-                candidate = step.extra.get("daydream_phase")
-                if isinstance(candidate, str):
-                    phase = candidate
-                    break
-            child.parent._register_fork_subtrajectory(
-                phase=phase,
-                descriptor=self._descriptor,
-                started_at=self._entered_at or now_iso(),
-                ended_at=self._exited_at or now_iso(),
-                sibling_trajectory_ref=sibling_ref,
-            )
 
 
 class _InvocationCM:
