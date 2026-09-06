@@ -2576,7 +2576,7 @@ def _write_remote_verdict(
         urls=tuple(item.url for item in (*required, *advisory) if item.url),
         diagnostic=None,
         stable_polls=2,
-        elapsed_seconds=20,
+        elapsed_seconds=120 if status == "no_ci" else 20,
     )
     write_remote_ci_verdict(
         target_dir / ".daydream" / "deep" / "remote-ci-verdict.json",
@@ -2584,7 +2584,7 @@ def _write_remote_verdict(
         session_id=session_id,
         poll_count=2,
         started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:00:20Z",
+        updated_at="2026-09-06T12:02:00Z" if status == "no_ci" else "2026-09-06T12:00:20Z",
         discovery_deadline=120,
         completion_deadline=1800,
     )
@@ -2966,7 +2966,10 @@ def test_archive_rejects_contradictory_terminal_ci_evidence(
     assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 
-def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("discovery_seconds", [120.0, 0.5])
+def test_archive_no_ci_retains_empty_strict_policy(
+    tmp_path: Path, discovery_seconds: float
+) -> None:
     """Strictness alone does not declare a required CI context."""
     from daydream.remote_ci import RemoteCILimits, RemoteCISnapshot, evaluate_remote_ci
 
@@ -2974,6 +2977,7 @@ def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path) -> None:
     _write_remote_verdict(tmp_path, status="no_ci")
     artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
     payload = json.loads(artifact.read_text())
+    limits = RemoteCILimits(discovery_seconds=discovery_seconds)
     verdict = evaluate_remote_ci(
         RemoteCISnapshot(
             target=RemoteCITarget(target_dir=tmp_path, **payload["target"]),
@@ -2983,9 +2987,9 @@ def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path) -> None:
             head_observations=(),
             merge_observations=(),
         ),
-        elapsed=120,
+        elapsed=discovery_seconds,
         stable_polls=2,
-        limits=RemoteCILimits(),
+        limits=limits,
     )
     assert verdict.status == "no_ci"
     write_remote_ci_verdict(
@@ -2995,11 +2999,35 @@ def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path) -> None:
         poll_count=2,
         started_at="2026-09-06T12:00:00Z",
         updated_at="2026-09-06T12:02:00Z",
-        discovery_deadline=120,
+        discovery_deadline=discovery_seconds,
         completion_deadline=1800,
+        limits=limits,
     )
 
     assert _p08_states(tmp_path)["remote_ci"]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("status", "field", "value"),
+    [
+        ("no_ci", "elapsed_seconds", 0),
+        ("no_ci", "stable_polls", 1),
+        ("passed", "stable_polls", 1),
+        ("no_ci", "discovery_seconds", -1),
+        ("no_ci", "required_stable_polls", True),
+    ],
+)
+def test_archive_terminal_ci_requires_declared_discovery_and_stability(
+    tmp_path: Path, status: str, field: str, value: object
+) -> None:
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path, status=status)
+    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    payload = json.loads(artifact.read_text())
+    payload["polling"][field] = value
+    artifact.write_text(json.dumps(payload))
+
+    assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 
 def test_archive_unpinned_legacy_status_uses_casefolded_context(tmp_path: Path) -> None:

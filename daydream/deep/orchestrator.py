@@ -5024,6 +5024,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
             updated_at=now_iso(),
             discovery_deadline=discovery_deadline,
             completion_deadline=completion_deadline,
+            limits=limits,
         )
 
     caught: BaseException | None = None
@@ -5046,6 +5047,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                     updated_at=now_iso(),
                     discovery_deadline=discovery_deadline,
                     completion_deadline=completion_deadline,
+                    limits=limits,
                 )
             else:
                 # One monotonic start owns both the durable deadline metadata
@@ -5065,6 +5067,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                     updated_at=now_iso(),
                     discovery_deadline=discovery_deadline,
                     completion_deadline=completion_deadline,
+                    limits=limits,
                 )
                 # The new target is durable before the previous attempt's
                 # guidance is retired. Do this before any CI request so a

@@ -36,9 +36,9 @@ class NoCIRemote:
             "DEFAULT_LIMITS",
             remote_ci.RemoteCILimits(
                 poll_seconds=0.01,
-                discovery_seconds=5,
-                completion_seconds=5,
-                request_seconds=2,
+                discovery_seconds=15,
+                completion_seconds=20,
+                request_seconds=10,
             ),
         )
 

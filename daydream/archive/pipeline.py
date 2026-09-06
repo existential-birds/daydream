@@ -18,7 +18,7 @@ Exports:
 import re
 from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from daydream.archive import _read_json_artifact
 from daydream.remote_ci import (
@@ -219,7 +219,7 @@ def _identity_mapping(value: object) -> dict[str, Any] | None:
     return value
 
 
-def _nonnegative_number(value: object) -> bool:
+def _nonnegative_number(value: object) -> TypeGuard[int | float]:
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -334,6 +334,9 @@ def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
         return False
     poll_count = polling.get("poll_count")
     stable_polls = polling.get("stable_polls")
+    required_stable_polls = polling.get("required_stable_polls")
+    discovery_seconds = polling.get("discovery_seconds")
+    completion_seconds = polling.get("completion_seconds")
     active_count = payload.get("active_workflow_count")
     contexts = policy.get("contexts")
     if (
@@ -345,11 +348,19 @@ def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
         or not isinstance(stable_polls, int)
         or isinstance(stable_polls, bool)
         or stable_polls <= 0
+        or stable_polls > poll_count
+        or not isinstance(required_stable_polls, int)
+        or isinstance(required_stable_polls, bool)
+        or required_stable_polls <= 0
         or _bounded_text(polling.get("started_at")) is None
         or _bounded_text(polling.get("updated_at")) is None
         or not _nonnegative_number(polling.get("elapsed_seconds"))
         or not _nonnegative_number(polling.get("discovery_deadline"))
         or not _nonnegative_number(polling.get("completion_deadline"))
+        or not _nonnegative_number(discovery_seconds)
+        or discovery_seconds <= 0
+        or not _nonnegative_number(completion_seconds)
+        or completion_seconds < discovery_seconds
         or not isinstance(policy.get("strict"), bool)
         or not isinstance(contexts, list)
         or not isinstance(active_count, int)
@@ -381,9 +392,12 @@ def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
             return False
     except ValueError:
         return False
+    if status in {"passed", "no_ci"} and stable_polls < required_stable_polls:
+        return False
     if status == "no_ci":
         return (
             contexts == []
+            and polling["elapsed_seconds"] >= discovery_seconds
             and active_count == 0
             and payload["required_observations"] == []
             and payload["advisory_observations"] == []

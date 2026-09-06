@@ -1437,6 +1437,7 @@ def remote_ci_verdict_payload(
     updated_at: str,
     discovery_deadline: float,
     completion_deadline: float,
+    limits: RemoteCILimits = DEFAULT_LIMITS,
 ) -> dict[str, object]:
     """Return the deterministic v1 artifact without raw GitHub data."""
     _required_text(session_id, "session id")
@@ -1483,6 +1484,9 @@ def remote_ci_verdict_payload(
             "elapsed_seconds": verdict.elapsed_seconds,
             "discovery_deadline": discovery_deadline,
             "completion_deadline": completion_deadline,
+            "discovery_seconds": limits.discovery_seconds,
+            "completion_seconds": limits.completion_seconds,
+            "required_stable_polls": limits.stable_polls,
         },
         "policy": (
             None
@@ -1522,6 +1526,7 @@ def write_remote_ci_verdict(
     updated_at: str,
     discovery_deadline: float,
     completion_deadline: float,
+    limits: RemoteCILimits = DEFAULT_LIMITS,
 ) -> None:
     """Atomically replace the session- and SHA-bound remote CI verdict."""
     atomic_write_json(
@@ -1534,6 +1539,7 @@ def write_remote_ci_verdict(
             updated_at=updated_at,
             discovery_deadline=discovery_deadline,
             completion_deadline=completion_deadline,
+            limits=limits,
         ),
         indent=2,
         sort_keys=True,

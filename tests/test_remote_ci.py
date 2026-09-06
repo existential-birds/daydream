@@ -670,6 +670,31 @@ def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path) -> None:
     assert loaded["session_id"] == "session-2"
 
 
+def test_verdict_payload_persists_applied_polling_limits(tmp_path: Path) -> None:
+    limits = RemoteCILimits(discovery_seconds=4.5, completion_seconds=9.5, stable_polls=3)
+    verdict = evaluate_remote_ci(
+        _snapshot(_target(tmp_path)), elapsed=4.5, stable_polls=3, limits=limits
+    )
+
+    payload = remote_ci_verdict_payload(
+        verdict,
+        session_id="custom-limits",
+        poll_count=3,
+        started_at="2026-09-06T12:00:00Z",
+        updated_at="2026-09-06T12:00:04.500Z",
+        discovery_deadline=104.5,
+        completion_deadline=109.5,
+        limits=limits,
+    )
+
+    polling = payload["polling"]
+    assert isinstance(polling, dict)
+    assert polling["discovery_seconds"] == 4.5
+    assert polling["completion_seconds"] == 9.5
+    assert polling["required_stable_polls"] == 3
+    assert polling["discovery_deadline"] == 104.5
+
+
 def test_handoff_payload_is_only_for_non_success_and_preserves_identity(tmp_path: Path) -> None:
     target = _target(tmp_path)
     failed = evaluate_remote_ci(
