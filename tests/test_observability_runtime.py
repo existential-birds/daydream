@@ -19,6 +19,7 @@ from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -120,6 +121,72 @@ async def test_attempt_and_nested_step_do_not_inherit_unobserved_request_metadat
     assert "daydream.invocation.aggregate" not in nested
     assert nested["daydream.backend"] == "pi"
     assert nested["daydream.attempt"] == 1
+
+
+@pytest.mark.anyio
+async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "opaque-diagnostic-secret"
+    monkeypatch.setenv("DAYDREAM_TEST_TOKEN", secret)
+    exporter = InMemorySpanExporter()
+    registry = Registry()
+    registry.register_trace_exporter("memory", lambda _: exporter)
+
+    async with trace_run(
+        ObservabilityConfig(destinations=("memory",), capture_content=True),
+        registry,
+        flow="review",
+    ):
+        with agent_scope("review", backend="codex"):
+            async with attempt_scope(1) as attempt:
+                attempt.observe(
+                    DiagnosticEvent(
+                        code=f"parser_{secret}",
+                        message=f"do not export {secret}",
+                        metadata={"api_key": secret, "count": 99},
+                    )
+                )
+                attempt.observe(
+                    DiagnosticEvent(
+                        code=f"parser_{secret}",
+                        message="another message",
+                        metadata={"raw": "not observable"},
+                    )
+                )
+                attempt.observe(
+                    DiagnosticEvent(
+                        code="codex_transport_coverage",
+                        message="transport detail",
+                        metadata={"occurrences": 4},
+                    )
+                )
+
+    spans = exporter.get_finished_spans()
+    assert sorted(str((span.attributes or {})["daydream.span.kind"]) for span in spans) == [
+        "agent",
+        "attempt",
+        "run",
+    ]
+    attempt_span = next(
+        span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt"
+    )
+    attrs = dict(attempt_span.attributes or {})
+    assert attrs["daydream.backend_diagnostic.codes"] == (
+        "parser_[REDACTED_CREDENTIAL]",
+        "codex_transport_coverage",
+    )
+    assert attrs["daydream.backend_diagnostic.counts"] == (2, 1)
+    encoded = str(spans)
+    assert secret not in encoded
+    assert "do not export" not in encoded
+    assert "not observable" not in encoded
+    for span in spans:
+        if span is not attempt_span:
+            assert not any(
+                key.startswith("daydream.backend_diagnostic")
+                for key in (span.attributes or {})
+            )
 
 
 def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogCaptureFixture) -> None:

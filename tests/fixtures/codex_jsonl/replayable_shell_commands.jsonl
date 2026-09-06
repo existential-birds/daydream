@@ -1,0 +1,13 @@
+{"type":"thread.started","thread_id":"replayable-shell-contract"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"cmd-1","type":"command_execution","command":"/bin/zsh -lc 'printf \"%s\\n\" \"$HOME\"'"}}
+{"type":"item.completed","item":{"id":"cmd-1","type":"command_execution","command":"/bin/zsh -lc 'printf \"%s\\n\" \"$HOME\"'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"cmd-2","type":"command_execution","command":"/bin/bash -lc \"sed -n '1,3p' \\\"a file.txt\\\"\""}}
+{"type":"item.completed","item":{"id":"cmd-2","type":"command_execution","command":"/bin/bash -lc \"sed -n '1,3p' \\\"a file.txt\\\"\"","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"cmd-3","type":"command_execution","command":"/bin/sh -lc 'printf \"%s\" \"$(uname -s)\"'"}}
+{"type":"item.completed","item":{"id":"cmd-3","type":"command_execution","command":"/bin/sh -lc 'printf \"%s\" \"$(uname -s)\"'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"cmd-4","type":"command_execution","command":"/bin/zsh -lc 'printf one\nprintf two'"}}
+{"type":"item.completed","item":{"id":"cmd-4","type":"command_execution","command":"/bin/zsh -lc 'printf one\nprintf two'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"cmd-5","type":"command_execution","command":"/bin/zsh -lc 'cat <<'\"'\"'EOF'\"'\"'\n$HOME\nEOF'"}}
+{"type":"item.completed","item":{"id":"cmd-5","type":"command_execution","command":"/bin/zsh -lc 'cat <<'\"'\"'EOF'\"'\"'\n$HOME\nEOF'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}

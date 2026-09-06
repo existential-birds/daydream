@@ -19,7 +19,7 @@ from collections import Counter
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
 from daydream.generated_files import is_generated_file
@@ -166,6 +166,21 @@ def _files_from_diff(diff_path: Path) -> list[str]:
 
 _READ_VERBS = ("sed", "nl", "cat", "rg", "grep", "head", "tail", "awk", "wc")
 _IMPORT_ONLY_ALTERNATIVE_RE = re.compile(r"^\^?(?:from\b|import\b)")
+_WRITE_TOOL_ALIASES = frozenset(
+    {"write", "edit", "multiedit", "notebookedit", "patch", "apply_patch"}
+)
+
+
+def _semantic_tool_kind(
+    function_name: str,
+) -> Literal["read", "write", "other"]:
+    """Classify a standard-event tool name without changing its raw spelling."""
+    name = function_name.casefold()
+    if name == "read":
+        return "read"
+    if name in _WRITE_TOOL_ALIASES:
+        return "write"
+    return "other"
 
 
 def _is_import_only_pattern(pattern: str) -> bool:
@@ -430,9 +445,9 @@ def _read_paths_for_call(tc: dict[str, Any]) -> list[str]:
     - pi:     lowercase ``read`` → ``arguments.path``
     - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
     """
-    fn = tc["function_name"].lower()
+    fn = tc["function_name"].casefold()
     args = tc["arguments"]
-    if fn == "read":
+    if _semantic_tool_kind(tc["function_name"]) == "read":
         p = args.get("file_path") or args.get("path", "")
         return [p] if p else []
     if fn == "grep":
@@ -558,16 +573,21 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
         total_counts.update(counts)
 
         read_paths = [
-            tc["arguments"].get("file_path", "")
+            tc["arguments"].get("file_path")
+            or tc["arguments"].get("path", "")
             for tc in calls
-            if tc["function_name"] == "Read"
+            if _semantic_tool_kind(tc["function_name"]) == "read"
         ]
         for path, count in Counter(read_paths).items():
             if count > 1 and path:
                 redundant_reads.append({"agent": label, "file": path, "read_count": count})
 
     total = sum(total_counts.values())
-    write_count = total_counts.get("Write", 0)
+    write_count = sum(
+        count
+        for function_name, count in total_counts.items()
+        if _semantic_tool_kind(function_name) == "write"
+    )
 
     return {
         "total_calls": total,
@@ -1469,12 +1489,94 @@ def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_TOOL_OUTCOME_FLAG_ORDER = (
+    "failed_tool_result",
+    "incomplete_tool_call",
+    "unmatched_tool_result",
+    "incomplete_telemetry",
+    "parser_coverage_gap",
+)
+_DIAGNOSTIC_TRAINING_FLAGS = {
+    "codex_transport_coverage": "incomplete_telemetry",
+    "codex_parser_coverage": "parser_coverage_gap",
+}
+
+
+def _tool_outcome_flags(steps: list[dict[str, Any]]) -> list[str]:
+    """Classify tool outcomes and diagnostics with step-local correlation."""
+    found: set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        call_counts: Counter[str] = Counter()
+        malformed_calls = 0
+        raw_calls = step.get("tool_calls")
+        if isinstance(raw_calls, list):
+            for call in raw_calls:
+                call_id = call.get("tool_call_id") if isinstance(call, dict) else None
+                if isinstance(call_id, str) and call_id:
+                    call_counts[call_id] += 1
+                else:
+                    malformed_calls += 1
+
+        paired_counts: Counter[str] = Counter()
+        observation = step.get("observation")
+        raw_results = observation.get("results") if isinstance(observation, dict) else None
+        if isinstance(raw_results, list):
+            for result in raw_results:
+                if not isinstance(result, dict):
+                    continue
+                source_call_id = result.get("source_call_id")
+                raw_extra = result.get("extra")
+                extra = raw_extra if isinstance(raw_extra, dict) else {}
+                interrupted = (
+                    extra.get("status") == "interrupted"
+                    or extra.get("cancelled") is True
+                )
+                if isinstance(source_call_id, str) and source_call_id:
+                    if source_call_id not in call_counts:
+                        found.add("unmatched_tool_result")
+                        continue
+                    paired_counts[source_call_id] += 1
+                    if interrupted:
+                        found.add("incomplete_tool_call")
+                    elif extra.get("is_error") is True:
+                        found.add("failed_tool_result")
+                elif interrupted and (call_counts or malformed_calls):
+                    # Recorder-generated interruption markers deliberately
+                    # carry a null source id. The unpaired call is the primary
+                    # evidence; this branch preserves the marker semantics
+                    # without misclassifying it as an orphan result.
+                    found.add("incomplete_tool_call")
+
+        if malformed_calls or any(
+            paired_counts[call_id] < count for call_id, count in call_counts.items()
+        ):
+            found.add("incomplete_tool_call")
+
+        step_extra = step.get("extra")
+        if not isinstance(step_extra, dict):
+            continue
+        unmatched = step_extra.get("unmatched_tool_results")
+        if isinstance(unmatched, list) and unmatched:
+            found.add("unmatched_tool_result")
+        diagnostics = step_extra.get("backend_diagnostics")
+        if isinstance(diagnostics, list):
+            for diagnostic in diagnostics:
+                code = diagnostic.get("code") if isinstance(diagnostic, dict) else None
+                flag = _DIAGNOSTIC_TRAINING_FLAGS.get(code) if isinstance(code, str) else None
+                if flag is not None:
+                    found.add(flag)
+
+    return [flag for flag in _TOOL_OUTCOME_FLAG_ORDER if flag in found]
+
+
 def analyze_training_signals(
     trajectories: dict[str, Any],
     findings: list[dict[str, Any]],
     grounding: dict[str, Any],
 ) -> dict[str, Any]:
-    """Assess trajectory quality for ML training purposes."""
+    """Assess forked training trajectories for content and evidence quality."""
     signals: list[dict[str, Any]] = []
 
     for traj in trajectories["forked"]:
@@ -1507,6 +1609,8 @@ def analyze_training_signals(
                         noise_flags.append("empty_tool_result")
                         break
 
+        noise_flags.extend(_tool_outcome_flags(steps))
+
         # Extract stack name from agent label (e.g. "deep-python" → "python")
         agent_stack = label.removeprefix("deep-").removeprefix("explore-")
         agent_ungrounded = [
@@ -1515,6 +1619,10 @@ def analyze_training_signals(
         ]
         if agent_ungrounded:
             noise_flags.append(f"ungrounded_findings:{len(agent_ungrounded)}")
+
+        # Keep the documented category order while ensuring repeated evidence
+        # never repeats a training-review flag.
+        noise_flags = list(dict.fromkeys(noise_flags))
 
         signals.append({
             "trajectory": label,
