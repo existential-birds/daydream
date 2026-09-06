@@ -17,14 +17,14 @@ import json
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-from pydantic import ValidationError
+from typing import Any, Literal
 
 from daydream import severity
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
+from daydream.benchmark.manifest import load_benchmark_manifest
 
 TEMPLATE_VERSION = "4"
 
@@ -324,6 +324,29 @@ def task_spec_digest(case_doc: dict[str, Any]) -> str:
     return hashlib.sha256(
         render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
     ).hexdigest()
+
+
+TaskSpecApprovalState = Literal["not-required", "current", "stale"]
+
+
+@dataclass(frozen=True)
+class TaskSpecApproval:
+    state: TaskSpecApprovalState
+    current_sha256: str
+    approved_sha256: str | None
+
+
+def task_spec_approval(case_doc: dict[str, Any]) -> TaskSpecApproval:
+    current = task_spec_digest(case_doc)
+    curation = case_doc.get("curation") or {}
+    approved = curation.get("task_spec_sha256")
+    if curation.get("state") != "ready":
+        return TaskSpecApproval("not-required", current, approved if isinstance(approved, str) else None)
+    return TaskSpecApproval(
+        "current" if approved == current else "stale",
+        current,
+        approved if isinstance(approved, str) else None,
+    )
 
 
 def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
@@ -646,15 +669,14 @@ def _write_task_spec(stage: Path, case_doc: dict[str, Any]) -> str:
     row.
     """
     task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
-    task_spec_sha256 = task_spec_digest(case_doc)
-    approved = (case_doc.get("curation") or {}).get("task_spec_sha256")
-    if task_spec_sha256 != approved:
+    approval = task_spec_approval(case_doc)
+    if approval.state != "current":
         raise CompileError(
             f"case {case_doc.get('case_id')} task spec digest "
-            f"{task_spec_sha256} != approved {approved}"
+            f"{approval.current_sha256} != approved {approval.approved_sha256}"
         )
     (stage / "Task.md").write_bytes(task_spec_bytes)
-    return task_spec_sha256
+    return approval.current_sha256
 
 
 def _compile_case(
@@ -863,21 +885,12 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
     runtime_lock_fields = pkg.runtime_lock_header_fields(runtime_lock.decode("utf-8"))
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
-        manifest = storage.load_yaml_strict(root / "benchmark.yaml")
+        try:
+            loaded_manifest = load_benchmark_manifest(root, canonicalize_case_order=True)
+        except storage.WorkspaceCorrupt as exc:
+            raise CompileError(str(exc)) from exc
+        manifest = loaded_manifest.raw
         repo_slug = manifest.get("source", {}).get("repository") or ""
-
-        # Compile canonicalizes the manifest's ``cases[]`` row order to the
-        # schema's canonical (pr_number, head-sha, case_id) order before model
-        # validation, so compile output stays row-order-insensitive (the model
-        # requires the canonical order; reversed rows are not corruption here).
-        manifest["cases"] = sorted(
-            manifest.get("cases") or [],
-            key=lambda c: (
-                int(c.get("pr_number", 0) or 0),
-                schema.head_sha_from_case_id(c.get("case_id", "")),
-                c.get("case_id", ""),
-            ),
-        )
         # Every indexed case is loaded through the shared model-gated loader
         # (same ``_schema_ready`` + ``CaseDocument`` validation as the
         # validate/status read path); a present-but-corrupt case raises
@@ -885,10 +898,7 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
         # validation (which rejects malformed/empty privacy host lists) is
         # surfaced as ``CompileError`` so a disallowed-host policy fails the
         # compile closed through the documented rejection type.
-        try:
-            manifest_model = schema.BenchmarkManifest.model_validate(manifest)
-        except ValidationError as exc:
-            raise CompileError(f"{root}: invalid benchmark.yaml: {exc}") from exc
+        manifest_model = loaded_manifest.model
         # The compiled network policy is sourced from the workspace's persisted
         # privacy allowlists -- never a hardcoded default. The Privacy field
         # validators (_normalize_host_list) already reject empty/malformed

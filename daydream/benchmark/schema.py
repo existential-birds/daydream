@@ -1017,7 +1017,7 @@ def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
     curation = dict(raw.get("curation") or {})
     curation.pop("gold_mode", None)
     curation.pop("task_spec_approved_at", None)
-    if curation.get("state") == "ready" and curation.get("task_spec_sha256") is None:
+    if curation.get("state") == "ready" and "task_spec_sha256" not in curation:
         from daydream.benchmark.harbor.build import (
             task_spec_digest,
         )

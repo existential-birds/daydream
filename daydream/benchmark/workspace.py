@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from daydream import git_ops
 from daydream.benchmark import schema
 from daydream.benchmark import snapshot as snapshot_mod
+from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
@@ -175,8 +176,12 @@ def init_workspace(
                 if sub != "transactions":
                     tx.create_dir(sub)
             tx.commit()
+        try:
+            manifest = load_benchmark_manifest(root).model
+        except WorkspaceCorrupt as exc:
+            raise InitError(f"{root}: invalid benchmark.yaml") from exc
 
-    return BenchmarkManifest.model_validate(load_yaml_strict(root / "benchmark.yaml"))
+    return manifest
 
 
 @dataclass
@@ -210,11 +215,7 @@ def workspace_status(root: Path) -> WorkspaceStatus:
     root = Path(root)
     with WorkspaceLock(root):
         recover_startup(root)
-        raw = load_yaml_strict(root / "benchmark.yaml")
-        try:
-            manifest = BenchmarkManifest.model_validate(raw)
-        except Exception as exc:
-            raise WorkspaceCorrupt(f"{root}: invalid benchmark.yaml: {exc}") from exc
+        manifest = load_benchmark_manifest(root).model
         docs = load_case_documents(root, manifest)
         state, resolved = _derived_state(root, manifest, docs)
         case_snapshots = _case_snapshot_summaries(root, manifest, docs)
@@ -264,12 +265,11 @@ def validate_workspace(root: Path) -> tuple[int, str]:
     with WorkspaceLock(root):
         try:
             recover_startup(root)
-            raw = load_yaml_strict(root / "benchmark.yaml")
-            manifest = BenchmarkManifest.model_validate(raw)
-        except Exception as exc:  # schema/checksum/unreadable all map to corruption
+            manifest = load_benchmark_manifest(root).model
+        except Exception:  # schema/checksum/unreadable all map to corruption
             return (
                 classify_validation(corrupt=True, ready=False, incomplete=False),
-                f"corrupt: invalid benchmark.yaml ({exc})",
+                f"corrupt: {root}: invalid benchmark.yaml",
             )
 
         # Orphan + missing-indexed-file rule over the case/import/bundle set.
@@ -771,7 +771,14 @@ def _case_curation_states(
         docs = load_case_documents(root, manifest)
     states: list[dict[str, str]] = []
     for case in manifest.cases:
-        states.append({"curation_state": docs[case.case_file].curation.state})
+        doc = docs[case.case_file]
+        state = doc.curation.state
+        if state == "ready":
+            from daydream.benchmark.harbor.build import task_spec_approval
+
+            if task_spec_approval(doc.model_dump(mode="json")).state == "stale":
+                state = "stale"
+        states.append({"curation_state": state})
     return states
 
 
@@ -804,9 +811,16 @@ def _case_snapshot_summaries(
                 "snapshot_status": status,
                 "head_prefix": head[:12],
                 "error_reason": error_reason,
+                "task_spec_approval": _task_spec_approval_state(doc),
             }
         )
     return summaries
+
+
+def _task_spec_approval_state(doc: CaseDocument) -> str:
+    from daydream.benchmark.harbor.build import task_spec_approval
+
+    return task_spec_approval(doc.model_dump(mode="json")).state
 
 
 def _scan_authoring_files(root: Path) -> set[Path]:
