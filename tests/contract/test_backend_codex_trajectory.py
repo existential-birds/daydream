@@ -246,8 +246,10 @@ async def test_replayable_shell_commands_survive_codex_to_atif_exactly(
 
     assert archived == expected
     for command in archived:
+        # These bodies use POSIX shell syntax; validate without requiring the
+        # wrapper shell from the capture to be installed on the test host.
         checked = subprocess.run(
-            ["zsh", "-n", "-c", command],
+            ["/bin/sh", "-n", "-c", command],
             capture_output=True,
             text=True,
             check=False,
