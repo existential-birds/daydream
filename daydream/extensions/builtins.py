@@ -14,7 +14,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from opentelemetry.sdk.trace.export import SpanExporter
+
     from daydream.extensions.registry import FlowEntry, Registry
+    from daydream.observability.config import ObservabilityConfig
 
 
 def register_builtins(registry: Registry) -> None:
@@ -28,11 +31,24 @@ def register_builtins(registry: Registry) -> None:
 
 def _register_trace_exporters(registry: Registry) -> None:
     """Register lazy factories; merely validating extensions never initializes tracing."""
-    from daydream.observability.exporters import honeyhive_exporter, langsmith_exporter, otlp_exporter
+    def langsmith(config: ObservabilityConfig) -> SpanExporter:
+        from daydream.observability.exporters import langsmith_exporter
 
-    registry.register_trace_exporter("langsmith", langsmith_exporter)
-    registry.register_trace_exporter("honeyhive", honeyhive_exporter)
-    registry.register_trace_exporter("otlp", otlp_exporter)
+        return langsmith_exporter(config)
+
+    def honeyhive(config: ObservabilityConfig) -> SpanExporter:
+        from daydream.observability.exporters import honeyhive_exporter
+
+        return honeyhive_exporter(config)
+
+    def otlp(config: ObservabilityConfig) -> SpanExporter:
+        from daydream.observability.exporters import otlp_exporter
+
+        return otlp_exporter(config)
+
+    registry.register_trace_exporter("langsmith", langsmith)
+    registry.register_trace_exporter("honeyhive", honeyhive)
+    registry.register_trace_exporter("otlp", otlp)
 
 
 def _register_improve_builtins(registry: Registry) -> None:
