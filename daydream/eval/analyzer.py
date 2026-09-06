@@ -18,21 +18,21 @@ import math
 import re
 import shlex
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Literal
+from typing import Any, Iterator, Literal
 
 from daydream._tree_sitter_safety import (
     TreeSitterBadVersionError,
     assert_tree_sitter_safe,
 )
+from daydream.artifact_visibility import ArtifactEvidenceProvenance
 from daydream.generated_files import is_generated_file
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.timeutil import parse_iso_timestamp
-
-if TYPE_CHECKING:
-    from daydream.artifact_visibility import ArtifactEvidenceProvenance
+from daydream.trajectory import redact_text
 
 # Trajectory loading
 
@@ -479,6 +479,185 @@ def _files_read(tool_calls: list[dict[str, Any]]) -> set[str]:
     return paths
 
 
+_ArtifactPathKind = Literal[
+    "repository",
+    "artifact",
+    "exploration_artifact",
+    "rejected",
+]
+
+
+@dataclass(frozen=True)
+class _ArtifactPathRoots:
+    """Trusted lexical spellings used to classify already-recorded paths."""
+
+    daydream: tuple[tuple[str, ...], ...]
+    review_output: tuple[tuple[str, ...], ...]
+    live: tuple[tuple[str, ...], ...]
+
+
+def _lexical_path(value: str) -> tuple[bool, tuple[str, ...]] | None:
+    """Return an absolute marker plus safe components without touching disk."""
+    if type(value) is not str or not value:
+        return None
+    absolute = value.startswith("/")
+    components: list[str] = []
+    for component in value.split("/"):
+        if component in ("", "."):
+            continue
+        if component == "..":
+            return None
+        components.append(component)
+    return (absolute, tuple(components)) if components else None
+
+
+def _absolute_spellings(path: Path) -> tuple[tuple[str, ...], ...]:
+    """Raw and canonically redacted component spellings for one absolute path."""
+    spellings: list[tuple[str, ...]] = []
+    for value in (str(path), redact_text(str(path))):
+        lexical = _lexical_path(value)
+        if lexical is None or not lexical[0]:
+            continue
+        if lexical[1] not in spellings:
+            spellings.append(lexical[1])
+    return tuple(spellings)
+
+
+def _single_component_identity(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and "/" not in value
+        and value not in (".", "..")
+    )
+
+
+def _artifact_path_roots(
+    daydream_dir: Path | None,
+    artifact_provenance: ArtifactEvidenceProvenance | None,
+) -> _ArtifactPathRoots:
+    """Validate supplied provenance once and derive trusted lexical roots."""
+    daydream_roots: list[tuple[str, ...]] = []
+    review_roots: list[tuple[str, ...]] = []
+    live_roots: tuple[tuple[str, ...], ...] = ()
+    if daydream_dir is not None and daydream_dir.is_absolute():
+        daydream_roots.extend(_absolute_spellings(daydream_dir))
+    if artifact_provenance is None:
+        return _ArtifactPathRoots(tuple(daydream_roots), (), ())
+    if (
+        not isinstance(artifact_provenance, ArtifactEvidenceProvenance)
+        or not _single_component_identity(artifact_provenance.workspace_key)
+        or not _single_component_identity(artifact_provenance.session_id)
+        or not isinstance(artifact_provenance.public_source, Path)
+        or not artifact_provenance.public_source.is_absolute()
+        or ".." in artifact_provenance.public_source.parts
+        or type(artifact_provenance.live_components) is not tuple
+        or not artifact_provenance.live_components
+        or not all(
+            type(component) is str and bool(component)
+            for component in artifact_provenance.live_components
+        )
+    ):
+        raise ValueError("invalid artifact evidence provenance")
+    live_root = Path(*artifact_provenance.live_components)
+    expected_tail = (
+        artifact_provenance.workspace_key,
+        "runs",
+        artifact_provenance.session_id,
+        "live",
+    )
+    if (
+        not live_root.is_absolute()
+        or tuple(live_root.parts) != artifact_provenance.live_components
+        or ".." in live_root.parts
+        or tuple(live_root.parts[-4:]) != expected_tail
+    ):
+        raise ValueError("invalid artifact evidence provenance")
+    public_daydream = artifact_provenance.public_source / ".daydream"
+    daydream_roots.extend(_absolute_spellings(public_daydream))
+    review_roots.extend(
+        _absolute_spellings(artifact_provenance.public_source / ".review-output.md")
+    )
+    live_roots = _absolute_spellings(live_root)
+    return _ArtifactPathRoots(
+        tuple(dict.fromkeys(daydream_roots)),
+        tuple(review_roots),
+        live_roots,
+    )
+
+
+def _relative_to_root(
+    components: tuple[str, ...],
+    root: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    if len(components) < len(root) or components[: len(root)] != root:
+        return None
+    return components[len(root) :]
+
+
+def _artifact_path_kind(path: str, *, roots: _ArtifactPathRoots) -> _ArtifactPathKind:
+    """Classify one recorded path by exact lexical component ownership."""
+    lexical = _lexical_path(path)
+    if lexical is None:
+        return "rejected"
+    absolute, components = lexical
+    if not absolute:
+        if components[0] == ".daydream":
+            return (
+                "exploration_artifact"
+                if components[1:2] == ("exploration",)
+                else "artifact"
+            )
+        if components == (".review-output.md",):
+            return "artifact"
+        return "repository"
+    for root in roots.daydream:
+        relative = _relative_to_root(components, root)
+        if relative is not None:
+            return (
+                "exploration_artifact"
+                if relative[:1] == ("exploration",)
+                else "artifact"
+            )
+    if components in roots.review_output:
+        return "artifact"
+    for root in roots.live:
+        relative = _relative_to_root(components, root)
+        if relative is not None:
+            return (
+                "exploration_artifact"
+                if relative[:2] == (".daydream", "exploration")
+                else "artifact"
+            )
+    return "repository"
+
+
+def _partition_repository_reads(
+    tool_calls: list[dict[str, Any]],
+    *,
+    roots: _ArtifactPathRoots,
+) -> tuple[set[str], set[str]]:
+    repository: set[str] = set()
+    rejected: set[str] = set()
+    for path in _files_read(tool_calls):
+        if _artifact_path_kind(path, roots=roots) == "repository":
+            repository.add(path)
+        else:
+            rejected.add(path)
+    return repository, rejected
+
+
+def _repository_reads(
+    tool_calls: list[dict[str, Any]],
+    *,
+    daydream_dir: Path,
+    artifact_provenance: ArtifactEvidenceProvenance | None,
+) -> tuple[set[str], set[str]]:
+    """Partition source reads from artifact-shaped or unsafe evidence paths."""
+    roots = _artifact_path_roots(daydream_dir, artifact_provenance)
+    return _partition_repository_reads(tool_calls, roots=roots)
+
+
 def _path_matches(absolute: str, relative: str) -> bool:
     """Check if an absolute tool-call path corresponds to a relative diff path."""
     return absolute.endswith(relative) or absolute.endswith("/" + relative)
@@ -607,20 +786,36 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def analyze_coverage(trajectories: dict[str, Any], daydream_dir: Path) -> dict[str, Any]:
-    """File review coverage: files in diff vs files read by review agents."""
+def analyze_coverage(
+    trajectories: dict[str, Any],
+    daydream_dir: Path,
+    *,
+    artifact_provenance: ArtifactEvidenceProvenance | None = None,
+) -> dict[str, Any]:
+    """File review coverage using repository reads, never run artifacts.
+
+    ``artifact_reads_rejected`` counts unique artifact-shaped or lexically
+    unsafe read paths excluded before suffix matching. The raw private owner
+    identity is never included in the result.
+    """
     diff_files = _files_from_diff(daydream_dir / "diff.patch")
 
-    review_reads: set[str] = set()
+    review_calls: list[dict[str, Any]] = []
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
         if label.startswith("deep-"):
-            review_reads.update(_files_read(_extract_tool_calls(traj)))
+            review_calls.extend(_extract_tool_calls(traj))
 
     if trajectories["main"]:
         for tc in _extract_tool_calls(trajectories["main"]):
             if tc["phase"] in ("deep", "alternatives"):
-                review_reads.update(_read_paths_for_call(tc))
+                review_calls.append(tc)
+
+    review_reads, rejected_reads = _repository_reads(
+        review_calls,
+        daydream_dir=daydream_dir,
+        artifact_provenance=artifact_provenance,
+    )
 
     covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
     uncovered = sorted(set(diff_files) - covered)
@@ -630,6 +825,7 @@ def analyze_coverage(trajectories: dict[str, Any], daydream_dir: Path) -> dict[s
         "files_read_by_reviewers": len(covered),
         "coverage_ratio": (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
         "uncovered_files": uncovered,
+        "artifact_reads_rejected": len(rejected_reads),
     }
 
 
@@ -1297,6 +1493,8 @@ def analyze_grounding(
     trajectories: dict[str, Any],
     findings: list[dict[str, Any]],
     daydream_dir: Path,
+    *,
+    artifact_provenance: ArtifactEvidenceProvenance | None = None,
 ) -> dict[str, Any]:
     """Grounding: the cited file was read AND the cited line resolves to a hunk.
 
@@ -1342,11 +1540,20 @@ def analyze_grounding(
     ``file_grounding_rate``/``line_grounding_rate`` follow the same convention
     and are reported alongside the composite so the tightening is observable as
     components rather than one opaque number.
+
+    Run-owned artifact paths are partitioned before suffix matching. An
+    artifact primary file or rationale reference forces the finding ungrounded
+    and is retained in redacted artifact-specific fields; it is neither source
+    credit nor an ordinary unread source reference.
     """
+    roots = _artifact_path_roots(daydream_dir, artifact_provenance)
     agent_reads: dict[str, set[str]] = {}
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
-        agent_reads[label] = _files_read(_extract_tool_calls(traj))
+        agent_reads[label], _rejected = _partition_repository_reads(
+            _extract_tool_calls(traj),
+            roots=roots,
+        )
 
     ranges, hunk_source = _hunk_ranges(daydream_dir)
 
@@ -1355,22 +1562,50 @@ def analyze_grounding(
     tiers = dict.fromkeys((*_LOCATION_TIERS, *_GROUNDING_EXEMPT_TIERS), 0)
     file_grounded_count = 0
     line_grounded_count = 0
+    artifact_evidence_rejections = 0
 
     for finding in findings:
         stack = finding.get("_stack", "")
         reads = agent_reads.get(f"deep-{stack}", set())
 
-        cited_file = finding.get("file", "")
-        rationale = finding.get("rationale", "")
+        cited_file_value = finding.get("file", "")
+        cited_file = cited_file_value if isinstance(cited_file_value, str) else ""
+        rationale_value = finding.get("rationale", "")
+        rationale = rationale_value if isinstance(rationale_value, str) else ""
 
-        file_was_read = any(_path_matches(r, cited_file) for r in reads)
+        cited_kind = _artifact_path_kind(cited_file, roots=roots)
+        artifact_file_ref = (
+            redact_text(cited_file)
+            if cited_kind in ("artifact", "exploration_artifact")
+            else None
+        )
+        file_was_read = cited_kind == "repository" and any(
+            _path_matches(r, cited_file) for r in reads
+        )
 
-        rationale_refs = re.findall(r"[\w/.:-]+\.(?:md|json|py|ts|tsx|js|txt|yaml|yml|in|toml|cfg)", rationale)
-        unread_refs = [
-            ref for ref in rationale_refs
-            if not any(_path_matches(r, ref) for r in reads)
-        ]
-        file_grounded = file_was_read and len(unread_refs) == 0
+        rationale_refs = re.findall(
+            r"(?:\[REDACTED_USER\]|[\w/.:-])+\."
+            r"(?:md|json|py|ts|tsx|js|txt|yaml|yml|in|toml|cfg)",
+            rationale,
+        )
+        artifact_rationale_refs: list[str] = []
+        unread_refs: list[str] = []
+        for ref in rationale_refs:
+            ref_kind = _artifact_path_kind(ref, roots=roots)
+            if ref_kind in ("artifact", "exploration_artifact"):
+                artifact_rationale_refs.append(redact_text(ref))
+            elif ref_kind == "rejected" or not any(
+                _path_matches(read, ref) for read in reads
+            ):
+                unread_refs.append(ref)
+        artifact_rationale_refs = sorted(set(artifact_rationale_refs))
+        artifact_rejected = bool(artifact_file_ref or artifact_rationale_refs)
+        artifact_evidence_rejections += int(artifact_rejected)
+        file_grounded = (
+            file_was_read
+            and len(unread_refs) == 0
+            and not artifact_rejected
+        )
 
         cited = _cited_line(finding)
         cited_line = _int_or_none(cited)
@@ -1397,10 +1632,12 @@ def analyze_grounding(
         entry = {
             "id": finding.get("id"),
             "stack": stack,
-            "file": cited_file,
+            "file": artifact_file_ref if artifact_file_ref is not None else cited_file,
             "confidence": finding.get("confidence", "UNKNOWN"),
             "file_was_read": file_was_read,
             "unread_rationale_refs": unread_refs,
+            "artifact_file_ref": artifact_file_ref,
+            "artifact_rationale_refs": artifact_rationale_refs,
             "location_tier": tier,
             "line_grounded": line_grounded,
             "grounded": file_grounded and line_grounded,
@@ -1418,21 +1655,27 @@ def analyze_grounding(
         "line_grounded_count": line_grounded_count,
         "file_grounding_rate": (round(file_grounded_count / total, 4) if total > 0 else None),
         "line_grounding_rate": (round(line_grounded_count / total, 4) if total > 0 else None),
+        "artifact_evidence_rejections": artifact_evidence_rejections,
         "tiers": tiers,
         "grounded": grounded,
         "ungrounded": ungrounded,
     }
 
 
-def analyze_exploration_utilization(trajectories: dict[str, Any]) -> dict[str, Any]:
-    """Check whether review agents read the exploration-path artifacts.
+def analyze_exploration_utilization(
+    trajectories: dict[str, Any],
+    *,
+    daydream_dir: Path | None = None,
+    artifact_provenance: ArtifactEvidenceProvenance | None = None,
+) -> dict[str, Any]:
+    """Check whether review agents read current-run exploration artifacts.
 
-    Any tool call contributing a read path beneath an ``exploration/`` directory
-    (e.g. the deterministic ``affected_files.md`` index, ``summary.md``, or
-    ``conventions.md``) counts as exploration utilization, whichever backend
-    performed the read — ``Read``/``Grep`` tool calls and ``shell``/``bash``
-    commands alike route through ``_read_paths_for_call``.
+    Relative public ``.daydream/exploration`` paths and exact public/private
+    roots bound by the supplied provenance count. Arbitrary directories named
+    ``exploration``, other owners, and unsafe parent traversals do not. Backend
+    normalization remains centralized in ``_read_paths_for_call``.
     """
+    roots = _artifact_path_roots(daydream_dir, artifact_provenance)
     results: list[dict[str, Any]] = []
 
     for traj in trajectories["forked"]:
@@ -1450,7 +1693,7 @@ def analyze_exploration_utilization(trajectories: dict[str, Any]) -> dict[str, A
                 continue
             total_reads += 1
             for path in read_paths:
-                if "/exploration/" in path:
+                if _artifact_path_kind(path, roots=roots) == "exploration_artifact":
                     exploration_refs.append(path)
 
         results.append({
@@ -2640,11 +2883,24 @@ def analyze_session(
     costs = analyze_costs(trajectories)
     tools = analyze_tools(trajectories)
     findings_data = analyze_findings(daydream_dir)
-    coverage = analyze_coverage(trajectories, daydream_dir)
-    grounding = analyze_grounding(trajectories, findings_data["findings"], daydream_dir)
+    coverage = analyze_coverage(
+        trajectories,
+        daydream_dir,
+        artifact_provenance=artifact_provenance,
+    )
+    grounding = analyze_grounding(
+        trajectories,
+        findings_data["findings"],
+        daydream_dir,
+        artifact_provenance=artifact_provenance,
+    )
     location = analyze_location(daydream_dir)
     shipped_duplication = analyze_shipped_duplication(daydream_dir)
-    exploration = analyze_exploration_utilization(trajectories)
+    exploration = analyze_exploration_utilization(
+        trajectories,
+        daydream_dir=daydream_dir,
+        artifact_provenance=artifact_provenance,
+    )
     timing = analyze_timing(trajectories)
     training = analyze_training_signals(
         trajectories, findings_data["findings"], grounding,
