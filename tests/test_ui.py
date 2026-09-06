@@ -542,17 +542,48 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     assert len(_summarize_input({"command": long_command}, "Bash")) == _BASH_COMMAND_MAX_CHARS
 
 
-def test_bash_header_shows_cd_stripped_display_variant() -> None:
-    """S1: UI renders the cd-stripped display variant, not the stored replayable value."""
+def test_bash_header_preserves_operator_cd_prefix() -> None:
+    """Claude/Pi Bash commands never pass through the Codex wrapper (issue #336).
+
+    The operator-authored cd prefix must render — stripping it would hide cwd
+    context and make 'cd backend && pytest' vs 'cd frontend && pytest'
+    display identically.
+    """
     from daydream.ui.tools import _build_tool_header
+
     header = _build_tool_header("Bash", {"command": "cd /app && echo hello"})
+    assert "cd /app && echo hello" in header.plain
+
+
+def test_shell_header_shows_cd_stripped_display_variant() -> None:
+    """S1: Codex ('shell') renders the cd-stripped display variant, not the stored replayable value."""
+    from daydream.ui.tools import _build_tool_header
+
+    header = _build_tool_header("shell", {"command": "cd /app && echo hello"})
     assert "echo hello" in header.plain
     assert "cd /app" not in header.plain  # the stored replayable value must not leak through
 
 
 def test_log_summary_shows_cd_stripped_display_variant() -> None:
-    """S1 parity: --log (_summarize_input) shows the cd-stripped variant like the live surfaces."""
+    """S1 parity: --log (_summarize_input) shows the cd-stripped variant for Codex ('shell')."""
     from daydream.agent import _summarize_input
 
-    assert _summarize_input({"command": "cd /app && echo hello"}, "Bash") == "echo hello"
     assert _summarize_input({"command": "cd /app && echo hello"}, "shell") == "echo hello"
+
+
+def test_log_summary_preserves_operator_cd_prefix() -> None:
+    """--log keeps the operator-authored cd prefix for Claude/Pi Bash commands (issue #336)."""
+    from daydream.agent import _summarize_input
+
+    assert _summarize_input({"command": "cd /app && echo hello"}, "Bash") == "cd /app && echo hello"
+
+
+def test_callback_progress_cd_split_matches_live_surfaces() -> None:
+    """format_callback_progress splits the same way: cd-strip Codex 'shell' only."""
+    from daydream.ui.tools import format_callback_progress
+
+    bash_line = format_callback_progress("Bash", {"command": "cd /app && echo hello"}, None)
+    assert "cd /app && echo hello" in bash_line.plain
+    shell_line = format_callback_progress("shell", {"command": "cd /app && echo hello"}, None)
+    assert "echo hello" in shell_line.plain
+    assert "cd /app" not in shell_line.plain

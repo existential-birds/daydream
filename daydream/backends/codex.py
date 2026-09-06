@@ -293,6 +293,9 @@ def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
     return prompt
 
 
+_SHELL_LC_PREFIX_RE = re.compile(r"^/bin/(?:zsh|bash|sh)\s+-lc\s+")
+
+
 def _unwrap_shell_command(command: str) -> str:
     """Decode the replayable ``-lc`` payload from a Codex shell command wrapper.
 
@@ -302,21 +305,34 @@ def _unwrap_shell_command(command: str) -> str:
     :func:`shlex.split` so the stored command is byte-identical to what actually
     executed — replayable verbatim, including any leading ``cd`` prefix.
 
-    Decoding happens only when the wrapper shape is recognized exactly: non-empty
-    argv, ``argv[0]`` in {"/bin/zsh", "/bin/bash", "/bin/sh"}, ``argv[1] == "-lc"``,
-    and exactly one argument. The returned value is ``argv[2]`` verbatim — no
-    stripping, no quote reprocessing, no cd removal.
+    Decoding happens only when the wrapper shape is recognized: non-empty argv,
+    ``argv[0]`` in {"/bin/zsh", "/bin/bash", "/bin/sh"}, ``argv[1] == "-lc"``.
+    An exactly one-argument payload returns ``argv[2]`` verbatim — no stripping,
+    no quote reprocessing, no cd removal. Real Codex also sends bare multi-word
+    payloads without quotes ('/bin/zsh -lc make test'): the payload argument then
+    splits into several argv tokens, and the raw command bytes after the ``-lc``
+    prefix are returned verbatim so embedded quoting survives.
 
-    Fails open: any other shape (non-wrapper, trailing argv, missing ``-lc``
-    argument) or a :class:`ValueError` from unbalanced quoting returns the input
-    unchanged, byte-for-byte.
+    Fails open: any other shape (non-wrapper, a shell-quoted payload followed by
+    trailing argv, missing ``-lc`` argument) or a :class:`ValueError` from
+    unbalanced quoting returns the input unchanged, byte-for-byte.
     """
     try:
         argv = shlex.split(command)
     except ValueError:
         return command
-    if len(argv) == 3 and argv[0] in ("/bin/zsh", "/bin/bash", "/bin/sh") and argv[1] == "-lc":
-        return argv[2]
+    if len(argv) >= 2 and argv[0] in ("/bin/zsh", "/bin/bash", "/bin/sh") and argv[1] == "-lc":
+        if len(argv) == 3:
+            return argv[2]
+        # More than one word after '-lc': a shell-quoted payload with trailing
+        # argv is not a valid wrapper (fail open), but a bare, unquoted payload
+        # is the real-Codex shape for simple commands ('/bin/zsh -lc ls -la').
+        # Recover it from the raw command so embedded quoting is preserved.
+        wrapper = _SHELL_LC_PREFIX_RE.match(command)
+        if wrapper is not None:
+            payload = command[wrapper.end() :]
+            if payload and payload[0] not in ("'", '"'):
+                return payload
     return command
 
 

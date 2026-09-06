@@ -1318,6 +1318,67 @@ class TestUnwrapShellCommand:
             f"payload; got warnings: {warnings}"
         )
 
+    @pytest.mark.asyncio
+    async def test_tool_supervisor_sees_cd_stripped_display_variant(self) -> None:
+        """Extension tool supervisors match the pre-#1124 cd-stripped value.
+
+        The stored ToolStartEvent input keeps the replayable cd-prefixed payload
+        ('cd /home/user/project && make test'), but the extension tool supervisor
+        — a matching surface holding start-anchored deny patterns such as
+        '^make' — must keep receiving the pre-#1124 wrapper-decoded, cd-stripped
+        command. A regression handing the supervisor the stored value would let
+        'cd <dir> && make test' silently evade '^make'.
+        """
+        from daydream.agent import run_agent
+        from daydream.extensions import Registry, ToolDecision, set_registry
+        from daydream.trajectory import DaydreamPhase
+
+        raw = '/bin/zsh -lc "cd /home/user/project && make test"'
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": "th_sup"}),
+            json.dumps(
+                {"type": "item.started", "item": {"type": "command_execution", "command": raw}}
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": raw,
+                        "status": "completed",
+                        "exit_code": 0,
+                        "aggregated_output": "ok",
+                    },
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+        ]
+
+        seen: dict[str, str] = {}
+
+        def supervisor(tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
+            del phase
+            assert tool_name == "shell"
+            seen["command"] = str(tool_input.get("command", ""))
+            if seen["command"].startswith("make"):
+                return ToolDecision(veto=True, reason="^make deny")
+            return ToolDecision(veto=False)
+
+        registry = Registry()
+        registry.register_tool_supervisor(supervisor)
+        set_registry(registry)
+        backend = CodexBackend(model="fixture-model")
+        mock_proc = make_mock_process(lines)
+        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+            _, _, budget_reason = await run_agent(
+                backend, Path("/tmp"), "run", phase=DaydreamPhase.REVIEW,
+            )
+
+        # The supervisor matched the cd-stripped display variant, so the
+        # start-anchored '^make' deny fired against the pre-#1124 shape.
+        assert seen["command"] == "make test"
+        assert budget_reason == "tool_vetoed:shell"
+
     def test_wrapper_without_cd(self) -> None:
         cmd = '/bin/zsh -lc "ls -la"'
         assert _unwrap_shell_command(cmd) == "ls -la"
@@ -1335,6 +1396,32 @@ class TestUnwrapShellCommand:
     def test_unquoted_simple(self) -> None:
         """Real Codex format: no quotes around simple commands."""
         assert _unwrap_shell_command("/bin/zsh -lc ls") == "ls"
+
+    def test_unquoted_multi_word(self) -> None:
+        """Real Codex format: no quotes around simple multi-word commands.
+
+        '/bin/zsh -lc make test' splits to four shlex tokens, so the strict
+        3-token shape check used to fall open to the wrapper for both storage
+        and display. A bare payload decodes to the raw command bytes after
+        '-lc'; a shell-quoted payload with trailing argv still fails open
+        (see test_trailing_argv_is_raw_fallback).
+        """
+        assert _unwrap_shell_command("/bin/zsh -lc make test") == "make test"
+        assert _unwrap_shell_command("/bin/zsh -lc ls -la") == "ls -la"
+        assert _unwrap_shell_command("/bin/bash -lc git status --short") == "git status --short"
+
+    def test_unquoted_multi_word_keeps_embedded_quotes(self) -> None:
+        """The raw-remainder decode preserves embedded quoting byte-for-byte."""
+        cmd = "/bin/zsh -lc echo 'hello world'"
+        assert _unwrap_shell_command(cmd) == "echo 'hello world'"
+
+    def test_unquoted_multi_word_cd_display(self) -> None:
+        """Unquoted multi-word cd chains stay replayable stored, cd-stripped on display."""
+        from daydream.backends.codex import display_shell_command
+
+        raw = "/bin/zsh -lc cd /app && make test"
+        assert _unwrap_shell_command(raw) == "cd /app && make test"
+        assert display_shell_command(raw) == "make test"
 
     def test_single_quoted_git_diff(self) -> None:
         """Real Codex format: single-quoted multi-word command."""
@@ -1775,3 +1862,4 @@ async def test_issue1124_stored_commands_are_replayable() -> None:
     assert starts["cmd_5"] == "cat <<EOF\nhello\nEOF"
     assert starts["cmd_6"] == 'python -c "print(1)"'
     assert starts["cmd_7"] == "/bin/zsh -lc 'unbalanced"
+    assert starts["cmd_8"] == "make test"

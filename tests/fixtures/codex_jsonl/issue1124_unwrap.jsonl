@@ -13,4 +13,6 @@
 {"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_6", "command": "python -c \"print(1)\"", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
 {"type": "item.started", "item": {"type": "command_execution", "id": "cmd_7", "command": "/bin/zsh -lc 'unbalanced", "status": "running"}}
 {"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_7", "command": "/bin/zsh -lc 'unbalanced", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_8", "command": "/bin/zsh -lc make test", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_8", "command": "/bin/zsh -lc make test", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
 {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}
