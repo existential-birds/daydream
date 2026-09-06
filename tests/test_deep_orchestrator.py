@@ -953,7 +953,9 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
     _force_interactive(monkeypatch)
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    item = _merge_item(1, "api.py", "high")
+    item["related_files"] = ["App.tsx"]
+    stub.merge_items = [item]
     # round 1 verifier says: defect really lives in App.tsx
     stub.fix_verify_verdicts = {1: {"issue_id": 1, "verdict": "wrong_target",
                                     "path": "App.tsx", "reason": "moved"}}
@@ -965,8 +967,18 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
     assert exit_code == 0
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
     assert outcomes["outcomes"]["item:1"]["verdict"] == "resolved"
+    assert outcomes["outcomes"]["item:1"]["path"] == "App.tsx"
     audit = json.loads((multi_stack_target / ".daydream/deep/fix-footprint.json").read_text())
-    assert any(event["action"] == "rejected_retarget" for event in audit["events"])
+    accepted = [
+        event
+        for event in audit["events"]
+        if event["action"] == "authorize" and event["origin"] == "retarget"
+    ]
+    assert len(accepted) == 1
+    assert accepted[0]["path"] == "App.tsx"
+    assert accepted[0]["item_uid"] == "item:1"
+    assert accepted[0]["round_number"] == 2
+    assert audit["policy_revision"] == 1
 
 
 async def test_unresolved_finding_reported_attempted_not_fixed(
@@ -1126,23 +1138,17 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     assert any("App.tsx" in key for key in manifest["fix_failures"])
 
 
-async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
+async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """A symlink-escape finding in the fix cycle is handled, not raised.
+    """Footprint preflight blocks unsafe paths before fixing and records why.
 
-    The ``src/handler.py`` finding is confined *lexically* (so it passes the
-    ``_step_fix_gate`` changed_files partition) but escapes via a symlink, so
-    ``phase_fix_parallel``'s preflight raises ``UnconfinedFindingError``. The
-    guarded
-    caller must run the recovery machinery, avoid creating the fix-group
-    sentinel for the aborted group, archive ``recommended.patch``, mark the run
-    partial, name the offending item, and return ``Stop(1)`` (exit 1) rather
-    than let the exception reach cli.py's generic handler.
+    The durable failure names blocked canonical item identities without
+    reflecting an unsafe model path. No fixer or unconfined patch read runs.
     """
     from daydream.runner import run
 
@@ -1180,20 +1186,22 @@ async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
     )
     assert exit_code == 1  # handled failure => Stop(1), not a raise
 
-    # (a) recovery ran: the archived run is partial and records the failure,
-    #     and the recommendation patch survives.
+    # The admitted evidence session records the blocked findings in archive.
     run_dirs = list((archive_dir / "runs").iterdir())
     assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
     manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["status"] == "complete"
-    assert not manifest["fix_failures"]
+    assert manifest["status"] == "partial"
+    items = _merged_items(multi_stack_target / ".daydream" / "deep")
+    assert set(manifest["fix_failures"]) == {item["item_uid"] for item in items}
+    assert set(manifest["fix_failures"].values()) == {"fix_preflight_rejected: fix cycle did not start"}
+    assert manifest["pipeline_status"] == "partial"
     assert manifest["phase_states"]["test"] == {"ran": False, "status": "absent"}
 
     # (b) no dangling pre-fix stash / tree restored: the symlink finding's
     #     group never got a fix applied (preflight aborts before dispatch).
     assert not (multi_stack_target / ".fixed-src_handler_py").exists()
 
-    # (c) the CLI output names the offending item by id and/or file ref.
+    # Unsafe path values are not reflected into diagnostics.
     assert not any("src/handler.py" in warning for warning in warnings)
 
 
@@ -10753,6 +10761,103 @@ def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None
     assert rejected[0].round_number == 2
 
 
+def test_fix_cycle_tracks_last_dispatched_target_after_accepted_then_rejected_retarget(
+    tmp_path: Path,
+) -> None:
+    from daydream.deep.orchestrator import _round_dispatch_items
+
+    repo = tmp_path / "accepted-then-rejected-retarget"
+    _init_repo(repo)
+    for path in ("a.py", "b.py", "c.py"):
+        (repo / path).write_text(f"# {path}\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    items = [
+        {**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": ["b.py"]},
+        {**_merge_item(2, "c.py", "high"), "item_uid": "item:c", "related_files": []},
+    ]
+    ctx = _direct_fix_context(repo, items, changed_files={"a.py", "c.py"})
+    state = _direct_fix_state(ctx, items, {"a.py", "c.py"})
+
+    ctx.data["iteration"] = 1
+    assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["a.py", "c.py"]
+    assert state.last_fix_target_by_uid == {"item:a": "a.py", "item:c": "c.py"}
+
+    ctx.data["iteration"] = 2
+    ctx.data["fix_outcomes"] = {
+        "item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "b.py", "reason": "moved"}
+    }
+    assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["b.py"]
+    assert state.last_fix_target_by_uid["item:a"] == "b.py"
+
+    ctx.data["iteration"] = 3
+    ctx.data["fix_outcomes"] = {
+        "item:a": {
+            "issue_id": 1,
+            "verdict": "wrong_target",
+            "path": "c.py",
+            "reason": "other item",
+        }
+    }
+    assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["a.py"]
+    assert state.last_fix_target_by_uid["item:a"] == "a.py"
+
+
+async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.deep.orchestrator import RetainedTreeSnapshot, verify_retained_tree
+    from tests.harness.backend import ScriptedBackend
+
+    repo = tmp_path / "resolved-target-provenance"
+    _init_repo(repo)
+    for path in ("a.py", "b.py", "untrusted.py"):
+        (repo / path).write_text(f"# {path}\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    item = {
+        **_merge_item(1, "a.py", "high"),
+        "item_uid": "item:a",
+        "related_files": ["b.py"],
+    }
+    ctx = _direct_fix_context(repo, [item], changed_files={"a.py"})
+    state = _direct_fix_state(ctx, [item], {"a.py"})
+    state.last_fix_target_by_uid["item:a"] = "b.py"
+    snapshot = RetainedTreeSnapshot(
+        paths=frozenset(),
+        states=(),
+        tree_key="tree",
+        verifier_patch="patch",
+        recommended_patch=b"patch",
+    )
+
+    backend = ScriptedBackend(
+        events=[
+            ResultEvent(
+                structured_output={
+                    "verdicts": [
+                        {
+                            "issue_id": 1,
+                            "verdict": "resolved",
+                            "path": "untrusted.py",
+                            "reason": "model candidate must not become provenance",
+                        }
+                    ]
+                },
+                continuation=None,
+            )
+        ]
+    )
+    monkeypatch.setattr("daydream.runner._resolve_backend", lambda *_a, **_k: backend)
+
+    outcomes = await verify_retained_tree(ctx, snapshot, [item], pass_number=2)
+
+    assert backend.call_count == 1
+    assert backend.read_only_calls == [True]
+    assert outcomes["item:a"]["path"] == "b.py"
+
+
 def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
     from daydream.deep.orchestrator import capture_retained_tree
 
@@ -11106,10 +11211,12 @@ def test_final_red_override_requires_fresh_interactive_prompt(
     assert len(prompts) == 1
 
 
+@pytest.mark.parametrize("new_file_permissions", [0o600, 0o644])
 async def test_related_regression_real_runner_stabilizes_and_commits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
+    new_file_permissions: int,
 ) -> None:
     """Real host-test/Git path retains A/B/T and restores C + user scratch."""
     from daydream.runner import run
@@ -11130,6 +11237,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     scratch_one = repo / "scratch-one.bin"
     scratch_two = repo / "scratch-two.txt"
     scratch_one.write_bytes(b"\x00owner-one")
+    scratch_one.chmod(0o600)
     scratch_two.write_text("owner-two\n")
     deep = repo / ".daydream" / "deep"
     item = {
@@ -11176,6 +11284,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
                         "assert (root / 'api.py').read_text() == 'A = 3\\n'\n"
                         "assert (root / 'sibling.py').read_text() == 'B = 7\\n'\n"
                     )
+                    (cwd / "tests/test_a.py").chmod(new_file_permissions)
                     (cwd / "other.py").write_text("C = 9\n")
                     scratch_one.write_bytes(b"damaged")
                     scratch_two.unlink()
@@ -11249,8 +11358,10 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     assert (repo / "api.py").read_text() == "A = 3\n"
     assert (repo / "sibling.py").read_text() == "B = 7\n"
     assert (repo / "tests/test_a.py").is_file()
+    assert (repo / "tests/test_a.py").stat().st_mode & 0o777 == new_file_permissions
     assert (repo / "other.py").read_text() == "C = 1\n"
     assert scratch_one.read_bytes() == b"\x00owner-one"
+    assert scratch_one.stat().st_mode & 0o777 == 0o600
     assert scratch_two.read_text() == "owner-two\n"
     assert set(_git(repo, "show", "--pretty=", "--name-only", "HEAD").splitlines()) == {
         "api.py", "sibling.py", "tests/test_a.py"

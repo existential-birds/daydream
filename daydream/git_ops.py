@@ -1848,10 +1848,11 @@ def _snapshot_worktree_path(
                 os.close(descriptor)
         except OSError as exc:
             raise GitError("could not read a confined worktree path") from exc
-        permissions = stat.S_IMODE(metadata.st_mode)
-        if mode_from_index is not None:
-            permissions = 0o755 if permissions & 0o111 else 0o644
-        mode = stat.S_IFREG | permissions
+        # Worktree evidence preserves actual permissions, including private
+        # owner files. Its identity must not change merely because a formerly
+        # untracked path enters the index. Git-mode projection belongs only at
+        # the worktree-to-index comparison boundary.
+        mode = stat.S_IFREG | stat.S_IMODE(metadata.st_mode)
         return GitPathState(path=path, state="regular", mode=mode, digest=_write_git_blob(repo, b"".join(chunks)))
     raise GitError("unsupported worktree path type")
 
@@ -2656,12 +2657,12 @@ def _preflight_gitlink_restore(repo: Path, state: GitPathState) -> Path:
     return nested
 
 
-def restore_group_from_snapshot(
+def restore_group_worktree_from_snapshot(
     repo: Path,
     snapshot: WorktreeRollbackSnapshot,
     paths: Iterable[str],
 ) -> None:
-    """Restore every requested group path and the supplied round index."""
+    """Restore requested group paths without mutating the parent index."""
     requested = sorted(set(paths), key=_path_sort_key)
     tracked = {state.path: state for state in snapshot.path_states}
     committed = {
@@ -2685,20 +2686,28 @@ def restore_group_from_snapshot(
             replace_type = state.state == "missing"
         restore_states.append((state, replace_type))
 
+    # Preflight every nested repository before changing any worktree path. A
+    # dirty or unavailable gitlink is a fail-closed condition, never grounds
+    # for a forced checkout that could destroy user content.
+    for state, _replace_type in restore_states:
+        if state.state == "gitlink":
+            _preflight_gitlink_restore(repo, state)
+    for state, replace_type in restore_states:
+        _restore_path_state(
+            repo,
+            state,
+            allow_leaf_type_replacement=replace_type,
+        )
+
+
+def restore_group_from_snapshot(
+    repo: Path,
+    snapshot: WorktreeRollbackSnapshot,
+    paths: Iterable[str],
+) -> None:
+    """Restore every requested group path and the supplied complete index."""
     try:
-        # Preflight every nested repository before changing any worktree path.
-        # A dirty or unavailable gitlink is a fail-closed condition, never
-        # grounds for a forced checkout that could destroy user content.  The
-        # complete parent index is still restored by ``finally``.
-        for state, _replace_type in restore_states:
-            if state.state == "gitlink":
-                _preflight_gitlink_restore(repo, state)
-        for state, replace_type in restore_states:
-            _restore_path_state(
-                repo,
-                state,
-                allow_leaf_type_replacement=replace_type,
-            )
+        restore_group_worktree_from_snapshot(repo, snapshot, paths)
     finally:
         restore_index(repo, snapshot.index)
 

@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
     canonicalize_repository_file_path,
+    git_observed_path_is_confined,
 )
 
 FixFootprintAction = Literal[
@@ -74,10 +75,18 @@ class AuthorizedFixFootprint:
         items: list[dict[str, Any]],
     ) -> AuthorizedFixFootprint:
         """Build a fail-closed footprint from reviewed paths and canonical items."""
-        reviewed = sorted(
-            (canonicalize_repository_file_path(repo, path) for path in (reviewed_paths or set())),
-            key=lambda path: path.encode("utf-8", errors="surrogateescape"),
-        )
+        # Reviewed paths come from the host's Git diff, not model output.
+        # Preserve their exact native spelling while retaining confinement;
+        # item targets and related/retarget paths still use the model grammar.
+        reviewed_set: set[str] = set()
+        for path in reviewed_paths or set():
+            if not isinstance(path, str):
+                raise InvalidRepositoryFilePath("invalid reviewed repository path")
+            normalized = path[2:] if path.startswith("./") else path
+            if not git_observed_path_is_confined(repo, normalized):
+                raise InvalidRepositoryFilePath("invalid reviewed repository path")
+            reviewed_set.add(normalized)
+        reviewed = sorted(reviewed_set, key=lambda path: path.encode("utf-8", errors="surrogateescape"))
 
         normalized_items: list[tuple[str, str, tuple[str, ...]]] = []
         seen_uids: set[str] = set()
@@ -104,7 +113,7 @@ class AuthorizedFixFootprint:
             footprint._append_event(
                 action="authorize",
                 path=path,
-                path_kind="model",
+                path_kind="git",
                 origin="reviewed",
                 item_uid=None,
                 phase="initialization",
@@ -188,6 +197,16 @@ class AuthorizedFixFootprint:
             )
             return None
         if normalized in own_paths:
+            self._append_event(
+                action="authorize",
+                path=normalized,
+                path_kind="model",
+                origin="retarget",
+                item_uid=item_uid,
+                phase=phase,
+                round_number=round_number,
+                reason="retarget selected an existing item-authorized path; policy unchanged",
+            )
             return normalized
         self._append_event(
             action="rejected_retarget",

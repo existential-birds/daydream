@@ -41,6 +41,12 @@ def _structured_turn(structured: object) -> tuple[AgentEvent, ...]:
     return (ResultEvent(structured_output=structured, continuation=None),)
 
 
+def test_fix_guardrails_forbid_git_index_mutation() -> None:
+    from daydream.phases import _FIX_GUARDRAILS
+
+    assert "`git add`" in _FIX_GUARDRAILS
+
+
 async def _fake_passed_run(*args: Any, **kwargs: Any) -> Any:
     """Stand-in for ``run_test_command`` returning a green host-side result."""
     from daydream.test_execution import TestExecutionResult
@@ -179,6 +185,10 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(phases, "phase_fix_batched", _batched_with_contract)
     monkeypatch.setattr(phases, "phase_fix_parallel", _parallel_with_contract)
     monkeypatch.setattr(git_ops, "restore_group_from_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        git_ops, "restore_group_worktree_from_snapshot", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(git_ops, "restore_index", lambda *args, **kwargs: None)
 
 
 def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(
@@ -5120,7 +5130,7 @@ async def test_phase_fix_parallel_passes_exact_group_edit_and_run_read_scopes(
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_restores_whole_group_before_batch_fallback(
+async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
@@ -5153,7 +5163,7 @@ async def test_phase_fix_parallel_restores_whole_group_before_batch_fallback(
 
     monkeypatch.setattr(phases, "phase_fix_batched", _fail_batch)
     monkeypatch.setattr(phases, "phase_fix", _fix)
-    monkeypatch.setattr(git_ops, "restore_group_from_snapshot", _restore)
+    monkeypatch.setattr(git_ops, "restore_group_worktree_from_snapshot", _restore)
 
     failures = await phases.phase_fix_parallel(
         cast(Backend, object()),
@@ -5307,6 +5317,49 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
     assert committed is True
     assert calls == {"stage": 1, "commit_staged": 1}
     assert git(repo, "show", "HEAD:app.py") == "after"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permissions", [0o600, 0o640, 0o664, 0o700, 0o610, 0o644])
+async def test_strict_commit_accepts_new_file_permissions_without_changing_owner_bytes(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    permissions: int,
+) -> None:
+    from daydream import git_ops, phases
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / "base.py").write_text("baseline\n")
+    git(repo, "add", "base.py")
+    git_commit(repo, "baseline")
+    owner = repo / "private.txt"
+    owner.write_bytes(b"private owner bytes\n")
+    owner.chmod(0o600)
+    initial_index = phases.require_empty_staged_index(make_work(repo))
+    created = repo / "new.py"
+    created.write_bytes(b"new retained content\n")
+    created.chmod(permissions)
+    retained = frozenset({"new.py"})
+    before_states = git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"])
+
+    assert await phases._do_commit(
+        _HostCommitBackend(repo), make_work(repo),
+        retained_paths=retained,
+        retained_states=git_ops.snapshot_worktree_paths(repo, retained),
+        initial_index=initial_index,
+        preexisting_untracked={"private.txt"},
+    ) is True
+
+    assert git(repo, "show", "HEAD:new.py") == "new retained content"
+    assert git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"]) == before_states
+    assert created.stat().st_mode & 0o777 == permissions
+    assert owner.read_bytes() == b"private owner bytes\n"
+    assert owner.stat().st_mode & 0o777 == 0o600
+    assert frozenset(git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD")) == retained
+    assert git(repo, "diff", "--cached") == ""
+    expected_mode = "100755" if permissions & 0o100 else "100644"
+    assert git(repo, "ls-tree", "HEAD", "--", "new.py").startswith(expected_mode)
 
 
 @pytest.mark.asyncio

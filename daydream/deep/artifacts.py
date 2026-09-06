@@ -174,11 +174,9 @@ def fix_failures_path(deep_dir_path: Path) -> Path:
 def fix_outcomes_path(deep_dir_path: Path) -> Path:
     """Post-fix verifier outcomes ({finding_id: verdict} JSON, issue #744).
 
-    Sidecar adjacent to :func:`fix_failures_path`: every finding the fix phase
-    dispatched has exactly one recorded terminal verdict here (``resolved`` /
-    ``unresolved`` / ``wrong_target`` / ``regressed``), so an attempted-but-
-    unconfirmed finding cannot silently pass as fixed. Accumulates across
-    rounds; deleted when empty.
+    Sidecar adjacent to :func:`fix_failures_path`: the current session and
+    evidence key bind one full-canonical verification result, keyed by durable
+    item UID. Each verification replaces the preceding round's envelope.
     """
     return deep_dir_path / "fix-outcomes.json"
 

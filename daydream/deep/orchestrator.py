@@ -18,7 +18,7 @@ import inspect
 import json
 import os
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, cast
@@ -3233,6 +3233,18 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     return Stop(0)
 
 
+def _record_fix_preflight_rejection(dd: Path, items: list[dict[str, Any]]) -> None:
+    """Record an admitted cycle's blocked items without reflecting unsafe paths."""
+    failures = {
+        item["item_uid"]: "fix_preflight_rejected: fix cycle did not start"
+        for item in items
+    }
+    try:
+        atomic_write_json(fix_failures_path(dd), failures, sort_keys=True)
+    except OSError as exc:
+        print_error(console, "Fix preflight failure audit failed", str(exc))
+
+
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     """Fix-apply gate; on accept, load and severity-sort the canonical items."""
     # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
@@ -3318,6 +3330,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
             ctx.work.repo, set(changed_files or []), items
         )
     except (OSError, ValueError, git_ops.GitError) as exc:
+        _record_fix_preflight_rejection(dd, items)
         print_error(console, "Fix preflight failed", str(exc))
         return Stop(1)
 
@@ -3336,6 +3349,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         initial_key = EvidenceKey(_capture_full_delta_key(ctx.work, state), footprint.policy_revision)
         _write_footprint_audit(ctx, state, initial_key)
     except (OSError, git_ops.GitError) as exc:
+        _record_fix_preflight_rejection(dd, items)
         print_error(console, "Fix preflight failed", str(exc))
         return Stop(1)
 
@@ -3928,6 +3942,7 @@ class FixCycleState:
     latest_retained: RetainedTreeSnapshot | None = None
     verifier_key: EvidenceKey | None = None
     test_evidence: TestAttemptEvidence | None = None
+    last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
 
 
 def _fix_cycle_state(ctx: FlowContext) -> FixCycleState:
@@ -4019,9 +4034,15 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     """
     iteration = ctx.data.get("iteration")
     outcomes = ctx.data.get("fix_outcomes") or {}
-    if iteration in (None, 1) or not outcomes:
-        return [dict(i) for i in canonical]
     state = _fix_cycle_state(ctx)
+    if iteration in (None, 1) or not outcomes:
+        initial_dispatch = [dict(i) for i in canonical]
+        for item in initial_dispatch:
+            uid = item.get("item_uid")
+            target = item.get("file")
+            if isinstance(uid, str) and isinstance(target, str):
+                state.last_fix_target_by_uid[uid] = target
+        return initial_dispatch
     round_number = iteration if isinstance(iteration, int) else 1
     dispatched: list[dict[str, Any]] = []
     for item in canonical:
@@ -4043,6 +4064,9 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
                 copy["fix_verify_path"] = accepted
         copy["fix_verify_verdict"] = outcome.get("verdict")
         copy["fix_verify_reason"] = outcome.get("reason") or ""
+        target = copy.get("file")
+        if isinstance(uid, str) and isinstance(target, str):
+            state.last_fix_target_by_uid[uid] = target
         dispatched.append(copy)
     return dispatched
 
@@ -4399,6 +4423,7 @@ async def verify_retained_tree(
         for item in items
         if isinstance(item.get("id"), int) and isinstance(item.get("item_uid"), str)
     }
+    state = _fix_cycle_state(ctx)
     outcomes: dict[str, dict[str, Any]] = {}
     for verdict in verdicts:
         item = by_id.get(verdict.get("issue_id"))
@@ -4406,7 +4431,12 @@ async def verify_retained_tree(
             continue
         stored = dict(verdict)
         stored["issue_id"] = item["id"]
-        outcomes[item["item_uid"]] = stored
+        uid = item["item_uid"]
+        if stored.get("verdict") == "resolved":
+            target = state.last_fix_target_by_uid.get(uid)
+            if target is not None:
+                stored["path"] = target
+        outcomes[uid] = stored
     return outcomes
 
 

@@ -94,14 +94,23 @@ def enforce_authorized_fix_footprint(
         | protected_gitlink_mutations
     )
 
+    filing_evidence: list[tuple[str, str]] = []
     if file_scope_issues:
         paths_to_file = sorted(
             residual_tracked - set(preexisting_untracked),
             key=lambda value: value.encode("utf-8", "surrogateescape"),
         )
         for path in paths_to_file:
-            patch = git_ops.diff_worktree_against(repo, stable_ref, [path])
-            _file_reverted_edit_issue(repo, path, patch)
+            try:
+                patch = git_ops.diff_worktree_against(repo, stable_ref, [path])
+            except Exception:  # noqa: BLE001 -- optional evidence must not block restoration
+                print_warning(
+                    console,
+                    "Could not capture optional out-of-scope edit evidence; "
+                    "continuing to restoration without filing.",
+                )
+            else:
+                filing_evidence.append((path, patch))
 
     if to_restore:
         stable_states = git_ops.snapshot_commit_paths(
@@ -174,6 +183,14 @@ def enforce_authorized_fix_footprint(
     retained = ((remaining_tracked | remaining_untracked) & set(footprint.run_allowed_paths)) - set(
         preexisting_untracked
     )
+    for path, patch in filing_evidence:
+        try:
+            _file_reverted_edit_issue(repo, path, patch)
+        except Exception:  # noqa: BLE001 -- all issue filing is best-effort
+            print_warning(
+                console,
+                "Could not file optional out-of-scope edit evidence after restoration.",
+            )
     return ScopeEnforcementResult(retained_paths=frozenset(retained), mutated=bool(to_restore))
 
 

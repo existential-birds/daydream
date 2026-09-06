@@ -7,8 +7,9 @@ import logging
 import os
 import re
 import shlex
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
@@ -2230,10 +2231,10 @@ and never introduce smart quotes when writing new code or comments — use plain
 ASCII straight quotes so the committed tree stays byte-clean and re-reviews do
 not re-surface a typographic finding.
 
-Forbid working-tree git mutation: many fix agents share ONE working tree, and
-a tree mutation is a data-loss race. `git stash`, `git checkout`, `git reset`,
-and `git commit` are each a refusal — if you believe one is needed, stop and
-report why instead of running it.
+Forbid working-tree or index git mutation: many fix agents share ONE working
+tree and index, and either mutation is a data-loss race. `git add`, `git stash`,
+`git checkout`, `git reset`, and `git commit` are each a refusal — if you
+believe one is needed, stop and report why instead of running it.
 """
     + GENERATED_FILES_PROMPT_RULE
     + "\n"
@@ -2737,6 +2738,27 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
             print_fix_complete(console, item_num, total, outcome=None)
 
 
+@asynccontextmanager
+async def _restore_round_index_after_fanout(
+    repo: Path,
+    index: git_ops.IndexSnapshot,
+) -> AsyncIterator[None]:
+    """Restore one shared index only after the enclosed fixer fan-out closes."""
+    try:
+        yield
+    except BaseException as fanout_error:
+        try:
+            git_ops.restore_index(repo, index)
+        except BaseException as restore_error:
+            raise BaseExceptionGroup(
+                "fix fan-out failed and round index restoration also failed",
+                [fanout_error, restore_error],
+            ) from None
+        raise
+    else:
+        git_ops.restore_index(repo, index)
+
+
 async def phase_fix_parallel(
     backend: Backend,
     work: WorkContext,
@@ -2761,7 +2783,8 @@ async def phase_fix_parallel(
     batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
     Every prompt receives the exact group's edit scope and the wider run scope
     only as readable context. Failed batch or group execution restores every
-    group path and the supplied round index before fallback/return.
+    group worktree path before fallback/return. The supplied complete index is
+    restored once, only after every concurrent fixer has joined or cancelled.
 
     Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
     is consulted before every fix call (including the batched call), and if a
@@ -2890,7 +2913,9 @@ async def phase_fix_parallel(
             )
             budget.record_item()
 
-    async with anyio.create_task_group() as tg:
+    async with _restore_round_index_after_fanout(
+        work.repo, round_snapshot.index
+    ), anyio.create_task_group() as tg:
         for file_key, numbered_items in groups_numbered:
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
             async def _task(
@@ -2940,7 +2965,7 @@ async def phase_fix_parallel(
                                     # per-finding fixes don't re-apply partial edits
                                     # that the batched turn may have already written.
                                     try:
-                                        git_ops.restore_group_from_snapshot(
+                                        git_ops.restore_group_worktree_from_snapshot(
                                             work.repo, round_snapshot, edit_scope
                                         )
                                     except Exception as restore_err:  # noqa: BLE001
@@ -2952,7 +2977,7 @@ async def phase_fix_parallel(
                             failure: BaseException = e
                             try:
                                 grp_items = [item for item, _ in grp]
-                                git_ops.restore_group_from_snapshot(
+                                git_ops.restore_group_worktree_from_snapshot(
                                     work.repo,
                                     round_snapshot,
                                     footprint.group_paths(grp_items),
@@ -3671,7 +3696,15 @@ def _stage_retained_once(
     if frozenset(staged_index.paths) != retained_paths:
         raise GitError("Staged index path set does not match the retained path set")
     staged_states = git_ops.snapshot_index_paths(work.repo, retained_paths)
-    if staged_states != expected_states:
+    # Git regular-file modes retain only the owner's executable bit. Keep
+    # exact filesystem modes in retained/test/post-hook evidence and project
+    # only this index comparison; staging does not chmod the worktree.
+    expected_index_states = tuple(
+        replace(state, mode=0o100755 if state.mode & 0o100 else 0o100644)
+        if state.state == "regular" and state.mode is not None else state
+        for state in expected_states
+    )
+    if staged_states != expected_index_states:
         raise GitError("Staged index content does not match the retained tree")
     return staged_states
 

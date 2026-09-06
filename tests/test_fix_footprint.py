@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,76 @@ def _seed(repo: Path, files: dict[str, bytes]) -> None:
         path.write_bytes(content)
     _git(repo, "add", ".")
     _commit(repo, "seed footprint files")
+
+
+def _install_scope_boundary_shims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_diff_path: str | None = None,
+    watched_paths: tuple[str, ...] = (),
+    fail_issue_create: bool = False,
+) -> Path:
+    """Install executable Git/gh fakes while leaving production subprocess calls intact."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "scope-bin"
+    bin_dir.mkdir()
+    git_script = bin_dir / "git"
+    git_script.write_text(
+        "#!/bin/sh\n"
+        + (
+            f'if [ "$1" = "diff" ] && [ "$2" = "HEAD" ] && [ "$3" = "--" ] '
+            f'&& [ "$4" = "{fail_diff_path}" ]; then\n'
+            '  echo "SECRET_TOKEN optional evidence failure" >&2\n'
+            "  exit 2\n"
+            "fi\n"
+            if fail_diff_path is not None
+            else ""
+        )
+        + f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    git_script.chmod(0o755)
+
+    record_path = tmp_path / "gh-calls.jsonl"
+    gh_script = bin_dir / "gh"
+    gh_script.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+argv = sys.argv[1:]
+if argv[:2] == ["issue", "list"]:
+    print("[]")
+    raise SystemExit(0)
+if argv[:2] != ["issue", "create"]:
+    print("unexpected gh invocation", file=sys.stderr)
+    raise SystemExit(2)
+body_path = Path(argv[argv.index("--body-file") + 1])
+watched = {
+    name: (Path.cwd() / name).read_bytes().hex()
+    for name in json.loads(os.environ["P01_GH_WATCHED"])
+}
+record = {"argv": argv, "body": body_path.read_text(), "watched": watched}
+with Path(os.environ["P01_GH_RECORD"]).open("a") as stream:
+    stream.write(json.dumps(record) + "\\n")
+if os.environ.get("P01_GH_FAIL") == "1":
+    print("offline", file=sys.stderr)
+    raise SystemExit(1)
+print("https://example.invalid/issues/1")
+""",
+        encoding="utf-8",
+    )
+    gh_script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("P01_GH_RECORD", str(record_path))
+    monkeypatch.setenv("P01_GH_WATCHED", json.dumps(watched_paths))
+    if fail_issue_create:
+        monkeypatch.setenv("P01_GH_FAIL", "1")
+    return record_path
 
 
 def _items() -> list[dict[str, object]]:
@@ -133,6 +205,72 @@ def test_footprint_uses_item_uids_and_exact_item_group_and_run_unions(tmp_path: 
     assert ("reviewed", "README.md", None) in actions
     assert ("primary", "src/a.py", "item:1") in actions
     assert ("related", "tests/test_a.py", "item:1") in actions
+
+
+def test_accepted_retarget_is_audited_without_widening_policy(tmp_path: Path) -> None:
+    footprint = AuthorizedFixFootprint.build(tmp_path, {"src/a.py"}, _items())
+    revision = footprint.policy_revision
+    run_scope = footprint.run_allowed_paths
+    item_scope = footprint.item_paths("item:1")
+    event_count = len(footprint.events)
+
+    accepted = footprint.accept_retarget(
+        tmp_path,
+        "item:1",
+        "tests/test_a.py",
+        phase="fix",
+        round_number=2,
+    )
+
+    assert accepted == "tests/test_a.py"
+    assert footprint.policy_revision == revision
+    assert footprint.run_allowed_paths == run_scope
+    assert footprint.item_paths("item:1") == item_scope
+    assert len(footprint.events) == event_count + 1
+    event = footprint.events[-1]
+    assert event.action == "authorize"
+    assert event.origin == "retarget"
+    assert event.path_kind == "model"
+    assert event.path == "tests/test_a.py"
+    assert event.item_uid == "item:1"
+    assert event.phase == "fix"
+    assert event.round_number == 2
+
+
+@pytest.mark.parametrize("reviewed_path", ["odd\nname.py", "literal-$(value)[1].py", "native-\udcff.py"])
+def test_footprint_treats_reviewed_git_names_separately_from_model_paths(
+    git_repo: Path, reviewed_path: str,
+) -> None:
+    import errno
+
+    try:
+        _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
+    except OSError as exc:
+        if exc.errno == errno.EILSEQ:
+            pytest.skip("host filesystem rejects non-UTF-8 filenames; exercised on Linux CI")
+        raise
+    (git_repo / reviewed_path).write_bytes(b"reviewed\n")
+    reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
+    assert reviewed == {reviewed_path}
+    item = {"item_uid": "item:normal", "file": "normal.py"}
+
+    footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
+
+    assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
+    assert footprint.group_paths([item]) == frozenset({"normal.py"})
+    reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
+    assert reviewed_event.path == reviewed_path
+    assert reviewed_event.path_kind == "git"
+    assert footprint.accept_retarget(
+        git_repo, "item:normal", reviewed_path, phase="fix", round_number=1,
+    ) is None
+    assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
+
+
+@pytest.mark.parametrize("reviewed_path", ["", ".", "/outside", "../outside", "src/../outside", "src//a.py"])
+def test_footprint_rejects_unconfined_reviewed_git_paths(tmp_path: Path, reviewed_path: str) -> None:
+    with pytest.raises(InvalidRepositoryFilePath, match="invalid reviewed repository path"):
+        AuthorizedFixFootprint.build(tmp_path, {reviewed_path}, [])
 
 
 @pytest.mark.parametrize(
@@ -367,6 +505,332 @@ def test_group_rollback_restores_all_paths_untracked_and_supplied_index(git_repo
     assert (git_repo / "round-scratch").read_bytes() == b"scratch baseline"
     assert stat.S_IMODE((git_repo / "round-scratch").stat().st_mode) == 0o600
     assert git_ops.snapshot_index(git_repo) == snapshot.index
+
+
+def test_group_worktree_rollback_preserves_sibling_index_entry(git_repo: Path) -> None:
+    _seed(git_repo, {"a.py": b"A = 1\n", "b.py": b"B = 1\n"})
+    snapshot = WorktreeRollbackSnapshot(
+        ref="HEAD",
+        index=git_ops.snapshot_index(git_repo),
+        path_states=git_ops.snapshot_worktree_paths(git_repo, ["a.py"]),
+        untracked={},
+    )
+    (git_repo / "a.py").write_bytes(b"A = partial\n")
+    (git_repo / "b.py").write_bytes(b"B = sibling\n")
+    _git(git_repo, "add", "b.py")
+    sibling_index = git_ops.snapshot_index(git_repo)
+
+    git_ops.restore_group_worktree_from_snapshot(git_repo, snapshot, ["a.py"])
+
+    assert (git_repo / "a.py").read_bytes() == b"A = 1\n"
+    assert (git_repo / "b.py").read_bytes() == b"B = sibling\n"
+    assert git_ops.snapshot_index(git_repo) == sibling_index
+
+
+def test_scope_issue_diff_failure_still_restores_and_audits_without_sensitive_warning(
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _seed(git_repo, {"allowed.py": b"allowed\n", "outside.py": b"owner\n"})
+    footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.py"}, [])
+    index_before = git_ops.snapshot_index(git_repo)
+    (git_repo / "outside.py").write_bytes(b"unauthorized\n")
+    gh_record = _install_scope_boundary_shims(
+        tmp_path,
+        monkeypatch,
+        fail_diff_path="outside.py",
+        watched_paths=("outside.py",),
+    )
+
+    result = enforce_authorized_fix_footprint(
+        _work(git_repo),
+        "HEAD",
+        footprint,
+        preexisting_untracked={},
+        phase="fix",
+        round_number=1,
+        file_scope_issues=True,
+    )
+
+    assert result.mutated is True
+    assert (git_repo / "outside.py").read_bytes() == b"owner\n"
+    assert git_ops.snapshot_index(git_repo) == index_before
+    assert not gh_record.exists()
+    assert [(event.action, event.path) for event in footprint.events][-1] == (
+        "restore",
+        "outside.py",
+    )
+    warning_output = capsys.readouterr().out
+    assert "continuing to" in warning_output
+    assert "restoration without filing" in warning_output
+    assert "SECRET_TOKEN" not in warning_output
+    assert "outside.py" not in warning_output
+
+
+def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_residuals(
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(
+        git_repo,
+        {"allowed.py": b"allowed\n", "outside-a.py": b"owner a\n", "outside-b.py": b"owner b\n"},
+    )
+    footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.py"}, [])
+    (git_repo / "outside-a.py").write_bytes(b"unauthorized a\n")
+    (git_repo / "outside-b.py").write_bytes(b"unauthorized b\n")
+    gh_record = _install_scope_boundary_shims(
+        tmp_path,
+        monkeypatch,
+        fail_diff_path="outside-a.py",
+        watched_paths=("outside-a.py", "outside-b.py"),
+    )
+
+    result = enforce_authorized_fix_footprint(
+        _work(git_repo),
+        "HEAD",
+        footprint,
+        preexisting_untracked={},
+        phase="fix",
+        round_number=1,
+        file_scope_issues=True,
+    )
+
+    assert result.mutated is True
+    assert (git_repo / "outside-a.py").read_bytes() == b"owner a\n"
+    assert (git_repo / "outside-b.py").read_bytes() == b"owner b\n"
+    calls = [json.loads(line) for line in gh_record.read_text().splitlines()]
+    assert len(calls) == 1
+    assert calls[0]["watched"] == {
+        "outside-a.py": b"owner a\n".hex(),
+        "outside-b.py": b"owner b\n".hex(),
+    }
+    assert "outside-b.py" in calls[0]["body"]
+    assert "+unauthorized b" in calls[0]["body"]
+    assert "outside-a.py" not in calls[0]["body"]
+
+
+def test_scope_issue_filing_failure_occurs_after_verified_restore_and_is_best_effort(
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(git_repo, {"allowed.py": b"allowed\n", "outside.py": b"owner\n"})
+    footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.py"}, [])
+    (git_repo / "outside.py").write_bytes(b"unauthorized\n")
+    gh_record = _install_scope_boundary_shims(
+        tmp_path,
+        monkeypatch,
+        watched_paths=("outside.py",),
+        fail_issue_create=True,
+    )
+
+    result = enforce_authorized_fix_footprint(
+        _work(git_repo),
+        "HEAD",
+        footprint,
+        preexisting_untracked={},
+        phase="fix",
+        round_number=1,
+        file_scope_issues=True,
+    )
+
+    assert result.mutated is True
+    assert (git_repo / "outside.py").read_bytes() == b"owner\n"
+    calls = [json.loads(line) for line in gh_record.read_text().splitlines()]
+    assert len(calls) == 1
+    assert calls[0]["watched"] == {"outside.py": b"owner\n".hex()}
+    assert "+unauthorized" in calls[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_group_fallback_never_restores_index_while_sibling_is_live(
+    git_repo: Path,
+) -> None:
+    """Real fix dispatch uses a join barrier before the one complete index restore."""
+    import anyio
+
+    from daydream.backends import AgentEvent, ResultEvent
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.phases import phase_fix_parallel
+
+    _seed(git_repo, {"a.py": b"A = 1\n", "b.py": b"B = 1\n"})
+    round_index = git_ops.snapshot_index(git_repo)
+    snapshot = WorktreeRollbackSnapshot(
+        ref="HEAD",
+        index=round_index,
+        path_states=git_ops.snapshot_worktree_paths(git_repo, ["a.py", "b.py"]),
+        untracked={},
+    )
+    items = [
+        {"id": 1, "item_uid": "item:a1", "file": "a.py", "description": "a one"},
+        {"id": 2, "item_uid": "item:a2", "file": "a.py", "description": "a two"},
+        {"id": 3, "item_uid": "item:b1", "file": "b.py", "description": "b one"},
+        {"id": 4, "item_uid": "item:b2", "file": "b.py", "description": "b two"},
+    ]
+    footprint = AuthorizedFixFootprint.build(git_repo, {"a.py", "b.py"}, items)
+    b_staged = anyio.Event()
+    a_fallback_started = anyio.Event()
+    b_observed_sibling_index = anyio.Event()
+
+    class BarrierBackend:
+        model = "barrier-backend"
+        fanout_concurrency = 2
+        retry_attempts = 0
+
+        def __init__(self) -> None:
+            self.a_fallback_calls = 0
+            self.prompts: list[str] = []
+            self.b_cached_while_live = ""
+
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: object = None,
+            continuation: object = None,
+            agents: object = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            del output_schema, continuation, agents, max_turns, read_only, persist_session
+            self.prompts.append(prompt)
+            if prompt.startswith("Fix these 2 issues") and "b one" in prompt:
+                (cwd / "b.py").write_bytes(b"B = sibling\n")
+                _git(cwd, "add", "b.py")
+                b_staged.set()
+                await a_fallback_started.wait()
+                self.b_cached_while_live = _git(cwd, "diff", "--cached", "--name-only")
+                b_observed_sibling_index.set()
+            elif prompt.startswith("Fix these 2 issues") and "a one" in prompt:
+                await b_staged.wait()
+                (cwd / "a.py").write_bytes(b"A = partial\n")
+                raise RuntimeError("force batch fallback")
+            elif prompt.startswith("Fix this issue:") and ("a one" in prompt or "a two" in prompt):
+                self.a_fallback_calls += 1
+                (cwd / "a.py").write_bytes(b"A = fixed\n")
+                a_fallback_started.set()
+                await b_observed_sibling_index.wait()
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        async def cancel(self) -> None:
+            return None
+
+    backend = BarrierBackend()
+    failures = await phase_fix_parallel(
+        backend,
+        _work(git_repo),
+        items,
+        footprint=footprint,
+        round_snapshot=snapshot,
+        limiter_size=2,
+    )
+
+    assert failures == {}
+    assert backend.a_fallback_calls == 2, backend.prompts
+    assert b_observed_sibling_index.is_set()
+    assert backend.b_cached_while_live == "b.py"
+    assert (git_repo / "a.py").read_bytes() == b"A = fixed\n"
+    assert (git_repo / "b.py").read_bytes() == b"B = sibling\n"
+    assert git_ops.snapshot_index(git_repo) == round_index
+
+
+@pytest.mark.asyncio
+async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_index(
+    git_repo: Path,
+) -> None:
+    import anyio
+
+    from daydream.backends import AgentEvent, ResultEvent
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.phases import phase_fix_parallel
+
+    _seed(git_repo, {"a.py": b"A = 1\n"})
+    round_index = git_ops.snapshot_index(git_repo)
+    snapshot = WorktreeRollbackSnapshot(
+        ref="HEAD",
+        index=round_index,
+        path_states=git_ops.snapshot_worktree_paths(git_repo, ["a.py"]),
+        untracked={},
+    )
+    item = {"id": 1, "item_uid": "item:a", "file": "a.py", "description": "a"}
+    footprint = AuthorizedFixFootprint.build(git_repo, {"a.py"}, [item])
+    staged = anyio.Event()
+    stream_closed = anyio.Event()
+    never = anyio.Event()
+
+    class CancelBackend:
+        model = "cancel-backend"
+        fanout_concurrency = 1
+        retry_attempts = 0
+
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: object = None,
+            continuation: object = None,
+            agents: object = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            del prompt, output_schema, continuation, agents, max_turns, read_only, persist_session
+            try:
+                (cwd / "a.py").write_bytes(b"A = staged by live fixer\n")
+                _git(cwd, "add", "a.py")
+                staged.set()
+                await never.wait()
+                yield ResultEvent(structured_output=None, continuation=None)
+            finally:
+                stream_closed.set()
+
+        async def cancel(self) -> None:
+            return None
+
+    async def _run_phase() -> None:
+        await phase_fix_parallel(
+            CancelBackend(),
+            _work(git_repo),
+            [item],
+            footprint=footprint,
+            round_snapshot=snapshot,
+            limiter_size=1,
+        )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_run_phase)
+        await staged.wait()
+        task_group.cancel_scope.cancel()
+
+    assert stream_closed.is_set()
+    assert git_ops.snapshot_index(git_repo) == round_index
+
+
+@pytest.mark.asyncio
+async def test_fanout_cancellation_and_index_restore_failure_are_both_reported(
+    git_repo: Path,
+) -> None:
+    import asyncio
+
+    from daydream.phases import _restore_round_index_after_fanout
+
+    _seed(git_repo, {"a.py": b"A = 1\n"})
+    index = git_ops.snapshot_index(git_repo)
+    lock = git_repo / ".git" / "index.lock"
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        async with _restore_round_index_after_fanout(git_repo, index):
+            lock.write_bytes(b"held")
+            raise asyncio.CancelledError("primary cancellation")
+
+    lock.unlink(missing_ok=True)
+    assert len(raised.value.exceptions) == 2
+    assert isinstance(raised.value.exceptions[0], asyncio.CancelledError)
+    assert isinstance(raised.value.exceptions[1], GitError)
 
 
 def test_authorized_parent_symlink_substitution_fails_before_read_restore_or_stage(
