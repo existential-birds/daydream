@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
+from daydream.artifact_visibility import artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
     AgentEventStream,
     Backend,
@@ -41,6 +42,7 @@ from daydream.backends import (
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
+from daydream.prompt_budget import PreparedSanctionedInputs
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
 from daydream.ui import (
     NEON_THEME,
@@ -528,12 +530,15 @@ async def run_agent(
     wall_budget_s: float | None = None,
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
+    sanctioned_inputs: PreparedSanctionedInputs | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
     """
+    if sanctioned_inputs is not None:
+        prompt = sanctioned_inputs.render_prompt(prompt)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()
     with agent_scope(phase.value, backend=backend_name, model=backend.model) as observed:
         observed.content("traceloop.entity.input", {"prompt": prompt, "output_schema": output_schema})
@@ -542,6 +547,7 @@ async def run_agent(
             continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
             persist_session=persist_session, wall_budget_s=wall_budget_s, tool_call_budget=tool_call_budget,
             validate_structured_output=validate_structured_output,
+            sanctioned_inputs=sanctioned_inputs,
         )
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
@@ -564,6 +570,7 @@ async def _run_agent(
     wall_budget_s: float | None = None,
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
+    sanctioned_inputs: PreparedSanctionedInputs | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -701,6 +708,10 @@ async def _run_agent(
             agent_renderer = AgentTextRenderer(console)
 
             try:
+                if artifact_session_active():
+                    assert_model_cwd_clean(cwd)
+                if sanctioned_inputs is not None:
+                    sanctioned_inputs.revalidate(backend, cwd, read_only)
                 execute_kwargs: dict[str, Any] = {
                     "agents": agents,
                     "max_turns": max_turns,

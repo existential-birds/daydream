@@ -34,6 +34,7 @@ from daydream.artifact_visibility import (
     PrivateRootLocations,
     PrivateWorkspaceOwner,
     artifact_dir_for,
+    artifact_session_active,
     bind_artifact_session,
     derive_workspace_identity,
     operational_worktree_root,
@@ -1042,7 +1043,9 @@ async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_re
     alias = tmp_path / "repo-alias"
     alias.symlink_to(source, target_is_directory=True)
 
+    assert artifact_session_active() is False
     async with open_artifact_session(work, session_id="routing") as session:
+        assert artifact_session_active() is True
         async def child() -> None:
             observed.append(artifact_dir_for(work.repo))
 
@@ -1059,6 +1062,7 @@ async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_re
         assert not (source / ".daydream").exists()
         assert not (source / ".review-output.md").exists()
 
+    assert artifact_session_active() is False
     assert artifact_dir_for(work.repo) == source / ".daydream"
 
 

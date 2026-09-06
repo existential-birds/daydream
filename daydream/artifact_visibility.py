@@ -4553,6 +4553,11 @@ def artifact_dir_for(repo: Path) -> Path:
     return session.daydream_dir
 
 
+def artifact_session_active() -> bool:
+    """Whether the current task is bound to one live artifact session."""
+    return _SESSION.get() is not None
+
+
 def review_output_path_for(repo: Path) -> Path:
     session = _SESSION.get()
     if session is None:
