@@ -418,6 +418,15 @@ def _summarize_input(input_data: dict[str, Any], name: str) -> str:
     for key in _PRIMARY_TOOL_ARG.get(name, ()):
         value = input_data.get(key)
         if isinstance(value, str) and value:
+            # S1 parity with the live render surfaces (ui.tools): the stored
+            # input keeps the replayable cd-prefixed payload, but the --log
+            # surface shows the cd-stripped display variant. Codex-only
+            # ('shell'): Claude/Pi Bash commands never pass through the Codex
+            # wrapper, so their operator-authored cd prefix must render.
+            if key == "command" and name == "shell":
+                from daydream.backends.codex import display_shell_command
+
+                value = display_shell_command(value)
             return redact_structured_text(value)[:_BASH_COMMAND_MAX_CHARS]
     if "path" in input_data:
         complete = f"{input_data['path']}" + (
@@ -779,7 +788,23 @@ async def _run_agent(
 
                                 if tool_supervisor is not None:
                                     try:
-                                        decision = tool_supervisor(event.name, event.input, phase=phase)
+                                        # Extension tool supervisors matched
+                                        # start-anchored deny patterns against the
+                                        # pre-#1124 wrapper-decoded, cd-stripped
+                                        # command value. The stored
+                                        # ToolStartEvent keeps the replayable
+                                        # cd-prefixed payload; hand the supervisor
+                                        # the display variant so e.g. '^make'
+                                        # keeps matching Codex shell commands.
+                                        supervisor_input = event.input
+                                        if event.name == "shell" and isinstance(event.input, dict):
+                                            command = event.input.get("command")
+                                            if isinstance(command, str):
+                                                from daydream.backends.codex import display_shell_command
+
+                                                supervisor_input = dict(event.input)
+                                                supervisor_input["command"] = display_shell_command(command)
+                                        decision = tool_supervisor(event.name, supervisor_input, phase=phase)
                                     except Exception as exc:  # noqa: BLE001 - policy failures must propagate
                                         raise _ToolSupervisorFailure(exc) from exc
                                     if decision.veto:

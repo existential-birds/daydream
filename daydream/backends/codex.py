@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess as subprocess
 import sys as sys
@@ -45,8 +46,6 @@ from daydream.backends._transport import (
 )
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
-_SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
-_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 
 _logger = logging.getLogger(__name__)
@@ -294,25 +293,67 @@ def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
     return prompt
 
 
+_SHELL_LC_PREFIX_RE = re.compile(r"^/bin/(?:zsh|bash|sh)\s+-lc\s+")
+
+
 def _unwrap_shell_command(command: str) -> str:
-    """Strip shell wrapper from Codex command_execution commands.
+    """Decode the replayable ``-lc`` payload from a Codex shell command wrapper.
 
-    Codex wraps commands in three forms::
+    Codex wraps command_execution commands as ``/bin/{zsh,bash,sh} -lc <payload>``,
+    where the payload is shell-quoted (single-quoted, double-quoted, or bare) and
+    may itself contain nested quotes, ``$`` substitutions, or newlines. Decode via
+    :func:`shlex.split` so the stored command is byte-identical to what actually
+    executed — replayable verbatim, including any leading ``cd`` prefix.
 
-        /bin/zsh -lc 'actual command'      (single-quoted)
-        /bin/zsh -lc "actual command"      (double-quoted)
-        /bin/zsh -lc actual command         (unquoted)
+    Decoding happens only when the wrapper shape is recognized: non-empty argv,
+    ``argv[0]`` in {"/bin/zsh", "/bin/bash", "/bin/sh"}, ``argv[1] == "-lc"``.
+    An exactly one-argument payload returns ``argv[2]`` verbatim — no stripping,
+    no quote reprocessing, no cd removal. Real Codex also sends bare multi-word
+    payloads without quotes ('/bin/zsh -lc make test'): the payload argument then
+    splits into several argv tokens, and the raw command bytes after the ``-lc``
+    prefix are returned verbatim so embedded quoting survives.
 
-    This extracts just the inner command for display purposes.
+    Fails open: any other shape (non-wrapper, a shell-quoted payload followed by
+    trailing argv, missing ``-lc`` argument) or a :class:`ValueError` from
+    unbalanced quoting returns the input unchanged, byte-for-byte.
     """
-    m = _SHELL_WRAPPER_RE.match(command)
-    if not m:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
         return command
-    inner = m.group(1)
-    if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
-        inner = inner[1:-1]
-    inner = _CD_PREFIX_RE.sub("", inner)  # Strip leading "cd /some/path &&".
-    return inner.strip()
+    if len(argv) >= 2 and argv[0] in ("/bin/zsh", "/bin/bash", "/bin/sh") and argv[1] == "-lc":
+        if len(argv) == 3:
+            return argv[2]
+        # More than one word after '-lc': a shell-quoted payload with trailing
+        # argv is not a valid wrapper (fail open), but a bare, unquoted payload
+        # is the real-Codex shape for simple commands ('/bin/zsh -lc ls -la').
+        # Recover it from the raw command so embedded quoting is preserved.
+        wrapper = _SHELL_LC_PREFIX_RE.match(command)
+        if wrapper is not None:
+            payload = command[wrapper.end() :]
+            if payload and payload[0] not in ("'", '"'):
+                return payload
+    return command
+
+
+_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
+
+
+def display_shell_command(command: str) -> str:
+    """Decode a Codex shell wrapper AND strip the leading ``cd`` prefix, for display.
+
+    This reproduces the pre-#1124 friendly rendering: the same ``shlex`` decode
+    as :func:`_unwrap_shell_command`, then removal of a leading ``cd <dir> &&``
+    prefix from the decoded value. The result is purely presentational — the
+    value stored in ``ToolStartEvent.input["command"]`` must come from
+    :func:`_unwrap_shell_command` so it stays replayable, cd prefix retained.
+
+    Fails open exactly like the decode step: unparseable input passes through
+    unchanged and the cd regex simply does not match, returning the input
+    byte-for-byte.
+    """
+    decoded = _unwrap_shell_command(command)
+    return _CD_PREFIX_RE.sub("", decoded, count=1)
 
 
 class CodexError(Exception):
