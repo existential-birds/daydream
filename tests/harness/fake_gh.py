@@ -1,14 +1,11 @@
-"""In-process fake ``gh`` harness for real-path tests.
+"""Fake ``gh`` harness for synchronous and real-process tests.
 
-:func:`install_fake_gh` patches ``subprocess.run`` as seen by
-:mod:`daydream.git_ops` (the single point of contact for all ``gh`` calls)
-with a router: an argv starting with ``gh`` is answered synchronously by
-:func:`_handle_gh`; every other command (``git`` against real temp
-worktrees, most importantly) runs for real. Everything of daydream's runs
-unchanged — ``_run_gh``'s env/token merging and stdin piping, the ``gh_api``
-tempfile-``--input`` path, JSON response parsing — only the OS process spawn
-is replaced. No fork, no ``PATH`` shim, no wall-clock timeout: the fake
-cannot stall, so these tests are deterministic under any host load.
+:func:`install_fake_gh` patches synchronous ``subprocess.run`` calls as seen
+by :mod:`daydream.git_ops`: an argv starting with ``gh`` is answered by
+:func:`_handle_gh`, while every other command (most importantly, ``git``
+against real temp worktrees) runs for real. It also installs a PATH executable
+that runs the same handler for asynchronous subprocess tests, including
+cancellation and timeout lifecycle coverage.
 
 The handler records every invocation (argv + parsed ``--input`` payload) to
 a JSONL log the :class:`FakeGh` helper parses, and replies from a canned
@@ -46,8 +43,11 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -135,6 +135,56 @@ def _emit(value: Any, jq: str | None) -> str:
     # output is one JSON-encoded element per line.
     items = value if isinstance(value, list) else [value]
     return "".join(json.dumps(item) + "\n" for item in items)
+
+
+def _take_response(state: Path, key: str, value: Any) -> Any:
+    """Return one canned response, advancing a configured sequence once."""
+    if not isinstance(value, dict) or "__sequence__" not in value:
+        return value
+    sequence = value["__sequence__"]
+    if not isinstance(sequence, list):
+        return {"__error__": f"fake gh: invalid response sequence for {key}"}
+    cursor_path = state / "response_cursors.json"
+    cursors = (
+        json.loads(cursor_path.read_text(encoding="utf-8"))
+        if cursor_path.exists()
+        else {}
+    )
+    index = cursors.get(key, 0)
+    if not isinstance(index, int) or index < 0 or index >= len(sequence):
+        return {"__error__": f"fake gh: response sequence exhausted for {key}"}
+    cursors[key] = index + 1
+    cursor_path.write_text(json.dumps(cursors), encoding="utf-8")
+    return sequence[index]
+
+
+def _serve_api_response(
+    state: Path,
+    key: str,
+    value: Any,
+    jq: str | None,
+) -> tuple[int, str, str]:
+    """Render one structured canned API response."""
+    value = _take_response(state, key, value)
+    if isinstance(value, dict) and isinstance(value.get("__error__"), str):
+        return 1, "", value["__error__"] + "\n"
+    if isinstance(value, dict) and isinstance(value.get("__stdout__"), str):
+        return 0, value["__stdout__"], ""
+    if isinstance(value, dict) and isinstance(value.get("__blocking__"), dict):
+        pid_file = Path(str(value["__blocking__"].get("pid_file", "")))
+        child_pid = os.fork()
+        if child_pid == 0:
+            while True:
+                time.sleep(3600)
+        pid_file.write_text(
+            json.dumps({"direct": os.getpid(), "grandchild": child_pid}),
+            encoding="utf-8",
+        )
+        while True:
+            time.sleep(3600)
+    if value is None:
+        return 1, "", f"fake gh: 404 {key} (no such resource)\n"
+    return 0, _emit(value, jq), ""
 
 
 def _next_comment_seq(state: Path) -> int:
@@ -286,20 +336,12 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
             return 0, json.dumps(value) + "\n", ""
         return 1, "", "fake gh: unrecognized graphql query\n"
     key = f"{method} {endpoint}"
-    if key in responses and isinstance(responses[key], dict) and "__error__" in responses[key]:
-        return 1, "", str(responses[key]["__error__"]) + "\n"
     if key in responses:
-        if responses[key] is None:
-            return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
-        return 0, _emit(responses[key], jq), ""
+        return _serve_api_response(state, key, responses[key], jq)
     # Query strings select/paginate; the canned response is keyed by path alone.
     bare_key = f"{method} {endpoint.split('?')[0]}"
-    if bare_key in responses and isinstance(responses[bare_key], dict) and "__error__" in responses[bare_key]:
-        return 0, "", str(responses[bare_key]["__error__"]) + "\n"
     if bare_key in responses:
-        if responses[bare_key] is None:
-            return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
-        return 0, _emit(responses[bare_key], jq), ""
+        return _serve_api_response(state, bare_key, responses[bare_key], jq)
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
         return 0, _emit([], jq), ""
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/files", endpoint):
@@ -430,7 +472,7 @@ class GhSetCall:
 
 
 class FakeGh:
-    """Driver/inspector for the in-process fake ``gh``."""
+    """Driver/inspector for the shared in-process and PATH fake ``gh``."""
 
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = state_dir
@@ -540,6 +582,23 @@ class FakeGh:
         else:
             responses[f"{method.upper()} {endpoint.lstrip('/')}"] = value
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    def set_response_sequence(self, key: str, responses: list[Any]) -> None:
+        """Serve successive responses for one exact ``METHOD endpoint`` key."""
+        canned = self._read_responses()
+        canned[key] = {"__sequence__": responses}
+        self._responses_path.write_text(json.dumps(canned), encoding="utf-8")
+        cursor_path = self.state_dir / "response_cursors.json"
+        if cursor_path.exists():
+            cursors = json.loads(cursor_path.read_text(encoding="utf-8"))
+            cursors.pop(key, None)
+            cursor_path.write_text(json.dumps(cursors), encoding="utf-8")
+
+    def serve_blocking_process(self, key: str, *, pid_file: Path) -> None:
+        """Serve a process that blocks with a stdout-holding grandchild."""
+        canned = self._read_responses()
+        canned[key] = {"__blocking__": {"pid_file": str(pid_file)}}
+        self._responses_path.write_text(json.dumps(canned), encoding="utf-8")
 
     def serve_pr_view(self, response: dict[str, Any]) -> None:
         """Make ``gh pr view`` emit *response* and feed ``gh pr list``."""
@@ -740,9 +799,40 @@ class FakeGh:
         return {}
 
 
+def _shim_main(state_dir: Path) -> int:
+    """Run the fake handler behind the executable PATH boundary."""
+    argv = sys.argv[1:]
+    _record(
+        state_dir,
+        {
+            "kind": "gh process",
+            "cwd": str(Path.cwd().resolve()),
+            "argv": ["gh", *argv],
+        },
+    )
+    rc, stdout, stderr = _handle_gh(argv, sys.stdin.read(), state_dir)
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    return rc
+
+
 def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    """Route ``gh`` invocations to the in-process handler; run everything else for real."""
+    """Route sync ``gh`` in process and async ``gh`` through a PATH shim."""
     state_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir = state_dir / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "gh"
+    source_root = Path(__file__).resolve().parents[2]
+    shim.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        f"sys.path.insert(0, {str(source_root)!r})\n"
+        "from tests.harness.fake_gh import _shim_main\n"
+        f"raise SystemExit(_shim_main(pathlib.Path({str(state_dir)!r})))\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(bin_dir), os.environ["PATH"])))
     real_run = subprocess.run
 
     def router(args: Any, *pargs: Any, **kwargs: Any) -> Any:

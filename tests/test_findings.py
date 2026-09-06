@@ -31,7 +31,7 @@ def test_build_artifact_declares_target_envelope(tmp_path: Path) -> None:
     without touching the diff, so no git/collaborator mocking is needed; inline
     snapping is exercised by the real-path test below.
     """
-    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
+    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
                 owner="o", repo="r", url="u")
     issues = [ParsedIssue(path="a.py", line=None, title="T", body="B", severity="high",
                           confidence="HIGH", fingerprint="f" * 64, is_cross_stack=True)]
@@ -177,7 +177,7 @@ async def test_review_mode_writes_findings_artifact(
         ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
         cwd=feature_branch_repo, capture_output=True, text=True, check=True,
     ).stdout.strip()
-    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main", head_ref="feature",
                 owner="o", repo="r", url="https://example.invalid/pr/7")
 
     with _review_run_env(feature_branch_repo, monkeypatch, out, backend, pr) as config:
@@ -231,7 +231,7 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
             pass
 
     head = git_ops.head_sha(feature_branch_repo)
-    pr = PRInfo(number=7, head_sha=head, base_sha=head, base_ref="main",
+    pr = PRInfo(number=7, head_sha=head, base_sha=head, base_ref="main", head_ref="feature",
                 owner="o", repo="r", url="https://example.invalid/pr/7")
 
     with _review_run_env(feature_branch_repo, monkeypatch, out, ErroringBackend(), pr) as config:
@@ -274,7 +274,7 @@ def _diagram_payload() -> dict[str, Any]:
 
 def test_diagram_artifact_round_trips_kind_and_payload(tmp_path: Path) -> None:
     """``kind``/``diagrams`` survive build -> write -> validate -> load."""
-    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
+    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
                 owner="o", repo="r", url="u")
     payload = _diagram_payload()
     artifact = build_findings_artifact(
@@ -339,7 +339,7 @@ def test_unknown_artifact_kind_is_rejected_by_the_schema(tmp_path: Path) -> None
 
 def test_write_rejects_an_oversized_artifact(tmp_path: Path) -> None:
     """The size cap fails in the job that produced the artifact, not one job later."""
-    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
+    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
                 owner="o", repo="r", url="u")
     payload = _diagram_payload()
     payload["results"]["sequence"]["spec_final"]["messages"] = [

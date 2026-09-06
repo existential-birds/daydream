@@ -2607,8 +2607,8 @@ async def test_host_phase_scope_records_duration_and_stop_reason(
     hook = ends[(DaydreamPhase.HOOK_RUN.value, "phase_end")]
     assert hook["status"] == "succeeded"
     assert hook["metadata"]["stop_reason"] == "completed"
-    # All four host phases are distinct DaydreamPhase values, so the manifest
-    # can tell test-execution, hook-run, commit, and push apart.
+    # The original four host phases remain distinct; remote CI has its own
+    # focused assertion below.
     assert {
         p.value
         for p in (
@@ -2630,6 +2630,63 @@ async def test_host_phase_scope_noop_without_recorder() -> None:
     _reset_recorder_for_tests()
     async with host_phase_scope(DaydreamPhase.COMMIT):
         pass  # must not raise when no recorder is active
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_status", "expected_reason"),
+    [
+        ("completed", "succeeded", None),
+        ("passed", "succeeded", None),
+        ("no_ci", "succeeded", None),
+        ("timed_out", "timed_out", "timed_out"),
+        ("cancelled", "cancelled", "cancelled"),
+        ("interrupted", "cancelled", "cancelled"),
+        ("failed", "failed", "domain_failure"),
+        ("missing", "failed", "domain_failure"),
+        ("unavailable", "failed", "domain_failure"),
+        ("superseded", "failed", "domain_failure"),
+        ("pending", "failed", "domain_failure"),
+    ],
+)
+async def test_remote_ci_host_phases_record_exact_terminal_reasons(
+    tmp_path: Path,
+    stop_reason: str,
+    expected_status: str,
+    expected_reason: str | None,
+) -> None:
+    """Every admitted remote-CI reason has one closed lifecycle projection."""
+    from daydream.trajectory import DaydreamPhase, host_phase_scope
+
+    rec = make_recorder(tmp_path)
+    async with rec:
+        async with host_phase_scope(DaydreamPhase.REMOTE_CI) as phase:
+            await anyio.sleep(0)
+            phase.stop_reason = stop_reason
+
+    remote_events = [
+        event
+        for event in rec.phase_event_dicts()
+        if event["phase"] == DaydreamPhase.REMOTE_CI.value
+    ]
+    assert [event["event"] for event in remote_events] == ["phase_start", "phase_end"]
+    ends = [event for event in remote_events if event["event"] == "phase_end"]
+    assert len(ends) == 1
+    assert ends[0]["status"] == expected_status
+    assert ends[0].get("reason_code") == expected_reason
+    assert ends[0]["metadata"]["stop_reason"] == stop_reason
+    assert all(event["metadata"]["duration_ms"] >= 0 for event in ends)
+
+
+def test_remote_ci_artifact_paths_are_named_under_deep_dir(tmp_path: Path) -> None:
+    from daydream.deep.artifacts import (
+        push_verdict_path,
+        remote_ci_handoff_path,
+        remote_ci_verdict_path,
+    )
+
+    assert push_verdict_path(tmp_path) == tmp_path / "push-verdict.json"
+    assert remote_ci_verdict_path(tmp_path) == tmp_path / "remote-ci-verdict.json"
+    assert remote_ci_handoff_path(tmp_path) == tmp_path / "remote-ci-handoff.json"
 
 
 async def test_do_commit_records_commit_phase_event(
@@ -2661,7 +2718,8 @@ async def test_do_commit_records_commit_phase_event(
     rec = make_recorder(git_repo)
     async with rec:
         ok = await _do_commit(_Backend(), work, push=False, preexisting_untracked=set())
-    assert ok is True
+    assert ok.committed is True
+    assert ok.push is None
 
     commit_ends = [e for e in rec.phase_event_dicts() if e["phase"] == "commit" and e["event"] == "phase_end"]
     assert len(commit_ends) == 1

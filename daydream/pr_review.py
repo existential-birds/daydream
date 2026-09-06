@@ -125,7 +125,7 @@ class ParsedIssue:
     severity_off_vocabulary: bool = False
 
 
-@dataclass
+@dataclass(frozen=True)
 class PRInfo:
     """Details about the open PR for the current branch."""
 
@@ -133,6 +133,7 @@ class PRInfo:
     head_sha: str
     base_sha: str
     base_ref: str
+    head_ref: str
     owner: str
     repo: str
     url: str
@@ -533,17 +534,21 @@ def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo:
 
     number = row.get("number")
     head_sha = row.get("headRefOid")
+    head_ref = row.get("headRefName")
     base_ref = row.get("baseRefName")
     url = row.get("url")
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         raise GitError("invalid PR row: number must be a positive integer")
     if not isinstance(head_sha, str):
         raise GitError("invalid PR row: headRefOid must be a string")
+    if not isinstance(head_ref, str) or not head_ref:
+        raise GitError("invalid PR row: headRefName must be a non-empty string")
     if not isinstance(base_ref, str) or not base_ref:
         raise GitError("invalid PR row: baseRefName must be a non-empty string")
     if not isinstance(url, str) or not url:
         raise GitError("invalid PR row: url must be a non-empty string")
     head_repo = _head_repo_slug_from_row(row)
+    git_ops.validate_branch_name(target_dir, head_ref)
     git_ops.validate_branch_name(target_dir, base_ref)
 
     owner, repo = git_ops.gh_repo_view_required(target_dir)
@@ -564,6 +569,7 @@ def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo:
         head_sha=head_sha,
         base_sha=base_sha,
         base_ref=base_ref,
+        head_ref=head_ref,
         owner=owner,
         repo=repo,
         url=url,
@@ -2414,6 +2420,7 @@ def post_findings_from_artifact(
         head_sha=head_sha,
         base_sha="",
         base_ref="",
+        head_ref="",
         owner=owner,
         repo=repo_name,
         url="",

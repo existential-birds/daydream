@@ -332,6 +332,7 @@ def pr() -> PRInfo:
         head_sha="head123",
         base_sha="base456",
         base_ref="main",
+        head_ref="feature",
         owner="acme",
         repo="widgets",
         url="https://github.com/acme/widgets/pull/42",
@@ -838,6 +839,7 @@ def _local_pr_row(repo: Path, *, head_owner: str = "o") -> tuple[dict[str, Any],
         {
             "number": 7,
             "headRefOid": head,
+            "headRefName": "feature",
             "baseRefName": "main",
             "url": "https://github.com/o/r/pull/7",
             "headRepository": {"name": "r", "nameWithOwner": f"{head_owner}/r"},
@@ -876,6 +878,7 @@ def test_find_open_pr_captures_head_repo_for_fork_pr(
     assert info is not None
     assert (info.owner, info.repo) == ("acme", "widgets")
     assert info.head_repo == "forky/widgets"
+    assert info.head_ref == "feature"
 
 
 def test_find_pr_by_number_returns_none_when_pr_missing(
@@ -925,6 +928,9 @@ def test_find_pr_by_number_assembles_pr_info(
         ("number", 0),
         ("headRefOid", "HEAD"),
         ("headRefOid", "deadbeef"),
+        ("headRefName", ""),
+        ("headRefName", 7),
+        ("headRefName", "feature~1"),
         ("baseRefName", ""),
         ("baseRefName", "main~1"),
         ("url", ""),
@@ -1407,6 +1413,7 @@ def _pr_for(base_sha: str, head_sha: str) -> PRInfo:
         head_sha=head_sha,
         base_sha=base_sha,
         base_ref="main",
+        head_ref="feature",
         owner="acme",
         repo="widgets",
         url="https://github.com/acme/widgets/pull/7",

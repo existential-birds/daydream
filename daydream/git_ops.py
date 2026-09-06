@@ -32,15 +32,18 @@ Error-handling patterns:
     Each function's docstring specifies which pattern it follows under its
     **Raises** or **Returns** section.
 
-The module is intentionally dependency-free: stdlib only.
+Apart from the shared bounded subprocess-termination helper, this module uses
+only the standard library.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -53,7 +56,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Generator, Literal, overload
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
+
+from daydream.backends._subprocess import terminate_process
 
 _logger = logging.getLogger(__name__)
 
@@ -232,6 +237,35 @@ class GitTimeoutError(GitError):
     so it is retried a bounded number of times in :func:`_run_git` before it
     surfaces as this exception.
     """
+
+
+class DeadlineExpired(GitError):
+    """Raised before a GitHub request when its shared deadline has expired."""
+
+
+@dataclass(frozen=True)
+class GitHubRequestBudget:
+    """Shared absolute deadline and per-request cap for GitHub reads."""
+
+    deadline: float
+    per_request_seconds: float
+    monotonic: Callable[[], float]
+
+    def next_timeout(self) -> float:
+        """Return the current positive min(cap, remaining), else raise."""
+        remaining = self.deadline - self.monotonic()
+        timeout = min(self.per_request_seconds, remaining)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise DeadlineExpired("GitHub request deadline expired")
+        return timeout
+
+
+@dataclass(frozen=True)
+class GitHubPageLimits:
+    """Manual pagination limits for bounded GitHub collection reads."""
+
+    per_page: int = 100
+    max_pages: int = 10
 
 
 class RateLimitError(GitError):
@@ -3494,6 +3528,7 @@ GH_PR_VIEW_FIELDS: tuple[str, ...] = (
 )
 GH_PR_LIST_FIELDS: tuple[str, ...] = (
     "number",
+    "headRefName",
     "headRefOid",
     "baseRefName",
     "url",
@@ -3748,6 +3783,250 @@ def _parse_gh_json(stdout: str, jq: str | None, endpoint: str, *, payload_note: 
         raise GitError(
             _redact_sensitive_text(f"gh api {endpoint} returned invalid JSON: {exc}{payload_note}")
         ) from exc
+
+
+_GITHUB_JSON_HEADERS: tuple[str, ...] = (
+    "Accept: application/vnd.github+json",
+    "X-GitHub-Api-Version: 2022-11-28",
+)
+
+
+async def _run_gh_async(
+    repo: Path,
+    args: list[str],
+    *,
+    budget: GitHubRequestBudget,
+) -> subprocess.CompletedProcess[str]:
+    """Run one cancellable ``gh`` process within a shared float deadline."""
+    token_env = _gh_token_env_for_request()
+    env = {**os.environ, **token_env} if token_env is not None else None
+    timeout = budget.next_timeout()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh",
+            *args,
+            cwd=repo,
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        command = " ".join(_redact_args(args))
+        detail = _redact_sensitive_text(str(exc))
+        raise GitError(f"gh {command} failed: {type(exc).__name__}: {detail}") from exc
+
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+    except asyncio.CancelledError:
+        await terminate_process(proc)
+        raise
+    except TimeoutError as exc:
+        await terminate_process(proc)
+        command = " ".join(_redact_args(args))
+        raise GitTimeoutError(
+            f"gh {command} timed out after {timeout:g}s"
+        ) from exc
+    except BaseException:
+        await terminate_process(proc)
+        raise
+
+    try:
+        stdout = stdout_bytes.decode("utf-8")
+        stderr = stderr_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        await terminate_process(proc)
+        raise GitError("gh API request returned invalid UTF-8") from exc
+    return subprocess.CompletedProcess(args, proc.returncode or 0, stdout, stderr)
+
+
+async def _gh_api_read(
+    repo: Path,
+    endpoint: str,
+    *,
+    budget: GitHubRequestBudget,
+) -> Any:
+    """Read one GitHub endpoint with explicit version headers."""
+    args = ["api"]
+    for header in _GITHUB_JSON_HEADERS:
+        args.extend(("-H", header))
+    args.extend(("--method", "GET", endpoint))
+    proc = await _run_gh_async(repo, args, budget=budget)
+    if proc.returncode != 0:
+        diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
+        raise _gh_error_for(f"gh api {endpoint} failed: {diagnostic}", proc.stderr)
+    return _parse_gh_json(proc.stdout, None, endpoint)
+
+
+def _validate_page_limits(limits: GitHubPageLimits) -> None:
+    if limits.per_page <= 0 or limits.max_pages <= 0:
+        raise GitError("GitHub pagination limits must be positive")
+
+
+async def gh_api_bounded_pages(
+    repo: Path,
+    endpoint: str,
+    *,
+    envelope: str | None,
+    limits: GitHubPageLimits,
+    budget: GitHubRequestBudget,
+) -> list[dict[str, Any]]:
+    """Collect a manually paged GitHub list without silent truncation."""
+    _validate_page_limits(limits)
+    capacity = limits.per_page * limits.max_pages
+    collected: list[dict[str, Any]] = []
+    separator = "&" if "?" in endpoint else "?"
+
+    for page in range(1, limits.max_pages + 1):
+        page_endpoint = (
+            f"{endpoint}{separator}per_page={limits.per_page}&page={page}"
+        )
+        value = await _gh_api_read(repo, page_endpoint, budget=budget)
+        total_count: int | None = None
+        if envelope is None:
+            rows = value
+        else:
+            if not isinstance(value, dict):
+                raise GitError(f"gh api {endpoint} returned an invalid page shape")
+            total_count = value.get("total_count")
+            if (
+                not isinstance(total_count, int)
+                or isinstance(total_count, bool)
+                or total_count < 0
+            ):
+                raise GitError(f"gh api {endpoint} returned an invalid page shape")
+            if total_count > capacity:
+                raise GitError(f"gh api {endpoint} exceeded pagination limit")
+            rows = value.get(envelope)
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) for row in rows
+        ):
+            raise GitError(f"gh api {endpoint} returned an invalid page shape")
+        if len(rows) > limits.per_page:
+            raise GitError(f"gh api {endpoint} returned an invalid page shape")
+        collected.extend(rows)
+        if total_count is not None:
+            if len(collected) > total_count:
+                raise GitError(f"gh api {endpoint} returned an invalid page shape")
+            if len(collected) == total_count:
+                return collected
+        if page == limits.max_pages and len(rows) == limits.per_page:
+            raise GitError(f"gh api {endpoint} exceeded pagination limit")
+        if len(rows) < limits.per_page:
+            if total_count is not None and len(collected) != total_count:
+                raise GitError(f"gh api {endpoint} returned an incomplete page")
+            return collected
+
+    raise GitError(f"gh api {endpoint} exceeded pagination limit")
+
+
+async def gh_pr_ci_snapshot(
+    repo: Path,
+    owner: str,
+    name: str,
+    number: int,
+    *,
+    budget: GitHubRequestBudget,
+) -> dict[str, Any]:
+    """Return one PR object from the bounded asynchronous read boundary."""
+    endpoint = f"repos/{owner}/{name}/pulls/{number}"
+    value = await _gh_api_read(repo, endpoint, budget=budget)
+    if not isinstance(value, dict):
+        raise GitError(f"gh api {endpoint} returned an invalid top-level shape")
+    return value
+
+
+async def gh_active_branch_rules(
+    repo: Path,
+    owner: str,
+    name: str,
+    branch: str,
+    *,
+    limits: GitHubPageLimits,
+    budget: GitHubRequestBudget,
+) -> list[dict[str, Any]]:
+    """Return active repository rules applying to a branch."""
+    encoded_branch = quote(branch, safe="")
+    endpoint = f"repos/{owner}/{name}/rules/branches/{encoded_branch}"
+    return await gh_api_bounded_pages(
+        repo, endpoint, envelope=None, limits=limits, budget=budget
+    )
+
+
+async def gh_classic_required_checks(
+    repo: Path,
+    owner: str,
+    name: str,
+    branch: str,
+    *,
+    budget: GitHubRequestBudget,
+) -> dict[str, Any] | None:
+    """Return classic required checks, or None only for unprotected branches."""
+    encoded_branch = quote(branch, safe="")
+    endpoint = (
+        f"repos/{owner}/{name}/branches/{encoded_branch}"
+        "/protection/required_status_checks"
+    )
+    try:
+        value = await _gh_api_read(repo, endpoint, budget=budget)
+    except GitError as exc:
+        absent = f"gh api {endpoint} failed: gh: Branch not protected (HTTP 404)"
+        if type(exc) is GitError and str(exc) == absent:
+            return None
+        raise
+    if not isinstance(value, dict):
+        raise GitError(f"gh api {endpoint} returned an invalid top-level shape")
+    return value
+
+
+async def gh_commit_check_runs(
+    repo: Path,
+    owner: str,
+    name: str,
+    sha: str,
+    *,
+    limits: GitHubPageLimits,
+    budget: GitHubRequestBudget,
+) -> list[dict[str, Any]]:
+    """Return the latest check runs for an exact commit SHA."""
+    endpoint = f"repos/{owner}/{name}/commits/{sha}/check-runs?filter=latest"
+    return await gh_api_bounded_pages(
+        repo, endpoint, envelope="check_runs", limits=limits, budget=budget
+    )
+
+
+async def gh_commit_statuses(
+    repo: Path,
+    owner: str,
+    name: str,
+    sha: str,
+    *,
+    limits: GitHubPageLimits,
+    budget: GitHubRequestBudget,
+) -> list[dict[str, Any]]:
+    """Return legacy statuses for an exact commit SHA."""
+    endpoint = f"repos/{owner}/{name}/commits/{sha}/statuses"
+    return await gh_api_bounded_pages(
+        repo, endpoint, envelope=None, limits=limits, budget=budget
+    )
+
+
+async def gh_actions_workflows(
+    repo: Path,
+    owner: str,
+    name: str,
+    *,
+    limits: GitHubPageLimits,
+    budget: GitHubRequestBudget,
+) -> list[dict[str, Any]]:
+    """Return repository Actions workflows."""
+    endpoint = f"repos/{owner}/{name}/actions/workflows"
+    return await gh_api_bounded_pages(
+        repo, endpoint, envelope="workflows", limits=limits, budget=budget
+    )
 
 
 def gh_api(

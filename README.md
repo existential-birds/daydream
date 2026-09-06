@@ -72,7 +72,22 @@ The default flow is the deep multi-stack pipeline. This pipeline performs the fo
 6. Merge the findings across stacks.
 7. Verify the findings.
 8. Fix the identified issues.
-9. Run the test suite to validate the fixes.
+9. Run the test suite natively on the local host to validate the fixes.
+10. Commit and push through ordinary Git commands and repository hooks.
+11. Verify GitHub CI for the exact pushed repository, PR, branch, and commit SHA.
+
+Local verification, push verification, and remote CI are recorded as distinct
+states. Remote CI polls every 10 seconds, allows 120 seconds for checks to
+register, and has a 30-minute completion bound. Required checks determine the
+result; advisory failures and pending checks remain visible but do not turn a
+green required policy red. Daydream reports `no_ci` only after the fixed PR/SHA
+has no required policy, active workflow, check run, or legacy status through
+the bounded registration window. Every failed or incomplete remote result exits
+1 and writes `.daydream/deep/remote-ci-handoff.json` with the next action.
+
+Commit and push hooks always run. The local platform facts and GitHub-reported
+check names in the artifacts describe only what was observed; they are not proof
+of another operating system or broader test coverage.
 
 Use the common commands for the common tasks:
 
@@ -545,6 +560,10 @@ See [docs/self-hosted-bot-setup.md](docs/self-hosted-bot-setup.md) for details.
 | `.daydream/runs/<id>/trajectories/` | Forked sub-trajectories from parallel fan-outs |
 | `.daydream/diff.patch` | Unified diff captured at run start |
 | `.daydream/deep/` | Deep pipeline artifacts |
+| `.daydream/deep/test-verdict.json` | Native local-test result and local host facts |
+| `.daydream/deep/push-verdict.json` | Session-bound ordinary push attempt and exact SHA |
+| `.daydream/deep/remote-ci-verdict.json` | Bounded GitHub CI evidence for the exact pushed target |
+| `.daydream/deep/remote-ci-handoff.json` | Next action for failed or incomplete remote CI |
 | `.daydream/exploration/` | Cached pre-scan grounding |
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |

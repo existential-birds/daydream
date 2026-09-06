@@ -407,12 +407,14 @@ class DaydreamPhase(str, Enum):
     MERGE = "merge"
     # Host-side (non-agent) operations (issue #726): each is bracketed by
     # phase events carrying ``duration_ms`` and ``stop_reason`` so the
-    # trajectory can tell test execution, hook runs, commits, and pushes
+    # trajectory can tell test execution, hook runs, commits, pushes, and
+    # exact-SHA remote CI verification
     # apart without inferring from step timestamps.
     TEST_EXECUTION = "test-execution"
     HOOK_RUN = "hook-run"
     COMMIT = "commit"
     PUSH = "push"
+    REMOTE_CI = "remote-ci"
 
 
 class DaydreamRunFlow(str, Enum):
@@ -2250,6 +2252,19 @@ def _lifecycle_exception_terminal(
     return LifecycleStatus.FAILED, LifecycleReasonCode.UNCAUGHT_EXCEPTION
 
 
+def _host_lifecycle_terminal(
+    stop_reason: str,
+) -> tuple[LifecycleStatus, LifecycleReasonCode | None]:
+    """Project one closed host stop reason onto lifecycle status evidence."""
+    if stop_reason in {"completed", "passed", "no_ci"}:
+        return LifecycleStatus.SUCCEEDED, None
+    if stop_reason == "timed_out":
+        return LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT
+    if stop_reason in {"cancelled", "interrupted"}:
+        return LifecycleStatus.CANCELLED, LifecycleReasonCode.CANCELLED
+    return LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE
+
+
 def _phase_scope_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     """Admit only the fixed lifecycle metadata surface used by phase scopes."""
     stage = metadata.get("stage")
@@ -2345,16 +2360,9 @@ async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterat
         raise
     finally:
         if lifecycle.status is LifecycleStatus.SUCCEEDED:
-            if handle.stop_reason == "timed_out":
-                lifecycle._override(
-                    LifecycleStatus.TIMED_OUT,
-                    LifecycleReasonCode.TIMED_OUT,
-                )
-            elif handle.stop_reason != "completed":
-                lifecycle._override(
-                    LifecycleStatus.FAILED,
-                    LifecycleReasonCode.DOMAIN_FAILURE,
-                )
+            status, reason_code = _host_lifecycle_terminal(handle.stop_reason)
+            lifecycle.status = status
+            lifecycle.reason_code = reason_code
         lifecycle._close()
         if recorder is not None:
             try:

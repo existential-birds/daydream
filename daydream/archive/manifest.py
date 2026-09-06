@@ -484,8 +484,9 @@ def build_manifest(
         pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
             cancelled/unknown) derived from per-phase terminal states; distinct
             from ``status``/``archive_status`` (archive finalization).
-        phase_states: Per-phase terminal states (``merge``/``fix``/``test``),
-            each ``{"ran": bool, "status": str}``, or ``None`` for legacy runs.
+        phase_states: Per-phase terminal states (``merge``/``fix``/``test``/
+            ``push``/``remote_ci``), each ``{"ran": bool, "status": str}``
+            plus optional bounded details, or ``None`` for legacy runs.
         provenance: The ``ExecutableProvenance`` of the Daydream executable that
             produced this run, or ``None`` (never merged into ``git.*``).
 

@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
-from daydream.archive.manifest import _flow_fix_test_steps, build_manifest
+from daydream.archive.manifest import (
+    _flow_fix_test_steps,
+    _flow_phase_steps,
+    _runtime_flow_name,
+    build_manifest,
+)
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.trajectory import DaydreamRunFlow
 
@@ -67,6 +72,16 @@ def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
         steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
         return any("merge" in step for step in steps)
     return True
+
+
+def _flow_push_remote_steps(
+    flow: DaydreamRunFlow, flow_name: str | None
+) -> tuple[bool, bool]:
+    """Return exact commit/push and remote-CI capabilities for this run."""
+    if flow in {DaydreamRunFlow.TTT, DaydreamRunFlow.PR}:
+        return False, False
+    steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
+    return ("commit" in steps, "remote-ci" in steps)
 
 
 def get_archive_dir() -> Path:
@@ -231,13 +246,14 @@ def _archive_run_inner(
     from daydream.archive.provenance import capture_executable_provenance
 
     provenance = capture_executable_provenance()
-    # Gate the per-phase derivation to only the phases THIS flow actually runs:
-    # the deep artifacts it reads are session-agnostic, so a non-deep flow on a
-    # previously deep-reviewed repo must not inherit a prior run's state (#336,
-    # #762). ``runs_merge`` mirrors the ``_flow_fix_test_steps`` classification.
+    # Gate derivation to phases this registered flow can execute. Session-bound
+    # artifacts prevent a non-deep or interrupted run from adopting prior state.
     runs_merge = (
         _flow_runs_merge(recorder.run_flow, config.flow_name)
         and getattr(config, "start_at", None) != "fix"
+    )
+    runs_push, runs_remote_ci = _flow_push_remote_steps(
+        recorder.run_flow, config.flow_name
     )
     raw_frozen_extra = frozen_root.get("extra") if isinstance(frozen_root, dict) else None
     frozen_extra: dict[str, Any] = raw_frozen_extra if isinstance(raw_frozen_extra, dict) else {}
@@ -248,7 +264,11 @@ def _archive_run_inner(
         runs_merge=runs_merge,
         runs_fix=runs_fix,
         runs_test=runs_test,
+        runs_push=runs_push,
+        runs_remote_ci=runs_remote_ci,
         session_id=recorder.session_id,
+        pr_repo=getattr(config, "pr_repo", None),
+        pr_number=getattr(config, "pr_number", None),
     )
     pipeline_status = derive_pipeline_status(
         status,

@@ -21,7 +21,7 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -72,7 +72,10 @@ from daydream.deep.artifacts import (
     merged_report_path,
     per_stack_failures_path,
     per_stack_records_path,
+    push_verdict_path,
     recommended_capture_path,
+    remote_ci_handoff_path,
+    remote_ci_verdict_path,
     stabilization_failed_path,
     test_verdict_path,
 )
@@ -137,13 +140,15 @@ from daydream.generated_files import (
     is_generated_file,
     related_manifest_paths,
 )
-from daydream.git_ops import GitPathState, IndexSnapshot, WorktreeRollbackSnapshot
+from daydream.git_ops import GitError, GitPathState, IndexSnapshot, WorktreeRollbackSnapshot
 from daydream.json_utils import atomic_write_json
 from daydream.phases import (
     FIX_VERIFY_ACTIONABLE_VERDICTS,
     FIX_VERIFY_RETARGETABLE_VERDICTS,
     UNCOVERED_SWEEP_SCHEMA,
     CrossStackMergeError,
+    PushAttemptError,
+    PushReceipt,
     TestAndHealResult,
     TestAttemptEvidence,
     _write_single_stack_merged_items,
@@ -177,8 +182,11 @@ from daydream.trajectory import (
     _safe_descriptor,
     dispatch_scope,
     get_current_recorder,
+    host_phase_scope,
     maybe_fork,
+    now_iso,
     phase_scope,
+    redact_structured_text,
 )
 from daydream.ui import (
     format_verdict_join,
@@ -198,6 +206,7 @@ from daydream.ui import (
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
+    from daydream.remote_ci import RemoteCITarget, RemoteCIVerdict
     from daydream.runner import RunConfig
     from daydream.trajectory import DispatchHandle, PhaseScopeHandle, TrajectoryRecorder
 
@@ -4689,6 +4698,8 @@ def _persist_test_verdict(
     ignored: bool,
     attempts: list[TestAttemptEvidence],
 ) -> None:
+    from daydream.remote_ci import local_host_facts
+
     atomic_write_json(
         test_verdict_path(ctx.data["dd"]),
         {
@@ -4697,6 +4708,7 @@ def _persist_test_verdict(
             "ignored": ignored,
             "retries": max(0, len(attempts) - 1),
             "attempts": [_test_attempt_payload(attempt) for attempt in attempts],
+            "local_host": local_host_facts(),
         },
         sort_keys=True,
     )
@@ -4901,20 +4913,36 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     return await finalize_retained_tree_after_test(ctx, result)
 
 
-async def _commit_push_or_stop(coro: Awaitable[None]) -> Stop | None:
-    """Await a commit/push phase, mapping failure to a clean Stop(1).
-
-    Shared by _step_commit and _step_commit_push so the try/except ->
-    print_error("Commit/Push Failed") -> Stop(1) guard lives in one place.
-    The phase coroutine is created by the caller but only awaited here, so a
-    synchronous GitError from staging still surfaces inside the guard.
-    """
-    try:
-        await coro
-    except Exception as e:
-        print_error(console, "Commit/Push Failed", str(e))
-        return Stop(1)
-    return None
+def _persist_push_verdict(
+    ctx: FlowContext,
+    receipt: PushReceipt,
+    *,
+    status: Literal["succeeded", "failed"],
+    started_at: str,
+    diagnostic: str | None = None,
+) -> None:
+    """Replace the current session's exact push-attempt outcome atomically."""
+    state = _fix_cycle_state(ctx)
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "session_id": state.session_id,
+        "status": status,
+        "remote": receipt.remote,
+        "branch": receipt.branch,
+        "pushed_sha": receipt.sha,
+        "pushed_repository": receipt.pushed_repository,
+        "started_at": started_at,
+        "updated_at": now_iso(),
+    }
+    if diagnostic is not None:
+        payload["diagnostic"] = redact_structured_text(diagnostic)[:2_000]
+    atomic_write_json(
+        push_verdict_path(ctx.data["dd"]),
+        payload,
+        indent=2,
+        sort_keys=True,
+        trailing_newline=True,
+    )
 
 
 async def _step_commit(ctx: FlowContext) -> Stop | None:
@@ -4939,8 +4967,9 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
     except Exception as exc:
         print_error(console, "Commit/Push Failed", str(exc))
         return Stop(1)
-    return await _commit_push_or_stop(
-        phase_commit_push(
+    started_at = now_iso()
+    try:
+        receipt = await phase_commit_push(
             ctx.backend_for("fix"),
             ctx.work,
             preexisting_untracked=set(state.preexisting_untracked),
@@ -4950,7 +4979,271 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             retained_states=snapshot.states,
             initial_index=state.initial_index,
         )
+    except PushAttemptError as exc:
+        try:
+            _persist_push_verdict(
+                ctx,
+                exc.receipt,
+                status="failed",
+                started_at=started_at,
+                diagnostic=str(exc),
+            )
+        except Exception as artifact_exc:
+            print_error(console, "Push verdict persistence failed", str(artifact_exc))
+        print_error(console, "Commit/Push Failed", str(exc))
+        return Stop(1)
+    except Exception as exc:
+        print_error(console, "Commit/Push Failed", str(exc))
+        return Stop(1)
+    if receipt is not None:
+        try:
+            _persist_push_verdict(
+                ctx,
+                receipt,
+                status="succeeded",
+                started_at=started_at,
+            )
+        except Exception as exc:
+            print_error(console, "Push verdict persistence failed", str(exc))
+            return Stop(1)
+        ctx.data["push_receipt"] = receipt
+    return None
+
+
+def _remote_ci_enabled(ctx: FlowContext) -> bool:
+    """Run remote verification only after this flow recorded a successful push."""
+    return isinstance(ctx.data.get("push_receipt"), PushReceipt)
+
+
+def _resolve_remote_ci_target(ctx: FlowContext, receipt: PushReceipt) -> RemoteCITarget:
+    """Bind the pushed repository/ref to one configured P04 pull request."""
+    from daydream import git_ops, pr_review
+    from daydream.remote_ci import RemoteCITarget
+
+    configured_repo = ctx.config.pr_repo
+    configured_pr = ctx.config.pr_number
+    if git_ops.split_owner_repo(configured_repo or "") is None:
+        raise GitError("remote CI requires a configured GitHub base repository")
+    assert configured_repo is not None
+    if not isinstance(configured_pr, int) or isinstance(configured_pr, bool) or configured_pr <= 0:
+        raise GitError("remote CI requires a configured pull request number")
+    if receipt.pushed_repository is None:
+        raise GitError("the successful push remote has no GitHub repository identity")
+
+    pr = pr_review.find_pr_by_number(ctx.work.repo, configured_pr)
+    if pr is None:
+        raise GitError(f"configured pull request #{configured_pr} was not found")
+    base_repository = f"{pr.owner}/{pr.repo}"
+    expected = {
+        "pull request": (configured_pr, pr.number),
+        "configured base repository": (configured_repo.lower(), base_repository.lower()),
+        "base ref": (ctx.work.base_branch, pr.base_ref),
+        "head repository": (receipt.pushed_repository.lower(), (pr.head_repo or "").lower()),
+        "head ref": (receipt.branch, pr.head_ref),
+    }
+    mismatches = [name for name, (wanted, actual) in expected.items() if wanted != actual]
+    if mismatches:
+        raise GitError(
+            "remote CI identity does not match the pushed target: "
+            + ", ".join(mismatches)
+        )
+    if pr.head_repo is None:
+        raise GitError("pull request head repository is unavailable")
+    return RemoteCITarget(
+        target_dir=ctx.work.repo.resolve(),
+        base_repository=base_repository,
+        base_ref=pr.base_ref,
+        head_repository=pr.head_repo,
+        head_ref=pr.head_ref,
+        pr_number=pr.number,
+        pr_url=pr.url,
+        remote=receipt.remote,
+        pushed_sha=receipt.sha,
     )
+
+
+def _print_remote_ci_result(verdict: RemoteCIVerdict) -> None:
+    """Render only normalized GitHub evidence and its explicit limitations."""
+    target = verdict.target
+    if target is not None:
+        print_info(
+            console,
+            escape_markup(
+                f"Remote CI target: {target.base_repository} PR #{target.pr_number} "
+                f"at {target.pushed_sha}"
+            ),
+        )
+    print_info(
+        console,
+        escape_markup(f"Remote CI result: {verdict.status} — {verdict.reason}"),
+    )
+    if verdict.evidence_sha is not None:
+        print_info(
+            console,
+            escape_markup(f"Remote CI evidence SHA: {verdict.evidence_sha}"),
+        )
+    if verdict.failing_contexts:
+        print_warning(console, f"Failing CI: {', '.join(verdict.failing_contexts)}")
+    if verdict.pending_contexts:
+        print_warning(console, f"Pending CI: {', '.join(verdict.pending_contexts)}")
+    if verdict.missing_contexts:
+        print_warning(console, f"Missing CI: {', '.join(verdict.missing_contexts)}")
+    advisory = [
+        item.context
+        for item in verdict.advisory_observations
+        if item.state in {"fail", "pending"}
+    ]
+    if advisory:
+        print_warning(console, f"Advisory CI not green: {', '.join(advisory)}")
+    for url in verdict.urls:
+        print_info(console, escape_markup(f"CI details: {url}"))
+
+
+async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
+    """Bind and wait for exact pushed-SHA GitHub CI, failing closed."""
+    from daydream.remote_ci import (
+        DEFAULT_LIMITS,
+        GitHubRemoteCIFetcher,
+        pending_remote_ci_verdict,
+        unavailable_remote_ci_verdict,
+        wait_for_remote_ci,
+        write_remote_ci_handoff,
+        write_remote_ci_verdict,
+    )
+
+    receipt = ctx.data.get("push_receipt")
+    if not isinstance(receipt, PushReceipt):
+        return None
+    state = _fix_cycle_state(ctx)
+    limits = DEFAULT_LIMITS
+    started_at = now_iso()
+    monotonic_started = anyio.current_time()
+    discovery_deadline = monotonic_started + limits.discovery_seconds
+    completion_deadline = monotonic_started + limits.completion_seconds
+    poll_count = 0
+    verdict: RemoteCIVerdict | None = None
+
+    def persist(snapshot: RemoteCIVerdict) -> None:
+        nonlocal poll_count, verdict
+        poll_count += 1
+        verdict = snapshot
+        write_remote_ci_verdict(
+            remote_ci_verdict_path(ctx.data["dd"]),
+            snapshot,
+            session_id=state.session_id,
+            poll_count=poll_count,
+            started_at=started_at,
+            updated_at=now_iso(),
+            discovery_deadline=discovery_deadline,
+            completion_deadline=completion_deadline,
+            limits=limits,
+        )
+
+    caught: BaseException | None = None
+    cancelled_type = anyio.get_cancelled_exc_class()
+    try:
+        async with host_phase_scope(DaydreamPhase.REMOTE_CI) as phase:
+            try:
+                target = _resolve_remote_ci_target(ctx, receipt)
+            except Exception as exc:
+                verdict = unavailable_remote_ci_verdict(
+                    reason="remote CI target identity is unavailable",
+                    diagnostic=str(exc),
+                )
+                write_remote_ci_verdict(
+                    remote_ci_verdict_path(ctx.data["dd"]),
+                    verdict,
+                    session_id=state.session_id,
+                    poll_count=0,
+                    started_at=started_at,
+                    updated_at=now_iso(),
+                    discovery_deadline=discovery_deadline,
+                    completion_deadline=completion_deadline,
+                    limits=limits,
+                )
+            else:
+                # One monotonic start owns both the durable deadline metadata
+                # and the waiter's request budgets.  Resolution above is a
+                # separate bounded P04 lookup and does not consume CI polling
+                # time; persisting the initial state below does.
+                started_at = now_iso()
+                monotonic_started = anyio.current_time()
+                discovery_deadline = monotonic_started + limits.discovery_seconds
+                completion_deadline = monotonic_started + limits.completion_seconds
+                write_remote_ci_verdict(
+                    remote_ci_verdict_path(ctx.data["dd"]),
+                    pending_remote_ci_verdict(target),
+                    session_id=state.session_id,
+                    poll_count=0,
+                    started_at=started_at,
+                    updated_at=now_iso(),
+                    discovery_deadline=discovery_deadline,
+                    completion_deadline=completion_deadline,
+                    limits=limits,
+                )
+                # The new target is durable before the previous attempt's
+                # guidance is retired. Do this before any CI request so a
+                # blocked or abruptly interrupted resume cannot expose it.
+                remote_ci_handoff_path(ctx.data["dd"]).unlink(missing_ok=True)
+                print_info(
+                    console,
+                    f"Verifying remote CI for {target.base_repository} PR "
+                    f"#{target.pr_number} at {target.pushed_sha}",
+                )
+                try:
+                    verdict = await wait_for_remote_ci(
+                        target,
+                        fetcher=GitHubRemoteCIFetcher(limits=limits),
+                        limits=limits,
+                        monotonic_started_at=monotonic_started,
+                        on_snapshot=persist,
+                    )
+                except (cancelled_type, KeyboardInterrupt) as exc:
+                    phase.stop_reason = (
+                        "cancelled" if isinstance(exc, cancelled_type) else "interrupted"
+                    )
+                    caught = exc
+                else:
+                    phase.stop_reason = verdict.status
+            if caught is None and verdict is not None:
+                phase.stop_reason = verdict.status
+    except Exception as exc:
+        print_error(console, "Remote CI verification failed", str(exc))
+        return Stop(1)
+    if caught is not None:
+        if verdict is not None:
+            try:
+                with anyio.CancelScope(shield=True):
+                    write_remote_ci_handoff(
+                        remote_ci_handoff_path(ctx.data["dd"]),
+                        verdict,
+                        session_id=state.session_id,
+                    )
+            except Exception as exc:
+                print_error(console, "Remote CI handoff persistence failed", str(exc))
+        raise caught
+    if verdict is None:
+        print_error(console, "Remote CI verification failed", "no verdict was produced")
+        return Stop(1)
+
+    _print_remote_ci_result(verdict)
+    handoff = remote_ci_handoff_path(ctx.data["dd"])
+    if verdict.status in {"passed", "no_ci"}:
+        try:
+            handoff.unlink(missing_ok=True)
+        except OSError as exc:
+            print_error(console, "Remote CI handoff cleanup failed", str(exc))
+            return Stop(1)
+        if verdict.status == "passed":
+            print_success(console, "Exact pushed-SHA remote CI passed.")
+        else:
+            print_success(console, "Remote CI was observably not configured.")
+        return None
+    try:
+        write_remote_ci_handoff(handoff, verdict, session_id=state.session_id)
+    except Exception as exc:
+        print_error(console, "Remote CI handoff persistence failed", str(exc))
+    return Stop(1)
 
 
 async def _perform_cleanup(ctx: FlowContext) -> None:
@@ -5117,7 +5410,7 @@ def _flow_name_for_mode(mode: str) -> str:
 #     per-stack reviews -> per-stack parse + dedup -> uncovered-file sweep (#309)
 #     -> arbiter -> cross-stack merge (or the tiny-diff single-stack bypass) ->
 #     supervise -> findings-out stop / post-review -> fix gate -> verify -> fix ->
-#     test -> commit.
+#     test -> commit -> exact-SHA remote CI.
 #
 # ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
 # definition; ``run_deep`` keeps the preamble and delegates here via
@@ -5160,6 +5453,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="test", run=_step_test, enabled=_fix_cycle_enabled),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
     FlowStep(name="commit", run=_step_commit, config_phase="fix", enabled=_fix_cycle_enabled),
+    FlowStep(name="remote-ci", run=_step_remote_ci, enabled=_remote_ci_enabled),
 )
 
 

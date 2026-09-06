@@ -411,6 +411,118 @@ def test_phase_subtitles_include_wonder() -> None:
     assert len(PHASE_SUBTITLES["WONDER"]) >= 2
 
 
+@pytest.mark.parametrize(
+    ("remote_outcome", "expected_code"),
+    [("no_ci", 0), ("failed", 1)],
+)
+def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_backend: Any,
+    fake_gh: Any,
+    remote_outcome: str,
+    expected_code: int,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Explicit argv drives the real review adapter from a different cwd."""
+    from daydream import cli
+    from tests.test_integration import (
+        _FULL_FLOW_ISSUE,
+        _finish_remote_ci_fake,
+        _remote_ci_push_project,
+        _seed_remote_ci_pr,
+        _start_remote_ci_fake_after_push,
+        _WorktreeMutatingBackend,
+    )
+
+    project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
+    _seed_remote_ci_pr(fake_gh, head_sha=subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip())
+    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
+        project, fake_gh, hook_marker, outcome=remote_outcome
+    )
+    from daydream import remote_ci
+
+    monkeypatch.setattr(
+        remote_ci,
+        "DEFAULT_LIMITS",
+        remote_ci.RemoteCILimits(
+            poll_seconds=0.01,
+            discovery_seconds=10,
+            completion_seconds=20,
+            request_seconds=3,
+        ),
+    )
+    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
+    elsewhere = tmp_path / "different cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main(
+                [
+                    "review",
+                    str(project),
+                    "--stack",
+                    "python",
+                    "--shallow",
+                    "--yes",
+                    "--test-command",
+                    "true",
+                ]
+            )
+    finally:
+        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+
+    assert exc_info.value.code == expected_code
+    assert hook_marker.read_text() == "ran\n"
+    pushed_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert subprocess.run(
+        ["git", "rev-parse", "refs/heads/feature"],
+        cwd=remote,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == pushed_sha
+    assert subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == raw_remote
+    verdict = json.loads(
+        (project / ".daydream" / "deep" / "remote-ci-verdict.json").read_text()
+    )
+    assert verdict["status"] == remote_outcome
+    assert all(call.cwd == project.resolve() for call in fake_gh.process_calls())
+    output = capsys.readouterr().out
+    if remote_outcome == "no_ci":
+        assert "Remote CI was observably not configured" in output
+        assert "Linux verified" not in output
+        assert "coverage verified" not in output.lower()
+        assert not (
+            project / ".daydream" / "deep" / "remote-ci-handoff.json"
+        ).exists()
+    else:
+        assert "Exact pushed-SHA remote CI passed" not in output
+        assert (
+            project / ".daydream" / "deep" / "remote-ci-handoff.json"
+        ).is_file()
+
+
 def test_print_issues_table_renders() -> None:
     from io import StringIO
     from typing import cast

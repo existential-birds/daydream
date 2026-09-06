@@ -30,6 +30,7 @@ from daydream.trajectory import (
 )
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
 
@@ -806,13 +807,14 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     archive_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Any,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """A failed batch plus serial fallback stays one exact FIX child document."""
     from daydream.runner import run
 
     target = multi_stack_target
     origin = bare_remote(tmp_path / "origin.git")
-    git(target, "remote", "add", "origin", str(origin))
+    no_ci_remote.connect(target, origin)
     backend = StubBackend(target)
     backend.fail_batched_fix_file = "api.py"
     backend.fix_edit_line = "\n"
@@ -829,6 +831,8 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 cleanup=False,
                 output_mode="loop",
                 run_eval=True,
+                pr_number=no_ci_remote.pr_number,
+                pr_repo=no_ci_remote.base_repository,
             )
         )
 

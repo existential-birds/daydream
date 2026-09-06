@@ -33,6 +33,7 @@ from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import (
     PARTIAL_FIX_MARKER,
     StubBackend,
@@ -66,7 +67,7 @@ def _default_strategy(stage: str) -> str:
     return _rp.build_default_profile().strategies[stage].content
 
 
-def _add_bare_remote(repo: Path) -> None:
+def _add_bare_remote(repo: Path) -> Path:
     """Give *repo* a real, pushable ``origin``: a sibling bare clone.
 
     Host-native commit/push (issue #726) really runs ``git push`` and verifies
@@ -79,6 +80,7 @@ def _add_bare_remote(repo: Path) -> None:
         ["git", "-C", str(repo), "remote", "add", "origin", str(bare)],
         check=True, capture_output=True,
     )
+    return bare
 
 
 def _install_model_capturing_stubs(
@@ -343,6 +345,7 @@ def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> "PRInfo":
         head_sha=head,
         base_sha=base,
         base_ref="main",
+        head_ref="feature",
         owner="o",
         repo="r",
         url="https://example.invalid/pr/7",
@@ -871,6 +874,46 @@ async def test_fix_verify_turn_is_read_only(
     verify_calls = [c for c in stub.calls if "fix-verify" in c["prompt"]]
     assert verify_calls, "expected a fix-verify turn"
     assert all(c["read_only"] is True for c in verify_calls)
+
+
+async def test_fix_verify_uses_verify_backend_key_through_runner(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """The registered fix-verify step deliberately resolves the verify model."""
+    from daydream.config_file import load_file_config
+    from daydream.runner import run
+
+    (multi_stack_target / ".daydream.toml").write_text(
+        '[phases.verify]\nmodel = "verify-model-sentinel"\n'
+        '[phases.fix-verify]\nmodel = "registered-step-sentinel"\n'
+    )
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+
+    exit_code = await run(
+        make_config(
+            multi_stack_target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            file_config=load_file_config(multi_stack_target),
+        )
+    )
+
+    assert exit_code == 0
+    verifier_calls = [call for call in calls if "fix-verify" in call["prompt"]]
+    assert verifier_calls
+    assert {call["model"] for call in verifier_calls} == {"verify-model-sentinel"}
+    assert all(call["model"] != "registered-step-sentinel" for call in verifier_calls)
+    outcomes = json.loads(
+        (multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text()
+    )
+    assert outcomes["outcomes"]
 
 
 async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
@@ -2186,12 +2229,13 @@ async def test_fix_guard_reverts_generated_migration_edit(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     from daydream.runner import run
 
     project, migration = _migration_project(tmp_path, "migration_repo")
     bare = _bare_remote(tmp_path / "remote.git")
-    _git(project, "remote", "add", "origin", str(bare))
+    no_ci_remote.connect(project, bare)
 
     # Issue #336: the fix loop only auto-fixes findings whose file is in the
     # reviewed diff. The draft migration finding must therefore be part of the
@@ -2227,6 +2271,8 @@ async def test_fix_guard_reverts_generated_migration_edit(
             output_mode="loop",
             non_interactive=False,
             archive=False,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
 
@@ -2263,6 +2309,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """Real path: a fix writing U+201D into a changed .go comment is scrubbed pre-commit.
 
@@ -2277,7 +2324,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
 
     project = _go_quote_project(tmp_path)
     bare = _bare_remote(tmp_path / "remote.git")
-    _git(project, "remote", "add", "origin", str(bare))
+    no_ci_remote.connect(project, bare)
     notes_before = (project / "notes.md").read_bytes()
     head_before = _git(project, "rev-parse", "HEAD")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
@@ -2300,6 +2347,8 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     exit_code = await run(make_config(
         project, assume="yes", output_mode="loop", non_interactive=False,
         archive=False,
+        pr_number=no_ci_remote.pr_number,
+        pr_repo=no_ci_remote.base_repository,
     ))
     assert exit_code == 0
     go_src = (project / "main.go").read_text()
@@ -2441,6 +2490,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#336 real-path: the post-fix residual check reverts out-of-scope edits.
 
@@ -2461,7 +2511,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_residual")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     pre_fix_unrelated = (target / "unrelated.py").read_text()
 
     _silence(monkeypatch)
@@ -2492,6 +2543,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
             non_interactive=False,
             archive=False,
             scope_issue_filing=True,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -2524,13 +2577,15 @@ async def test_fix_reverts_but_files_no_issue_by_default(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#1056 default-off: the residual edit is still reverted (safety invariant)
     but no GitHub issue is filed."""
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_default_off")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     pre_fix_unrelated = (target / "unrelated.py").read_text()
 
     _silence(monkeypatch)
@@ -2548,7 +2603,11 @@ async def test_fix_reverts_but_files_no_issue_by_default(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
     exit_code = await run(
-        make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False)
+        make_config(
+            target, assume="yes", output_mode="loop", non_interactive=False,
+            archive=False, pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
+        )
     )
     assert exit_code == 0
     # The safety revert still happened — invariant independent of filing.
@@ -2564,12 +2623,14 @@ async def test_fix_reverts_and_files_when_opted_in(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#1056 opt-in: the reverted edit is filed exactly as #336 built it."""
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_opt_in")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
@@ -2588,6 +2649,8 @@ async def test_fix_reverts_and_files_when_opted_in(
         make_config(
             target, assume="yes", output_mode="loop", non_interactive=False,
             archive=False, scope_issue_filing=True,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -2599,13 +2662,15 @@ async def test_reverted_edit_dedups_across_runs(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#1051 regression: an opted-in run does not re-file an issue for a
     reverted edit whose fingerprint marker already sits on an open issue."""
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_dedup")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
@@ -2650,6 +2715,8 @@ async def test_reverted_edit_dedups_across_runs(
         make_config(
             target, assume="yes", output_mode="loop", non_interactive=False,
             archive=False, scope_issue_filing=True,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -6234,6 +6301,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#201 real-path: a runaway file group is capped by the serial-item budget.
 
@@ -6254,6 +6322,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     both assertions fail. Treating the budget marker as an exception failure
     instead makes the exit/commit/remote assertions fail.
     """
+    from daydream import remote_ci
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -6267,14 +6336,20 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     stub.fail_batched_fix_file = "api.py"  # force the per-finding fallback for api.py
     retained_marker = "# retained before budget stop\n"
     stub.fix_edit_line = retained_marker
-    _add_bare_remote(multi_stack_target)
+    bare = _add_bare_remote(multi_stack_target)
+    no_ci_remote.connect(multi_stack_target, bare)
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
     traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
+    # Preserve the original work watchdog in addition to the newly required,
+    # separately bounded remote-CI wait. The no-CI harness keeps its truthful
+    # discovery window; reducing it previously failed under parallel load.
+    with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
         exit_code = await run(
             make_config(
-                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                pr_number=no_ci_remote.pr_number,
+                pr_repo=no_ci_remote.base_repository,
             )
         )
     assert exit_code == 0
@@ -7653,6 +7728,13 @@ async def test_test_verdict_artifact_written_on_passing_suite(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.remote_ci.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("daydream.remote_ci.platform.release", lambda: "25.1.0")
+    monkeypatch.setattr("daydream.remote_ci.platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        "daydream.remote_ci.platform.python_implementation", lambda: "CPython"
+    )
+    monkeypatch.setattr("daydream.remote_ci.platform.python_version", lambda: "3.13.7")
     _install_stub_backend(monkeypatch, tiny_diff_target)
     mute_side_effects(heal=False)
 
@@ -7664,6 +7746,15 @@ async def test_test_verdict_artifact_written_on_passing_suite(
     verdict = json.loads(verdict_file.read_text())
     assert verdict["passed"] is True, verdict
     assert verdict["retries"] == 0, "a green suite must not have consumed a heal retry"
+    assert verdict["local_host"] == {
+        "system": "Darwin",
+        "release": "25.1.0",
+        "machine": "arm64",
+        "python_implementation": "CPython",
+        "python_version": "3.13.7",
+    }
+    assert "Linux" not in json.dumps(verdict)
+    assert "coverage" not in json.dumps(verdict).lower()
 
 
 async def test_test_verdict_artifact_written_on_failing_suite(
@@ -10795,6 +10886,206 @@ def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str])
     return state
 
 
+def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _persist_push_verdict
+    from daydream.phases import PushReceipt
+
+    repo = tmp_path / "push-verdict"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    ctx = _direct_fix_context(repo, [], changed_files=set())
+    _direct_fix_state(ctx, [], set())
+    sha = git_ops.head_sha(repo)
+
+    _persist_push_verdict(
+        ctx,
+        PushReceipt("origin", "feature", sha, "fork/project"),
+        status="succeeded",
+        started_at="2026-09-06T12:00:00Z",
+    )
+
+    payload = json.loads((ctx.data["dd"] / "push-verdict.json").read_text())
+    assert payload == {
+        "schema_version": 1,
+        "session_id": "session-current",
+        "status": "succeeded",
+        "remote": "origin",
+        "branch": "feature",
+        "pushed_sha": sha,
+        "pushed_repository": "fork/project",
+        "started_at": "2026-09-06T12:00:00Z",
+        "updated_at": payload["updated_at"],
+    }
+    assert payload["updated_at"].endswith("Z")
+
+    _persist_push_verdict(
+        ctx,
+        PushReceipt("origin", "feature", sha, "fork/project"),
+        status="failed",
+        started_at="2026-09-06T12:01:00Z",
+        diagnostic="token=top-secret push rejected",
+    )
+    failed = json.loads((ctx.data["dd"] / "push-verdict.json").read_text())
+    assert failed["status"] == "failed"
+    assert failed["pushed_sha"] == sha
+    assert "top-secret" not in failed["diagnostic"]
+
+
+@pytest.mark.anyio
+async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Path) -> None:
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _remote_ci_enabled, _step_remote_ci
+    from daydream.extensions.api import Stop
+    from daydream.phases import PushReceipt
+
+    repo = tmp_path / "non-github-push"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    ctx = _direct_fix_context(repo, [], changed_files=set())
+    _direct_fix_state(ctx, [], set())
+    ctx.data["push_receipt"] = PushReceipt(
+        "origin", "main", git_ops.head_sha(repo), None
+    )
+
+    assert _remote_ci_enabled(ctx) is True
+    result = await _step_remote_ci(ctx)
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    verdict = json.loads((ctx.data["dd"] / "remote-ci-verdict.json").read_text())
+    handoff = json.loads((ctx.data["dd"] / "remote-ci-handoff.json").read_text())
+    assert verdict["session_id"] == "session-current"
+    assert verdict["status"] == "unavailable"
+    assert verdict["polling"]["poll_count"] == 0
+    assert verdict["target"] is None
+    assert handoff["status"] == "unavailable"
+    assert handoff["target"] is None
+
+
+def _remote_identity_context(
+    tmp_path: Path,
+    fake_gh: Any,
+    *,
+    head_repository: str | None,
+    configured_repository: str = "base-user/project",
+    base_ref: str = "main",
+    configured_pr: int = 7,
+) -> tuple[Any, str]:
+    from daydream import git_ops
+
+    repo = tmp_path / "remote-identity"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "a.py").write_text("A = 2\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "feature")
+    sha = git_ops.head_sha(repo)
+    head_row = None
+    head_owner = None
+    if head_repository is not None:
+        owner, name = head_repository.split("/", 1)
+        head_row = {"name": name, "nameWithOwner": head_repository}
+        head_owner = {"login": owner}
+    fake_gh.set_response("repo-view", value="base-user/project")
+    fake_gh.serve_pr_view(
+        {
+            "number": 7,
+            "title": "Fix",
+            "body": "",
+            "state": "OPEN",
+            "headRefName": "feature",
+            "baseRefName": base_ref,
+            "headRefOid": sha,
+            "url": "https://github.com/base-user/project/pull/7",
+            "headRepository": head_row,
+            "headRepositoryOwner": head_owner,
+        }
+    )
+    ctx = _direct_fix_context(repo, [], changed_files=set())
+    ctx.config.pr_number = configured_pr
+    ctx.config.pr_repo = configured_repository
+    return ctx, sha
+
+
+@pytest.mark.parametrize(
+    ("head_repository", "pushed_repository"),
+    [
+        ("base-user/project", "base-user/project"),
+        ("fork-user/project", "fork-user/project"),
+    ],
+)
+def test_remote_target_accepts_matching_same_repo_and_fork_identity(
+    tmp_path: Path,
+    fake_gh: Any,
+    head_repository: str,
+    pushed_repository: str,
+) -> None:
+    from daydream.deep.orchestrator import _resolve_remote_ci_target
+    from daydream.phases import PushReceipt
+
+    ctx, sha = _remote_identity_context(
+        tmp_path, fake_gh, head_repository=head_repository
+    )
+    target = _resolve_remote_ci_target(
+        ctx, PushReceipt("origin", "feature", sha, pushed_repository)
+    )
+
+    assert target.base_repository == "base-user/project"
+    assert target.head_repository == head_repository
+    assert target.head_ref == "feature"
+    assert target.pushed_sha == sha
+
+
+@pytest.mark.parametrize(
+    (
+        "head_repository",
+        "pushed_repository",
+        "configured_repository",
+        "base_ref",
+        "configured_pr",
+    ),
+    [
+        ("fork-user/project", "other-user/project", "base-user/project", "main", 7),
+        (None, "fork-user/project", "base-user/project", "main", 7),
+        ("fork-user/project", "fork-user/project", "wrong-user/project", "main", 7),
+        ("fork-user/project", "fork-user/project", "base-user/project", "feature", 7),
+        ("fork-user/project", "fork-user/project", "base-user/project", "main", 8),
+    ],
+)
+def test_remote_target_rejects_untrusted_identity_combinations(
+    tmp_path: Path,
+    fake_gh: Any,
+    head_repository: str | None,
+    pushed_repository: str,
+    configured_repository: str,
+    base_ref: str,
+    configured_pr: int,
+) -> None:
+    from daydream.deep.orchestrator import _resolve_remote_ci_target
+    from daydream.git_ops import GitError
+    from daydream.phases import PushReceipt
+
+    ctx, sha = _remote_identity_context(
+        tmp_path,
+        fake_gh,
+        head_repository=head_repository,
+        configured_repository=configured_repository,
+        base_ref=base_ref,
+        configured_pr=configured_pr,
+    )
+    with pytest.raises(GitError):
+        _resolve_remote_ci_target(
+            ctx, PushReceipt("origin", "feature", sha, pushed_repository)
+        )
+
+
 async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11489,7 +11780,10 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
             test_command=f"python tests/test_a.py {counter}",
         )
     )
-    assert rc == 0
+    # The local bare remote deliberately has no GitHub identity. The retained
+    # tree still stabilizes, commits, and pushes, but the new remote-CI phase
+    # must fail closed with an explicit handoff rather than claim completion.
+    assert rc == 1
     assert counter.read_text() == "3"
     assert (repo / "api.py").read_text() == "A = 3\n"
     assert (repo / "sibling.py").read_text() == "B = 7\n"
@@ -11503,6 +11797,10 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
         "api.py", "sibling.py", "tests/test_a.py"
     }
     assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
+    unavailable = json.loads((deep / "remote-ci-verdict.json").read_text())
+    assert unavailable["status"] == "unavailable"
+    assert unavailable["target"] is None
+    assert (deep / "remote-ci-handoff.json").is_file()
 
     audit = json.loads((deep / "fix-footprint.json").read_text())
     assert any(event["action"] == "rejected_retarget" for event in audit["events"])
