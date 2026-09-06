@@ -75,6 +75,24 @@ _LS_REMOTE_DEFAULT = (
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/heads/base\n"
 )
 
+# Frozen to the subset verified present in gh 2.45 by issue #1109. The fake
+# rejects every other requested PR JSON field before serving a response, just
+# as the real CLI validates --json before contacting GitHub.
+_GH_245_PR_JSON_FIELDS = frozenset(
+    {
+        "number",
+        "title",
+        "body",
+        "state",
+        "headRefName",
+        "baseRefName",
+        "headRefOid",
+        "url",
+        "headRepository",
+        "headRepositoryOwner",
+    }
+)
+
 _EMPTY_THREADS_RESPONSE: dict[str, Any] = {
     "data": {
         "repository": {
@@ -181,6 +199,8 @@ def _handle_pr_view(argv: list[str], state: Path) -> tuple[int, str, str]:
     value = _read_responses(state).get("pr-view")
     if value is None:
         return 1, "", "fake gh: no pr-view response configured\n"
+    if isinstance(value, dict) and isinstance(value.get("__error__"), str):
+        return 1, "", value["__error__"] + "\n"
     return 0, json.dumps(value) + "\n", ""
 
 
@@ -192,7 +212,11 @@ def _handle_pr_list(argv: list[str], state: Path) -> tuple[int, str, str]:
         pr_view = responses.get("pr-view")
         if pr_view is None:
             return 1, "", "fake gh: no pr-list or pr-view response configured\n"
+        if isinstance(pr_view, dict) and isinstance(pr_view.get("__error__"), str):
+            return 1, "", pr_view["__error__"] + "\n"
         value = [pr_view]
+    if isinstance(value, dict) and isinstance(value.get("__error__"), str):
+        return 1, "", value["__error__"] + "\n"
     return 0, json.dumps(value) + "\n", ""
 
 
@@ -309,6 +333,11 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
 
 def _handle_gh(argv: list[str], stdin_text: str, state: Path) -> tuple[int, str, str]:
     """Answer one ``gh`` invocation (argv after ``gh``). Returns (rc, stdout, stderr)."""
+    if argv[:2] in (["pr", "view"], ["pr", "list"]):
+        requested = (_argv_opt(argv, "--json") or "").split(",")
+        unsupported = sorted(set(requested) - _GH_245_PR_JSON_FIELDS)
+        if unsupported:
+            return 1, "", f'Unknown JSON field: "{unsupported[0]}"\n'
     if argv[:2] in (["secret", "set"], ["variable", "set"]):
         return _handle_set(argv[0], argv, stdin_text, state)
     if argv[:2] in (["secret", "list"], ["variable", "list"]):
@@ -367,6 +396,14 @@ class GhCommandCall:
     kind: str
     argv: list[str]
     env: dict[str, Any] | None = None
+
+
+@dataclass
+class GhProcessCall:
+    """One intercepted ``gh`` process with its exact checkout context."""
+
+    cwd: Path
+    argv: list[str]
 
 
 @dataclass
@@ -430,6 +467,22 @@ class FakeGh:
             record = json.loads(line)
             if record.get("kind") == kind:
                 out.append(GhCommandCall(kind=kind, argv=record["argv"], env=record.get("env")))
+        return out
+
+    def process_calls(self) -> list[GhProcessCall]:
+        """Return every intercepted ``gh`` process in invocation order."""
+        out: list[GhProcessCall] = []
+        if not self._calls_path.exists():
+            return out
+        for line in self._calls_path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("kind") == "gh process":
+                out.append(
+                    GhProcessCall(
+                        cwd=Path(record["cwd"]),
+                        argv=record["argv"],
+                    )
+                )
         return out
 
     def pr_view_calls(self) -> list[GhCommandCall]:
@@ -690,6 +743,11 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
 
     def router(args: Any, *pargs: Any, **kwargs: Any) -> Any:
         if isinstance(args, (list, tuple)) and args and args[0] == "gh":
+            cwd = Path(kwargs.get("cwd") or Path.cwd()).resolve()
+            _record(
+                state_dir,
+                {"kind": "gh process", "cwd": str(cwd), "argv": list(args)},
+            )
             rc, out, err = _handle_gh(list(args[1:]), kwargs.get("input") or "", state_dir)
             return subprocess.CompletedProcess(list(args), rc, stdout=out, stderr=err)
         if (
