@@ -413,6 +413,7 @@ async def test_deep_run_mints_app_identity_before_posting_path(
         head_sha="0" * 40,
         base_sha="1" * 40,
         base_ref="main",
+        head_ref="feature",
         owner="test-owner",
         repo="test-repo",
         url="https://example/pr/123",

@@ -498,6 +498,7 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
         head_sha="0" * 40,
         base_sha="1" * 40,
         base_ref="main",
+        head_ref="feature",
         owner="test-owner",
         repo="test-repo",
         url="https://example/pr/123",

@@ -80,6 +80,7 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> _CapturedPost:
         head_sha="a" * 40,
         base_sha="b" * 40,
         base_ref="main",
+        head_ref="feature",
         owner="acme",
         repo="widgets",
         url="https://example/pr/123",

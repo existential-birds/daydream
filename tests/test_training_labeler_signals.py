@@ -50,6 +50,7 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
         head_sha="f" * 40,
         base_sha="0" * 40,
         base_ref="main",
+        head_ref="feature",
         owner="acme",
         repo="widgets",
         url="https://github.com/acme/widgets/pull/1",

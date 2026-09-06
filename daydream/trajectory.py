@@ -396,12 +396,14 @@ class DaydreamPhase(str, Enum):
     DIAGRAM = "diagram"
     # Host-side (non-agent) operations (issue #726): each is bracketed by
     # phase events carrying ``duration_ms`` and ``stop_reason`` so the
-    # trajectory can tell test execution, hook runs, commits, and pushes
+    # trajectory can tell test execution, hook runs, commits, pushes, and
+    # exact-SHA remote CI verification
     # apart without inferring from step timestamps.
     TEST_EXECUTION = "test-execution"
     HOOK_RUN = "hook-run"
     COMMIT = "commit"
     PUSH = "push"
+    REMOTE_CI = "remote-ci"
 
 
 class DaydreamRunFlow(str, Enum):

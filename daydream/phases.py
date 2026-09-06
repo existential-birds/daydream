@@ -3640,8 +3640,8 @@ def _stage_deterministic(
     Raises:
         GitError: If the changed-file enumeration or staging fails — the
             strict enumerator must not silently degrade to an empty stage
-            (that would leave tracked fixes uncommitted behind a green
-            "Commit and push complete").
+            (that would leave tracked fixes uncommitted behind a green final
+            pipeline result).
     """
     stage = set(
         git_ops.changed_files_against(
@@ -3790,7 +3790,7 @@ async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
     config, resolved exactly as in the TEST phase) runs again as a real
     subprocess via :func:`run_test_command`; a green suite lets the run end
     successfully with the fixes left uncommitted, and a red suite raises so
-    the caller's ``_commit_push_or_stop`` guard surfaces ``Stop(1)``.
+    the orchestrator's commit-step guard surfaces ``Stop(1)``.
 
     With no canonical command configured there is nothing to validate against
     (see :func:`_canonical_test_cmd`); the decline then behaves as before
@@ -3818,6 +3818,32 @@ async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
     )
 
 
+@dataclass(frozen=True)
+class PushReceipt:
+    """Exact identity of one ordinary push attempt."""
+
+    remote: str
+    branch: str
+    sha: str
+    pushed_repository: str | None
+
+
+@dataclass(frozen=True)
+class CommitPushResult:
+    """Host commit result and optional verified push receipt."""
+
+    committed: bool
+    push: PushReceipt | None
+
+
+class PushAttemptError(GitError):
+    """A push or its exact remote-ref verification failed."""
+
+    def __init__(self, message: str, *, receipt: PushReceipt) -> None:
+        super().__init__(message)
+        self.receipt = receipt
+
+
 async def _do_commit(
     backend: Backend,
     work: WorkContext,
@@ -3830,7 +3856,7 @@ async def _do_commit(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
-) -> bool:
+) -> CommitPushResult:
     """Stage, commit, and optionally push — all host-side, no agent turn.
 
     Issue #726: the commit is a real subprocess with a real exit status, not
@@ -3839,9 +3865,9 @@ async def _do_commit(
     included at commit time — no post-hoc amend), and a ``push=True`` commit
     only reports success after ``git_ops.remote_contains_commit`` confirms the
     remote actually holds the pushed HEAD. A failed push raises the project
-    ``GitError`` even though a local commit exists — the caller's
-    ``_commit_push_or_stop`` guard surfaces it as ``Stop(1)`` rather than
-    hiding it behind "Commit and push complete".
+    ``PushAttemptError`` even though a local commit exists — the orchestrator's
+    commit-step guard surfaces it as ``Stop(1)`` rather than continuing to
+    remote CI.
 
     Args:
         backend: Unused on the host path (kept for call-site/signature
@@ -3872,8 +3898,8 @@ async def _do_commit(
             snapshot, which avoids this.
 
     Returns:
-        True if a commit was performed, False if the user declined or there
-        was nothing to commit.
+        Whether a commit was performed and, after a successful push, its exact
+        verified receipt.
 
     """
     del backend  # host-native commit: no agent turn (issue #726)
@@ -3897,7 +3923,7 @@ async def _do_commit(
             # host test runner; a red suite raises (surfaces as Stop(1)) so a
             # run is never reported successful with unvalidated fixes.
             await _validate_declined_fixes(work, config)
-            return False
+            return CommitPushResult(committed=False, push=None)
 
     strict_commit = any(
         value is not None for value in (retained_paths, retained_states, initial_index)
@@ -3944,12 +3970,12 @@ async def _do_commit(
         )
         if not staged_states:
             print_info(console, "Nothing to commit — no daydream changes")
-            return False
+            return CommitPushResult(committed=False, push=None)
         stage = set(retained_paths)
     else:
         legacy_stage = _stage_deterministic(work, preexisting_untracked)
         if legacy_stage is None:
-            return False
+            return CommitPushResult(committed=False, push=None)
         stage = legacy_stage
         try:
             sha_before = git_ops.head_sha(work.repo)
@@ -4035,28 +4061,58 @@ async def _do_commit(
                         f"validation failed; push blocked: {exc}"
                     ) from exc
 
+    push_receipt: PushReceipt | None = None
     if push:
         # The push + remote verification is its own trajectory phase
         # (issue #726 task 12).
         async with host_phase_scope(DaydreamPhase.PUSH):
+            from daydream.archive.git_safe import normalize_remote_url
+
+            remote = "origin"
             branch = git_ops.current_branch(work.repo)
             if branch is None:
                 raise GitError(
                     f"Cannot push: {work.repo} is in a detached-HEAD state "
                     "with no current branch"
                 )
-            git_ops.push_branch(work.repo, branch)
             sha = git_ops.head_sha(work.repo)
-            # Success requires the remote to actually hold the pushed HEAD — a
-            # push that "succeeded" without landing the commit is still a failure
-            # (issue #726: "green" means really on the remote).
-            if not git_ops.remote_contains_commit(work.repo, branch, sha):
-                raise GitError(
-                    f"Push verification failed: remote 'origin' does not report "
-                    f"refs/heads/{branch} at {sha} after the push"
-                )
+            raw_remote = git_ops.remote_url(work.repo, remote)
+            pushed_repository = None
+            if raw_remote is not None:
+                normalized_repository = normalize_remote_url(raw_remote)[0]
+                if normalized_repository is not None:
+                    pushed_repository = normalized_repository.lower()
+            attempted = PushReceipt(
+                remote=remote,
+                branch=branch,
+                sha=sha,
+                pushed_repository=pushed_repository,
+            )
+            try:
+                git_ops.push_branch(work.repo, branch, remote=remote)
+                if (
+                    git_ops.current_branch(work.repo) != branch
+                    or git_ops.head_sha(work.repo) != sha
+                    or git_ops.remote_url(work.repo, remote) != raw_remote
+                ):
+                    raise GitError(
+                        "Push verification failed: local branch, HEAD, or configured "
+                        "remote URL changed during the push"
+                    )
+                # Success requires the remote to actually hold the exact SHA
+                # captured before push.
+                if not git_ops.remote_contains_commit(
+                    work.repo, branch, sha, remote=remote
+                ):
+                    raise GitError(
+                        f"Push verification failed: remote {remote!r} does not report "
+                        f"refs/heads/{branch} at {sha} after the push"
+                    )
+            except GitError as exc:
+                raise PushAttemptError(str(exc), receipt=attempted) from exc
+            push_receipt = attempted
 
-    return True
+    return CommitPushResult(committed=True, push=push_receipt)
 
 
 async def phase_commit_push(
@@ -4069,7 +4125,7 @@ async def phase_commit_push(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
-) -> None:
+) -> PushReceipt | None:
     """Prompt user to commit and push changes.
 
     When the gate is declined, the applied fixes are still validated by
@@ -4089,7 +4145,7 @@ async def phase_commit_push(
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
-    committed = await _do_commit(
+    result = await _do_commit(
         backend, work, push=True, interactive=True,
         preexisting_untracked=preexisting_untracked,
         config=config,
@@ -4098,8 +4154,9 @@ async def phase_commit_push(
         retained_states=retained_states,
         initial_index=initial_index,
     )
-    if committed:
-        print_success(console, "Commit and push complete")
+    if result.push is not None:
+        print_success(console, "Changes pushed; verifying remote CI...")
+    return result.push
 
 
 async def phase_understand_intent(

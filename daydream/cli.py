@@ -2940,7 +2940,7 @@ def main(argv: list[str] | None = None) -> None:
         config = (
             _parse_improve_args(argv)
             if verb == "improve"
-            else _parse_args()
+            else _parse_args(argv)
         )
         exit_code = anyio.run(run, config)
         sys.exit(exit_code)

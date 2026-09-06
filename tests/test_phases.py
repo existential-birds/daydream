@@ -2,6 +2,7 @@
 """Tests for phase functions with backend abstraction."""
 import json
 import os
+import shlex
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from io import StringIO
 from pathlib import Path
@@ -480,7 +481,8 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     ok = await _do_commit(
         backend, work, push=False, preexisting_untracked={"notes.txt"},
     )
-    assert ok is True
+    assert ok.committed is True
+    assert ok.push is None
     # The commit exists and its tree has the daydream change but NOT notes.txt.
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
@@ -517,7 +519,8 @@ async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
         items=[{"file": "app.py", "description": "fix app"}],
         preexisting_untracked={"notes.txt"},
     )
-    assert ok is True
+    assert ok.committed is True
+    assert ok.push is None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert sorted(committed) == ["app.py", "helper.py"]
     assert "notes.txt" in git(git_repo, "status", "--porcelain")
@@ -557,7 +560,8 @@ async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
     ok = await _do_commit(
         backend, work, push=False, preexisting_untracked=set(),
     )
-    assert ok is True
+    assert ok.committed is True
+    assert ok.push is None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
     assert not any(p.startswith(".daydream/") for p in committed), (
@@ -595,7 +599,9 @@ async def test_host_commit_push_verifies_remote_before_success(
         items=[{"file": "fix.py", "description": "fix bug"}],
         preexisting_untracked=set(),
     )
-    assert ok is True
+    assert ok.committed is True
+    assert ok.push is not None
+    assert ok.push.pushed_repository is None
     from daydream import git_ops
 
     sha = git_ops.head_sha(work_repo)
@@ -605,14 +611,106 @@ async def test_host_commit_push_verifies_remote_before_success(
 
 
 @pytest.mark.asyncio
+async def test_push_receipt_uses_raw_github_remote_and_real_hook(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """The ordinary real push returns its exact SHA/branch/GitHub identity."""
+    from daydream.phases import _do_commit
+
+    remote = tmp_path / "receipt remote.git"
+    git(tmp_path, "init", "--bare", str(remote))
+    repo = tmp_path / "receipt checkout"
+    repo.mkdir()
+    git(repo, "init", "-b", "feature")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    (repo / "app.py").write_text("x = 0\n")
+    git(repo, "add", "app.py")
+    git_commit(repo, "baseline")
+    raw_remote = "https://github.com/Fork-User/Widgets.git"
+    git(repo, "config", f"url.{remote.resolve().as_uri()}.insteadOf", raw_remote)
+    git(repo, "remote", "add", "origin", raw_remote)
+    hook_marker = tmp_path / "receipt hook.log"
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(f"#!/bin/sh\nprintf 'ran\\n' > '{hook_marker}'\n")
+    hook.chmod(0o755)
+    (repo / "app.py").write_text("x = 1\n")
+
+    result = await _do_commit(
+        _HostCommitBackend(repo),
+        make_work(repo),
+        push=True,
+        interactive=False,
+        preexisting_untracked=set(),
+        config=_hook_run_config(),
+    )
+
+    assert result.committed is True
+    assert result.push is not None
+    assert result.push.remote == "origin"
+    assert result.push.branch == "feature"
+    assert result.push.sha == git(repo, "rev-parse", "HEAD")
+    assert result.push.pushed_repository == "fork-user/widgets"
+    assert git(remote, "rev-parse", "refs/heads/feature") == result.push.sha
+    assert hook_marker.read_text() == "ran\n"
+
+
+@pytest.mark.asyncio
+async def test_push_rejects_remote_url_changed_by_real_hook(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """A hook cannot make verification attest a different configured remote."""
+    from daydream.phases import PushAttemptError, _do_commit
+
+    remote = tmp_path / "remote-url-race.git"
+    git(tmp_path, "init", "--bare", str(remote))
+    repo = tmp_path / "remote-url-race-checkout"
+    repo.mkdir()
+    git(repo, "init", "-b", "feature")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    (repo / "app.py").write_text("x = 0\n")
+    git(repo, "add", "app.py")
+    git_commit(repo, "baseline")
+    original = "https://github.com/fork-user/widgets.git"
+    replacement = "https://github.com/other-user/widgets.git"
+    for url in (original, replacement):
+        git(repo, "config", "--add", f"url.{remote.resolve().as_uri()}.insteadOf", url)
+    git(repo, "remote", "add", "origin", original)
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"git config remote.origin.url {shlex.quote(replacement)}\n"
+    )
+    hook.chmod(0o755)
+    (repo / "app.py").write_text("x = 1\n")
+
+    with pytest.raises(PushAttemptError) as exc_info:
+        await _do_commit(
+            _HostCommitBackend(repo),
+            make_work(repo),
+            push=True,
+            interactive=False,
+            preexisting_untracked=set(),
+            config=_hook_run_config(),
+        )
+
+    assert exc_info.value.receipt.pushed_repository == "fork-user/widgets"
+    assert git(repo, "config", "--get", "remote.origin.url") == replacement
+    assert git(remote, "rev-parse", "refs/heads/feature") == exc_info.value.receipt.sha
+
+
+@pytest.mark.asyncio
 async def test_push_failure_reported_as_failure_even_with_local_commit(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A failed push is a failure even though a local commit exists: _do_commit
-    raises the project error (surfaced as Stop(1) by _commit_push_or_stop) and
-    never reports "Commit and push complete"."""
+    raises the project error (surfaced as Stop(1) by the commit step) and never
+    reports final completion."""
     from daydream.phases import _do_commit
 
     work_repo = tmp_path / "clone"
@@ -642,6 +740,46 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
     assert git_ops.head_commit_message(work_repo).startswith("fix:")
     out = capsys.readouterr().out
     assert "Commit and push complete" not in out
+
+
+@pytest.mark.asyncio
+async def test_push_attempt_error_carries_exact_attempted_identity(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """A local transport rejection retains the exact attempted push receipt."""
+    from daydream import git_ops
+    from daydream.phases import _do_commit
+
+    repo = tmp_path / "rejected checkout"
+    repo.mkdir()
+    git(repo, "init", "-b", "feature")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    (repo / "app.py").write_text("x = 0\n")
+    git(repo, "add", "app.py")
+    git_commit(repo, "baseline")
+    raw_remote = "https://github.com/fork-user/widgets.git"
+    missing = tmp_path / "missing remote.git"
+    git(repo, "config", f"url.{missing.resolve().as_uri()}.insteadOf", raw_remote)
+    git(repo, "remote", "add", "origin", raw_remote)
+    (repo / "app.py").write_text("x = 1\n")
+
+    with pytest.raises(git_ops.GitError) as exc_info:
+        await _do_commit(
+            _HostCommitBackend(repo),
+            make_work(repo),
+            push=True,
+            interactive=False,
+            preexisting_untracked=set(),
+        )
+
+    assert type(exc_info.value).__name__ == "PushAttemptError"
+    receipt = exc_info.value.receipt  # type: ignore[attr-defined]
+    assert receipt.remote == "origin"
+    assert receipt.branch == "feature"
+    assert receipt.sha == git(repo, "rev-parse", "HEAD")
+    assert receipt.pushed_repository == "fork-user/widgets"
 
 
 @pytest.mark.asyncio
@@ -700,7 +838,8 @@ async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
         interactive=False, items=[{"file": "app.py", "description": "fix app"}],
         preexisting_untracked=None,
     )
-    assert ok is True
+    assert ok.committed is True
+    assert ok.push is None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
     assert "notes.txt" not in committed
@@ -728,7 +867,8 @@ async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
         interactive=False, items=[{"file": "app.py", "description": "fix app"}],
         preexisting_untracked=None,
     )
-    assert ok is True
+    assert ok.committed is True
+    assert ok.push is None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
     # Fix-created new file is untracked at snapshot time and dropped.
@@ -804,7 +944,8 @@ async def test_hook_aware_push_runs_suite_exactly_once(
             preexisting_untracked=set(),
             config=_hook_run_config(),
         )
-        assert ok is True
+        assert ok.committed is True
+        assert ok.push is not None
         assert len(runs) == expected_runs, (
             f"hook_present={hook_present}: expected {expected_runs} host run(s), got {len(runs)}"
         )
@@ -5314,7 +5455,8 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
         initial_index=initial_index,
     )
 
-    assert committed is True
+    assert committed.committed is True
+    assert committed.push is None
     assert calls == {"stage": 1, "commit_staged": 1}
     assert git(repo, "show", "HEAD:app.py") == "after"
 
@@ -5343,13 +5485,13 @@ async def test_strict_commit_accepts_new_file_permissions_without_changing_owner
     retained = frozenset({"new.py"})
     before_states = git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"])
 
-    assert await phases._do_commit(
+    assert (await phases._do_commit(
         _HostCommitBackend(repo), make_work(repo),
         retained_paths=retained,
         retained_states=git_ops.snapshot_worktree_paths(repo, retained),
         initial_index=initial_index,
         preexisting_untracked={"private.txt"},
-    ) is True
+    )).committed is True
 
     assert git(repo, "show", "HEAD:new.py") == "new retained content"
     assert git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"]) == before_states
@@ -5393,13 +5535,13 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
     if native_retained:
         (repo / native).write_bytes(b"retained after\n")
 
-    assert await phases._do_commit(
+    assert (await phases._do_commit(
         _HostCommitBackend(repo), make_work(repo),
         retained_paths=retained,
         retained_states=git_ops.snapshot_worktree_paths(repo, retained),
         initial_index=initial_index,
         preexisting_untracked=set() if native_retained else {native},
-    ) is True
+    )).committed is True
     assert (repo / native).read_bytes() == (
         b"retained after\n" if native_retained else b"private or retained\n"
     )
@@ -5452,7 +5594,7 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
     )
     hook.chmod(0o755)
 
-    async def commit_retained() -> bool:
+    async def commit_retained() -> phases.CommitPushResult:
         return await phases._do_commit(
             _HostCommitBackend(repo),
             make_work(repo),
@@ -5465,7 +5607,7 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
         with pytest.raises(git_ops.GitError, match="push blocked"):
             await commit_retained()
     else:
-        assert await commit_retained() is True
+        assert (await commit_retained()).committed is True
     assert artifact.read_text() == "hook runtime\n"
     assert git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD") == "app.py"
     assert git(repo, "diff", "--cached") == ""

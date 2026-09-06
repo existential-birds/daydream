@@ -249,6 +249,21 @@ def test_verdict_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "test-verdict.json"
 
 
+def push_verdict_path(deep_dir_path: Path) -> Path:
+    """Session-bound outcome of the current run's ordinary push attempt."""
+    return deep_dir_path / "push-verdict.json"
+
+
+def remote_ci_verdict_path(deep_dir_path: Path) -> Path:
+    """Session- and pushed-SHA-bound remote CI state."""
+    return deep_dir_path / "remote-ci-verdict.json"
+
+
+def remote_ci_handoff_path(deep_dir_path: Path) -> Path:
+    """Operator handoff for a failed or incomplete remote CI state."""
+    return deep_dir_path / "remote-ci-handoff.json"
+
+
 def diff_key_path(deep_dir_path: Path) -> Path:
     """Sibling file recording which diff the deep artifacts were produced from."""
     return deep_dir_path / "diff-key"

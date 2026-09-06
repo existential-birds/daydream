@@ -2316,6 +2316,25 @@ def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch
         git_ops.gh_api(tmp_path, "/app/installations", jq=".[]")
 
 
+def test_github_request_budget_preserves_subsecond_deadline() -> None:
+    readings = iter((10.25, 10.75, 11.0))
+    budget = git_ops.GitHubRequestBudget(
+        deadline=11.0,
+        per_request_seconds=0.6,
+        monotonic=lambda: next(readings),
+    )
+
+    assert budget.next_timeout() == pytest.approx(0.6)
+    assert budget.next_timeout() == pytest.approx(0.25)
+    with pytest.raises(git_ops.DeadlineExpired, match="deadline"):
+        budget.next_timeout()
+
+
+def test_pr_list_fields_include_gh_245_head_ref_name() -> None:
+    assert "headRefName" in git_ops.GH_PR_LIST_FIELDS
+    assert "baseRefOid" not in git_ops.GH_PR_LIST_FIELDS
+
+
 # --- gh secret/variable/PR primitives (Task 2) ------------------------------
 
 from tests.harness.fake_gh import FakeGh  # noqa: E402

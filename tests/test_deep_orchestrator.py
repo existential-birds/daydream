@@ -343,6 +343,7 @@ def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> "PRInfo":
         head_sha=head,
         base_sha=base,
         base_ref="main",
+        head_ref="feature",
         owner="o",
         repo="r",
         url="https://example.invalid/pr/7",
@@ -7542,6 +7543,13 @@ async def test_test_verdict_artifact_written_on_passing_suite(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.remote_ci.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("daydream.remote_ci.platform.release", lambda: "25.1.0")
+    monkeypatch.setattr("daydream.remote_ci.platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        "daydream.remote_ci.platform.python_implementation", lambda: "CPython"
+    )
+    monkeypatch.setattr("daydream.remote_ci.platform.python_version", lambda: "3.13.7")
     _install_stub_backend(monkeypatch, tiny_diff_target)
     mute_side_effects(heal=False)
 
@@ -7553,6 +7561,15 @@ async def test_test_verdict_artifact_written_on_passing_suite(
     verdict = json.loads(verdict_file.read_text())
     assert verdict["passed"] is True, verdict
     assert verdict["retries"] == 0, "a green suite must not have consumed a heal retry"
+    assert verdict["local_host"] == {
+        "system": "Darwin",
+        "release": "25.1.0",
+        "machine": "arm64",
+        "python_implementation": "CPython",
+        "python_version": "3.13.7",
+    }
+    assert "Linux" not in json.dumps(verdict)
+    assert "coverage" not in json.dumps(verdict).lower()
 
 
 async def test_test_verdict_artifact_written_on_failing_suite(
@@ -10659,6 +10676,206 @@ def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str])
     return state
 
 
+def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _persist_push_verdict
+    from daydream.phases import PushReceipt
+
+    repo = tmp_path / "push-verdict"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    ctx = _direct_fix_context(repo, [], changed_files=set())
+    _direct_fix_state(ctx, [], set())
+    sha = git_ops.head_sha(repo)
+
+    _persist_push_verdict(
+        ctx,
+        PushReceipt("origin", "feature", sha, "fork/project"),
+        status="succeeded",
+        started_at="2026-09-06T12:00:00Z",
+    )
+
+    payload = json.loads((ctx.data["dd"] / "push-verdict.json").read_text())
+    assert payload == {
+        "schema_version": 1,
+        "session_id": "session-current",
+        "status": "succeeded",
+        "remote": "origin",
+        "branch": "feature",
+        "pushed_sha": sha,
+        "pushed_repository": "fork/project",
+        "started_at": "2026-09-06T12:00:00Z",
+        "updated_at": payload["updated_at"],
+    }
+    assert payload["updated_at"].endswith("Z")
+
+    _persist_push_verdict(
+        ctx,
+        PushReceipt("origin", "feature", sha, "fork/project"),
+        status="failed",
+        started_at="2026-09-06T12:01:00Z",
+        diagnostic="token=top-secret push rejected",
+    )
+    failed = json.loads((ctx.data["dd"] / "push-verdict.json").read_text())
+    assert failed["status"] == "failed"
+    assert failed["pushed_sha"] == sha
+    assert "top-secret" not in failed["diagnostic"]
+
+
+@pytest.mark.anyio
+async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Path) -> None:
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _remote_ci_enabled, _step_remote_ci
+    from daydream.extensions.api import Stop
+    from daydream.phases import PushReceipt
+
+    repo = tmp_path / "non-github-push"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    ctx = _direct_fix_context(repo, [], changed_files=set())
+    _direct_fix_state(ctx, [], set())
+    ctx.data["push_receipt"] = PushReceipt(
+        "origin", "main", git_ops.head_sha(repo), None
+    )
+
+    assert _remote_ci_enabled(ctx) is True
+    result = await _step_remote_ci(ctx)
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    verdict = json.loads((ctx.data["dd"] / "remote-ci-verdict.json").read_text())
+    handoff = json.loads((ctx.data["dd"] / "remote-ci-handoff.json").read_text())
+    assert verdict["session_id"] == "session-current"
+    assert verdict["status"] == "unavailable"
+    assert verdict["polling"]["poll_count"] == 0
+    assert verdict["target"] is None
+    assert handoff["status"] == "unavailable"
+    assert handoff["target"] is None
+
+
+def _remote_identity_context(
+    tmp_path: Path,
+    fake_gh: Any,
+    *,
+    head_repository: str | None,
+    configured_repository: str = "base-user/project",
+    base_ref: str = "main",
+    configured_pr: int = 7,
+) -> tuple[Any, str]:
+    from daydream import git_ops
+
+    repo = tmp_path / "remote-identity"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "a.py").write_text("A = 2\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "feature")
+    sha = git_ops.head_sha(repo)
+    head_row = None
+    head_owner = None
+    if head_repository is not None:
+        owner, name = head_repository.split("/", 1)
+        head_row = {"name": name, "nameWithOwner": head_repository}
+        head_owner = {"login": owner}
+    fake_gh.set_response("repo-view", value="base-user/project")
+    fake_gh.serve_pr_view(
+        {
+            "number": 7,
+            "title": "Fix",
+            "body": "",
+            "state": "OPEN",
+            "headRefName": "feature",
+            "baseRefName": base_ref,
+            "headRefOid": sha,
+            "url": "https://github.com/base-user/project/pull/7",
+            "headRepository": head_row,
+            "headRepositoryOwner": head_owner,
+        }
+    )
+    ctx = _direct_fix_context(repo, [], changed_files=set())
+    ctx.config.pr_number = configured_pr
+    ctx.config.pr_repo = configured_repository
+    return ctx, sha
+
+
+@pytest.mark.parametrize(
+    ("head_repository", "pushed_repository"),
+    [
+        ("base-user/project", "base-user/project"),
+        ("fork-user/project", "fork-user/project"),
+    ],
+)
+def test_remote_target_accepts_matching_same_repo_and_fork_identity(
+    tmp_path: Path,
+    fake_gh: Any,
+    head_repository: str,
+    pushed_repository: str,
+) -> None:
+    from daydream.deep.orchestrator import _resolve_remote_ci_target
+    from daydream.phases import PushReceipt
+
+    ctx, sha = _remote_identity_context(
+        tmp_path, fake_gh, head_repository=head_repository
+    )
+    target = _resolve_remote_ci_target(
+        ctx, PushReceipt("origin", "feature", sha, pushed_repository)
+    )
+
+    assert target.base_repository == "base-user/project"
+    assert target.head_repository == head_repository
+    assert target.head_ref == "feature"
+    assert target.pushed_sha == sha
+
+
+@pytest.mark.parametrize(
+    (
+        "head_repository",
+        "pushed_repository",
+        "configured_repository",
+        "base_ref",
+        "configured_pr",
+    ),
+    [
+        ("fork-user/project", "other-user/project", "base-user/project", "main", 7),
+        (None, "fork-user/project", "base-user/project", "main", 7),
+        ("fork-user/project", "fork-user/project", "wrong-user/project", "main", 7),
+        ("fork-user/project", "fork-user/project", "base-user/project", "feature", 7),
+        ("fork-user/project", "fork-user/project", "base-user/project", "main", 8),
+    ],
+)
+def test_remote_target_rejects_untrusted_identity_combinations(
+    tmp_path: Path,
+    fake_gh: Any,
+    head_repository: str | None,
+    pushed_repository: str,
+    configured_repository: str,
+    base_ref: str,
+    configured_pr: int,
+) -> None:
+    from daydream.deep.orchestrator import _resolve_remote_ci_target
+    from daydream.git_ops import GitError
+    from daydream.phases import PushReceipt
+
+    ctx, sha = _remote_identity_context(
+        tmp_path,
+        fake_gh,
+        head_repository=head_repository,
+        configured_repository=configured_repository,
+        base_ref=base_ref,
+        configured_pr=configured_pr,
+    )
+    with pytest.raises(GitError):
+        _resolve_remote_ci_target(
+            ctx, PushReceipt("origin", "feature", sha, pushed_repository)
+        )
+
+
 async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11353,7 +11570,10 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
             test_command=f"python tests/test_a.py {counter}",
         )
     )
-    assert rc == 0
+    # The local bare remote deliberately has no GitHub identity. The retained
+    # tree still stabilizes, commits, and pushes, but the new remote-CI phase
+    # must fail closed with an explicit handoff rather than claim completion.
+    assert rc == 1
     assert counter.read_text() == "3"
     assert (repo / "api.py").read_text() == "A = 3\n"
     assert (repo / "sibling.py").read_text() == "B = 7\n"
@@ -11367,6 +11587,10 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
         "api.py", "sibling.py", "tests/test_a.py"
     }
     assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
+    unavailable = json.loads((deep / "remote-ci-verdict.json").read_text())
+    assert unavailable["status"] == "unavailable"
+    assert unavailable["target"] is None
+    assert (deep / "remote-ci-handoff.json").is_file()
 
     audit = json.loads((deep / "fix-footprint.json").read_text())
     assert any(event["action"] == "rejected_retarget" for event in audit["events"])
