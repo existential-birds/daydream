@@ -239,12 +239,14 @@ async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
             prompt: str,
             output_schema: Any = None,
             continuation: Any = None,
-            **kwargs: Any,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: Any = False,
         ) -> AsyncGenerator[AgentEvent, None]:
             if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
                 (Path(cwd) / "b.py").write_text("B = 2\n")
             async for event in super().execute(
-                cwd, prompt, output_schema, continuation, **kwargs
+                cwd, prompt, output_schema, continuation, agents, max_turns, read_only
             ):
                 yield event
 
