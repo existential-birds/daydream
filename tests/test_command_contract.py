@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
 
+from daydream.backends import AgentEvent
 from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA,
@@ -29,7 +30,12 @@ from daydream.improve.command_contract import (
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.runner import RunConfig, run
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
-from tests.harness.improve_backend import improve_artifact, install_improve_stub
+from tests.harness.improve_backend import (
+    ImproveStubBackend,
+    improve_artifact,
+    install_capable_improve_backend,
+    install_improve_stub,
+)
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -360,7 +366,6 @@ async def test_host_enumeration_dedups_absolute_model_wd(
     # collapses the absolute model wd against the relative host wd.
     service = improve_fixture_service(improve_monorepo_target / "apps")
     rel = f"apps/{service}"
-    abs_wd = f"{improve_monorepo_target}/apps/{service}"
     monkeypatch.setattr(
         "daydream.improve.orchestrator.enumerate_repository_commands",
         lambda repo, *, directories=(".",), reserved_ids=(): [
@@ -387,7 +392,38 @@ async def test_host_enumeration_dedups_absolute_model_wd(
             }
         ],
     )
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncIterator[AgentEvent]:
+            if "IMPROVE_RECON" in prompt:
+                assert isinstance(self.recon_output_override, dict)
+                commands = self.recon_output_override["commands"]
+                commands[0]["working_directory"] = str(cwd / rel)
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+                persist_session=persist_session,
+            ):
+                yield event
+
+    stub = install_capable_improve_backend(
+        monkeypatch,
+        AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target),
+    )
 
     # Derive the evidence anchor from the fixture's actual content instead of
     # hardcoding a line number: the root pyproject.toml must declare the test
@@ -405,8 +441,9 @@ async def test_host_enumeration_dedups_absolute_model_wd(
                 "purpose": "Run the repository test suite",
                 "command": "uv run pytest",
                 # Absolute spelling of the SAME directory the host enumerates
-                # relative; dedup collapses the two spellings.
-                "working_directory": abs_wd,
+                # relative. The backend rewrites this placeholder using the
+                # real isolated audit cwd supplied at execute time.
+                "working_directory": rel,
                 "expected_success": {
                     "exit_code": 0,
                     "observable_result": "exit 0 and the tests pass",
@@ -432,6 +469,13 @@ async def test_host_enumeration_dedups_absolute_model_wd(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
+    recon_cwd = next(call["cwd"] for call in stub.calls if call["marker"] == "recon")
+    emitted_model_wd = Path(
+        stub.recon_output_override["commands"][0]["working_directory"]
+    )
+    assert emitted_model_wd.is_absolute()
+    assert emitted_model_wd == recon_cwd / rel
+    assert emitted_model_wd != improve_monorepo_target / rel
     recon = json.loads(
         improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
     )
