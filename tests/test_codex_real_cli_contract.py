@@ -1,6 +1,7 @@
 """Contract checks against REAL codex CLI output (parser-drift guard).
 
-Two layers, per issue #154:
+The historical parser-drift contract remains paired with a newer, separately
+provenanced generic-tool omission capture:
 
 1. ``test_real_golden_parses_to_expected_events`` (always-on): drives
    ``CodexBackend.execute`` through a committed golden fixture derived from
@@ -21,15 +22,20 @@ Two layers, per issue #154:
 
 The golden is committed at ``tests/fixtures/codex_jsonl/real/golden.jsonl``;
 use ``scripts/capture-codex-golden.sh`` to re-capture it.
+The sanitized codex 0.153.4 public omission capture and its raw/sanitized
+digests live beside it; its dedicated maintenance script creates only an
+unpublished public candidate for later exact-run corroboration and review.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -37,6 +43,7 @@ from unittest.mock import patch
 import pytest
 
 from daydream.backends import (
+    DiagnosticEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -48,6 +55,8 @@ from tests.harness.codex_replay import FIXTURES_DIR, make_mock_process_from_fixt
 
 REAL_GOLDEN = "real/golden.jsonl"
 REAL_FILE_CHANGE = "real/file-change.jsonl"
+REAL_GENERIC_TOOL_FAILURE = "real/generic-tool-failure.jsonl"
+REAL_GENERIC_TOOL_FAILURE_META = "real/generic-tool-failure.meta.json"
 
 _logger = logging.getLogger(__name__)
 
@@ -58,6 +67,229 @@ _logger = logging.getLogger(__name__)
 # is skipped by default and only runs when a human explicitly enables it.
 _CODEX_LIVE_OPT_IN = os.environ.get("DAYDREAM_CODEX_LIVE") == "1"
 _CODEX_AVAILABLE = shutil.which("codex") is not None
+
+
+def test_generic_tool_transport_capture_has_truthful_sanitized_provenance() -> None:
+    """The genuine public capture is immutable apart from its declared path redaction."""
+    capture_script = Path(__file__).parents[1] / "scripts" / "capture-codex-generic-tool-failure.sh"
+    fixture_path = FIXTURES_DIR / REAL_GENERIC_TOOL_FAILURE
+    metadata_path = FIXTURES_DIR / REAL_GENERIC_TOOL_FAILURE_META
+    fixture_bytes = fixture_path.read_bytes()
+    metadata = json.loads(metadata_path.read_text())
+    records = [json.loads(line) for line in fixture_bytes.splitlines()]
+
+    assert capture_script.is_file() and os.access(capture_script, os.X_OK)
+    assert hashlib.sha256(fixture_bytes).hexdigest() == metadata["fixture_sha256_sanitized"]
+    assert metadata["capture_sha256_raw"] == (
+        "896389a5da72401e74ee50324bedd745c513cb7468fa5dcb0fbf682e4b125683"
+    )
+    assert metadata["capture_sha256_raw"] != metadata["fixture_sha256_sanitized"]
+    assert metadata["fixture_sanitized"] is True
+    assert metadata["sanitizations"] == [
+        {
+            "field": "item.message",
+            "occurrences": 1,
+            "replacement": "/Users/[REDACTED_USER]/.codex/config.toml",
+            "reason": "personal_home_path",
+        }
+    ]
+    assert [
+        record["type"]
+        if record["type"] != "item.completed"
+        else f"item.completed/{record['item']['type']}"
+        for record in records
+    ] == [
+        "thread.started",
+        "item.completed/error",
+        "turn.started",
+        "item.completed/error",
+        "item.completed/agent_message",
+        "item.completed/agent_message",
+        "turn.completed",
+    ]
+    assert metadata["ordered_public_shape"] == [
+        "thread.started",
+        "item.completed/error",
+        "turn.started",
+        "item.completed/error",
+        "item.completed/agent_message",
+        "item.completed/agent_message",
+        "turn.completed",
+    ]
+    assert metadata["cli_version"] == "0.153.4"
+    assert metadata["captured_at_utc"] == "2026-09-06T02:31:50Z"
+    assert metadata["capture_working_directory"] == "disposable_git_repo"
+    assert metadata["public_flags"] == ["--json", "--sandbox", "read-only", "--enable", "code_mode"]
+    assert metadata["exit_code"] == 0
+    assert metadata["public_generic_function_items_exposed"] is False
+    assert metadata["private_rollout_correlated"] is True
+    assert metadata["private_custom_tool_calls"] == [
+        {"name": "exec", "count": 1, "matching_outputs": 1, "error_class": "TypeError"}
+    ]
+    assert metadata["probe_prompt"] == (
+        "This is a transport-contract probe. You MUST invoke the functions.exec tool exactly once "
+        "with this exact JavaScript body: const r = await tools.wait({cell_id:\"definitely-missing-cell\","
+        "yield_time_ms:250}); text(r); Do not call any other tool. Do not claim success unless you "
+        "receive the tool output. Afterward report whether the nested wait call was visible to you "
+        "and include its error category without inventing it."
+    )
+
+    public_items = [record["item"] for record in records if "item" in record]
+    assert [item["type"] for item in public_items] == [
+        "error",
+        "error",
+        "agent_message",
+        "agent_message",
+    ]
+    for item in public_items:
+        assert not ({"name", "call_id", "arguments", "output"} & item.keys())
+
+    fixture_text = fixture_bytes.decode()
+    metadata_text = metadata_path.read_text()
+    assert "/Users/ka" not in fixture_text
+    assert "/Users/ka" not in metadata_text
+    assert "definitely-missing-cell" not in fixture_text
+    for forbidden_key in {
+        "private_rollout_bytes",
+        "private_session_path",
+        "home_path",
+        "environment_context",
+        "credentials",
+        "call_id",
+        "arguments",
+        "output_text",
+    }:
+        assert forbidden_key not in metadata
+
+
+def test_capture_script_publishes_only_public_candidate_without_replacing_fixture(
+    tmp_path: Path,
+) -> None:
+    """A fake external CLI proves candidate capture is non-publishing and public-only."""
+    capture_script = Path(__file__).parents[1] / "scripts" / "capture-codex-generic-tool-failure.sh"
+    committed_fixture = FIXTURES_DIR / REAL_GENERIC_TOOL_FAILURE
+    committed_metadata = FIXTURES_DIR / REAL_GENERIC_TOOL_FAILURE_META
+    before_fixture = committed_fixture.read_bytes()
+    before_metadata = committed_metadata.read_bytes()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ "${1:-}" == "--version" ]]; then\n'
+        "  printf '%s\\n' 'codex-cli 9.9.9'\n"
+        "  exit 0\n"
+        "fi\n"
+        # Consume the real CLI's stdin contract before returning output. Exiting
+        # without reading races the producer and can make pipefail report SIGPIPE.
+        "IFS= read -r probe_prompt\n"
+        'printf \'%s\\n\' "$probe_prompt" > "$FAKE_CODEX_PROBE_PATH"\n'
+        'if [[ "${FAKE_CODEX_EXPOSE_PAIR:-}" == "1" ]]; then\n'
+        "  printf '%s\\n' \\\n"
+        "    '{\"type\":\"item.completed\",\"item\":{\"type\":\"error\"}}' \\\n"
+        "    '{\"type\":\"item.completed\",\"item\":{"
+        "\"type\":\"custom_tool_call\"}}' \\\n"
+        "    '{\"type\":\"turn.completed\"}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' \\\n"
+        "  '{\"type\":\"thread.started\",\"thread_id\":\"candidate-thread\"}' \\\n"
+        "  '{\"type\":\"item.completed\",\"item\":{\"id\":\"warning\","
+        "\"type\":\"error\",\"message\":\"see /Users/fake-person/.codex/config.toml\"}}' \\\n"
+        "  '{\"type\":\"turn.started\"}' \\\n"
+        "  '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,"
+        "\"output_tokens\":1}}'\n"
+    )
+    fake_codex.chmod(0o755)
+    candidate_root = tmp_path / "candidates"
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["DAYDREAM_CODEX_CAPTURE_ROOT"] = str(candidate_root)
+    probe_path = tmp_path / "received-probe.txt"
+    env["FAKE_CODEX_PROBE_PATH"] = str(probe_path)
+    env.pop("DAYDREAM_CODEX_PRIVATE_CORROBORATED", None)
+    env.pop("DAYDREAM_CODEX_PRIVATE_ERROR_CLASS", None)
+
+    captured = subprocess.run(
+        [str(capture_script)],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert captured.returncode == 0, captured.stderr
+    candidates = [path for path in candidate_root.iterdir() if not path.name.startswith(".")]
+    assert len(candidates) == 1
+    candidate_fixture = candidates[0] / "public.jsonl"
+    candidate_metadata = candidates[0] / "public.meta.json"
+    assert candidate_fixture.is_file() and candidate_metadata.is_file()
+    metadata = json.loads(candidate_metadata.read_text())
+    assert metadata["cli_version"] == "9.9.9"
+    assert metadata["publication_status"] == "candidate_unpublished"
+    assert probe_path.read_text() == metadata["probe_prompt"] + "\n"
+    assert metadata["review_requirements"] == [
+        "privately_correlate_this_exact_candidate_run_before_fixture_update"
+    ]
+    assert not [key for key in metadata if key.startswith("private_")]
+    assert hashlib.sha256(candidate_fixture.read_bytes()).hexdigest() == metadata["fixture_sha256_sanitized"]
+    assert "/Users/fake-person" not in candidate_fixture.read_text()
+    assert committed_fixture.read_bytes() == before_fixture
+    assert committed_metadata.read_bytes() == before_metadata
+
+    rejected_root = tmp_path / "rejected-candidates"
+    env["DAYDREAM_CODEX_CAPTURE_ROOT"] = str(rejected_root)
+    env["FAKE_CODEX_EXPOSE_PAIR"] = "1"
+    rejected = subprocess.run(
+        [str(capture_script)],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "update the parser contract" in rejected.stderr
+    assert not [path for path in rejected_root.iterdir() if not path.name.startswith(".")]
+    assert committed_fixture.read_bytes() == before_fixture
+    assert committed_metadata.read_bytes() == before_metadata
+
+
+@pytest.mark.asyncio
+async def test_generic_tool_transport_capture_maps_only_public_error_sentinel() -> None:
+    backend = CodexBackend(model="gpt-5.5")
+    mock_proc = make_mock_process_from_fixture(REAL_GENERIC_TOOL_FAILURE)
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = [event async for event in backend.execute(Path("/tmp"), "transport contract")]
+
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert [event.code for event in diagnostics] == [
+        "codex_transport_coverage",
+        "codex_transport_coverage",
+    ]
+    assert diagnostics[0].metadata["occurrences"] == 1
+    assert diagnostics[-1].metadata == {
+        "coverage": "incomplete",
+        "reason": "uncorrelated_public_error_item",
+        "occurrences": 2,
+        "contract": "codex-cli-0.153.4-json-code-mode-v1",
+    }
+    assert not [event for event in events if isinstance(event, (ToolStartEvent, ToolResultEvent))]
+
+
+@pytest.mark.asyncio
+async def test_real_golden_has_no_parser_or_transport_diagnostic() -> None:
+    backend = CodexBackend(model="gpt-5.5")
+    mock_proc = make_mock_process_from_fixture(REAL_GOLDEN)
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = [event async for event in backend.execute(Path("/tmp"), "golden contract")]
+
+    assert not [event for event in events if isinstance(event, DiagnosticEvent)]
 
 
 @pytest.mark.asyncio

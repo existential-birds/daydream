@@ -18,6 +18,7 @@ import pytest
 from daydream import git_ops
 from daydream.backends import (
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -27,6 +28,8 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends import codex as codex_backend
+from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import (
     _CODEX_STDOUT_LIMIT_BYTES,
     CodexBackend,
@@ -99,6 +102,32 @@ async def test_tool_use_events() -> None:
     assert any("main.py" in tr.output for tr in tool_results)
 
     assert any(t.text == "Done!" for t in texts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", [None, 42, False, [], {"token": "private-value"}])
+async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(
+    tmp_path: Path, tool_name: Any,
+) -> None:
+    item = {"id": "mcp-1", "type": "mcp_tool_call", "tool": tool_name, "arguments": {"path": "api.py"}}
+    process = make_mock_process([
+        json.dumps({"type": "item.started", "item": item}),
+        json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ])
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        events = [event async for event in CodexBackend(model="fixture-model").execute(tmp_path, "review")]
+
+    starts = [event for event in events if isinstance(event, ToolStartEvent)]
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert len(starts) == len(results) == 1
+    assert starts[0].name == "unknown"
+    assert starts[0].id == results[0].id == "mcp-1"
+    assert diagnostics[0].code == "codex_parser_coverage"
+    assert diagnostics[0].metadata["warnings"]["reasons"] == {"tool_not_string": 1}
+    assert events.index(diagnostics[0]) < events.index(starts[0])
+    assert "private-value" not in repr(diagnostics)
 
 
 @pytest.mark.asyncio
@@ -359,9 +388,12 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
             async for event in backend.execute(Path("/tmp"), "Fail"):
                 events.append(event)
 
-    # The attempted request is observable, and the stream still raises.
-    assert len(events) == 1
+    # The attempted request and bounded parse gap are observable before the
+    # original process-exit failure is preserved.
+    assert len(events) == 2
     assert isinstance(events[0], RequestEvent)
+    assert isinstance(events[1], DiagnosticEvent)
+    assert events[1].code == "codex_parser_coverage"
     msg = str(exc_info.value)
     assert "authentication required" in msg
     assert exc_info.value.category == "PROCESS_EXIT"
@@ -1530,6 +1562,204 @@ async def test_malformed_structured_output_warns(caplog: pytest.LogCaptureFixtur
     assert any("structured output parse failed" in w for w in warnings), (
         f"expected a 'structured output parse failed' WARNING; got {warnings}"
     )
+
+
+@pytest.mark.asyncio
+async def test_parser_coverage_is_bounded_redacted_and_precedes_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = CodexBackend(model="fixture-model")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+        events = await _run_fixture(
+            backend,
+            "Parse gaps",
+            "parser_coverage_gaps.jsonl",
+            output_schema=schema,
+        )
+
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert [event.code for event in diagnostics] == [
+        "codex_transport_coverage",
+        "codex_parser_coverage",
+        "codex_parser_coverage",
+    ]
+    assert events.index(diagnostics[-1]) < next(
+        index for index, event in enumerate(events) if isinstance(event, ResultEvent)
+    )
+
+    transport = diagnostics[0]
+    assert transport.metadata == {
+        "coverage": "incomplete",
+        "reason": "uncorrelated_public_error_item",
+        "occurrences": 1,
+        "contract": "codex-cli-0.153.4-json-code-mode-v1",
+    }
+
+    assert diagnostics[1].metadata["unknown_event_types"]["total"] == 1
+    parser = diagnostics[-1].metadata
+    assert parser["unknown_event_types"] == {
+        "total": 35,
+        "labels": {f"unknown.{index:02d}": (2 if index == 0 else 1) for index in range(32)},
+        "overflow": 2,
+    }
+    assert parser["unknown_item_types"] == {
+        "total": 3,
+        "labels": {"mystery.item": 2, 'token="[REDACTED_CREDENTIAL]"': 1},
+        "overflow": 0,
+    }
+    assert parser["malformed_shapes"] == {
+        "event_not_object": 2,
+        "event_type_not_scalar": 1,
+        "item_not_object": 1,
+    }
+    assert parser["non_json_lines"] == 1
+    assert parser["warnings"] == {
+        "total": 2,
+        "reasons": {
+            "structured_output_parse_failed": 1,
+            "unmatched_tool_result": 1,
+        },
+    }
+
+    combined = json.dumps([event.metadata for event in diagnostics]) + "\n" + caplog.text
+    assert "opaque-parser-secret" not in combined
+    assert "/Users/private-person" not in combined
+    assert "printf hidden-command" not in combined
+
+
+def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
+    label = "x" * 54 + " ghp_" + "y" * 12
+
+    bounded = codex_backend._bounded_diagnostic_label(label)
+
+    assert len(bounded) <= 64
+    assert "ghp_" not in bounded
+    assert "[REDACTED" in bounded
+
+
+@pytest.mark.asyncio
+async def test_parser_diagnostic_precedes_structured_turn_failure() -> None:
+    backend = CodexBackend(model="fixture-model")
+    lines = [
+        json.dumps({"type": "future.event"}),
+        json.dumps({"type": "turn.failed", "error": {"message": "Model returned an error"}}),
+    ]
+    mock_proc = make_mock_process(lines)
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="Model returned an error"):
+            async for event in backend.execute(Path("/tmp"), "Fail"):
+                observed.append(event)
+
+    assert isinstance(observed[-1], DiagnosticEvent)
+    assert observed[-1].code == "codex_parser_coverage"
+
+
+@pytest.mark.asyncio
+async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout() -> None:
+    backend = CodexBackend(model="fixture-model")
+
+    class _FailureThenBlockingStdout:
+        def __init__(self) -> None:
+            self._lines = iter(
+                [
+                    json.dumps({"type": "future.one"}),
+                    json.dumps({"type": "future.two"}),
+                    json.dumps(
+                        {"type": "turn.failed", "error": {"message": "terminal failure"}}
+                    ),
+                ]
+            )
+            self.blocking_read_started = False
+
+        async def readline(self) -> bytes:
+            try:
+                return (next(self._lines) + "\n").encode()
+            except StopIteration:
+                self.blocking_read_started = True
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+    stdout = _FailureThenBlockingStdout()
+    mock_proc = make_mock_process([])
+    mock_proc.stdout = stdout
+    observed: list[Any] = []
+
+    async def consume() -> None:
+        async for event in backend.execute(Path("/tmp"), "Fail now"):
+            observed.append(event)
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="terminal failure"):
+            await asyncio.wait_for(consume(), timeout=0.2)
+
+    parser_diagnostics = [
+        event
+        for event in observed
+        if isinstance(event, DiagnosticEvent) and event.code == "codex_parser_coverage"
+    ]
+    assert [event.metadata["unknown_event_types"]["total"] for event in parser_diagnostics] == [1, 2]
+    assert stdout.blocking_read_started is False
+
+
+@pytest.mark.asyncio
+async def test_first_parser_gap_is_observable_before_following_stream_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexBackend(model="fixture-model")
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
+
+    class _GapThenBlockingStdout:
+        def __init__(self) -> None:
+            self.sent_gap = False
+
+        async def readline(self) -> bytes:
+            if not self.sent_gap:
+                self.sent_gap = True
+                return b'{"type":"future.before.stall"}\n'
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    mock_proc = make_mock_process([])
+    mock_proc.stdout = _GapThenBlockingStdout()
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(StreamStalledError):
+            async for event in backend.execute(Path("/tmp"), "Stall"):
+                observed.append(event)
+
+    diagnostics = [event for event in observed if isinstance(event, DiagnosticEvent)]
+    assert [event.code for event in diagnostics] == ["codex_parser_coverage"]
+    assert diagnostics[0].metadata["unknown_event_types"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
+    backend = CodexBackend(model="fixture-model")
+    secret_line = (
+        "not-json token=opaque-parser-secret /Users/private-person/.codex/config.toml "
+        + "x" * 500
+    )
+    mock_proc = make_mock_process([secret_line] * 30)
+    mock_proc.returncode = 9
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="return code 9") as exc_info:
+            async for event in backend.execute(Path("/tmp"), "Fail"):
+                observed.append(event)
+
+    assert isinstance(observed[-1], DiagnosticEvent)
+    assert observed[-1].metadata["non_json_lines"] == 30
+    assert "opaque-parser-secret" not in json.dumps(observed[-1].metadata)
+    message = str(exc_info.value)
+    assert "opaque-parser-secret" not in message
+    assert "/Users/private-person" not in message
+    assert len(message) <= 3_000
 
 
 @pytest.mark.parametrize(

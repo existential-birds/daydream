@@ -30,6 +30,7 @@ from daydream.backends import (
     AgentEvent,
     ContinuationToken,
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -54,6 +55,12 @@ def _assert_fields(event: Any, expected: dict[str, Any]) -> None:
     ("cls", "kwargs", "expected"),
     [
         pytest.param(TextEvent, {"text": "hello"}, {"text": "hello"}, id="text-event"),
+        pytest.param(
+            DiagnosticEvent,
+            {"code": "parser_gap", "message": "unknown item", "metadata": {"count": 2}},
+            {"code": "parser_gap", "message": "unknown item", "metadata": {"count": 2}},
+            id="diagnostic-event",
+        ),
         pytest.param(
             ThinkingEvent, {"text": "reasoning..."}, {"text": "reasoning..."}, id="thinking-event"
         ),
@@ -129,6 +136,11 @@ def test_event_field_values(cls: type, kwargs: dict[str, Any], expected: dict[st
     ("cls", "kwargs"),
     [
         pytest.param(TextEvent, {"text": "hi"}, id="text-event"),
+        pytest.param(
+            DiagnosticEvent,
+            {"code": "parser_gap", "message": "unknown item"},
+            id="diagnostic-event",
+        ),
         pytest.param(ThinkingEvent, {"text": "reasoning"}, id="thinking-event"),
         pytest.param(
             ToolStartEvent, {"id": "abc", "name": "Read", "input": {"file_path": "/tmp/a"}}, id="tool-start-event"
@@ -194,6 +206,19 @@ def test_turn_end_event_is_in_agent_event_union() -> None:
     assert isinstance(ev.timestamp, str) and ev.timestamp.endswith("Z")
     # Runtime confirmation that TurnEndEvent is part of the AgentEvent union.
     assert isinstance(ev, AgentEvent)
+
+
+def test_diagnostic_event_has_fresh_metadata_and_is_exported() -> None:
+    first = DiagnosticEvent(code="parser_gap", message="first")
+    second = DiagnosticEvent(code="parser_gap", message="second")
+    first.metadata["count"] = 1
+
+    assert second.metadata == {}
+    assert isinstance(first, AgentEvent)
+
+    from daydream import backends
+
+    assert "DiagnosticEvent" in backends.__all__
 
 
 def test_tool_result_event_status_fields_default_to_none() -> None:

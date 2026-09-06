@@ -118,10 +118,18 @@ Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.
 ### Backend protocol
 
 `Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()`.
-`execute()` yields the 9-member `AgentEvent` union (`Request`, `Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
-`Metrics`, `TurnEnd`, `Result`). `Request` exposes the effective Daydream-sent request after adapter
+`execute()` yields the 10-member `AgentEvent` union (`Request`, `Text`, `Thinking`, `ToolStart`, `ToolResult`,
+`Diagnostic`, `Cost`, `Metrics`, `TurnEnd`, `Result`). `Request` exposes the effective Daydream-sent request after adapter
 transformations. Adding a backend means producing that stream correctly — phases and the
-recorder are backend-agnostic.
+recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport evidence: the recorder
+normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
+only scrubbed diagnostic codes and counts on the enclosing attempt span.
+Codex transport coverage is necessarily evidence-driven: a recognized public `item.type == "error"`
+sentinel produces an incomplete-coverage diagnostic, but if a transport omits a tool and emits no public
+marker, Daydream cannot infer the invisible call. Never synthesize a hidden tool pair or emit an
+invocation-wide coverage warning without public evidence. The committed generic-tool fixture is a
+sanitized public capture with separate raw/sanitized digests; its maintenance script creates an
+unpublished public-only candidate that requires exact-run private corroboration and separate review.
 
 Observability is activated only by operator CLI/environment settings. The target's file config never
 selects destinations or credentials. A run owns its OTel provider and OpenLLMetry 0.62.3 processors;

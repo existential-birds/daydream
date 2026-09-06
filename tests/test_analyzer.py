@@ -12,7 +12,7 @@ import json
 import math
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -21,6 +21,7 @@ from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
 from daydream.eval.analyzer import (
     _files_read,
     _quality_python_parser,
+    _semantic_tool_kind,
     _tokenize_command,
     analyze_costs,
     analyze_coverage,
@@ -30,6 +31,8 @@ from daydream.eval.analyzer import (
     analyze_quality,
     analyze_session,
     analyze_shipped_duplication,
+    analyze_tools,
+    analyze_training_signals,
     load_trajectories,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -96,6 +99,193 @@ def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
 
     assert result["total_cost_usd"] == 0.00006
     assert sum(agent["cost_usd"] for agent in result["by_agent"]) == result["total_cost_usd"]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Write", "write"),
+        ("write", "write"),
+        ("Edit", "write"),
+        ("edit", "write"),
+        ("MultiEdit", "write"),
+        ("multiedit", "write"),
+        ("NotebookEdit", "write"),
+        ("notebookedit", "write"),
+        ("patch", "write"),
+        ("apply_patch", "write"),
+        ("Read", "read"),
+        ("read", "read"),
+        ("shell", "other"),
+        ("bash", "other"),
+        ("custom", "other"),
+    ],
+)
+def test_semantic_tool_kind_is_backend_neutral(name: str, expected: str) -> None:
+    assert _semantic_tool_kind(name) == expected
+
+
+def test_analyze_tools_uses_semantic_writes_and_preserves_raw_names() -> None:
+    shell_calls = [
+        {"function_name": "shell", "arguments": {"command": f"echo {i}"}}
+        for i in range(311)
+    ]
+    patch_calls = [
+        {"function_name": "patch", "arguments": {"patch": f"change {i}"}}
+        for i in range(15)
+    ]
+    trajectories = {
+        "main": None,
+        "forked": [
+            {
+                "_source_file": "deep-python.json",
+                "steps": [{"step_id": 1, "tool_calls": [*shell_calls, *patch_calls]}],
+            }
+        ],
+    }
+
+    result = analyze_tools(trajectories)
+
+    assert result["total_calls"] == 326
+    assert result["by_type"] == {"shell": 311, "patch": 15}
+    assert result["by_agent"] == {"deep-python": {"shell": 311, "patch": 15}}
+    assert result["write_ratio"] == 0.046
+
+
+def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
+    result = analyze_training_signals(
+        {
+            "main": None,
+            "forked": [{"_source_file": "deep-python.json", "steps": steps}],
+        },
+        [],
+        {"ungrounded": []},
+    )
+    return cast(list[str], result["trajectories"][0]["noise_flags"])
+
+
+@pytest.mark.parametrize(
+    ("result_extra", "expected"),
+    [
+        ({"is_error": True}, "failed_tool_result"),
+        ({"status": "interrupted"}, "incomplete_tool_call"),
+        ({"cancelled": True}, "incomplete_tool_call"),
+    ],
+)
+def test_training_flags_linked_tool_failures(
+    result_extra: dict[str, Any], expected: str
+) -> None:
+    steps = [
+        {
+            "step_id": 1,
+            "tool_calls": [
+                {"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}
+            ],
+            "observation": {
+                "results": [
+                    {
+                        "source_call_id": "call-1",
+                        "content": "output",
+                        "extra": result_extra,
+                    }
+                ]
+            },
+        }
+    ]
+    assert _training_flags(steps) == [expected]
+
+
+def test_training_flags_unpaired_calls_and_null_interrupted_marker_once() -> None:
+    steps = [
+        {
+            "step_id": 1,
+            "tool_calls": [
+                {"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}
+            ],
+            "observation": {
+                "results": [
+                    {
+                        "source_call_id": None,
+                        "content": "interrupted",
+                        "extra": {"is_error": True, "status": "interrupted"},
+                    }
+                ]
+            },
+        }
+    ]
+    assert _training_flags(steps) == ["incomplete_tool_call"]
+
+
+def test_training_correlations_are_step_local_and_detect_unmatched_results() -> None:
+    steps = [
+        {
+            "step_id": 1,
+            "tool_calls": [
+                {"tool_call_id": "same", "function_name": "Read", "arguments": {}}
+            ],
+        },
+        {
+            "step_id": 2,
+            "observation": {
+                "results": [
+                    {
+                        "source_call_id": "same",
+                        "content": "late",
+                        "extra": {"is_error": False},
+                    }
+                ]
+            },
+            "extra": {"unmatched_tool_results": ["another"]},
+        },
+    ]
+    assert _training_flags(steps) == [
+        "incomplete_tool_call",
+        "unmatched_tool_result",
+    ]
+
+
+def test_training_diagnostics_map_only_recognized_codes_in_fixed_order() -> None:
+    steps = [
+        {
+            "step_id": 1,
+            "extra": {
+                "backend_diagnostics": [
+                    {"code": "codex_parser_coverage"},
+                    {"code": "arbitrary_backend_note"},
+                    {"code": "codex_transport_coverage"},
+                    {"code": "codex_parser_coverage"},
+                ]
+            },
+        }
+    ]
+    assert _training_flags(steps) == [
+        "incomplete_telemetry",
+        "parser_coverage_gap",
+    ]
+
+
+@pytest.mark.parametrize(
+    "legacy_extra", [None, {}, {"is_error": "true"}, {"cancelled": 1}, []]
+)
+def test_clean_training_tolerates_missing_or_malformed_legacy_result_metadata(
+    legacy_extra: Any,
+) -> None:
+    result: dict[str, Any] = {
+        "source_call_id": "call-1",
+        "content": "ok",
+    }
+    if legacy_extra is not None:
+        result["extra"] = legacy_extra
+    steps = [
+        {
+            "step_id": 1,
+            "tool_calls": [
+                {"tool_call_id": "call-1", "function_name": "read", "arguments": {}}
+            ],
+            "observation": {"results": [result]},
+        }
+    ]
+    assert _training_flags(steps) == []
 
 
 def test_analyze_costs_includes_cached_tokens_when_prompt_dominates() -> None:

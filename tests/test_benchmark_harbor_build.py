@@ -121,13 +121,15 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, li
     return str(bare), base_sha, head_sha
 
 
-def _seed_candidate(fake_gh: FakeGh, *, number: int = 101, head_sha: str) -> None:
+def _seed_candidate(
+    fake_gh: FakeGh, *, number: int = 101, head_sha: str, body: str = "please fix",
+) -> None:
     """Seed one REST inline comment so the case has one exact-acceptable candidate."""
     comment = {
         "id": number,
         "node_id": f"DIFF_{number}",
         "user": {"login": "alice", "type": "User"},
-        "body": "please fix",
+        "body": body,
         "commit_id": head_sha,
         "original_commit_id": head_sha,
         "path": "feature.py",
@@ -579,6 +581,94 @@ def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp
 def _load_json(path: Path) -> Any:
     import json as _json
     return _json.loads(path.read_bytes())
+
+
+def test_finding_marker_import_curate_compile_preserves_raw_source(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.metadata
+
+    import yaml
+
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import storage
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.workspace import init_workspace
+    from daydream.pr_review import FINDING_MARKER_RE, finding_marker
+
+    marker = finding_marker("f" * 64)
+    raw_body = f"\n{marker}\n## Cache race\nProtect the shared cache.\n{marker}\n"
+    ws = tmp_path / "ws-marker-flow"
+    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
+    _seed_preflight(fake_gh)
+    origin_url, _base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
+    _seed_candidate(fake_gh, head_sha=head_sha, body=raw_body)
+    config_index = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    monkeypatch.setenv(f"GIT_CONFIG_KEY_{config_index}", f"url.{origin_url}.insteadOf")
+    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{config_index}", "https://github.com/o/r.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(config_index + 1))
+
+    assert _handle_benchmark_command(["import-prs", str(ws), "--pr", "101"]) == 0
+    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    ledger_entry = manifest["pull_requests"][0]
+    case_id = ledger_entry["case_ids"][0]
+    case = cu.get_case(ws, case_id)
+    import_path = ws / ledger_entry["import_file"]
+    import_doc = storage.load_json_strict(import_path)
+    evidence = import_doc["evidence"][0]
+    assert evidence["body"] == raw_body
+    assert evidence["body_sha256"] == hashlib.sha256(raw_body.encode()).hexdigest()
+    payload = {
+        key: import_doc[key]
+        for key in ("schema_version", "repository", "pull_request", "evidence")
+    }
+    assert import_doc["fetch"]["payload_sha256"] == gi._payload_sha256(payload)
+    assert ledger_entry["import_sha256"] == storage.sha256_file(import_path)
+    candidate = case["candidates"][0]
+    assert candidate["source_id"] == evidence["source_id"]
+    assert candidate["title"] == "Cache race"
+    assert candidate["exact_acceptable"] is True
+    assert candidate["location"] == {"path": "feature.py", "start_line": 2, "end_line": 2}
+    assert not FINDING_MARKER_RE.search(candidate["body"])
+
+    edited_body = candidate["body"] + "\nCurator clarification."
+    fragment = tmp_path / "gold.yaml"
+    fragment.write_text(yaml.safe_dump({
+        "findings": [{
+            "title": candidate["title"], "body": edited_body, "severity": None,
+            "location": candidate["location"], "source_ids": [candidate["source_id"]],
+        }],
+        "exclusions": [], "case_exclusion": None, "clean": False,
+    }, sort_keys=False))
+    assert _handle_benchmark_command([
+        "curate", str(ws), "--case", case_id, "--apply-gold", str(fragment),
+    ]) == 0
+    curated = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    finding = curated["curation"]["findings"][0]
+    assert finding["provenance"]["kind"] == "edited"
+    assert finding["provenance"]["source_ids"] == [evidence["source_id"]]
+    assert finding["body"] == edited_body
+    _mark_ready(ws, case_id, head_sha)
+    version = importlib.metadata.version("daydream")
+    wheel = tmp_path / f"daydream-{version}-py3-none-any.whl"
+    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    assert _handle_benchmark_command([
+        "build-harbor", str(ws), "--daydream-wheel", str(wheel),
+    ]) == 0
+
+    compiled = ws / "harbor" / build.derive_task_key(case_id)
+    for relative in ("tests/golden-review.json", "solution/golden-review.json"):
+        artifact_path = compiled / relative
+        serialized = artifact_path.read_text()
+        assert "daydream-finding" not in serialized
+        assert not FINDING_MARKER_RE.search(serialized)
+        artifact = _load_json(artifact_path)
+        emitted = artifact if isinstance(artifact, list) else artifact["findings"]
+        assert len(emitted) == 1
+        assert emitted[0]["title"] == "Cache race"
+        assert emitted[0]["body"] == edited_body
 
 
 def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, fake_gh: FakeGh) -> None:
