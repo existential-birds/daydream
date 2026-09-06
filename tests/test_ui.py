@@ -540,3 +540,11 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     long_line = format_callback_progress("Bash", {"command": long_command}, None)
     assert "b" * _BASH_COMMAND_MAX_CHARS in long_line.plain
     assert len(_summarize_input({"command": long_command}, "Bash")) == _BASH_COMMAND_MAX_CHARS
+
+
+def test_bash_header_shows_cd_stripped_display_variant() -> None:
+    """S1: UI renders the cd-stripped display variant, not the stored replayable value."""
+    from daydream.ui.tools import _build_tool_header
+    header = _build_tool_header("Bash", {"command": "cd /app && echo hello"})
+    assert "echo hello" in header.plain
+    assert "cd /app" not in header.plain  # the stored replayable value must not leak through

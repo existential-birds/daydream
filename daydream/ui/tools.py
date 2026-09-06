@@ -256,7 +256,11 @@ def format_callback_progress(
         # fragment.
         display_value = value
         if name in ("Bash", "shell") and key == "command":
-            display_value = redact_structured_text(value)
+            # Display variant only: strip the stored Codex wrapper / cd prefix for
+            # rendering. The stored ToolStartEvent input is untouched.
+            from daydream.backends.codex import display_shell_command
+
+            display_value = redact_structured_text(display_shell_command(value))
         line.append(" ")
         line.append(display_value[:max_len], style=_primary_value_style(key))
     return line
@@ -486,11 +490,14 @@ def _build_tool_header(
 
         # Import lazily because trajectory initializes the UI facade used to
         # reach this renderer while the application import graph is loading.
+        # The stored command is the replayable -lc argument (Codex wrapper kept,
+        # cd prefix retained); display the cd-stripped friendly variant instead.
+        from daydream.backends.codex import display_shell_command
         from daydream.trajectory import redact_structured_text
 
         # Redact the complete command before slicing so a credential crossing
         # the display boundary cannot be truncated into an unmatchable fragment.
-        full_command = redact_structured_text(str(args.get("command", "")))
+        full_command = redact_structured_text(display_shell_command(str(args.get("command", ""))))
         command = full_command[:_BASH_COMMAND_MAX_CHARS]
         if len(full_command) > _BASH_COMMAND_MAX_CHARS:
             command = f"{command}..."

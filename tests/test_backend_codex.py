@@ -1685,3 +1685,18 @@ class TestIsolatedChildEnvDarwinPath:
 
         assert codex._isolated_child_env(Path("/work"), Path("/work")) is None  # M7
         assert called == []  # resolver never invoked on the non-clone path
+
+
+@pytest.mark.asyncio
+async def test_issue1124_stored_commands_are_replayable() -> None:
+    """M1-M3: ToolStartEvent.input['command'] is the exact -lc argument (or raw fallback)."""
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Run the commands", "issue1124_unwrap.jsonl")
+    starts = {e.id: e.input["command"] for e in events if isinstance(e, ToolStartEvent)}
+    assert starts["cmd_1"] == "awk '{print $1}' file.txt"
+    assert starts["cmd_2"] == 'echo "hi" and $HOME'
+    assert starts["cmd_3"] == "echo $(date)"
+    assert starts["cmd_4"] == "echo line1\nline2"
+    assert starts["cmd_5"] == "cat <<EOF\nhello\nEOF"
+    assert starts["cmd_6"] == 'python -c "print(1)"'
+    assert starts["cmd_7"] == "/bin/zsh -lc 'unbalanced"

@@ -1,0 +1,16 @@
+{"type": "thread.started", "thread_id": "th_1124"}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_1", "command": "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_1", "command": "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_2", "command": "/bin/zsh -lc \"echo \\\"hi\\\" and $HOME\"", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_2", "command": "/bin/zsh -lc \"echo \\\"hi\\\" and $HOME\"", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_3", "command": "/bin/zsh -lc \"echo $(date)\"", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_3", "command": "/bin/zsh -lc \"echo $(date)\"", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_4", "command": "/bin/zsh -lc 'echo line1\nline2'", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_4", "command": "/bin/zsh -lc 'echo line1\nline2'", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_5", "command": "/bin/zsh -lc 'cat <<EOF\nhello\nEOF'", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_5", "command": "/bin/zsh -lc 'cat <<EOF\nhello\nEOF'", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_6", "command": "python -c \"print(1)\"", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_6", "command": "python -c \"print(1)\"", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_7", "command": "/bin/zsh -lc 'unbalanced", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_7", "command": "/bin/zsh -lc 'unbalanced", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}
