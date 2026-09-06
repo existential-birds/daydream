@@ -224,27 +224,23 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
     raw["source"]["visibility"] = "private"
     repo_slug = raw["source"]["repository"]
 
-    # The PR-meta SHAs recorded on the doc stay the fixture's fixed
-    # schema-valid values (provenance metadata, never cross-checked by
-    # validate); the bundle bytes + tree IDs + digests come from the real
-    # origin so the authoritative offline-clone fidelity check passes.
-    head_sha = "0123456789ab" + "0" * 28
-    base_sha = "b" * 40
+    # The PR and snapshot metadata name the real source commits so the local
+    # mirror provenance check and the portable bundle fidelity check agree.
+    origin_url, base_sha, head_sha = _seed_local_origin(root)
     case_id = f"pr-000101-{head_sha[:12]}"
     case_file = f"cases/{case_id}.yaml"
     import_file = "imports/pr-000101.json"
     bundle_rel = f"snapshots/{case_id}.bundle"
 
-    origin_url, real_base_sha, real_head_sha = _seed_local_origin(root)
     sn.ensure_mirror(root, repo_slug, origin_url)
-    sn.fetch_pr_refs(root, repo_slug, 101, base_tip=real_base_sha,
-                     explicit_shas=[real_head_sha], origin_url=origin_url)
+    sn.fetch_pr_refs(root, repo_slug, 101, base_tip=base_sha,
+                     explicit_shas=[head_sha], origin_url=origin_url)
     m = sn.mirror(root)
     bundle_path = root / bundle_rel
-    sn.build_bundle(m, real_base_sha, real_head_sha, bundle_path)
-    base_tree_sha = sn.rev_parse(m, f"{real_base_sha}^{{tree}}")
-    head_tree_sha = sn.rev_parse(m, f"{real_head_sha}^{{tree}}")
-    diff_sha256 = sn.canonical_diff_sha256(m, real_base_sha, real_head_sha)
+    sn.build_bundle(m, base_sha, head_sha, bundle_path)
+    base_tree_sha = sn.rev_parse(m, f"{base_sha}^{{tree}}")
+    head_tree_sha = sn.rev_parse(m, f"{head_sha}^{{tree}}")
+    diff_sha256 = sn.canonical_diff_sha256(m, base_sha, head_sha)
     bundle_sha256 = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
 
     pr_meta = PullRequestMeta(
@@ -326,6 +322,7 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
         pull_request=pr_meta,
         snapshot=SnapshotReady(
             status="ready",
+            base_resolution="merge_base_v1",
             policy="final_pr_head",
             requested_head="final",
             original_base_sha=base_sha,
@@ -533,7 +530,186 @@ def test_status_reports_snapshot_state_per_case(tmp_path: Path, capsys: pytest.C
     rc = _handle_benchmark_command(["status", str(ws)])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "ready" in out and "pr-000101-0123456789ab" in out and "0123456789ab" in out
+    case_id = next((ws / "cases").glob("*.yaml")).stem
+    assert "ready" in out and case_id in out and case_id.rsplit("-", 1)[-1] in out
+
+
+def _make_case_base_drift(root: Path) -> str:
+    """Convert the fixture's ready case into a valid typed drift refusal."""
+    import yaml
+
+    case_path = next((root / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    snapshot = raw["snapshot"]
+    (root / snapshot["bundle_file"]).unlink()
+    raw["snapshot"] = {
+        "status": "unreplayable",
+        "policy": "explicit_head",
+        "requested_head": snapshot["original_head_sha"],
+        "original_base_sha": snapshot["original_base_sha"],
+        "requested_base_sha": snapshot["requested_base_sha"],
+        "original_head_sha": snapshot["original_head_sha"],
+        "base_tree_sha": None,
+        "head_tree_sha": None,
+        "diff_sha256": None,
+        "bundle_file": None,
+        "bundle_sha256": None,
+        "error": {"reason": "base_drift", "detail": "private path omitted"},
+    }
+    raw["curation"].update(
+        state="unreplayable",
+        snapshot_attested=False,
+        clean_attested=False,
+        gold_status="findings",
+    )
+    raw["curation"].pop("task_spec_sha256", None)
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    return str(raw["case_id"])
+
+
+def test_status_and_validate_surface_typed_unreplayable_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Public status/validate expose the reason code, never private detail."""
+    from daydream import cli as top_cli
+    from daydream.benchmark.workspace import validate_workspace, workspace_status
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    case_id = _make_case_base_drift(root)
+    status = workspace_status(root)
+    assert status.case_snapshots == [
+        {
+            "case_id": case_id,
+            "snapshot_status": "unreplayable",
+            "head_prefix": case_id.rsplit("-", 1)[-1],
+            "error_reason": "base_drift",
+        }
+    ]
+    assert validate_workspace(root) == (
+        2,
+        "incomplete: workspace state curating; unreplayable snapshot reasons: base_drift",
+    )
+
+    with pytest.raises(SystemExit) as status_exit:
+        top_cli.main(["benchmark", "status", str(root)])
+    assert status_exit.value.code == 0
+    status_out = capsys.readouterr().out
+    assert "snapshot unreplayable (base_drift)" in status_out
+    assert "private path omitted" not in status_out
+
+    with pytest.raises(SystemExit) as validate_exit:
+        top_cli.main(["benchmark", "validate", str(root)])
+    assert validate_exit.value.code == 2
+    validate_out = capsys.readouterr().out
+    assert "unreplayable snapshot reasons: base_drift" in validate_out
+    assert "private path omitted" not in validate_out
+
+
+def test_validate_rechecks_marked_snapshot_source_when_mirror_is_present(tmp_path: Path) -> None:
+    """A marker cannot hide commit-linkage tampering in a live authoring mirror."""
+    import yaml
+
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    assert validate_workspace(root) == (0, "ready")
+    case_path = next((root / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    raw["snapshot"]["original_base_sha"] = "a" * 40
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    code, label = validate_workspace(root)
+    assert code == 1
+    assert "source provenance" in label
+    assert "feature.py" not in label
+
+
+def test_validate_partial_mirror_reports_restore_guidance_without_mutation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real CLI names the retained mirror and leaves its repair to the user."""
+    import shutil
+
+    from daydream import cli as top_cli
+
+    parent = tmp_path / "parent with spaces"
+    parent.mkdir()
+    root = _write_curated_workspace(parent, "ready")
+    mirror = root / "cache" / "repository.git"
+    shutil.rmtree(mirror / "objects")
+    (mirror / "objects").mkdir()
+    sentinel = mirror / "restore-me"
+    sentinel.write_text("operator recovery marker\n")
+
+    with pytest.raises(SystemExit) as exc:
+        top_cli.main(["benchmark", "validate", str(root)])
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert str(root) in output
+    assert "cache/repository.git" in output
+    assert "restore" in output.lower()
+    assert sentinel.read_text() == "operator recovery marker\n"
+
+
+def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path: Path) -> None:
+    """The marker plus offline bundle remains sufficient after cache cleanup."""
+    import shutil
+
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    assert validate_workspace(root) == (0, "ready")
+    shutil.rmtree(root / "cache" / "repository.git")
+    assert validate_workspace(root) == (0, "ready")
+
+
+@pytest.mark.parametrize("tamper", ["base", "source", "source_file", "inventory"])
+def test_portable_validation_binds_case_to_checksummed_import(
+    tmp_path: Path, tamper: str
+) -> None:
+    """A cleaned workspace still binds copied case metadata to its import."""
+    import shutil
+
+    import yaml
+
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    shutil.rmtree(root / "cache" / "repository.git")
+    case_path = next((root / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    if tamper == "base":
+        raw["pull_request"]["base"]["sha"] = "f" * 40
+        raw["snapshot"]["requested_base_sha"] = "f" * 40
+    elif tamper == "source":
+        raw["source"]["import_sha256"] = "f" * 64
+    elif tamper == "source_file":
+        raw["source"]["import_file"] = "imports/other.json"
+    else:
+        raw["pull_request"]["changed_files"] = []
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    code, label = validate_workspace(root)
+    assert code == 1
+    assert "import provenance" in label
+
+
+def test_base_drift_case_is_rejected_before_compile_stage_mutation(tmp_path: Path) -> None:
+    """The existing curation gate rejects typed drift before Harbor staging."""
+    from daydream.benchmark.harbor import build
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    case_id = _make_case_base_drift(root)
+    harbor = root / "harbor"
+    harbor.mkdir()
+    sentinel = harbor / "sentinel.txt"
+    sentinel.write_text("prior build\n")
+
+    with pytest.raises(build.CompileError, match=rf"{case_id}.*unreplayable"):
+        build.compile_workspace(root)
+
+    assert sentinel.read_text() == "prior build\n"
+    assert not (root / "cache" / "harbor-build-stage").exists()
 
 
 def test_curated_fixture_writes_schema_valid_case(tmp_path: Path) -> None:

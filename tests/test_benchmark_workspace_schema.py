@@ -228,7 +228,7 @@ def _valid_import_document() -> dict[str, Any]:
             "state": "open",
             "title_sha256": hashlib.sha256(b"Fix cache").hexdigest(),
             "body_sha256": hashlib.sha256("fixes the cache".encode()).hexdigest(),
-            "base": {"ref": "main", "sha": "b" * 40},
+            "base": {"ref": "main", "sha": "0123456789abcdef0123456789abcdef01234567"},
             "head": {"ref": "feature/cache", "sha": "h" * 40},
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
@@ -316,6 +316,44 @@ def test_pull_request_meta_predate_reads_empty_and_validates() -> None:
     assert m.body == "" and m.title_sha256 == "" and m.body_sha256 == ""
     assert m.merged_at is None and m.closed_at is None and m.html_url == ""
     assert m.head.ref is None
+
+
+def test_pull_request_changed_files_is_optional_but_canonical_when_present() -> None:
+    raw = {
+        "number": 101, "url": "u", "title": "t", "state": "open",
+        "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "author": {"login": "a", "type": "User"},
+    }
+    assert PullRequestMeta.model_validate(raw).changed_files is None
+    assert PullRequestMeta.model_validate({**raw, "changed_files": []}).changed_files == []
+    paths = ["a:b.py", r"dir\literal.py", "src/file with spaces.py"]
+    assert PullRequestMeta.model_validate({**raw, "changed_files": paths}).changed_files == paths
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ["b.py", "a.py"],
+        ["a.py", "a.py"],
+        [""],
+        ["/absolute.py"],
+        ["../escape.py"],
+        ["src/../escape.py"],
+        ["src//empty.py"],
+        ["nul\x00.py"],
+        [1],
+    ],
+)
+def test_pull_request_changed_files_rejects_noncanonical_paths(paths: list[Any]) -> None:
+    raw = {
+        "number": 101, "url": "u", "title": "t", "state": "open",
+        "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "author": {"login": "a", "type": "User"}, "changed_files": paths,
+    }
+    with pytest.raises(ValidationError):
+        PullRequestMeta.model_validate(raw)
 
 
 def test_pull_request_meta_fails_closed_on_malformed_required() -> None:
@@ -418,7 +456,7 @@ def _valid_case_dict() -> dict[str, Any]:
             "state": "open",
             "title_sha256": hashlib.sha256(b"Fix cache").hexdigest(),
             "body_sha256": hashlib.sha256("fix".encode()).hexdigest(),
-            "base": {"ref": "main", "sha": "b" * 40},
+            "base": {"ref": "main", "sha": "0123456789abcdef0123456789abcdef01234567"},
             "head": {"ref": "feature/cache", "sha": "h" * 40},
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
@@ -428,6 +466,7 @@ def _valid_case_dict() -> dict[str, Any]:
         },
         "snapshot": {
             "status": "ready",
+            "base_resolution": "merge_base_v1",
             "policy": "final_pr_head",
             "requested_head": "final",
             "original_base_sha": "0123456789abcdef0123456789abcdef01234567",
@@ -503,6 +542,42 @@ def test_ready_snapshot_valid() -> None:
     assert doc.curation.state == "ready"
 
 
+def test_ready_snapshot_requires_merge_base_resolution_marker() -> None:
+    marked = _valid_case_dict()
+    assert CaseDocument.model_validate(marked).snapshot.status == "ready"
+
+    missing = _valid_case_dict()
+    missing["snapshot"].pop("base_resolution")
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(missing)
+
+    marked["snapshot"]["base_resolution"] = "invented"
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(marked)
+
+
+def test_base_drift_is_the_only_new_snapshot_reason() -> None:
+    raw = _valid_case_dict()
+    raw["snapshot"] = {
+        "status": "unreplayable", "policy": "explicit_head", "requested_head": "a" * 40,
+        "original_base_sha": "b" * 40,
+        "requested_base_sha": "0123456789abcdef0123456789abcdef01234567",
+        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
+        "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": "base_drift", "detail": "one extra path"},
+    }
+    raw["curation"].update({
+        "state": "unreplayable", "snapshot_attested": False,
+        "clean_attested": False, "gold_status": None, "findings": [],
+        "task_spec_sha256": None,
+    })
+    assert CaseDocument.model_validate(raw).snapshot.status == "unreplayable"
+    raw["snapshot"]["error"]["reason"] = "invented_reason"
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
 def test_ready_snapshot_rejects_missing_bundle_fields() -> None:
     # Re-validate from a raw dict so a missing required field is caught.
     raw = _valid_case_dict()
@@ -556,6 +631,36 @@ def test_unreplayable_curation_requires_unreplayable_snapshot() -> None:
     assert doc.curation.state == "unreplayable"
 
 
+def test_unreplayable_snapshot_requires_matching_curation_unless_excluded() -> None:
+    raw = _valid_case_dict()
+    raw["snapshot"] = {
+        "status": "unreplayable", "policy": "explicit_head", "requested_head": "a" * 40,
+        "original_base_sha": "b" * 40,
+        "requested_base_sha": "0123456789abcdef0123456789abcdef01234567",
+        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
+        "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": "head_not_on_pr", "detail": "not on PR"},
+    }
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+    raw["curation"].update({
+        "state": "excluded", "snapshot_attested": False, "clean_attested": False,
+        "gold_status": None, "findings": [], "task_spec_sha256": None,
+        "case_exclusion": {"reason": "unreplayable", "note": None},
+    })
+    assert CaseDocument.model_validate(raw).curation.state == "excluded"
+
+
+def test_snapshot_requested_base_must_match_pull_request_base() -> None:
+    raw = _valid_case_dict()
+    raw["snapshot"]["base_resolution"] = "merge_base_v1"
+    raw["snapshot"]["requested_base_sha"] = "c" * 40
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
 def test_unreplayable_snapshot_requires_error_and_null_bundle() -> None:
     raw = _valid_case_dict()
     raw["snapshot"] = {
@@ -572,6 +677,11 @@ def test_unreplayable_snapshot_requires_error_and_null_bundle() -> None:
         "bundle_sha256": None,
         "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
     }
+    raw["curation"].update({
+        "state": "unreplayable", "snapshot_attested": False,
+        "clean_attested": False, "gold_status": None, "findings": [],
+        "task_spec_sha256": None,
+    })
     doc = CaseDocument.model_validate(raw)
     assert doc.snapshot.status == "unreplayable"
 
