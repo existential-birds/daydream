@@ -108,6 +108,60 @@ def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> 
     assert "calibrate-reward" in captured.out
 
 
+def test_adjudicate_publication_commands_run_through_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.training.adjudication import cli as adjudication_cli
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+    from tests.test_training_adjudication_publish import _final_bundle
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "queue.json").write_text("[]\n", encoding="utf-8")
+    (state / "observations.jsonl").write_text("", encoding="utf-8")
+    (state / "preview-ledger.json").write_text("{}\n", encoding="utf-8")
+    manifest = tmp_path / "preview-manifest.json"
+    manifest.write_text(
+        json.dumps({"curation_id": "cur-main", "snapshot_id": "e" * 64}) + "\n",
+        encoding="utf-8",
+    )
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
+
+    assert _run_main([
+        "corpus", "adjudicate", "publish-state",
+        "--state-dir", str(state),
+        "--manifest", str(manifest),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+    revision = hub.repo_info("main").sha
+    assert "annotations/cur-main/checkpoints/batch-latest.json" in hub.list_repo_files(revision)
+
+    destination = tmp_path / "restored"
+    assert _run_main([
+        "corpus", "adjudicate", "resume-state",
+        "--curation-id", "cur-main",
+        "--destination", str(destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+    assert (destination / "preview-manifest.json").read_bytes() == manifest.read_bytes()
+
+    bundle, curation_id = _final_bundle(tmp_path)
+    published = publish_final_annotation_bundle(hub, bundle)
+    final_destination = tmp_path / "downloaded-final"
+    assert _run_main([
+        "corpus", "adjudicate", "download-final",
+        "--curation-id", curation_id,
+        "--snapshot-id", published["final_snapshot_id"],
+        "--revision", published["hub_commit_sha"],
+        "--destination", str(final_destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+    assert (final_destination / "_SUCCESS").is_file()
+
+
 # ---------------------------------------------------------------------------
 # Task 8 (#1080): build-v2 operator inputs — pinned license policy, exact-slug
 # copyleft opt-ins, and refusal of URL-shaped identities. Real-path: the

@@ -205,6 +205,94 @@ def test_cli_real_path_real_archive(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert (src / "index.db").read_bytes() == before
 
 
+def test_cli_import_seeds_every_eligible_hydrated_run_for_checkpoint_resume(
+    tmp_path: Path,
+) -> None:
+    """The checkpoint archive must retain the complete hydrated run inventory.
+
+    Only ``sess-a`` has a surviving backup observation to import.  ``sess-b``
+    is nevertheless an eligible run in the pinned hydrated index and must be
+    present in the checkpoint ``index.db`` so a fresh-VM canonical harvest can
+    append its observation without manufacturing history during resume.
+    """
+    stage = tmp_path / "hydrated"
+    for session_id in ("sess-a", "sess-b"):
+        head = hashlib.sha256(session_id.encode()).hexdigest()
+        base = hashlib.sha256(("base-" + session_id).encode()).hexdigest()
+        upsert_run(
+            stage,
+            make_manifest(
+                session_id=session_id,
+                repo_slug="org/repo",
+                head_sha=head,
+                base_sha=base,
+            ),
+        )
+        rubric = {
+            "per_finding_resolutions": [
+                {
+                    "fingerprint": f"fp-{session_id}",
+                    "comment_id": 7,
+                    "disposition": "accepted",
+                    "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+                    "evidence_digest": "d" * 32,
+                }
+            ]
+        }
+        assert append_label_observation(
+            stage,
+            session_id,
+            labels=["finding-accepted"],
+            pr_state=None,
+            labeler_version="980-rubric-r2",
+            evidence_sha=head,
+            rubric_json=json.dumps(rubric),
+            source="auto",
+            observed_at=_OBSERVED,
+        )
+    (stage / "downloads" / ("a" * 40)).mkdir(parents=True)
+
+    backup = tmp_path / "backup"
+    sess_a_head = hashlib.sha256("sess-a".encode()).hexdigest()
+    _seed_session(
+        backup,
+        "sess-a",
+        evidence_sha=sess_a_head,
+        labels=["accepted"],
+    )
+    target = tmp_path / "checkpoint-state"
+
+    assert cli._handle_corpus_command(
+        [
+            "adjudicate",
+            *_import_args(
+                backup,
+                state_dir=target,
+                index_root=stage,
+                archive_dir=target,
+                extra=[],
+            ),
+        ]
+    ) == 0
+
+    conn = sqlite3.connect(f"file:{target / 'index.db'}?mode=ro", uri=True)
+    try:
+        run_ids = {
+            str(row[0])
+            for row in conn.execute("SELECT session_id FROM runs ORDER BY session_id")
+        }
+        observation_ids = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT session_id FROM label_observations ORDER BY session_id"
+            )
+        }
+    finally:
+        conn.close()
+    assert run_ids == {"sess-a", "sess-b"}
+    assert observation_ids == {"sess-a"}
+
+
 def test_cli_reimport_does_not_displace_newer_target_runs_state(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -364,7 +452,10 @@ def test_publish_then_resume_reproduces_queue_and_report(
     assert rc == 0
     capsys.readouterr()
 
-    prefix = f"annotations/cur-import/{'e' * 64}/"
+    revision = hub.repo_info("main").sha
+    pointer_path = "annotations/cur-import/checkpoints/batch-latest.json"
+    pointer = json.loads(hub.download_file(pointer_path, revision))
+    batch_prefix = pointer["batch_prefix"]
     # The checkpoint is always written on --publish: it is the fresh-VM
     # resume anchor (AC5). The archive index (where the import's rows live)
     # is byte-published with the adjudication payload, so a fresh-VM resume
@@ -375,13 +466,18 @@ def test_publish_then_resume_reproduces_queue_and_report(
         "preview-ledger.json",
         "preview-manifest.json",
         "index.db",
-        "checkpoints/batch-latest.json",
     ):
-        assert prefix + name in hub.files
+        assert batch_prefix + name in hub.files
+    assert pointer_path in hub.files
 
     # Fresh-VM resume: empty stage dir, restore from the Hub checkpoint.
     resumed_dir = tmp_path / "resumed"
-    resumed = resume_annotation_state(hub, manifest=manifest, stage_dir=resumed_dir)
+    resumed = resume_annotation_state(
+        hub,
+        curation_id="cur-import",
+        destination=resumed_dir,
+        expected_snapshot_id="e" * 64,
+    )
     assert set(resumed["restored"]) == {
         "queue.json",
         "observations.jsonl",
@@ -443,7 +539,7 @@ def test_publish_refuses_non_private_before_any_write(
     )
     assert rc == 1
     captured = capsys.readouterr()
-    assert "not private" in captured.out + captured.err
+    assert "public Hub repository" in captured.out + captured.err
     prefix = f"annotations/cur-import/{'e' * 64}/"
     assert hub.uploaded_paths == []
     assert set(hub.files) == {prefix + "preview-manifest.json"}

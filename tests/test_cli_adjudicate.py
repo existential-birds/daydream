@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from daydream import cli
+from daydream.training.adjudication.publish import AnnotationHubClient
 
 
 def _write_sessions(tmp_path: Path) -> Path:
@@ -32,6 +33,34 @@ def _write_sessions(tmp_path: Path) -> Path:
         "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
     )
     return tmp_path
+
+
+def _install_annotation_hub(
+    monkeypatch: pytest.MonkeyPatch, hub: AnnotationHubClient,
+) -> None:
+    """Route only the external Hub boundary at an in-memory implementation."""
+    from daydream.training.adjudication import cli as adjudication_cli
+
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
+
+
+def _write_checkpoint_inputs(root: Path) -> tuple[Path, Path]:
+    state = root / "state"
+    state.mkdir()
+    (state / "queue.json").write_text("[]\n", encoding="utf-8")
+    (state / "observations.jsonl").write_text("", encoding="utf-8")
+    (state / "preview-ledger.json").write_text("{}\n", encoding="utf-8")
+    manifest = root / "preview-manifest.json"
+    manifest.write_text(
+        json.dumps({"curation_id": "cur-1", "snapshot_id": "e" * 64}) + "\n",
+        encoding="utf-8",
+    )
+    return state, manifest
+
+
+def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
+    captured = capsys.readouterr()
+    return "".join((captured.out + captured.err).split()).replace("║", "")
 
 
 def test_adjudicate_label_records_human_observation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -374,13 +403,276 @@ def test_cli_publish_state_missing_state_file_exits_1(
     ]) == 1
     captured = capsys.readouterr()
     assert "publish-state failed" in captured.out + captured.err
-    assert "No such file or directory" in captured.out + captured.err  # FileNotFoundError rendered, not a traceback
+    assert "queue.json" in captured.out + captured.err
+    assert "required regular file is missing" in captured.out + captured.err
+
+
+def test_cli_publish_state_checkpoint_reports_batch_and_actual_revision(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    state, manifest = _write_checkpoint_inputs(tmp_path)
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    _install_annotation_hub(monkeypatch, hub)
+
+    assert handle_adjudicate([
+        "publish-state",
+        "--state-dir", str(state),
+        "--manifest", str(manifest),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+
+    revision = hub.repo_info("main").sha
+    pointer_path = "annotations/cur-1/checkpoints/batch-latest.json"
+    pointer = json.loads(hub.download_file(pointer_path, revision))
+    rendered = _console_text(capsys)
+    assert pointer["batch_id"] in rendered
+    assert revision in rendered
+
+
+def test_cli_publish_state_accepts_legacy_batch_complete_as_a_no_op(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    state, manifest = _write_checkpoint_inputs(tmp_path)
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    _install_annotation_hub(monkeypatch, hub)
+
+    assert handle_adjudicate([
+        "publish-state",
+        "--state-dir", str(state),
+        "--manifest", str(manifest),
+        "--hub-repo", hub.repo_id,
+        "--batch-complete",
+    ]) == 0
+    assert "annotations/cur-1/checkpoints/batch-latest.json" in hub.list_repo_files(
+        hub.repo_info("main").sha
+    )
+
+
+def test_cli_resume_state_bootstraps_from_curation_without_local_manifest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    state, manifest = _write_checkpoint_inputs(tmp_path)
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    _install_annotation_hub(monkeypatch, hub)
+    assert handle_adjudicate([
+        "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+    capsys.readouterr()
+    revision = hub.repo_info("main").sha
+    destination = tmp_path / "restored"
+
+    assert handle_adjudicate([
+        "resume-state",
+        "--curation-id", "cur-1",
+        "--destination", str(destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+
+    assert (destination / "preview-manifest.json").read_bytes() == manifest.read_bytes()
+    assert revision in _console_text(capsys)
+
+
+def test_cli_resume_state_manifest_compatibility_enforces_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    state, manifest = _write_checkpoint_inputs(tmp_path)
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    _install_annotation_hub(monkeypatch, hub)
+    assert handle_adjudicate([
+        "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+
+    assert handle_adjudicate([
+        "resume-state",
+        "--manifest", str(manifest),
+        "--destination", str(tmp_path / "restored"),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+    mismatched = tmp_path / "mismatched-manifest.json"
+    mismatched.write_text(
+        json.dumps({"curation_id": "cur-1", "snapshot_id": "f" * 64}) + "\n",
+        encoding="utf-8",
+    )
+    assert handle_adjudicate([
+        "resume-state",
+        "--manifest", str(mismatched),
+        "--destination", str(tmp_path / "not-restored"),
+        "--hub-repo", hub.repo_id,
+    ]) == 1
+    assert not (tmp_path / "not-restored").exists()
+
+
+@pytest.mark.parametrize("remote_state", ["missing", "corrupt", "public"])
+def test_cli_resume_state_missing_unavailable_or_corrupt_exits_1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remote_state: str,
+) -> None:
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    hub = AnnotationsHub(
+        repo_id="org/annotations",
+        private=remote_state != "public",
+    )
+    if remote_state == "corrupt":
+        hub.seed_remote_files({
+            "annotations/cur-1/checkpoints/batch-latest.json": b"not JSON",
+        })
+    _install_annotation_hub(monkeypatch, hub)
+    destination = tmp_path / "restored"
+
+    assert handle_adjudicate([
+        "resume-state",
+        "--curation-id", "cur-1",
+        "--destination", str(destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 1
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".restored.*"))
+
+
+@pytest.mark.parametrize("destination_kind", ["file", "directory", "symlink"])
+def test_cli_resume_state_rejects_existing_destination_before_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_kind: str,
+) -> None:
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    state, manifest = _write_checkpoint_inputs(tmp_path)
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    _install_annotation_hub(monkeypatch, hub)
+    assert handle_adjudicate([
+        "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+    hub.downloaded_revision_log.clear()
+    destination = tmp_path / "restored"
+    if destination_kind == "file":
+        destination.write_text("occupied", encoding="utf-8")
+    elif destination_kind == "directory":
+        destination.mkdir()
+    else:
+        destination.symlink_to(state, target_is_directory=True)
+
+    assert handle_adjudicate([
+        "resume-state",
+        "--curation-id", "cur-1",
+        "--destination", str(destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 1
+    assert hub.downloaded_revision_log == []
+    assert not list(tmp_path.glob(".restored.*"))
+
+
+def test_cli_download_final_installs_exact_success_revision(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+    from tests.test_training_adjudication_publish import _final_bundle
+
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    bundle, curation_id = _final_bundle(tmp_path)
+    published = publish_final_annotation_bundle(hub, bundle)
+    _install_annotation_hub(monkeypatch, hub)
+    destination = tmp_path / "downloaded"
+
+    assert handle_adjudicate([
+        "download-final",
+        "--curation-id", curation_id,
+        "--snapshot-id", published["final_snapshot_id"],
+        "--revision", published["hub_commit_sha"],
+        "--destination", str(destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 0
+
+    assert sorted(path.name for path in destination.iterdir()) == published["files"]
+    assert (destination / "_SUCCESS").is_file()
+    rendered = _console_text(capsys)
+    assert published["final_snapshot_id"] in rendered
+    assert published["hub_commit_sha"] in rendered
+
+
+@pytest.mark.parametrize("destination_kind", ["file", "directory", "symlink"])
+def test_cli_download_final_rejects_existing_destination_before_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_kind: str,
+) -> None:
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+    from tests.test_training_adjudication_publish import _final_bundle
+
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    bundle, curation_id = _final_bundle(tmp_path)
+    published = publish_final_annotation_bundle(hub, bundle)
+    _install_annotation_hub(monkeypatch, hub)
+    hub.downloaded_revision_log.clear()
+    destination = tmp_path / "downloaded"
+    if destination_kind == "file":
+        destination.write_text("occupied", encoding="utf-8")
+    elif destination_kind == "directory":
+        destination.mkdir()
+    else:
+        destination.symlink_to(bundle, target_is_directory=True)
+
+    assert handle_adjudicate([
+        "download-final",
+        "--curation-id", curation_id,
+        "--snapshot-id", published["final_snapshot_id"],
+        "--revision", published["hub_commit_sha"],
+        "--destination", str(destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 1
+    assert hub.downloaded_revision_log == []
+    assert not list(tmp_path.glob(".downloaded.*"))
+
+
+def test_cli_download_final_hub_failure_exits_1_without_partial_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    _install_annotation_hub(monkeypatch, hub)
+    destination = tmp_path / "downloaded"
+
+    assert handle_adjudicate([
+        "download-final",
+        "--curation-id", "cur-1",
+        "--snapshot-id", "e" * 64,
+        "--revision", "f" * 40,
+        "--destination", str(destination),
+        "--hub-repo", hub.repo_id,
+    ]) == 1
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".downloaded.*"))
 
 
 # ---- final publish verb (issue #1078, task 6 / M4-M6) ----
 
 from daydream.training.adjudication.canonical import run_canonical_harvest  # noqa: E402
-from tests.fixtures.training.build_hub_snapshot import build_snapshot  # noqa: E402
+from tests.fixtures.training.build_hub_snapshot import AnnotationsHub, build_snapshot  # noqa: E402
 from tests.test_training_adjudication_final_bundle import seed_final_bundle_state  # noqa: E402
 
 
@@ -390,14 +682,9 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     from daydream.training.adjudication import cli as adjudication_cli
     from daydream.training.corpus_v2.identity import record_id
 
-    hub = build_snapshot()
-    # Route the CLI's Hub client factory at this in-memory hub (the documented
-    # _make_client monkeypatch seam), so the "nothing was published" assertion
-    # observes the exact hub the CLI would publish to. The fixture index pins
-    # the ``a*40`` revision, so the hub must know that commit for a real
-    # publish's pinned-revision resolution to succeed (mirrors the integration
-    # fixture, whose hub carries its committed SNAPSHOT_REVISION).
-    hub.commit_revision("a" * 40)
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    # Route the CLI's only external boundary at the revision-aware fixture so
+    # the dry-run and actual-success OID assertions observe real CLI behavior.
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     state = tmp_path / "state"
@@ -429,6 +716,10 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     assert rc == 0
     out = capsys.readouterr().out
     assert "annotations.jsonl" in out and "record" in out.lower()
+    from daydream.training.adjudication.final_bundle import final_snapshot_id
+
+    final_id, _digests = final_snapshot_id(mat / "final-bundle")
+    assert final_id in "".join(out.split()).replace("║", "")
     # nothing was published: the dry-run validated the bundle without ever
     # constructing a client, so the wired hub still carries no final/ keys
     assert not any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
@@ -442,6 +733,9 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
         "--curation-bundle-dir", str(index_root),
         "--state-dir", str(state),
         "--hub-repo", "org/private-ds"]) == 0
+    published_output = _console_text(capsys)
+    assert final_id in published_output
+    assert hub.repo_info("main").sha in published_output
     assert any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
 
 
@@ -499,6 +793,13 @@ def test_runbook_commands_parse_against_real_parser() -> None:
     from daydream.training.adjudication.cli import _build_adjudicate_parser
     text = (Path(__file__).parents[1] / "docs" / "runbooks" /
             "annotation-final-publish.md").read_text()
+    assert "daydream corpus adjudicate publish-state --state-dir" in text
+    assert "daydream corpus adjudicate resume-state --curation-id" in text
+    assert "daydream corpus adjudicate download-final --curation-id" in text
+    assert "--batch-complete" not in text
+    assert "resume-state --manifest" not in text
+    assert "daydream corpus build-v2" not in text
+    assert "daydream train" not in text
     cmds = re.findall(r"daydream corpus adjudicate [^\s`].*", text)
     assert cmds, "runbook must contain literal CLI commands"
     for cmd in cmds:

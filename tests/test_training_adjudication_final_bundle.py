@@ -6,22 +6,63 @@ generated lineage) from pipeline state alone â€” no hand-authored lineage file â
 without touching the Hub.
 """
 
+import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from daydream.archive.hydrate_rules import derive_curation_id_v2
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.adjudication.canonical import run_canonical_harvest
-from daydream.training.adjudication.final_bundle import build_final_bundle
+from daydream.training.adjudication.final_bundle import (
+    FINAL_IDENTITY_FILES,
+    build_final_bundle,
+    final_snapshot_id,
+)
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 
+_SOURCE = "b" * 40
+_POLICY_BINDING: dict[str, Any] = {
+    "schema_version": "2",
+    "policy_digest": "1" * 64,
+    "policy_version": "production-v1",
+    "allow_copyleft": ["owner/repo"],
+    "exclusions_digest": "2" * 64,
+    "resolved_decisions_digest": "3" * 64,
+    "distribution_digest": "4" * 64,
+}
+_CURATION_ID = derive_curation_id_v2(
+    _SOURCE,
+    _POLICY_BINDING["policy_digest"],
+    _POLICY_BINDING["policy_version"],
+    frozenset(_POLICY_BINDING["allow_copyleft"]),
+    _POLICY_BINDING["exclusions_digest"],
+    _POLICY_BINDING["resolved_decisions_digest"],
+    _POLICY_BINDING["distribution_digest"],
+)
 _PIN = {
-    "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
-    "source_hub_commit": "b" * 40, "archive_index_digest": "c" * 64,
+    "curation_id": _CURATION_ID, "sanitized_hub_commit": _SOURCE,
+    "source_hub_commit": _SOURCE, "archive_index_digest": "c" * 64,
     "evidence_observed_at": "2026-01-01T00:00:00+00:00",
     "as_of": "2026-02-01T00:00:00+00:00",
     "labeler_version": "v1", "rubric_version": "v1", "classifier_version": "v1",
 }
+
+
+def _refresh_curation_envelope(root: Path) -> None:
+    lines = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name in {"SHA256SUMS", "_SUCCESS"}:
+            continue
+        lines.append(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+            f"{path.relative_to(root).as_posix()}"
+        )
+    (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
 
 
 def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
@@ -53,6 +94,27 @@ def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str,
         "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
     )
     (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
+    (root / "policy-binding.json").write_text(
+        json.dumps(_POLICY_BINDING, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (root / "curation-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "source_hub_commit": _SOURCE,
+                "curation_id": _CURATION_ID,
+                "sanitizer_version": "v1",
+                "hydration_index_schema_version": "v1",
+                "admission_policy_version": "v1",
+                "publication_prefix": f"curated/{_CURATION_ID}/",
+                "batches": [],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_curation_envelope(root)
     archive = tmp_path / "archive"
     conn = _get_connection(archive)
     for n in (1, 2, 3):
@@ -93,7 +155,8 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
         observations_path=obs_path,
     )
     for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
-                 "coverage-report.json", "lineage.json"):
+                 "coverage-report.json", "lineage.json", "preview-manifest.json",
+                 "policy-binding.json"):
         assert (out / name).is_file(), name
     lineage = json.loads((out / "lineage.json").read_text())
     assert lineage["curation_id"] == pin["curation_id"]
@@ -151,7 +214,8 @@ def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> 
     )
     assert ".publish-stage" not in summary["files"]
     for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
-                 "coverage-report.json", "lineage.json"):
+                 "coverage-report.json", "lineage.json", "preview-manifest.json",
+                 "policy-binding.json"):
         assert (out / name).is_file(), name
 
 
@@ -185,7 +249,8 @@ def test_build_final_bundle_is_byte_identical_on_re_run(tmp_path: Path) -> None:
         index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out_two
     )
     for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
-                 "coverage-report.json", "lineage.json"):
+                 "coverage-report.json", "lineage.json", "preview-manifest.json",
+                 "policy-binding.json"):
         assert (out_one / name).read_bytes() == (out_two / name).read_bytes(), name
 
 
@@ -215,3 +280,110 @@ def test_build_final_bundle_fails_closed_on_missing_materialized_outputs(
             index_root=index_root, materialize_dir=empty, archive_dir=archive_dir,
             out_dir=tmp_path / "out",
         )
+
+
+def _built_final_bundle(tmp_path: Path) -> tuple[Path, Path]:
+    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+    out = tmp_path / "final-bundle"
+    build_final_bundle(
+        index_root=index_root,
+        materialize_dir=mat,
+        archive_dir=archive_dir,
+        out_dir=out,
+    )
+    return index_root, out
+
+
+def test_build_final_bundle_copies_semantically_bound_policy_and_preview(tmp_path: Path) -> None:
+    index_root, out = _built_final_bundle(tmp_path)
+
+    assert tuple(sorted(path.name for path in out.iterdir())) == tuple(sorted(FINAL_IDENTITY_FILES))
+    assert (out / "preview-manifest.json").read_bytes() == (
+        tmp_path / "mat" / "preview-manifest.json"
+    ).read_bytes()
+    assert (out / "policy-binding.json").read_bytes() == (
+        index_root / "policy-binding.json"
+    ).read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"policy_version": "rival-v2"}, "derives curation_id"),
+        ({"policy_digest": True}, "invalid policy_digest"),
+        ({"allow_copyleft": ["owner/repo", "owner/repo"]}, "invalid allow_copyleft"),
+        ({"foreign": "value"}, "exact v2 field set"),
+    ],
+)
+def test_policy_binding_semantics_fail_even_with_regenerated_envelope(
+    mutation: dict[str, object], message: str, tmp_path: Path
+) -> None:
+    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+    binding = dict(_POLICY_BINDING)
+    binding.update(mutation)
+    (index_root / "policy-binding.json").write_text(
+        json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    _refresh_curation_envelope(index_root)
+    out = tmp_path / "final-bundle"
+
+    with pytest.raises(ValueError, match=message):
+        build_final_bundle(
+            index_root=index_root,
+            materialize_dir=mat,
+            archive_dir=archive_dir,
+            out_dir=out,
+        )
+    assert not out.exists()
+
+
+def test_policy_binding_requires_producer_canonical_bytes(tmp_path: Path) -> None:
+    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+    (index_root / "policy-binding.json").write_text(
+        json.dumps(_POLICY_BINDING, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    _refresh_curation_envelope(index_root)
+
+    with pytest.raises(ValueError, match="canonically encoded"):
+        build_final_bundle(
+            index_root=index_root,
+            materialize_dir=mat,
+            archive_dir=archive_dir,
+            out_dir=tmp_path / "final-bundle",
+        )
+
+
+@pytest.mark.parametrize("name", FINAL_IDENTITY_FILES)
+def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: Path) -> None:
+    _index_root, out = _built_final_bundle(tmp_path)
+    before, before_digests = final_snapshot_id(out)
+
+    (out / name).write_bytes((out / name).read_bytes() + b" ")
+    after, after_digests = final_snapshot_id(out)
+
+    assert after != before
+    assert after_digests[name] != before_digests[name]
+
+
+def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Path) -> None:
+    from daydream.training.corpus_v2.bundle import load_curated_bundle
+    from daydream.training.corpus_v2.projector import _verify_annotation_bundle
+
+    index_root, out = _built_final_bundle(tmp_path)
+    sums = "".join(
+        f"{hashlib.sha256((out / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in sorted(FINAL_IDENTITY_FILES)
+    )
+    (out / "SHA256SUMS").write_text(sums, encoding="utf-8")
+    (out / "_SUCCESS").write_text("complete\n", encoding="utf-8")
+
+    lineage = _verify_annotation_bundle(
+        out,
+        load_curated_bundle(index_root),
+        index_root,
+    )
+    assert lineage["curation_id"] == _CURATION_ID
