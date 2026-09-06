@@ -11,7 +11,7 @@ import pytest
 
 from daydream import git_ops
 from daydream import review_profile as rp
-from daydream.backends import AgentEvent, Backend
+from daydream.backends import AgentEvent, Backend, TextEvent
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
@@ -129,8 +129,7 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
     async def _execute_canary(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         del args, kwargs
         execute_calls.append("claude")
-        if False:
-            yield  # pragma: no cover - makes this an async generator
+        yield TextEvent(text="UNEXPECTED_CLAUDE_EXECUTION")
 
     monkeypatch.setattr(ClaudeBackend, "execute", _execute_canary)
     phases = (
@@ -314,10 +313,9 @@ async def test_unborn_improve_cancellation_cleans_snapshot(
             del prompt, output_schema, continuation, agents, max_turns
             del read_only, persist_session
             self.audit_paths.append(cwd)
+            yield TextEvent(text="Audit cancellation fixture ready")
             started.set()
             await anyio.sleep_forever()
-            if False:
-                yield  # pragma: no cover - async-generator declaration
 
     backend = install_capable_improve_backend(monkeypatch, BlockingBackend())
 
