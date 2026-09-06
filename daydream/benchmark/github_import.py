@@ -37,6 +37,7 @@ from daydream import git_ops
 from daydream.benchmark import curation as cu
 from daydream.benchmark import schema, snapshot, storage
 from daydream.benchmark.schema import EXTRACTION_VERSION
+from daydream.pr_review import FINDING_MARKER_RE
 
 
 def _run_gh_preflight_status(root: Path) -> subprocess.CompletedProcess[str]:
@@ -823,6 +824,11 @@ def _normalize_body(body: str) -> str:
     return body.replace("\r\n", "\n").replace("\r", "\n").rstrip()
 
 
+def _projected_body(body: str) -> str:
+    """Normalize candidate text after removing canonical Daydream markers."""
+    return _normalize_body(FINDING_MARKER_RE.sub("", body))
+
+
 _MARKDOWN_PREFIX = re.compile(r"^(#{1,6}\s+|[-*]\s+)")
 
 
@@ -905,7 +911,7 @@ def _anchor_location(
 
 
 def _project_one(evidence: schema.EvidenceRecord, head_sha: str) -> schema.Candidate:
-    body = _normalize_body(evidence.body)
+    body = _projected_body(evidence.body)
     title = _derive_title(body)
     title_ok = _title_ok(title)
 
