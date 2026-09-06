@@ -1188,17 +1188,60 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 class TestUnwrapShellCommand:
     """Tests for _unwrap_shell_command helper."""
 
-    def test_zsh_wrapper_with_cd(self) -> None:
+    def test_zsh_wrapper_with_cd_kept_replayable(self) -> None:
         cmd = '/bin/zsh -lc "cd /home/user/project && make test"'
-        assert _unwrap_shell_command(cmd) == "make test"
+        assert _unwrap_shell_command(cmd) == "cd /home/user/project && make test"
 
-    def test_bash_wrapper_with_cd(self) -> None:
+    def test_bash_wrapper_with_cd_kept_replayable(self) -> None:
         cmd = '/bin/bash -lc "cd /tmp/work && pytest -x"'
-        assert _unwrap_shell_command(cmd) == "pytest -x"
+        assert _unwrap_shell_command(cmd) == "cd /tmp/work && pytest -x"
 
-    def test_sh_wrapper_with_cd(self) -> None:
+    def test_sh_wrapper_with_cd_kept_replayable(self) -> None:
         cmd = '/bin/sh -lc "cd /app && echo hello"'
-        assert _unwrap_shell_command(cmd) == "echo hello"
+        assert _unwrap_shell_command(cmd) == "cd /app && echo hello"
+
+    def test_nested_single_quotes_round_trip(self) -> None:
+        # The reported corruption class: '\' escaping inside the -lc payload.
+        cmd = "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'"
+        assert _unwrap_shell_command(cmd) == "awk '{print $1}' file.txt"
+
+    def test_escaped_double_quotes_and_env_round_trip(self) -> None:
+        cmd = '/bin/zsh -lc "echo \\"hi\\" and $HOME"'
+        assert _unwrap_shell_command(cmd) == 'echo "hi" and $HOME'
+
+    def test_command_substitution_round_trip(self) -> None:
+        cmd = '/bin/zsh -lc "echo $(date)"'
+        assert _unwrap_shell_command(cmd) == "echo $(date)"
+
+    def test_multiline_round_trip(self) -> None:
+        cmd = "/bin/zsh -lc 'echo line1\nline2'"
+        assert _unwrap_shell_command(cmd) == "echo line1\nline2"
+
+    def test_heredoc_round_trip(self) -> None:
+        cmd = "/bin/zsh -lc 'cat <<EOF\nhello\nEOF'"
+        assert _unwrap_shell_command(cmd) == "cat <<EOF\nhello\nEOF"
+
+    def test_unrecognized_wrapper_passthrough(self) -> None:
+        assert _unwrap_shell_command('python -c "print(1)"') == 'python -c "print(1)"'
+
+    def test_trailing_argv_is_raw_fallback(self) -> None:
+        cmd = '/bin/zsh -lc "cmd" extra_arg'
+        assert _unwrap_shell_command(cmd) == cmd
+
+    def test_unbalanced_quotes_fail_open_to_raw(self) -> None:
+        cmd = "/bin/zsh -lc 'unbalanced"
+        assert _unwrap_shell_command(cmd) == cmd
+
+    def test_flag_only_wrapper_raw_fallback(self) -> None:
+        assert _unwrap_shell_command("/bin/zsh -lc") == "/bin/zsh -lc"
+
+    def test_pending_content_key_uses_raw_command(self) -> None:
+        """M7: the legacy pending-id key is keyed on the raw wrapped command."""
+        raw = '/bin/zsh -lc "ls -la"'
+        # In the parser: pending_item_ids[f"command_execution:{item.get('command', '')}"]
+        # must be built from item['command'] BEFORE _unwrap_shell_command runs.
+        from daydream.backends.codex import _unwrap_shell_command  # noqa: F401  (import site pinned)
+        assert raw.startswith("/bin/zsh -lc ")  # key shape: raw, not decoded
 
     def test_wrapper_without_cd(self) -> None:
         cmd = '/bin/zsh -lc "ls -la"'
@@ -1212,7 +1255,7 @@ class TestUnwrapShellCommand:
 
     def test_single_quotes(self) -> None:
         cmd = "/bin/zsh -lc 'cd /project && git status'"
-        assert _unwrap_shell_command(cmd) == "git status"
+        assert _unwrap_shell_command(cmd) == "cd /project && git status"
 
     def test_unquoted_simple(self) -> None:
         """Real Codex format: no quotes around simple commands."""

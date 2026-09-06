@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess as subprocess
 import sys as sys
@@ -45,8 +46,6 @@ from daydream.backends._transport import (
 )
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
-_SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
-_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 
 _logger = logging.getLogger(__name__)
@@ -295,24 +294,30 @@ def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
 
 
 def _unwrap_shell_command(command: str) -> str:
-    """Strip shell wrapper from Codex command_execution commands.
+    """Decode the replayable ``-lc`` payload from a Codex shell command wrapper.
 
-    Codex wraps commands in three forms::
+    Codex wraps command_execution commands as ``/bin/{zsh,bash,sh} -lc <payload>``,
+    where the payload is shell-quoted (single-quoted, double-quoted, or bare) and
+    may itself contain nested quotes, ``$`` substitutions, or newlines. Decode via
+    :func:`shlex.split` so the stored command is byte-identical to what actually
+    executed — replayable verbatim, including any leading ``cd`` prefix.
 
-        /bin/zsh -lc 'actual command'      (single-quoted)
-        /bin/zsh -lc "actual command"      (double-quoted)
-        /bin/zsh -lc actual command         (unquoted)
+    Decoding happens only when the wrapper shape is recognized exactly: non-empty
+    argv, ``argv[0]`` in {"/bin/zsh", "/bin/bash", "/bin/sh"}, ``argv[1] == "-lc"``,
+    and exactly one argument. The returned value is ``argv[2]`` verbatim — no
+    stripping, no quote reprocessing, no cd removal.
 
-    This extracts just the inner command for display purposes.
+    Fails open: any other shape (non-wrapper, trailing argv, missing ``-lc``
+    argument) or a :class:`ValueError` from unbalanced quoting returns the input
+    unchanged, byte-for-byte.
     """
-    m = _SHELL_WRAPPER_RE.match(command)
-    if not m:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
         return command
-    inner = m.group(1)
-    if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
-        inner = inner[1:-1]
-    inner = _CD_PREFIX_RE.sub("", inner)  # Strip leading "cd /some/path &&".
-    return inner.strip()
+    if len(argv) == 3 and argv[0] in ("/bin/zsh", "/bin/bash", "/bin/sh") and argv[1] == "-lc":
+        return argv[2]
+    return command
 
 
 class CodexError(Exception):
