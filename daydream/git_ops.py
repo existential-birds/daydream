@@ -1827,6 +1827,47 @@ def _copy_snapshot_leaf(source: Path, destination: Path, rel: str) -> None:
         raise SnapshotPreparationError("snapshot path is not a regular file, symlink, or directory")
 
 
+_SNAPSHOT_GIT_REDIRECTS = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES",
+    "GIT_PREFIX", "GIT_NAMESPACE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE", "GIT_REFERENCE_BACKEND", "GIT_TEMPLATE_DIR",
+    "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_EXEC_PATH",
+})
+
+
+def _snapshot_git_environment_is_safe() -> bool:
+    """Admit only non-storage indexed config; never rewrite caller settings."""
+    config_names = {name for name in os.environ if name.startswith("GIT_CONFIG")}
+    if any(
+        name in _SNAPSHOT_GIT_REDIRECTS or name.startswith("GIT_TRACE")
+        for name in os.environ
+    ):
+        return False
+    if not config_names:
+        return True
+    raw_count = os.environ.get("GIT_CONFIG_COUNT", "")
+    if re.fullmatch(r"[0-9]{1,3}", raw_count) is None or int(raw_count) > 256:
+        return False
+    expected = {"GIT_CONFIG_COUNT"}
+    for index in range(int(raw_count)):
+        key_name, value_name = f"GIT_CONFIG_KEY_{index}", f"GIT_CONFIG_VALUE_{index}"
+        expected.update((key_name, value_name))
+        key = os.environ.get(key_name, "").lower()
+        value = os.environ.get(value_name)
+        if value is None:
+            return False
+        # Signing policy and ignore-pattern paths cannot redirect storage or
+        # execute Git helpers. Preserve them verbatim, including true signing.
+        # All other config (especially includes, filters and hooks) fails closed.
+        if key == "commit.gpgsign":
+            if value.lower() not in {"true", "false", "yes", "no", "on", "off", "1", "0"}:
+                return False
+        elif key != "core.excludesfile":
+            return False
+    return config_names == expected
+
+
 def prepare_independent_snapshot(
     source: Path, destination: Path, *, include_untracked: bool,
 ) -> IndependentSnapshot:
@@ -1835,7 +1876,17 @@ def prepare_independent_snapshot(
     This is a Git-storage boundary, not a host-filesystem sandbox. Parent
     symlinks fail closed before copying; leaf symlinks remain links. The caller
     owns the newly created destination and its cleanup on every failure path.
+
+    Inherited Git repository/diff/trace and arbitrary configuration overrides
+    are unsupported, even when empty. Only well-formed indexed signing-policy
+    and ignore-file configuration passes through unchanged. Refuse before any
+    subprocess or mutation rather than clearing caller settings (including
+    hooks) or returning storage that only works in the parent environment.
     """
+    if not _snapshot_git_environment_is_safe():
+        raise SnapshotPreparationError(
+            "snapshot refuses inherited Git repository, configuration, diff, or trace overrides"
+        )
     source = source.resolve(strict=True)
     destination = destination.resolve()
     _require_disjoint_snapshot_paths(source, destination)

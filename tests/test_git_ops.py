@@ -131,6 +131,56 @@ def test_independent_snapshot_rejects_shared_alternates(
         git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
 
 
+@pytest.mark.parametrize("unborn", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("variable", [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
+    "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE", "GIT_REFERENCE_BACKEND", "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+    "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_TRACE",
+    "GIT_EXEC_PATH",
+])
+def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    variable: str, empty: bool, unborn: bool,
+) -> None:
+    repo = tmp_path / "source"
+    _init_repo(repo)
+    (repo / "app.py").write_bytes(b"VALUE = 1\n")
+    _git(repo, "add", "app.py")
+    if not unborn:
+        _commit(repo, "initial")
+    (repo / "app.py").write_bytes(b"VALUE = 2\n")
+    external = tmp_path / "external"
+    shutil.copytree(repo / ".git", external)
+    destination = tmp_path / "snapshot"
+
+    def file_bytes(root: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in root.rglob("*") if path.is_file()
+        }
+
+    before_source = file_bytes(repo)
+    before_external = file_bytes(external)
+    value = "" if empty else str(
+        repo / ".git" / "objects"
+        if variable == "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+        else external / "objects" if variable == "GIT_OBJECT_DIRECTORY" else external
+    )
+    with monkeypatch.context() as poison:
+        poison.setenv(variable, value)
+        with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git"):
+            git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
+        assert os.environ[variable] == value
+    assert not destination.exists()
+    assert file_bytes(repo) == before_source
+    assert file_bytes(external) == before_external
+
+
 def test_independent_snapshot_strict_queries_reject_broken_repository(tmp_path: Path) -> None:
     with pytest.raises(GitError):
         git_ops.list_remotes(tmp_path, strict=True)
@@ -145,6 +195,47 @@ def test_independent_snapshot_strict_queries_reject_broken_repository(tmp_path: 
     assert git_ops.list_remotes(tmp_path) == []
     assert git_ops.object_alternates(tmp_path) == ()
     assert git_ops.ls_tree_files(tmp_path, "HEAD") == []
+
+
+@pytest.mark.parametrize("key", [
+    "core.worktree", "core.hooksPath", "include.path", "filter.private.clean",
+    "remote.origin.uploadpack", "init.templateDir", "extensions.refStorage",
+])
+def test_independent_snapshot_rejects_indexed_config_injection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    destination = tmp_path / "snapshot"
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", key)
+    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", str(tmp_path / "external"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(count + 1))
+    before = dict(os.environ)
+    with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git"):
+        git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
+    assert not destination.exists()
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("signing", ["true", "false"])
+def test_independent_snapshot_preserves_safe_config_and_independent_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signing: str,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", "commit.gpgsign")
+    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", signing)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(count + 1))
+    before = dict(os.environ)
+    snapshot = git_ops.prepare_independent_snapshot(
+        repo, tmp_path / "snapshot", include_untracked=False,
+    )
+    assert dict(os.environ) == before
+    assert _git(snapshot.repo, "config", "--get", "commit.gpgsign") == signing
+    assert _git(snapshot.repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
+    _git(snapshot.repo, "fsck", "--full", "--no-dangling")
+    assert any((snapshot.repo / ".git" / "objects").rglob("*.pack"))
+    assert git_ops.object_alternates(snapshot.repo, strict=True) == ()
 
 
 def test_independent_snapshot_unborn_detection_rejects_corrupt_head(tmp_path: Path) -> None:

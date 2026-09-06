@@ -1514,7 +1514,39 @@ async def test_host_enumeration_dedups_absolute_model_wd(
             )
         ],
     )
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+
+    class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncIterator[AgentEvent]:
+            if "IMPROVE_RECON" in prompt:
+                assert isinstance(self.recon_output_override, dict)
+                commands = self.recon_output_override["commands"]
+                commands[0]["working_directory"] = str(cwd / rel)
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+                persist_session=persist_session,
+            ):
+                yield event
+
+    stub = install_capable_improve_backend(
+        monkeypatch,
+        AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target),
+    )
     stub.recon_output_override = {
         "languages": ["python"],
         "commands": [
@@ -1523,7 +1555,9 @@ async def test_host_enumeration_dedups_absolute_model_wd(
                 purpose="Run the repository test suite",
                 # Absolute spelling of the SAME directory the host enumerates
                 # relative.
-                working_directory=f"{improve_monorepo_target}/{rel}",
+                # The backend rewrites this placeholder to the absolute audit
+                # snapshot path once the real runner supplies its cwd.
+                working_directory=rel,
                 scope={"kind": "whole-repository"},
                 rationale="The root configuration declares the test command.",
                 evidence={
@@ -3195,6 +3229,116 @@ async def test_improve_model_calls_run_in_audit_worktree_not_target(
     assert not next(iter(audit_cwds)).exists()
     # The target tree is untouched (host artifacts under gitignored paths only).
     assert _git_status_porcelain(improve_monorepo_target) == before_status
+
+
+@pytest.mark.anyio
+async def test_improve_model_inputs_exclude_source_only_repository_canaries(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """Real runner: host preprocessing reads only the tracked audit snapshot."""
+    ignored_make_canary = "PRIVATE_IGNORED_MAKE_CANARY"
+    untracked_package_canary = "PRIVATE_UNTRACKED_PACKAGE_CANARY"
+    service_canary = "private-source-only-service-canary"
+
+    git_dir = Path(git(improve_monorepo_target, "rev-parse", "--git-dir"))
+    if not git_dir.is_absolute():
+        git_dir = improve_monorepo_target / git_dir
+    exclude = git_dir / "info" / "exclude"
+    exclude.write_text(
+        exclude.read_text(encoding="utf-8")
+        + "\n/Makefile\n/services/private-source-only-service-canary/\n",
+        encoding="utf-8",
+    )
+    (improve_monorepo_target / "Makefile").write_text(
+        f"test-private: ; @echo {ignored_make_canary}\n",
+        encoding="utf-8",
+    )
+    (improve_monorepo_target / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "test-private": f"echo {untracked_package_canary}",
+                }
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    private_service = improve_monorepo_target / "services" / service_canary
+    private_service.mkdir(parents=True)
+    (private_service / "pyproject.toml").write_text(
+        f'[project]\nname = "{service_canary}"\n',
+        encoding="utf-8",
+    )
+    assert git(
+        improve_monorepo_target,
+        "check-ignore",
+        "Makefile",
+        f"services/{service_canary}/pyproject.toml",
+    ).splitlines() == [
+        "Makefile",
+        f"services/{service_canary}/pyproject.toml",
+    ]
+    assert git(
+        improve_monorepo_target,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "package.json",
+    ) == "package.json"
+
+    backend = install_capable_improve_backend(
+        monkeypatch,
+        ImproveStubBackend(improve_monorepo_target, n_findings=1),
+    )
+    backend.recon_commands_extra = [
+        {
+            "id": "source-only-package-test",
+            "purpose": "Run a source-only package test",
+            "command": "npm run test-private",
+            "working_directory": ".",
+            "expected_success": {
+                "exit_code": 0,
+                "observable_result": "the private package test passes",
+            },
+            "applicability": {
+                "scope": {"kind": "whole-repository"},
+                "preconditions": [],
+                "rationale": "The source-only manifest declares the test.",
+            },
+            "evidence": {
+                "kind": "literal-command",
+                "source_path": "package.json",
+                "line_anchor": {"start_line": 3, "end_line": 3},
+                "verbatim_excerpt": (
+                    f'    "test-private": "echo {untracked_package_canary}"'
+                ),
+            },
+        }
+    ]
+
+    code = await run(
+        make_config(improve_monorepo_target, flow_name="improve")
+    )
+
+    assert code == 0
+    assert backend.calls
+    forbidden = (
+        ignored_make_canary,
+        untracked_package_canary,
+        service_canary,
+    )
+    for call in backend.calls:
+        prompt = call["prompt"]
+        assert all(canary not in prompt for canary in forbidden), call["marker"]
+    recon = improve_artifact(
+        improve_monorepo_target,
+        "recon.json",
+    ).read_text(encoding="utf-8")
+    assert all(canary not in recon for canary in forbidden)
 
 
 class _AuditCommittingBackend(ImproveStubBackend):

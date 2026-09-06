@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 import threading
@@ -770,6 +771,46 @@ def test_improve_backend_preflight_fails_closed(
     assert exc_info.value.backend_name == "claude"
     assert exc_info.value.phase == "recon"
     assert exc_info.value.reason == reason
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("unborn", [False, True])
+async def test_improve_inherited_storage_override_stops_before_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: Callable[..., RunConfig],
+    unborn: bool,
+) -> None:
+    repo = tmp_path / "source"
+    _init_repo(repo)
+    (repo / "app.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "app.py")
+    if not unborn:
+        _commit(repo, "initial")
+    (repo / "app.py").write_text("VALUE = 2\n")
+    before_index = (repo / ".git" / "index").read_bytes()
+    before_refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    backend_calls: list[str] = []
+
+    def unexpected_backend(*args: Any, **kwargs: Any) -> Backend:
+        backend_calls.append("created")
+        raise AssertionError("snapshot refusal must precede model construction")
+
+    monkeypatch.setattr("daydream.runner.create_backend", unexpected_backend)
+    alternate = str(repo / ".git" / "objects")
+    with monkeypatch.context() as poison:
+        poison.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate)
+        result = await runner.run(make_config(repo, flow_name="improve"))
+        assert os.environ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] == alternate
+    output = capsys.readouterr().out
+    assert result == 1
+    assert backend_calls == []
+    assert "snapshot refuses inherited Git" in output
+    assert len(output) < 5_000
+    assert (repo / "app.py").read_text() == "VALUE = 2\n"
+    assert (repo / ".git" / "index").read_bytes() == before_index
+    assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
 
 
 # --- Task 6: deep fix-cycle hero is followed by Model: dim line -------------

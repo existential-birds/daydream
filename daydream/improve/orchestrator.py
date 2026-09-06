@@ -345,7 +345,7 @@ def _host_enumerated_commands(
 
 async def _step_recon(ctx: FlowContext) -> Stop | None:
     """Enumerate services, inspect repository conventions, and detect stacks."""
-    target = ctx.work.repo
+    target = _audit_repo(ctx)
     directory: Path = ctx.data["improve_dir"]
     description_mode = ctx.config.improve_plan_description is not None
     branch_focus = ctx.config.improve_focus == "branch"
@@ -439,14 +439,13 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     backend = ctx.backend_for("recon")
-    audit_repo = _audit_repo(ctx)
     async with phase_scope(DaydreamPhase.RECON):
-        exploration = await repo_scan(backend, audit_repo)
+        exploration = await repo_scan(backend, target)
         recon, _, _ = await run_agent(
             backend,
-            audit_repo,
+            target,
             _build_recon_prompt(
-                audit_repo, services, groups, exploration.to_prompt_section()
+                target, services, groups, exploration.to_prompt_section()
             ),
             phase=DaydreamPhase.RECON,
             output_schema=RECON_SCHEMA,
@@ -1062,7 +1061,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 assignment.category,
                 services,
                 partitions,
-                repo=ctx.work.repo,
+                repo=_audit_repo(ctx),
             )
             if stamped is None:
                 discarded_no_evidence += 1
@@ -1347,7 +1346,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                             batch_findings,
                             verdicts,
                             rejected_at_sha=ctx.work.head_sha,
-                            repo=ctx.work.repo,
+                            repo=_audit_repo(ctx),
                             default_provenance=(
                                 "inherited" if branch_focus else None
                             ),
@@ -1833,7 +1832,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                         if isinstance(output, dict):
                             assembled, issues = assemble_plan(
                                 output,
-                                repo=ctx.work.repo,
+                                repo=_audit_repo(ctx),
                                 recon_commands=_verification_commands(ctx.data["recon"]),
                                 expected_fingerprints=(_expected_plan_fingerprints(current)),
                             )
