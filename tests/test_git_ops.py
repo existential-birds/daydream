@@ -13,6 +13,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -1622,6 +1623,29 @@ def test_gh_repo_view_required_returns_exact_slug(
         lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="Owner/Repo\n", stderr=""),
     )
     assert git_ops.gh_repo_view_required(repo) == ("Owner", "Repo")
+
+
+def test_diagnostic_url_redaction_is_bounded_on_long_untrusted_text() -> None:
+    """Non-URL diagnostics must not trigger quadratic scheme-prefix searches."""
+    checked = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from daydream.git_ops import _redact_sensitive_text\n"
+            "for text in ('A' * 100_000, 'A.' * 50_000):\n"
+            "    assert _redact_sensitive_text(text) == text\n"
+            "for scheme in ('https', 'ssh', 'git+custom.transport'):\n"
+            "    raw = f'failed {scheme}://user:password@example.invalid/o/r'\n"
+            "    assert _redact_sensitive_text(raw) == "
+            "f'failed {scheme}://***@example.invalid/o/r'\n",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
 
 
 def test_gh_repo_view_required_preserves_safe_failure_diagnostic(

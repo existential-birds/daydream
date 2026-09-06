@@ -164,7 +164,9 @@ _APP_MANIFEST_CONVERSION_CODE_RE = re.compile(r"(/app-manifests/)[^/\s]+(/conver
 _GITHUB_TOKEN_RE = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
 )
-_URL_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
+# Start at the fixed authority delimiter. Searching for an arbitrary-length
+# scheme at every input character makes long non-URL diagnostics quadratic.
+_URL_USERINFO_RE = re.compile(r"://[^/@\s]+@")
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -179,7 +181,7 @@ def _redact_sensitive_text(text: str) -> str:
     """
     redacted = _APP_MANIFEST_CONVERSION_CODE_RE.sub(r"\1***\2", text)
     redacted = _GITHUB_TOKEN_RE.sub("***", redacted)
-    redacted = _URL_USERINFO_RE.sub(r"\1***@", redacted)
+    redacted = _URL_USERINFO_RE.sub("://***@", redacted)
     for key in ("GH_TOKEN", "GITHUB_TOKEN"):
         token = os.environ.get(key)
         if token and len(token) >= 8:
