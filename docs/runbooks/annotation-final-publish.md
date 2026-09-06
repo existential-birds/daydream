@@ -39,8 +39,13 @@ First inspect the complete admission accounting without publishing:
 daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <source-revision> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --dry-run
 ```
 
-If the accounting and license decisions are correct, hydrate the pinned
-source into the local index:
+Gate the next step on complete record accounting: every discovered record
+must have an admission or exclusion decision, and the license decisions must
+match the production policy. Copyleft repositories remain excluded unless
+you explicitly opt in with `--allow-copyleft`; when needed, pass that option
+to both the dry run and the subsequent hydration commands.
+
+After this gate passes, hydrate the pinned source into the local index:
 
 ```bash
 daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <source-revision> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json
