@@ -3249,6 +3249,16 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         print_success(console, f"Report written to {ctx.data['merged_report']}. Exiting.")
         return Stop(0)
 
+    from daydream import git_ops
+
+    # A rejected index preflight must preserve prior artifacts as well as
+    # source bytes. Only an admitted run may start a new evidence session.
+    try:
+        initial_index = require_empty_staged_index(ctx.work)
+    except (OSError, git_ops.GitError) as exc:
+        print_error(console, "Fix preflight failed", str(exc))
+        return Stop(1)
+
     # An accepted gate starts a new evidence session. No prior run's success,
     # patch, or policy audit may be inherited if this run later stops early.
     dd: Path = ctx.data["dd"]
@@ -3297,10 +3307,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # fixer's edit scope.
     changed_files = _resolve_changed_files(ctx)
 
-    from daydream import git_ops
-
     try:
-        initial_index = require_empty_staged_index(ctx.work)
         stable_head = git_ops.head_sha(ctx.work.repo)
         stable_ref = git_ops.stash_create(ctx.work.repo) or stable_head
         preexisting_untracked = git_ops.snapshot_untracked_paths(
@@ -3950,11 +3957,16 @@ def capture_retained_tree(work: WorkContext, state: FixCycleState) -> RetainedTr
     for mutation attribution, rollback, and test identity.  Commit selection is
     deliberately relative to the original HEAD: authorized reviewed edits that
     predate the gate are part of the result even when no fixer touches them.
+    Pre-existing untracked owner files remain protected even when a finding
+    names them; authorization cannot silently enroll that private draft in a
+    commit. New related files created after the gate are still retained.
     """
     from daydream import git_ops
 
     changed = set(git_ops.changed_paths_z(work.repo, state.stable_head))
-    paths = frozenset(changed & set(state.footprint.run_allowed_paths))
+    paths = frozenset(
+        (changed & set(state.footprint.run_allowed_paths)) - set(state.preexisting_untracked)
+    )
     states = git_ops.snapshot_worktree_paths(work.repo, paths)
     full_states = git_ops.snapshot_worktree_delta(
         work.repo,
@@ -4241,7 +4253,30 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
             if confinement_error is not None:
                 print_error(console, "Fix failure confinement failed", confinement_error)
             return Stop(1)
-    if failures:
+    budget_prefix = "file_group_budget_exceeded:"
+    exception_failures = {
+        path: reason
+        for path, reason in failures.items()
+        if not reason.startswith(budget_prefix)
+    }
+    failures_artifact = fix_failures_path(ctx.data["dd"])
+    try:
+        if failures:
+            atomic_write_json(failures_artifact, failures, sort_keys=True)
+        else:
+            failures_artifact.unlink(missing_ok=True)
+    except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
+        )
+        print_error(console, "Fix failure audit failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        return Stop(1)
+    if exception_failures:
         from daydream import git_ops
 
         confinement_error = _enforce_terminal_confinement(
@@ -4252,7 +4287,6 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
         )
         artifact_errors: list[str] = []
         try:
-            atomic_write_json(fix_failures_path(ctx.data["dd"]), failures, sort_keys=True)
             leftover = sorted(
                 set(
                     git_ops.snapshot_untracked_paths(
@@ -4267,7 +4301,8 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
             artifact_errors.append(str(exc))
         print_warning(
             console,
-            "Fix groups failed and were rolled back: " + ", ".join(sorted(failures)),
+            "Failed fix groups were restored; this run will not commit successful "
+            "sibling-group edits: " + ", ".join(sorted(exception_failures)),
         )
         if confinement_error is not None:
             print_error(console, "Fix failure confinement failed", confinement_error)
@@ -4436,9 +4471,9 @@ async def _step_fix_verify_authorized(
     actionable = _actionable_verdicts(outcomes)
     if actionable and iteration not in (None, 3):
         return None
+    _render_fix_outcome_summary(ctx.data["dd"], ctx.data["items"], outcomes)
     if actionable:
         return Stop(1)
-    _render_fix_outcome_summary(ctx.data["dd"], ctx.data["items"], outcomes)
     return BreakLoop()
 
 

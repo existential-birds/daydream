@@ -2793,8 +2793,9 @@ async def phase_fix_parallel(
 
     Returns:
         ``failures``: file -> reason string.  Exception-failed groups carry
-        ``"<ExceptionType>: <message>"``; their partial edits may be broken and
-        callers MUST revert them.  Budget-exceeded groups carry
+        ``"<ExceptionType>: <message>"`` and have already been restored from the
+        supplied round snapshot; callers must treat them as terminal without
+        reverting successful sibling groups.  Budget-exceeded groups carry
         ``"file_group_budget_exceeded: <reason>"``; their already-applied fixes
         are intact and callers MUST NOT revert them — only the remaining findings
         were skipped.  Callers distinguish the two by the prefix.  Empty dict on
@@ -2967,8 +2968,8 @@ async def phase_fix_parallel(
                             async with _console_lock:
                                 print_warning(
                                     console,
-                                    f"Fixes for '{fkey}' failed ({reason}); other fixes applied "
-                                    "but this file's changes are left uncommitted.",
+                                    f"Fixes for '{fkey}' failed ({reason}); its complete group was "
+                                    "restored and successful sibling-group edits were preserved.",
                                 )
 
             tg.start_soon(_task)

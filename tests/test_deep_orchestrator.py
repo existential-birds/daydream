@@ -180,14 +180,7 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
 
 
 def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
-    """Commit *files* to the current branch so they land in the reviewed diff.
-
-    Issue #336 bounds the fix loop to the reviewed diff's file set: findings on
-    files OUTSIDE the diff are filed as GitHub issues instead of auto-fixed.
-    Fix-loop-mechanics tests that feed synthetic merge items must therefore put
-    those files IN the diff, or the partition correctly routes them to issues
-    and the fix never runs.
-    """
+    """Commit *files* to the branch for tests that need reviewed-diff fixtures."""
     for name in files:
         (target / name).touch()
     _git(target, "add", *files)
@@ -981,6 +974,7 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Spec: a finding still unresolved after the last round appears as
     attempted-not-fixed, never counted/shown as fixed."""
@@ -998,6 +992,7 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
         )
     )
     assert exit_code == 1
+    assert "Attempted, not fixed" in capsys.readouterr().out
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
     assert outcomes["outcomes"]["item:1"]["verdict"] == "unresolved"
     # fix applied was NOT asserted for the unresolved finding (no "Fix applied" line for it)
@@ -1009,6 +1004,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """AC#5: a failed fix group is isolated, surfaced, and exits nonzero.
 
@@ -1054,6 +1050,9 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     assert not (multi_stack_target / ".fixed-bad_py").exists()  # failed group did not apply
     assert any("bad.py" in m for m in warnings)  # non-silent
     assert commit_calls == []  # no commit on failure
+    output = capsys.readouterr().out
+    assert "complete group was restored" in output
+    assert "this file's changes are left uncommitted" not in output
 
 
 async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
@@ -3395,24 +3394,16 @@ async def test_yes_auto_applies_fix(
     assert _fix_prompts(stub), "phase_fix never ran -> --yes did not auto-apply"
 
 
-async def test_fix_gate_routes_out_of_scope_finding_to_issue(
+async def test_fix_gate_authorizes_canonical_finding_outside_reviewed_diff(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#336 real-path: the fix gate files out-of-scope findings as issues.
+    """A canonical primary path is authorized even when absent from the diff.
 
-    merged-items.json carries item A on api.py (inside the reviewed diff) and
-    item B on notes.txt (outside it). Under ``assume="yes"`` the gate must:
-
-      1. exclude item B from the fix list — no fix prompt names notes.txt;
-      2. file exactly one GitHub issue carrying item B's file + description;
-      3. run ``phase_fix`` only for item A's file group.
-
-    Discriminating: without the pre-fix partition, item B would be auto-fixed
-    (a fix prompt would name notes.txt) and no issue would be filed — both
-    assertions fail.
+    Both findings must reach the fixer and merely being outside the reviewed
+    diff must not route ``notes.txt`` to issue filing.
     """
     from daydream.runner import run
 
@@ -3432,8 +3423,6 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
-    # opt-in explicitly.
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
@@ -3448,20 +3437,18 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
     ]
     assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
     assert any("notes.txt" in p for p in fix_prompts)
-    # 3. Fix phase ran for item A's file group (api.py).
     assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
 
     assert issues == []
 
 
-async def test_fix_gate_files_no_issue_by_default(
+async def test_fix_gate_off_diff_finding_files_no_issue_by_default(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#1056 default-off: out-of-scope findings are excluded and short-circuited
-    but NO GitHub issue is filed."""
+    """A canonical off-diff finding is fixed and files no issue by default."""
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -3484,13 +3471,13 @@ async def test_fix_gate_files_no_issue_by_default(
     assert any("notes.txt" in (b or "") for b in _fix_prompts(stub))
 
 
-async def test_fix_gate_files_issue_when_opted_in(
+async def test_fix_gate_off_diff_finding_files_no_issue_when_opted_in(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#1056 opt-in: scope_issue_filing=True restores the #336 filing behavior."""
+    """Scope filing does not turn an authorized finding path into a residual."""
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -3525,15 +3512,9 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
 ) -> None:
     """#572/#573: a ``./``-prefixed finding file stays in scope.
 
-    The grammar now admits ``./x`` as a legal path spelling, so a finding's
-    ``file`` may arrive as ``./api.py`` while the reviewed diff (and the git
-    tree) name the same file as bare ``api.py``. The fix gate's pre-fix
-    partition and the post-fix residual net both compare the finding file
-    against bare git-derived paths, so without normalization a ``./api.py``
-    finding is misfiled as out-of-scope: dropped from auto-fix AND filed as an
-    issue. Discriminating: if the gate normalizes a leading ``./``, the
-    ``./api.py`` finding is fixed (a fix prompt names api.py) and no issue is
-    filed for it.
+    The grammar admits ``./x`` while Git-derived paths are bare. The gate must
+    normalize that spelling before building the footprint so ``api.py`` reaches
+    the fixer under its confined repository-relative identity.
     """
     from daydream.runner import run
 
@@ -3553,8 +3534,6 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
-    # opt-in explicitly.
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
@@ -3576,110 +3555,24 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
     assert issues == []
 
 
-async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
+async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_diff(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#336 real-path: an out-of-scope finding already filed is not re-filed.
+    """Every canonical finding path reaches the fixer, including off-diff paths.
 
-    Out-of-scope findings are never fixed, so a re-run/resume re-derives them.
-    Without cross-run dedup they would be re-filed as a duplicate issue every
-    run (#336 finding). The gate embeds the finding's fingerprint as a hidden
-    marker in the issue body and skips filing when an open issue already
-    carries it (GitHub is the store — same stateless-dedup model as
-    reconcile.py). Discriminating: with dedup ``gh_issue_create`` is never
-    called even though the finding is still excluded from auto-fix.
-    """
-    from daydream.deep.scope_issues import (
-        _scope_finding_fingerprint,
-        _scope_finding_marker,
-    )
-    from daydream.pr_review import compute_fingerprint
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [
-        _merge_item(1, "api.py", "high", desc="in-scope finding"),
-        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
-    ]
-    mute_side_effects()
-
-    # The marker the gate would embed for item 2 — pre-filed in an open issue,
-    # simulating a prior run. Confirm the local helper reproduces the same
-    # identity compute_fingerprint produces, so the dedup key is stable.
-    item_b = _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding")
-    fp = compute_fingerprint(item_b["file"], item_b["description"], item_b["evidence"])
-    marker = _scope_finding_marker(fp)
-    assert marker == _scope_finding_marker(_scope_finding_fingerprint(item_b))
-
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list",
-        lambda repo, **kw: [
-            {
-                "number": 9,
-                "title": "[daydream] out-of-scope finding: notes.txt",
-                "body": f"prior run\n{marker}",
-                "url": "https://github.com/owner/repo/issues/9",
-            }
-        ],
-    )
-
-    created: list[tuple[Any, ...]] = []
-
-    def _record_create(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
-        created.append((repo, title, body))
-        return "https://github.com/owner/repo/issues/9"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_create)
-
-    exit_code = await run(
-        make_config(
-            multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
-        )
-    )
-    assert exit_code == 0
-
-    # Deduped: the already-filed finding is NOT re-filed.
-    assert created == [], f"out-of-scope finding re-filed as a duplicate: {created!r}"
-
-    # And it is still excluded from auto-fix (no fix prompt names notes.txt).
-    fix_prompts = [
-        c["prompt"]
-        for c in stub.calls
-        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
-    ]
-    assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
-    assert any("notes.txt" in p for p in fix_prompts)
-
-
-async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """#336 real-path: when every finding routes to issues, the gate Stop(0)s.
-
-    merged-items.json carries ONLY out-of-scope findings (files outside the
-    reviewed diff {api.py, App.tsx, README.md}). The host also appends a
-    structural finding, so ``parse_by_stack`` routes THAT one to an
-    out-of-scope file too -- otherwise it would default to ``api.py`` (in
-    scope) and keep the gate open. With every merged item out of scope the
-    gate files them all and short-circuits before the no-op fix pass, the
-    full target test-suite run, and the commit-agent turn. Discriminating:
-    without the post-partition ``Stop(0)`` the flow continues into
-    ``phase_fix`` with nothing to fix -- a fix prompt would be dispatched.
+    The test uses only findings outside the reviewed diff and proves the gate
+    neither short-circuits nor files them merely because of that location.
     """
     from daydream.runner import run
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "notes.txt", "high", desc="out-of-scope finding")]
-    # Route the appended structural finding to an out-of-scope file too; the
-    # stub's default structural parse emits ``file=api.py`` (in scope).
+    # Route the appended structural finding to another off-diff file; the
+    # stub's default structural parse emits ``file=api.py``.
     stub.parse_by_stack = {
         "structure": {
             "severity": "high",
@@ -3699,8 +3592,6 @@ async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
-    # opt-in explicitly.
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
@@ -3710,9 +3601,6 @@ async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
 
     assert issues == []
 
-    # No fix prompt dispatched -- the gate short-circuited before phase_fix,
-    # so the run skipped a no-op fix pass + the full target test suite + the
-    # commit-agent turn.
     fix_prompts = [
         c["prompt"]
         for c in stub.calls
@@ -6314,7 +6202,6 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
-    mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: a runaway file group is capped by the serial-item budget.
 
@@ -6325,11 +6212,15 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     group serial-item ceiling lowered to 3, only 3 of the 6 fallback fixes run;
     the remaining 3 are skipped, recorded in ``failures`` (surfaced as the
     fix-failures artifact), and a ``file_group_budget_exceeded`` trajectory event
-    is emitted naming the file, reason, and processed/skipped counts.
+    is emitted naming the file, reason, and processed/skipped counts. Budget
+    exhaustion is recoverable: the retained authorized edits proceed through
+    the real verifier, TEST-agent fallback, strict commit, and push to a local
+    bare remote.
 
     Discriminating: without the group budget, the fallback loop fixes all 6
     api.py findings (six "fix this issue" turns) and no budget event exists --
-    both assertions fail.
+    both assertions fail. Treating the budget marker as an exception failure
+    instead makes the exit/commit/remote assertions fail.
     """
     from daydream.runner import run
 
@@ -6342,7 +6233,10 @@ async def test_run_caps_runaway_file_group_serial_fixes(
         _merge_item(7, "App.tsx", "high")
     ]
     stub.fail_batched_fix_file = "api.py"  # force the per-finding fallback for api.py
-    mute_side_effects()
+    retained_marker = "# retained before budget stop\n"
+    stub.fix_edit_line = retained_marker
+    _add_bare_remote(multi_stack_target)
+    head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
@@ -6351,7 +6245,13 @@ async def test_run_caps_runaway_file_group_serial_fixes(
                 multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
             )
         )
-    assert isinstance(exit_code, int)
+    assert exit_code == 0
+    assert retained_marker in (multi_stack_target / "api.py").read_text()
+    assert stub.test_suite_calls >= 1
+    head_after = _git(multi_stack_target, "rev-parse", "HEAD")
+    assert head_after != head_before
+    remote = multi_stack_target.parent / "multi_stack-remote.git"
+    assert _git(remote, "rev-parse", "refs/heads/feature") == head_after
 
     # The failed batched turn names the api.py group size (the pipeline may add a
     # structural finding, so derive N rather than hard-coding it).
@@ -10579,7 +10479,10 @@ async def test_item_uid_is_never_reported_as_record_provenance(
     assert pool and not any(uid.startswith("item:") for uid in pool), pool
 
 
-def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scratch_is_related", [False, True])
+def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
+    tmp_path: Path, scratch_is_related: bool,
+) -> None:
     """Unrelated/protected bytes invalidate evidence without entering the patch."""
     from daydream import git_ops
     from daydream.deep.orchestrator import FixCycleState, capture_retained_tree
@@ -10594,7 +10497,10 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: P
     _commit(repo, "base")
     (repo / "scratch.bin").write_bytes(b"\x00user")
     protected = git_ops.snapshot_untracked_paths(repo)
-    item = {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": []}
+    item = {
+        "id": 1, "item_uid": "item:1", "file": "a.py",
+        "related_files": ["scratch.bin"] if scratch_is_related else [],
+    }
     footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
     index = git_ops.snapshot_index(repo)
     state = FixCycleState(
@@ -10794,6 +10700,9 @@ async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
     _git(repo, "add", "a.py")
     item = _merge_item(1, "a.py", "high")
     ctx = _direct_fix_context(repo, [item], changed_files={"a.py"})
+    stale = ctx.data["dd"] / "test-verdict.json"
+    stale_bytes = b'{"session_id":"prior","passed":true}\n'
+    stale.write_bytes(stale_bytes)
     index_before = git_ops.snapshot_index(repo)
     bytes_before = (repo / "a.py").read_bytes()
     monkeypatch.setattr("daydream.deep.orchestrator.resolve_or_prompt", lambda **_k: True)
@@ -10805,6 +10714,7 @@ async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
     assert ctx._backend_cache == {}
     assert git_ops.snapshot_index(repo) == index_before
     assert (repo / "a.py").read_bytes() == bytes_before
+    assert stale.read_bytes() == stale_bytes
 
 
 def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None:
