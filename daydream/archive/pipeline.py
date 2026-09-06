@@ -66,14 +66,14 @@ def _fix_state(target_dir: Path, phase_events: list[Any]) -> dict[str, Any]:
     return {"ran": False, "status": _ABSENT}
 
 
-def _test_state(target_dir: Path) -> dict[str, Any]:
+def _test_state(target_dir: Path, session_id: str | None) -> dict[str, Any]:
     """Derive the test terminal state from ``test-verdict.json``.
 
     The verdict is written for BOTH outcomes before the failure early-return, so
     presence ⇔ the test phase ran; ``passed: false`` ⇔ failed.
     """
     verdict = _read_json_artifact(_deep_dir(target_dir) / "test-verdict.json", dict)
-    if verdict is None:
+    if verdict is None or session_id is None or verdict.get("session_id") != session_id:
         return {"ran": False, "status": _ABSENT}
     if verdict.get("passed") is False:
         return {"ran": True, "status": _FAILED}
@@ -92,6 +92,7 @@ def derive_phase_states(
     runs_merge: bool = True,
     runs_fix: bool = True,
     runs_test: bool = True,
+    session_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return per-phase terminal states for ``merge``, ``fix``, and ``test``.
 
@@ -100,19 +101,17 @@ def derive_phase_states(
     derivation over on-disk deep artifacts + recorder phase events; never
     raises on absent/malformed artifacts (they read as ``absent``).
 
-    The deep artifacts (``per-stack-failures.json`` / ``merged-items.json`` /
-    ``test-verdict.json`` / ``fix-failures.json``) are session-agnostic -- they
-    live in ``target_dir/.daydream/deep`` with no run-bound ``session_id``. A
-    non-deep flow run against a previously deep-reviewed repo would otherwise
-    inherit a PRIOR run's artifacts as its own pipeline state. ``runs_merge`` /
-    ``runs_fix`` / ``runs_test`` gate each phase read to only the phases the
-    current flow actually executes; a phase the flow never runs reads
-    ``absent`` (neutral) regardless of what stale artifacts sit on disk.
+    Most deep artifacts are repository-local rather than run-qualified.
+    ``test-verdict.json`` therefore carries a ``session_id`` and is accepted
+    only when it matches this archive session; stale or unbound test evidence
+    reads as absent. ``runs_merge`` / ``runs_fix`` / ``runs_test`` additionally
+    gate reads to phases the current flow executes, so a skipped phase remains
+    neutral regardless of artifacts left by prior runs.
     """
     return {
         "merge": _merge_state(target_dir) if runs_merge else _absent(),
         "fix": _fix_state(target_dir, phase_events) if runs_fix else _absent(),
-        "test": _test_state(target_dir) if runs_test else _absent(),
+        "test": _test_state(target_dir, session_id) if runs_test else _absent(),
     }
 
 

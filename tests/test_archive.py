@@ -2480,10 +2480,29 @@ def test_merge_succeeded_when_items_and_no_merge_key(tmp_path: Path) -> None:
 
 def test_test_failed_from_verdict(tmp_path: Path) -> None:
     from daydream.archive import pipeline
-    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 1, "ignored": False})
-    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    _write_deep(
+        tmp_path,
+        "test-verdict.json",
+        {"session_id": "current", "passed": False, "retries": 1, "ignored": False},
+    )
+    states = pipeline.derive_phase_states(
+        tmp_path, phase_events=[], session_id="current"
+    )
     assert states["test"]["ran"] is True
     assert states["test"]["status"] == "failed"
+
+
+def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(tmp_path: Path) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "test-verdict.json", {"session_id": "prior", "passed": True})
+    states = pipeline.derive_phase_states(
+        tmp_path, phase_events=[], session_id="current"
+    )
+    assert states["test"] == {"ran": False, "status": "absent"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_fix=True, runs_test=True
+    ) == "partial"
 
 
 def test_test_absent_when_no_verdict(tmp_path: Path) -> None:

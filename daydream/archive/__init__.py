@@ -217,6 +217,7 @@ def _archive_run_inner(
         runs_merge=runs_merge,
         runs_fix=runs_fix,
         runs_test=runs_test,
+        session_id=recorder.session_id,
     )
     pipeline_status = derive_pipeline_status(
         status, fix_failures, phase_states, runs_fix=runs_fix, runs_test=runs_test,

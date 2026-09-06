@@ -84,6 +84,102 @@ class _HealBackend(ScriptedBackend):
         return [call["read_only"] for call in self.calls]
 
 
+@pytest.fixture(autouse=True)
+def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adapt pre-footprint unit cases to the required test phase contract.
+
+    The legacy cases in this module exercise menu, prompt, and backend behavior;
+    they now run through a stable identity callback and an explicit run scope.
+    New contract-focused cases can pass their own values, which are preserved.
+    """
+    from daydream import git_ops, phases
+    from daydream.fix_footprint import AuthorizedFixFootprint
+
+    implementation = phases.phase_test_and_heal
+    fix_implementation = phases.phase_fix
+    batched_implementation = phases.phase_fix_batched
+    parallel_implementation = phases.phase_fix_parallel
+
+    async def _with_contract(*args: Any, **kwargs: Any) -> Any:
+        feedback = kwargs.get("feedback_items")
+        paths = frozenset(
+            item["file"]
+            for item in (feedback or [])
+            if isinstance(item, dict) and isinstance(item.get("file"), str)
+        )
+        kwargs.setdefault("session_id", "unit-test-session")
+        kwargs.setdefault("capture_tree_key", lambda: "unit-test-tree")
+        kwargs.setdefault(
+            "footprint",
+            AuthorizedFixFootprint(run_allowed_paths=paths, policy_revision=1),
+        )
+        return await implementation(*args, **kwargs)
+
+    monkeypatch.setattr(phases, "phase_test_and_heal", _with_contract)
+
+    async def _fix_with_contract(*args: Any, **kwargs: Any) -> Any:
+        item = args[2]
+        changed = kwargs.pop("changed_files", None)
+        default_scope = frozenset(
+            {item.get("file")} if isinstance(item.get("file"), str) else set()
+        )
+        edit_scope = frozenset(changed) if changed is not None else default_scope
+        kwargs.setdefault("edit_scope", edit_scope)
+        kwargs.setdefault("read_scope", edit_scope)
+        return await fix_implementation(*args, **kwargs)
+
+    async def _batched_with_contract(*args: Any, **kwargs: Any) -> Any:
+        items = args[2]
+        changed = kwargs.pop("changed_files", None)
+        default_scope = frozenset(
+            item["file"] for item in items if isinstance(item.get("file"), str)
+        )
+        edit_scope = frozenset(changed) if changed is not None else default_scope
+        kwargs.setdefault("edit_scope", edit_scope)
+        kwargs.setdefault("read_scope", edit_scope)
+        return await batched_implementation(*args, **kwargs)
+
+    async def _parallel_with_contract(*args: Any, **kwargs: Any) -> Any:
+        original_items = args[2]
+        items = [dict(item, item_uid=item.get("item_uid") or f"item:{n}")
+                 for n, item in enumerate(original_items, start=1)]
+        mutable_args = (*args[:2], items, *args[3:])
+        item_paths = {
+            item["item_uid"]: frozenset(
+                path
+                for path in [item.get("file"), *(item.get("related_files") or [])]
+                if isinstance(path, str)
+            )
+            for item in items
+        }
+        run_paths = frozenset(path for paths in item_paths.values() for path in paths)
+        kwargs.setdefault(
+            "footprint",
+            AuthorizedFixFootprint(
+                run_allowed_paths=run_paths,
+                policy_revision=1,
+                _item_paths=item_paths,
+            ),
+        )
+        from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
+
+        kwargs.setdefault(
+            "round_snapshot",
+            WorktreeRollbackSnapshot(
+                ref="HEAD",
+                index=IndexSnapshot(tree_sha="unit-test-tree", paths=()),
+                path_states=(),
+                untracked={},
+            ),
+        )
+        return await parallel_implementation(*mutable_args, **kwargs)
+
+    monkeypatch.setattr(phases, "phase_fix", _fix_with_contract)
+    monkeypatch.setattr(phases, "phase_fix_batched", _batched_with_contract)
+    monkeypatch.setattr(phases, "phase_fix_parallel", _parallel_with_contract)
+    monkeypatch.setattr(git_ops, "restore_group_from_snapshot", lambda *args, **kwargs: None)
+
+
 def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(
     tmp_path: Path,
     silence_console: Callable[..., None],
@@ -884,7 +980,7 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
 
     result = await phase_test_and_heal(backend, make_work(tmp_path))
 
-    assert result == (False, 1, False)
+    assert (result.passed, result.retries, result.proceed) == (False, 1, False)
     assert backend.call_count == 2
 
 
@@ -1078,17 +1174,12 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_prompt_enumerates_changed_files_when_provided(
+async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None],
 ) -> None:
-    """When ``changed_files`` is passed, the prompt carries an explicit
-    "Allowed files" clause enumerating the reviewed diff's file set.
-
-    ``changed_files=None`` (legacy/resume callers) keeps the old behavior — no
-    allowed-files clause in the prompt, only the prose boundary.
-    """
+    """The prompt distinguishes exact edit authority from readable context."""
     from daydream.phases import phase_fix
 
     silence_console("daydream.phases")
@@ -1098,22 +1189,24 @@ async def test_phase_fix_prompt_enumerates_changed_files_when_provided(
     item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
     await phase_fix(
         backend_with, make_work(tmp_path), item, 1, 1,
-        changed_files={"src/handler.py", "src/util.py"},
+        edit_scope=frozenset({"src/handler.py", "src/util.py"}),
+        read_scope=frozenset({"src/handler.py", "src/util.py"}),
     )
     assert len(backend_with.prompts) == 1
     prompt_with = backend_with.prompts[0]
-    # The clause is present and lists both files.
-    assert "Allowed files" in prompt_with
+    # The exact edit clause is present and lists both files.
+    assert "Authorized edit scope" in prompt_with
     # src/handler.py already appears via the finding's own File: line, so only
-    # src/util.py (which appears nowhere else) isolates the Allowed-files clause.
+    # src/util.py (which appears nowhere else) isolates the edit-scope clause.
     assert "src/util.py" in prompt_with
 
-    # --- Without changed_files: no allowed-files clause (legacy callers). ---
+    # --- A direct item still receives its own exact scope. ---
     backend_without = ScriptedBackend()
     await phase_fix(backend_without, make_work(tmp_path), item, 1, 1)
     assert len(backend_without.prompts) == 1
     prompt_without = backend_without.prompts[0]
-    assert "Allowed files" not in prompt_without
+    assert "Authorized edit scope" in prompt_without
+    assert "src/handler.py" in prompt_without
 
 
 @pytest.mark.asyncio
@@ -4930,32 +5023,401 @@ def test_print_fix_complete_gates_on_resolved(
     assert out.count("Fix applied") == 1  # only the resolved one
 
 
-def test_group_items_by_footprint_unions_overlapping_footprints() -> None:
+def test_group_items_by_footprint_unions_overlapping_footprints(tmp_path: Path) -> None:
+    from daydream.fix_footprint import AuthorizedFixFootprint
     from daydream.phases import group_items_by_footprint
 
     items = [
-        {"id": 1, "file": "a.py", "related_files": ["b.py"]},
-        {"id": 2, "file": "b.py"},                      # overlaps item 1 via b.py
-        {"id": 3, "file": "c.py"},                      # disjoint
+        {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["b.py"]},
+        {"id": 2, "item_uid": "item:2", "file": "b.py"},
+        {"id": 3, "item_uid": "item:3", "file": "c.py"},
     ]
-    groups = group_items_by_footprint(items)
+    groups = group_items_by_footprint(
+        items, AuthorizedFixFootprint.build(tmp_path, set(), items)
+    )
     # 1 and 2 must be in ONE group (shared b.py); 3 separate.
     assert len(groups) == 2
     a_group = next(it for _, it in groups if any(i["id"] == 1 for i in it))
     assert {i["id"] for i in a_group} == {1, 2}
 
 
-def test_group_items_by_footprint_never_splits_same_file_batch() -> None:
+def test_group_items_by_footprint_never_splits_same_file_batch(tmp_path: Path) -> None:
+    from daydream.fix_footprint import AuthorizedFixFootprint
     from daydream.phases import group_items_by_footprint
 
     items = [
-        {"id": 1, "file": "a.py"},
-        {"id": 2, "file": "a.py", "related_files": ["x.py"]},
-        {"id": 3, "file": "a.py"},
+        {"id": 1, "item_uid": "item:1", "file": "a.py"},
+        {"id": 2, "item_uid": "item:2", "file": "a.py", "related_files": ["x.py"]},
+        {"id": 3, "item_uid": "item:3", "file": "a.py"},
     ]
-    groups = group_items_by_footprint(items)
+    groups = group_items_by_footprint(
+        items, AuthorizedFixFootprint.build(tmp_path, set(), items)
+    )
     assert len([g for _, g in groups]) == 1  # same primary file must never split (#170/#202)
     assert {i["id"] for i in groups[0][1]} == {1, 2, 3}
+
+
+def test_group_items_by_footprint_uses_authorized_transitive_scopes(tmp_path: Path) -> None:
+    """Grouping is driven by the normalized policy, not raw finding fields."""
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.phases import group_items_by_footprint
+
+    items = [
+        {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["bridge.py"]},
+        {"id": 2, "item_uid": "item:2", "file": "b.py", "related_files": ["bridge.py"]},
+        {"id": 3, "item_uid": "item:3", "file": "c.py"},
+    ]
+    footprint = AuthorizedFixFootprint.build(tmp_path, {"reviewed-only.py"}, items)
+
+    groups = group_items_by_footprint(items, footprint)
+
+    assert [[item["item_uid"] for item in group] for _, group in groups] == [
+        ["item:1", "item:2"],
+        ["item:3"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_passes_exact_group_edit_and_run_read_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """Disjoint groups cannot edit a reviewed-only path shared by the run."""
+    from daydream import phases
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
+
+    items = [
+        {"id": 1, "item_uid": "item:1", "file": "a.py"},
+        {"id": 2, "item_uid": "item:2", "file": "b.py"},
+    ]
+    footprint = AuthorizedFixFootprint.build(tmp_path, {"shared.md"}, items)
+    round_snapshot = WorktreeRollbackSnapshot(
+        ref="HEAD",
+        index=IndexSnapshot(tree_sha="tree", paths=()),
+        path_states=(),
+        untracked={},
+    )
+    calls: list[tuple[frozenset[str], frozenset[str]]] = []
+
+    async def _fake_fix(*args: Any, **kwargs: Any) -> None:
+        calls.append((kwargs["edit_scope"], kwargs["read_scope"]))
+
+    monkeypatch.setattr(phases, "phase_fix", _fake_fix)
+
+    await phases.phase_fix_parallel(
+        cast(Backend, object()),
+        make_work(tmp_path),
+        items,
+        footprint=footprint,
+        round_snapshot=round_snapshot,
+    )
+
+    assert sorted(edit for edit, _ in calls) == [frozenset({"a.py"}), frozenset({"b.py"})]
+    assert all(read == footprint.run_allowed_paths for _, read in calls)
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_restores_whole_group_before_batch_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    from daydream import git_ops, phases
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.git_ops import IndexSnapshot, WorktreeRollbackSnapshot
+
+    items = [
+        {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["shared.py"]},
+        {"id": 2, "item_uid": "item:2", "file": "shared.py", "related_files": ["test_a.py"]},
+    ]
+    footprint = AuthorizedFixFootprint.build(tmp_path, set(), items)
+    snapshot = WorktreeRollbackSnapshot(
+        ref="round-ref",
+        index=IndexSnapshot(tree_sha="round-index", paths=()),
+        path_states=(),
+        untracked={},
+    )
+    restored: list[tuple[WorktreeRollbackSnapshot, frozenset[str]]] = []
+
+    async def _fail_batch(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("partial batch")
+
+    async def _fix(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    def _restore(repo: Path, supplied: WorktreeRollbackSnapshot, paths: Any) -> None:
+        restored.append((supplied, frozenset(paths)))
+
+    monkeypatch.setattr(phases, "phase_fix_batched", _fail_batch)
+    monkeypatch.setattr(phases, "phase_fix", _fix)
+    monkeypatch.setattr(git_ops, "restore_group_from_snapshot", _restore)
+
+    failures = await phases.phase_fix_parallel(
+        cast(Backend, object()),
+        make_work(tmp_path),
+        items,
+        footprint=footprint,
+        round_snapshot=snapshot,
+    )
+
+    assert failures == {}
+    assert restored == [(snapshot, frozenset({"a.py", "shared.py", "test_a.py"}))]
+
+
+@pytest.mark.asyncio
+async def test_phase_test_once_records_host_input_and_output_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    from daydream import phases
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.test_execution import TestExecutionResult
+
+    observed = iter(["before", "after"])
+
+    async def _run(*args: Any, **kwargs: Any) -> TestExecutionResult:
+        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="1 passed")
+
+    monkeypatch.setattr(phases, "run_test_command", _run)
+    evidence, continuation, output = await phases.phase_test_once(
+        _HostCommitBackend(tmp_path),
+        make_work(tmp_path),
+        config=SimpleNamespace(
+            test_command="pytest -q",
+            file_config=DaydreamFileConfig(test_command="pytest -q"),
+        ),
+        session_id="session-1",
+        capture_tree_key=lambda: next(observed),
+    )
+
+    assert evidence.session_id == "session-1"
+    assert evidence.kind == "host"
+    assert evidence.command == ("pytest", "-q")
+    assert evidence.passed is True
+    assert evidence.input_tree_key == "before"
+    assert evidence.output_tree_key == "after"
+    assert continuation is None
+    assert output == "1 passed"
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    from daydream import phases
+    from daydream.fix_footprint import AuthorizedFixFootprint
+
+    feedback = [{"id": 1, "item_uid": "item:1", "file": "a.py"}]
+    footprint = AuthorizedFixFootprint.build(tmp_path, {"readme.md"}, feedback)
+    backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
+    monkeypatch.setattr(phases, "prompt_user", lambda *args, **kwargs: "2")
+    keys = iter(["in-1", "out-1", "in-2", "out-2"])
+
+    result = await phases.phase_test_and_heal(
+        backend,
+        make_work(tmp_path),
+        feedback_items=feedback,
+        session_id="session-2",
+        capture_tree_key=lambda: next(keys),
+        footprint=footprint,
+    )
+
+    assert result.passed is True
+    assert result.ignored is False
+    assert [(a.input_tree_key, a.output_tree_key) for a in result.attempts] == [
+        ("in-1", "out-1"),
+        ("in-2", "out-2"),
+    ]
+    assert all(a.kind == "agent" and a.command is None for a in result.attempts)
+    heal_prompt = backend.prompts[1]
+    assert "Authorized edit scope" in heal_prompt
+    assert "a.py" in heal_prompt and "readme.md" in heal_prompt
+
+
+def test_require_empty_staged_index_rejects_preexisting_staged_change(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    from daydream.phases import require_empty_staged_index
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / "base.py").write_text("base\n")
+    git(repo, "add", "base.py")
+    git_commit(repo, "baseline")
+    (repo / "staged.py").write_text("new\n")
+    git(repo, "add", "staged.py")
+
+    with pytest.raises(Exception, match="staged changes"):
+        require_empty_staged_index(make_work(repo))
+
+
+@pytest.mark.asyncio
+async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    from daydream import git_ops, phases
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / "app.py").write_text("before\n")
+    git(repo, "add", "app.py")
+    git_commit(repo, "baseline")
+    initial_index = phases.require_empty_staged_index(make_work(repo))
+    (repo / "app.py").write_text("after\n")
+    retained_states = git_ops.snapshot_worktree_paths(repo, ["app.py"])
+    calls = {"stage": 0, "commit_staged": 0}
+    real_stage = git_ops.stage_paths
+    real_commit_staged = git_ops.commit_staged
+
+    def _stage(*args: Any, **kwargs: Any) -> None:
+        calls["stage"] += 1
+        real_stage(*args, **kwargs)
+
+    def _commit_staged(*args: Any, **kwargs: Any) -> None:
+        calls["commit_staged"] += 1
+        real_commit_staged(*args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "stage_paths", _stage)
+    monkeypatch.setattr(git_ops, "commit_staged", _commit_staged)
+    monkeypatch.setattr(
+        git_ops,
+        "commit_paths",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("strict commit must not restage")
+        ),
+    )
+
+    committed = await phases._do_commit(
+        _HostCommitBackend(repo),
+        make_work(repo),
+        retained_paths=frozenset({"app.py"}),
+        retained_states=retained_states,
+        initial_index=initial_index,
+    )
+
+    assert committed is True
+    assert calls == {"stage": 1, "commit_staged": 1}
+    assert git(repo, "show", "HEAD:app.py") == "after"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("artifact_path", "tracked", "preexisting", "must_block"),
+    [
+        (".daydream/runtime.json", False, False, False),
+        (".daydream/runtime.json", False, True, False),
+        (".review-output.md", False, True, False),
+        (".daydreamish/runtime.json", False, False, True),
+        (".daydream/tracked.json", True, True, True),
+    ],
+)
+async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user_files(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    artifact_path: str,
+    tracked: bool,
+    preexisting: bool,
+    must_block: bool,
+) -> None:
+    """A real hook may update runtime output, never tracked or lookalike user files."""
+    from daydream import git_ops, phases
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / "app.py").write_text("before\n")
+    artifact = repo / artifact_path
+    if preexisting:
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("before runtime\n")
+    git(repo, "add", "app.py")
+    if tracked:
+        git(repo, "add", artifact_path)
+    git_commit(repo, "baseline")
+    initial_index = phases.require_empty_staged_index(make_work(repo))
+    (repo / "app.py").write_text("after\n")
+    retained_states = git_ops.snapshot_worktree_paths(repo, ["app.py"])
+    hook = repo / ".git" / "hooks" / "post-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "mkdir -p .daydream .daydreamish\n"
+        f"printf '%s\\n' 'hook runtime' > '{artifact_path}'\n"
+    )
+    hook.chmod(0o755)
+
+    async def commit_retained() -> bool:
+        return await phases._do_commit(
+            _HostCommitBackend(repo),
+            make_work(repo),
+            retained_paths=frozenset({"app.py"}),
+            retained_states=retained_states,
+            initial_index=initial_index,
+        )
+
+    if must_block:
+        with pytest.raises(git_ops.GitError, match="push blocked"):
+            await commit_retained()
+    else:
+        assert await commit_retained() is True
+    assert artifact.read_text() == "hook runtime\n"
+    assert git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD") == "app.py"
+    assert git(repo, "diff", "--cached") == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hook_mutation", ["worktree", "index"])
+async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    hook_mutation: str,
+) -> None:
+    from daydream import git_ops, phases
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / "app.py").write_text("before\n")
+    git(repo, "add", "app.py")
+    git_commit(repo, "baseline")
+    initial_index = phases.require_empty_staged_index(make_work(repo))
+    (repo / "app.py").write_text("after\n")
+    retained_states = git_ops.snapshot_worktree_paths(repo, ["app.py"])
+    real_commit_staged = git_ops.commit_staged
+
+    def _mutating_commit(repo_arg: Path, message: str) -> None:
+        real_commit_staged(repo_arg, message)
+        if hook_mutation == "worktree":
+            (repo_arg / "app.py").write_text("hook mutation\n")
+        else:
+            (repo_arg / "app.py").write_text("hook mutation\n")
+            git(repo_arg, "add", "app.py")
+            (repo_arg / "app.py").write_text("after\n")
+
+    monkeypatch.setattr(git_ops, "commit_staged", _mutating_commit)
+
+    with pytest.raises(
+        git_ops.GitError,
+        match=r"Local commit [0-9a-f]+ was created.*push blocked",
+    ):
+        await phases._do_commit(
+            _HostCommitBackend(repo),
+            make_work(repo),
+            retained_paths=frozenset({"app.py"}),
+            retained_states=retained_states,
+            initial_index=initial_index,
+        )
+
+    assert git(repo, "show", "HEAD:app.py") == "after"
+    expected_worktree = "hook mutation\n" if hook_mutation == "worktree" else "after\n"
+    assert (repo / "app.py").read_text() == expected_worktree
 
 
 async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(

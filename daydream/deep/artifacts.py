@@ -183,6 +183,16 @@ def fix_outcomes_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "fix-outcomes.json"
 
 
+def fix_footprint_path(deep_dir_path: Path) -> Path:
+    """Session-bound authorization and enforcement audit for the fix cycle."""
+    return deep_dir_path / "fix-footprint.json"
+
+
+def stabilization_failed_path(deep_dir_path: Path) -> Path:
+    """Terminal reason emitted when the bounded retained tree cannot stabilize."""
+    return deep_dir_path / "stabilization-failed.json"
+
+
 def recommended_capture_path(deep_dir_path: Path) -> Path:
     """Capture-point sidecar recording which tree produced recommended.patch.
 

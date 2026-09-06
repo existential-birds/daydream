@@ -415,6 +415,9 @@ class StubBackend:
         if sm is None or sm.group(1) not in self.parse_by_stack:
             return [issue]
         ov = self.parse_by_stack[sm.group(1)]
+        payload = ov.get("issue")
+        if isinstance(payload, dict):
+            issue.update(payload)
         issue["severity"] = ov["severity"]
         issue["confidence"] = ov["confidence"]
         issue["file"] = ov.get("file", issue["file"])
@@ -1086,8 +1089,11 @@ class StubBackend:
         if "post-fix fix-verifier agent" in pl:
             if self.fix_verify_requires_read_only and not read_only:
                 raise AssertionError("fix-verify turn must arrive read_only=True")
-            round_match = re.search(r"Round (\d+) of up to 3 check passes", prompt)
-            round_num = int(round_match.group(1)) if round_match else 1
+            round_match = re.search(
+                r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))",
+                prompt,
+            )
+            round_num = int(next(group for group in round_match.groups() if group)) if round_match else 1
             ids = [int(i) for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
             verdicts = []
             for i in ids:

@@ -12,16 +12,132 @@ fingerprint -> marker -> dedup -> file chain, issue #1051). Extracted from
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daydream.agent import console
+from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.generated_files import is_generated_file
+from daydream.git_ops import GitPathState
 from daydream.ui import print_warning
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
     from daydream.workspace import WorkContext
+
+
+@dataclass(frozen=True)
+class ScopeEnforcementResult:
+    """Outcome of one strict run-wide authorization enforcement boundary."""
+
+    retained_paths: frozenset[str]
+    mutated: bool
+
+
+def enforce_authorized_fix_footprint(
+    work: WorkContext,
+    stable_ref: str,
+    footprint: AuthorizedFixFootprint,
+    *,
+    preexisting_untracked: dict[str, GitPathState],
+    phase: str,
+    round_number: int | None,
+    file_scope_issues: bool = False,
+) -> ScopeEnforcementResult:
+    """Restore every run-external edit while preserving authorized siblings.
+
+    Enumeration, capture, restoration, and verification are strict. Protected
+    pre-existing untracked paths are compared by their stored blob/type/mode
+    state and restored even though they remain untracked throughout the run.
+    The index is snapshotted at entry and restored byte-for-byte after the
+    worktree-only recovery operation.
+    """
+    from daydream import git_ops
+
+    repo = work.repo
+    index_before = git_ops.snapshot_index(repo)
+    tracked_changed = set(git_ops.changed_paths_z(repo, stable_ref, include_untracked=False))
+    current_untracked = git_ops.snapshot_untracked_paths(repo, include_runtime_artifacts=False)
+    current_protected: dict[str, GitPathState] = {}
+    for path in preexisting_untracked:
+        if path in current_untracked:
+            current_protected[path] = current_untracked[path]
+        else:
+            current_protected[path] = git_ops.snapshot_worktree_paths(repo, [path])[0]
+    mutated_protected = {
+        path
+        for path, baseline in preexisting_untracked.items()
+        if current_protected[path] != baseline
+    }
+    new_untracked = set(current_untracked) - set(preexisting_untracked)
+    residual_tracked = tracked_changed - set(footprint.run_allowed_paths)
+    residual_new = new_untracked - set(footprint.run_allowed_paths)
+    to_restore = residual_tracked | residual_new | mutated_protected
+
+    if file_scope_issues:
+        paths_to_file = sorted(
+            residual_tracked - set(preexisting_untracked),
+            key=lambda value: value.encode("utf-8", "surrogateescape"),
+        )
+        for path in paths_to_file:
+            patch = git_ops.diff_worktree_against(repo, stable_ref, [path])
+            _file_reverted_edit_issue(repo, path, patch)
+
+    if to_restore:
+        stable_states = git_ops.snapshot_commit_paths(
+            repo,
+            stable_ref,
+            residual_tracked - set(preexisting_untracked),
+        )
+        rollback = git_ops.WorktreeRollbackSnapshot(
+            ref=stable_ref,
+            index=index_before,
+            path_states=stable_states,
+            untracked={path: preexisting_untracked[path] for path in mutated_protected},
+        )
+        git_ops.restore_group_from_snapshot(repo, rollback, to_restore)
+
+        for path in sorted(to_restore, key=lambda value: value.encode("utf-8", "surrogateescape")):
+            if path in residual_new and path not in preexisting_untracked:
+                action = "remove"
+                reason = "removed a new untracked path outside the authorized run footprint"
+            else:
+                action = "restore"
+                reason = (
+                    "restored protected pre-existing untracked state"
+                    if path in preexisting_untracked
+                    else "restored tracked content outside the authorized run footprint"
+                )
+            footprint.record_git_event(
+                action=action,
+                path=path,
+                origin="guard",
+                phase=phase,
+                round_number=round_number,
+                reason=reason,
+            )
+
+    if git_ops.snapshot_index(repo) != index_before:
+        raise git_ops.GitError("scope enforcement changed the repository index")
+    untracked_after = git_ops.snapshot_untracked_paths(repo, include_runtime_artifacts=False)
+    for path, baseline in preexisting_untracked.items():
+        current = (
+            untracked_after[path]
+            if path in untracked_after
+            else git_ops.snapshot_worktree_paths(repo, [path])[0]
+        )
+        if current != baseline:
+            raise git_ops.GitError("scope enforcement did not restore protected untracked state")
+    remaining_tracked = set(git_ops.changed_paths_z(repo, stable_ref, include_untracked=False))
+    remaining_untracked = set(untracked_after) - set(preexisting_untracked)
+    residual_after = (remaining_tracked | remaining_untracked) - set(footprint.run_allowed_paths)
+    if residual_after:
+        raise git_ops.GitError("scope enforcement left paths outside the authorized run footprint")
+    retained = ((remaining_tracked | remaining_untracked) & set(footprint.run_allowed_paths)) - set(
+        preexisting_untracked
+    )
+    return ScopeEnforcementResult(retained_paths=frozenset(retained), mutated=bool(to_restore))
 
 
 def _file_scope_issue(repo: Path, *, title: str, body: str, noun: str, ident: str) -> None:
@@ -215,9 +331,8 @@ def _revert_out_of_scope_edits(
     files the fix pass actually edited (vs the pre-fix snapshot) and subtract
     the allowed set — the finding files, the reviewed-diff file set, and
     newly-created generated files. Every residual is reverted unconditionally to
-    its pre-fix content (``git checkout <ref> -- <file>``, the same mechanism
-    the generated-file guard uses) so the commit step can never land an
-    edit outside the reviewed diff.
+    its pre-fix worktree content without changing the index, so the commit step
+    can never land an edit outside the reviewed diff.
 
     Filing is OPT-IN (issue #1056): when *file_scope_issues* is true each
     reverted residual is additionally filed as a best-effort GitHub issue
@@ -305,9 +420,9 @@ def _revert_out_of_scope_edits(
                 patch = git_ops.diff_worktree_against(repo, pre_fix_ref, [path])
             except GitError as exc:
                 print_warning(console, f"Could not diff out-of-scope edit '{path}': {exc}")
-        # Revert unconditionally — same mechanism as the generated-file guard.
+        # Revert the worktree only; preserve the index exactly as supplied.
         try:
-            git_ops.restore_paths_from_ref(repo, pre_fix_ref, [path])
+            git_ops.restore_worktree_paths_from_ref(repo, pre_fix_ref, [path])
         except GitError as exc:
             print_warning(console, f"Could not revert out-of-scope edit '{path}': {exc}")
             # Fail-close to match the sibling generated-file guard: an

@@ -573,8 +573,28 @@ def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
         async def _no_post(*_args: object, **_kwargs: object) -> None:
             return None
 
-        async def _ok(*_args: object, **_kwargs: object) -> tuple[bool, int, bool]:
-            return True, 0, True
+        async def _ok(*_args: object, **kwargs: object) -> object:
+            from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+            capture = kwargs["capture_tree_key"]
+            session_id = str(kwargs["session_id"])
+            key = capture()  # type: ignore[operator]
+            return TestAndHealResult(
+                passed=True,
+                retries=0,
+                proceed=True,
+                ignored=False,
+                attempts=(
+                    TestAttemptEvidence(
+                        session_id=session_id,
+                        kind="agent",
+                        command=None,
+                        passed=True,
+                        input_tree_key=key,
+                        output_tree_key=key,
+                    ),
+                ),
+            )
 
         if post:
             monkeypatch.setattr(

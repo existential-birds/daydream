@@ -7,6 +7,7 @@ import logging
 import re
 import shlex
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
@@ -38,6 +39,7 @@ from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
+from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.generated_files import (
     GENERATED_FILES_PROMPT_RULE,
     _changed_untracked_generated_files,
@@ -1238,8 +1240,11 @@ def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda it: SEVERITY_RANK.get(it.get("severity") or "", 1))
 
 
-def group_items_by_footprint(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Partition fix items by footprint (``{file} ∪ related_files``), widening-only.
+def group_items_by_footprint(
+    items: list[dict[str, Any]],
+    footprint: AuthorizedFixFootprint,
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Partition fix items by their normalized authorized footprints.
 
     A finding's footprint is its primary ``file`` plus every ``related_files``
     entry it carries. Any two groups whose footprints share a file are united
@@ -1281,10 +1286,10 @@ def group_items_by_footprint(items: list[dict[str, Any]]) -> list[tuple[str, lis
 
     file_to_indices: dict[str, list[int]] = {}
     for i, item in enumerate(items):
-        footprint = {(item.get("file") or "<no-file>")} | {
-            f for f in (item.get("related_files") or []) if isinstance(f, str)
-        }
-        for f in footprint:
+        item_uid = item.get("item_uid")
+        if not isinstance(item_uid, str) or not item_uid:
+            raise ValueError("fix grouping requires item_uid")
+        for f in footprint.item_paths(item_uid):
             for j in file_to_indices.setdefault(f, []):
                 union(i, j)
             file_to_indices[f].append(i)
@@ -2077,11 +2082,10 @@ async def phase_fix_verify(
     console_lock: anyio.Lock | None = None,
     round_number: int = 1,
 ) -> list[dict[str, Any]]:
-    """Post-round fix verifier: one read-only verdict per dispatched finding.
+    """Read-only verifier: one verdict per supplied canonical finding.
 
-    Runs AFTER every fix group in a round finishes (the round barrier — the
-    caller invokes this once per footprint group). The agent audits the
-    round's changed hunks only (never the whole tree) and returns exactly one
+    The agent audits the complete retained patch supplied by the caller and
+    returns exactly one
     verdict per listed finding from the four-value enum: ``resolved``,
     ``unresolved``, ``wrong_target(path)``, or ``regressed(path)``.
 
@@ -2235,18 +2239,22 @@ report why instead of running it.
 )
 
 
-def _build_allowed_files_clause(changed_files: set[str] | None) -> str:
-    """Build the explicit "Allowed files" clause for a fix prompt.
+def _build_fix_scope_clause(
+    edit_scope: frozenset[str], read_scope: frozenset[str]
+) -> str:
+    """Render separate edit authorization and readable run context.
 
-    Issue #336 threads the reviewed diff's file set into the fix prompt so the
-    prose boundary above is also concrete and checkable. ``None`` (legacy
-    callers, resume without diff context) yields an empty string — the prose
-    boundary still applies, but no enumerated file set is injected (behavior
-    unchanged for those callers).
+    The edit list is the enforcement contract. The wider read list is context
+    only and never grants write authority.
     """
-    if not changed_files:
-        return ""
-    return "\nAllowed files (reviewed diff + this finding): " + ", ".join(sorted(changed_files)) + "\n"
+    edits = ", ".join(sorted(edit_scope)) or "(none)"
+    readable_only = ", ".join(sorted(read_scope - edit_scope)) or "(none)"
+    return (
+        "\nAuthorized edit scope (ONLY these repository-relative paths): "
+        f"{edits}\n"
+        "Run-readable context (read-only unless also listed in the edit scope): "
+        f"{readable_only}\n"
+    )
 
 
 def _item_evidence(item: dict[str, Any]) -> str:
@@ -2504,9 +2512,10 @@ async def phase_fix(
     item_num: int,
     total: int,
     *,
+    edit_scope: frozenset[str] | None = None,
+    read_scope: frozenset[str] | None = None,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
-    changed_files: set[str] | None = None,
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
 ) -> None:
@@ -2518,6 +2527,8 @@ async def phase_fix(
         item: Feedback item containing description, file, and line
         item_num: Current item number (1-indexed)
         total: Total number of items
+        edit_scope: Exact transitive group paths the fixer may edit.
+        read_scope: Run-wide paths available as read-only context.
         console_lock: Optional lock to serialize console writes across
             concurrent callers.  Pass the same lock to every concurrent
             ``phase_fix`` invocation; leave ``None`` for serial callers.
@@ -2526,17 +2537,14 @@ async def phase_fix(
             with a rule forbidding fixes that undo a deliberate decision. The
             read is best-effort enrichment: a missing or unreadable file is
             skipped silently so an intent-read failure can never block the fix.
-        changed_files: Optional set of files in the reviewed diff (issue #336).
-            When non-None, an explicit "Allowed files" clause is appended to
-            the prompt so the prose scope boundary is also concrete. ``None``
-            (legacy/resume callers) leaves the prompt without the clause; the
-            prose boundary still applies.
         exploration_dir: Optional pre-scan directory whose deterministic
             ``affected_files.md`` index is pointed out to the fixer.
         test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
     """
+    if edit_scope is None or read_scope is None:
+        raise TypeError("phase_fix requires explicit edit_scope and read_scope")
     description = item.get("description", "No description")
     file_ref = _resolve_finding_file_ref(work.repo, item.get("file"))
     line = item.get("line", "Unknown")
@@ -2556,9 +2564,8 @@ File: {file_ref}
 Line: {line}{related_line}{evidence_line}
 
 Make the minimal change needed. {_FIX_GUARDRAILS}"""
-    # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
-    # the prose boundary in place without an enumerated set.
-    prompt += _build_allowed_files_clause(changed_files)
+    # Exact group edit authority is distinct from wider read-only run context.
+    prompt += _build_fix_scope_clause(edit_scope, read_scope)
     prompt += _exploration_pointer(exploration_dir, fixer=True)
     prompt += _build_test_map_hints([item], test_map, work.repo)
 
@@ -2602,9 +2609,10 @@ async def phase_fix_batched(
     item_nums: list[int],
     total: int,
     *,
+    edit_scope: frozenset[str] | None = None,
+    read_scope: frozenset[str] | None = None,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
-    changed_files: set[str] | None = None,
     exploration_dir: Path | None = None,
     test_map: dict[str, str] | None = None,
 ) -> None:
@@ -2625,26 +2633,27 @@ async def phase_fix_batched(
         items: Feedback items, all targeting the same file.
         item_nums: 1-based progress counters aligned with ``items``.
         total: Total number of items across the whole fix run.
+        edit_scope: Exact transitive group paths the fixer may edit.
+        read_scope: Run-wide paths available as read-only context.
         console_lock: Optional lock to serialize console writes across concurrent
             callers. Pass the same lock to every concurrent invocation; leave
             ``None`` for serial callers.
         intent_path: Optional path to the confirmed author-intent file, injected
             verbatim (same best-effort handling as ``phase_fix``).
-        changed_files: Optional set of files in the reviewed diff (issue #336),
-            forwarded to the single-item delegation and appended to the batched
-            prompt as an explicit "Allowed files" clause. ``None`` for
-            legacy/resume callers leaves the prompt without the clause.
         exploration_dir: Optional pre-scan directory whose deterministic
             ``affected_files.md`` index is pointed out to the fixer.
         test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
             (built once by ``_parse_test_map`` at the fan-out root); ``None``
             yields no hint. Invalid maps are ignored.
     """
+    if edit_scope is None or read_scope is None:
+        raise TypeError("phase_fix_batched requires explicit edit_scope and read_scope")
     if len(items) == 1:
         await phase_fix(
             backend, work, items[0], item_nums[0], total,
+            edit_scope=edit_scope, read_scope=read_scope,
             console_lock=console_lock, intent_path=intent_path,
-            changed_files=changed_files, exploration_dir=exploration_dir,
+            exploration_dir=exploration_dir,
             test_map=test_map,
         )
         return
@@ -2679,9 +2688,8 @@ async def phase_fix_batched(
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}
 Make the minimal changes needed to address ALL of the above findings in one coherent patch. {_FIX_GUARDRAILS}"""
-    # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
-    # the prose boundary in place without an enumerated set.
-    prompt += _build_allowed_files_clause(changed_files)
+    # Exact group edit authority is distinct from wider read-only run context.
+    prompt += _build_fix_scope_clause(edit_scope, read_scope)
     prompt += _exploration_pointer(exploration_dir, fixer=True)
     prompt += _build_test_map_hints(items, test_map, work.repo)
 
@@ -2733,29 +2741,26 @@ async def phase_fix_parallel(
     work: WorkContext,
     items: list[dict[str, Any]],
     *,
+    footprint: AuthorizedFixFootprint | None = None,
+    round_snapshot: git_ops.WorktreeRollbackSnapshot | None = None,
     limiter_size: int = 10,
     intent_path: Path | None = None,
     group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
-    changed_files: set[str] | None = None,
     exploration_dir: Path | None = None,
     test_map_path: Path | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
-    Items are grouped by footprint (the item's ``file`` union its
-    ``related_files``, widening-only), preserving the caller's severity order.
+    Items are grouped by their normalized per-item footprint, preserving the
+    caller's severity order.
     Each footprint-group becomes one task whose findings are fixed together in a
     single ``phase_fix_batched`` call (one ``run_agent`` turn per group), while
     distinct files run concurrently under an ``anyio.CapacityLimiter``. If the
     batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
-    Same-file serialization prevents concurrent writes to the *same named file*;
-    it does not guarantee disjoint edits if an agent touches files other than the
-    one named in the item's ``file`` key. Issue #336 bounds that: the caller
-    passes ``changed_files`` (the reviewed diff's file set) so every fix prompt
-    carries an explicit allowed-files clause, and the post-fix residual check
-    in ``_step_fix`` reverts any edited file outside ``changed_files ∪ finding
-    files ∪ generated whitelist``. Commit stays serial and after.
+    Every prompt receives the exact group's edit scope and the wider run scope
+    only as readable context. Failed batch or group execution restores every
+    group path and the supplied round index before fallback/return.
 
     Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
     is consulted before every fix call (including the batched call), and if a
@@ -2773,15 +2778,13 @@ async def phase_fix_parallel(
         backend: The Backend to execute against (shared across tasks).
         work: Workspace context for the fixes; ``work.repo`` is the agent cwd.
         items: Feedback items, already severity-sorted by the caller.
+        footprint: Normalized run/item authorization policy.
+        round_snapshot: Round rollback point used for whole-group recovery.
         limiter_size: Max number of file-groups to fix concurrently.
         intent_path: Optional confirmed-intent file forwarded unchanged to each
             fix call so every fix carries the deliberate-intent guard.
         group_max_wall_s: Per-file-group wall-clock ceiling (#201).
         group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
-        changed_files: Optional set of files in the reviewed diff (issue #336),
-            forwarded to every ``phase_fix_batched`` / ``phase_fix`` call so each
-            prompt carries an explicit "Allowed files" clause. ``None`` for
-            legacy/resume callers (no diff context) leaves prompts unchanged.
         exploration_dir: Optional pre-scan directory forwarded to every fix
             call so prompts point at its deterministic ``affected_files.md``.
         test_map_path: Optional ``test-map.json`` forwarded to every fix call
@@ -2797,6 +2800,8 @@ async def phase_fix_parallel(
         full success.
 
     """
+    if footprint is None or round_snapshot is None:
+        raise TypeError("phase_fix_parallel requires footprint and round_snapshot")
     # Preflight confinement gate: validate EVERY item's file reference before
     # grouping, progress, prompt construction, recovery, or dispatch. An
     # unconfined (or missing/non-string) reference raises
@@ -2806,7 +2811,7 @@ async def phase_fix_parallel(
     # recompute them.
     _preflight_finding_file_refs(work.repo, items)
 
-    raw_groups = group_items_by_footprint(items)
+    raw_groups = group_items_by_footprint(items, footprint)
     # Assign stable 1-based counters by pairing each item with its number
     # directly, avoiding fragile id()-keyed dicts whose keys are memory
     # addresses and can collide if dicts are reallocated between loops.
@@ -2859,6 +2864,7 @@ async def phase_fix_parallel(
         fkey: str,
         grp: list[tuple[dict[str, Any], int]],
         budget: FileGroupBudget,
+        edit_scope: frozenset[str],
     ) -> None:
         """Fix a group's findings one at a time, honoring the group budget.
 
@@ -2873,9 +2879,10 @@ async def phase_fix_parallel(
                 return
             await phase_fix(
                 backend, work, item, item_num, total,
+                edit_scope=edit_scope,
+                read_scope=footprint.run_allowed_paths,
                 console_lock=_console_lock,
                 intent_path=intent_path,
-                changed_files=changed_files,
                 exploration_dir=exploration_dir,
                 test_map=test_map,
             )
@@ -2898,12 +2905,13 @@ async def phase_fix_parallel(
                         try:
                             grp_items = [item for item, _ in grp]
                             grp_nums = [num for _, num in grp]
+                            edit_scope = footprint.group_paths(grp_items)
                             is_real_batch = len(grp_items) > 1 and fkey != "<no-file>"
                             if not is_real_batch:
                                 # Single-item or <no-file> groups: go straight to
                                 # per-finding phase_fix (no batched prompt to build,
                                 # no fallback retry on failure).
-                                await _fix_group_serially(fkey, grp, budget)
+                                await _fix_group_serially(fkey, grp, budget, edit_scope)
                             else:
                                 # Design-checkpoint #1: consult the group budget
                                 # BEFORE the batched call too, mirroring the serial
@@ -2917,9 +2925,10 @@ async def phase_fix_parallel(
                                 try:
                                     await phase_fix_batched(
                                         backend, work, grp_items, grp_nums, total,
+                                        edit_scope=edit_scope,
+                                        read_scope=footprint.run_allowed_paths,
                                         console_lock=_console_lock,
                                         intent_path=intent_path,
-                                        changed_files=changed_files,
                                         exploration_dir=exploration_dir,
                                         test_map=test_map,
                                     )
@@ -2929,16 +2938,29 @@ async def phase_fix_parallel(
                                     # per-finding fixes don't re-apply partial edits
                                     # that the batched turn may have already written.
                                     try:
-                                        git_ops.checkout_paths(work.repo, [Path(fkey)])
-                                    except Exception as _restore_err:  # noqa: BLE001 -- restore is best-effort; don't block fallback
-                                        if not get_quiet_mode():
-                                            print_warning(
-                                                console,
-                                                f"Could not restore {fkey} before fallback: {_restore_err}",
-                                            )
-                                    await _fix_group_serially(fkey, grp, budget)
+                                        git_ops.restore_group_from_snapshot(
+                                            work.repo, round_snapshot, edit_scope
+                                        )
+                                    except Exception as restore_err:  # noqa: BLE001
+                                        raise RuntimeError(
+                                            "failed to restore the complete fix group before fallback"
+                                        ) from restore_err
+                                    await _fix_group_serially(fkey, grp, budget, edit_scope)
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                            reason = f"{type(e).__name__}: {e}"
+                            failure: BaseException = e
+                            try:
+                                grp_items = [item for item, _ in grp]
+                                git_ops.restore_group_from_snapshot(
+                                    work.repo,
+                                    round_snapshot,
+                                    footprint.group_paths(grp_items),
+                                )
+                            except Exception as restore_err:  # noqa: BLE001
+                                failure = RuntimeError(
+                                    "failed to restore the complete failed fix group"
+                                )
+                                failure.__cause__ = restore_err
+                            reason = f"{type(failure).__name__}: {failure}"
                             async with _failures_lock:
                                 failures[fkey] = reason
                             async with _console_lock:
@@ -3220,12 +3242,108 @@ async def _run_host_test_command(
     )
 
 
+@dataclass(frozen=True)
+class TestAttemptEvidence:
+    """Identity-bound evidence from one real host or TEST-agent execution."""
+
+    session_id: str
+    kind: Literal["host", "agent"]
+    command: tuple[str, ...] | None
+    passed: bool
+    input_tree_key: str
+    output_tree_key: str
+
+
+@dataclass(frozen=True)
+class TestAndHealResult:
+    """Typed outcome of the bounded test-and-heal interaction."""
+
+    passed: bool
+    retries: int
+    proceed: bool
+    ignored: bool
+    attempts: tuple[TestAttemptEvidence, ...]
+
+    def __iter__(self) -> Any:
+        """Keep tuple unpacking source-compatible while callers migrate."""
+        return iter((self.passed, self.retries, self.proceed))
+
+
+async def phase_test_once(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    config: Any,
+    session_id: str,
+    capture_tree_key: Callable[[], str],
+    continuation: ContinuationToken | None = None,
+    command_override: list[str] | None = None,
+) -> tuple[TestAttemptEvidence, ContinuationToken | None, str]:
+    """Execute exactly one canonical test attempt and bind it to tree identity.
+
+    Configured and explicitly approved commands run host-side. With no command,
+    the established TEST-agent/prose path is used. Both paths capture the same
+    before/after identity projection supplied by the fix-cycle orchestrator.
+    """
+    cmd = command_override if command_override is not None else _canonical_test_cmd(config)
+    input_tree_key = capture_tree_key()
+    next_continuation: ContinuationToken | None = None
+    if cmd is not None:
+        try:
+            result = await _run_host_test_command(cmd, work, config)
+        except (OSError, ValueError) as exc:
+            output = f"The configured test command failed to run (spawn): {exc}"
+            passed = False
+        else:
+            if result.timed_out:
+                print_warning(
+                    console,
+                    f"Test command hit the {_test_command_wall_budget(config):g}s "
+                    "wall budget and was killed.",
+                )
+            output = result.merged_output
+            passed = result.passed
+        kind: Literal["host", "agent"] = "host"
+        command: tuple[str, ...] | None = tuple(cmd)
+    else:
+        prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
+        output, next_continuation, _ = await run_agent(
+            backend,
+            work.repo,
+            prompt,
+            continuation=continuation,
+            phase=DaydreamPhase.TEST,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=TEST_WALL_BUDGET_S,
+        )
+        passed = detect_test_success(output)
+        kind = "agent"
+        command = None
+    output_tree_key = capture_tree_key()
+    return (
+        TestAttemptEvidence(
+            session_id=session_id,
+            kind=kind,
+            command=command,
+            passed=passed,
+            input_tree_key=input_tree_key,
+            output_tree_key=output_tree_key,
+        ),
+        next_continuation,
+        output,
+    )
+
+
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
     feedback_items: list[dict[str, Any]] | None = None,
     config: Any = None,
-) -> tuple[bool, int, bool]:
+    *,
+    session_id: str | None = None,
+    capture_tree_key: Callable[[], str] | None = None,
+    footprint: AuthorizedFixFootprint | None = None,
+) -> TestAndHealResult:
     """Phase 4: Run tests and prompt user on failure for action.
 
     Args:
@@ -3239,17 +3357,25 @@ async def phase_test_and_heal(
             #726) — no TEST-phase agent turn and no prose detection. When
             nothing is configured, the deprecated agent-run fallback applies
             (see :func:`_canonical_test_cmd`).
+        session_id: Current fix-cycle session bound into every attempt.
+        capture_tree_key: Full stable-base delta identity callback, invoked
+            immediately before and after each actual test execution.
+        footprint: Run-wide authorization used as the healing edit scope.
 
     Returns:
-        Tuple of (passed: bool, retries_used: int, proceed: bool). ``passed`` is
-        what the suite actually did; ``proceed`` is whether the run continues,
-        which the operator can grant to a red suite via "ignore and continue".
+        A typed result preserving the real verdict, explicit red override, and
+        identity evidence for every actual host or agent test attempt.
 
     """
+    if session_id is None or capture_tree_key is None or footprint is None:
+        raise TypeError(
+            "phase_test_and_heal requires session_id, capture_tree_key, and footprint"
+        )
     print_phase_hero(console, "AWAKEN", phase_subtitle("AWAKEN"))
     print_dim(console, f"Model: {backend.model}")
 
     retries_used = 0
+    attempts: list[TestAttemptEvidence] = []
     continuation: ContinuationToken | None = None
     # Merged (redacted) output of a host-side test-command run whose suite came
     # back red; consumed at the top of the next iteration so it flows through
@@ -3275,6 +3401,9 @@ async def phase_test_and_heal(
         fix_prompt = get_registry().prompt("fix")(
             output, feedback_items, repo=work.repo,
             concise_mode=_backend_concise_fix_prompts(backend),
+        )
+        fix_prompt += _build_fix_scope_clause(
+            footprint.run_allowed_paths, footprint.run_allowed_paths
         )
         await run_agent(
             backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
@@ -3305,58 +3434,20 @@ async def phase_test_and_heal(
             output, host_failure_output = host_failure_output, None
             test_passed = False
         else:
-            cmd = _canonical_test_cmd(config)
-            if cmd is None:
-                # Deprecated fallback: no canonical test command is configured,
-                # so a TEST-phase agent turn runs the suite and its prose is
-                # pattern-matched for the verdict (untrusted by design).
-                prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
-                output, continuation, _ = await run_agent(
-                    backend,
-                    work.repo,
-                    prompt,
-                    continuation=continuation,
-                    phase=DaydreamPhase.TEST,
-                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                    wall_budget_s=TEST_WALL_BUDGET_S,
-                )
-
-                test_passed = detect_test_success(output)
-            else:
-                # Issue #726: the configured canonical test command runs
-                # host-side as a real subprocess; the verdict is the exit
-                # status, never the agent's prose. No agent turn here.
-                try:
-                    result = await _run_host_test_command(cmd, work, config)
-                except (OSError, ValueError) as exc:
-                    # The command could not be spawned (missing binary, a
-                    # shell-builtin argv, or malformed words). That is a test
-                    # failure, not a crash: route the diagnostic through the
-                    # same failure gate/heal menu so the run continues instead
-                    # of dying with an unhandled traceback (issue #726).
-                    print_warning(
-                        console,
-                        f"Configured test command could not be run: {exc}",
-                    )
-                    output = (
-                        "The configured test command failed to run (spawn): "
-                        f"{exc}"
-                    )
-                    test_passed = False
-                else:
-                    if result.timed_out:
-                        print_warning(
-                            console,
-                            f"Test command hit the "
-                            f"{_test_command_wall_budget(config):g}s wall "
-                            "budget and was killed.",
-                        )
-                    output = result.merged_output
-                    test_passed = result.passed
+            evidence, continuation, output = await phase_test_once(
+                backend,
+                work,
+                config=config,
+                session_id=session_id,
+                capture_tree_key=capture_tree_key,
+                continuation=continuation,
+            )
+            attempts.append(evidence)
+            test_passed = evidence.passed
 
         if test_passed:
             print_success(console, "Tests passed")
-            return True, retries_used, True
+            return TestAndHealResult(True, retries_used, True, False, tuple(attempts))
 
         print_warning(console, "Tests may have failed or result is unclear.")
 
@@ -3368,7 +3459,7 @@ async def phase_test_and_heal(
                 "Test failure looks environmental (infrastructure unavailable); "
                 "skipping heal loop.",
             )
-            return False, retries_used, False
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
 
         # Test-heal retry gate across the two interaction axes. With no human at
         # the keyboard, the menu's default "2" (fix-and-retry) would launch an
@@ -3388,13 +3479,13 @@ async def phase_test_and_heal(
                 console, "Tests failed", "Aborting heal loop (no further auto-retries)",
             )
             await _emit_failure_handoff(backend, work, output, offer_clipboard=False)
-            return False, retries_used, False
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
         if decision is True:
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
             if not await _launch_fix(output):
-                return False, retries_used, False
+                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
             continue
 
         print_menu(console, "What would you like to do?", [
@@ -3456,23 +3547,26 @@ async def phase_test_and_heal(
                             retries_used += 1
                             continue
                         try:
-                            result = await _run_host_test_command(cmd, work, config)
-                        except (OSError, ValueError) as exc:
-                            # Spawn errors (missing binary, shell builtin) and
-                            # remaining argv errors must not escape into a
-                            # traceback; surface as a failed suggestion and
-                            # re-run the original command.
-                            print_warning(
-                                console,
-                                f"Approved test command could not be run: {exc}",
+                            evidence, _, alternate_output = await phase_test_once(
+                                backend,
+                                work,
+                                config=config,
+                                session_id=session_id,
+                                capture_tree_key=capture_tree_key,
+                                command_override=cmd,
                             )
+                        except (OSError, ValueError) as exc:
+                            print_warning(console, f"Approved test command could not be run: {exc}")
                             retries_used += 1
                             continue
-                        if result.passed:
+                        attempts.append(evidence)
+                        if evidence.passed:
                             print_success(console, "Tests passed")
-                            return True, retries_used, True
+                            return TestAndHealResult(
+                                True, retries_used, True, False, tuple(attempts)
+                            )
                         print_warning(console, "Approved test command failed.")
-                        host_failure_output = result.merged_output
+                        host_failure_output = alternate_output
                         continue
 
             retries_used += 1
@@ -3482,21 +3576,21 @@ async def phase_test_and_heal(
             console.print()
             print_info(console, "Launching agent to fix test failures...")
             if not await _launch_fix(output):
-                return False, retries_used, False
+                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
             continue
 
         elif choice == "3":
             print_warning(console, "Ignoring test failures, continuing...")
-            return False, retries_used, True
+            return TestAndHealResult(False, retries_used, True, True, tuple(attempts))
 
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
             await _emit_failure_handoff(backend, work, output, offer_clipboard=True)
-            return False, retries_used, False
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
 
         else:
             print_warning(console, f"Invalid choice '{choice}', aborting")
-            return False, retries_used, False
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
 
 
 def _stage_deterministic(
@@ -3535,6 +3629,85 @@ def _stage_deterministic(
         return None
     git_ops.stage_paths(work.repo, [Path(p) for p in sorted(stage)])
     return stage
+
+
+def require_empty_staged_index(work: WorkContext) -> git_ops.IndexSnapshot:
+    """Capture the pre-run index and reject any staged entry before mutation."""
+    snapshot = git_ops.snapshot_index(work.repo)
+    if snapshot.paths:
+        raise GitError(
+            "Cannot start the fix cycle with staged changes. Unstage or commit "
+            "them first; Daydream did not modify the worktree."
+        )
+    return snapshot
+
+
+def _stage_retained_once(
+    work: WorkContext,
+    *,
+    retained_paths: frozenset[str],
+    retained_states: tuple[git_ops.GitPathState, ...],
+    initial_index: git_ops.IndexSnapshot,
+) -> tuple[git_ops.GitPathState, ...]:
+    """Validate the untouched index, then stage and validate retained paths once."""
+    if initial_index.paths:
+        raise GitError("Fix-cycle preflight index was not empty")
+    current_index = git_ops.snapshot_index(work.repo)
+    if current_index != initial_index:
+        raise GitError("Index changed during the fix cycle; refusing to stage")
+    expected_states = tuple(sorted(retained_states, key=lambda state: state.path.encode()))
+    if frozenset(state.path for state in expected_states) != retained_paths:
+        raise GitError("Retained path set does not match retained tree states")
+    current_states = git_ops.snapshot_worktree_paths(work.repo, retained_paths)
+    if current_states != expected_states:
+        raise GitError("Worktree changed after retained-tree verification")
+    if not retained_paths:
+        return ()
+
+    git_ops.stage_paths(work.repo, [Path(path) for path in sorted(retained_paths)])
+    staged_index = git_ops.snapshot_index(work.repo)
+    if frozenset(staged_index.paths) != retained_paths:
+        raise GitError("Staged index path set does not match the retained path set")
+    staged_states = git_ops.snapshot_index_paths(work.repo, retained_paths)
+    if staged_states != expected_states:
+        raise GitError("Staged index content does not match the retained tree")
+    return staged_states
+
+
+def _verify_strict_commit_and_worktree(
+    work: WorkContext,
+    *,
+    sha_before: str,
+    retained_paths: frozenset[str],
+    staged_states: tuple[git_ops.GitPathState, ...],
+    precommit_paths: frozenset[str],
+    precommit_states: tuple[git_ops.GitPathState, ...],
+) -> None:
+    """Fail closed when commit hooks alter the commit, index, or worktree."""
+    committed_paths = frozenset(git_ops.diff_name_only_strict(work.repo, sha_before, "HEAD"))
+    if committed_paths != retained_paths:
+        raise GitError("Committed path set does not match the validated staged index")
+    if git_ops.snapshot_commit_paths(work.repo, "HEAD", retained_paths) != staged_states:
+        raise GitError("Committed content does not match the validated staged index")
+
+    post_index = git_ops.snapshot_index(work.repo)
+    if post_index.paths:
+        raise GitError("Commit hooks left staged index changes")
+    post_changed = frozenset(
+        git_ops.changed_paths_z(work.repo, "HEAD", include_runtime_artifacts=False)
+    )
+    universe = precommit_paths | post_changed
+    expected_by_path = {state.path: state for state in precommit_states}
+    expected = tuple(
+        expected_by_path.get(
+            path,
+            git_ops.GitPathState(path=path, state="missing", mode=None, digest=None),
+        )
+        for path in sorted(universe, key=lambda value: value.encode())
+    )
+    actual = git_ops.snapshot_worktree_paths(work.repo, universe)
+    if actual != expected:
+        raise GitError("Commit or validation hooks changed the worktree")
 
 
 def _verify_commit_scope(
@@ -3619,6 +3792,9 @@ async def _do_commit(
     items: list[dict[str, Any]] | None = None,
     preexisting_untracked: set[str] | None = None,
     config: Any = None,
+    retained_paths: frozenset[str] | None = None,
+    retained_states: tuple[git_ops.GitPathState, ...] | None = None,
+    initial_index: git_ops.IndexSnapshot | None = None,
 ) -> bool:
     """Stage, commit, and optionally push — all host-side, no agent turn.
 
@@ -3688,6 +3864,16 @@ async def _do_commit(
             await _validate_declined_fixes(work, config)
             return False
 
+    strict_commit = any(
+        value is not None for value in (retained_paths, retained_states, initial_index)
+    )
+    if strict_commit and (
+        retained_paths is None or retained_states is None or initial_index is None
+    ):
+        raise TypeError(
+            "retained_paths, retained_states, and initial_index must be supplied together"
+        )
+
     # Defensive untracked protection: a caller without a pre-run snapshot
     # still must not sweep user scratch files into the commit, so compute the
     # snapshot at commit time rather than dropping the protection. Computed
@@ -3696,14 +3882,44 @@ async def _do_commit(
     if preexisting_untracked is None:
         preexisting_untracked = set(git_ops.list_untracked(work.repo))
 
-    stage = _stage_deterministic(work, preexisting_untracked)
-    if stage is None:
-        return False
-
-    try:
+    stage: set[str]
+    sha_before: str | None
+    staged_states: tuple[git_ops.GitPathState, ...] = ()
+    precommit_paths: frozenset[str] = frozenset()
+    precommit_states: tuple[git_ops.GitPathState, ...] = ()
+    if strict_commit:
+        assert retained_paths is not None
+        assert retained_states is not None
+        assert initial_index is not None
         sha_before = git_ops.head_sha(work.repo)
-    except GitError:
-        sha_before = None
+        # Match fix-cycle evidence: untracked runtime output may change while
+        # recording host phases. Tracked and explicitly retained paths remain
+        # protected even when their names are in the runtime namespace.
+        precommit_paths = retained_paths | frozenset(
+            git_ops.changed_paths_z(
+                work.repo, sha_before, include_runtime_artifacts=False
+            )
+        )
+        precommit_states = git_ops.snapshot_worktree_paths(work.repo, precommit_paths)
+        staged_states = _stage_retained_once(
+            work,
+            retained_paths=retained_paths,
+            retained_states=retained_states,
+            initial_index=initial_index,
+        )
+        if not staged_states:
+            print_info(console, "Nothing to commit — no daydream changes")
+            return False
+        stage = set(retained_paths)
+    else:
+        legacy_stage = _stage_deterministic(work, preexisting_untracked)
+        if legacy_stage is None:
+            return False
+        stage = legacy_stage
+        try:
+            sha_before = git_ops.head_sha(work.repo)
+        except GitError:
+            sha_before = None
 
     message = build_commit_message(
         items=items or [], run_id=work.run_id, version=daydream.__version__,
@@ -3711,11 +3927,30 @@ async def _do_commit(
     # Issue #726 task 12: the commit is its own trajectory phase, so the
     # manifest can time it and tell it apart from test/hook/push phases.
     async with host_phase_scope(DaydreamPhase.COMMIT):
-        git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
+        if strict_commit:
+            git_ops.commit_staged(work.repo, message)
+        else:
+            git_ops.commit_paths(work.repo, [Path(p) for p in sorted(stage)], message)
 
-    # Deterministic-staging invariant check (issue #562): the committed tree
-    # must match the pre-staged daydream set in both directions.
-    if sha_before is not None:
+    if strict_commit:
+        assert sha_before is not None
+        assert retained_paths is not None
+        try:
+            _verify_strict_commit_and_worktree(
+                work,
+                sha_before=sha_before,
+                retained_paths=retained_paths,
+                staged_states=staged_states,
+                precommit_paths=precommit_paths,
+                precommit_states=precommit_states,
+            )
+        except GitError as exc:
+            local_sha = git_ops.head_sha(work.repo)
+            raise GitError(
+                f"Local commit {local_sha} was created, but post-commit validation "
+                f"failed; push blocked: {exc}"
+            ) from exc
+    elif sha_before is not None:
         _verify_commit_scope(work, sha_before, stage)
 
     # Hook-aware validation orchestration (issue #726): with an executable
@@ -3745,6 +3980,25 @@ async def _do_commit(
                     "Pre-push validation failed: the configured test command "
                     "exited non-zero, so the commit was not pushed."
                 )
+
+            if strict_commit:
+                assert sha_before is not None
+                assert retained_paths is not None
+                try:
+                    _verify_strict_commit_and_worktree(
+                        work,
+                        sha_before=sha_before,
+                        retained_paths=retained_paths,
+                        staged_states=staged_states,
+                        precommit_paths=precommit_paths,
+                        precommit_states=precommit_states,
+                    )
+                except GitError as exc:
+                    local_sha = git_ops.head_sha(work.repo)
+                    raise GitError(
+                        f"Local commit {local_sha} was created, but post-hook "
+                        f"validation failed; push blocked: {exc}"
+                    ) from exc
 
     if push:
         # The push + remote verification is its own trajectory phase
@@ -3777,6 +4031,9 @@ async def phase_commit_push(
     preexisting_untracked: set[str] | None = None,
     config: Any = None,
     items: list[dict[str, Any]] | None = None,
+    retained_paths: frozenset[str] | None = None,
+    retained_states: tuple[git_ops.GitPathState, ...] | None = None,
+    initial_index: git_ops.IndexSnapshot | None = None,
 ) -> None:
     """Prompt user to commit and push changes.
 
@@ -3790,6 +4047,10 @@ async def phase_commit_push(
             ``description`` keys) threaded from the production fix cycle;
             folded into the deterministic commit message by
             :func:`build_commit_message`.
+        retained_paths: Exact final authorized HEAD-relative paths to stage.
+        retained_states: Binary-safe final states matching ``retained_paths``.
+        initial_index: Empty pre-dispatch index snapshot. Supplying these three
+            selects strict stage-once and post-hook validation.
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
@@ -3798,6 +4059,9 @@ async def phase_commit_push(
         preexisting_untracked=preexisting_untracked,
         config=config,
         items=items,
+        retained_paths=retained_paths,
+        retained_states=retained_states,
+        initial_index=initial_index,
     )
     if committed:
         print_success(console, "Commit and push complete")

@@ -38,15 +38,19 @@ The module is intentionally dependency-free: stdlib only.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
+import shutil
+import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Generator, Literal, overload
 from urllib.parse import urlparse
@@ -246,6 +250,34 @@ class WrongBranchError(GitError):
     """
 
 
+@dataclass(frozen=True)
+class GitPathState:
+    """Binary-safe identity for one exact repository path."""
+
+    path: str
+    state: Literal["missing", "regular", "symlink", "gitlink"]
+    mode: int | None
+    digest: str | None
+
+
+@dataclass(frozen=True)
+class IndexSnapshot:
+    """A complete index tree plus its HEAD-relative changed path set."""
+
+    tree_sha: str
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WorktreeRollbackSnapshot:
+    """One round's tracked, untracked, and index rollback point."""
+
+    ref: str
+    index: IndexSnapshot
+    path_states: tuple[GitPathState, ...]
+    untracked: dict[str, GitPathState]
+
+
 # --- Internal subprocess helpers --------------------------------------------
 
 
@@ -336,6 +368,7 @@ def _run_git(
     capture_bytes: Literal[True],
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
+    input_bytes: bytes | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Binary-capture variant: ``capture_bytes=True`` reads bytes stdout."""
@@ -350,6 +383,7 @@ def _run_git(
     capture_bytes: Literal[False] = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
+    input_bytes: bytes | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Text-capture variant (the default): decoded ``str`` stdout."""
@@ -363,6 +397,7 @@ def _run_git(
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
     input_text: str | None = None,
+    input_bytes: bytes | None = None,
     env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` in *repo* with hardened defaults.
@@ -374,6 +409,9 @@ def _run_git(
             cannot express the whole ref set on argv). Encoded to UTF-8 when
             *capture_bytes* is set so the binary variant never feeds ``str``
             to the subprocess.
+        input_bytes: Optional raw bytes piped to stdin. Requires
+            ``capture_bytes=True`` and is mutually exclusive with
+            ``input_text``.
         retries: How many additional attempts to make after a
             :class:`subprocess.TimeoutExpired` (total attempts = ``retries + 1``).
             Only timeouts are retried; other failures raise immediately.
@@ -395,6 +433,10 @@ def _run_git(
         GitError: If the underlying subprocess machinery fails for any other
             reason (missing binary, OS-level error).
     """
+    if input_text is not None and input_bytes is not None:
+        raise GitError("git subprocess input must be text or bytes, not both")
+    if input_bytes is not None and not capture_bytes:
+        raise GitError("binary git subprocess input requires binary capture")
     last_timeout: subprocess.TimeoutExpired | None = None
     for attempt in range(retries + 1):
         try:
@@ -410,7 +452,9 @@ def _run_git(
                 # input_text must be encoded: subprocess.run raises a raw
                 # TypeError for str input with text=False.
                 input=(
-                    input_text.encode("utf-8")
+                    input_bytes
+                    if input_bytes is not None
+                    else input_text.encode("utf-8")
                     if capture_bytes and input_text is not None
                     else input_text
                 ),
@@ -1559,6 +1603,349 @@ def _filter_preexisting_untracked(
     return [path for path in untracked if path not in preexisting_untracked]
 
 
+def _decode_nul_paths(stdout: bytes) -> list[str]:
+    """Decode exact NUL-delimited Git paths with filesystem round-tripping."""
+    return [os.fsdecode(raw) for raw in stdout.split(b"\0") if raw]
+
+
+def _path_sort_key(path: str) -> bytes:
+    return os.fsencode(path)
+
+
+def _literal_pathspec(path: str) -> str:
+    return f":(literal){path}"
+
+
+def _git_path_parent_is_confined(repo: Path, value: str) -> bool:
+    """Confinement check that may inspect, but never follows, the leaf."""
+    if not value or "\0" in value or value.startswith("/"):
+        return False
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    root = repo.resolve()
+    candidate = repo
+    for part in parts[:-1]:
+        candidate /= part
+        try:
+            if candidate.is_symlink():
+                return False
+            if not candidate.exists():
+                break
+        except OSError:
+            return False
+    try:
+        return candidate.resolve(strict=False).is_relative_to(root)
+    except OSError:
+        return False
+
+
+def _require_git_path_confined(repo: Path, path: str, *, allow_leaf_symlink: bool = False) -> None:
+    from daydream.repository_paths import git_observed_path_is_confined
+
+    confined = (
+        _git_path_parent_is_confined(repo, path)
+        if allow_leaf_symlink
+        else git_observed_path_is_confined(repo, path)
+    )
+    if not confined:
+        raise GitError("Git-observed path is not confined to the repository")
+
+
+def _is_untracked_runtime_artifact(path: str) -> bool:
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    return path.startswith(".daydream/") or path == REVIEW_OUTPUT_FILE
+
+
+def changed_paths_z(
+    repo: Path,
+    ref: str,
+    *,
+    include_untracked: bool = True,
+    include_runtime_artifacts: bool = True,
+) -> list[str]:
+    """Strictly enumerate paths changed from *ref* using NUL delimiters.
+
+    Fix evidence may exclude untracked runtime output. Tracked changes are
+    always included, even inside the runtime namespace.
+    """
+    proc = _run_git(repo, ["diff", "--name-only", "-z", ref], timeout=10, capture_bytes=True)
+    if proc.returncode != 0:
+        stderr = os.fsdecode(proc.stderr)
+        raise GitError(f"git diff --name-only -z {ref} failed in {repo}: {stderr.strip()}")
+    paths = _decode_nul_paths(proc.stdout)
+    if include_untracked:
+        others = _run_git(
+            repo,
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+            timeout=10,
+            capture_bytes=True,
+        )
+        if others.returncode != 0:
+            stderr = os.fsdecode(others.stderr)
+            raise GitError(f"git ls-files --others -z failed in {repo}: {stderr.strip()}")
+        paths.extend(
+            path for path in _decode_nul_paths(others.stdout)
+            if include_runtime_artifacts or not _is_untracked_runtime_artifact(path)
+        )
+    unique = dict.fromkeys(paths)
+    for path in unique:
+        _require_git_path_confined(repo, path, allow_leaf_symlink=True)
+    return list(unique)
+
+
+def _write_git_blob(repo: Path, content: bytes) -> str:
+    proc = _run_git(
+        repo,
+        ["hash-object", "-w", "--stdin"],
+        timeout=30,
+        capture_bytes=True,
+        input_bytes=content,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git hash-object failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    oid = os.fsdecode(proc.stdout).strip()
+    if not oid:
+        raise GitError("git hash-object returned no object id")
+    return oid
+
+
+def _read_git_blob(repo: Path, oid: str) -> bytes:
+    proc = _run_git(repo, ["cat-file", "blob", oid], timeout=30, capture_bytes=True)
+    if proc.returncode != 0:
+        raise GitError(f"git cat-file blob failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    return proc.stdout
+
+
+def _index_mode_for_path(repo: Path, path: str) -> int | None:
+    proc = _run_git(
+        repo,
+        ["ls-files", "--stage", "-z", "--", _literal_pathspec(path)],
+        capture_bytes=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git ls-files --stage failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    records = [record for record in proc.stdout.split(b"\0") if record]
+    if not records:
+        return None
+    if len(records) != 1:
+        raise GitError("index contains unresolved entries for a captured path")
+    metadata, separator, raw_path = records[0].partition(b"\t")
+    if not separator or os.fsdecode(raw_path) != path:
+        raise GitError("git returned an unexpected index path")
+    mode, _oid, stage = metadata.decode("ascii").split(" ")
+    if stage != "0":
+        raise GitError("index contains an unresolved entry")
+    return int(mode, 8)
+
+
+def _snapshot_worktree_path(
+    repo: Path,
+    path: str,
+    *,
+    allow_leaf_symlink: bool,
+) -> GitPathState:
+    _require_git_path_confined(repo, path, allow_leaf_symlink=allow_leaf_symlink)
+    mode_from_index = _index_mode_for_path(repo, path)
+    absolute_bytes = os.fsencode(repo) + b"/" + os.fsencode(path)
+    try:
+        metadata = os.lstat(absolute_bytes)
+    except FileNotFoundError:
+        return GitPathState(path=path, state="missing", mode=None, digest=None)
+    except OSError as exc:
+        raise GitError("could not inspect a confined worktree path") from exc
+
+    if mode_from_index == 0o160000 and stat.S_ISDIR(metadata.st_mode):
+        nested = repo / path
+        try:
+            assert_is_worktree(nested)
+        except NotAWorktreeError as exc:
+            raise GitError("gitlink working tree is unavailable for exact evidence") from exc
+        dirty = _run_git(
+            nested,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"],
+            capture_bytes=True,
+        )
+        if dirty.returncode != 0:
+            raise GitError("could not inspect gitlink working tree for exact evidence")
+        if dirty.stdout:
+            # A commit OID cannot identify additional worktree content. Refuse
+            # stale test evidence instead of recursively snapshotting submodules.
+            raise GitError("dirty gitlink cannot provide commit-only test evidence")
+        oid = head_sha(nested)
+        return GitPathState(path=path, state="gitlink", mode=0o160000, digest=oid)
+    if stat.S_ISLNK(metadata.st_mode):
+        target = os.readlink(absolute_bytes)
+        content = target if isinstance(target, bytes) else os.fsencode(target)
+        return GitPathState(path=path, state="symlink", mode=0o120000, digest=_write_git_blob(repo, content))
+    if stat.S_ISREG(metadata.st_mode):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(absolute_bytes, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise GitError("captured worktree path changed type during read")
+                chunks: list[bytes] = []
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    chunks.append(chunk)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise GitError("could not read a confined worktree path") from exc
+        permissions = stat.S_IMODE(metadata.st_mode)
+        if mode_from_index is not None:
+            permissions = 0o755 if permissions & 0o111 else 0o644
+        mode = stat.S_IFREG | permissions
+        return GitPathState(path=path, state="regular", mode=mode, digest=_write_git_blob(repo, b"".join(chunks)))
+    raise GitError("unsupported worktree path type")
+
+
+def snapshot_untracked_paths(
+    repo: Path, *, include_runtime_artifacts: bool = True,
+) -> dict[str, GitPathState]:
+    """Capture actual untracked content/type/mode, optionally omitting runtime output."""
+    proc = _run_git(
+        repo,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        timeout=10,
+        capture_bytes=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git ls-files --others -z failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    paths = _decode_nul_paths(proc.stdout)
+    return {
+        path: _snapshot_worktree_path(repo, path, allow_leaf_symlink=True)
+        for path in paths
+        if include_runtime_artifacts or not _is_untracked_runtime_artifact(path)
+    }
+
+
+def snapshot_worktree_paths(repo: Path, paths: Iterable[str]) -> tuple[GitPathState, ...]:
+    """Capture binary-safe worktree states for exact confined paths."""
+    unique = sorted(set(paths), key=_path_sort_key)
+    return tuple(
+        _snapshot_worktree_path(repo, path, allow_leaf_symlink=False)
+        for path in unique
+    )
+
+
+def snapshot_worktree_delta(
+    repo: Path,
+    ref: str,
+    *,
+    preexisting_untracked: dict[str, GitPathState],
+) -> tuple[GitPathState, ...]:
+    """Capture source delta plus protected paths, not changing runtime output.
+
+    Explicitly protected paths remain visible regardless of namespace. This
+    makes user-file changes invalidate evidence without audit/trace writes
+    recursively invalidating the evidence they describe.
+    """
+    paths = set(changed_paths_z(repo, ref, include_runtime_artifacts=False)) | set(preexisting_untracked)
+    return tuple(
+        _snapshot_worktree_path(
+            repo,
+            path,
+            allow_leaf_symlink=path in preexisting_untracked,
+        )
+        for path in sorted(paths, key=_path_sort_key)
+    )
+
+
+def _snapshot_git_tree_paths(
+    repo: Path,
+    args: list[str],
+    paths: Iterable[str],
+) -> tuple[GitPathState, ...]:
+    unique = sorted(set(paths), key=_path_sort_key)
+    for path in unique:
+        _require_git_path_confined(repo, path, allow_leaf_symlink=True)
+    if not unique:
+        return ()
+    proc = _run_git(
+        repo,
+        [*args, "-z", "--", *(_literal_pathspec(path) for path in unique)],
+        capture_bytes=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git tree-state query failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+    found: dict[str, GitPathState] = {}
+    for record in (record for record in proc.stdout.split(b"\0") if record):
+        metadata, separator, raw_path = record.partition(b"\t")
+        if not separator:
+            raise GitError("git returned malformed tree-state output")
+        path = os.fsdecode(raw_path)
+        if path not in unique:
+            raise GitError("git returned an unexpected tree-state path")
+        fields = metadata.decode("ascii").split(" ")
+        if args[0] == "ls-files":  # ls-files --stage: mode oid stage
+            if len(fields) != 3:
+                raise GitError("git returned malformed index-state metadata")
+            mode_text, oid, stage_text = fields
+            if stage_text != "0":
+                raise GitError("index contains unresolved entries")
+        elif len(fields) == 3:  # ls-tree: mode type oid
+            mode_text, _object_type, oid = fields
+        else:
+            raise GitError("git returned malformed tree-state metadata")
+        mode = int(mode_text, 8)
+        state: Literal["regular", "symlink", "gitlink"]
+        if mode == 0o120000:
+            state = "symlink"
+        elif mode == 0o160000:
+            state = "gitlink"
+        else:
+            state = "regular"
+        found[path] = GitPathState(path=path, state=state, mode=mode, digest=oid)
+    return tuple(
+        found.get(path, GitPathState(path=path, state="missing", mode=None, digest=None))
+        for path in unique
+    )
+
+
+def snapshot_index(repo: Path) -> IndexSnapshot:
+    """Capture the complete index tree without changing the worktree."""
+    tree = _run_git(repo, ["write-tree"], timeout=30)
+    if tree.returncode != 0:
+        raise GitError(f"git write-tree failed in {repo}: {tree.stderr.strip()}")
+    changed = _run_git(
+        repo,
+        ["diff", "--cached", "--name-only", "-z", "HEAD"],
+        capture_bytes=True,
+    )
+    if changed.returncode != 0:
+        raise GitError(f"git diff --cached failed in {repo}: {os.fsdecode(changed.stderr).strip()}")
+    paths = tuple(sorted(set(_decode_nul_paths(changed.stdout)), key=_path_sort_key))
+    return IndexSnapshot(tree_sha=tree.stdout.strip(), paths=paths)
+
+
+def snapshot_index_paths(repo: Path, paths: Iterable[str]) -> tuple[GitPathState, ...]:
+    """Capture exact path states from the current index."""
+    return _snapshot_git_tree_paths(repo, ["ls-files", "--stage"], paths)
+
+
+def snapshot_commit_paths(repo: Path, ref: str, paths: Iterable[str]) -> tuple[GitPathState, ...]:
+    """Capture exact path states from a commit/tree ref."""
+    return _snapshot_git_tree_paths(repo, ["ls-tree", ref], paths)
+
+
+def tree_key(states: Iterable[GitPathState]) -> str:
+    """Hash a canonical binary-safe sequence of content-only path states."""
+    ordered = sorted(states, key=lambda state: _path_sort_key(state.path))
+    digest = hashlib.sha256()
+    for state in ordered:
+        path = os.fsencode(state.path)
+        state_bytes = state.state.encode("ascii")
+        mode = b"-" if state.mode is None else format(state.mode, "o").encode("ascii")
+        object_digest = b"-" if state.digest is None else state.digest.encode("ascii")
+        for field_value in (path, state_bytes, mode, object_digest):
+            digest.update(len(field_value).to_bytes(8, "big"))
+            digest.update(field_value)
+    return digest.hexdigest()
+
+
 def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     """Return repo-relative paths of tracked files.
 
@@ -1989,6 +2376,178 @@ def restore_paths_from_ref(repo: Path, ref: str, paths: list[str]) -> None:
         raise GitError(f"git checkout {ref} -- {paths} failed in {repo}: {proc.stderr.strip()}")
 
 
+def restore_worktree_paths_from_ref(repo: Path, ref: str, paths: Iterable[str]) -> None:
+    """Restore exact paths from *ref* without changing the index."""
+    unique = sorted(set(paths), key=_path_sort_key)
+    if not unique:
+        return
+    expected = snapshot_commit_paths(repo, ref, unique)
+    for state in expected:
+        _require_git_path_confined(repo, state.path, allow_leaf_symlink=state.state == "symlink")
+    proc = _run_git(
+        repo,
+        [
+            "restore",
+            f"--source={ref}",
+            "--worktree",
+            "--no-overlay",
+            "--",
+            *(_literal_pathspec(path) for path in unique),
+        ],
+        timeout=30,
+        retries=0,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git restore --worktree from ref failed in {repo}: {proc.stderr.strip()}")
+
+
+def _remove_confined_leaf(repo: Path, path: str) -> None:
+    _require_git_path_confined(repo, path, allow_leaf_symlink=True)
+    absolute = os.fsencode(repo) + b"/" + os.fsencode(path)
+    try:
+        metadata = os.lstat(absolute)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise GitError("could not inspect path before confined removal") from exc
+    try:
+        if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+            shutil.rmtree(absolute)
+        else:
+            os.unlink(absolute)
+    except OSError as exc:
+        raise GitError("could not remove confined worktree path") from exc
+
+
+def _restore_path_state(
+    repo: Path,
+    state: GitPathState,
+    *,
+    allow_leaf_type_replacement: bool,
+    ref: str,
+) -> None:
+    if state.state == "missing":
+        _remove_confined_leaf(repo, state.path)
+        return
+    _require_git_path_confined(
+        repo,
+        state.path,
+        allow_leaf_symlink=allow_leaf_type_replacement or state.state == "symlink",
+    )
+    if state.state == "gitlink":
+        restore_worktree_paths_from_ref(repo, ref, [state.path])
+        return
+    if state.digest is None or state.mode is None:
+        raise GitError("restorable path state is incomplete")
+    content = _read_git_blob(repo, state.digest)
+    _remove_confined_leaf(repo, state.path)
+    absolute = os.fsencode(repo) + b"/" + os.fsencode(state.path)
+    parent = os.path.dirname(absolute)
+    try:
+        os.makedirs(parent, exist_ok=True)
+        if state.state == "symlink":
+            os.symlink(content, absolute)
+            return
+        descriptor = os.open(absolute, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IMODE(state.mode))
+        try:
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+        finally:
+            os.close(descriptor)
+        os.chmod(absolute, stat.S_IMODE(state.mode))
+    except OSError as exc:
+        raise GitError("could not restore confined worktree path") from exc
+
+
+def restore_group_from_snapshot(
+    repo: Path,
+    snapshot: WorktreeRollbackSnapshot,
+    paths: Iterable[str],
+) -> None:
+    """Restore every requested group path and the supplied round index."""
+    requested = sorted(set(paths), key=_path_sort_key)
+    tracked = {state.path: state for state in snapshot.path_states}
+    committed = {
+        state.path: state
+        for state in snapshot_commit_paths(
+            repo,
+            snapshot.ref,
+            [path for path in requested if path not in tracked and path not in snapshot.untracked],
+        )
+    }
+    try:
+        for path in requested:
+            if path in snapshot.untracked:
+                state = snapshot.untracked[path]
+                replace_type = True
+            elif path in tracked:
+                state = tracked[path]
+                replace_type = False
+            else:
+                state = committed[path]
+                replace_type = state.state == "missing"
+            _restore_path_state(
+                repo,
+                state,
+                allow_leaf_type_replacement=replace_type,
+                ref=snapshot.ref,
+            )
+    finally:
+        restore_index(repo, snapshot.index)
+
+
+def restore_index(repo: Path, snapshot: IndexSnapshot) -> None:
+    """Restore a complete index tree without modifying the worktree."""
+    proc = _run_git(repo, ["read-tree", snapshot.tree_sha], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git read-tree failed in {repo}: {proc.stderr.strip()}")
+
+
+def build_recommended_patch_strict(
+    repo: Path,
+    base_ref: str,
+    retained_paths: Iterable[str],
+) -> bytes:
+    """Build deterministic binary-capable presentation output for exact paths."""
+    unique = sorted(set(retained_paths), key=_path_sort_key)
+    if not unique:
+        return b""
+    base_states = {state.path: state for state in snapshot_commit_paths(repo, base_ref, unique)}
+    current_states = {state.path: state for state in snapshot_worktree_paths(repo, unique)}
+    chunks: list[bytes] = []
+    for path in unique:
+        if base_states[path].state == "missing" and current_states[path].state != "missing":
+            proc = _run_git(
+                repo,
+                ["diff", "--no-index", "--binary", "--full-index", "--", "/dev/null", path],
+                timeout=30,
+                capture_bytes=True,
+            )
+            if proc.returncode not in {0, 1}:
+                raise GitError(f"git diff --no-index --binary failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+        else:
+            proc = _run_git(
+                repo,
+                [
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    "--no-ext-diff",
+                    base_ref,
+                    "--",
+                    _literal_pathspec(path),
+                ],
+                timeout=30,
+                capture_bytes=True,
+            )
+            if proc.returncode != 0:
+                raise GitError(f"git diff --binary failed in {repo}: {os.fsdecode(proc.stderr).strip()}")
+        chunks.append(proc.stdout)
+    return b"".join(chunks)
+
+
 def clean_untracked(repo: Path) -> None:
     """Run ``git clean -fd`` to remove untracked files and directories.
 
@@ -2178,9 +2737,37 @@ def stage_paths(repo: Path, paths: list[Path]) -> None:
     """
     if not paths:
         raise GitError("stage_paths requires at least one path")
-    add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
+    normalized = [p.as_posix() for p in paths]
+    for path in normalized:
+        _require_git_path_confined(repo, path)
+    add = _run_git(
+        repo,
+        ["--literal-pathspecs", "add", "--", *normalized],
+        timeout=30,
+        retries=0,
+    )
     if add.returncode != 0:
         raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+
+
+def commit_staged(repo: Path, message: str) -> None:
+    """Commit the already-validated index without staging again."""
+    identity_ok = (
+        _run_git(repo, ["config", "user.email"], timeout=5).returncode == 0
+        and _run_git(repo, ["config", "user.name"], timeout=5).returncode == 0
+    )
+    commit_args = ["commit", "-m", message]
+    if not identity_ok:
+        commit_args = [
+            "-c",
+            "user.email=daydream@localhost",
+            "-c",
+            "user.name=daydream",
+            *commit_args,
+        ]
+    commit = _run_git(repo, commit_args, timeout=30, retries=0)
+    if commit.returncode != 0:
+        raise GitError(f"git commit failed in {repo}: {commit.stderr.strip()}")
 
 
 def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
@@ -2199,22 +2786,7 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     """
     # Empty-path guard lives in stage_paths (identical GitError).
     stage_paths(repo, paths)
-    # git commit fails "Author identity unknown" with no user.email/user.name
-    # (common in fresh CI). Inject fallback values via -c only when none is set.
-    identity_ok = (
-        _run_git(repo, ["config", "user.email"], timeout=5).returncode == 0
-        and _run_git(repo, ["config", "user.name"], timeout=5).returncode == 0
-    )
-    commit_args = ["commit", "-m", message]
-    if not identity_ok:
-        commit_args = [
-            "-c", "user.email=daydream@localhost",
-            "-c", "user.name=daydream",
-            *commit_args,
-        ]
-    commit = _run_git(repo, commit_args, timeout=30, retries=0)
-    if commit.returncode != 0:
-        raise GitError(f"git commit failed in {repo}: {commit.stderr.strip()}")
+    commit_staged(repo, message)
 
 
 def push_branch(repo: Path, branch: str, *, remote: str = "origin") -> None:
