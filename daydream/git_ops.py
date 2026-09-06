@@ -1591,21 +1591,25 @@ def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
     """Return repo-relative paths that differ between two refs' trees.
 
     Strict counterpart to :func:`diff_name_only` (which soft-fails to an empty
-    list) for post-commit tree checks: ``git diff --name-only <from_ref>
+    list) for post-commit tree checks: ``git diff --name-only -z <from_ref>
     <to_ref>`` over the two commit trees. Raises :class:`GitError` when the
     diff cannot be computed, so callers can distinguish "no differences" from
     "unknown" (e.g. when verifying that a commit agent did not broaden a
     commit beyond the pre-staged set).
 
     Returns:
-        List of repo-relative path strings (unique, as emitted by git).
+        Exact filesystem-decoded repo-relative paths, without quoting or trimming.
     """
-    proc = _run_git(repo, ["diff", "--name-only", from_ref, to_ref], timeout=10)
+    proc = _run_git(
+        repo, ["diff", "--name-only", "-z", from_ref, to_ref],
+        timeout=10, capture_bytes=True,
+    )
     if proc.returncode != 0:
         raise GitError(
-            f"git diff --name-only {from_ref} {to_ref} failed in {repo}: {proc.stderr.strip()}"
+            f"git diff --name-only -z {from_ref} {to_ref} failed in {repo}: "
+            f"{os.fsdecode(proc.stderr).strip()}"
         )
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return _decode_nul_paths(proc.stdout)
 
 
 def list_untracked(repo: Path, *, strict: bool = False) -> list[str]:

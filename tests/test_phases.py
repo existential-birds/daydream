@@ -1,6 +1,7 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
 import json
+import os
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from io import StringIO
 from pathlib import Path
@@ -5306,6 +5307,51 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
     assert committed is True
     assert calls == {"stage": 1, "commit_staged": 1}
     assert git(repo, "show", "HEAD:app.py") == "after"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_retained", [False, True])
+async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    native_retained: bool,
+) -> None:
+    import errno
+
+    from daydream import git_ops, phases
+
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    native = os.fsdecode(b"native-\xff.py")
+    try:
+        (repo / native).write_bytes(b"private or retained\n")
+    except OSError as exc:
+        if exc.errno == errno.EILSEQ:
+            pytest.skip("host filesystem rejects non-UTF-8 filenames; exercised on Linux CI")
+        raise
+    (repo / "app.py").write_text("before\n")
+    git(repo, "add", "app.py")
+    if native_retained:
+        git(repo, "add", "--", native)
+    git_commit(repo, "baseline")
+    initial_index = phases.require_empty_staged_index(make_work(repo))
+    (repo / "app.py").write_text("after\n")
+    retained = frozenset({"app.py", native} if native_retained else {"app.py"})
+    if native_retained:
+        (repo / native).write_bytes(b"retained after\n")
+
+    assert await phases._do_commit(
+        _HostCommitBackend(repo), make_work(repo),
+        retained_paths=retained,
+        retained_states=git_ops.snapshot_worktree_paths(repo, retained),
+        initial_index=initial_index,
+        preexisting_untracked=set() if native_retained else {native},
+    ) is True
+    assert (repo / native).read_bytes() == (
+        b"retained after\n" if native_retained else b"private or retained\n"
+    )
+    assert frozenset(git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD")) == retained
+    assert git(repo, "diff", "--cached") == ""
 
 
 @pytest.mark.asyncio

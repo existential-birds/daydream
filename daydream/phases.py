@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 import shlex
 from collections.abc import Callable
@@ -3655,7 +3656,7 @@ def _stage_retained_once(
     current_index = git_ops.snapshot_index(work.repo)
     if current_index != initial_index:
         raise GitError("Index changed during the fix cycle; refusing to stage")
-    expected_states = tuple(sorted(retained_states, key=lambda state: state.path.encode()))
+    expected_states = tuple(sorted(retained_states, key=lambda state: os.fsencode(state.path)))
     if frozenset(state.path for state in expected_states) != retained_paths:
         raise GitError("Retained path set does not match retained tree states")
     current_states = git_ops.snapshot_worktree_paths(work.repo, retained_paths)
@@ -3703,7 +3704,7 @@ def _verify_strict_commit_and_worktree(
             path,
             git_ops.GitPathState(path=path, state="missing", mode=None, digest=None),
         )
-        for path in sorted(universe, key=lambda value: value.encode())
+        for path in sorted(universe, key=os.fsencode)
     )
     actual = git_ops.snapshot_worktree_paths(work.repo, universe)
     if actual != expected:
