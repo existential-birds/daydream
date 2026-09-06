@@ -8,10 +8,12 @@ snapshot equality is banned (Pitfall 11). Most assertions go through
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import anyio
 import pytest
 
 from daydream.atif import validate as atif_validate
@@ -1044,10 +1046,13 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
         warnings_emitted.append(message)
 
     async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv)
         with patch("daydream.trajectory.print_warning", fake_print_warning):
             async with recorder.fork("fail-child") as child:
                 async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                     observe_text_and_result(inv)
+                original_path = child.path
                 # Sabotage the write path: make the parent an existing
                 # regular file so atomic_write_json's parent mkdir fails no
                 # matter the filesystem permissions (a fixed
@@ -1058,8 +1063,12 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
                 child.path = blocker / "child.json"
 
         assert get_current_recorder() is recorder
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv)
+        child.path = original_path
+        from daydream.trajectory import flush_active_signal_recorders
+
+        flush_active_signal_recorders()
+        assert recorder.path.with_suffix(".json.partial").exists()
+        assert not child.path.with_suffix(".json.partial").exists()
 
     assert any("Sibling trajectory write failed" in m for m in warnings_emitted)
     assert recorder.path.exists()
@@ -1331,91 +1340,323 @@ async def test_write_partial_no_double_count_after_invocation_exit(tmp_path: Pat
     )
 
 
-# Regression: WR-02 — get_signal_recorder reads module-level stack, not ContextVar
+def _partial_path(recorder: TrajectoryRecorder) -> Path:
+    return recorder.path.with_suffix(recorder.path.suffix + ".partial")
 
 
-async def test_get_signal_recorder_returns_active_recorder(tmp_path: Path) -> None:
-    """WR-02 regression: signal-handler-safe accessor returns the active recorder.
-
-    Signal handlers fire in the main thread outside the asyncio task context,
-    so ``ContextVar.get()`` is non-deterministic. ``get_signal_recorder`` reads
-    a module-level stack populated synchronously in __aenter__, which is
-    reliable regardless of where the signal interleaves.
-    """
-    from daydream.trajectory import get_signal_recorder
-
-    assert get_signal_recorder() is None, "Stack should be empty before __aenter__"
-
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        assert get_signal_recorder() is recorder, "Signal recorder should be set inside async with"
-
-    assert get_signal_recorder() is None, "Stack should be empty after __aexit__"
+def _trajectory_text(path: Path) -> str:
+    return json.dumps(read_trajectory(path), sort_keys=True)
 
 
-async def test_get_signal_recorder_returns_innermost_for_nested_recorders(
-    tmp_path: Path,
+async def _hold_fork(
+    parent: TrajectoryRecorder,
+    descriptor: str,
+    marker: str,
+    entered: anyio.Event,
+    release: anyio.Event,
+    children: dict[str, TrajectoryRecorder],
 ) -> None:
-    """Nested recorders push onto the stack; signal-handler reads the top (innermost)."""
-    from daydream.trajectory import get_signal_recorder
+    """Hold one public fork invocation open across a signal-flush barrier."""
+    async with parent.fork(descriptor) as child:
+        children[descriptor] = child
+        async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            assert get_current_recorder() is child
+            observe_text_and_result(inv, marker)
+            entered.set()
+            await release.wait()
 
-    outer = make_recorder(tmp_path / "outer")
-    inner = make_recorder(tmp_path / "inner")
 
+@pytest.mark.parametrize(
+    "entry_order",
+    [("signal-a", "signal-b"), ("signal-b", "signal-a")],
+    ids=["a-then-b", "b-then-a"],
+)
+async def test_signal_flushes_concurrent_siblings(
+    tmp_path: Path, entry_order: tuple[str, str]
+) -> None:
+    """One run flush writes root and every live sibling, independent of entry order."""
+    from daydream.trajectory import flush_active_signal_recorders
+
+    markers = {"signal-a": "SIBLING_A_ONLY", "signal-b": "SIBLING_B_ONLY"}
+    entered = {name: anyio.Event() for name in markers}
+    release = {name: anyio.Event() for name in markers}
+    children: dict[str, TrajectoryRecorder] = {}
+    root = make_recorder(tmp_path)
+
+    async with root:
+        async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv, "ROOT_ONLY")
+        async with anyio.create_task_group() as tg:
+            for name in entry_order:
+                tg.start_soon(
+                    _hold_fork,
+                    root,
+                    name,
+                    markers[name],
+                    entered[name],
+                    release[name],
+                    children,
+                )
+                await entered[name].wait()
+
+            flush_active_signal_recorders()
+            paths = [_partial_path(root), *(_partial_path(children[n]) for n in markers)]
+            assert all(path.exists() for path in paths)
+            trajectories = [read_trajectory(path) for path in paths]
+            assert all(atif_validate(item, validate_images=False) for item in trajectories)
+            assert len({item["trajectory_id"] for item in trajectories}) == 3
+            assert "ROOT_ONLY" in _trajectory_text(paths[0])
+            for name, marker in markers.items():
+                text = _trajectory_text(_partial_path(children[name]))
+                assert marker in text
+                assert "ROOT_ONLY" not in text
+                assert all(other == marker or other not in text for other in markers.values())
+
+            for name in reversed(entry_order):
+                release[name].set()
+
+
+@pytest.mark.parametrize("exit_kind", ["normal", "runtime", "cancel", "system-exit"])
+async def test_signal_flush_excludes_exited_child(
+    tmp_path: Path, exit_kind: str
+) -> None:
+    """Every child exit shape unregisters before a later root-only flush."""
+    from daydream.trajectory import flush_active_signal_recorders
+
+    root = make_recorder(tmp_path)
+
+    async def child_body() -> TrajectoryRecorder:
+        async with root.fork(f"exited-{exit_kind}") as child:
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                observe_text_and_result(inv, "EXITED_CHILD_ONLY")
+                if exit_kind == "runtime":
+                    raise RuntimeError("child body")
+                if exit_kind == "system-exit":
+                    raise SystemExit(17)
+            return child
+
+    async with root:
+        async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv, "ROOT_ONLY")
+
+        if exit_kind == "runtime":
+            with pytest.raises(RuntimeError, match="child body"):
+                await child_body()
+        elif exit_kind == "system-exit":
+            with pytest.raises(SystemExit) as exc:
+                await child_body()
+            assert exc.value.code == 17
+        elif exit_kind == "cancel":
+            with anyio.CancelScope() as scope:
+                async with root.fork("exited-cancel") as active_child:
+                    async with active_child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                        observe_text_and_result(inv, "EXITED_CHILD_ONLY")
+                        scope.cancel()
+                        await anyio.sleep_forever()
+        else:
+            await child_body()
+
+        flush_active_signal_recorders()
+        assert _partial_path(root).exists()
+        child_path = root._sibling_path_for(f"exited-{exit_kind}")
+        assert not child_path.with_suffix(child_path.suffix + ".partial").exists()
+
+
+async def test_signal_flush_excludes_child_after_final_write_system_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A BaseException from the child final write cannot leak registry membership."""
+    from daydream.trajectory import flush_active_signal_recorders
+
+    root = make_recorder(tmp_path)
+    child: TrajectoryRecorder
+    child_path: Path
+
+    def fail_final_write() -> None:
+        raise SystemExit(23)
+
+    async with root:
+        async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv, "ROOT_ONLY")
+        with pytest.raises(SystemExit) as exc:
+            async with root.fork("final-system-exit") as child:
+                child_path = child.path
+                async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                    observe_text_and_result(inv, "STALE_CHILD_ONLY")
+                monkeypatch.setattr(child, "_write", fail_final_write)
+        assert exc.value.code == 23
+        child.path = child_path
+        flush_active_signal_recorders()
+        assert _partial_path(root).exists()
+        assert not _partial_path(child).exists()
+
+
+async def test_signal_flush_selects_latest_independent_root(tmp_path: Path) -> None:
+    """A nested independent root is targeted until it exits, then outer resumes."""
+    from daydream.trajectory import flush_active_signal_recorders
+
+    writes: list[tuple[str, str]] = []
+    outer = make_recorder(
+        tmp_path / "outer", on_write=lambda _rec, status: writes.append(("outer", status))
+    )
+    inner = make_recorder(
+        tmp_path / "inner", on_write=lambda _rec, status: writes.append(("inner", status))
+    )
     async with outer:
-        assert get_signal_recorder() is outer
+        async with outer.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv, "OUTER_ONLY")
         async with inner:
-            assert get_signal_recorder() is inner
-        assert get_signal_recorder() is outer
+            async with inner.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                observe_text_and_result(inv, "INNER_ONLY")
+            flush_active_signal_recorders()
+            assert writes == [("inner", "partial")]
+        writes.clear()
+        flush_active_signal_recorders()
+        assert writes == [("outer", "partial")]
 
-    assert get_signal_recorder() is None
+
+def _finish_shutdown_panel() -> None:
+    from daydream.ui import get_shutdown_panel, set_shutdown_panel
+
+    panel = get_shutdown_panel()
+    if panel is not None:
+        panel.finish()
+        set_shutdown_panel(None)
 
 
-# Regression: forked child recorders must be visible to signal handler
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+async def test_signal_handler_flushes_all_siblings_once(
+    tmp_path: Path, signum: signal.Signals
+) -> None:
+    """The real handler flushes root and both siblings without parent recursion."""
+    from daydream.cli import _signal_handler
+
+    root_statuses: list[str] = []
+    root = make_recorder(tmp_path, on_write=lambda _rec, status: root_statuses.append(status))
+    entered = {name: anyio.Event() for name in ("signal-a", "signal-b")}
+    release = {name: anyio.Event() for name in entered}
+    children: dict[str, TrajectoryRecorder] = {}
+    markers = {"signal-a": "SIBLING_A_ONLY", "signal-b": "SIBLING_B_ONLY"}
+
+    async with root:
+        async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv, "ROOT_ONLY")
+        async with anyio.create_task_group() as tg:
+            for name in ("signal-a", "signal-b"):
+                tg.start_soon(
+                    _hold_fork,
+                    root,
+                    name,
+                    markers[name],
+                    entered[name],
+                    release[name],
+                    children,
+                )
+                await entered[name].wait()
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    _signal_handler(signum, None)
+                assert root_statuses == ["partial"]
+                paths = [_partial_path(root), *(_partial_path(children[n]) for n in entered)]
+                assert all(path.exists() for path in paths)
+            finally:
+                _finish_shutdown_panel()
+                for event in release.values():
+                    event.set()
 
 
-async def test_forked_child_visible_to_signal_handler(tmp_path: Path) -> None:
-    """Forked child recorder must appear on _ACTIVE_RECORDERS so SIGINT can flush it.
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+async def test_signal_handler_isolates_sibling_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signum: signal.Signals,
+) -> None:
+    """One denied sibling partial cannot prevent healthy siblings or shutdown setup."""
+    from daydream.cli import _signal_handler
 
-    Pre-fix bug: _ForkCM.__aenter__ set the ContextVar but never appended
-    the child to _ACTIVE_RECORDERS, so get_signal_recorder() could not see
-    it and write_partial() on the child was never called during SIGINT.
-    """
-    from daydream.trajectory import get_signal_recorder
+    root = make_recorder(tmp_path)
+    entered = {name: anyio.Event() for name in ("signal-a", "signal-b")}
+    release = {name: anyio.Event() for name in entered}
+    children: dict[str, TrajectoryRecorder] = {}
+    warnings: list[str] = []
+    real_write_text = Path.write_text
 
-    parent = make_recorder(tmp_path)
-    async with parent:
-        assert get_signal_recorder() is parent
-        async with parent.fork("child-branch") as child:
-            assert get_signal_recorder() is child, (
-                "Forked child should be top of signal-handler stack"
+    async with root:
+        async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv, "ROOT_ONLY")
+        async with anyio.create_task_group() as tg:
+            for name, marker in (
+                ("signal-a", "SIBLING_A_ONLY"),
+                ("signal-b", "SIBLING_B_ONLY"),
+            ):
+                tg.start_soon(
+                    _hold_fork,
+                    root,
+                    name,
+                    marker,
+                    entered[name],
+                    release[name],
+                    children,
+                )
+                await entered[name].wait()
+
+            denied_path = _partial_path(children["signal-a"])
+
+            def selective_write(path: Path, *args: Any, **kwargs: Any) -> int:
+                if path == denied_path:
+                    raise PermissionError("denied sibling A")
+                return real_write_text(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "write_text", selective_write)
+            monkeypatch.setattr(
+                "daydream.trajectory.print_warning",
+                lambda _console, message: warnings.append(message),
             )
-        assert get_signal_recorder() is parent, (
-            "Parent should be restored after child fork exits"
-        )
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    _signal_handler(signum, None)
+                assert not denied_path.exists()
+                for recorder in (root, children["signal-b"]):
+                    path = _partial_path(recorder)
+                    assert path.exists()
+                    assert atif_validate(read_trajectory(path), validate_images=False)
+                matching_warnings = [
+                    warning
+                    for warning in warnings
+                    if "Partial trajectory write failed: PermissionError" in warning
+                ]
+                assert len(matching_warnings) == 1
+            finally:
+                _finish_shutdown_panel()
+                for event in release.values():
+                    event.set()
 
 
 async def test_forked_child_write_partial_captures_in_flight_steps(tmp_path: Path) -> None:
-    """SIGINT mid-fork must flush child's in-flight steps via write_partial."""
-    from daydream.trajectory import get_signal_recorder
+    """A direct child write keeps the established child-to-parent cascade."""
 
     parent = make_recorder(tmp_path)
     async with parent:
+        async with parent.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            observe_text_and_result(inv, "parent-before-child")
         async with parent.fork("child-branch") as child:
             async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
                 inv.observe_user_step(prompt="forked-prompt")
                 inv.observe(TextEvent(text="forked-response"))
                 inv.observe(ResultEvent(structured_output=None, continuation=None))
 
-                sig_recorder = get_signal_recorder()
-                assert sig_recorder is child
-                sig_recorder.write_partial()
+                child.write_partial()
 
     partial_path = child.path.with_suffix(child.path.suffix + ".partial")
+    parent_partial_path = parent.path.with_suffix(parent.path.suffix + ".partial")
     assert partial_path.exists(), "Child partial trajectory should be written"
+    assert parent_partial_path.exists(), "Direct child partial should cascade to parent"
 
     data = json.loads(partial_path.read_text(encoding="utf-8"))
+    parent_data = json.loads(parent_partial_path.read_text(encoding="utf-8"))
     assert data.get("extra", {}).get("partial") is True
+    assert parent_data.get("extra", {}).get("partial") is True
+    assert "parent-before-child" in json.dumps(parent_data, sort_keys=True)
     assert len(data["steps"]) >= 2, (
         f"Child partial missing in-flight steps: {data['steps']!r}"
     )
