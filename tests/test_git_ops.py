@@ -1372,6 +1372,19 @@ _gh_available = shutil.which("gh") is not None
 gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
 
 
+@pytest.fixture
+def local_only_gh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Reach local remote discovery without depending on host authentication.
+
+    These repositories have no remotes, so gh fails before making a request.
+    The synthetic token only suppresses its earlier login/configuration gate.
+    """
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "isolated-gh-config"))
+    monkeypatch.setenv("GH_HOST", "github.com")
+    monkeypatch.setenv("GH_TOKEN", "test-local-only-no-network")
+    monkeypatch.delenv("GH_REPO", raising=False)
+
+
 @gh_required
 def test_gh_repo_view_returns_none_outside_github_repo(tmp_path: Path) -> None:
     """A local-only repo with no GitHub remote yields ``None``."""
@@ -1380,6 +1393,7 @@ def test_gh_repo_view_returns_none_outside_github_repo(tmp_path: Path) -> None:
 
 
 @gh_required
+@pytest.mark.usefixtures("local_only_gh")
 def test_gh_pr_view_raises_without_remote(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     with pytest.raises(GitError, match="no git remotes found"):
@@ -1387,6 +1401,7 @@ def test_gh_pr_view_raises_without_remote(tmp_path: Path) -> None:
 
 
 @gh_required
+@pytest.mark.usefixtures("local_only_gh")
 def test_gh_pr_list_for_branch_raises_without_remote(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     with pytest.raises(GitError, match="no git remotes found"):
