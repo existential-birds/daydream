@@ -709,10 +709,10 @@ def _resolve_backend(
             ``"intent"``, ``"wonder"``, ``"merge"``,
             ``"exploration"``).
         cache: Optional dict to cache backends by
-            ``(backend_name, model, reasoning_effort)``. When provided,
+            ``(backend_name, model, reasoning_effort, audit_root)``. When provided,
             backends are reused only when the backend kind, resolved model,
-            and resolved reasoning effort all match — so the same backend kind
-            with two different models or effort levels yields two distinct
+            resolved reasoning effort, and canonical audit root all match — so
+            differing models, effort levels, or audit roots yield distinct
             instances.
         cwd: Target workspace used for backend-specific configuration.
     """
@@ -762,7 +762,14 @@ _IMPROVE_MODEL_PHASES: tuple[str, ...] = ("recon", "audit", "vet", "plan_write")
 
 
 def _preflight_improve_backends(ctx: FlowContext) -> None:
-    """Resolve and validate every improve backend before the first model turn."""
+    """Resolve and validate every improve backend before the first model turn.
+
+    The production improve composition calls this only inside
+    :func:`open_audit_workspace`, after binding ``ctx.audit_workspace``. The
+    ``None`` guard is a fail-closed defense for unsupported direct/internal
+    construction of an improve context, not a reachable backend-selection
+    diagnostic in the runner flow.
+    """
     audit = ctx.audit_workspace
     if audit is None:
         raise AuditIsolationError("claude", "wrong_root", phase="recon")
@@ -1316,7 +1323,16 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         # The standalone snapshot gives improve independent Git storage. The
         # root-bound backend capability below is the separate filesystem-tool
         # boundary; neither mechanism is described as an OS sandbox.
-        async with open_audit_workspace(work.repo, run_id=work.run_id) as audit:
+        branch_base_ref = (
+            work.base_branch if config.improve_focus == "branch" else None
+        )
+        expected_head_sha = work.head_sha if branch_base_ref is not None else None
+        async with open_audit_workspace(
+            work.repo,
+            run_id=work.run_id,
+            branch_base_ref=branch_base_ref,
+            expected_head_sha=expected_head_sha,
+        ) as audit:
             ctx = FlowContext(
                 config=config,
                 work=work,

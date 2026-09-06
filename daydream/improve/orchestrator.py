@@ -364,9 +364,16 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
         return Stop(1)
 
-    branch_diff = (
-        git_ops.diff(target, ctx.work.base_branch) if branch_focus else ""
-    )
+    branch_diff = ""
+    if branch_focus:
+        audit = ctx.audit_workspace
+        if audit is None or audit.branch_base_sha is None or ctx.work.head_sha is None:
+            raise RuntimeError("branch-focus improve has no pinned audit diff base")
+        branch_diff = git_ops.diff(
+            target,
+            audit.branch_base_sha,
+            head=ctx.work.head_sha,
+        )
     branch_files = _diff_changed_files(branch_diff) if branch_focus else []
     if branch_focus:
         # Branch focus needs every category over one small diff, run serially —

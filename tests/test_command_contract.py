@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
 
-from daydream.backends import AgentEvent
 from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA,
@@ -31,7 +30,7 @@ from daydream.repository_paths import canonicalize_working_directory
 from daydream.runner import RunConfig, run
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
 from tests.harness.improve_backend import (
-    ImproveStubBackend,
+    AuditAbsoluteWorkingDirectoryBackend,
     improve_artifact,
     install_capable_improve_backend,
     install_improve_stub,
@@ -392,37 +391,9 @@ async def test_host_enumeration_dedups_absolute_model_wd(
             }
         ],
     )
-    class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
-            if "IMPROVE_RECON" in prompt:
-                assert isinstance(self.recon_output_override, dict)
-                commands = self.recon_output_override["commands"]
-                commands[0]["working_directory"] = str(cwd / rel)
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-                persist_session=persist_session,
-            ):
-                yield event
-
     stub = install_capable_improve_backend(
         monkeypatch,
-        AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target),
+        AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target, rel=rel),
     )
 
     # Derive the evidence anchor from the fixture's actual content instead of

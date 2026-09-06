@@ -925,6 +925,59 @@ def _prefer_remote_base(repo: Path, base: str) -> str:
     return base
 
 
+def _validated_diff_object_id(stdout: str) -> str | None:
+    """Return one canonical SHA-1 line, rejecting every other representation."""
+    if re.fullmatch(r"[0-9a-f]{40}\n?", stdout) is None:
+        return None
+    return stdout.removesuffix("\n")
+
+
+def resolve_diff_merge_base(repo: Path, base: str, head_sha: str) -> str:
+    """Resolve the immutable merge-base used by :func:`diff`'s three-dot range.
+
+    The preferred base selection intentionally matches :func:`diff` rather
+    than :func:`merge_base`: a present ``origin/<base>`` wins even when no
+    upstream relationship is configured. Both inputs are resolved to commit
+    OIDs before the merge-base probe so a concurrent ref move cannot change
+    the second half of the operation.
+
+    Raises:
+        GitError: If either commit or their merge-base cannot be resolved.
+    """
+    if _has_leading_dash(base, head_sha):
+        raise GitError("branch-focus diff base or head is invalid")
+
+    try:
+        preferred_base = _prefer_remote_base(repo, base)
+    except (GitError, UnicodeError) as exc:
+        raise GitError("branch-focus preferred base probe failed") from exc
+
+    def _commit_oid(ref: str, label: str) -> str:
+        try:
+            proc = _run_git(
+                repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], timeout=5,
+            )
+        except (GitError, UnicodeError) as exc:
+            raise GitError(f"branch-focus {label} commit probe failed") from exc
+        oid = _validated_diff_object_id(proc.stdout) if proc.returncode == 0 else None
+        if oid is None:
+            raise GitError(f"branch-focus {label} commit cannot be resolved")
+        return oid
+
+    resolved_head = _commit_oid(head_sha, "recorded head")
+    resolved_base = _commit_oid(preferred_base, "preferred base")
+    try:
+        proc = _run_git(repo, ["merge-base", resolved_head, resolved_base], timeout=5)
+    except (GitError, UnicodeError) as exc:
+        raise GitError("branch-focus diff merge-base probe failed") from exc
+    merge_base_sha = (
+        _validated_diff_object_id(proc.stdout) if proc.returncode == 0 else None
+    )
+    if merge_base_sha is None:
+        raise GitError("branch-focus diff merge-base cannot be resolved")
+    return merge_base_sha
+
+
 def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None = None) -> str:
     """Return the unified diff between *base* and *head*, plus tracked worktree changes.
 
@@ -1800,11 +1853,36 @@ def _remove_snapshot_leaf(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _snapshot_has_nondirectory_ancestor(root: Path, rel: str) -> bool:
+    """Return whether a copied ancestor already makes *rel* unreachable."""
+    ancestor = root
+    for part in rel.split("/")[:-1]:
+        ancestor /= part
+        try:
+            mode = ancestor.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        except NotADirectoryError:
+            return True
+        if not stat.S_ISDIR(mode):
+            return True
+    return False
+
+
 def _copy_snapshot_leaf(source: Path, destination: Path, rel: str) -> None:
     src = _snapshot_leaf(source, rel)
     dst = _snapshot_leaf(destination, rel)
     try:
         mode = src.lstat().st_mode
+    except NotADirectoryError:
+        # Parent paths are copied before children. A staged directory-to-file
+        # change therefore makes former HEAD children unreachable only after
+        # their authoritative replacement leaf has already been copied. With
+        # untracked files excluded, however, the replacement is absent from the
+        # path set and the old tracked destination child must become a deletion.
+        if not _snapshot_has_nondirectory_ancestor(destination, rel):
+            _remove_snapshot_leaf(dst)
+        return
     except FileNotFoundError:
         _remove_snapshot_leaf(dst)
         return
@@ -1853,45 +1931,93 @@ def _snapshot_git_exec_path_is_safe() -> bool:
             retries=0,
             env_cmd=query_env,
         )
-    except (GitError, OSError):
+    except (GitError, OSError, UnicodeError):
         return False
     return proc.returncode == 0 and proc.stdout == f"{inherited}\n"
 
 
-def _snapshot_git_environment_is_safe() -> bool:
-    """Admit only non-storage indexed config; never rewrite caller settings."""
-    config_names = {name for name in os.environ if name.startswith("GIT_CONFIG")}
-    if any(
-        name in _SNAPSHOT_GIT_REDIRECTS or name.startswith("GIT_TRACE")
+def _snapshot_git_environment_violations() -> tuple[str, ...]:
+    """Return names of inherited Git settings that make snapshots unsafe."""
+    violations = {
+        name
         for name in os.environ
-    ):
-        return False
+        if name in _SNAPSHOT_GIT_REDIRECTS or name.startswith("GIT_TRACE")
+    }
+    config_names = {name for name in os.environ if name.startswith("GIT_CONFIG")}
     if config_names:
+        config_is_safe = True
         raw_count = os.environ.get("GIT_CONFIG_COUNT", "")
         if re.fullmatch(r"[0-9]{1,3}", raw_count) is None or int(raw_count) > 256:
-            return False
-        expected = {"GIT_CONFIG_COUNT"}
-        for index in range(int(raw_count)):
-            key_name = f"GIT_CONFIG_KEY_{index}"
-            value_name = f"GIT_CONFIG_VALUE_{index}"
-            expected.update((key_name, value_name))
-            key = os.environ.get(key_name, "").lower()
-            value = os.environ.get(value_name)
-            if value is None:
-                return False
-            # Signing policy and ignore-pattern paths cannot redirect storage or
-            # execute Git helpers. Preserve them verbatim, including true signing.
-            # All other config (especially includes, filters and hooks) fails closed.
-            if key == "commit.gpgsign":
-                if value.lower() not in {
-                    "true", "false", "yes", "no", "on", "off", "1", "0",
-                }:
-                    return False
-            elif key != "core.excludesfile":
-                return False
-        if config_names != expected:
-            return False
-    return _snapshot_git_exec_path_is_safe()
+            config_is_safe = False
+        else:
+            expected = {"GIT_CONFIG_COUNT"}
+            for index in range(int(raw_count)):
+                key_name = f"GIT_CONFIG_KEY_{index}"
+                value_name = f"GIT_CONFIG_VALUE_{index}"
+                expected.update((key_name, value_name))
+                key = os.environ.get(key_name, "").lower()
+                value = os.environ.get(value_name)
+                if value is None:
+                    config_is_safe = False
+                    continue
+                # Signing policy and ignore-pattern paths cannot redirect storage or
+                # execute Git helpers. Preserve them verbatim, including true signing.
+                # All other config (especially includes, filters and hooks) fails closed.
+                if key == "commit.gpgsign":
+                    if value.lower() not in {
+                        "true", "false", "yes", "no", "on", "off", "1", "0",
+                    }:
+                        config_is_safe = False
+                elif key != "core.excludesfile":
+                    config_is_safe = False
+            if config_names != expected:
+                config_is_safe = False
+        if not config_is_safe:
+            violations.update(config_names)
+    # Preserve the old fail-fast boundary: once refusal is certain, do not run
+    # a diagnostic Git subprocess under already-dangerous inherited settings.
+    if not violations and not _snapshot_git_exec_path_is_safe():
+        violations.add("GIT_EXEC_PATH")
+    return tuple(sorted(violations))
+
+
+_SAFE_GIT_ENVIRONMENT_NAME_RE = re.compile(r"GIT_[A-Z0-9_]+")
+_GIT_ENVIRONMENT_DIAGNOSTIC_BUDGET = 320
+_GIT_ENVIRONMENT_DIAGNOSTIC_NAME_LIMIT = 20
+
+
+def _format_snapshot_git_environment_violations(names: tuple[str, ...]) -> str:
+    """Format bounded variable-name evidence without exposing arbitrary keys."""
+    safe_names: list[str] = []
+    invalid_count = 0
+    for name in names:
+        if (
+            len(name) <= 128
+            and _SAFE_GIT_ENVIRONMENT_NAME_RE.fullmatch(name) is not None
+        ):
+            safe_names.append(name)
+        else:
+            invalid_count += 1
+
+    displayed: list[str] = []
+    used = 0
+    for name in safe_names:
+        addition = len(name) + (2 if displayed else 0)
+        if (
+            len(displayed) >= _GIT_ENVIRONMENT_DIAGNOSTIC_NAME_LIMIT
+            or used + addition > _GIT_ENVIRONMENT_DIAGNOSTIC_BUDGET
+        ):
+            break
+        displayed.append(name)
+        used += addition
+    parts = [", ".join(displayed)] if displayed else []
+    omitted_count = len(safe_names) - len(displayed)
+    if omitted_count:
+        parts.append(f"and {omitted_count} more")
+    if invalid_count:
+        noun = "name" if invalid_count == 1 else "names"
+        parts.append(f"{invalid_count} invalid Git variable {noun}")
+    return "; ".join(parts)
 
 
 def prepare_independent_snapshot(
@@ -1910,9 +2036,12 @@ def prepare_independent_snapshot(
     rather than clearing caller settings (including hooks) or returning storage
     that only works in the parent environment.
     """
-    if not _snapshot_git_environment_is_safe():
+    environment_violations = _snapshot_git_environment_violations()
+    if environment_violations:
+        details = _format_snapshot_git_environment_violations(environment_violations)
         raise SnapshotPreparationError(
-            "snapshot refuses inherited Git repository, configuration, diff, or trace overrides"
+            "snapshot refuses inherited Git repository, configuration, diff, or trace "
+            f"overrides; offending variables: {details}"
         )
     source = source.resolve(strict=True)
     destination = destination.resolve()

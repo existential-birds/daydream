@@ -667,6 +667,9 @@ async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path)
     secret.write_text("secret\n", encoding="utf-8")
     outward = root / "escape"
     outward.symlink_to(source, target_is_directory=True)
+    linked = root / "sub"
+    linked.mkdir()
+    (linked / "loop").symlink_to("..", target_is_directory=True)
     backend = ClaudeBackend(
         model="opus",
         audit_root=root,
@@ -725,6 +728,14 @@ async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path)
         {"tool_name": "Grep", "tool_input": {"pattern": "needle", "path": str(inside), "glob": "*"}},
         {"tool_name": "Glob", "tool_input": {"pattern": "clean/*.py"}},
         {"tool_name": "Glob", "tool_input": {"path": "clean", "pattern": "../*.py"}},
+        {
+            "tool_name": "Glob",
+            "tool_input": {"path": "sub", "pattern": "loop/escape/*"},
+        },
+        {
+            "tool_name": "Glob",
+            "tool_input": {"path": "sub/loop/clean", "pattern": "*.py"},
+        },
         {"tool_name": "Glob", "tool_input": {"path": "clean", "pattern": "C:\\*"}},
         {"tool_name": "Glob", "tool_input": {"path": "clean", "pattern": "\\\\server\\share"}},
         {"tool_name": "Bash", "tool_input": {"command": "cat ../source/secret.txt"}},
@@ -898,7 +909,17 @@ async def test_audit_guard_round_trips_through_real_sdk_query_protocol(
     root.mkdir()
     inside = root / "inside.py"
     inside.write_text("ok\n", encoding="utf-8")
-    backend = ClaudeBackend(model="opus", audit_root=root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "escape").symlink_to(outside, target_is_directory=True)
+    sub = root / "sub"
+    sub.mkdir()
+    (sub / "loop").symlink_to("..", target_is_directory=True)
+    backend = ClaudeBackend(
+        model="opus",
+        audit_root=root,
+        audit_outward_symlinks=frozenset({root / "escape"}),
+    )
     guard = backend._audit_root_guard  # noqa: SLF001 - pinned SDK adapter seam
     assert guard is not None
     transport = MemoryTransport()
@@ -948,6 +969,14 @@ async def test_audit_guard_round_trips_through_real_sdk_query_protocol(
                         "path": "inside.py",
                         "output_mode": {},
                     },
+                },
+                "deny",
+            ),
+            (
+                "deny-inward-symlink-glob",
+                {
+                    "tool_name": "Glob",
+                    "tool_input": {"path": "sub", "pattern": "loop/escape/*"},
                 },
                 "deny",
             ),

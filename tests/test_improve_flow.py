@@ -42,6 +42,7 @@ from daydream.workspace import AuditWorkspace, WorkContext
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
 from tests.harness.git_helpers import commit, configure_identity, git, init_repo
 from tests.harness.improve_backend import (
+    AuditAbsoluteWorkingDirectoryBackend,
     ImproveStubBackend,
     IncrementalPlanBackend,
     OutOfOrderPlanBackend,
@@ -169,6 +170,89 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
     assert _git_status_porcelain(improve_monorepo_target) == before_status
 
 
+@pytest.mark.anyio
+async def test_improve_git_environment_refusal_names_key_without_value(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+    tmp_path: Path,
+) -> None:
+    repo = improve_monorepo_target
+    private_config = tmp_path / "PRIVATE_ENV_VALUE_SENTINEL"
+    private_config.write_text("", encoding="utf-8")
+    private_value = str(private_config)
+    backend = install_improve_stub(monkeypatch, repo)
+    before_head = head_sha(repo)
+    before_status = _git_status_porcelain(repo)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", private_value)
+
+    code = await run(make_config(repo, flow_name="improve"))
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+
+    assert code == 1
+    assert backend.calls == []
+    assert "GIT_CONFIG_GLOBAL" in output
+    assert private_value not in output
+    assert len(output) < 5_000
+    assert head_sha(repo) == before_head
+    assert _git_status_porcelain(repo) == before_status
+
+
+@pytest.mark.anyio
+async def test_branch_improve_redacts_malformed_external_git_probe_before_model(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+    tmp_path: Path,
+) -> None:
+    import shutil
+    import sys
+
+    repo = improve_monorepo_target
+    head = head_sha(repo)
+    before_status = _git_status_porcelain(repo)
+    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    backend = install_improve_stub(monkeypatch, repo)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "private git shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        "head = os.environ['DAYDREAM_TEST_HEAD']\n"
+        "if args[:2] == ['rev-parse', '--verify'] and "
+        "len(args) == 3 and args[2] == head + '^{commit}':\n"
+        "    print('PRIVATE_STDOUT_SENTINEL')\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(subprocess.run([os.environ['DAYDREAM_TEST_REAL_GIT'], *args]).returncode)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+    monkeypatch.setenv("DAYDREAM_TEST_HEAD", head)
+    monkeypatch.setenv("PATH", str(shim_dir))
+
+    code = await run(make_config(repo, flow_name="improve", improve_focus="branch"))
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+
+    assert code == 1
+    assert backend.calls == []
+    assert "cannot resolve branch-focus diff merge-base" in output
+    assert "PRIVATE_STDOUT_SENTINEL" not in output
+    assert str(repo) not in output
+    assert len(output) < 5_000
+    assert head_sha(repo) == head
+    assert _git_status_porcelain(repo) == before_status
+    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+
+
 class _UnbornAuditBackend(ImproveStubBackend):
     """Capability fake that observes and optionally commits its unborn snapshot."""
 
@@ -228,6 +312,186 @@ class _UnbornAuditBackend(ImproveStubBackend):
             yield event
 
 
+class _AuditGitBoundaryBackend(ImproveStubBackend):
+    """Observe the real Git boundary from each external backend turn."""
+
+    def __init__(self, target: Path, *, absent_oid: str | None = None) -> None:
+        super().__init__(target)
+        self.absent_oid = absent_oid
+        self.git_observations: list[dict[str, object]] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        self.git_observations.append(
+            {
+                "outside_source": not cwd.is_relative_to(self._target.resolve()),
+                "remotes": git(cwd, "remote"),
+                "remote_refs": git(cwd, "for-each-ref", "refs/remotes"),
+                "absent_oid_present": (
+                    git_ops.commit_exists(cwd, self.absent_oid)
+                    if self.absent_oid is not None
+                    else None
+                ),
+            }
+        )
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
+class _StagedDirectoryToFileBackend(ImproveStubBackend):
+    """Observe a staged path-type replacement in the real audit snapshot."""
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target, n_findings=0)
+        self.audit_paths: list[Path] = []
+        self.replacement_bytes: bytes | None = None
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        if cwd not in self.audit_paths:
+            self.audit_paths.append(cwd)
+        if self.replacement_bytes is None:
+            replacement = cwd / "x"
+            assert replacement.is_file()
+            self.replacement_bytes = replacement.read_bytes()
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
+class _UnstagedDirectoryToFileBackend(ImproveStubBackend):
+    """Observe an excluded untracked replacement without stale descendants."""
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target, n_findings=0)
+        self.audit_paths: list[Path] = []
+        self.observed_status: str | None = None
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        if cwd not in self.audit_paths:
+            self.audit_paths.append(cwd)
+        if self.observed_status is None:
+            assert not (cwd / "x").is_file()
+            assert not (cwd / "x" / "child.txt").exists()
+            self.observed_status = git(cwd, "status", "--short")
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
+class _SymlinkGuardBackend(ImproveStubBackend):
+    """Drive the production Claude guard inside a real audit snapshot."""
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target, n_findings=0)
+        self.audit_paths: list[Path] = []
+        self.glob_denied: bool | None = None
+        self.external_enumeration_attempted = False
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        from daydream.backends.claude import ClaudeBackend
+
+        if cwd not in self.audit_paths:
+            self.audit_paths.append(cwd)
+        if self.glob_denied is None:
+            backend = ClaudeBackend(
+                model="opus",
+                audit_root=cwd,
+                audit_outward_symlinks=self.audit_outward_symlinks,
+            )
+            guard = backend._audit_root_guard  # noqa: SLF001 - security boundary
+            assert guard is not None
+            decision = cast(dict[str, Any], await guard(
+                cast(Any, {
+                    "tool_name": "Glob",
+                    "tool_input": {"path": "sub", "pattern": "loop/escape/*"},
+                }),
+                None,
+                {"signal": None},
+            ))
+            self.glob_denied = (
+                decision.get("hookSpecificOutput", {}).get("permissionDecision")
+                == "deny"
+            )
+            if not self.glob_denied:
+                self.external_enumeration_attempted = True
+                list((cwd / "sub" / "loop" / "escape").iterdir())
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
 def _make_unborn_improve_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "unborn-improve"
     init_repo(repo)
@@ -237,6 +501,112 @@ def _make_unborn_improve_repo(tmp_path: Path) -> Path:
     (repo / "ignored-secret.txt").write_text("do-not-copy\n", encoding="utf-8")
     git(repo, "add", ".gitignore", "tracked.bin")
     return repo
+
+
+@pytest.mark.anyio
+async def test_full_improve_snapshots_staged_directory_to_file_change(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    repo = improve_monorepo_target
+    nested = repo / "x"
+    nested.mkdir()
+    (nested / "old.py").write_text("OLD = True\n", encoding="utf-8")
+    git(repo, "add", "x")
+    commit(repo, "add tracked directory")
+    nested.joinpath("old.py").unlink()
+    nested.rmdir()
+    nested.write_bytes(b"replacement file\x00\xff")
+    git(repo, "add", "-A")
+    before_head = head_sha(repo)
+    before_status = _git_status_porcelain(repo)
+    before_patch = git_ops.staged_patch(repo)
+    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    backend = install_capable_improve_backend(
+        monkeypatch, _StagedDirectoryToFileBackend(repo),
+    )
+
+    code = await run(make_config(repo, flow_name="improve"))
+
+    assert code == 0
+    assert backend.replacement_bytes == b"replacement file\x00\xff"
+    assert backend.audit_paths
+    assert all(not path.exists() for path in backend.audit_paths)
+    assert head_sha(repo) == before_head
+    assert _git_status_porcelain(repo) == before_status
+    assert git_ops.staged_patch(repo) == before_patch
+    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    assert (repo / "x").read_bytes() == b"replacement file\x00\xff"
+
+
+@pytest.mark.anyio
+async def test_full_improve_excludes_untracked_replacement_without_stale_child(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    repo = improve_monorepo_target
+    nested = repo / "x"
+    nested.mkdir()
+    (nested / "child.txt").write_text("old child\n", encoding="utf-8")
+    git(repo, "add", "x/child.txt")
+    commit(repo, "add tracked directory")
+    nested.joinpath("child.txt").unlink()
+    nested.rmdir()
+    nested.write_bytes(b"untracked replacement\x00\xff")
+    before_head = head_sha(repo)
+    before_status = _git_status_porcelain(repo)
+    before_patch = git_ops.staged_patch(repo)
+    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    backend = install_capable_improve_backend(
+        monkeypatch, _UnstagedDirectoryToFileBackend(repo),
+    )
+
+    code = await run(make_config(repo, flow_name="improve"))
+
+    assert code == 0
+    assert backend.observed_status == "D x/child.txt"
+    assert backend.audit_paths
+    assert all(not path.exists() for path in backend.audit_paths)
+    assert head_sha(repo) == before_head
+    assert _git_status_porcelain(repo) == before_status
+    assert git_ops.staged_patch(repo) == before_patch
+    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    assert (repo / "x").read_bytes() == b"untracked replacement\x00\xff"
+
+
+@pytest.mark.anyio
+async def test_full_improve_denies_glob_through_inward_then_outward_symlink(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    tmp_path: Path,
+) -> None:
+    repo = improve_monorepo_target
+    outside = tmp_path / "private outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("never enumerate\n", encoding="utf-8")
+    (repo / "escape").symlink_to(outside, target_is_directory=True)
+    sub = repo / "sub"
+    sub.mkdir()
+    (sub / "loop").symlink_to("..", target_is_directory=True)
+    git(repo, "add", "escape", "sub/loop")
+    commit(repo, "add audit symlink topology")
+    before_head = head_sha(repo)
+    before_status = _git_status_porcelain(repo)
+    backend = install_capable_improve_backend(monkeypatch, _SymlinkGuardBackend(repo))
+
+    code = await run(make_config(repo, flow_name="improve"))
+
+    assert code == 0
+    assert backend.glob_denied is True
+    assert backend.external_enumeration_attempted is False
+    assert backend.audit_paths
+    assert all(not path.exists() for path in backend.audit_paths)
+    assert head_sha(repo) == before_head
+    assert _git_status_porcelain(repo) == before_status
+    assert (outside / "secret.txt").read_text(encoding="utf-8") == "never enumerate\n"
 
 
 @pytest.mark.anyio
@@ -1515,37 +1885,9 @@ async def test_host_enumeration_dedups_absolute_model_wd(
         ],
     )
 
-    class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ) -> AsyncIterator[AgentEvent]:
-            if "IMPROVE_RECON" in prompt:
-                assert isinstance(self.recon_output_override, dict)
-                commands = self.recon_output_override["commands"]
-                commands[0]["working_directory"] = str(cwd / rel)
-            async for event in super().execute(
-                cwd,
-                prompt,
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-                persist_session=persist_session,
-            ):
-                yield event
-
     stub = install_capable_improve_backend(
         monkeypatch,
-        AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target),
+        AuditAbsoluteWorkingDirectoryBackend(improve_monorepo_target, rel=rel),
     )
     stub.recon_output_override = {
         "languages": ["python"],
@@ -1891,6 +2233,133 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
         "introduced",
         "inherited",
     }
+
+
+@pytest.mark.anyio
+async def test_branch_focus_pins_remote_preferred_merge_base_in_remote_free_snapshot(
+    improve_branch_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    repo = improve_branch_target
+    prior_feature = git(repo, "rev-parse", "feature")
+    local_main = git(repo, "rev-parse", "main")
+    git(repo, "checkout", "main")
+    (repo / "upstream.py").write_text("UPSTREAM = 1\n")
+    git(repo, "add", "upstream.py")
+    remote_main = commit(repo, "remote-only advancement")
+    git(repo, "rebase", "--onto", remote_main, local_main, "feature")
+    git(repo, "branch", "-f", "main", local_main)
+    bare = tmp_path / "origin.git"
+    bare.mkdir()
+    git(bare, "init", "--bare", "-b", "main")
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "origin", f"{remote_main}:refs/heads/main")
+    git(repo, "fetch", "origin", "main")
+    git(repo, "remote", "set-head", "origin", "main")
+    git(repo, "checkout", "feature")
+    assert git(repo, "rev-parse", "feature") != prior_feature
+
+    git_dir = Path(git(repo, "rev-parse", "--absolute-git-dir"))
+    index_path = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+    before = {
+        "head": git(repo, "rev-parse", "HEAD"),
+        "refs": git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+        "config": (git_dir / "config").read_bytes(),
+        "index": index_path.read_bytes(),
+    }
+    backend = install_capable_improve_backend(
+        monkeypatch, _AuditGitBoundaryBackend(repo)
+    )
+
+    assert await run(
+        make_config(repo, flow_name="improve", improve_focus="branch")
+    ) == 0
+    diff_blocks = [
+        call["prompt"].split("```diff\n", 1)[1].split("\n```", 1)[0]
+        for call in backend.calls
+        if call["marker"] in ("audit", "vet") and "```diff\n" in call["prompt"]
+    ]
+    assert diff_blocks
+    assert all("billing-v2" in block for block in diff_blocks)
+    assert all("UPSTREAM = 1" not in block for block in diff_blocks)
+    assert backend.git_observations
+    assert all(obs["outside_source"] is True for obs in backend.git_observations)
+    assert all(obs["remotes"] == obs["remote_refs"] == "" for obs in backend.git_observations)
+    assert git(repo, "rev-parse", "HEAD") == before["head"]
+    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before["refs"]
+    assert (git_dir / "config").read_bytes() == before["config"]
+    assert index_path.read_bytes() == before["index"]
+
+
+@pytest.mark.anyio
+async def test_branch_focus_dangling_base_carries_only_merge_base_into_snapshot(
+    improve_branch_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    repo = improve_branch_target
+    feature = git(repo, "rev-parse", "feature")
+    common = git(repo, "rev-parse", "main")
+    git(repo, "checkout", "--detach", common)
+    (repo / "side.py").write_text("SIDE = 1\n")
+    git(repo, "add", "side.py")
+    dangling_tip = commit(repo, "dangling explicit base")
+    git(repo, "checkout", "feature")
+    assert git(repo, "rev-parse", "HEAD") == feature
+    backend = install_capable_improve_backend(
+        monkeypatch,
+        _AuditGitBoundaryBackend(repo, absent_oid=dangling_tip),
+    )
+
+    assert await run(
+        make_config(
+            repo,
+            flow_name="improve",
+            improve_focus="branch",
+            base=dangling_tip,
+        )
+    ) == 0
+    assert backend.git_observations
+    assert all(obs["absent_oid_present"] is False for obs in backend.git_observations)
+    assert all(obs["remotes"] == obs["remote_refs"] == "" for obs in backend.git_observations)
+
+
+@pytest.mark.anyio
+async def test_branch_focus_shallow_preferred_history_fails_before_model(
+    improve_branch_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = improve_branch_target
+    common = git(repo, "rev-parse", "main")
+    git(repo, "checkout", "main")
+    (repo / "remote.py").write_text("remote\n")
+    git(repo, "add", "remote.py")
+    remote_tip = commit(repo, "preferred remote tip")
+    git(repo, "checkout", "feature")
+    git(repo, "branch", "-f", "main", common)
+    git(repo, "update-ref", "refs/remotes/origin/main", remote_tip)
+    shallow_path = Path(
+        git(repo, "rev-parse", "--path-format=absolute", "--git-path", "shallow")
+    )
+    shallow_path.write_text(f"{common}\n{remote_tip}\n")
+    before_shallow = shallow_path.read_bytes()
+    backend = install_capable_improve_backend(
+        monkeypatch, _AuditGitBoundaryBackend(repo)
+    )
+
+    assert await run(
+        make_config(repo, flow_name="improve", improve_focus="branch")
+    ) == 1
+    output = capsys.readouterr().out
+    assert "branch-focus" in output
+    assert "merge-base" in output
+    assert backend.calls == []
+    assert backend.git_observations == []
+    assert shallow_path.read_bytes() == before_shallow
 
 
 @pytest.mark.anyio

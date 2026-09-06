@@ -66,8 +66,8 @@ class FlowContext:
 
         Instance-sharing semantics are identical to the flow helpers'
         ``backend_cache`` dicts today: backends are cached per resolved
-        ``(backend_name, model, reasoning_effort)`` triple for the lifetime of
-        this context.
+        ``(backend_name, model, reasoning_effort, audit_root)`` tuple for the
+        lifetime of this context.
         """
         from daydream.runner import _resolve_backend
 

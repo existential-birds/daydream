@@ -233,13 +233,18 @@ async def open_workspace(
 
 @dataclass(frozen=True)
 class AuditWorkspace:
-    """Independent audit repository plus the boundaries its backend must enforce."""
+    """Independent audit repository plus the boundaries its backend must enforce.
+
+    ``branch_base_sha`` is the source-resolved immutable merge-base for a
+    branch-focus run. It is absent for full-repository and unborn improve.
+    """
 
     repo: Path
     source: Path
     repo_git_common_dir: Path
     source_git_common_dir: Path
     outward_symlinks: frozenset[Path]
+    branch_base_sha: str | None = None
 
 
 @asynccontextmanager
@@ -247,6 +252,8 @@ async def open_audit_workspace(
     source: Path,
     *,
     run_id: str,
+    branch_base_ref: str | None = None,
+    expected_head_sha: str | None = None,
 ) -> AsyncIterator[AuditWorkspace]:
     """Open an outside-source snapshot with independent objects, index and refs.
 
@@ -255,27 +262,77 @@ async def open_audit_workspace(
     The improve backend must separately enforce the returned tool-root boundary.
     A genuine unborn checkout remains unborn in a separate repository.
 
+    When ``branch_base_ref`` and ``expected_head_sha`` are supplied together,
+    resolve the source's remote-preferred branch diff base before cloning and
+    attest both immutable commits in the clone before yielding. Supplying only
+    one is invalid. No symbolic base or remote metadata crosses the boundary.
+
     The process-owned temporary directory is cleaned on every exit. Cleanup
     errors surface unless a body/preparation/cancellation error is already
     active, in which case that primary error is retained and cleanup is warned.
     """
+    if (branch_base_ref is None) != (expected_head_sha is None):
+        raise git_ops.SnapshotPreparationError(
+            "audit snapshot branch-base inputs must be paired"
+        )
     source = source.resolve(strict=True)
     git_ops.assert_is_worktree(source)
     temporary = tempfile.TemporaryDirectory(prefix=f"daydream-audit-{run_id}-")
     primary_error = False
     try:
+        branch_base_sha: str | None = None
+        if branch_base_ref is not None and expected_head_sha is not None:
+            try:
+                current_head = git_ops.head_sha(source)
+                if current_head != expected_head_sha:
+                    raise git_ops.SnapshotPreparationError(
+                        "source HEAD changed after workspace resolution"
+                    )
+                branch_base_sha = git_ops.resolve_diff_merge_base(
+                    source, branch_base_ref, expected_head_sha
+                )
+            except git_ops.SnapshotPreparationError:
+                raise
+            except git_ops.GitError as exc:
+                raise git_ops.SnapshotPreparationError(
+                    "cannot resolve branch-focus diff merge-base"
+                ) from exc
         temporary_root = Path(temporary.name).resolve()
         if source.is_relative_to(temporary_root) or temporary_root.is_relative_to(source):
             raise git_ops.SnapshotPreparationError("audit temporary directory must be outside source")
         snapshot = git_ops.prepare_independent_snapshot(
             source, temporary_root / "repo", include_untracked=False,
         )
+        if expected_head_sha is not None and branch_base_sha is not None:
+            try:
+                snapshot_head = git_ops.head_sha(snapshot.repo)
+                base_present = git_ops.commit_exists(snapshot.repo, branch_base_sha)
+                base_is_ancestor = base_present and git_ops.is_ancestor(
+                    snapshot.repo, branch_base_sha, expected_head_sha
+                )
+            except git_ops.GitError as exc:
+                raise git_ops.SnapshotPreparationError(
+                    "cannot verify branch-focus commits in audit snapshot"
+                ) from exc
+            if snapshot_head != expected_head_sha:
+                raise git_ops.SnapshotPreparationError(
+                    "audit snapshot HEAD does not match the recorded source HEAD"
+                )
+            if not base_present:
+                raise git_ops.SnapshotPreparationError(
+                    "branch-focus diff base object is missing from audit snapshot"
+                )
+            if not base_is_ancestor:
+                raise git_ops.SnapshotPreparationError(
+                    "branch-focus diff base is not an ancestor of audit snapshot HEAD"
+                )
         yield AuditWorkspace(
             repo=snapshot.repo,
             source=source,
             repo_git_common_dir=git_ops.git_common_dir(snapshot.repo),
             source_git_common_dir=git_ops.git_common_dir(source),
             outward_symlinks=snapshot.outward_symlinks,
+            branch_base_sha=branch_base_sha,
         )
     except BaseException:
         primary_error = True

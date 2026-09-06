@@ -202,6 +202,38 @@ def _audit_directory(root: Path, value: Any) -> Path | None:
     return resolved
 
 
+def _audit_path_crosses_lexical_symlink(root: Path, value: str) -> bool:
+    """Return whether any component of one validated relative path is a link."""
+    candidate = root
+    try:
+        for part in Path(value).parts:
+            candidate /= part
+            if candidate.is_symlink():
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _audit_symlink_inventory(root: Path) -> frozenset[Path]:
+    """Inventory lexical links below *root* without traversing link targets."""
+    links: set[Path] = set()
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = directory / entry.name
+                    if entry.is_symlink():
+                        links.add(path)
+                    elif entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
+    except OSError as exc:
+        raise ValueError("cannot inventory audit-root symlinks") from exc
+    return frozenset(links)
+
+
 def _total_input_tokens(usage: dict[str, Any]) -> int | None:
     """Fold Anthropic's three input buckets into the true total input.
 
@@ -401,7 +433,7 @@ def _read_only_deny(reason: str) -> HookJSONOutput:
 
 def _build_audit_root_guard(
     root: Path,
-    outward_symlinks: frozenset[Path],
+    lexical_symlinks: frozenset[Path],
 ) -> HookCallback:
     """Build a deny-by-default guard for one immutable audit snapshot root."""
 
@@ -466,11 +498,15 @@ def _build_audit_root_guard(
             pattern = tool_input.get("pattern")
             if not isinstance(pattern, str) or not _valid_relative_audit_path(pattern):
                 return _read_only_deny("audit isolation denied malformed Glob pattern")
-            base = _audit_directory(root, tool_input.get("path"))
+            raw_base = tool_input.get("path")
+            if isinstance(raw_base, str) and _valid_relative_audit_path(raw_base):
+                if _audit_path_crosses_lexical_symlink(root, raw_base):
+                    return _read_only_deny("audit isolation denied Glob across a symlink")
+            base = _audit_directory(root, raw_base)
             if base is None:
                 return _read_only_deny("audit isolation denied Glob outside its root")
-            if any(link == base or link.is_relative_to(base) for link in outward_symlinks):
-                return _read_only_deny("audit isolation denied Glob across an outward symlink")
+            if any(link == base or link.is_relative_to(base) for link in lexical_symlinks):
+                return _read_only_deny("audit isolation denied Glob across a symlink")
             return {}
         return _read_only_deny("audit isolation denied an unsupported tool")
 
@@ -628,8 +664,13 @@ class ClaudeBackend:
         ):
             raise ValueError("audit_outward_symlinks must be inside audit_root")
         self.audit_outward_symlinks = lexical_links
+        audit_symlinks = (
+            lexical_links | _audit_symlink_inventory(self.audit_root)
+            if self.audit_root is not None
+            else frozenset()
+        )
         self._audit_root_guard = (
-            _build_audit_root_guard(self.audit_root, lexical_links)
+            _build_audit_root_guard(self.audit_root, audit_symlinks)
             if self.audit_root is not None
             else None
         )

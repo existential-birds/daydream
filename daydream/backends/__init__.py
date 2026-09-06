@@ -430,9 +430,10 @@ class Backend(Protocol):
     protocol because each narrows it to its own driver's literal vocabulary.
     Read it via ``getattr(backend, "reasoning_effort", None)``. It is set at
     construction rather than per ``execute`` call because a backend instance is
-    already cached per resolved ``(kind, model, reasoning_effort)`` triple, so
-    one instance serves exactly one effort level. ``None`` means no source
-    supplied one and the driver applies its own ambient default.
+    already cached per resolved ``(kind, model, reasoning_effort, audit_root)``
+    tuple, so one instance serves exactly one effort level and audit boundary.
+    ``None`` means no source supplied one and the driver applies its own ambient
+    default.
     """
 
     model: str

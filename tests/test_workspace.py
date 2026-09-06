@@ -558,6 +558,182 @@ def _audit_source_signature(repo: Path) -> tuple[object, ...]:
 
 
 @pytest.mark.anyio
+async def test_audit_workspace_binds_diff_base_to_recorded_head(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    common = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.py").write_text("feature\n")
+    _git(repo, "add", "feature.py")
+    head = _commit(repo, "feature")
+
+    async with open_audit_workspace(
+        repo,
+        run_id="branch-base",
+        branch_base_ref="main",
+        expected_head_sha=head,
+    ) as audit:
+        assert audit.branch_base_sha == common
+        assert git_ops.head_sha(audit.repo) == head
+        assert git_ops.commit_exists(audit.repo, common)
+        assert git_ops.list_remotes(audit.repo, strict=True) == []
+        assert _git(audit.repo, "for-each-ref", "refs/remotes") == ""
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_rejects_recorded_head_race_before_snapshot(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    recorded_head = _git(repo, "rev-parse", "HEAD")
+    (repo / "advanced.py").write_text("advanced\n")
+    _git(repo, "add", "advanced.py")
+    _commit(repo, "advance after workspace open")
+    before = _audit_source_signature(repo)
+
+    with pytest.raises(git_ops.SnapshotPreparationError, match="HEAD changed") as exc_info:
+        async with open_audit_workspace(
+            repo,
+            run_id="head-race",
+            branch_base_ref="main",
+            expected_head_sha=recorded_head,
+        ):
+            pytest.fail("raced source yielded an audit workspace")
+    assert str(repo) not in str(exc_info.value)
+    assert _audit_source_signature(repo) == before
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["malformed-head", "remove-after-preference"])
+async def test_audit_workspace_redacts_diff_base_probe_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    import shutil
+    import sys
+
+    repo, _ = _make_repo_with_origin(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD")
+    before = _audit_source_signature(repo)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "private git shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        "real = os.environ['DAYDREAM_TEST_REAL_GIT']\n"
+        "mode = os.environ['DAYDREAM_TEST_GIT_SHIM_MODE']\n"
+        "head = os.environ['DAYDREAM_TEST_HEAD']\n"
+        "is_preference = args[:2] == ['rev-parse', '--verify'] and "
+        "len(args) == 3 and args[2].startswith('refs/remotes/origin/')\n"
+        "is_head = args[:2] == ['rev-parse', '--verify'] and "
+        "len(args) == 3 and args[2] == head + '^{commit}'\n"
+        "if mode == 'malformed-head' and is_head:\n"
+        "    print('PRIVATE_STDOUT_SENTINEL')\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'remove-after-preference' and is_preference:\n"
+        "    result = subprocess.run([real, *args])\n"
+        "    os.unlink(sys.argv[0])\n"
+        "    raise SystemExit(result.returncode)\n"
+        "raise SystemExit(subprocess.run([real, *args]).returncode)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+
+    with monkeypatch.context() as shim_env:
+        shim_env.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+        shim_env.setenv("DAYDREAM_TEST_GIT_SHIM_MODE", mode)
+        shim_env.setenv("DAYDREAM_TEST_HEAD", head)
+        shim_env.setenv("PATH", str(shim_dir))
+        with pytest.raises(
+            git_ops.SnapshotPreparationError,
+            match=r"^cannot resolve branch-focus diff merge-base$",
+        ) as exc_info:
+            async with open_audit_workspace(
+                repo,
+                run_id="redacted-base-probe",
+                branch_base_ref="main",
+                expected_head_sha=head,
+            ):
+                pytest.fail("failed source probe yielded an audit workspace")
+
+    message = str(exc_info.value)
+    assert "PRIVATE_STDOUT_SENTINEL" not in message
+    assert "private git shim" not in message
+    assert str(repo) not in message
+    assert head not in message
+    assert _audit_source_signature(repo) == before
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_rejects_missing_cloned_diff_base_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An external Git fault removes only the cloned merge-base object."""
+    import shutil
+    import sys
+
+    repo, _ = _make_repo_with_origin(tmp_path)
+    common = _git(repo, "rev-parse", "HEAD")
+    (repo / "main.py").write_text("main\n")
+    _git(repo, "add", "main.py")
+    _commit(repo, "main advancement")
+    _git(repo, "checkout", "-b", "feature", common)
+    (repo / "feature.py").write_text("feature\n")
+    _git(repo, "add", "feature.py")
+    head = _commit(repo, "feature")
+    before = _audit_source_signature(repo)
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "git shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, subprocess, sys\n"
+        "real = os.environ['DAYDREAM_TEST_REAL_GIT']\n"
+        "result = subprocess.run([real, *sys.argv[1:]])\n"
+        "if result.returncode == 0 and len(sys.argv) > 2 and sys.argv[1] == 'clone':\n"
+        "    destination = pathlib.Path(sys.argv[-1])\n"
+        "    objects = destination / '.git' / 'objects'\n"
+        "    packs = list((objects / 'pack').glob('*.pack'))\n"
+        "    payloads = [pack.read_bytes() for pack in packs]\n"
+        "    for packed in list((objects / 'pack').iterdir()):\n"
+        "        packed.unlink()\n"
+        "    for payload in payloads:\n"
+        "        unpack = subprocess.run([real, 'unpack-objects', '-r'], cwd=destination, input=payload)\n"
+        "        if unpack.returncode != 0:\n"
+        "            sys.exit(unpack.returncode)\n"
+        "    oid = os.environ['DAYDREAM_TEST_REMOVE_CLONED_OID']\n"
+        "    (objects / oid[:2] / oid[2:]).unlink()\n"
+        "sys.exit(result.returncode)\n"
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+    monkeypatch.setenv("DAYDREAM_TEST_REMOVE_CLONED_OID", common)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(
+        git_ops.SnapshotPreparationError,
+        match="diff base object is missing from audit snapshot",
+    ) as exc_info:
+        async with open_audit_workspace(
+            repo,
+            run_id="missing-base-object",
+            branch_base_ref="main",
+            expected_head_sha=head,
+        ):
+            pytest.fail("snapshot with missing base object yielded")
+    assert str(repo) not in str(exc_info.value)
+    assert git_ops.commit_exists(repo, common)
+    assert _audit_source_signature(repo) == before
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("linked", [False, True])
 async def test_audit_workspace_independent_of_source_storage(tmp_path: Path, linked: bool) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)

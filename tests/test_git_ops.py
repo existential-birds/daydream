@@ -38,6 +38,181 @@ from tests.harness.git_helpers import init_repo as _init_repo
 # --- assert_is_worktree / is_inside_worktree --------------------------------
 
 
+def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "upstream.py").write_text("UPSTREAM = 1\n")
+    _git(repo, "add", "upstream.py")
+    remote_tip = _commit(repo, "remote advancement")
+    _git(repo, "branch", "feature", remote_tip)
+    _git(repo, "reset", "--hard", base)
+    _git(repo, "update-ref", "refs/remotes/origin/main", remote_tip)
+    _git(repo, "checkout", "feature")
+    (repo / "feature.py").write_text("FEATURE = 1\n")
+    _git(repo, "add", "feature.py")
+    head = _commit(repo, "feature")
+
+    assert git_ops.merge_base(repo, "main", head) == base
+    assert git_ops.resolve_diff_merge_base(repo, "main", head) == remote_tip
+
+
+def test_resolve_diff_merge_base_carries_only_ancestor_of_dangling_base(
+    tmp_path: Path,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    common = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.py").write_text("FEATURE = 1\n")
+    _git(repo, "add", "feature.py")
+    head = _commit(repo, "feature")
+    _git(repo, "checkout", "--detach", common)
+    (repo / "side.py").write_text("SIDE = 1\n")
+    _git(repo, "add", "side.py")
+    dangling_tip = _commit(repo, "dangling selected base")
+    _git(repo, "checkout", "feature")
+
+    assert git_ops.resolve_diff_merge_base(repo, dangling_tip, head) == common
+
+
+def _install_diff_base_git_shim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mode: str,
+    head: str,
+) -> Path:
+    """Install an external Git shim for resolver boundary failures."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "diff base git shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "args = sys.argv[1:]\n"
+        "mode = os.environ['DAYDREAM_TEST_GIT_SHIM_MODE']\n"
+        "real = os.environ['DAYDREAM_TEST_REAL_GIT']\n"
+        "head = os.environ['DAYDREAM_TEST_HEAD']\n"
+        "is_preference = args[:2] == ['rev-parse', '--verify'] and "
+        "len(args) == 3 and args[2].startswith('refs/remotes/origin/')\n"
+        "is_head = args[:2] == ['rev-parse', '--verify'] and "
+        "len(args) == 3 and args[2] == head + '^{commit}'\n"
+        "if mode == 'malformed-head' and is_head:\n"
+        "    print('PRIVATE_STDOUT_SENTINEL')\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'uppercase-head' and is_head:\n"
+        "    print(head.upper())\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'abbreviated-head' and is_head:\n"
+        "    print(head[:12])\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'sha256-head' and is_head:\n"
+        "    print(head + head[:24])\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'invalid-utf8-head' and is_head:\n"
+        "    os.write(1, b'\\xff\\xfe\\n')\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'malformed-merge' and args[:1] == ['merge-base']:\n"
+        "    print('PRIVATE_MERGE_SENTINEL')\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'timeout-preference' and is_preference:\n"
+        "    time.sleep(30)\n"
+        "if mode == 'remove-after-preference' and is_preference:\n"
+        "    result = subprocess.run([real, *args])\n"
+        "    os.unlink(sys.argv[0])\n"
+        "    raise SystemExit(result.returncode)\n"
+        "raise SystemExit(subprocess.run([real, *args]).returncode)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("DAYDREAM_TEST_GIT_SHIM_MODE", mode)
+    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+    monkeypatch.setenv("DAYDREAM_TEST_HEAD", head)
+    monkeypatch.setenv("PATH", str(shim_dir))
+    return shim
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_message", "private_fragment"),
+    [
+        (
+            "malformed-head",
+            "branch-focus recorded head commit cannot be resolved",
+            "PRIVATE_STDOUT_SENTINEL",
+        ),
+        (
+            "invalid-utf8-head",
+            "branch-focus recorded head commit probe failed",
+            "\\xff\\xfe",
+        ),
+        (
+            "uppercase-head",
+            "branch-focus recorded head commit cannot be resolved",
+            "A PRIVATE VALUE THAT CANNOT APPEAR",
+        ),
+        (
+            "abbreviated-head",
+            "branch-focus recorded head commit cannot be resolved",
+            "A PRIVATE VALUE THAT CANNOT APPEAR",
+        ),
+        (
+            "sha256-head",
+            "branch-focus recorded head commit cannot be resolved",
+            "A PRIVATE VALUE THAT CANNOT APPEAR",
+        ),
+        (
+            "malformed-merge",
+            "branch-focus diff merge-base cannot be resolved",
+            "PRIVATE_MERGE_SENTINEL",
+        ),
+        (
+            "remove-after-preference",
+            "branch-focus recorded head commit probe failed",
+            "diff base git shim",
+        ),
+    ],
+)
+def test_resolve_diff_merge_base_rejects_and_redacts_external_git_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    expected_message: str,
+    private_fragment: str,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD")
+    _install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head)
+
+    with pytest.raises(GitError) as raised:
+        git_ops.resolve_diff_merge_base(repo, "main", head)
+
+    message = str(raised.value)
+    assert message == expected_message
+    assert private_fragment not in message
+    assert str(repo) not in message
+    assert head not in message
+    assert len(message) < 200
+
+
+def test_resolve_diff_merge_base_redacts_external_git_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD")
+    _install_diff_base_git_shim(
+        tmp_path, monkeypatch, mode="timeout-preference", head=head,
+    )
+
+    with pytest.raises(GitError) as raised:
+        git_ops.resolve_diff_merge_base(repo, "main", head)
+
+    assert str(raised.value) == "branch-focus preferred base probe failed"
+    assert str(repo) not in str(raised.value)
+    assert head not in str(raised.value)
+
+
 @pytest.mark.parametrize("include_untracked", [False, True])
 def test_independent_snapshot_preserves_exact_filename_bytes(
     tmp_path: Path, include_untracked: bool,
@@ -61,6 +236,110 @@ def test_independent_snapshot_preserves_exact_filename_bytes(
         assert (snapshot.repo / name).exists() is include_untracked
         if include_untracked:
             assert (snapshot.repo / name).read_bytes() == b"scratch\x00\xfe"
+
+
+@pytest.mark.parametrize("include_untracked", [False, True])
+def test_independent_snapshot_preserves_staged_directory_to_file_change(
+    tmp_path: Path, include_untracked: bool,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    nested = repo / "x"
+    nested.mkdir()
+    (nested / "a.txt").write_text("old a\n", encoding="utf-8")
+    (nested / "b.txt").write_text("old b\n", encoding="utf-8")
+    _git(repo, "add", "x")
+    _commit(repo, "add tracked directory")
+    shutil.rmtree(nested)
+    nested.write_bytes(b"replacement file\x00\xff")
+    _git(repo, "add", "-A")
+    before_head = _git(repo, "rev-parse", "HEAD")
+    before_status = _git(repo, "status", "--short")
+    before_patch = git_ops.staged_patch(repo)
+    before_refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+
+    snapshot = git_ops.prepare_independent_snapshot(
+        repo, tmp_path / "snapshot", include_untracked=include_untracked,
+    )
+
+    assert (snapshot.repo / "x").is_file()
+    assert (snapshot.repo / "x").read_bytes() == b"replacement file\x00\xff"
+    assert not (snapshot.repo / "x" / "a.txt").exists()
+    assert not (snapshot.repo / "x" / "b.txt").exists()
+    assert _git(snapshot.repo, "status", "--short") == before_status
+    assert git_ops.staged_patch(snapshot.repo) == before_patch
+    assert git_ops.ls_files(snapshot.repo, strict=True) == git_ops.ls_files(
+        repo, strict=True,
+    )
+    assert _git(repo, "rev-parse", "HEAD") == before_head
+    assert _git(repo, "status", "--short") == before_status
+    assert git_ops.staged_patch(repo) == before_patch
+    assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    assert (repo / "x").read_bytes() == b"replacement file\x00\xff"
+
+
+@pytest.mark.parametrize("include_untracked", [False, True])
+def test_independent_snapshot_preserves_unstaged_directory_to_file_change(
+    tmp_path: Path, include_untracked: bool,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    nested = repo / "x"
+    nested.mkdir()
+    (nested / "child.txt").write_text("old child\n", encoding="utf-8")
+    _git(repo, "add", "x/child.txt")
+    _commit(repo, "add tracked directory")
+    shutil.rmtree(nested)
+    nested.write_bytes(b"untracked replacement\x00\xff")
+    before_head = _git(repo, "rev-parse", "HEAD")
+    before_status = _git(repo, "status", "--short")
+    before_patch = git_ops.staged_patch(repo)
+    before_refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+
+    snapshot = git_ops.prepare_independent_snapshot(
+        repo, tmp_path / "snapshot", include_untracked=include_untracked,
+    )
+
+    assert not (snapshot.repo / "x" / "child.txt").exists()
+    if include_untracked:
+        assert (snapshot.repo / "x").is_file()
+        assert (snapshot.repo / "x").read_bytes() == b"untracked replacement\x00\xff"
+        assert _git(snapshot.repo, "status", "--short") == before_status
+    else:
+        assert not (snapshot.repo / "x").is_file()
+        assert _git(snapshot.repo, "status", "--short") == "D x/child.txt"
+    assert git_ops.staged_patch(snapshot.repo) == before_patch
+    assert _git(repo, "rev-parse", "HEAD") == before_head
+    assert _git(repo, "status", "--short") == before_status
+    assert git_ops.staged_patch(repo) == before_patch
+    assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    assert (repo / "x").read_bytes() == b"untracked replacement\x00\xff"
+
+
+def test_independent_snapshot_preserves_staged_file_to_directory_change(
+    tmp_path: Path,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    replaced = repo / "x"
+    replaced.write_text("old file\n", encoding="utf-8")
+    _git(repo, "add", "x")
+    _commit(repo, "add tracked file")
+    replaced.unlink()
+    replaced.mkdir()
+    (replaced / "child.txt").write_bytes(b"replacement child\x00\xff")
+    _git(repo, "add", "-A")
+    before_status = _git(repo, "status", "--short")
+    before_patch = git_ops.staged_patch(repo)
+
+    snapshot = git_ops.prepare_independent_snapshot(
+        repo, tmp_path / "snapshot", include_untracked=False,
+    )
+
+    assert (snapshot.repo / "x").is_dir()
+    assert (snapshot.repo / "x" / "child.txt").read_bytes() == (
+        b"replacement child\x00\xff"
+    )
+    assert _git(snapshot.repo, "status", "--short") == before_status
+    assert git_ops.staged_patch(snapshot.repo) == before_patch
+    assert _git(repo, "status", "--short") == before_status
 
 
 @pytest.mark.parametrize("include_untracked", [False, True])
@@ -174,12 +453,168 @@ def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
     )
     with monkeypatch.context() as poison:
         poison.setenv(variable, value)
-        with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git"):
+        with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
             git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
         assert os.environ[variable] == value
+    assert variable in str(raised.value)
+    if value:
+        assert value not in str(raised.value)
     assert not destination.exists()
     assert file_bytes(repo) == before_source
     assert file_bytes(external) == before_external
+
+
+def test_independent_snapshot_redacts_malformed_git_environment_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    destination = tmp_path / "snapshot"
+    newline_name = "GIT_TRACE_PRIVATE\nSECRET_NAME"
+    oversized_name = "GIT_CONFIG_" + "S" * 500
+    private_value = "PRIVATE_ENV_VALUE_SENTINEL"
+    monkeypatch.setenv(newline_name, private_value)
+    monkeypatch.setenv(oversized_name, private_value)
+
+    with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
+        git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
+
+    message = str(raised.value)
+    assert "2 invalid Git variable names" in message
+    assert newline_name not in message
+    assert oversized_name not in message
+    assert private_value not in message
+    assert "SECRET_NAME" not in message
+    assert len(message) < 500
+    assert not destination.exists()
+    assert os.environ[newline_name] == private_value
+    assert os.environ[oversized_name] == private_value
+
+
+def test_independent_snapshot_redacts_malformed_names_at_process_boundary(
+    tmp_path: Path,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    destination = tmp_path / "snapshot"
+    newline_name = "GIT_TRACE_PRIVATE\nSECRET_NAME"
+    oversized_name = "GIT_CONFIG_" + "S" * 500
+    private_value = "PRIVATE_ENV_VALUE_SENTINEL"
+    child_env = {
+        name: value
+        for name, value in os.environ.items()
+        if not (
+            name in git_ops._SNAPSHOT_GIT_REDIRECTS  # noqa: SLF001 - boundary fixture
+            or name.startswith("GIT_TRACE")
+            or name.startswith("GIT_CONFIG")
+            or name == "GIT_EXEC_PATH"
+        )
+    }
+    child_env[newline_name] = private_value
+    child_env[oversized_name] = private_value
+    script = """
+import sys
+from pathlib import Path
+from daydream import git_ops
+try:
+    git_ops.prepare_independent_snapshot(Path(sys.argv[1]), Path(sys.argv[2]), include_untracked=False)
+except git_ops.SnapshotPreparationError as exc:
+    print(exc)
+    raise SystemExit(7)
+raise SystemExit(9)
+"""
+
+    proc = subprocess.run(
+        [sys.executable, "-c", script, str(repo), str(destination)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=child_env,
+    )
+
+    assert proc.returncode == 7
+    assert "2 invalid Git variable names" in proc.stdout
+    assert newline_name not in proc.stdout
+    assert oversized_name not in proc.stdout
+    assert private_value not in proc.stdout
+    assert "SECRET_NAME" not in proc.stdout
+    assert len(proc.stdout) < 500
+    assert proc.stderr == ""
+    assert not destination.exists()
+
+
+def test_independent_snapshot_bounds_git_environment_name_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    for index in range(30):
+        monkeypatch.setenv(f"GIT_TRACE_TEST_{index:02d}", "PRIVATE")
+
+    with pytest.raises(git_ops.SnapshotPreparationError) as raised:
+        git_ops.prepare_independent_snapshot(
+            repo, tmp_path / "snapshot", include_untracked=False,
+        )
+
+    message = str(raised.value)
+    assert "GIT_TRACE_TEST_00" in message
+    assert "GIT_TRACE_TEST_15" in message
+    assert "GIT_TRACE_TEST_16" not in message
+    assert "and 14 more" in message
+    assert "PRIVATE" not in message
+    assert len(message) < 500
+
+
+def test_independent_snapshot_known_git_violation_skips_exec_path_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    trace_file = tmp_path / "git-trace-side-effect.log"
+    monkeypatch.setenv("GIT_TRACE", str(trace_file))
+    monkeypatch.setenv("GIT_EXEC_PATH", str(tmp_path / "invalid git exec path"))
+
+    with pytest.raises(git_ops.SnapshotPreparationError) as raised:
+        git_ops.prepare_independent_snapshot(
+            repo, tmp_path / "snapshot", include_untracked=False,
+        )
+
+    message = str(raised.value)
+    assert "GIT_TRACE" in message
+    assert str(trace_file) not in message
+    assert not trace_file.exists()
+
+
+def test_independent_snapshot_redacts_invalid_utf8_exec_path_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    private_exec_path = str(tmp_path / "PRIVATE_EXEC_PATH_SENTINEL")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "exec path git shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "if sys.argv[1:] == ['--exec-path']:\n"
+        "    os.write(1, b'\\xff\\xfe\\n')\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(subprocess.run([os.environ['DAYDREAM_TEST_REAL_GIT'], *sys.argv[1:]]).returncode)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+    monkeypatch.setenv("PATH", str(shim_dir))
+    monkeypatch.setenv("GIT_EXEC_PATH", private_exec_path)
+
+    with pytest.raises(git_ops.SnapshotPreparationError) as raised:
+        git_ops.prepare_independent_snapshot(
+            repo, tmp_path / "snapshot", include_untracked=False,
+        )
+
+    message = str(raised.value)
+    assert "GIT_EXEC_PATH" in message
+    assert private_exec_path not in message
+    assert "\\xff" not in message
+    assert len(message) < 500
 
 
 def test_independent_snapshot_strict_queries_reject_broken_repository(tmp_path: Path) -> None:
@@ -212,8 +647,12 @@ def test_independent_snapshot_rejects_indexed_config_injection(
     monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", str(tmp_path / "external"))
     monkeypatch.setenv("GIT_CONFIG_COUNT", str(count + 1))
     before = dict(os.environ)
-    with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git"):
+    with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
         git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
+    assert "GIT_CONFIG_COUNT" in str(raised.value)
+    assert f"GIT_CONFIG_KEY_{count}" in str(raised.value)
+    assert f"GIT_CONFIG_VALUE_{count}" in str(raised.value)
+    assert str(tmp_path / "external") not in str(raised.value)
     assert not destination.exists()
     assert dict(os.environ) == before
 

@@ -7,8 +7,10 @@ marker. Its many public attributes are per-test switches — set them on the
 instance after construction to shape one turn's payload (a rejected vet
 verdict, a schema-invalid enum, a crashing plan writer, an injected credential).
 
-Three subclasses bend one axis each and are otherwise the same fake:
+Four subclasses bend one axis each and are otherwise the same fake:
 
+* :class:`AuditAbsoluteWorkingDirectoryBackend` — rewrites the first recon
+  command's working directory relative to the actual audit snapshot cwd.
 * :class:`ProductionPathBackend` — Pi-shaped delays, a 42-command recon menu and
   a provider concurrency ceiling, for the full production-path regressions.
 * :class:`IncrementalPlanBackend` — holds one plan writer open and observes the
@@ -798,6 +800,41 @@ class ImproveStubBackend:
         pass
 
 
+class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
+    """Spell one recon working directory absolutely from the execution cwd."""
+
+    def __init__(self, target: Path, *, rel: str) -> None:
+        super().__init__(target)
+        self._rel = rel
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        if "IMPROVE_RECON" in prompt:
+            assert isinstance(self.recon_output_override, dict)
+            commands = self.recon_output_override["commands"]
+            commands[0]["working_directory"] = str(cwd / self._rel)
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
 class _ProductionPathPlannerError(RuntimeError):
     category = "PROCESS_EXIT"
     retryable = False
@@ -1202,13 +1239,13 @@ def install_per_phase_improve_stubs(
     monkeypatch: pytest.MonkeyPatch,
     target: Path,
 ) -> list[dict[str, Any]]:
-    """Install a factory that mints one stub per resolved backend triple.
+    """Install a factory that mints one stub per resolved backend cache key.
 
-    ``_resolve_backend`` caches on ``(name, model, reasoning_effort)``, so one
-    stub per triple is exactly one stub per distinct phase tier. Every stub
-    shares a single ``calls`` list, and each recorded call carries the
-    ``model``/``reasoning_effort`` the turn actually ran on — the observable at
-    the ``Backend.execute`` seam.
+    ``_resolve_backend`` caches on ``(name, model, reasoning_effort,
+    audit_root)``, so one stub per tuple is exactly one stub per distinct phase
+    tier and audit boundary. Every stub shares a single ``calls`` list, and
+    each recorded call carries the ``model``/``reasoning_effort`` the turn
+    actually ran on — the observable at the ``Backend.execute`` seam.
     """
     shared_calls: list[dict[str, Any]] = []
 
