@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -1206,19 +1207,53 @@ def test_final_download_parent_fsync_failure_removes_owned_install(
     assert list(tmp_path.glob(".download.*")) == []
 
 
+def _record_open_directory_fds(monkeypatch: pytest.MonkeyPatch) -> set[int]:
+    opened: set[int] = set()
+    real_open = os.open
+
+    def record_open(*args: Any, **kwargs: Any) -> int:
+        fd = real_open(*args, **kwargs)
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            opened.add(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", record_open)
+    return opened
+
+
+def _open_fd_identity(fd: int) -> tuple[int, int] | None:
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+@pytest.mark.parametrize("operation", ["download", "resume"])
 def test_final_download_cleanup_preserves_concurrent_destination_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     hub = AnnotationsHub(repo_id="org/private-annotations")
-    bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
+    if operation == "download":
+        bundle, curation_id = _final_bundle(tmp_path)
+        published = publish_final_annotation_bundle(hub, bundle)
+    else:
+        state, manifest = _state_v2(tmp_path)
+        publish_annotation_state(hub, state, manifest=manifest)
     destination = tmp_path / "download"
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
     real_fsync = os.fsync
+    directory_fds = _record_open_directory_fds(monkeypatch)
+    installed_inode_was_pinned: list[bool] = []
 
     def replace_then_fail(fd: int) -> None:
         stat = os.fstat(fd)
         if destination.exists() and (stat.st_dev, stat.st_ino) == parent_identity:
+            installed = destination.stat()
+            installed_identity = (installed.st_dev, installed.st_ino)
+            installed_inode_was_pinned.append(
+                any(_open_fd_identity(open_fd) == installed_identity for open_fd in directory_fds)
+            )
             shutil.rmtree(destination)
             destination.mkdir()
             (destination / "concurrent").write_text("keep")
@@ -1227,6 +1262,39 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
 
     monkeypatch.setattr(os, "fsync", replace_then_fail)
     with pytest.raises(HydrationError, match="parent fsync failed"):
+        if operation == "download":
+            download_final_annotation_bundle(
+                hub,
+                curation_id=curation_id,
+                snapshot_id=published["final_snapshot_id"],
+                revision=published["hub_commit_sha"],
+                destination=destination,
+            )
+        else:
+            resume_annotation_state(hub, curation_id=_CID, destination=destination)
+
+    assert (destination / "concurrent").read_text() == "keep"
+    assert installed_inode_was_pinned == [True]
+    assert list(tmp_path.glob(".download.*")) == []
+    assert directory_fds
+    assert all(_open_fd_identity(fd) is None for fd in directory_fds)
+
+
+@pytest.mark.parametrize("operation", ["download", "resume"])
+def test_successful_installation_closes_directory_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    if operation == "download":
+        bundle, curation_id = _final_bundle(tmp_path)
+        published = publish_final_annotation_bundle(hub, bundle)
+    else:
+        state, manifest = _state_v2(tmp_path)
+        publish_annotation_state(hub, state, manifest=manifest)
+    destination = tmp_path / "installed"
+    directory_fds = _record_open_directory_fds(monkeypatch)
+
+    if operation == "download":
         download_final_annotation_bundle(
             hub,
             curation_id=curation_id,
@@ -1234,8 +1302,13 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
             revision=published["hub_commit_sha"],
             destination=destination,
         )
+    else:
+        resume_annotation_state(hub, curation_id=_CID, destination=destination)
 
-    assert (destination / "concurrent").read_text() == "keep"
+    assert destination.is_dir()
+    assert list(tmp_path.glob(".installed.*")) == []
+    assert directory_fds
+    assert all(_open_fd_identity(fd) is None for fd in directory_fds)
 
 
 @pytest.mark.parametrize("after_stage", ["data", "success"])

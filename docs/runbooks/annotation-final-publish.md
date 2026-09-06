@@ -181,8 +181,11 @@ daydream corpus adjudicate download-final --curation-id <curation-id> --snapshot
 
 The command pins every read to the requested success commit, verifies the
 publication manifest, semantic-file digests, `SHA256SUMS`, and `_SUCCESS`
-binding, then installs the complete directory in one final replacement. It
-removes temporary staging after any failure and leaves the destination absent.
+binding, then installs the complete directory in one final replacement. After
+establishing ownership, a failed install attempts to remove only the staging or
+installed tree whose identity it still owns. A concurrent replacement is
+preserved. Failure before ownership can be established may leave a temporary
+pathname for operator inspection.
 
 Annotation publication is complete only when this command succeeds and prints
 the same final snapshot ID and success commit that `publish-final` reported.
