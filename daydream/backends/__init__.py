@@ -33,6 +33,30 @@ from daydream.trajectory import now_iso
 
 logger = logging.getLogger(__name__)
 
+AUDIT_ROOT_ISOLATION_V1 = "claude-pretooluse-v1"
+AuditIsolationReason = Literal[
+    "unsupported_backend",
+    "missing_capability",
+    "wrong_capability",
+    "wrong_root",
+]
+
+
+class AuditIsolationError(RuntimeError):
+    """A backend cannot satisfy the requested improve audit boundary."""
+
+    def __init__(
+        self,
+        backend_name: str,
+        reason: AuditIsolationReason,
+        *,
+        phase: str | None = None,
+    ) -> None:
+        super().__init__(f"{backend_name}: {reason}")
+        self.backend_name = backend_name
+        self.reason = reason
+        self.phase = phase
+
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
 
@@ -390,6 +414,14 @@ class Backend(Protocol):
     When absent, the caller falls back to False via
     ``getattr(backend, "read_only_disposable_clone", False)``.
 
+    Optional extension: backends may expose ``audit_root_isolation`` and
+    ``audit_root`` when they mediate every filesystem-capable tool against one
+    exact improve audit snapshot. This tool-layer capability is separate from
+    ``read_only_disposable_clone`` and does not claim an OS/container sandbox.
+    Callers must compare the capability to :data:`AUDIT_ROOT_ISOLATION_V1` and
+    the bound root by canonical identity; missing or different values fail
+    closed.
+
     Optional extension: backends may expose ``reasoning_effort``, the per-phase
     reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``
     and applied through the driver's native knob (Claude
@@ -398,9 +430,10 @@ class Backend(Protocol):
     protocol because each narrows it to its own driver's literal vocabulary.
     Read it via ``getattr(backend, "reasoning_effort", None)``. It is set at
     construction rather than per ``execute`` call because a backend instance is
-    already cached per resolved ``(kind, model, reasoning_effort)`` triple, so
-    one instance serves exactly one effort level. ``None`` means no source
-    supplied one and the driver applies its own ambient default.
+    already cached per resolved ``(kind, model, reasoning_effort, audit_root)``
+    tuple, so one instance serves exactly one effort level and audit boundary.
+    ``None`` means no source supplied one and the driver applies its own ambient
+    default.
     """
 
     model: str
@@ -494,6 +527,8 @@ def create_backend(
     cwd: Path | None = None,
     reasoning_effort: str | None = None,
     osprey_binary: str | None = None,
+    audit_root: Path | None = None,
+    audit_outward_symlinks: frozenset[Path] = frozenset(),
 ) -> Backend:
     """Create a backend by name.
 
@@ -508,6 +543,11 @@ def create_backend(
             it through its own native knob: Claude via
             ``ClaudeAgentOptions.effort``, Codex via
             ``-c model_reasoning_effort=...``, Pi via ``--thinking``.
+        audit_root: Exact standalone improve snapshot to which every exposed
+            filesystem-capable tool must be confined. Currently supported only
+            by Claude.
+        audit_outward_symlinks: Lexical paths of snapshot symlinks whose
+            targets resolve outside ``audit_root``.
 
     Returns:
         A Backend instance whose ``.model`` attribute is a non-empty string.
@@ -519,7 +559,14 @@ def create_backend(
 
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
-        return ClaudeBackend(model=model or DEFAULT_CLAUDE_MODEL, reasoning_effort=reasoning_effort)
+        return ClaudeBackend(
+            model=model or DEFAULT_CLAUDE_MODEL,
+            reasoning_effort=reasoning_effort,
+            audit_root=audit_root,
+            audit_outward_symlinks=audit_outward_symlinks,
+        )
+    if audit_root is not None and name in {"codex", "pi", "osprey"}:
+        raise AuditIsolationError(name, "unsupported_backend")
     if name == "codex":
         from daydream.backends.codex import CodexBackend
         return CodexBackend(model=model or DEFAULT_CODEX_MODEL, reasoning_effort=reasoning_effort)
@@ -542,8 +589,11 @@ from daydream.backends.osprey import OspreyBackend  # noqa: E402
 from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
+    "AUDIT_ROOT_ISOLATION_V1",
     "AgentEvent",
     "AgentEventStream",
+    "AuditIsolationError",
+    "AuditIsolationReason",
     "Backend",
     "ClaudeBackend",
     "ContinuationToken",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 import threading
@@ -21,11 +22,20 @@ import pytest
 from daydream import git_ops, runner
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import Manifest, build_manifest
-from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
+from daydream.backends import (
+    AUDIT_ROOT_ISOLATION_V1,
+    AgentEvent,
+    AuditIsolationError,
+    Backend,
+    ResultEvent,
+    TextEvent,
+)
 from daydream.exploration import ExplorationContext
+from daydream.extensions.loader import build_registry
+from daydream.flows.engine import FlowContext
 from daydream.runner import RunConfig
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
-from daydream.workspace import WorkContext
+from daydream.workspace import AuditWorkspace, WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -81,6 +91,39 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
+
+
+@pytest.mark.parametrize("flow_name", [None, "deep", "shallow"])
+async def test_unborn_non_improve_runner_fails_before_backend(
+    tmp_path: Path, make_config: Callable[..., RunConfig], flow_name: str | None,
+) -> None:
+    repo = tmp_path / "unborn"
+    _init_repo(repo)
+    (repo / "staged.py").write_text("value = 1\n")
+    _git(repo, "add", "staged.py")
+    before = git_ops.staged_patch(repo)
+    config = make_config(repo, flow_name=flow_name)
+    assert await runner.run(config) == 1
+    assert git_ops.is_unborn_head(repo)
+    assert git_ops.staged_patch(repo) == before
+
+
+async def test_unborn_improve_approved_head_rejected_before_backend(
+    tmp_path: Path, make_config: Callable[..., RunConfig],
+) -> None:
+    repo = tmp_path / "unborn"
+    _init_repo(repo)
+    (repo / "staged.py").write_text("value = 1\n")
+    _git(repo, "add", "staged.py")
+    before = git_ops.staged_patch(repo)
+    config = make_config(
+        repo, flow_name="improve", approved_head_sha="a" * 40,
+    )
+    assert await runner.run(config) == 1
+    assert git_ops.is_unborn_head(repo)
+    assert git_ops.staged_patch(repo) == before
+
+
 # A failing test run, then the heal fix agent's turn.
 _FAIL_TURN: tuple[AgentEvent, ...] = (TextEvent(text="1 failed, 0 passed"), _RESULT)
 _FIX_TURN: tuple[AgentEvent, ...] = (TextEvent(text="Applied fix attempt"), _RESULT)
@@ -582,7 +625,7 @@ class TestResolveBackendPhaseModel:
         assert backend.model == "gpt-5.6-sol"  # codex REVIEW default (heavy tier)
 
     def test_cache_returns_same_instance_for_same_phase_and_backend(self) -> None:
-        cache: dict[tuple[str, str | None, str | None], Backend] = {}
+        cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
         config = RunConfig(backend="claude")
         b1 = runner._resolve_backend(config, "review", cache)
         b2 = runner._resolve_backend(config, "review", cache)
@@ -590,14 +633,14 @@ class TestResolveBackendPhaseModel:
 
     def test_cache_returns_distinct_instances_for_different_phases(self) -> None:
         # Different models -> different backends, even on the same backend kind.
-        cache: dict[tuple[str, str | None, str | None], Backend] = {}
+        cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
         config = RunConfig(backend="claude")
         review_backend = runner._resolve_backend(config, "review", cache)
         parse_backend = runner._resolve_backend(config, "parse", cache)
         assert review_backend is not parse_backend
 
     def test_codex_backend_receives_resolved_reasoning_effort_and_cache_splits_on_it(self) -> None:
-        cache: dict[tuple[str, str | None, str | None], Backend] = {}
+        cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
         config = RunConfig(backend="codex", reasoning_effort="low")
         low_backend: Any = runner._resolve_backend(config, "review", cache)
         assert low_backend.reasoning_effort == "low"
@@ -605,6 +648,169 @@ class TestResolveBackendPhaseModel:
         high_backend: Any = runner._resolve_backend(config, "review", cache)
         assert high_backend.reasoning_effort == "high"
         assert low_backend is not high_backend  # different effort -> distinct cached instance
+
+    def test_audit_workspace_is_forwarded_and_splits_backend_cache(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "source"
+        source.mkdir()
+        first = tmp_path / "audit-one"
+        first.mkdir()
+        second = tmp_path / "audit-two"
+        second.mkdir()
+        created: list[tuple[object, dict[str, Any]]] = []
+
+        def fake_create_backend(name: str, **kwargs: Any) -> object:
+            backend = SimpleNamespace(
+                model=kwargs.get("model") or "mock",
+                audit_root=kwargs.get("audit_root"),
+            )
+            created.append((backend, kwargs))
+            return backend
+
+        monkeypatch.setattr(runner, "create_backend", fake_create_backend)
+        config = RunConfig(target=str(source), backend="claude")
+        cache: dict[
+            tuple[str, str | None, str | None, Path | None], Backend
+        ] = {}
+
+        def boundary(repo: Path) -> AuditWorkspace:
+            return AuditWorkspace(
+                repo=repo,
+                source=source,
+                repo_git_common_dir=repo / ".git",
+                source_git_common_dir=source / ".git",
+                outward_symlinks=frozenset({repo / "outward"}),
+            )
+
+        first_boundary = boundary(first)
+        first_backend = runner._resolve_backend(
+            config,
+            "recon",
+            cache,
+            cwd=source,
+            audit_workspace=first_boundary,
+        )
+        assert runner._resolve_backend(
+            config,
+            "recon",
+            cache,
+            cwd=source,
+            audit_workspace=first_boundary,
+        ) is first_backend
+        second_backend = runner._resolve_backend(
+            config,
+            "recon",
+            cache,
+            cwd=source,
+            audit_workspace=boundary(second),
+        )
+
+        assert second_backend is not first_backend
+        assert len(created) == 2
+        assert created[0][1]["audit_root"] == first.resolve(strict=True)
+        assert created[0][1]["audit_outward_symlinks"] == frozenset(
+            {first / "outward"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("capability", "bound_root", "reason"),
+    [
+        (None, "expected", "missing_capability"),
+        ("wrong-token", "expected", "wrong_capability"),
+        (AUDIT_ROOT_ISOLATION_V1, "other", "wrong_root"),
+    ],
+)
+def test_improve_backend_preflight_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capability: str | None,
+    bound_root: str,
+    reason: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    audit = tmp_path / "audit"
+    audit.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    work = WorkContext(
+        repo=source,
+        source=source,
+        base_branch="main",
+        base_sha="1" * 40,
+        head_branch="feature",
+        head_sha="2" * 40,
+        is_ephemeral=False,
+        run_id="run-1",
+    )
+    boundary = AuditWorkspace(
+        repo=audit,
+        source=source,
+        repo_git_common_dir=audit / ".git",
+        source_git_common_dir=source / ".git",
+        outward_symlinks=frozenset(),
+    )
+    context = FlowContext(
+        config=RunConfig(target=str(source), flow_name="improve"),
+        work=work,
+        registry=build_registry(),
+        audit_workspace=boundary,
+    )
+    backend = SimpleNamespace(model="mock", audit_root=audit if bound_root == "expected" else other)
+    if capability is not None:
+        backend.audit_root_isolation = capability
+    monkeypatch.setattr(FlowContext, "backend_for", lambda _self, _phase: backend)
+
+    with pytest.raises(AuditIsolationError) as exc_info:
+        runner._preflight_improve_backends(context)
+
+    assert exc_info.value.backend_name == "claude"
+    assert exc_info.value.phase == "recon"
+    assert exc_info.value.reason == reason
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("unborn", [False, True])
+async def test_improve_inherited_storage_override_stops_before_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: Callable[..., RunConfig],
+    unborn: bool,
+) -> None:
+    repo = tmp_path / "source"
+    _init_repo(repo)
+    (repo / "app.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "app.py")
+    if not unborn:
+        _commit(repo, "initial")
+    (repo / "app.py").write_text("VALUE = 2\n")
+    before_index = (repo / ".git" / "index").read_bytes()
+    before_refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    backend_calls: list[str] = []
+
+    def unexpected_backend(*args: Any, **kwargs: Any) -> Backend:
+        backend_calls.append("created")
+        raise AssertionError("snapshot refusal must precede model construction")
+
+    monkeypatch.setattr("daydream.runner.create_backend", unexpected_backend)
+    alternate = str(repo / ".git" / "objects")
+    with monkeypatch.context() as poison:
+        poison.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate)
+        result = await runner.run(make_config(repo, flow_name="improve"))
+        assert os.environ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] == alternate
+    output = capsys.readouterr().out
+    assert result == 1
+    assert backend_calls == []
+    assert "snapshot refuses inherited Git" in output
+    assert len(output) < 5_000
+    assert (repo / "app.py").read_text() == "VALUE = 2\n"
+    assert (repo / ".git" / "index").read_bytes() == before_index
+    assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
 
 
 # --- Task 6: deep fix-cycle hero is followed by Model: dim line -------------

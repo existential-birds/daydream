@@ -184,6 +184,7 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     grandchildren) and the fd count returns to the pre-run baseline.
     """
     from daydream import runner
+    from daydream.backends import AUDIT_ROOT_ISOLATION_V1
     from daydream.backends.codex import CodexBackend
 
     silence_console("daydream.runner")
@@ -216,7 +217,18 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     # network/API is mocked by the fake CLI on $PATH, but the subprocess spawn
     # stays real so the OS process group actually exists for the assertion.
     backend = CodexBackend(model="test-model")
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
+
+    def _factory(*_args: object, **kwargs: object) -> CodexBackend:
+        audit_root = kwargs.get("audit_root")
+        setattr(backend, "audit_root", audit_root)
+        setattr(
+            backend,
+            "audit_root_isolation",
+            AUDIT_ROOT_ISOLATION_V1 if isinstance(audit_root, Path) else None,
+        )
+        return backend
+
+    monkeypatch.setattr("daydream.runner.create_backend", _factory)
 
     base_fds = _fd_count()
     run_task = asyncio.create_task(runner.run(make_config(improve_monorepo_target, flow_name="improve")))
