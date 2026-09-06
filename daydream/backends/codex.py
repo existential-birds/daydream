@@ -841,6 +841,12 @@ class CodexBackend:
                             # preserving); content-key stays as legacy fallback.
                             pending_fifo.setdefault("mcp_tool_call", []).append(item_id)
                             pending_item_ids[f"mcp_tool_call:{item.get('tool', '')}"] = item_id
+                        tool_name = item.get("tool", "unknown")
+                        if not isinstance(tool_name, str):
+                            _warn("tool_not_string")
+                            tool_name = "unknown"
+                            for diagnostic in _take_early_diagnostics():
+                                yield diagnostic
                         arguments = item.get("arguments", {})
                         if not isinstance(arguments, dict):
                             _warn("tool_arguments_not_object")
@@ -849,7 +855,7 @@ class CodexBackend:
                                 yield diagnostic
                         yield ToolStartEvent(
                             id=item_id,
-                            name=item.get("tool", "unknown"),
+                            name=tool_name,
                             input=arguments,
                         )
                     elif item_type not in ("agent_message", "reasoning", "file_change", "error"):

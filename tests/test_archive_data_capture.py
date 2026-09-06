@@ -1040,3 +1040,66 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
     assert evaluation["tools"]["by_type"] == {"read": 1}
     assert training["noise_flags"] == []
     assert training["training_quality"] == "clean"
+
+
+async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+) -> None:
+    """Replay CLI drift through the real parser, log-mode runner, and archive."""
+    from unittest.mock import patch
+
+    from daydream.backends.codex import CodexBackend
+    from tests.harness.codex_replay import make_mock_process
+
+    class MalformedToolBackend(StubBackend):
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+        ) -> AsyncIterator[AgentEvent]:
+            if "you are reviewing the python stack" in prompt.lower():
+                item = {
+                    "id": "malformed-mcp", "type": "mcp_tool_call",
+                    "tool": {"unexpected": "name-shape"}, "arguments": {"path": "api.py"},
+                }
+                process = make_mock_process([
+                    json.dumps({"type": "item.started", "item": item}),
+                    json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
+                    json.dumps({"type": "turn.completed", "usage": {}}),
+                ])
+                with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+                    async for event in CodexBackend(model="fixture-model").execute(cwd, prompt):
+                        if isinstance(event, (ToolStartEvent, ToolResultEvent, DiagnosticEvent)):
+                            yield event
+            async for event in super().execute(
+                cwd, prompt, output_schema=output_schema, continuation=continuation,
+                agents=agents, max_turns=max_turns, read_only=read_only,
+            ):
+                yield event
+
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    backend = MalformedToolBackend(multi_stack_target)
+    backend.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
+    assert await run(RunConfig(
+        target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False,
+        log_mode=True,
+    )) == 0
+
+    child = json.loads(
+        (_only_archived_run(archive_dir) / "trajectories" / "deep-python.json").read_text()
+    )
+    calls = [call for step in child["steps"] for call in (step.get("tool_calls") or [])]
+    assert [(call["tool_call_id"], call["function_name"]) for call in calls] == [("malformed-mcp", "unknown")]
+    diagnostics = [
+        diagnostic for step in child["steps"]
+        for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+    ]
+    assert diagnostics[0]["metadata"]["warnings"]["reasons"] == {"tool_not_string": 1}

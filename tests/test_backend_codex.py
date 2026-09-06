@@ -105,6 +105,32 @@ async def test_tool_use_events() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", [None, 42, False, [], {"token": "private-value"}])
+async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(
+    tmp_path: Path, tool_name: Any,
+) -> None:
+    item = {"id": "mcp-1", "type": "mcp_tool_call", "tool": tool_name, "arguments": {"path": "api.py"}}
+    process = make_mock_process([
+        json.dumps({"type": "item.started", "item": item}),
+        json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ])
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        events = [event async for event in CodexBackend(model="fixture-model").execute(tmp_path, "review")]
+
+    starts = [event for event in events if isinstance(event, ToolStartEvent)]
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert len(starts) == len(results) == 1
+    assert starts[0].name == "unknown"
+    assert starts[0].id == results[0].id == "mcp-1"
+    assert diagnostics[0].code == "codex_parser_coverage"
+    assert diagnostics[0].metadata["warnings"]["reasons"] == {"tool_not_string": 1}
+    assert events.index(diagnostics[0]) < events.index(starts[0])
+    assert "private-value" not in repr(diagnostics)
+
+
+@pytest.mark.asyncio
 async def test_file_change_legacy_scalar_payload_unchanged() -> None:
     backend = CodexBackend(model="fixture-model")
     events = await _run_fixture(backend, "Run ls", "tool_use.jsonl")
