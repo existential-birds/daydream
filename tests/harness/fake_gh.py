@@ -25,6 +25,8 @@ response map (``responses.json``) plus built-in behaviors:
   success (the Task 0 spike's chosen stale-finding mechanism);
 - ``GET repos/<o>/<r>/pulls/<n>/reviews`` returns the configured review list
   (``[]`` by default);
+- ``GET repos/<o>/<r>/pulls/<n>/files`` returns the configured changed-file
+  inventory (``[]`` by default);
 - ``POST repos/<o>/<r>/pulls/<n>/reviews`` returns a fake ``html_url``.
 - ``gh pr view [<number>] --json ...`` emits the configured ``pr-view`` JSON
   and records the invocation; ``gh pr list`` projects that same response into
@@ -299,6 +301,8 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
             return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
         return 0, _emit(responses[bare_key], jq), ""
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
+        return 0, _emit([], jq), ""
+    if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/files", endpoint):
         return 0, _emit([], jq), ""
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/comments", endpoint):
         return 0, _emit([], jq), ""

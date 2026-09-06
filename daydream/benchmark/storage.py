@@ -241,11 +241,12 @@ class WorkspaceLock:
 @dataclass
 class _TargetState:
     rel: str
-    stage_path: Path
+    operation: Literal["replace", "retire"]
+    stage_path: Path | None
     backup_path: Path | None
     original_existed: bool
     before_digest: str | None
-    after_digest: str
+    after_digest: str | None
     applied: bool = False
 
 
@@ -284,7 +285,8 @@ class Transaction:
             targets.append(
                 {
                     "rel": rel,
-                    "stage": st.stage_path.name,
+                    "operation": st.operation,
+                    "stage": st.stage_path.name if st.stage_path else None,
                     "backup": st.backup_path.name if st.backup_path else None,
                     "original_existed": st.original_existed,
                     "before_digest": st.before_digest,
@@ -351,6 +353,7 @@ class Transaction:
             before_digest = None
         self._states[rel] = _TargetState(
             rel=rel,
+            operation="replace",
             stage_path=stage_path,
             backup_path=backup_path,
             original_existed=original_existed,
@@ -363,6 +366,46 @@ class Transaction:
             self._replacement_order = self._order.copy()
         else:
             self._replacement_order = [r for r in self._replacement_order if r != "benchmark.yaml"] + [rel]
+
+    def retire(self, target_rel: str | Path, *, expected_sha256: str) -> None:
+        """Stage a digest-matched existing file for atomic deletion.
+
+        The target is backed up inside the same transaction before the journal
+        is prepared. A committing-state recovery restores that backup; a
+        complete transaction verifies that the target is absent. The digest
+        binds retirement to the exact file the caller inspected.
+        """
+        rel = _resolve_target(self._root, target_rel)
+        if rel in self._states:
+            raise WorkspaceCorrupt(f"{self._root}: duplicate staged target {rel!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise WorkspaceCorrupt(f"{self._root}: retirement digest is not lowercase sha256")
+        target = self._root / rel
+        if not target.is_file():
+            raise WorkspaceCorrupt(f"{self._root}: retirement target {rel!r} is missing")
+        actual = sha256_file(target)
+        if actual != expected_sha256:
+            raise WorkspaceCorrupt(
+                f"{self._root}: retirement target {rel!r} digest mismatch "
+                f"(expected {expected_sha256}, got {actual})"
+            )
+        index = len(self._order)
+        backup_path = self._dir / f"backup-{index:04d}.bin"
+        shutil.copyfile(target, backup_path)
+        _fsync_file(backup_path)
+        self._states[rel] = _TargetState(
+            rel=rel,
+            operation="retire",
+            stage_path=None,
+            backup_path=backup_path,
+            original_existed=True,
+            before_digest=actual,
+            after_digest=None,
+        )
+        self._order.append(rel)
+        self._replacement_order = [
+            r for r in self._replacement_order if r != "benchmark.yaml"
+        ] + [rel]
 
     def prepare(self) -> None:
         """Persist the ``prepared`` journal (fsync'd) for startup recovery."""
@@ -421,9 +464,16 @@ class Transaction:
             self._applied_count += 1
             self._write_journal()
             _fsync_file(self._journal_path())
-            os.replace(st.stage_path, target)
-            _fsync_file(target)
-            os.chmod(target, 0o600)
+            if st.operation == "retire":
+                target.unlink()
+            else:
+                if st.stage_path is None:
+                    raise WorkspaceCorrupt(
+                        f"{self._root}: replacement target {rel!r} has no staged file"
+                    )
+                os.replace(st.stage_path, target)
+                _fsync_file(target)
+                os.chmod(target, 0o600)
             _fsync_dir(target.parent)
 
     def commit(self) -> None:
@@ -434,6 +484,16 @@ class Transaction:
         self._write_journal()
         _fsync_file(self._journal_path())
         for st in self._states.values():
+            if st.operation == "retire":
+                if (self._root / st.rel).exists():
+                    raise WorkspaceCorrupt(
+                        f"{self._root}: commit verify retired target {st.rel} still exists"
+                    )
+                continue
+            if st.after_digest is None:
+                raise WorkspaceCorrupt(
+                    f"{self._root}: commit verify replacement {st.rel} lacks after digest"
+                )
             actual = sha256_file(self._root / st.rel)
             if actual != st.after_digest:
                 raise WorkspaceCorrupt(
@@ -767,15 +827,43 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
         if rel in rels:
             raise WorkspaceCorrupt(f"{root}: duplicate target rel in journal: {rel!r}")
         rels.add(rel)
+        operation = t.get("operation", "replace")
+        if operation not in ("replace", "retire"):
+            raise WorkspaceCorrupt(
+                f"{root}: journal target {rel!r} has invalid operation {operation!r}"
+            )
         for field in ("stage", "backup"):
             val = t.get(field)
-            if val is None and field == "backup":
+            if val is None and (
+                field == "backup" or (field == "stage" and operation == "retire")
+            ):
                 continue
             # Reject empty strings too: os.path.basename("") == "", so the bare
             # name check alone would accept "", letting ``op_dir / "" == op_dir``
             # make _rollback_committing rename the whole op dir as the target.
             if not isinstance(val, str) or not val or os.path.basename(val) != val:
                 raise WorkspaceCorrupt(f"{root}: journal target {rel!r} {field} is not a bare filename")
+        if operation == "retire":
+            if t.get("stage") is not None or t.get("backup") is None:
+                raise WorkspaceCorrupt(
+                    f"{root}: retired journal target {rel!r} has invalid stage/backup"
+                )
+            before_digest = t.get("before_digest")
+            if (
+                t.get("original_existed") is not True
+                or not isinstance(before_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", before_digest)
+                or t.get("after_digest") is not None
+            ):
+                raise WorkspaceCorrupt(
+                    f"{root}: retired journal target {rel!r} has invalid digest state"
+                )
+            if state in ("prepared", "committing"):
+                backup_path = op_dir / t["backup"]
+                if not backup_path.is_file() or sha256_file(backup_path) != before_digest:
+                    raise WorkspaceCorrupt(
+                        f"{root}: retired journal target {rel!r} backup digest mismatch"
+                    )
     order = doc.get("replacement_order")
     if not isinstance(order, list):
         raise WorkspaceCorrupt(f"{root}: journal replacement_order is not a list")
@@ -809,9 +897,10 @@ def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
 def _rollback_prepared(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     # Staged files only — no real target was replaced, so nothing to restore.
     for t in _targets_from_doc(doc):
-        stage = op_dir / t["stage"]
-        with suppress(OSError):
-            stage.unlink()
+        stage = t.get("stage")
+        if stage:
+            with suppress(OSError):
+                (op_dir / stage).unlink()
         backup = t.get("backup")
         if backup:
             with suppress(OSError):
@@ -867,6 +956,12 @@ def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     for t in _targets_from_doc(doc):
         rel = _resolve_target(root, t["rel"])
         target = root / rel
+        if t.get("operation", "replace") == "retire":
+            if target.exists():
+                raise WorkspaceCorrupt(
+                    f"{root}: complete journal retired target {rel} still exists"
+                )
+            continue
         if not target.exists():
             raise WorkspaceCorrupt(f"{root}: complete journal {rel} missing on disk")
         actual = sha256_file(target)

@@ -339,6 +339,7 @@ class _SnapshotBase(BaseModel):
 
 class SnapshotReady(_SnapshotBase):
     status: Literal["ready"]
+    base_resolution: Literal["merge_base_v1"]
     # original_base_sha is the true merge base of base-tip and head (the
     # bundle's synthetic base commit); requested_base_sha is the selected
     # base-branch tip the merge base was resolved against.
@@ -381,6 +382,7 @@ _SNAPSHOT_ERROR_REASON = Literal[
     "equal_trees",
     "empty_diff",
     "bundle_failure",
+    "base_drift",
 ]
 
 
@@ -442,6 +444,21 @@ Snapshot = Annotated[
 # ---------------------------------------------------------------------------
 # location / finding / provenance / exclusions
 # ---------------------------------------------------------------------------
+
+
+def exact_git_tree_path(value: Any) -> str:
+    """Validate a Git-tree path without normalizing legal filename bytes."""
+    if not isinstance(value, str):
+        raise ValueError("Git tree path must be a string")
+    if not value:
+        raise ValueError("Git tree path must not be blank")
+    if value.startswith("/"):
+        raise ValueError(f"Git tree path must be relative, got {value!r}")
+    if "\x00" in value:
+        raise ValueError("Git tree path must not contain NUL")
+    if any(part in ("", ".", "..") for part in value.split("/")):
+        raise ValueError(f"Git tree path contains an invalid component: {value!r}")
+    return value
 
 
 def _relative_path(v: str, *, what: str = "location") -> str:
@@ -721,6 +738,7 @@ class PullRequestMeta(BaseModel):
     body_sha256: str = ""
     merged_at: datetime | None = None
     closed_at: datetime | None = None
+    changed_files: list[str] | None = None
 
     @field_validator("created_at", "updated_at", "merged_at", "closed_at", mode="before")
     @classmethod
@@ -735,6 +753,18 @@ class PullRequestMeta(BaseModel):
         if v != "":
             return _hex64(v)
         return v
+
+    @field_validator("changed_files", mode="before")
+    @classmethod
+    def _canonical_changed_files(cls, value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError("changed_files must be a list or null")
+        paths = [exact_git_tree_path(path) for path in value]
+        if paths != sorted(set(paths)):
+            raise ValueError("changed_files must be sorted and duplicate-free")
+        return paths
 
     @model_validator(mode="after")
     def _body_hash_consistency(self) -> "PullRequestMeta":
@@ -1048,14 +1078,23 @@ class CaseDocument(BaseModel):
 
     @model_validator(mode="after")
     def _unreplayable_coupling(self) -> "CaseDocument":
-        if (
-            self.curation.state == "unreplayable"
-            and self.snapshot.status != "unreplayable"
-            and self.curation.case_exclusion is None
+        explicitly_excluded = (
+            self.curation.state == "excluded" and self.curation.case_exclusion is not None
+        )
+        if not explicitly_excluded and (
+            (self.curation.state == "unreplayable")
+            != (self.snapshot.status == "unreplayable")
         ):
             raise ValueError(
-                "unreplayable curation requires an unreplayable snapshot unless case_exclusion is set"
+                "unreplayable snapshot and curation states must match unless explicitly excluded"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _requested_base_matches_pr(self) -> "CaseDocument":
+        requested = self.snapshot.requested_base_sha
+        if requested is not None and requested != self.pull_request.base.sha:
+            raise ValueError("snapshot requested_base_sha must match pull_request.base.sha")
         return self
 
 

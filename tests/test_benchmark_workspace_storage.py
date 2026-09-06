@@ -119,6 +119,53 @@ def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path) -> No
     assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
 
+def test_transaction_retires_digest_matched_file_atomically(tmp_path: Path) -> None:
+    bundle = tmp_path / "snapshots" / "old.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_bytes(b"old bundle")
+    digest = sha256_file(bundle)
+    with Transaction(tmp_path, op_id="retire", kind="import") as tx:
+        tx.retire("snapshots/old.bundle", expected_sha256=digest)
+        tx.stage("benchmark.yaml", b"after")
+        tx.commit()
+    assert not bundle.exists()
+    assert (tmp_path / "benchmark.yaml").read_bytes() == b"after"
+
+
+@pytest.mark.parametrize("applied", [0, 1, 2])
+def test_transaction_retirement_rolls_back_with_other_targets(
+    tmp_path: Path, applied: int
+) -> None:
+    root = tmp_path / f"ws-{applied}"
+    bundle = root / "snapshots" / "old.bundle"
+    case = root / "cases" / "case.yaml"
+    manifest = root / "benchmark.yaml"
+    bundle.parent.mkdir(parents=True)
+    case.parent.mkdir(parents=True)
+    bundle.write_bytes(b"old bundle")
+    case.write_bytes(b"old case")
+    manifest.write_bytes(b"old manifest")
+    with Transaction(root, op_id="retire-crash", kind="import") as tx:
+        tx.retire("snapshots/old.bundle", expected_sha256=sha256_file(bundle))
+        tx.stage("cases/case.yaml", b"new case")
+        tx.stage("benchmark.yaml", b"new manifest")
+        tx.inject_crash(f"target-{applied}")
+    recover_startup(root)
+    assert bundle.read_bytes() == b"old bundle"
+    assert case.read_bytes() == b"old case"
+    assert manifest.read_bytes() == b"old manifest"
+
+
+def test_transaction_retirement_refuses_digest_mismatch(tmp_path: Path) -> None:
+    bundle = tmp_path / "snapshots" / "old.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_bytes(b"old bundle")
+    with Transaction(tmp_path, op_id="retire-wrong", kind="import") as tx:
+        with pytest.raises(WorkspaceCorrupt, match="digest mismatch"):
+            tx.retire("snapshots/old.bundle", expected_sha256="f" * 64)
+    assert bundle.read_bytes() == b"old bundle"
+
+
 def test_prepared_journal_rolls_back_on_startup(tmp_path: Path) -> None:
     data = tmp_path / "cases" / "b.yaml"
     data.parent.mkdir(parents=True)

@@ -600,6 +600,85 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
+    assert sn.changed_paths(sn.mirror(tmp_path), authoring_sha, head_sha) == {
+        "old.py",
+        "new.py",
+    }
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        b"M\x00a.py",
+        b"M\x00\x00",
+        b"R100\x00old.py\x00",
+        b"R101\x00old.py\x00new.py\x00",
+        b"R100\x00old.py\x00new.py\x00junk\x00",
+        b"Z\x00a.py\x00",
+    ],
+)
+def test_changed_paths_rejects_malformed_nul_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes
+) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    monkeypatch.setattr(
+        git_ops,
+        "_run_git",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout, b""),
+    )
+    with pytest.raises(GitError, match="name-status"):
+        sn.changed_paths(tmp_path, "a" * 40, "b" * 40)
+
+
+def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    drifted, bundle = sn.freeze_one(
+        tmp_path,
+        "o/r",
+        1,
+        base_tip=_SHA_BASE3,
+        head_sha=_SHA_HEAD,
+        policy="explicit_head",
+        requested_head=_SHA_HEAD,
+        pr_changed_files={"feature.py"},
+        origin_url=origin,
+    )
+    assert drifted["status"] == "unreplayable"
+    assert drifted["error"]["reason"] == "base_drift"
+    assert "base.py" in drifted["error"]["detail"]
+    assert drifted["original_base_sha"] == _SHA_BASE2
+    assert drifted["requested_base_sha"] == _SHA_BASE3
+    assert bundle is None
+
+
+def test_freeze_final_head_skips_pr_inventory_guard(tmp_path: Path) -> None:
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    ready, bundle = sn.freeze_one(
+        tmp_path,
+        "o/r",
+        1,
+        base_tip=_SHA_BASE3,
+        head_sha=_SHA_HEAD,
+        policy="final_pr_head",
+        requested_head="final",
+        pr_changed_files=set(),
+        origin_url=origin,
+    )
+    assert ready["status"] == "ready"
+    assert isinstance(bundle, bytes)
+
+
 def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
     from daydream.benchmark import snapshot as sn
     from daydream.benchmark.schema import case_id_for
@@ -609,7 +688,8 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
     sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
-                           policy="final_pr_head", requested_head="final", origin_url=origin)
+                           policy="final_pr_head", requested_head="final",
+                           pr_changed_files=set(), origin_url=origin)
     assert ready["status"] == "ready"
     assert ready["original_base_sha"] == _SHA_BASE2 and ready["original_head_sha"] == _SHA_HEAD
     assert ready["requested_base_sha"] == _SHA_BASE2
@@ -624,13 +704,15 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
     assert not (tmp_path / expect_rel).exists()
     # head_not_on_pr: a base3 head reachable elsewhere is rejected
     ur, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_BASE3,
-                               policy="explicit_head", requested_head=_SHA_BASE3, origin_url=origin)
+                               policy="explicit_head", requested_head=_SHA_BASE3,
+                               pr_changed_files=set(), origin_url=origin)
     assert ur["status"] == "unreplayable" and ur["error"]["reason"] == "head_not_on_pr"
     assert bundle is None
     assert ur["bundle_file"] is None and ur["base_tree_sha"] is None
     # head_unreachable: a sha absent from the mirror
     ur2, bundle2 = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha="0" * 40,
-                                 policy="explicit_head", requested_head="0" * 40, origin_url=origin)
+                                 policy="explicit_head", requested_head="0" * 40,
+                                 pr_changed_files=set(), origin_url=origin)
     assert ur2["status"] == "unreplayable" and ur2["error"]["reason"] == "head_unreachable"
     assert bundle2 is None
     assert ur2["bundle_file"] is None
@@ -645,9 +727,11 @@ def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path: Path) -> None:
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
     m = sn.mirror(tmp_path)
     ready1, b1 = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
-                               policy="final_pr_head", requested_head="final", origin_url=origin)
+                               policy="final_pr_head", requested_head="final",
+                               pr_changed_files=set(), origin_url=origin)
     ready2, b2 = sn.freeze_one(tmp_path, "o/r", 2, base_tip=dev_tip, head_sha=pr2_head,
-                               policy="final_pr_head", requested_head="final", origin_url=origin)
+                               policy="final_pr_head", requested_head="final",
+                               pr_changed_files=set(), origin_url=origin)
     assert ready1["status"] == "ready" and isinstance(b1, bytes)
     assert ready2["status"] == "ready" and isinstance(b2, bytes)
     # the shared base_tip ref was force-re-pointed from base2 to the unrelated dev tip
@@ -666,7 +750,8 @@ def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     # PR head is forked from base2; main has advanced to base3.
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD,
-                           policy="final_pr_head", requested_head="final", origin_url=origin)
+                           policy="final_pr_head", requested_head="final",
+                           pr_changed_files=set(), origin_url=origin)
     assert ready["status"] == "ready"
     assert ready["original_base_sha"] == _SHA_BASE2      # the true merge base
     assert ready["requested_base_sha"] == _SHA_BASE3      # the selected base-branch tip
@@ -682,13 +767,15 @@ def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path) -> None:
     origin = _seed_origin(tmp_path)
     # base-tip ref absent on the origin (only base1..3 + refs/pull/1/head exist)
     ur, b = sn.freeze_one(tmp_path, "o/r", 1, base_tip="0" * 40, head_sha=_SHA_HEAD,
-                          policy="final_pr_head", requested_head="final", origin_url=origin)
+                          policy="final_pr_head", requested_head="final",
+                          pr_changed_files=set(), origin_url=origin)
     assert ur["status"] == "unreplayable" and ur["error"]["reason"] == "base_unreachable"
     assert b is None
     assert ur["requested_base_sha"] == "0" * 40
     # PR-head ref absent (origin has only refs/pull/1/head, not 999)
     ur2, b2 = sn.freeze_one(tmp_path, "o/r", 999, base_tip=_SHA_BASE2, head_sha="0" * 40,
-                            policy="final_pr_head", requested_head="final", origin_url=origin)
+                            policy="final_pr_head", requested_head="final",
+                            pr_changed_files=set(), origin_url=origin)
     assert ur2["error"]["reason"] == "head_unreachable" and b2 is None
     assert ur2["requested_base_sha"] == _SHA_BASE2
 
