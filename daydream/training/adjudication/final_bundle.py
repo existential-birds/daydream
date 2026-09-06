@@ -1,8 +1,7 @@
 """Staging final-bundle constructor (issue #1078, M4 core).
 
-Assembles the publish-ready annotation staging bundle — ``annotations.jsonl``,
-``sessions.jsonl``, ``label-observations.jsonl``, ``coverage-report.json`` and
-a **generated** ``lineage.json`` — from pipeline state alone (the
+Assembles the seven-file semantic annotation staging bundle, including exact
+preview-manifest and verified v2 policy-binding bytes, from pipeline state (the
 materialization dir, the hydrated index, and the archive). Pure construction:
 no Hub I/O, no publishing; :func:`publish_final_annotation_bundle` consumes the
 directory this function produces, so ``--dry-run`` and the real publish share
@@ -20,13 +19,16 @@ fabricated field).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from daydream.archive.hydrate_rules import derive_curation_id_v2
 from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
 from daydream.training.adjudication.canonical import _evidence_after_as_of
@@ -39,6 +41,7 @@ from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report
+from daydream.training.corpus_v2.bundle import load_curated_bundle
 from daydream.training.corpus_v2.tiers import classify_tier
 from daydream.training.dispositions import (
     DECISIVE_DISPOSITIONS,
@@ -46,13 +49,14 @@ from daydream.training.dispositions import (
 )
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 
-__all__ = ["build_final_bundle"]
+__all__ = ["FINAL_IDENTITY_FILES", "build_final_bundle", "final_snapshot_id"]
 
 _ANNOTATIONS_FILENAME = "annotations.jsonl"
 _OBSERVATIONS_FILENAME = "label-observations.jsonl"
 _REPORT_FILENAME = "coverage-report.json"
 _LINEAGE_FILENAME = "lineage.json"
 _MANIFEST_FILENAME = "preview-manifest.json"
+_POLICY_BINDING_FILENAME = "policy-binding.json"
 
 _BUNDLE_FILES = (
     _ANNOTATIONS_FILENAME,
@@ -60,12 +64,14 @@ _BUNDLE_FILES = (
     _OBSERVATIONS_FILENAME,
     _REPORT_FILENAME,
     _LINEAGE_FILENAME,
+    _MANIFEST_FILENAME,
+    _POLICY_BINDING_FILENAME,
 )
+FINAL_IDENTITY_FILES = _BUNDLE_FILES
 
-# publish.py stages upload payloads into ``<bundle-dir>/.publish-stage`` and
-# leaves the scratch dir behind after a real publish; it is publish-internal,
-# never bundle content, so a re-construction over the same out_dir tolerates it
-# (re-publish idempotence).
+# Older publishers left this scratch directory in the bundle root. Continue
+# tolerating it during deterministic reconstruction; current publication uses
+# unique sibling temporary directories and leaves no in-bundle scratch state.
 _PUBLISH_STAGE_DIRNAME = ".publish-stage"
 
 # The lineage fields that must be present and non-empty in the pin/manifest —
@@ -84,6 +90,42 @@ def _canonical(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _bundle_input_names(root: Path) -> set[str]:
+    """Ignore only a real legacy scratch directory, without reading its contents."""
+    return {
+        path.name
+        for path in root.iterdir()
+        if not (
+            path.name == _PUBLISH_STAGE_DIRNAME
+            and not path.is_symlink()
+            and path.is_dir()
+        )
+    }
+
+
+def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
+    """Hash the exact seven-file semantic annotation bundle contract."""
+    root = Path(bundle_dir)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("final bundle must be a real directory")
+    allowed_envelope = {"publication-manifest.json", "SHA256SUMS", "_SUCCESS"}
+    names = _bundle_input_names(root)
+    foreign = sorted(names - set(FINAL_IDENTITY_FILES) - allowed_envelope)
+    missing = sorted(set(FINAL_IDENTITY_FILES) - names)
+    if foreign or missing:
+        raise ValueError(
+            f"final bundle identity file set mismatch: missing={missing}, foreign={foreign}"
+        )
+    digests: dict[str, str] = {}
+    for name in FINAL_IDENTITY_FILES:
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"final bundle identity input {name!r} must be a regular file")
+        digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    identity = _canonical(digests).encode("utf-8") + b"\n"
+    return hashlib.sha256(identity).hexdigest(), dict(sorted(digests.items()))
+
+
 def _write_atomic(out_path: Path, payload: str) -> None:
     """Temp-file + ``os.replace`` write, mirroring ``materialize._write_atomic``
     (deterministic-atomic-writes convention): a torn write can never leave a
@@ -98,6 +140,17 @@ def _write_atomic_bytes(out_path: Path, payload: bytes) -> None:
     tmp_path = out_path.with_name(out_path.name + ".tmp")
     tmp_path.write_bytes(payload)
     os.replace(tmp_path, out_path)
+
+
+def _require_regular_input(root: Path, name: str) -> Path:
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"input root for {name} must be a real directory")
+    path = root / name
+    if path.is_symlink():
+        raise ValueError(f"input {name} must be a regular non-symlink file")
+    if not path.is_file():
+        raise FileNotFoundError(f"input {name} is missing")
+    return path
 
 
 def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
@@ -167,6 +220,78 @@ def _lineage_field(manifest: Mapping[str, Any], field: str, manifest_path: Path)
             f"preview manifest at {manifest_path} is missing required lineage field {field!r}"
         )
     return value
+
+
+def _validated_policy_binding(
+    curation_bundle_dir: Path,
+    *,
+    curation_id: str,
+    source_hub_commit: str,
+) -> bytes:
+    """Load the producer-canonical v2 binding and rederive its identity."""
+    path = curation_bundle_dir / _POLICY_BINDING_FILENAME
+    if path.is_symlink() or not path.is_file():
+        raise FileNotFoundError(f"curation policy binding not found as a regular file: {path}")
+    try:
+        raw = path.read_bytes()
+        binding = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unreadable policy binding at {path}: {exc}") from None
+    required = {
+        "schema_version",
+        "policy_digest",
+        "policy_version",
+        "allow_copyleft",
+        "exclusions_digest",
+        "resolved_decisions_digest",
+        "distribution_digest",
+    }
+    if not isinstance(binding, dict) or set(binding) != required:
+        raise ValueError(f"policy binding at {path} must contain the exact v2 field set")
+    if binding["schema_version"] != "2":
+        raise ValueError(f"policy binding at {path} has unsupported schema_version")
+    for name in (
+        "policy_digest",
+        "exclusions_digest",
+        "resolved_decisions_digest",
+        "distribution_digest",
+    ):
+        value = binding[name]
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"policy binding at {path} has invalid {name}")
+    policy_version = binding["policy_version"]
+    if not isinstance(policy_version, str) or not policy_version:
+        raise ValueError(f"policy binding at {path} has invalid policy_version")
+    allow_copyleft = binding["allow_copyleft"]
+    if (
+        not isinstance(allow_copyleft, list)
+        or any(
+            not isinstance(slug, str)
+            or not slug
+            or slug != slug.casefold()
+            for slug in allow_copyleft
+        )
+        or allow_copyleft != sorted(set(allow_copyleft))
+    ):
+        raise ValueError(f"policy binding at {path} has invalid allow_copyleft")
+    canonical = (json.dumps(binding, sort_keys=True) + "\n").encode("utf-8")
+    if raw != canonical:
+        raise ValueError(f"policy binding at {path} is not canonically encoded")
+    derived = derive_curation_id_v2(
+        source_hub_commit,
+        binding["policy_digest"],
+        policy_version,
+        frozenset(allow_copyleft),
+        binding["exclusions_digest"],
+        binding["resolved_decisions_digest"],
+        binding["distribution_digest"],
+    )
+    if derived != curation_id:
+        raise ValueError(
+            f"policy binding at {path} derives curation_id {derived!r}, "
+            f"not {curation_id!r}"
+        )
+    return raw
 
 
 def _enrich_report_items(
@@ -262,7 +387,7 @@ def build_final_bundle(
 ) -> dict[str, Any]:
     """Construct the final annotation staging bundle into a fresh ``out_dir``.
 
-    Writes exactly the five contract files (``_BUNDLE_FILES``) and never
+    Writes exactly the seven semantic contract files (``_BUNDLE_FILES``) and never
     publishes: the caller feeds the directory to
     :func:`daydream.training.adjudication.publish.publish_final_annotation_bundle`.
 
@@ -289,38 +414,55 @@ def build_final_bundle(
       root when it *is* the curation bundle root), validated to exist.
 
     ``out_dir`` must not exist, must be empty, or may contain only the
-    five contract files from a prior (deterministic) construction — e.g. a
+    seven contract files from a prior (deterministic) construction — e.g. a
     ``--dry-run`` validation immediately followed by a real publish over the
     same state. Construction is deterministic, so re-writing those files is
     byte-identical; any foreign file (a previous run's ``_SUCCESS``, editor
     droppings, a partial publish) raises ``ValueError`` naming the directory,
     because a stale or published staging dir must never be silently mixed
-    with fresh content. The ``.publish-stage`` scratch dir a real publish
-    leaves behind is publish-internal, not foreign content, so a re-publish
-    over the same dir is tolerated.
+    with fresh content. A real, non-symlink ``.publish-stage`` directory left
+    by an older publisher is preserved without reading its contents; it is
+    excluded from construction, identity, and publication.
 
     Returns a summary dict with ``disposition_counts`` covering all five
     dispositions (``accepted``/``rejected``/``ambiguous``/``unanswered``/
     ``missing``) plus ``record_count`` and the written file names.
     """
+    bundle_root = curation_bundle_dir if curation_bundle_dir is not None else index_root
+    if bundle_root.is_symlink() or not bundle_root.is_dir():
+        raise ValueError("curation bundle root must be a real directory")
+    curated = load_curated_bundle(bundle_root)
     if out_dir.exists():
-        foreign = sorted(
-            p.name for p in out_dir.iterdir()
-            if p.name not in _BUNDLE_FILES and p.name != _PUBLISH_STAGE_DIRNAME
-        )
+        foreign = sorted(_bundle_input_names(out_dir) - set(_BUNDLE_FILES))
         if foreign:
             raise ValueError(
                 f"final-bundle staging dir {out_dir} contains foreign content "
                 f"({', '.join(foreign)}); remove it or pass a fresh path"
             )
-    out_dir.mkdir(parents=True, exist_ok=True)
-
+    _require_regular_input(materialize_dir, _ANNOTATIONS_FILENAME)
+    _require_regular_input(materialize_dir, _SESSIONS_OUT_FILENAME)
+    _require_regular_input(materialize_dir, _MANIFEST_FILENAME)
     records = _load_materialized_records(materialize_dir)
-    # Validate the materialized sessions output exists and parses (the bundle
-    # copies it verbatim below).
     _load_sessions_output(materialize_dir)
     manifest_path = materialize_dir / _MANIFEST_FILENAME
     manifest = _load_manifest(materialize_dir)
+    preview_curation = _lineage_field(manifest, "curation_id", manifest_path)
+    preview_source = _lineage_field(manifest, "source_hub_commit", manifest_path)
+    preview_sanitized = _lineage_field(manifest, "sanitized_hub_commit", manifest_path)
+    if preview_curation != curated.curation_id:
+        raise ValueError(
+            f"preview manifest curation_id {preview_curation!r} does not match "
+            f"curated bundle {curated.curation_id!r}"
+        )
+    if preview_source != curated.source_hub_commit or preview_sanitized != curated.source_hub_commit:
+        raise ValueError("preview manifest source/materialization pins do not match the curated bundle")
+    policy_binding = _validated_policy_binding(
+        bundle_root,
+        curation_id=curated.curation_id,
+        source_hub_commit=curated.source_hub_commit,
+    )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. annotations.jsonl + sessions.jsonl: verbatim copies of the canonical
     #    materialized artifacts (already canonical JSONL — re-serializing
@@ -333,6 +475,8 @@ def build_final_bundle(
         out_dir / _SESSIONS_OUT_FILENAME,
         (materialize_dir / _SESSIONS_OUT_FILENAME).read_bytes(),
     )
+    _write_atomic_bytes(out_dir / _MANIFEST_FILENAME, manifest_path.read_bytes())
+    _write_atomic_bytes(out_dir / _POLICY_BINDING_FILENAME, policy_binding)
 
     # 2. label-observations.jsonl: the archive's per-session observation
     #    history, chronological by ``observed_at`` (per-session rows are
@@ -374,11 +518,6 @@ def build_final_bundle(
         field: _lineage_field(manifest, field, manifest_path) for field in _LINEAGE_PIN_FIELDS
     }
     lineage["schema_version"] = f"annotation-snapshot/{ANNOTATION_SNAPSHOT_SCHEMA_VERSION}"
-    bundle_root = curation_bundle_dir if curation_bundle_dir is not None else index_root
-    if not bundle_root.is_dir():
-        raise FileNotFoundError(
-            f"curation bundle dir for the batch fileset digest not found: {bundle_root}"
-        )
     lineage["batch_fileset_digest"] = _derivative_digest(bundle_root)
     # ``as_of`` is pin-required but legitimately empty when unpinned (mirroring
     # ``snapshot.snapshot_id``'s as-of edge) — a *missing* key is an error, and

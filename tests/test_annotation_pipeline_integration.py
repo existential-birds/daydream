@@ -1,18 +1,17 @@
-"""AC 7 end-to-end: hydrate -> preview -> adjudication -> VM-loss resume ->
-canonical harvest -> CLI-only final publish -> clean download -> build-v2.
+"""Published annotation compatibility with the CPU-only corpus projector.
 
-Fake-Hub only (K6, mirrors test_archive_hydrate_integration.py) — no network.
-Every post-hydration publication step goes through the supported CLI
-(``handle_adjudicate``); no hand-authored bundle files anywhere (M7).
+External Hub/license services are fake. The separate publication integration
+test exercises the actual root CLI and deletes all first-VM state.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
-from daydream.archive import hydrate
+from daydream.archive import hydrate, license_enrich
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.materialize import run_materialize
@@ -21,10 +20,7 @@ from daydream.training.adjudication.publish import (
     publish_annotation_state,
     resume_annotation_state,
 )
-from tests.fixtures.training.build_snapshot_decisive import (
-    SNAPSHOT_REVISION,
-    build_snapshot_decisive,
-)
+from tests.fixtures.training.build_hub_snapshot import build_publication_hubs
 
 
 def test_full_annotation_pipeline_survives_vm_loss(
@@ -32,33 +28,35 @@ def test_full_annotation_pipeline_survives_vm_loss(
 ) -> None:
     from daydream.training.adjudication import cli as adjudication_cli
 
-    hub = build_snapshot_decisive()
-    # Route the CLI's Hub client factory at the in-memory FakeHub (the
-    # documented _make_client monkeypatch seam) — the test itself stays
-    # CLI-only.
-    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
+    hubs = build_publication_hubs()
+    source = hubs.source
+    annotations = hubs.annotations
+    monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: annotations)
 
-    # Since #1094, any non-dry publication requires a pinned license policy
-    # (fail-closed). The snapshot sessions carry declared MIT evidence, so a
-    # policy accepting MIT admits them all.
-    policy_path = tmp_path / "license-policy.json"
-    policy_path.write_text(json.dumps(
-        {"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}) + "\n")
+    class ExternalLicenseResolver:
+        def resolve(self, repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
+            commit = repo_commit or "a" * 40
+            return license_enrich.EnrichedEvidence("MIT", f"github:{repo_slug}@{commit}", commit)
+
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", ExternalLicenseResolver)
+    monkeypatch.setenv("HF_TOKEN", "offline-fixture-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "offline-fixture-token")
+    policy_path = hubs.policy_path
 
     # 1. hydrate: VM-local SQLite index over the fake Hub snapshot
     stage = tmp_path / "stage"
     hydrated = hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
-        source_repo="org/private-ds", source_revision=SNAPSHOT_REVISION,
-        destination_repo="org/private-ds", stage_dir=stage,
-        license_policy_path=str(policy_path)), client=hub)
+        source_repo=source.repo_id, source_revision=hubs.source_revision,
+        destination_repo=source.repo_id, stage_dir=stage,
+        license_policy_path=str(policy_path)), client=source)
     curation_id = hydrated.curation_id
 
     # 2. semantic preview -> sessions.jsonl + preview manifest (snapshot id),
     #    read directly off the hydrated staging archive (no sessions.jsonl there)
     pin = {
-        "curation_id": curation_id, "sanitized_hub_commit": SNAPSHOT_REVISION,
-        "source_hub_commit": SNAPSHOT_REVISION,
-        "archive_index_digest": "c" * 64,
+        "curation_id": curation_id, "sanitized_hub_commit": hubs.source_revision,
+        "source_hub_commit": hubs.source_revision,
+        "archive_index_digest": hashlib.sha256((stage / "index.db").read_bytes()).hexdigest(),
         "evidence_observed_at": "2026-01-01T00:00:00+00:00",
         "as_of": "2026-02-01T00:00:00+00:00",
         "labeler_version": "1055-human-r1", "rubric_version": "984-adjudicate-r1",
@@ -80,13 +78,12 @@ def test_full_annotation_pipeline_survives_vm_loss(
         "--disposition", "accepted", "--rationale", "clear maintainer approval",
         "--labeler", "alice"]) == 0
     run_preview(mat, state / "preview-ledger.json")
-    publish_annotation_state(
-        hub, state, manifest=mat / "preview-manifest.json", batch_complete=True)
+    publish_annotation_state(annotations, state, manifest=mat / "preview-manifest.json")
 
     # 4. VM loss: fresh disk, resume must restore byte-identical state
     fresh = tmp_path / "fresh-vm"
     resumed = resume_annotation_state(
-        hub, manifest=mat / "preview-manifest.json", stage_dir=fresh)
+        annotations, curation_id=curation_id, expected_snapshot_id=snapshot_id, destination=fresh)
     assert resumed["observation_count"] == 1
     assert (fresh / "observations.jsonl").read_bytes() == \
         (state / "observations.jsonl").read_bytes()
@@ -109,27 +106,26 @@ def test_full_annotation_pipeline_survives_vm_loss(
         "publish-final", "--index-root", str(stage), "--materialize-dir", str(mat),
         "--archive-dir", str(stage), "--curation-bundle-dir", str(stage / "curated" / curation_id),
         "--state-dir", str(fresh),
-        "--hub-repo", "org/private-ds", "--dry-run"]) == 0
+        "--hub-repo", annotations.repo_id, "--dry-run"]) == 0
     assert handle_adjudicate([
         "publish-final", "--index-root", str(stage), "--materialize-dir", str(mat),
         "--archive-dir", str(stage),
         "--curation-bundle-dir", str(stage / "curated" / curation_id),
         "--state-dir", str(fresh),
-        "--hub-repo", "org/private-ds"]) == 0
-    final_prefix = f"annotations/{curation_id}/{snapshot_id}/final/"
-    assert hub.files[f"{final_prefix}_SUCCESS"] == b""
+        "--hub-repo", annotations.repo_id]) == 0
+    success_commit = annotations.commit_order[-1]
+    assert len(success_commit["contains"]) == 1
+    success_path = success_commit["contains"][0]
+    assert success_path.endswith("/_SUCCESS")
+    success = json.loads(annotations.download_file(success_path, success_commit["sha"]))
 
-    # 7. clean download into a fresh dir verifies checksums. Copying the
-    # published files off the (fake) Hub is fixture transport — the bundle
-    # itself was constructed and uploaded exclusively by the CLI above; this
-    # loop only materializes the download side of the runbook's verify step.
+    # 7. A supported pinned download independently verifies the published tree.
     clean = tmp_path / "clean-download"
-    clean.mkdir()
-    for key, data in hub.files.items():
-        if key.startswith(final_prefix):
-            rel = Path(key[len(final_prefix):])
-            rel.parent.mkdir(parents=True, exist_ok=True)
-            (clean / rel).write_bytes(data)
+    assert handle_adjudicate([
+        "download-final", "--hub-repo", annotations.repo_id,
+        "--curation-id", curation_id, "--snapshot-id", success["final_snapshot_id"],
+        "--revision", success_commit["sha"], "--destination", str(clean),
+    ]) == 0
     from daydream.training.corpus_v2.bundle import _verify_sha256sums
 
     _verify_sha256sums(clean, "")  # raises on any corruption
@@ -145,9 +141,6 @@ def test_full_annotation_pipeline_survives_vm_loss(
         run_build_corpus_v2,
     )
 
-    policy_path = tmp_path / "license-policy.json"
-    policy_path.write_text(json.dumps(
-        {"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}) + "\n")
     summary = run_build_corpus_v2(BuildCorpusV2Config(
         out_dir=tmp_path / "corpus-out", bundle_dir=stage / "curated" / curation_id,
         annotation_bundle_dir=clean, license_policy_path=policy_path))
@@ -167,4 +160,3 @@ def test_full_annotation_pipeline_survives_vm_loss(
             "profile_source_kind": "builtin", "profile_digest": "d" * 64,
         }
         assert record["stack"] == "python"
-
