@@ -8,6 +8,7 @@ the candidate artifact.
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -57,6 +58,20 @@ def _serve() -> _JudgeServer:
     return srv
 
 
+def _write_verifier_metadata(verifier_dir: Path) -> None:
+    # Bind both entrypoints to the shipped gold and its case-x oracle fixture.
+    gold_bytes = (verifier_dir / "golden-review.json").read_bytes()
+    (verifier_dir / "verifier-metadata.json").write_text(json.dumps({
+        "schema_version": 1,
+        "case_id": "case-x",
+        "source_case_id": "case-x",
+        "base_ref": "base",
+        "head_ref": "head",
+        "template_version": "1",
+        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+    }))
+
+
 def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # host workspace carries credentials + source + reviewer config + agent outputs
     for name, val in _SENTINELS.items():
@@ -83,17 +98,8 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
         (_TEMPLATES_TESTS.parents[1] / "verifier_core.py").read_bytes())
     # task-binding metadata: run_verifier binds the candidate to the immutable
     # verifier-metadata.json beside the gold (case id + base/head refs + digest)
-    gold_bytes = (verifier_dir / "golden-review.json").read_bytes()
     # case id tied to the shipped fixture via test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1
-    (verifier_dir / "verifier-metadata.json").write_text(json.dumps({
-        "schema_version": 1,
-        "case_id": "case-x",
-        "source_case_id": "case-x",
-        "base_ref": "base",
-        "head_ref": "head",
-        "template_version": "1",
-        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
-    }))
+    _write_verifier_metadata(verifier_dir)
     artifact_path = tmp_path / "artifacts" / "review.json"
     artifact_path.parent.mkdir()
     oracle = Path(_TEMPLATES_TESTS / ".." / "solution" / "golden-review.json").resolve()
@@ -150,3 +156,65 @@ def test_verifier_asset_set_never_includes_task_md(tmp_path: Path, monkeypatch: 
     assert (
         _TEMPLATES_TESTS.parents[1] / "verifier_core.py"
     ).exists()
+
+
+def test_test_sh_runs_copied_bundle_from_unrelated_cwd(tmp_path: Path) -> None:
+    verifier_dir = tmp_path / "copied bundle" / "tests"
+    verifier_dir.mkdir(parents=True)
+    unrelated_cwd = tmp_path / "unrelated cwd"
+    unrelated_cwd.mkdir()
+    for name in ("test.sh", "score_review.py", "judge_prompt.md", "golden-review.json"):
+        shutil.copy2(_TEMPLATES_TESTS / name, verifier_dir / name)
+    shutil.copy2(_TEMPLATES_TESTS.parents[1] / "verifier_core.py", verifier_dir / "verifier_core.py")
+    _write_verifier_metadata(verifier_dir)
+    artifact_path = tmp_path / "artifacts" / "review.json"
+    artifact_path.parent.mkdir()
+    shutil.copy2(_TEMPLATES_TESTS.parent / "solution" / "golden-review.json", artifact_path)
+    out_dir = tmp_path / "verifier-out"
+
+    # Relocate only the copied script's image-specific log paths. Keep its
+    # interpreter and bare import intact so the caller cwd cannot be masked.
+    source_script = _TEMPLATES_TESTS / "test.sh"
+    source_text = source_script.read_text()
+    for required in (
+        "/logs/artifacts/review.json", "/logs/verifier/reward.json",
+        "python3 -c", "from verifier_core import validate_candidate_artifact", "python3 score_review.py",
+    ):
+        assert required in source_text
+    copied_script = verifier_dir / "test.sh"
+    copied_text = source_text.replace("/logs/artifacts/review.json", str(artifact_path)).replace(
+        "/logs/verifier/reward.json", str(out_dir / "reward.json")
+    )
+    copied_script.write_text(copied_text)
+    assert copied_script.read_text().replace(str(artifact_path), "/logs/artifacts/review.json").replace(
+        str(out_dir / "reward.json"), "/logs/verifier/reward.json"
+    ) == source_text
+
+    srv = _serve()
+    try:
+        env = {
+            "PATH": os.pathsep.join((str(Path(sys.executable).parent), os.environ.get("PATH", ""))),
+            "DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
+            "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": _JUDGE_KEY,
+            "DAYDREAM_JUDGE_BASE_URL": f"http://127.0.0.1:{srv.server_port}",
+            "DAYDREAM_JUDGE_ALLOWED_HOSTS": "127.0.0.1",
+            "DAYDREAM_JUDGE_ARTIFACT_PATH": str(artifact_path),
+            "DAYDREAM_JUDGE_OUT_PATH": str(out_dir),
+        }  # No PYTHONPATH/PYTHONHOME: python3 -c must find verifier_core via cwd.
+        proc = subprocess.run(
+            [str(copied_script)], cwd=unrelated_cwd, env=env,
+            capture_output=True, text=True, timeout=120,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert "candidate artifact valid" in proc.stdout
+    assert "verifier: reward.json written" in proc.stdout
+    assert srv.posted_bodies
+    reward = json.loads((out_dir / "reward.json").read_text())
+    assert reward["reward"] == 1.0
+    assert reward["verifier_error"] == 0
+    assert source_script.read_text() == source_text

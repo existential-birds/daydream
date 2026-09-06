@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+cd "$(dirname "$0")"
 # Harbor verifier self-test: confirm the solver produced a candidate artifact,
 # the candidate artifact loads, the judge entry runs to completion, and the
 # reward files were written. Exits non-zero on any verifier error.
