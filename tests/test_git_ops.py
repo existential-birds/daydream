@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -400,6 +402,90 @@ def test_merge_base_returns_none_for_leading_dash_ref(
     """Treat leading-dash revisions as invalid refs rather than Git options."""
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.merge_base(repo, *refs) is None
+
+
+def test_remote_urls_is_strict_and_allows_no_remotes(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    assert git_ops.remote_urls(repo) == {}
+
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    _git(repo, "remote", "add", "upstream", "git@github.com:other/widgets.git")
+    assert git_ops.remote_urls(repo) == {
+        "origin": "https://github.com/acme/widgets.git",
+        "upstream": "git@github.com:other/widgets.git",
+    }
+
+    _git(repo, "config", "remote.broken.fetch", "+refs/heads/*:refs/remotes/broken/*")
+    with pytest.raises(GitError, match="remote 'broken'.*fetch URL"):
+        git_ops.remote_urls(repo)
+
+
+def test_resolve_pr_merge_base_uses_local_branch_without_remotes(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    base = git_ops.head_sha(repo)
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.txt").write_text("feature\n")
+    _git(repo, "add", "feature.txt")
+    head = _commit(repo, "feature")
+
+    assert git_ops.resolve_pr_merge_base(repo, [], "refs/heads/main", head) == base
+
+
+def test_resolve_pr_merge_base_prefers_present_remote_over_stale_local(tmp_path: Path) -> None:
+    remote = _bare_remote(tmp_path / "remote.git")
+    repo = _make_repo_with_main(tmp_path, name="repo")
+    stale_local = git_ops.head_sha(repo)
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+    (repo / "base-update.txt").write_text("new base\n")
+    _git(repo, "add", "base-update.txt")
+    remote_base = _commit(repo, "base update")
+    _git(repo, "push", "origin", "main")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.txt").write_text("feature\n")
+    _git(repo, "add", "feature.txt")
+    head = _commit(repo, "feature")
+    _git(repo, "branch", "-f", "main", stale_local)
+
+    assert git_ops.resolve_pr_merge_base(
+        repo, ["refs/remotes/origin/main"], "refs/heads/main", head
+    ) == remote_base
+
+
+def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    oldest = git_ops.head_sha(repo)
+    (repo / "base-update.txt").write_text("new base\n")
+    _git(repo, "add", "base-update.txt")
+    newer = _commit(repo, "base update")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.txt").write_text("feature\n")
+    _git(repo, "add", "feature.txt")
+    head = _commit(repo, "feature")
+    _git(repo, "update-ref", "refs/remotes/one/main", newer)
+    _git(repo, "update-ref", "refs/remotes/two/main", oldest)
+
+    with pytest.raises(GitError, match="fetch/align the base remote"):
+        git_ops.resolve_pr_merge_base(
+            repo,
+            ["refs/remotes/one/main", "refs/remotes/two/main"],
+            "refs/heads/main",
+            head,
+        )
+
+
+@pytest.mark.parametrize("head", ["HEAD", "deadbeef", "f" * 40])
+def test_resolve_pr_merge_base_requires_exact_present_head(tmp_path: Path, head: str) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    with pytest.raises(GitError, match="exact PR head"):
+        git_ops.resolve_pr_merge_base(repo, [], "refs/heads/main", head)
+
+
+@pytest.mark.parametrize("local_ref", ["main", "refs/heads/-bad", "refs/heads/main~1"])
+def test_resolve_pr_merge_base_rejects_invalid_base_ref(tmp_path: Path, local_ref: str) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    with pytest.raises(GitError, match="base ref"):
+        git_ops.resolve_pr_merge_base(repo, [], local_ref, git_ops.head_sha(repo))
 
 
 # --- diff / log / show / grep / status / upstream_ahead_count ---------------
@@ -1286,6 +1372,19 @@ _gh_available = shutil.which("gh") is not None
 gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
 
 
+@pytest.fixture
+def local_only_gh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Reach local remote discovery without depending on host authentication.
+
+    These repositories have no remotes, so gh fails before making a request.
+    The synthetic token only suppresses its earlier login/configuration gate.
+    """
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "isolated-gh-config"))
+    monkeypatch.setenv("GH_HOST", "github.com")
+    monkeypatch.setenv("GH_TOKEN", "test-local-only-no-network")
+    monkeypatch.delenv("GH_REPO", raising=False)
+
+
 @gh_required
 def test_gh_repo_view_returns_none_outside_github_repo(tmp_path: Path) -> None:
     """A local-only repo with no GitHub remote yields ``None``."""
@@ -1294,16 +1393,19 @@ def test_gh_repo_view_returns_none_outside_github_repo(tmp_path: Path) -> None:
 
 
 @gh_required
-def test_gh_pr_view_returns_none_for_missing_pr(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("local_only_gh")
+def test_gh_pr_view_raises_without_remote(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
-    # No GitHub remote → gh fails → wrapper returns None instead of raising.
-    assert git_ops.gh_pr_view(repo, 999999) is None
+    with pytest.raises(GitError, match="no git remotes found"):
+        git_ops.gh_pr_view(repo, 999999)
 
 
 @gh_required
-def test_gh_pr_list_for_branch_returns_empty_without_remote(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("local_only_gh")
+def test_gh_pr_list_for_branch_raises_without_remote(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
-    assert git_ops.gh_pr_list_for_branch(repo, "main") == []
+    with pytest.raises(GitError, match="no git remotes found"):
+        git_ops.gh_pr_list_for_branch(repo, "main")
 
 
 @gh_required
@@ -1403,6 +1505,199 @@ def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
 # --- gh_api(input_data=...) and gh_pr_view(pr=None) -------------------------
 # These tests exercise wrapper logic, not gh itself: subprocess is monkeypatched
 # to capture argv and drive success/failure paths deterministically.
+
+
+def test_gh_pr_queries_request_only_legacy_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        stdout = "{}" if cmd[1:3] == ["pr", "view"] else "[]"
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    assert git_ops.gh_pr_view(repo) == {}
+    assert git_ops.gh_pr_list_for_branch(repo, "feature") == []
+
+    assert calls[0][calls[0].index("--json") + 1].split(",") == list(git_ops.GH_PR_VIEW_FIELDS)
+    assert calls[1][calls[1].index("--json") + 1].split(",") == list(git_ops.GH_PR_LIST_FIELDS)
+    assert "baseRefOid" not in git_ops.GH_PR_VIEW_FIELDS
+    assert "baseRefOid" not in git_ops.GH_PR_LIST_FIELDS
+    for fields in (git_ops.GH_PR_VIEW_FIELDS, git_ops.GH_PR_LIST_FIELDS):
+        assert "headRepository" in fields
+        assert "headRepositoryOwner" in fields
+
+
+@pytest.mark.parametrize(
+    ("pr", "stderr"),
+    [
+        (None, 'no pull requests found for branch "feature"\n'),
+        (42, "GraphQL: Could not resolve to a PullRequest with the number of 42. (repository.pullRequest)\n"),
+    ],
+)
+def test_gh_pr_view_returns_none_only_for_anchored_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pr: int | None,
+    stderr: str,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=stderr),
+    )
+    assert git_ops.gh_pr_view(repo, pr) is None
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "no git remotes found",
+        "HTTP 401: authentication required",
+        "Unknown JSON field: futureField",
+        "GraphQL: Could not resolve to a PullRequest with the number of 41. (repository.pullRequest)",
+        'prefix: no pull requests found for branch "feature"',
+        "HTTP 404: resource not found",
+    ],
+)
+def test_gh_pr_view_unknown_failures_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=stderr),
+    )
+    with pytest.raises(GitError, match=re.escape(stderr)):
+        git_ops.gh_pr_view(repo, 42)
+
+
+@pytest.mark.parametrize("stdout", ["not-json", "[]", "null", "42"])
+def test_gh_pr_view_rejects_invalid_json_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""),
+    )
+    with pytest.raises(GitError, match="invalid JSON|JSON object"):
+        git_ops.gh_pr_view(repo, 42)
+
+
+@pytest.mark.parametrize("stdout", ["not-json", "{}", "[42]", '[{"number": 1}, null]'])
+def test_gh_pr_list_rejects_failure_and_invalid_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""),
+    )
+    with pytest.raises(GitError, match="invalid JSON|JSON list|row"):
+        git_ops.gh_pr_list_for_branch(repo, "feature")
+
+
+def test_gh_pr_list_nonzero_uses_gh_error_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="rate limit exceeded; retry-after: 7"
+        ),
+    )
+    with pytest.raises(git_ops.RateLimitError) as excinfo:
+        git_ops.gh_pr_list_for_branch(repo, "feature")
+    assert excinfo.value.retry_after == 7
+
+
+@pytest.mark.parametrize("slug", ["owner", "owner/repo/extra", "owner/ ", " owner/repo", "/repo"])
+def test_gh_repo_view_required_rejects_invalid_slug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slug: str
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout=slug + "\n", stderr=""),
+    )
+    with pytest.raises(GitError, match="invalid repository slug"):
+        git_ops.gh_repo_view_required(repo)
+
+
+def test_gh_repo_view_required_returns_exact_slug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="Owner/Repo\n", stderr=""),
+    )
+    assert git_ops.gh_repo_view_required(repo) == ("Owner", "Repo")
+
+
+def test_diagnostic_url_redaction_is_bounded_on_long_untrusted_text() -> None:
+    """Non-URL diagnostics must not trigger quadratic scheme-prefix searches."""
+    checked = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from daydream.git_ops import _redact_sensitive_text\n"
+            "for text in ('A' * 100_000, 'A.' * 50_000):\n"
+            "    assert _redact_sensitive_text(text) == text\n"
+            "for scheme in ('https', 'ssh', 'git+custom.transport'):\n"
+            "    raw = f'failed {scheme}://user:password@example.invalid/o/r'\n"
+            "    assert _redact_sensitive_text(raw) == "
+            "f'failed {scheme}://***@example.invalid/o/r'\n",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_gh_repo_view_required_preserves_safe_failure_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setattr(
+        "daydream.git_ops.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr="HTTP 401: authentication required for token ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        ),
+    )
+
+    with pytest.raises(GitError) as excinfo:
+        git_ops.gh_repo_view_required(repo)
+    assert "authentication required" in str(excinfo.value)
+    assert "ghp_abcdefghijklmnopqrstuvwxyz1234567890" not in str(excinfo.value)
+
+
+@gh_required
+@pytest.mark.parametrize("fields", ["view", "list"])
+def test_installed_gh_accepts_production_pr_fields_without_network(
+    tmp_path: Path, fields: str
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    selected = git_ops.GH_PR_VIEW_FIELDS if fields == "view" else git_ops.GH_PR_LIST_FIELDS
+    proc = subprocess.run(
+        ["gh", "pr", fields, "--json", ",".join(selected)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "Unknown JSON field" not in proc.stderr
 
 
 def test_gh_api_input_data_passes_tempfile_and_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2014,6 +2309,26 @@ def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch
 # --- gh secret/variable/PR primitives (Task 2) ------------------------------
 
 from tests.harness.fake_gh import FakeGh  # noqa: E402
+
+
+@pytest.mark.parametrize("extra_field", ["baseRefOid", "futureCompatibilityFloor"])
+@pytest.mark.parametrize("query_kind", ["view", "list"])
+def test_fake_gh_rejects_every_field_outside_legacy_allowlist(
+    fake_gh: FakeGh,
+    git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    query_kind: str,
+    extra_field: str,
+) -> None:
+    fake_gh.serve_pr_view({"number": 7})
+    constant = "GH_PR_VIEW_FIELDS" if query_kind == "view" else "GH_PR_LIST_FIELDS"
+    monkeypatch.setattr(git_ops, constant, (*getattr(git_ops, constant), extra_field))
+
+    with pytest.raises(GitError, match=rf'Unknown JSON field: "{extra_field}"'):
+        if query_kind == "view":
+            git_ops.gh_pr_view(git_repo, 7)
+        else:
+            git_ops.gh_pr_list_for_branch(git_repo, "feature")
 
 
 def test_gh_secret_set_requires_exactly_one_scope(fake_gh: FakeGh, git_repo: Path) -> None:

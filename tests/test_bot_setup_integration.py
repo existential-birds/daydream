@@ -100,6 +100,7 @@ def test_land_workflows_writes_three_files_on_branch_and_opens_pr(
     fake_gh: FakeGh, repo_with_origin: Path
 ) -> None:
     """land_workflows copies the templates on a new branch, pushes, opens a PR."""
+    fake_gh.set_response("pr-list", value=[])
     fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/3")
     url = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
     wf = repo_with_origin / ".github/workflows"
@@ -390,6 +391,7 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     # App already installed on the owner → the Install-click wait is satisfied.
     fake_gh.serve_installations([{"account": {"login": "o"}}])
+    fake_gh.set_response("pr-list", value=[])
     fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/5")
 
     code = cli_main(["setup", str(repo_with_origin), "--repo", "o/r"])
@@ -401,6 +403,18 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     pr_calls = fake_gh.command_calls("pr create")
     assert len(pr_calls) == 1
     assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
+
+
+def test_land_workflows_pr_lookup_failure_never_creates_duplicate_pr(
+    fake_gh: FakeGh, repo_with_origin: Path
+) -> None:
+    fake_gh.set_response("pr-list", value={"__error__": "authentication required"})
+    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/unsafe")
+
+    with pytest.raises(git_ops.GitError, match="authentication required"):
+        bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
+
+    assert fake_gh.command_calls("pr create") == []
 
 
 def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
