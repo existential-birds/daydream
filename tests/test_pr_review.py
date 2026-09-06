@@ -12,6 +12,7 @@ import pytest
 
 from daydream import git_ops, pr_comment_renderer, pr_review
 from daydream.findings import ArtifactFinding
+from daydream.git_ops import GitError
 from daydream.pr_review import (
     DAYDREAM_FOOTER,
     ParsedIssue,
@@ -826,26 +827,39 @@ def test_find_open_pr_returns_none_on_empty_list(
     assert pr_review.find_open_pr(git_repo) is None
 
 
+def _local_pr_row(repo: Path, *, head_owner: str = "o") -> tuple[dict[str, Any], str, str]:
+    base = git_ops.head_sha(repo)
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.py").write_text("value = 1\n")
+    _git(repo, "add", "feature.py")
+    _git(repo, "commit", "-m", "feature")
+    head = git_ops.head_sha(repo)
+    return (
+        {
+            "number": 7,
+            "headRefOid": head,
+            "baseRefName": "main",
+            "url": "https://github.com/o/r/pull/7",
+            "headRepository": {"name": "r", "nameWithOwner": f"{head_owner}/r"},
+            "headRepositoryOwner": {"login": head_owner},
+        },
+        base,
+        head,
+    )
+
+
 def test_find_open_pr_returns_pr_info(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
     """Real git for branch; gh wrappers stubbed for the PR + repo lookups."""
-    rows = [
-        {
-            "number": 7,
-            "headRefOid": "h",
-            "baseRefOid": "b",
-            "baseRefName": "main",
-            "url": "u",
-        }
-    ]
-    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: rows)
-    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: ("o", "r"))
+    row, base, head = _local_pr_row(git_repo)
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
     info = pr_review.find_open_pr(git_repo)
     assert info is not None
-    assert info.number == 7
-    assert info.owner == "o"
-    assert info.repo == "r"
+    assert (info.number, info.head_sha, info.base_sha, info.owner, info.repo) == (
+        7, head, base, "o", "r",
+    )
 
 
 def test_find_open_pr_captures_head_repo_for_fork_pr(
@@ -854,19 +868,10 @@ def test_find_open_pr_captures_head_repo_for_fork_pr(
     """Fork-head PR: the row's headRepository/headRepositoryOwner (the fork)
     is captured as ``head_repo`` for the reviewed-commit link, while
     owner/repo (the POST target) stay the base repo from ``gh repo view``."""
-    rows = [
-        {
-            "number": 7,
-            "headRefOid": "h",
-            "baseRefOid": "b",
-            "baseRefName": "main",
-            "url": "u",
-            "headRepository": {"name": "widgets", "nameWithOwner": "forky/widgets"},
-            "headRepositoryOwner": {"login": "forky"},
-        }
-    ]
-    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: rows)
-    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: ("acme", "widgets"))
+    row, _, _ = _local_pr_row(git_repo, head_owner="forky")
+    row["headRepository"] = {"name": "widgets", "nameWithOwner": "forky/widgets"}
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("acme", "widgets"))
     info = pr_review.find_open_pr(git_repo)
     assert info is not None
     assert (info.owner, info.repo) == ("acme", "widgets")
@@ -881,32 +886,168 @@ def test_find_pr_by_number_returns_none_when_pr_missing(
     assert pr_review.find_pr_by_number(git_repo, 7) is None
 
 
-def test_find_pr_by_number_returns_none_when_slug_unresolved(
+def test_find_pr_by_number_raises_when_slug_unresolved(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
-    """A resolvable PR but unresolvable owner/repo slug yields None (no PRInfo)."""
-    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: {"number": 7})
-    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: None)
-    assert pr_review.find_pr_by_number(git_repo, 7) is None
+    """A resolvable PR but failed owner/repo lookup is a hard error."""
+    row, _, _ = _local_pr_row(git_repo)
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
+
+    def fail_slug(_repo: Path) -> tuple[str, str]:
+        raise GitError("gh repo view failed: auth")
+
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", fail_slug)
+    with pytest.raises(GitError, match="auth"):
+        pr_review.find_pr_by_number(git_repo, 7)
 
 
 def test_find_pr_by_number_assembles_pr_info(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
     """Valid lookups assemble a fully-populated PRInfo from the gh view row."""
-    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: {
-        "number": 7,
-        "headRefOid": "h",
-        "baseRefOid": "b",
-        "baseRefName": "main",
-        "url": "u",
-    })
-    monkeypatch.setattr(git_ops, "gh_repo_view", lambda _r: ("o", "r"))
+    row, base, head = _local_pr_row(git_repo, head_owner="forky")
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
     info = pr_review.find_pr_by_number(git_repo, 7)
     assert info is not None
-    assert (info.number, info.head_sha, info.base_sha, info.base_ref, info.owner, info.repo, info.url) == (
-        7, "h", "b", "main", "o", "r", "u",
+    assert (
+        info.number, info.head_sha, info.base_sha, info.base_ref,
+        info.owner, info.repo, info.url, info.head_repo,
+    ) == (
+        7, head, base, "main", "o", "r", "https://github.com/o/r/pull/7", "forky/r",
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("number", True),
+        ("number", 0),
+        ("headRefOid", "HEAD"),
+        ("headRefOid", "deadbeef"),
+        ("baseRefName", ""),
+        ("baseRefName", "main~1"),
+        ("url", ""),
+        ("url", 7),
+        ("headRepository", "fork/r"),
+        ("headRepository", {"nameWithOwner": "fork/r/extra"}),
+        ("headRepository", {}),
+        ("headRepository", {"nameWithOwner": 7, "name": "r"}),
+        ("headRepositoryOwner", {}),
+        ("headRepositoryOwner", {"login": 7}),
+        ("headRepositoryOwner", {"login": ""}),
+        ("headRepositoryOwner", "fork"),
+    ],
+)
+def test_pr_info_rejects_malformed_row_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo: Path,
+    field: str,
+    value: Any,
+) -> None:
+    row, _, _ = _local_pr_row(git_repo)
+    row[field] = value
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
+        pr_review._pr_info_from_row(git_repo, row)
+
+
+@pytest.mark.parametrize("missing_field", ["headRepository", "headRepositoryOwner"])
+def test_pr_info_rejects_missing_requested_head_metadata(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path, missing_field: str,
+) -> None:
+    row, _, _ = _local_pr_row(git_repo)
+    del row[missing_field]
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    with pytest.raises(GitError, match="invalid PR row"):
+        pr_review._pr_info_from_row(git_repo, row)
+
+
+def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path,
+) -> None:
+    row, _, _ = _local_pr_row(git_repo)
+    row["headRepository"] = None
+    row["headRepositoryOwner"] = {"login": 7}
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+    with pytest.raises(GitError, match="invalid PR row"):
+        pr_review._pr_info_from_row(git_repo, row)
+
+
+@pytest.mark.parametrize("head_owner", [None, {"login": "former-owner"}])
+def test_pr_info_accepts_null_same_repo_head_metadata(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path, head_owner: Any,
+) -> None:
+    row, _, _ = _local_pr_row(git_repo)
+    row["headRepository"] = None
+    row["headRepositoryOwner"] = head_owner
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("o", "r"))
+
+    assert pr_review._pr_info_from_row(git_repo, row).head_repo is None
+
+
+def test_find_open_pr_propagates_current_branch_failure(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    def fail_branch(_repo: Path) -> str | None:
+        raise GitError("cannot read current branch")
+
+    monkeypatch.setattr(git_ops, "current_branch", fail_branch)
+    with pytest.raises(GitError, match="cannot read current branch"):
+        pr_review.find_open_pr(git_repo)
+
+
+@pytest.mark.parametrize("lookup", ["branch", "number"])
+def test_fork_pr_uses_upstream_base_for_both_lookup_paths(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path, lookup: str
+) -> None:
+    row, base, _ = _local_pr_row(git_repo, head_owner="forky")
+    _git(git_repo, "remote", "add", "origin", "https://github.com/forky/r.git")
+    _git(git_repo, "remote", "add", "upstream", "https://github.com/acme/widgets.git")
+    _git(git_repo, "update-ref", "refs/remotes/upstream/main", base)
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("acme", "widgets"))
+    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
+    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
+
+    info = (
+        pr_review.find_open_pr(git_repo)
+        if lookup == "branch"
+        else pr_review.find_pr_by_number(git_repo, 7)
+    )
+    assert info is not None
+    assert info.base_sha == base
+    assert info.head_repo == "forky/r"
+
+
+def test_pr_base_remote_matching_is_credential_safe(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    row, base, _ = _local_pr_row(git_repo)
+    tree = _git(git_repo, "write-tree")
+    unrelated = _git(git_repo, "commit-tree", tree, "-m", "unrelated base")
+    _git(
+        git_repo,
+        "remote",
+        "add",
+        "origin",
+        "https://user:top-secret@github.com/acme/widgets.git?token=private",
+    )
+    _git(git_repo, "update-ref", "refs/remotes/origin/main", unrelated)
+    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r: ("acme", "widgets"))
+
+    with pytest.raises(GitError) as excinfo:
+        pr_review._pr_info_from_row(git_repo, row)
+    assert "top-secret" not in str(excinfo.value)
+    assert "token=private" not in str(excinfo.value)
+
+    _git(
+        git_repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://user:fork-secret@github.com/forky/widgets.git?token=fork",
+    )
+    assert pr_review._pr_info_from_row(git_repo, row).base_sha == base
 
 
 class _FakeConsole:
@@ -932,6 +1073,33 @@ async def test_post_skips_when_no_pr(
     )
     assert warnings and "No open PR" in warnings[0]
     assert status == pr_review.PostStatus.NO_PR
+
+
+@pytest.mark.asyncio
+async def test_post_fails_with_safe_diagnostic_when_pr_lookup_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fail_lookup(_target_dir: Path) -> PRInfo | None:
+        raise GitError("gh pr list failed: authentication required")
+
+    monkeypatch.setattr(pr_review, "find_open_pr", fail_lookup)
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        pr_review,
+        "print_error",
+        lambda _console, title, message: errors.append((title, message)),
+    )
+
+    status = await pr_review._post(
+        tmp_path,
+        [ParsedIssue(path="x.py", line=1, title="t", body="b")],
+        console=_FakeConsole(),  # type: ignore[arg-type]
+    )
+
+    assert status == pr_review.PostStatus.FAILED
+    assert errors == [
+        ("PR Lookup Failed", "gh pr list failed: authentication required")
+    ]
 
 
 @pytest.mark.asyncio

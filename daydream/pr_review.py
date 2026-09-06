@@ -18,7 +18,9 @@ Flow:
     6. Build a single review payload, show a summary, ask y/n.
     7. On yes, POST to `/repos/<owner>/<repo>/pulls/<num>/reviews`.
 
-Everything is best-effort: failures warn and return, never raise.
+Posting boundaries translate failures into explicit statuses. PR lookup and
+local-object helpers raise :class:`GitError` so operational failures cannot be
+misreported as an absent pull request.
 """
 
 from __future__ import annotations
@@ -474,37 +476,51 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
 
 
 def _current_branch(target_dir: Path) -> str | None:
-    try:
-        return git_ops.current_branch(target_dir)
-    except GitError:
-        return None
+    return git_ops.current_branch(target_dir)
 
 
 def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
     """The ``owner/repo`` slug that holds the PR's head commit, or ``None``.
 
-    ``gh pr list --json headRepository,headRepositoryOwner`` rows carry the
-    head repository — the fork for fork-head PRs, where the head commit
-    actually exists. ``gh pr view`` rows carry neither key, so callers fall
-    back to the base-repo slug for those.
+    Both PR lookup modes request the head repository and owner. An explicitly
+    null repository (for example a deleted fork) permits base-repository link
+    fallback; missing or malformed requested metadata is a schema failure.
     """
-    head_repo = row.get("headRepository")
-    if not isinstance(head_repo, dict):
+    if "headRepository" not in row or "headRepositoryOwner" not in row:
+        raise GitError("invalid PR row: missing requested head repository metadata")
+    head_owner = row["headRepositoryOwner"]
+    owner_login: str | None = None
+    if head_owner is not None:
+        if not isinstance(head_owner, dict) or not isinstance(head_owner.get("login"), str):
+            raise GitError("invalid PR row: malformed head repository owner")
+        owner_login = head_owner["login"]
+        if git_ops.split_owner_repo(f"{owner_login}/repository") is None:
+            raise GitError("invalid PR row: malformed head repository owner")
+    head_repo = row["headRepository"]
+    if head_repo is None:
         return None
-    name_with_owner = head_repo.get("nameWithOwner")
-    if isinstance(name_with_owner, str) and "/" in name_with_owner:
-        return name_with_owner
-    head_owner = row.get("headRepositoryOwner")
-    if (
-        isinstance(head_owner, dict)
-        and isinstance(head_owner.get("login"), str)
-        and isinstance(head_repo.get("name"), str)
-    ):
-        return f"{head_owner['login']}/{head_repo['name']}"
-    return None
+    if not isinstance(head_repo, dict):
+        raise GitError("invalid PR row: headRepository must be an object or null")
+    if "nameWithOwner" in head_repo:
+        name_with_owner = head_repo["nameWithOwner"]
+        if not isinstance(name_with_owner, str):
+            raise GitError("invalid PR row: malformed head repository slug")
+        slug = git_ops.split_owner_repo(name_with_owner)
+        if slug is None:
+            raise GitError("invalid PR row: malformed head repository slug")
+        owner, repo = slug
+        return f"{owner}/{repo}"
+    if owner_login is not None and isinstance(head_repo.get("name"), str):
+        candidate_slug = f"{owner_login}/{head_repo['name']}"
+        parsed_slug = git_ops.split_owner_repo(candidate_slug)
+        if parsed_slug is None:
+            raise GitError("invalid PR row: malformed head repository slug")
+        owner, repo = parsed_slug
+        return f"{owner}/{repo}"
+    raise GitError("invalid PR row: incomplete head repository metadata")
 
 
-def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo | None:
+def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo:
     """Build :class:`PRInfo` from a ``gh`` PR row, resolving the owner/repo slug.
 
     ``owner``/``repo`` (the posting target) come from ``gh repo view`` — the
@@ -512,22 +528,47 @@ def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo | None:
     reviewed-commit link target) comes from the row's head-repository entry
     when present, so fork-head PRs link to the fork that holds the commit.
 
-    Returns None when the owner/repo slug cannot be resolved.
+    Raises :class:`GitError` when the row or repository context is invalid.
     """
-    # Owner/repo lookup via `gh repo view` — the base repo hosts the PR.
-    slug = git_ops.gh_repo_view(target_dir)
-    if slug is None:
-        return None
-    owner, repo = slug
+    from daydream.archive.git_safe import normalize_remote_url
+
+    number = row.get("number")
+    head_sha = row.get("headRefOid")
+    base_ref = row.get("baseRefName")
+    url = row.get("url")
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise GitError("invalid PR row: number must be a positive integer")
+    if not isinstance(head_sha, str):
+        raise GitError("invalid PR row: headRefOid must be a string")
+    if not isinstance(base_ref, str) or not base_ref:
+        raise GitError("invalid PR row: baseRefName must be a non-empty string")
+    if not isinstance(url, str) or not url:
+        raise GitError("invalid PR row: url must be a non-empty string")
+    head_repo = _head_repo_slug_from_row(row)
+    git_ops.validate_branch_name(target_dir, base_ref)
+
+    owner, repo = git_ops.gh_repo_view_required(target_dir)
+    base_slug = f"{owner}/{repo}"
+    matching_remotes: list[str] = []
+    for remote, raw_url in git_ops.remote_urls(target_dir).items():
+        identity, _safe_url = normalize_remote_url(raw_url)
+        if identity is not None and identity.lower() == base_slug.lower():
+            matching_remotes.append(f"refs/remotes/{remote}/{base_ref}")
+    base_sha = git_ops.resolve_pr_merge_base(
+        target_dir,
+        matching_remotes,
+        f"refs/heads/{base_ref}",
+        head_sha,
+    )
     return PRInfo(
-        number=int(row["number"]),
-        head_sha=row["headRefOid"],
-        base_sha=row["baseRefOid"],
-        base_ref=row.get("baseRefName", ""),
+        number=number,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        base_ref=base_ref,
         owner=owner,
         repo=repo,
-        url=row.get("url", ""),
-        head_repo=_head_repo_slug_from_row(row),
+        url=url,
+        head_repo=head_repo,
     )
 
 
@@ -549,8 +590,11 @@ def find_pr_by_number(target_dir: Path, pr_number: int) -> PRInfo | None:
     deriving it from the current branch like :func:`find_open_pr`.
 
     Returns:
-        The resolved :class:`PRInfo`, or ``None`` when the PR or the
-        owner/repo slug cannot be resolved.
+        The resolved :class:`PRInfo`, or ``None`` only when the PR is absent.
+
+    Raises:
+        GitError: If repository identity, PR data, or local Git objects cannot
+            be resolved safely.
     """
     data = git_ops.gh_pr_view(target_dir, pr_number)
     if data is None:
@@ -1529,9 +1573,9 @@ def _resolve_pr(
     """Resolve the target PR for posting.
 
     Handles both the current-branch discovery path (:func:`find_open_pr`) and
-    the explicitly-pinned path (:func:`find_pr_by_number`). On failure it
-    prints a warning describing the cause — distinguishing a missing PR from a
-    failed owner/repo slug resolution — and returns ``None``.
+    the explicitly-pinned path (:func:`find_pr_by_number`). A genuine absence
+    prints a warning and returns ``None``; operational failures propagate for
+    the caller to report as failures.
 
     Returns:
         The resolved :class:`PRInfo`, or ``None`` (after warning) when the PR
@@ -1540,20 +1584,10 @@ def _resolve_pr(
     if pr_number is not None:
         pr = find_pr_by_number(target_dir, pr_number)
         if pr is None:
-            # Distinguish "PR not found" from "owner/repo slug unresolvable"
-            # so the operator gets a precise diagnostic rather than a generic
-            # "could not resolve" message.
-            if git_ops.gh_pr_view(target_dir, pr_number) is None:
-                print_warning(
-                    console,
-                    f"PR #{pr_number} not found via `gh pr view`; skipping PR post.",
-                )
-            else:
-                print_warning(
-                    console,
-                    f"PR #{pr_number} resolved via `gh pr view` but the owner/repo "
-                    "slug could not be resolved via `gh repo view`; skipping PR post.",
-                )
+            print_warning(
+                console,
+                f"PR #{pr_number} not found via `gh pr view`; skipping PR post.",
+            )
             return None
         return pr
     pr = find_open_pr(target_dir)
@@ -1576,7 +1610,11 @@ async def _post(
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
 ) -> PostStatus:
-    pr = _resolve_pr(target_dir, console, pr_number)
+    try:
+        pr = _resolve_pr(target_dir, console, pr_number)
+    except GitError as exc:
+        print_error(console, "PR Lookup Failed", str(exc))
+        return PostStatus.FAILED
     if pr is None:
         return PostStatus.NO_PR
 
@@ -2289,6 +2327,7 @@ def _post_diagram_artifact(
 
 
 def post_findings_from_artifact(
+    target_dir: Path,
     artifact_path: Path,
     *,
     pr_number: int,
@@ -2308,6 +2347,7 @@ def post_findings_from_artifact(
     No prompting and no ATIF trajectory — there is no agent work here.
 
     Args:
+        target_dir: Explicit checkout for local evidence and every GitHub operation.
         artifact_path: Path to the ``--findings-out`` artifact.
         pr_number: Event-derived target PR number.
         head_sha: Event-derived PR head SHA.
@@ -2348,7 +2388,6 @@ def post_findings_from_artifact(
             "REST dedup unavailable) — may double-post, will never suppress.",
         )
 
-    target_dir = Path.cwd()
     try:
         artifact = load_findings_artifact(
             artifact_path,

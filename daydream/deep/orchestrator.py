@@ -1373,7 +1373,15 @@ async def _step_intent(ctx: FlowContext) -> None:
     print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
     pr_description: str | None = None
     if config.pr_number is not None:
-        pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
+        try:
+            pr_view = git_ops.gh_pr_view(target_dir, config.pr_number)
+        except git_ops.GitError as exc:
+            print_warning(
+                console,
+                f"Could not load PR #{config.pr_number} description ({exc}); "
+                "continuing without PR description context",
+            )
+            pr_view = None
         if pr_view is not None:
             pr_state = pr_view.get("state", "")
             pr_head_oid = pr_view.get("headRefOid", "")
@@ -2832,6 +2840,11 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     from daydream.pr_review import PostStatus, post_review_to_pr_from_report
 
     items_file: Path = ctx.data["items_file"]
+    pr_kwargs = (
+        {"pr_number": ctx.config.pr_number}
+        if ctx.config.pr_number is not None
+        else {}
+    )
     outcome = await post_review_to_pr_from_report(
         ctx.work.repo,
         items_file,
@@ -2839,6 +2852,7 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         post=_mode_of(ctx) == "comment",
         approve_on_clean=_approve_on_clean(ctx.config),
         diagram_blocks=(ctx.data.get("diagrams") or {}).get("blocks"),
+        **pr_kwargs,
     )
     if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
         return Stop(1)
@@ -3369,6 +3383,7 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     ``--comment`` -- an unresolvable PR or a failed POST ends the run with
     exit 1, because the comment was the whole point of the run.
     """
+    from daydream.git_ops import GitError
     from daydream.pr_review import (
         _resolve_pr,
         diagram_comment_kinds,
@@ -3383,7 +3398,11 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     if ctx.config.findings_out is not None:
         return Stop(_emit_diagram_findings(ctx.work.repo, ctx.config, payload))
 
-    pr = _resolve_pr(ctx.work.repo, console, ctx.config.pr_number)
+    try:
+        pr = _resolve_pr(ctx.work.repo, console, ctx.config.pr_number)
+    except GitError as exc:
+        print_error(console, "Diagram PR Lookup Failed", str(exc))
+        return Stop(1)
     if pr is None:
         print_error(
             console,

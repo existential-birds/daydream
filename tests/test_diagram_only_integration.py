@@ -605,6 +605,32 @@ async def test_no_resolvable_pr_in_diagram_only_mode_exits_one(
     assert _issue_comments(fake_gh) == []
 
 
+async def test_pr_lookup_failure_in_diagram_only_mode_exits_one_with_diagnostic(
+    tmp_path: Path,
+    diagram_run: Callable[..., Any],
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operational lookup failure is reported, not misclassified as absence."""
+    target = dr.build_cross_module_repo(tmp_path)
+    fake_gh.set_response("pr-view", value={"__error__": "authentication required"})
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_error",
+        lambda _console, title, message: errors.append((title, message)),
+    )
+
+    exit_code, _ = await diagram_run(
+        target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]}
+    )
+
+    assert exit_code == 1
+    assert len(errors) == 1
+    assert errors[0][0] == "Diagram PR Lookup Failed"
+    assert "authentication required" in errors[0][1]
+    assert _issue_comments(fake_gh) == []
+
+
 # --- Regression (a): prior deep artifacts survive ---------------------------
 
 

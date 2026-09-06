@@ -23,6 +23,7 @@ from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
@@ -622,6 +623,7 @@ async def test_run_comment_full_flow(
         console: Any,
         post: Any,
         approve_on_clean: Any=False,
+        pr_number: int | None = None,
         diagram_blocks: Any=None,
     ) -> None:
         posted.extend(json.loads(merged_items_path.read_text())["items"])
@@ -641,6 +643,131 @@ async def test_run_comment_full_flow(
     assert any(item.get("file") for item in posted), posted
     # The diff was materialised for the review prompts.
     assert (tmp_path / ".daydream" / "diff.patch").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pr_number", [None, 7], ids=["branch", "explicit"])
+async def test_run_comment_resolves_pr_through_real_cli_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., "RunConfig"],
+    fake_gh: FakeGh,
+    pr_number: int | None,
+) -> None:
+    """Production runner, PR assembly, and posting use one explicit checkout."""
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    _two_commit_repo(tmp_path, "api.py", "print('hello')", "print('world')", "feat/test")
+    head = _git(tmp_path, "rev-parse", "HEAD")
+    fake_gh.serve_pr_view(
+        {
+            "number": 7,
+            "title": "Change greeting",
+            "body": "",
+            "state": "OPEN",
+            "headRefName": "feat/test",
+            "baseRefName": "main",
+            "headRefOid": head,
+            "url": "https://github.test/acme/widgets/pull/7",
+            "headRepository": {
+                "name": "widgets",
+                "nameWithOwner": "acme/widgets",
+            },
+            "headRepositoryOwner": {"login": "acme"},
+        }
+    )
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tmp_path)
+
+    exit_code = await run(
+        make_config(tmp_path, output_mode="comment", pr_number=pr_number)
+    )
+
+    assert exit_code == 0
+    review_calls = fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
+    assert len(review_calls) == 1
+    assert review_calls[0].payload["commit_id"] == head
+    assert review_calls[0].payload["comments"][0]["path"] == "api.py"
+    assert fake_gh.process_calls()
+    assert {call.cwd for call in fake_gh.process_calls()} == {tmp_path.resolve()}
+    list_calls = [
+        call for call in fake_gh.process_calls() if call.argv[1:3] == ["pr", "list"]
+    ]
+    if pr_number is None:
+        assert len(list_calls) == 1
+        assert "baseRefOid" not in list_calls[0].argv
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pr_number", [None, 7], ids=["branch", "explicit"])
+@pytest.mark.parametrize("outcome", ["auth_failure", "schema_failure", "malformed_head", "absence"])
+async def test_run_comment_pr_lookup_failure_and_absence_exit_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., "RunConfig"],
+    fake_gh: FakeGh,
+    pr_number: int | None,
+    outcome: str,
+) -> None:
+    """Both lookup modes fail closed without attempting a review POST."""
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
+    if outcome == "malformed_head":
+        fake_gh.serve_pr_view({
+            "number": 7, "title": "Change greeting", "body": "", "state": "OPEN",
+            "headRefName": "feat/test", "baseRefName": "main",
+            "headRefOid": _git(tmp_path, "rev-parse", "HEAD"),
+            "url": "https://github.test/acme/widgets/pull/7",
+            "headRepository": {}, "headRepositoryOwner": {"login": "acme"},
+        })
+    elif pr_number is None and outcome == "absence":
+        fake_gh.set_response("pr-list", value=[])
+    else:
+        diagnostic = (
+            "authentication required"
+            if outcome == "auth_failure"
+            else 'Unknown JSON field: "futureCompatibilityFloor"'
+        )
+        if outcome == "absence":
+            diagnostic = (
+                "GraphQL: Could not resolve to a PullRequest with the number of 7. "
+                "(repository.pullRequest)"
+            )
+        fake_gh.set_response("pr-view", value={"__error__": diagnostic})
+        if pr_number is None:
+            fake_gh.set_response("pr-list", value={"__error__": diagnostic})
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tmp_path)
+    errors: list[str] = []
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.pr_review.print_error",
+        lambda _console, _title, message: errors.append(message),
+    )
+    monkeypatch.setattr(
+        "daydream.pr_review.print_warning",
+        lambda _console, message: warnings.append(message),
+    )
+
+    exit_code = await run(
+        make_config(tmp_path, output_mode="comment", pr_number=pr_number)
+    )
+
+    assert exit_code == 1
+    assert fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews") == []
+    messages = errors + warnings
+    if outcome != "absence":
+        expected = (
+            "authentication required"
+            if outcome == "auth_failure"
+            else "invalid PR row" if outcome == "malformed_head" else "futureCompatibilityFloor"
+        )
+        assert any(expected in message for message in messages)
+        assert all("No open PR found" not in message for message in messages)
+    else:
+        expected = "No open PR found" if pr_number is None else "PR #7 not found"
+        assert any(expected in message for message in messages)
 
 
 @pytest.mark.asyncio
