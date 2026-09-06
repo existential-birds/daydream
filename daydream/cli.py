@@ -59,7 +59,7 @@ from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 from daydream.phases import UnconfinedFindingError
 from daydream.runner import RunConfig, run
-from daydream.trajectory import get_signal_recorder
+from daydream.trajectory import flush_active_signal_recorders
 from daydream.ui import (
     ShutdownPanel,
     create_console,
@@ -119,18 +119,14 @@ def _signal_handler(signum: int, _frame: object) -> None:
     D-07: SIGINT/SIGTERM flushes a ``<path>.partial`` trajectory with
     ``extra.partial=true`` so consumers know the run was interrupted.
 
-    Uses :func:`get_signal_recorder` (a module-level stack) rather than the
-    ContextVar. Signal handlers fire in the main thread at bytecode boundaries
-    and are not synced with the asyncio task context where the ContextVar was
-    set, so ContextVar reads from here are non-deterministic.
+    The recorder-owned run registry snapshots every active sibling without
+    consulting task-local ContextVar routing.
     """
     signal_name = signal.Signals(signum).name
 
-    # Flush partial trajectory before tearing down (D-07); write_partial is sync
-    # and exception-safe, so it can't crash the shutdown path.
-    recorder = get_signal_recorder()
-    if recorder is not None:
-        recorder.write_partial()
+    # Flush every active recorder before tearing down (D-07). The registry
+    # isolates ordinary write failures per recorder and never awaits.
+    flush_active_signal_recorders()
 
     panel = ShutdownPanel(console)
     set_shutdown_panel(panel)
