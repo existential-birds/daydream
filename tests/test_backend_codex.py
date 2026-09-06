@@ -1235,13 +1235,88 @@ class TestUnwrapShellCommand:
     def test_flag_only_wrapper_raw_fallback(self) -> None:
         assert _unwrap_shell_command("/bin/zsh -lc") == "/bin/zsh -lc"
 
-    def test_pending_content_key_uses_raw_command(self) -> None:
-        """M7: the legacy pending-id key is keyed on the raw wrapped command."""
+    @pytest.mark.asyncio
+    async def test_pending_content_key_uses_raw_command(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """M7: the legacy pending-id key is built from the raw wrapped command.
+
+        Drives the real parser over two no-id ``command_execution`` items, one
+        Codex-wrapped so the raw command differs from its decoded payload, plus
+        a trailing duplicate completion. The duplicate arrives once the FIFO
+        head is drained, so ``_claim_tool_id`` must resolve it through the
+        legacy content-key fallback — a lookup that only matches when both the
+        item.started registration and the item.completed claim key
+        ``pending_item_ids`` on the raw ``item['command']`` (never
+        ``_unwrap_shell_command`` output). A regression re-keying either site
+        by the decoded payload makes the fallback miss and must surface as an
+        'unmatched tool result' warning.
+        """
         raw = '/bin/zsh -lc "ls -la"'
-        # In the parser: pending_item_ids[f"command_execution:{item.get('command', '')}"]
-        # must be built from item['command'] BEFORE _unwrap_shell_command runs.
-        from daydream.backends.codex import _unwrap_shell_command  # noqa: F401  (import site pinned)
-        assert raw.startswith("/bin/zsh -lc ")  # key shape: raw, not decoded
+
+        def line(event_type: str, item: dict[str, Any]) -> str:
+            return json.dumps({"type": event_type, "item": item}, separators=(",", ":"))
+
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": "th_m7"}),
+            line("item.started", {"type": "command_execution", "command": "echo one"}),
+            line("item.started", {"type": "command_execution", "command": raw}),
+            line(
+                "item.completed",
+                {
+                    "type": "command_execution",
+                    "command": "echo one",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "aggregated_output": "one",
+                },
+            ),
+            line(
+                "item.completed",
+                {
+                    "type": "command_execution",
+                    "command": raw,
+                    "status": "completed",
+                    "exit_code": 0,
+                    "aggregated_output": "ls",
+                },
+            ),
+            line(
+                "item.completed",
+                {
+                    "type": "command_execution",
+                    "command": raw,
+                    "status": "completed",
+                    "exit_code": 0,
+                    "aggregated_output": "ls (dup)",
+                },
+            ),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+        ]
+
+        backend = CodexBackend(model="fixture-model")
+        mock_proc = make_mock_process(lines)
+        with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+                events = [event async for event in backend.execute(Path("/tmp"), "M7 content key")]
+
+        starts = [e for e in events if isinstance(e, ToolStartEvent)]
+        results = [e for e in events if isinstance(e, ToolResultEvent)]
+
+        # The parse site unwraps for the stored command but must NOT re-key by it.
+        assert [s.input["command"] for s in starts] == ["echo one", "ls -la"]
+        # FIFO pairs the first two completions; the trailing duplicate must resolve
+        # via the content-key fallback keyed on the raw wrapped command.
+        start_ids = [s.id for s in starts]
+        assert [r.id for r in results] == start_ids + [start_ids[1]], (
+            f"duplicate completion must resolve to its started item via the raw-command "
+            f"content key; starts={start_ids} results={[r.id for r in results]}"
+        )
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not warnings, (
+            f"content-key fallback must key on the raw wrapped command, not the decoded "
+            f"payload; got warnings: {warnings}"
+        )
 
     def test_wrapper_without_cd(self) -> None:
         cmd = '/bin/zsh -lc "ls -la"'

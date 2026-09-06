@@ -548,3 +548,11 @@ def test_bash_header_shows_cd_stripped_display_variant() -> None:
     header = _build_tool_header("Bash", {"command": "cd /app && echo hello"})
     assert "echo hello" in header.plain
     assert "cd /app" not in header.plain  # the stored replayable value must not leak through
+
+
+def test_log_summary_shows_cd_stripped_display_variant() -> None:
+    """S1 parity: --log (_summarize_input) shows the cd-stripped variant like the live surfaces."""
+    from daydream.agent import _summarize_input
+
+    assert _summarize_input({"command": "cd /app && echo hello"}, "Bash") == "echo hello"
+    assert _summarize_input({"command": "cd /app && echo hello"}, "shell") == "echo hello"

@@ -418,6 +418,13 @@ def _summarize_input(input_data: dict[str, Any], name: str) -> str:
     for key in _PRIMARY_TOOL_ARG.get(name, ()):
         value = input_data.get(key)
         if isinstance(value, str) and value:
+            # S1 parity with the live render surfaces (ui.tools): the stored
+            # input keeps the replayable cd-prefixed payload, but the --log
+            # surface shows the cd-stripped display variant.
+            if key == "command":
+                from daydream.backends.codex import display_shell_command
+
+                value = display_shell_command(value)
             return redact_structured_text(value)[:_BASH_COMMAND_MAX_CHARS]
     if "path" in input_data:
         complete = f"{input_data['path']}" + (
