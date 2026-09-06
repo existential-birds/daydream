@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import threading
 from pathlib import Path
@@ -11,6 +12,26 @@ import pytest
 from daydream import remote_ci
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git
+
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def _wait_for_pushed_sha(
+    sha_path: Path,
+    stop: threading.Event,
+    *,
+    poll_seconds: float = 0.01,
+) -> str | None:
+    """Wait until the pre-push hook publishes one complete commit SHA."""
+    while True:
+        try:
+            candidate = sha_path.read_text().strip()
+        except FileNotFoundError:
+            candidate = ""
+        if _FULL_SHA_RE.fullmatch(candidate) is not None:
+            return candidate
+        if stop.wait(poll_seconds):
+            return None
 
 
 class NoCIRemote:
@@ -62,10 +83,16 @@ class NoCIRemote:
         hook = repo / ".git" / "hooks" / "pre-push"
         if hook.exists():
             raise AssertionError(f"refusing to replace existing pre-push hook: {hook}")
+        sha_temp_prefix = f"{sha_path}.tmp"
         hook.write_text(
             "#!/bin/sh\n"
             "read local_ref local_sha remote_ref remote_sha\n"
-            f"printf '%s\\n' \"$local_sha\" > {shlex.quote(str(sha_path))}\n"
+            f"sha_tmp={shlex.quote(sha_temp_prefix)}.$$\n"
+            "cleanup_sha_tmp() { rm -f \"$sha_tmp\"; }\n"
+            "trap cleanup_sha_tmp EXIT HUP INT TERM\n"
+            "printf '%s\\n' \"$local_sha\" > \"$sha_tmp\"\n"
+            f"mv \"$sha_tmp\" {shlex.quote(str(sha_path))}\n"
+            "trap - EXIT HUP INT TERM\n"
             "i=0\n"
             f"while [ ! -f {shlex.quote(str(ready_path))} ]; do\n"
             "  i=$((i + 1))\n"
@@ -80,10 +107,9 @@ class NoCIRemote:
 
         def seed_after_push() -> None:
             try:
-                while not sha_path.exists():
-                    if stop.wait(0.01):
-                        return
-                pushed_sha = sha_path.read_text().strip()
+                pushed_sha = _wait_for_pushed_sha(sha_path, stop)
+                if pushed_sha is None:
+                    return
                 pushed_shas.append(pushed_sha)
                 self._serve_pr(branch=branch, head_sha=pushed_sha)
                 self._serve_no_ci(branch=branch, head_sha=pushed_sha)
