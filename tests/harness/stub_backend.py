@@ -150,6 +150,9 @@ class StubBackend:
         # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
         # it survives tree-protection and must surface in fix_leftover_untracked.
         self.fix_orphan_file: str | None = None
+        # Existing untracked user file damaged by the same failed turn.  The
+        # run-wide terminal guard must restore its exact pre-run bytes.
+        self.fix_damage_protected_file: str | None = None
         # Repo-relative generated path created by a successful fix turn.
         self.fix_new_generated: str | None = None
         # Repo-relative historical generated path modified by a test-healing
@@ -415,6 +418,9 @@ class StubBackend:
         if sm is None or sm.group(1) not in self.parse_by_stack:
             return [issue]
         ov = self.parse_by_stack[sm.group(1)]
+        payload = ov.get("issue")
+        if isinstance(payload, dict):
+            issue.update(payload)
         issue["severity"] = ov["severity"]
         issue["confidence"] = ov["confidence"]
         issue["file"] = ov.get("file", issue["file"])
@@ -1014,6 +1020,8 @@ class StubBackend:
                     orphan = cwd / self.fix_orphan_file
                     orphan.parent.mkdir(parents=True, exist_ok=True)
                     orphan.write_text("// stray file from a dead fix agent\n")
+                if self.fix_damage_protected_file is not None:
+                    (cwd / self.fix_damage_protected_file).write_bytes(b"damaged by failed fixer")
                 raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
             if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")
@@ -1086,8 +1094,11 @@ class StubBackend:
         if "post-fix fix-verifier agent" in pl:
             if self.fix_verify_requires_read_only and not read_only:
                 raise AssertionError("fix-verify turn must arrive read_only=True")
-            round_match = re.search(r"Round (\d+) of up to 3 check passes", prompt)
-            round_num = int(round_match.group(1)) if round_match else 1
+            round_match = re.search(
+                r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))",
+                prompt,
+            )
+            round_num = int(next(group for group in round_match.groups() if group)) if round_match else 1
             ids = [int(i) for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
             verdicts = []
             for i in ids:

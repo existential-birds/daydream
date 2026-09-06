@@ -63,18 +63,69 @@ _REPOSITORY_FILE_PATH = re.compile(REPOSITORY_FILE_PATH_PATTERN)
 _DIRECTORY_SCOPE = re.compile(DIRECTORY_SCOPE_PATTERN)
 
 
+class InvalidRepositoryFilePath(ValueError):
+    """Raised when a model-authored repository file path is unsafe.
+
+    The message deliberately does not reflect the rejected value. Model output
+    may contain terminal control characters or other untrusted text.
+    """
+
+
 def valid_repository_file_path(value: str) -> bool:
     """Return whether ``value`` has the safe repository-file grammar."""
-    return len(value.encode("utf-8")) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
-        _REPOSITORY_FILE_PATH.fullmatch(value)
-    )
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(_REPOSITORY_FILE_PATH.fullmatch(value))
+
+
+def canonicalize_repository_file_path(repo: Path, value: object) -> str:
+    """Validate and canonicalize one model-authored repository file path.
+
+    Only the schema's optional leading ``./`` is normalized. Absolute paths,
+    parent traversal, malformed values, and paths crossing a current symlink
+    boundary are rejected with a non-reflective error.
+    """
+    if not isinstance(value, str) or not valid_repository_file_path(value):
+        raise InvalidRepositoryFilePath("invalid repository file path")
+    canonical = value[2:] if value.startswith("./") else value
+    if not canonical or not path_is_confined(repo, canonical):
+        raise InvalidRepositoryFilePath("invalid repository file path")
+    return canonical
+
+
+def git_observed_path_is_confined(repo: Path, value: str) -> bool:
+    """Return whether an exact Git-observed path remains inside *repo*.
+
+    Git can track names outside the deliberately narrow model-output grammar
+    (newlines and shell metacharacters included), so this boundary performs no
+    schema validation. It rejects absolute paths, NUL, empty/dot/parent
+    components, and every current symlink component before checking resolved
+    containment.
+    """
+    if not isinstance(value, str) or not value or "\0" in value or value.startswith("/"):
+        return False
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    root = repo.resolve()
+    walked = _walk_components(repo, parts)
+    if walked is None:
+        return False
+    try:
+        return walked.resolve(strict=False).is_relative_to(root)
+    except OSError:
+        return False
 
 
 def valid_directory_scope_lexical(value: str) -> bool:
     """Return whether ``value`` is a safe file-or-directory scope."""
-    return len(value.encode("utf-8")) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
-        _DIRECTORY_SCOPE.fullmatch(value)
-    )
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(_DIRECTORY_SCOPE.fullmatch(value))
 
 
 def _strip_prefix(
@@ -245,8 +296,11 @@ __all__ = [
     "REPOSITORY_FILE_PATH_PATTERN",
     "REPOSITORY_FILE_PATH_SCHEMA",
     "REPOSITORY_FILE_PATH_SEGMENTS",
+    "InvalidRepositoryFilePath",
+    "canonicalize_repository_file_path",
     "canonicalize_directory_scope",
     "canonicalize_working_directory",
+    "git_observed_path_is_confined",
     "is_test_path",
     "path_is_confined",
     "valid_directory_scope_lexical",

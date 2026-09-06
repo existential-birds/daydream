@@ -18,6 +18,7 @@ backend seam is mocked.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from io import StringIO
 from pathlib import Path
@@ -118,15 +119,28 @@ def _install_deep_capture_backend(
     if not real_internal_phases:
         monkeypatch.setattr(
             "daydream.deep.orchestrator.phase_test_and_heal",
-            lambda *a, **k: _ok(),
+            lambda *a, **k: _ok(**k),
         )
         monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
     return stub
 
 
-async def _ok_with_heal_edit(target: Path) -> Any:
+async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    before = kwargs["capture_tree_key"]()
     (target / "heal_edit.py").write_text("def healed():\n    pass\n")
-    return await _ok()
+    after = kwargs["capture_tree_key"]()
+    return TestAndHealResult(
+        passed=True,
+        retries=0,
+        proceed=True,
+        ignored=False,
+        attempts=(TestAttemptEvidence(
+            session_id=kwargs["session_id"], kind="agent", command=None,
+            passed=True, input_tree_key=before, output_tree_key=after,
+        ),),
+    )
 
 
 # --- AC1 + AC3: default deep run populates eval metrics AND captures recommended.patch ---
@@ -230,7 +244,7 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     stub.fix_edit_line = "# daydream recommended change\n"
     monkeypatch.setattr(
         "daydream.deep.orchestrator.phase_test_and_heal",
-        lambda *a, **k: _ok_with_heal_edit(multi_stack_target),
+        lambda *a, **k: _ok_with_heal_edit(multi_stack_target, **k),
     )
 
     exit_code = await run(
@@ -239,14 +253,15 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     assert exit_code == 0
 
     run_dir = _only_archived_run(archive_dir)
-    # The heal edit was written after the pre-test capture; only a post-test
-    # re-capture can put it in the archived patch.
-    assert "heal_edit.py" in (run_dir / "recommended.patch").read_text()
+    assert "heal_edit.py" not in (run_dir / "recommended.patch").read_text()
+    assert not (multi_stack_target / "heal_edit.py").exists()
     # Session-bound capture-point sidecar, mirrored from fix-quality-gate.json.
     sidecar = json.loads(
         (multi_stack_target / ".daydream" / "deep" / "recommended-capture.json").read_text()
     )
-    assert sidecar == {"session_id": run_dir.name, "capture_point": "post_test"}
+    assert sidecar["session_id"] == run_dir.name
+    assert sidecar["capture_point"] == "post_test"
+    assert sidecar["tree_key"] == sidecar["evidence_key"]["tree_key"]
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["recommended_patch_capture"] == "post_test"
 
@@ -493,6 +508,18 @@ class _FixEditingBackend:
             main_py.write_text(main_py.read_text() + "# daydream recommended change\n")
             yield TextEvent(text="Fixed.")
             yield ResultEvent(structured_output=None, continuation=None)
+        elif "post-fix fix-verifier agent" in pl:
+            ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output={
+                    "verdicts": [
+                        {"issue_id": issue_id, "verdict": "resolved", "reason": "complete"}
+                        for issue_id in ids
+                    ]
+                },
+                continuation=None,
+            )
         elif "test suite" in pl or "run the project" in pl:
             yield TextEvent(text="All 1 tests passed. 0 failed.")
             yield ResultEvent(structured_output=None, continuation=None)

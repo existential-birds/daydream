@@ -201,6 +201,177 @@ async def test_full_fix_flow(
     assert _git(target_project, "rev-parse", "HEAD") != head_before
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protect_untracked_related", [False, True])
+async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
+    tmp_path: Path,
+    install_backend: Callable[[object], object],
+    make_config: Callable[..., 'RunConfig'],
+    protect_untracked_related: bool,
+) -> None:
+    """Real runner commits the complete authorized HEAD-relative result."""
+    repo = tmp_path / "pre-gate-authorized"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    (repo / "b.py").write_text("B = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "a.py").write_text("A = 2\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "feature")
+    # Reviewed and authorized before the fix gate, but never touched by the
+    # fixer.  This must still be selected relative to the original HEAD.
+    (repo / "a.py").write_text("A = 3\n")
+    if protect_untracked_related:
+        (repo / "scratch.py").write_text("PRIVATE_USER_DRAFT = 1\n")
+    remote = bare_remote(tmp_path / "pre-gate-origin.git")
+    _git(repo, "remote", "add", "origin", str(remote))
+
+    issue = {
+        "id": 1,
+        "description": "Update the related value",
+        "file": "b.py",
+        "line": 1,
+        "related_files": ["a.py", "scratch.py"] if protect_untracked_related else ["a.py"],
+    }
+
+    class RelatedOnlyBackend(PhaseDispatchBackend):
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: Any = False,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
+                (Path(cwd) / "b.py").write_text("B = 2\n")
+                if protect_untracked_related:
+                    (Path(cwd) / "scratch.py").write_text("PRIVATE_USER_DRAFT = 2\n")
+            async for event in super().execute(
+                cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+            ):
+                yield event
+
+    install_backend(RelatedOnlyBackend(parse_results=[[issue]]))
+
+    exit_code = await run(
+        make_config(repo, stack="python", quiet=True, shallow=True, assume="yes")
+    )
+
+    assert exit_code == 0
+    assert _git(repo, "show", "HEAD:a.py") == "A = 3"
+    assert _git(repo, "show", "HEAD:b.py") == "B = 2"
+    assert set(_git(repo, "show", "--pretty=", "--name-only", "HEAD").splitlines()) == {
+        "a.py",
+        "b.py",
+    }
+    remote_head = _git(remote, "rev-parse", "refs/heads/feature")
+    assert remote_head == _git(repo, "rev-parse", "HEAD")
+    if protect_untracked_related:
+        assert (repo / "scratch.py").read_text() == "PRIVATE_USER_DRAFT = 1\n"
+        assert "scratch.py" not in _git(remote, "ls-tree", "--name-only", remote_head).splitlines()
+        assert "PRIVATE_USER_DRAFT" not in (
+            repo / ".daydream" / "recommended.patch"
+        ).read_text()
+
+
+@pytest.mark.asyncio
+async def test_shallow_staged_fix_preflight_preserves_review_evidence_and_git_state(
+    target_project: Path,
+    install_backend: Callable[[object], object],
+    make_config: Callable[..., 'RunConfig'],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A fresh real run rejects a review-time staged edit without erasing proof."""
+    stale_bytes = b'{"session_id":"review-phase","passed":true}\n'
+    staged_source = b"def hello():\n    return 'staged during review'\n"
+
+    class ReviewStagingBackend(PhaseDispatchBackend):
+        staged_index: str | None = None
+
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: Any = False,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            prompt_lower = prompt.lower()
+            review_markers = (
+                "inclusion obligation",
+                "full change spans",
+                "language-agnostic review practices",
+                "assigned to this stack",
+                "repository-wide interactions",
+            )
+            if self.staged_index is None and any(
+                marker in prompt_lower for marker in review_markers
+            ):
+                repo = Path(cwd)
+                deep = repo / ".daydream" / "deep"
+                deep.mkdir(parents=True, exist_ok=True)
+                (deep / "test-verdict.json").write_bytes(stale_bytes)
+                (repo / "main.py").write_bytes(staged_source)
+                _git(repo, "add", "main.py")
+                self.staged_index = _git(repo, "write-tree")
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema,
+                continuation,
+                agents,
+                max_turns,
+                read_only,
+            ):
+                yield event
+
+    backend = ReviewStagingBackend(parse_results=[[_FULL_FLOW_ISSUE]])
+    install_backend(backend)
+    deep = target_project / ".daydream" / "deep"
+    stale = deep / "test-verdict.json"
+    assert not stale.exists()
+    head_before = _git(target_project, "rev-parse", "HEAD")
+
+    exit_code = await run(
+        make_config(
+            target_project,
+            stack="python",
+            quiet=True,
+            shallow=True,
+            assume="yes",
+        )
+    )
+
+    assert exit_code == 1
+    output = capfd.readouterr().out
+    from daydream.deep import orchestrator as deep_orchestrator
+
+    console_file = getattr(deep_orchestrator, "console").file
+    if isinstance(console_file, StringIO):
+        output += console_file.getvalue()
+    assert "Cannot start the fix cycle with staged changes" in output, (
+        output,
+        "\n".join(backend.call_log),
+        _git(target_project, "status", "--short"),
+    )
+    assert backend.staged_index is not None
+    assert _git(target_project, "write-tree") == backend.staged_index
+    assert _git(target_project, "rev-parse", "HEAD") == head_before
+    assert (target_project / "main.py").read_bytes() == staged_source
+    assert stale.read_bytes() == stale_bytes
+    assert not any(
+        prompt.startswith("fix this issue") or prompt.startswith("fix these")
+        for prompt in backend.call_log
+    )
+
+
 class _WorktreeMutatingBackend(PhaseDispatchBackend):
     """Phase-dispatch fake whose fix and commit turns really touch the worktree.
 

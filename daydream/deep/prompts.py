@@ -1170,9 +1170,8 @@ def build_fix_verify_prompt(
 ) -> str:
     """Assemble the read-only post-fix fix-verify prompt (issue #744).
 
-    Runs after every fix group in a round finishes (the round barrier) and
-    audits the round's changed hunks only -- never the whole tree. For each
-    dispatched finding listed below the verifier returns EXACTLY one verdict
+    Audits the complete current retained patch against every canonical finding.
+    For each finding listed below the verifier returns EXACTLY one verdict
     from the four-value enum: ``resolved`` (the named defect is gone),
     ``unresolved`` (still present, wholly or partly), ``wrong_target`` (the
     defect lives in a file the finding did not name -- carry ``path``), or
@@ -1185,11 +1184,10 @@ def build_fix_verify_prompt(
     pays for twice.
 
     Args:
-        items: The round's dispatched canonical items, rendered inline into the
+        items: All canonical items, rendered inline into the
             prompt; verdicts are keyed by each item's canonical ``id``.
-        changed_hunks: The round's diff text (changed hunks only) the verifier
-            audits. May be empty; the verifier is told these hunks are all it
-            may inspect.
+        changed_hunks: The complete retained patch the verifier audits. May be
+            empty when the retained tree matches the stable base.
         cwd: Absolute working directory the verifier runs in (grounds path resolution).
     """
     from daydream.deep.render import render_report
@@ -1197,19 +1195,19 @@ def build_fix_verify_prompt(
     hunks_block = changed_hunks if changed_hunks.strip() else "(no hunks provided)"
     parts: list[str] = []
     parts.append(
-        "You are the post-fix fix-verifier agent (the `fix-verify` step). A fix "
-        "round just ran on this "
-        "worktree; your job is to audit what the round produced and return "
+        "You are the post-fix fix-verifier agent (the `fix-verify` step). The "
+        "fix cycle is stabilizing this "
+        "worktree; your job is to audit the complete retained result and return "
         "EXACTLY one verdict per finding below. This is a READ-ONLY pass: you "
         "inspect the diff and the code, you do not edit anything.\n\n"
-        f"Round {round_number} of up to 3 check passes.\n\n"
+        f"Verification pass {round_number}.\n\n"
         f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
-        "You audit the round's changed hunks ONLY, never the whole tree:\n"
+        "Audit this complete current retained patch:\n"
         "\n"
         "<changed-hunks>\n"
         f"{hunks_block}\n"
         "</changed-hunks>\n\n"
-        "The numbered findings the round dispatched (each `issue_id` in your "
+        "Audit all canonical findings (each `issue_id` in your "
         "output MUST match the leading number `N.` of the finding it "
         "verifies):\n\n"
         + render_report(items)
@@ -1217,11 +1215,11 @@ def build_fix_verify_prompt(
     )
     parts.append(
         "Verdict semantics (MANDATORY):\n"
-        "  - `resolved` -- the named defect is gone from the changed hunks.\n"
+        "  - `resolved` -- the named defect is gone from the retained result.\n"
         "  - `unresolved` -- the defect is still present, wholly or partly.\n"
         "  - `wrong_target` -- the defect lives in a file the finding did NOT "
         "name; emit `path` with the corrected repo-relative file.\n"
-        "  - `regressed` -- the round introduced a NEW instance of the named "
+        "  - `regressed` -- the retained result contains a NEW instance of the named "
         "defect; emit `path` with the file where it now appears.\n"
         "  - `wrong_target` and `regressed` verdicts MUST carry `path`; the "
         "other two never carry it.\n"
@@ -1235,7 +1233,7 @@ def build_fix_verify_prompt(
         "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
         "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
         "state-changing command.\n"
-        "  - Depth: inspect the changed hunks' files, but do not roam the whole "
+        "  - Depth: inspect the retained patch's files, but do not roam the whole "
         "tree; prefer Grep/Glob to narrow."
     )
     return "\n\n".join(parts)
