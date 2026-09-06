@@ -220,8 +220,9 @@ async def post_review_to_pr_from_report(
 
     ``pr_number``: when set, resolves the target PR by explicit number via
     ``gh pr view`` (redrive) instead of the current branch's open PR;
-    a failing explicit lookup returns :attr:`PostStatus.NO_PR` with no
-    fallback to current-branch discovery.
+    an absent PR returns :attr:`PostStatus.NO_PR`, while an operational
+    lookup failure returns :attr:`PostStatus.FAILED`. Neither falls back to
+    current-branch discovery.
 
     ``diagram_blocks`` (issue #1113): host-rendered grounded-diagram markdown,
     threaded through to :func:`build_payload`.
@@ -508,15 +509,13 @@ def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
         slug = git_ops.split_owner_repo(name_with_owner)
         if slug is None:
             raise GitError("invalid PR row: malformed head repository slug")
-        owner, repo = slug
-        return f"{owner}/{repo}"
+        return name_with_owner
     if owner_login is not None and isinstance(head_repo.get("name"), str):
         candidate_slug = f"{owner_login}/{head_repo['name']}"
         parsed_slug = git_ops.split_owner_repo(candidate_slug)
         if parsed_slug is None:
             raise GitError("invalid PR row: malformed head repository slug")
-        owner, repo = parsed_slug
-        return f"{owner}/{repo}"
+        return candidate_slug
     raise GitError("invalid PR row: incomplete head repository metadata")
 
 
@@ -573,7 +572,15 @@ def _pr_info_from_row(target_dir: Path, row: dict[str, Any]) -> PRInfo:
 
 
 def find_open_pr(target_dir: Path) -> PRInfo | None:
-    """Locate the open PR for the current branch. Returns None if not found."""
+    """Locate the open PR for the current branch.
+
+    Returns:
+        None only when there is no current branch or matching open PR.
+
+    Raises:
+        GitError: If branch discovery, GitHub data, repository identity, or
+            the local PR merge base cannot be resolved safely.
+    """
     branch = _current_branch(target_dir)
     if not branch:
         return None
