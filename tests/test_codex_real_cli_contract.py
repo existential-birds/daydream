@@ -182,6 +182,10 @@ def test_capture_script_publishes_only_public_candidate_without_replacing_fixtur
         "  printf '%s\\n' 'codex-cli 9.9.9'\n"
         "  exit 0\n"
         "fi\n"
+        # Consume the real CLI's stdin contract before returning output. Exiting
+        # without reading races the producer and can make pipefail report SIGPIPE.
+        "IFS= read -r probe_prompt\n"
+        'printf \'%s\\n\' "$probe_prompt" > "$FAKE_CODEX_PROBE_PATH"\n'
         'if [[ "${FAKE_CODEX_EXPOSE_PAIR:-}" == "1" ]]; then\n'
         "  printf '%s\\n' \\\n"
         "    '{\"type\":\"item.completed\",\"item\":{\"type\":\"error\"}}' \\\n"
@@ -203,6 +207,8 @@ def test_capture_script_publishes_only_public_candidate_without_replacing_fixtur
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     env["DAYDREAM_CODEX_CAPTURE_ROOT"] = str(candidate_root)
+    probe_path = tmp_path / "received-probe.txt"
+    env["FAKE_CODEX_PROBE_PATH"] = str(probe_path)
     env.pop("DAYDREAM_CODEX_PRIVATE_CORROBORATED", None)
     env.pop("DAYDREAM_CODEX_PRIVATE_ERROR_CLASS", None)
 
@@ -224,6 +230,7 @@ def test_capture_script_publishes_only_public_candidate_without_replacing_fixtur
     metadata = json.loads(candidate_metadata.read_text())
     assert metadata["cli_version"] == "9.9.9"
     assert metadata["publication_status"] == "candidate_unpublished"
+    assert probe_path.read_text() == metadata["probe_prompt"] + "\n"
     assert metadata["review_requirements"] == [
         "privately_correlate_this_exact_candidate_run_before_fixture_update"
     ]
