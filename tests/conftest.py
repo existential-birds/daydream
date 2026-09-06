@@ -713,6 +713,21 @@ def _reset_trajectory_recorder() -> Iterator[Any]:
 
 
 @pytest.fixture(autouse=True)
+def artifact_runtime_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep real artifact transactions out of the operator's runtime store.
+
+    Only the default storage location is replaced. Ownership checks, locking,
+    Git queries, and filesystem operations still run against real temporary
+    paths, without an artifact-root environment variable reaching backends.
+    """
+    from daydream import artifact_visibility
+
+    base = tmp_path / "private"
+    monkeypatch.setattr(artifact_visibility, "_default_private_base", lambda: base)
+    return base / "runtime"
+
+
+@pytest.fixture(autouse=True)
 def archive_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Isolate DAYDREAM_ARCHIVE_DIR to a per-test tmpdir so tests never touch ~/.daydream/archive/."""
     path = tmp_path / "archive"

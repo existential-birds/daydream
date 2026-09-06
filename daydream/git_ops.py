@@ -2155,6 +2155,39 @@ def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     ]
 
 
+def tracked_artifact_collisions(repo: Path) -> tuple[str, ...]:
+    """Return tracked paths that collide with generated compatibility roots.
+
+    This strict query is the narrow Git boundary used before artifact detach.
+    A query failure raises :class:`GitError`; absence is represented only by an
+    empty tuple, never by a soft-failure fallback.
+    """
+    return tuple(
+        sorted(
+            path
+            for path in ls_files(repo, strict=True)
+            if path == ".review-output.md" or path == ".daydream" or path.startswith(".daydream/")
+        )
+    )
+
+
+def tracked_path_collisions(repo: Path, relative: str) -> tuple[str, ...]:
+    """Return tracked entries overlapping one repository-relative output.
+
+    Both a tracked ancestor and any tracked descendant make the requested
+    output unsafe. The query is strict so Git failure cannot be mistaken for
+    an untracked destination.
+    """
+    prefix = f"{relative}/"
+    return tuple(
+        sorted(
+            path
+            for path in ls_files(repo, strict=True)
+            if path == relative or path.startswith(prefix) or relative.startswith(f"{path}/")
+        )
+    )
+
+
 @dataclass(frozen=True)
 class IndependentSnapshot:
     """Standalone repository and lexical locations of its outward symlinks."""
@@ -2217,6 +2250,14 @@ def git_common_dir(repo: Path) -> Path:
     if proc.returncode != 0 or not proc.stdout.rstrip("\n"):
         raise GitError(f"cannot resolve common Git directory in {repo}")
     return Path(proc.stdout.rstrip("\n")).resolve()
+
+
+def git_dir(repo: Path) -> Path:
+    """Return the canonical worktree-specific Git directory, raising on query failure."""
+    proc = _run_git(repo, ["rev-parse", "--path-format=absolute", "--git-dir"])
+    if proc.returncode != 0 or not proc.stdout.rstrip("\n"):
+        raise GitError(f"cannot resolve Git directory in {repo}")
+    return Path(proc.stdout.rstrip("\n")).resolve(strict=True)
 
 
 def list_remotes(repo: Path, *, strict: bool = False) -> list[str]:
