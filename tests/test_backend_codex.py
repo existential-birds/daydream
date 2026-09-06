@@ -18,6 +18,7 @@ import pytest
 from daydream import git_ops
 from daydream.backends import (
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -27,11 +28,12 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends import codex as codex_backend
+from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import (
     _CODEX_STDOUT_LIMIT_BYTES,
     CodexBackend,
     CodexError,
-    _unwrap_shell_command,
 )
 from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 from tests.harness.codex_replay import make_mock_process, make_mock_process_from_fixture
@@ -359,9 +361,12 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
             async for event in backend.execute(Path("/tmp"), "Fail"):
                 events.append(event)
 
-    # The attempted request is observable, and the stream still raises.
-    assert len(events) == 1
+    # The attempted request and bounded parse gap are observable before the
+    # original process-exit failure is preserved.
+    assert len(events) == 2
     assert isinstance(events[0], RequestEvent)
+    assert isinstance(events[1], DiagnosticEvent)
+    assert events[1].code == "codex_parser_coverage"
     msg = str(exc_info.value)
     assert "authentication required" in msg
     assert exc_info.value.category == "PROCESS_EXIT"
@@ -1185,48 +1190,130 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
             await second_task
 
 
-class TestUnwrapShellCommand:
-    """Tests for _unwrap_shell_command helper."""
+class TestDecodeShellCommand:
+    """Recognized shell wrappers decode to the exact replayable ``-lc`` argv."""
 
-    def test_zsh_wrapper_with_cd(self) -> None:
-        cmd = '/bin/zsh -lc "cd /home/user/project && make test"'
-        assert _unwrap_shell_command(cmd) == "make test"
+    @pytest.mark.parametrize(
+        ("wrapped", "expected"),
+        [
+            (
+                "/bin/zsh -lc 'printf \"%s\\n\" \"$HOME\"'",
+                'printf "%s\\n" "$HOME"',
+            ),
+            (
+                r'''/bin/bash -lc "sed -n '1,3p' \"a file.txt\""''',
+                '''sed -n '1,3p' "a file.txt"''',
+            ),
+            (
+                "/bin/sh -lc 'printf \"%s\" \"$(uname -s)\"'",
+                'printf "%s" "$(uname -s)"',
+            ),
+            (
+                "/bin/zsh -lc 'printf one\nprintf two'",
+                "printf one\nprintf two",
+            ),
+            (
+                "/bin/zsh -lc 'cat <<'\"'\"'EOF'\"'\"'\n$HOME\nEOF'",
+                "cat <<'EOF'\n$HOME\nEOF",
+            ),
+            ("/bin/zsh -lc ls", "ls"),
+        ],
+        ids=[
+            "nested-double-quotes-and-dollar",
+            "nested-single-quotes",
+            "command-substitution",
+            "multiline",
+            "heredoc",
+            "unquoted-single-argument",
+        ],
+    )
+    def test_exact_three_argv_wrapper(self, wrapped: str, expected: str) -> None:
+        decoded, recognized = codex_backend._decode_shell_command(wrapped)
+        assert recognized is True
+        assert decoded == expected
 
-    def test_bash_wrapper_with_cd(self) -> None:
-        cmd = '/bin/bash -lc "cd /tmp/work && pytest -x"'
-        assert _unwrap_shell_command(cmd) == "pytest -x"
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "ls -la",
+            "",
+            "/usr/bin/zsh -lc 'git status'",
+            "/bin/zsh -c 'git status'",
+            "/bin/zsh -lc",
+            "/bin/zsh -lc one two",
+            "/bin/zsh -lc 'unterminated",
+        ],
+    )
+    def test_malformed_or_unrecognized_wrapper_is_exact_passthrough(self, raw: str) -> None:
+        decoded, recognized = codex_backend._decode_shell_command(raw)
+        assert recognized is False
+        assert decoded == raw
 
-    def test_sh_wrapper_with_cd(self) -> None:
-        cmd = '/bin/sh -lc "cd /app && echo hello"'
-        assert _unwrap_shell_command(cmd) == "echo hello"
+    def test_display_shortening_is_separate_from_replay_command(self) -> None:
+        wrapped = "/bin/bash -lc 'cd /tmp/work && pytest -x'"
+        decoded, recognized = codex_backend._decode_shell_command(wrapped)
 
-    def test_wrapper_without_cd(self) -> None:
-        cmd = '/bin/zsh -lc "ls -la"'
-        assert _unwrap_shell_command(cmd) == "ls -la"
+        assert recognized is True
+        assert decoded == "cd /tmp/work && pytest -x"
+        assert codex_backend._display_shell_command(decoded) == "pytest -x"
 
-    def test_plain_command_passthrough(self) -> None:
-        assert _unwrap_shell_command("ls -la") == "ls -la"
 
-    def test_empty_command(self) -> None:
-        assert _unwrap_shell_command("") == ""
+@pytest.mark.asyncio
+async def test_recognized_shell_wrapper_archives_replay_and_separate_display() -> None:
+    backend = CodexBackend(model="fixture-model")
+    raw = "/bin/zsh -lc 'cd /tmp/work && printf \"%s\" \"$HOME\"'"
+    lines = [
+        json.dumps(
+            {
+                "type": "item.started",
+                "item": {"id": "cmd-1", "type": "command_execution", "command": raw},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-1",
+                    "type": "command_execution",
+                    "command": raw,
+                    "aggregated_output": "",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
 
-    def test_single_quotes(self) -> None:
-        cmd = "/bin/zsh -lc 'cd /project && git status'"
-        assert _unwrap_shell_command(cmd) == "git status"
+    mock_proc = make_mock_process(lines)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = [event async for event in backend.execute(Path("/tmp"), "Run")]
+    start = next(event for event in events if isinstance(event, ToolStartEvent))
 
-    def test_unquoted_simple(self) -> None:
-        """Real Codex format: no quotes around simple commands."""
-        assert _unwrap_shell_command("/bin/zsh -lc ls") == "ls"
+    assert start.input["command"] == 'cd /tmp/work && printf "%s" "$HOME"'
+    assert start.input["display_command"] == 'printf "%s" "$HOME"'
 
-    def test_single_quoted_git_diff(self) -> None:
-        """Real Codex format: single-quoted multi-word command."""
-        cmd = "/bin/zsh -lc 'git diff main...HEAD'"
-        assert _unwrap_shell_command(cmd) == "git diff main...HEAD"
 
-    def test_double_quoted_sed(self) -> None:
-        """Real Codex format: double-quoted command with inner single quotes."""
-        cmd = """/bin/zsh -lc "sed -n '1,260p' amelia/agents/architect.py\""""
-        assert _unwrap_shell_command(cmd) == "sed -n '1,260p' amelia/agents/architect.py"
+@pytest.mark.asyncio
+async def test_unrecognized_shell_command_has_no_display_override() -> None:
+    backend = CodexBackend(model="fixture-model")
+    raw = "/bin/zsh -lc printf one two"
+    lines = [
+        json.dumps(
+            {
+                "type": "item.started",
+                "item": {"id": "cmd-1", "type": "command_execution", "command": raw},
+            }
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+
+    mock_proc = make_mock_process(lines)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        events = [event async for event in backend.execute(Path("/tmp"), "Run")]
+    start = next(event for event in events if isinstance(event, ToolStartEvent))
+
+    assert start.input == {"command": raw}
 
 
 @pytest.mark.asyncio
@@ -1325,6 +1412,204 @@ async def test_malformed_structured_output_warns(caplog: pytest.LogCaptureFixtur
     assert any("structured output parse failed" in w for w in warnings), (
         f"expected a 'structured output parse failed' WARNING; got {warnings}"
     )
+
+
+@pytest.mark.asyncio
+async def test_parser_coverage_is_bounded_redacted_and_precedes_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = CodexBackend(model="fixture-model")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+        events = await _run_fixture(
+            backend,
+            "Parse gaps",
+            "parser_coverage_gaps.jsonl",
+            output_schema=schema,
+        )
+
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert [event.code for event in diagnostics] == [
+        "codex_transport_coverage",
+        "codex_parser_coverage",
+        "codex_parser_coverage",
+    ]
+    assert events.index(diagnostics[-1]) < next(
+        index for index, event in enumerate(events) if isinstance(event, ResultEvent)
+    )
+
+    transport = diagnostics[0]
+    assert transport.metadata == {
+        "coverage": "incomplete",
+        "reason": "uncorrelated_public_error_item",
+        "occurrences": 1,
+        "contract": "codex-cli-0.153.4-json-code-mode-v1",
+    }
+
+    assert diagnostics[1].metadata["unknown_event_types"]["total"] == 1
+    parser = diagnostics[-1].metadata
+    assert parser["unknown_event_types"] == {
+        "total": 35,
+        "labels": {f"unknown.{index:02d}": (2 if index == 0 else 1) for index in range(32)},
+        "overflow": 2,
+    }
+    assert parser["unknown_item_types"] == {
+        "total": 3,
+        "labels": {"mystery.item": 2, 'token="[REDACTED_CREDENTIAL]"': 1},
+        "overflow": 0,
+    }
+    assert parser["malformed_shapes"] == {
+        "event_not_object": 2,
+        "event_type_not_scalar": 1,
+        "item_not_object": 1,
+    }
+    assert parser["non_json_lines"] == 1
+    assert parser["warnings"] == {
+        "total": 2,
+        "reasons": {
+            "structured_output_parse_failed": 1,
+            "unmatched_tool_result": 1,
+        },
+    }
+
+    combined = json.dumps([event.metadata for event in diagnostics]) + "\n" + caplog.text
+    assert "opaque-parser-secret" not in combined
+    assert "/Users/private-person" not in combined
+    assert "printf hidden-command" not in combined
+
+
+def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
+    label = "x" * 54 + " ghp_" + "y" * 12
+
+    bounded = codex_backend._bounded_diagnostic_label(label)
+
+    assert len(bounded) <= 64
+    assert "ghp_" not in bounded
+    assert "[REDACTED" in bounded
+
+
+@pytest.mark.asyncio
+async def test_parser_diagnostic_precedes_structured_turn_failure() -> None:
+    backend = CodexBackend(model="fixture-model")
+    lines = [
+        json.dumps({"type": "future.event"}),
+        json.dumps({"type": "turn.failed", "error": {"message": "Model returned an error"}}),
+    ]
+    mock_proc = make_mock_process(lines)
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="Model returned an error"):
+            async for event in backend.execute(Path("/tmp"), "Fail"):
+                observed.append(event)
+
+    assert isinstance(observed[-1], DiagnosticEvent)
+    assert observed[-1].code == "codex_parser_coverage"
+
+
+@pytest.mark.asyncio
+async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout() -> None:
+    backend = CodexBackend(model="fixture-model")
+
+    class _FailureThenBlockingStdout:
+        def __init__(self) -> None:
+            self._lines = iter(
+                [
+                    json.dumps({"type": "future.one"}),
+                    json.dumps({"type": "future.two"}),
+                    json.dumps(
+                        {"type": "turn.failed", "error": {"message": "terminal failure"}}
+                    ),
+                ]
+            )
+            self.blocking_read_started = False
+
+        async def readline(self) -> bytes:
+            try:
+                return (next(self._lines) + "\n").encode()
+            except StopIteration:
+                self.blocking_read_started = True
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+    stdout = _FailureThenBlockingStdout()
+    mock_proc = make_mock_process([])
+    mock_proc.stdout = stdout
+    observed: list[Any] = []
+
+    async def consume() -> None:
+        async for event in backend.execute(Path("/tmp"), "Fail now"):
+            observed.append(event)
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="terminal failure"):
+            await asyncio.wait_for(consume(), timeout=0.2)
+
+    parser_diagnostics = [
+        event
+        for event in observed
+        if isinstance(event, DiagnosticEvent) and event.code == "codex_parser_coverage"
+    ]
+    assert [event.metadata["unknown_event_types"]["total"] for event in parser_diagnostics] == [1, 2]
+    assert stdout.blocking_read_started is False
+
+
+@pytest.mark.asyncio
+async def test_first_parser_gap_is_observable_before_following_stream_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexBackend(model="fixture-model")
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
+
+    class _GapThenBlockingStdout:
+        def __init__(self) -> None:
+            self.sent_gap = False
+
+        async def readline(self) -> bytes:
+            if not self.sent_gap:
+                self.sent_gap = True
+                return b'{"type":"future.before.stall"}\n'
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    mock_proc = make_mock_process([])
+    mock_proc.stdout = _GapThenBlockingStdout()
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(StreamStalledError):
+            async for event in backend.execute(Path("/tmp"), "Stall"):
+                observed.append(event)
+
+    diagnostics = [event for event in observed if isinstance(event, DiagnosticEvent)]
+    assert [event.code for event in diagnostics] == ["codex_parser_coverage"]
+    assert diagnostics[0].metadata["unknown_event_types"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
+    backend = CodexBackend(model="fixture-model")
+    secret_line = (
+        "not-json token=opaque-parser-secret /Users/private-person/.codex/config.toml "
+        + "x" * 500
+    )
+    mock_proc = make_mock_process([secret_line] * 30)
+    mock_proc.returncode = 9
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="return code 9") as exc_info:
+            async for event in backend.execute(Path("/tmp"), "Fail"):
+                observed.append(event)
+
+    assert isinstance(observed[-1], DiagnosticEvent)
+    assert observed[-1].metadata["non_json_lines"] == 30
+    assert "opaque-parser-secret" not in json.dumps(observed[-1].metadata)
+    message = str(exc_info.value)
+    assert "opaque-parser-secret" not in message
+    assert "/Users/private-person" not in message
+    assert len(message) <= 3_000
 
 
 @pytest.mark.parametrize(

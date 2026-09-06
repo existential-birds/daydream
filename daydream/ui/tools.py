@@ -66,8 +66,8 @@ _PRIMARY_TOOL_ARG = {
     "NotebookEdit": ("notebook_path", "file_path"),
     "Glob": ("pattern",),
     "Grep": ("pattern",),
-    "Bash": ("command", "description"),
-    "shell": ("command", "description"),
+    "Bash": ("display_command", "command", "description"),
+    "shell": ("display_command", "command", "description"),
     "Skill": ("skill",),
 }
 
@@ -76,8 +76,9 @@ def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | 
     """Return the meaningful primary-argument value for a tool's progress line.
 
     ``_PRIMARY_TOOL_ARG`` is the source of truth shared by the callback path
-    and the ``--log`` summary, with Bash preferring required ``command`` over
-    optional ``description``. Falls back to the first non-mechanical,
+    and the ``--log`` summary, with shell tools preferring ``display_command``
+    when present, then replayable ``command``, then optional ``description``.
+    Falls back to the first non-mechanical,
     non-boolean value so an unknown tool still shows something meaningful
     rather than a stray flag — the old blind ``next(iter(args.values()))``
     surfaced ``replace_all=False`` as ``"False"``.
@@ -255,7 +256,7 @@ def format_callback_progress(
         # crossing the display boundary cannot be truncated into an unmatchable
         # fragment.
         display_value = value
-        if name in ("Bash", "shell") and key == "command":
+        if name in ("Bash", "shell") and key in ("display_command", "command"):
             display_value = redact_structured_text(value)
         line.append(" ")
         line.append(display_value[:max_len], style=_primary_value_style(key))
@@ -490,7 +491,9 @@ def _build_tool_header(
 
         # Redact the complete command before slicing so a credential crossing
         # the display boundary cannot be truncated into an unmatchable fragment.
-        full_command = redact_structured_text(str(args.get("command", "")))
+        full_command = redact_structured_text(
+            str(args.get("display_command", args.get("command", "")))
+        )
         command = full_command[:_BASH_COMMAND_MAX_CHARS]
         if len(full_command) > _BASH_COMMAND_MAX_CHARS:
             command = f"{command}..."

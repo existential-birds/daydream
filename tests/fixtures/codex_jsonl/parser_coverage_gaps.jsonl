@@ -1,0 +1,49 @@
+{"type":"thread.started","thread_id":"parser-gap-contract"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"warning-1","type":"error","message":"public coverage sentinel"}}
+{"type":"unknown.00"}
+{"type":"unknown.00"}
+{"type":"unknown.01"}
+{"type":"unknown.02"}
+{"type":"unknown.03"}
+{"type":"unknown.04"}
+{"type":"unknown.05"}
+{"type":"unknown.06"}
+{"type":"unknown.07"}
+{"type":"unknown.08"}
+{"type":"unknown.09"}
+{"type":"unknown.10"}
+{"type":"unknown.11"}
+{"type":"unknown.12"}
+{"type":"unknown.13"}
+{"type":"unknown.14"}
+{"type":"unknown.15"}
+{"type":"unknown.16"}
+{"type":"unknown.17"}
+{"type":"unknown.18"}
+{"type":"unknown.19"}
+{"type":"unknown.20"}
+{"type":"unknown.21"}
+{"type":"unknown.22"}
+{"type":"unknown.23"}
+{"type":"unknown.24"}
+{"type":"unknown.25"}
+{"type":"unknown.26"}
+{"type":"unknown.27"}
+{"type":"unknown.28"}
+{"type":"unknown.29"}
+{"type":"unknown.30"}
+{"type":"unknown.31"}
+{"type":"unknown.32"}
+{"type":"unknown.33"}
+{"type":"item.started","item":{"type":"mystery.item"}}
+{"type":"item.updated","item":{"type":"mystery.item"}}
+{"type":"item.completed","item":{"type":"token=opaque-parser-secret"}}
+7
+[]
+{"type":{"token":"opaque-parser-secret"}}
+{"type":"item.started","item":["/Users/private-person", "printf hidden-command"]}
+not-json token=opaque-parser-secret /Users/private-person printf hidden-command
+{"type":"item.completed","item":{"type":"command_execution","command":"printf hidden-command","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"token=opaque-parser-secret is malformed JSON output"}}
+{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":1}}

@@ -17,6 +17,7 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from daydream.backends import (
     AgentEvent,
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -285,6 +286,7 @@ class AttemptObserver:
         self.models: list[str] = []
         self.providers: list[str] = []
         self.reason: str | None = None
+        self.diagnostic_counts: dict[str, int] = {}
 
     @property
     def capture(self) -> bool:
@@ -329,7 +331,11 @@ class AttemptObserver:
     def _observe(self, event: AgentEvent) -> None:
         self._identity(event)
         policy = self.scope.session.policy if self.scope.session else None
-        if isinstance(event, RequestEvent):
+        if isinstance(event, DiagnosticEvent):
+            if policy is not None:
+                code = policy.text(event.code)
+                self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
+        elif isinstance(event, RequestEvent):
             self.scope.attrs(
                 {
                     "gen_ai.request.model": event.model_name,
@@ -517,6 +523,17 @@ class AttemptObserver:
             if self.usage_metadata:
                 self.scope.attrs({"daydream.message_usage": list(self.usage_metadata.values())})
             self.scope.attrs({"daydream.models": self.models or None, "daydream.providers": self.providers or None})
+            if self.diagnostic_counts:
+                self.scope.attrs(
+                    {
+                        "daydream.backend_diagnostic.codes": list(
+                            self.diagnostic_counts
+                        ),
+                        "daydream.backend_diagnostic.counts": list(
+                            self.diagnostic_counts.values()
+                        ),
+                    }
+                )
             if self.capture:
                 if self.request is not None:
                     self.scope.content("traceloop.entity.input", self.request)

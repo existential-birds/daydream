@@ -19,6 +19,7 @@ values before trajectory data is persisted.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from contextlib import asynccontextmanager, nullcontext, suppress
@@ -53,7 +54,7 @@ _TRAJECTORIES_SUBDIR = "trajectories"
 _DAYDREAM_DIRNAME = ".daydream"
 
 if TYPE_CHECKING:
-    from daydream.backends import AgentEvent, CostEvent, ToolResultEvent
+    from daydream.backends import AgentEvent, CostEvent, DiagnosticEvent, ToolResultEvent
 
 _console = create_console()
 _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0, "any_cost_seen": False}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
@@ -207,6 +208,13 @@ INCOMPLETE_CALL_CONTENT = "[interrupted: call did not complete before invocation
 #: Distinct from every existing [REDACTED_*] marker so consumers can tell a
 #: key-aware credential redaction from a flat regex hit.
 _REDACTED_CREDENTIAL = "[REDACTED_CREDENTIAL]"
+_UNSUPPORTED_DIAGNOSTIC_KEY = "[UNSUPPORTED_DIAGNOSTIC_KEY]"
+_UNSUPPORTED_DIAGNOSTIC_VALUE = "[UNSUPPORTED_DIAGNOSTIC_VALUE]"
+_DIAGNOSTIC_REDACTION_FAILED = {
+    "code": "diagnostic_redaction_failed",
+    "message": "[DIAGNOSTIC_REDACTION_FAILED]",
+    "metadata": {},
+}
 # Match env-var assignment where one of the underscore-separated SEGMENTS of
 # the var name is a secret keyword. Substring matching (the original) over-
 # redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
@@ -266,6 +274,47 @@ def redact_value(value: Any, sensitive: bool = False) -> Any:
     if isinstance(value, tuple):
         return tuple(redact_value(item, sensitive) for item in value)
     return value
+
+
+def _diagnostic_json_value(value: Any) -> Any:
+    """Return a JSON-shaped diagnostic value without stringifying objects."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _UNSUPPORTED_DIAGNOSTIC_VALUE
+    if isinstance(value, list):
+        return [_diagnostic_json_value(item) for item in value]
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = key if isinstance(key, str) else _UNSUPPORTED_DIAGNOSTIC_KEY
+            normalized[normalized_key] = _diagnostic_json_value(item)
+        return normalized
+    return _UNSUPPORTED_DIAGNOSTIC_VALUE
+
+
+def _normalize_diagnostic_record(event: "DiagnosticEvent") -> dict[str, Any]:
+    """Build one redacted, JSON-safe backend diagnostic record.
+
+    This is the privacy/type boundary for ``Step.extra`` diagnostics. It never
+    falls back to raw event data: any normalization or redaction failure keeps
+    one fixed marker so evidence is not silently lost.
+    """
+    try:
+        normalized = _diagnostic_json_value(
+            {"code": event.code, "message": event.message, "metadata": event.metadata}
+        )
+        redacted = redact_value(normalized)
+        if not isinstance(redacted, dict):
+            raise TypeError("diagnostic redactor returned a non-object")
+        json.dumps(redacted, allow_nan=False)
+        return redacted
+    except Exception:  # noqa: BLE001 - fixed fail-closed boundary, never raw fallback
+        return {
+            "code": _DIAGNOSTIC_REDACTION_FAILED["code"],
+            "message": _DIAGNOSTIC_REDACTION_FAILED["message"],
+            "metadata": {},
+        }
 
 
 def _safe_descriptor(raw: str) -> str:
@@ -1118,6 +1167,7 @@ class Invocation:
         # Function-local imports avoid load-order cycles with daydream.backends.
         from daydream.backends import (
             CostEvent,
+            DiagnosticEvent,
             MetricsEvent,
             ResultEvent,
             TextEvent,
@@ -1127,7 +1177,13 @@ class Invocation:
             TurnEndEvent,
         )
 
-        if isinstance(event, TextEvent):
+        if isinstance(event, DiagnosticEvent):
+            self._ensure_open_step()
+            assert self._open_step_dict is not None
+            self._open_step_dict["_backend_diagnostics"].append(
+                _normalize_diagnostic_record(event)
+            )
+        elif isinstance(event, TextEvent):
             self._ensure_open_step()
             assert self._open_step_dict is not None
             self._open_step_dict["_text_chunks"].append(event.text)
@@ -1302,6 +1358,7 @@ class Invocation:
             "_metrics": None,
             "_model_name": self.recorder.agent_model_name,
             "_unmatched_tool_results": [],
+            "_backend_diagnostics": [],
         }
 
     def _materialize_agent_step(
@@ -1321,6 +1378,8 @@ class Invocation:
             "daydream_run_flow": self.recorder.run_flow.value,
             **extra_overrides,
         }
+        if d["_backend_diagnostics"]:
+            extra["backend_diagnostics"] = list(d["_backend_diagnostics"])
         agent_step = Step(
             step_id=step_id,
             timestamp=now_iso(),

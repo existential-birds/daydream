@@ -11,6 +11,7 @@ Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
 - ``ThinkingEvent`` — extended reasoning / thinking content.
 - ``ToolStartEvent`` — tool invocation started.
 - ``ToolResultEvent`` — tool invocation completed.
+- ``DiagnosticEvent`` — backend parser/transport coverage evidence.
 - ``CostEvent`` — end-of-call cost/usage signal.
 - ``MetricsEvent`` — per-turn LLM token/cost usage.
 - ``TurnEndEvent`` — assistant-turn boundary; closes the recorder's open
@@ -133,6 +134,21 @@ class ToolResultEvent:
     duration_ms: float | None = None
     cancelled: bool = False
     truncated: bool = False
+
+
+@dataclass
+class DiagnosticEvent:
+    """Backend parser or transport coverage evidence for the active invocation.
+
+    Diagnostics are recorder-only signals. The trajectory recorder applies the
+    backend-neutral JSON normalization and redaction boundary before persisting
+    any of these fields.
+    """
+
+    code: str
+    message: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: str = field(default_factory=now_iso)
 
 
 @dataclass(frozen=True)
@@ -330,6 +346,7 @@ AgentEvent = (
     | ThinkingEvent
     | ToolStartEvent
     | ToolResultEvent
+    | DiagnosticEvent
     | CostEvent
     | MetricsEvent
     | TurnEndEvent
@@ -531,6 +548,7 @@ __all__ = [
     "ClaudeBackend",
     "ContinuationToken",
     "CostEvent",
+    "DiagnosticEvent",
     "MaxTurnsError",
     "MetricsEvent",
     "ModelUsageTotals",

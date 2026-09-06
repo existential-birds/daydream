@@ -540,3 +540,21 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     long_line = format_callback_progress("Bash", {"command": long_command}, None)
     assert "b" * _BASH_COMMAND_MAX_CHARS in long_line.plain
     assert len(_summarize_input({"command": long_command}, "Bash")) == _BASH_COMMAND_MAX_CHARS
+
+
+def test_display_command_preferred_across_three_render_surfaces() -> None:
+    """Replayable commands stay complete while every display path uses its override."""
+    from daydream.agent import _summarize_input
+    from daydream.ui.tools import _build_tool_header, format_callback_progress
+
+    args: dict[str, object] = {
+        "command": "cd /private/replay-root && printf secret-replay-only",
+        "display_command": "printf visible-display",
+    }
+
+    assert _summarize_input(args, "shell") == "printf visible-display"
+    assert format_callback_progress("shell", args, None).plain.endswith("printf visible-display")
+    panel = _build_tool_header("shell", args, quiet_mode=False).plain
+    assert "printf visible-display" in panel
+    assert "private/replay-root" not in panel
+    assert args["command"] == "cd /private/replay-root && printf secret-replay-only"

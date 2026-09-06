@@ -29,6 +29,7 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -728,10 +729,19 @@ async def _run_agent(
                             # The sole telemetry observer runs before UI callbacks,
                             # supervision and budgets can interrupt event handling.
                             observed.observe(event)
-                            if use_callback and not isinstance(event, TextEvent):
+                            if use_callback and not isinstance(
+                                event, (TextEvent, DiagnosticEvent)
+                            ):
                                 await _flush_callback_text()
 
-                            if isinstance(event, TextEvent):
+                            if isinstance(event, DiagnosticEvent):
+                                # Recorder-only parser/transport evidence. It
+                                # must not affect UI, callbacks, supervision,
+                                # tool bookkeeping, or invocation budgets.
+                                if inv is not None:
+                                    inv.observe(event)
+
+                            elif isinstance(event, TextEvent):
                                 output_parts.append(event.text)
 
                                 if _state.log_mode:
