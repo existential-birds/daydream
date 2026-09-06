@@ -58,6 +58,20 @@ def _serve() -> _JudgeServer:
     return srv
 
 
+def _write_verifier_metadata(verifier_dir: Path) -> None:
+    # Bind both entrypoints to the shipped gold and its case-x oracle fixture.
+    gold_bytes = (verifier_dir / "golden-review.json").read_bytes()
+    (verifier_dir / "verifier-metadata.json").write_text(json.dumps({
+        "schema_version": 1,
+        "case_id": "case-x",
+        "source_case_id": "case-x",
+        "base_ref": "base",
+        "head_ref": "head",
+        "template_version": "1",
+        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+    }))
+
+
 def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # host workspace carries credentials + source + reviewer config + agent outputs
     for name, val in _SENTINELS.items():
@@ -84,17 +98,8 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
         (_TEMPLATES_TESTS.parents[1] / "verifier_core.py").read_bytes())
     # task-binding metadata: run_verifier binds the candidate to the immutable
     # verifier-metadata.json beside the gold (case id + base/head refs + digest)
-    gold_bytes = (verifier_dir / "golden-review.json").read_bytes()
     # case id tied to the shipped fixture via test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1
-    (verifier_dir / "verifier-metadata.json").write_text(json.dumps({
-        "schema_version": 1,
-        "case_id": "case-x",
-        "source_case_id": "case-x",
-        "base_ref": "base",
-        "head_ref": "head",
-        "template_version": "1",
-        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
-    }))
+    _write_verifier_metadata(verifier_dir)
     artifact_path = tmp_path / "artifacts" / "review.json"
     artifact_path.parent.mkdir()
     oracle = Path(_TEMPLATES_TESTS / ".." / "solution" / "golden-review.json").resolve()
@@ -161,15 +166,7 @@ def test_test_sh_runs_copied_bundle_from_unrelated_cwd(tmp_path: Path) -> None:
     for name in ("test.sh", "score_review.py", "judge_prompt.md", "golden-review.json"):
         shutil.copy2(_TEMPLATES_TESTS / name, verifier_dir / name)
     shutil.copy2(_TEMPLATES_TESTS.parents[1] / "verifier_core.py", verifier_dir / "verifier_core.py")
-    (verifier_dir / "verifier-metadata.json").write_text(json.dumps({
-        "schema_version": 1,
-        "case_id": "case-x",
-        "source_case_id": "case-x",
-        "base_ref": "base",
-        "head_ref": "head",
-        "template_version": "1",
-        "gold_sha256": hashlib.sha256((verifier_dir / "golden-review.json").read_bytes()).hexdigest(),
-    }))
+    _write_verifier_metadata(verifier_dir)
     artifact_path = tmp_path / "artifacts" / "review.json"
     artifact_path.parent.mkdir()
     shutil.copy2(_TEMPLATES_TESTS.parent / "solution" / "golden-review.json", artifact_path)
