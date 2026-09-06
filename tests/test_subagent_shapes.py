@@ -28,6 +28,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
     TrajectoryRecorder,
+    dispatch_scope,
 )
 from tests.harness.trajectory import (
     make_recorder,
@@ -71,12 +72,13 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
     children: list[TrajectoryRecorder] = []
 
     async with recorder:
-        for desc in ("deep-python", "deep-typescript"):
-            async with recorder.fork(desc) as child:
-                children.append(child)
-                async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
-                    observe_text_and_result(inv, f"{desc}-output")
-        recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
+        descriptors = ("deep-python", "deep-typescript")
+        async with dispatch_scope(recorder, phase=DaydreamPhase.DEEP, descriptors=descriptors) as dispatch:
+            for desc in descriptors:
+                async with recorder.fork(desc, dispatch=dispatch) as child:
+                    children.append(child)
+                    async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
+                        observe_text_and_result(inv, f"{desc}-output")
 
     parent_traj = read_trajectory(recorder.path)
 
@@ -113,12 +115,12 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
     descriptors = ("explore-pattern-scanner", "explore-dependency-tracer", "explore-test-mapper")
 
     async with recorder:
-        for desc in descriptors:
-            async with recorder.fork(desc) as child:
-                children.append(child)
-                async with child.invocation(phase=DaydreamPhase.EXPLORATION) as inv:
-                    observe_text_and_result(inv, f"{desc}-output")
-        recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
+        async with dispatch_scope(recorder, phase=DaydreamPhase.EXPLORATION, descriptors=descriptors) as dispatch:
+            for desc in descriptors:
+                async with recorder.fork(desc, dispatch=dispatch) as child:
+                    children.append(child)
+                    async with child.invocation(phase=DaydreamPhase.EXPLORATION) as inv:
+                        observe_text_and_result(inv, f"{desc}-output")
 
     parent_traj = read_trajectory(recorder.path)
     assert atif_validate(parent_traj) is True
@@ -168,8 +170,6 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
                     async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                         observe_text_and_result(inv, f"{desc}-step-{j}")
 
-        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
-
     parent_traj = read_trajectory(recorder.path)
     parent_step_ids = [s["step_id"] for s in parent_traj["steps"]]
     assert parent_step_ids == list(range(1, len(parent_step_ids) + 1))
@@ -218,8 +218,6 @@ async def test_parent_final_metrics_includes_sibling_steps(tmp_path: Path) -> No
                     cost_usd=0.005,
                 ))
                 inv.observe(ResultEvent(structured_output=None, continuation=None))
-
-        recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
 
     parent_traj = read_trajectory(recorder.path)
     child_traj = read_trajectory(child.path)

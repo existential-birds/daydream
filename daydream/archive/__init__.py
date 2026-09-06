@@ -150,6 +150,18 @@ def _archive_run_inner(
     upload: bool = True,
 ) -> None:
     """Core archive logic, not exception-wrapped."""
+    from daydream.trajectory import snapshot_trajectories
+
+    frozen_root = snapshot_trajectories(write_snapshot).get("main")
+    if not isinstance(frozen_root, dict):
+        raise ValueError("frozen root trajectory is missing")
+    if (
+        frozen_root.get("trajectory_id") != write_snapshot.root_trajectory_id
+        or write_snapshot.root_trajectory_id != recorder.session_id
+        or frozen_root.get("session_id") != recorder.session_id
+    ):
+        raise ValueError("frozen root trajectory does not match archive session")
+
     archive_dir = get_archive_dir()
     run_dir = archive_dir / "runs" / recorder.session_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -223,53 +235,28 @@ def _archive_run_inner(
     # the deep artifacts it reads are session-agnostic, so a non-deep flow on a
     # previously deep-reviewed repo must not inherit a prior run's state (#336,
     # #762). ``runs_merge`` mirrors the ``_flow_fix_test_steps`` classification.
-    runs_merge = _flow_runs_merge(recorder.run_flow, config.flow_name)
-    from daydream.trajectory import (
-        DaydreamPhase,
-        LifecycleReasonCode,
-        LifecycleStatus,
-        PhaseEvent,
-        snapshot_trajectories,
+    runs_merge = (
+        _flow_runs_merge(recorder.run_flow, config.flow_name)
+        and getattr(config, "start_at", None) != "fix"
     )
-
-    frozen_root = snapshot_trajectories(write_snapshot).get("main")
     raw_frozen_extra = frozen_root.get("extra") if isinstance(frozen_root, dict) else None
     frozen_extra: dict[str, Any] = raw_frozen_extra if isinstance(raw_frozen_extra, dict) else {}
     frozen_phase_events = frozen_extra.get("phase_events")
-    typed_phase_events: list[PhaseEvent] = []
-    if isinstance(frozen_phase_events, list):
-        for value in frozen_phase_events:
-            if not isinstance(value, dict):
-                continue
-            try:
-                raw_status = value.get("status")
-                raw_reason = value.get("reason_code")
-                raw_metadata = value.get("metadata")
-                metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-                typed_phase_events.append(
-                    PhaseEvent(
-                        phase=DaydreamPhase(value["phase"]),
-                        event=str(value["event"]),
-                        timestamp=str(value["timestamp"]),
-                        session_id=value.get("session_id"),
-                        scope_id=value.get("scope_id"),
-                        status=(LifecycleStatus(raw_status) if raw_status is not None else None),
-                        reason_code=(LifecycleReasonCode(raw_reason) if raw_reason is not None else None),
-                        metadata=metadata,
-                    )
-                )
-            except (KeyError, TypeError, ValueError):
-                continue
     phase_states = derive_phase_states(
         target_dir,
-        phase_events=typed_phase_events,
+        phase_events=frozen_phase_events,
         runs_merge=runs_merge,
         runs_fix=runs_fix,
         runs_test=runs_test,
         session_id=recorder.session_id,
     )
     pipeline_status = derive_pipeline_status(
-        status, fix_failures, phase_states, runs_fix=runs_fix, runs_test=runs_test,
+        status,
+        fix_failures,
+        phase_states,
+        runs_merge=runs_merge,
+        runs_fix=runs_fix,
+        runs_test=runs_test,
     )
 
     # 4. Build and write manifest
@@ -338,7 +325,7 @@ def _read_json_artifact(path: Path, expected_type: type) -> Any | None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
     if not isinstance(data, expected_type) or not data:
         return None

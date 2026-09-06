@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ import daydream.trajectory as trajectory_module
 from daydream.atif import Step
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
+    AgentEvent,
     ResultEvent,
     TextEvent,
 )
@@ -25,7 +28,9 @@ from daydream.trajectory import (
     get_current_recorder,
     phase_scope,
 )
+from tests.harness.git_helpers import bare_remote, git
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, read_trajectory
 
 
@@ -633,6 +638,388 @@ async def test_compute_phase_timings_orphaned_start_pruned(tmp_path: Path) -> No
 
 
 # --- Real-path: deep run via runner.run ------------------------------------
+
+
+class _OverlappingReviewBackend(StubBackend):
+    """Hold the external wonder/reviewer calls until both are in flight."""
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target)
+        self.entered = {"wonder": anyio.Event(), "review": anyio.Event()}
+        self.finished: set[str] = set()
+
+    async def execute(
+        self, cwd: Path, prompt: str, output_schema: Any = None,
+        continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        lowered = prompt.lower()
+        role = None
+        if "would you have done this differently" in lowered or "evaluate the implementation" in lowered:
+            role = "wonder"
+        elif "you are reviewing the" in lowered or "you are the structural reviewer" in lowered:
+            role = "review"
+        if role is not None:
+            self.entered[role].set()
+            with anyio.fail_after(10):
+                await self.entered["wonder"].wait()
+                await self.entered["review"].wait()
+        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+            yield event
+        if role is not None:
+            self.finished.add(role)
+
+
+def _seconds(value: str) -> float:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def _phase_union_seconds(events: list[dict[str, Any]]) -> float:
+    starts = {event["scope_id"]: event for event in events if event["event"] == "phase_start"}
+    intervals = sorted(
+        (_seconds(starts[event["scope_id"]]["timestamp"]), _seconds(event["timestamp"]))
+        for event in events if event["event"] == "phase_end"
+    )
+    union: list[tuple[float, float]] = []
+    for start, end in intervals:
+        if union and start <= union[-1][1]:
+            union[-1] = (union[-1][0], max(union[-1][1], end))
+        else:
+            union.append((start, end))
+    return sum(end - start for start, end in union)
+
+
+async def test_complete_overlapping_deep_run_timing_completeness(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One actual run proves fan-out, overlap, diagrams and frozen archive totals."""
+    from daydream.runner import RunConfig, run
+    from tests.harness import diagram_repos as dr
+
+    target = dr.build_both_signals_repo(tmp_path)
+    backend = _OverlappingReviewBackend(target)
+    backend.diagram_specs = {
+        "sequence": [dr.sequence_spec()],
+        "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
+    }
+    backend.diagram_emit_reads = True
+    backend.per_stack_emit_reads = True
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
+
+    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True)) == 0
+    assert backend.finished == {"wonder", "review"}
+    assert not any("Fix this issue" in call["prompt"] for call in backend.calls)
+    roots = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
+    assert len(roots) == 1
+    root = json.loads(roots[0].read_bytes())
+    assert atif_validate(root, validate_images=False)
+    events = root["extra"]["phase_events"]
+    expected_metadata = {
+        "merge": {"stage": "cross-stack-agent"},
+        "diagram": {"stage": "diagram"},
+    }
+    for phase, metadata in expected_metadata.items():
+        pair = [event for event in events if event["phase"] == phase]
+        assert [event["event"] for event in pair] == ["phase_start", "phase_end"]
+        assert pair[0]["scope_id"] == pair[1]["scope_id"]
+        assert pair[1]["status"] == "succeeded"
+        assert pair[0]["metadata"] == pair[1]["metadata"] == metadata
+    assert not any(event["phase"] == "fix" for event in events)
+    diagram = json.loads((target / ".daydream/deep/diagram.json").read_bytes())
+    assert {kind: value["status"] for kind, value in diagram["results"].items()} == {
+        "sequence": "rendered", "flowchart": "rendered",
+    }
+
+    documents = {root["trajectory_id"]: root}
+    dispatches = [step for step in root["steps"] if "dispatch_id" in step.get("extra", {})]
+    assert {
+        step["extra"]["daydream_phase"]: [
+            result["content"] for result in step["observation"]["results"]
+        ]
+        for step in dispatches
+    } == {
+        "exploration": ["Dispatched to explore-dependency_tracer"],
+        "deep": ["Dispatched to deep-python", "Dispatched to deep-structure"],
+        "diagram": [
+            "Dispatched to diagram-sequence",
+            "Dispatched to diagram-flowchart",
+        ],
+    }
+    for step in dispatches:
+        extra = step["extra"]
+        refs = [ref for result in step["observation"]["results"] for ref in result["subagent_trajectory_ref"]]
+        assert len(refs) == extra["planned_count"] == extra["attempted_count"] == extra["completed_count"]
+        assert len({ref["trajectory_id"] for ref in refs}) == len(refs)
+        assert extra["dispatch_status"] == "succeeded"
+        for ref in refs:
+            child = json.loads((target / ".daydream" / ref["trajectory_path"]).read_bytes())
+            assert child["trajectory_id"] == ref["trajectory_id"]
+            assert child["session_id"] == root["session_id"]
+            assert extra["dispatch_started_at"] <= child["extra"]["run_started_at"]
+            assert child["extra"]["run_ended_at"] <= extra["dispatch_completed_at"]
+            documents[child["trajectory_id"]] = child
+
+    invocation_keys: list[tuple[str, str]] = []
+    for document_id, document in documents.items():
+        for invocation in document["extra"].get("subtrajectories", []):
+            if "invocation_id" in invocation:
+                assert invocation["trajectory_id"] == document_id
+                invocation_keys.append((document_id, invocation["invocation_id"]))
+            else:
+                assert "sibling_trajectory_ref" in invocation
+    assert len(set(invocation_keys)) == len(invocation_keys) > len(documents)
+
+    archive = archive_dir / "runs" / root["session_id"]
+    manifest = json.loads((archive / "manifest.json").read_bytes())
+    evaluation = json.loads((archive / "evaluation.json").read_bytes())
+    coverage = manifest["metrics"]["timing_coverage"]
+    assert coverage["agent_completeness"] == {
+        "total": len(invocation_keys), "attributed": len(invocation_keys), "unattributed": 0,
+    }
+    assert all(value == 0 for value in coverage["diagnostics"].values())
+    union = _phase_union_seconds(events)
+    wall = _seconds(root["extra"]["run_ended_at"]) - _seconds(root["extra"]["run_started_at"])
+    assert coverage["attributed_wall_clock_seconds"] == pytest.approx(union, abs=0.001)
+    assert coverage["unattributed_wall_clock_seconds"] == pytest.approx(wall - union, abs=0.001)
+    assert 0 <= coverage["coverage_ratio"] <= 1
+    assert evaluation["timing"]["agent_completeness"] == coverage["agent_completeness"]
+    assert evaluation["timing"]["total_wall_clock_seconds"] == manifest["metrics"]["wall_clock_seconds"]
+    # Concurrent wonder/review intervals overlap, so summing their widths is not wall time.
+    overlapping = [event for event in events if event["phase"] in {"alternatives", "deep"}]
+    starts = {event["scope_id"]: event for event in overlapping if event["event"] == "phase_start"}
+    summed = sum(
+        _seconds(event["timestamp"]) - _seconds(starts[event["scope_id"]]["timestamp"])
+        for event in overlapping if event["event"] == "phase_end"
+    )
+    assert _phase_union_seconds(overlapping) < summed
+    assert not any(
+        call["prompt"].lower().startswith(("fix this issue", "fix these"))
+        for call in backend.calls
+    )
+    assert not (target / ".daydream-fix-applied").exists()
+    assert not list(target.glob(".fixed-*"))
+
+
+async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Any,
+) -> None:
+    """A failed batch plus serial fallback stays one exact FIX child document."""
+    from daydream.runner import run
+
+    target = multi_stack_target
+    origin = bare_remote(tmp_path / "origin.git")
+    git(target, "remote", "add", "origin", str(origin))
+    backend = StubBackend(target)
+    backend.fail_batched_fix_file = "api.py"
+    backend.fix_edit_line = "\n"
+    monkeypatch.setattr(
+        "daydream.runner.create_backend", lambda *args, **kwargs: backend
+    )
+
+    with anyio.fail_after(30):
+        exit_code = await run(
+            make_config(
+                target,
+                archive=True,
+                assume="yes",
+                cleanup=False,
+                output_mode="loop",
+                run_eval=True,
+            )
+        )
+
+    assert exit_code == 0
+    assert git(origin, "rev-parse", "refs/heads/feature") == git(
+        target, "rev-parse", "HEAD"
+    )
+    fix_calls = [
+        call
+        for call in backend.calls
+        if call["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    api_batch = [
+        call
+        for call in fix_calls
+        if call["prompt"].startswith("Fix these 3 issues in ")
+        and "api.py:" in call["prompt"].splitlines()[0]
+    ]
+    api_serial = [
+        call
+        for call in fix_calls
+        if call["prompt"].startswith("Fix this issue:")
+        and any(
+            line.startswith("File: ") and Path(line.removeprefix("File: ")).name == "api.py"
+            for line in call["prompt"].splitlines()
+        )
+    ]
+    assert len(api_batch) == 1
+    assert len(api_serial) == 3
+
+    roots = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
+    assert len(roots) == 1
+    root = json.loads(roots[0].read_bytes())
+    fix_dispatches = [
+        step
+        for step in root["steps"]
+        if step.get("extra", {}).get("daydream_phase") == "fix"
+        and "dispatch_id" in step.get("extra", {})
+    ]
+    assert len(fix_dispatches) == 1
+    dispatch = fix_dispatches[0]
+    assert dispatch["extra"]["dispatch_status"] == "succeeded"
+    assert dispatch["extra"]["planned_count"] == 2
+    assert dispatch["extra"]["attempted_count"] == 2
+    assert dispatch["extra"]["completed_count"] == 2
+    assert [
+        result["content"] for result in dispatch["observation"]["results"]
+    ] == ["Dispatched to fix-api.py", "Dispatched to fix-App.tsx"]
+    api_result = dispatch["observation"]["results"][0]
+    assert len(api_result["subagent_trajectory_ref"]) == 1
+    api_ref = api_result["subagent_trajectory_ref"][0]
+    assert Path(api_ref["trajectory_path"]).name.startswith("fix-api-py--")
+    api_child = json.loads(
+        (target / ".daydream" / api_ref["trajectory_path"]).read_bytes()
+    )
+    assert api_child["trajectory_id"] == api_ref["trajectory_id"]
+    assert api_child["session_id"] == root["session_id"]
+
+    api_summaries = [
+        summary
+        for summary in root["extra"]["subtrajectories"]
+        if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
+        and summary.get("descriptor") == "fix-api.py"
+    ]
+    assert len(api_summaries) == 1
+    api_summary = api_summaries[0]
+    assert "invocation_id" not in api_summary
+    assert api_summary["trajectory_id"] == api_ref["trajectory_id"]
+    assert api_summary["sibling_trajectory_ref"] == api_ref["trajectory_path"]
+    assert api_summary["invocations"] == api_child["extra"]["subtrajectories"]
+    api_invocations = api_summary["invocations"]
+    assert len(api_invocations) == 4
+    assert all(invocation["phase"] == "fix" for invocation in api_invocations)
+    assert all(
+        invocation["trajectory_id"] == api_child["trajectory_id"]
+        for invocation in api_invocations
+    )
+    assert len(
+        {
+            (invocation["trajectory_id"], invocation["invocation_id"])
+            for invocation in api_invocations
+        }
+    ) == 4
+    assert all(
+        api_child["extra"]["run_started_at"]
+        <= invocation["started_at"]
+        <= invocation["ended_at"]
+        <= api_child["extra"]["run_ended_at"]
+        for invocation in api_invocations
+    )
+
+    fix_events = [
+        event for event in root["extra"]["phase_events"] if event["phase"] == "fix"
+    ]
+    assert [event["event"] for event in fix_events] == ["phase_start", "phase_end"]
+    assert fix_events[0]["scope_id"] == fix_events[1]["scope_id"]
+    assert fix_events[1]["status"] == "succeeded"
+    assert dispatch["extra"]["dispatch_started_at"] <= api_child["extra"]["run_started_at"]
+    assert api_child["extra"]["run_ended_at"] <= dispatch["extra"]["dispatch_completed_at"]
+    assert all(
+        fix_events[0]["timestamp"]
+        <= invocation["started_at"]
+        <= invocation["ended_at"]
+        <= fix_events[1]["timestamp"]
+        for invocation in api_invocations
+    )
+
+    documents = {root["trajectory_id"]: root}
+    document_descriptors = {root["trajectory_id"]: "root"}
+    pending = [root]
+    wrapper_count = 0
+    while pending:
+        document = pending.pop()
+        for entry in document["extra"].get("subtrajectories", []):
+            sibling_path = entry.get("sibling_trajectory_ref")
+            if sibling_path is None:
+                continue
+            wrapper_count += 1
+            child = json.loads((target / ".daydream" / sibling_path).read_bytes())
+            if child["trajectory_id"] not in documents:
+                documents[child["trajectory_id"]] = child
+                document_descriptors[child["trajectory_id"]] = Path(
+                    sibling_path
+                ).name.split("--", 1)[0]
+                pending.append(child)
+    invocation_keys = {
+        (document_id, invocation["invocation_id"])
+        for document_id, document in documents.items()
+        for invocation in document["extra"].get("subtrajectories", [])
+        if "invocation_id" in invocation
+    }
+    assert wrapper_count == len(documents) - 1 > 0
+    assert len(invocation_keys) == len(backend.calls)
+    assert len(invocation_keys) + wrapper_count > len(invocation_keys)
+    qualified_counts: dict[tuple[str, str], int] = {}
+    for document_id, document in documents.items():
+        for invocation in document["extra"].get("subtrajectories", []):
+            if "invocation_id" not in invocation:
+                continue
+            key = (document_descriptors[document_id], invocation["phase"])
+            qualified_counts[key] = qualified_counts.get(key, 0) + 1
+    assert qualified_counts == {
+        ("root", "alternatives"): 1,
+        ("root", "intent"): 1,
+        ("root", "merge"): 1,
+        ("root", "test"): 1,
+        ("root", "verify"): 2,
+        ("deep-generic", "deep"): 1,
+        ("deep-python", "deep"): 1,
+        ("deep-react", "deep"): 1,
+        ("deep-structure", "deep"): 1,
+        ("explore-dependency-tracer", "exploration"): 1,
+        ("fix-api-py", "fix"): 4,
+        ("fix-app-tsx", "fix"): 1,
+    }
+
+    verify_invocations = [
+        invocation
+        for invocation in root["extra"]["subtrajectories"]
+        if invocation.get("phase") == "verify" and "invocation_id" in invocation
+    ]
+    verify_events = [
+        event
+        for event in root["extra"]["phase_events"]
+        if event["phase"] == "verify"
+    ]
+    assert len(verify_invocations) == 2
+    assert [event["event"] for event in verify_events] == [
+        "phase_start",
+        "phase_end",
+        "phase_start",
+        "phase_end",
+    ]
+    for start, end, invocation in zip(
+        verify_events[::2], verify_events[1::2], verify_invocations, strict=True
+    ):
+        assert start["scope_id"] == end["scope_id"]
+        assert end["status"] == "succeeded"
+        assert start["timestamp"] <= invocation["started_at"]
+        assert invocation["ended_at"] <= end["timestamp"]
+
+    archive = archive_dir / "runs" / root["session_id"]
+    manifest = json.loads((archive / "manifest.json").read_bytes())
+    evaluation = json.loads((archive / "evaluation.json").read_bytes())
+    completeness = {
+        "total": len(invocation_keys),
+        "attributed": len(invocation_keys),
+        "unattributed": 0,
+    }
+    assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == completeness
+    assert evaluation["timing"]["agent_completeness"] == completeness
 
 
 async def test_shallow_run_emits_phase_events_and_subtrajectories(

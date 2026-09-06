@@ -6932,9 +6932,10 @@ def _count_merge_prompts(calls: list[dict[str, Any]]) -> int:
     return sum(1 for c in calls if "cross-stack merge agent" in c["prompt"].lower())
 
 
-async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_merge_phase(
+async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_phase(
     tiny_diff_target: Path,
     multi_stack_target: Path,
+    archive_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -6962,7 +6963,7 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_merge_phase(
         shared_calls = _install_model_capturing_stubs(monkeypatch, target)
         # Stub the post-merge side effects so the run terminates cleanly.
         mute_side_effects()
-        rc = await run(make_config(target))
+        rc = await run(make_config(target, archive=True, run_eval=False))
         assert rc == 0, f"deep run on {target.name} exited {rc}"
         return list(shared_calls)
 
@@ -7002,9 +7003,35 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_merge_phase(
     assert tiny_merge[-1]["status"] == "succeeded"
     assert multi_merge[-1]["status"] == "succeeded"
 
+    tiny_trajectory = next(
+        (tiny_diff_target / ".daydream" / "runs").glob("*/trajectory.json")
+    )
+    tiny_session_id = tiny_trajectory.parent.name
+    trajectory_documents = [
+        tiny_trajectory,
+        *sorted((tiny_trajectory.parent / "trajectories").glob("*.json")),
+    ]
+    merge_invocations: list[dict[str, Any]] = []
+    for document in trajectory_documents:
+        payload = json.loads(document.read_text(encoding="utf-8"))
+        merge_invocations.extend(
+            summary
+            for summary in (payload.get("extra") or {}).get("subtrajectories", [])
+            if isinstance(summary, dict)
+            and "invocation_id" in summary
+            and summary.get("phase") == "merge"
+        )
+    assert merge_invocations == []
 
-async def test_merge_phase_outcome_domain_failure_closes_failed_scope(
+    manifest = json.loads(
+        (archive_dir / "runs" / tiny_session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
+
+
+async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
     multi_stack_target: Path,
+    archive_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
@@ -7013,8 +7040,16 @@ async def test_merge_phase_outcome_domain_failure_closes_failed_scope(
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_emit_str = "no item list"
+    stale_deep = multi_stack_target / ".daydream" / "deep"
+    stale_deep.mkdir(parents=True, exist_ok=True)
+    (stale_deep / "merged-items.json").write_text(
+        json.dumps({"items": [{"id": 999, "description": "stale success"}]}),
+        encoding="utf-8",
+    )
 
-    exit_code = await run(make_config(multi_stack_target))
+    exit_code = await run(
+        make_config(multi_stack_target, archive=True, run_eval=False)
+    )
 
     assert exit_code == 1
     events = _root_phase_events(multi_stack_target, "merge")
@@ -7024,6 +7059,23 @@ async def test_merge_phase_outcome_domain_failure_closes_failed_scope(
     assert events[0]["scope_id"] == events[1]["scope_id"]
     assert events[1]["status"] == "failed"
     assert events[1]["reason_code"] == "domain_failure"
+    deep = multi_stack_target / ".daydream" / "deep"
+    salvage = json.loads((deep / "merged-items.json").read_text(encoding="utf-8"))
+    assert isinstance(salvage.get("items"), list)
+    failures = json.loads(
+        (deep / "per-stack-failures.json").read_text(encoding="utf-8")
+    )
+    assert isinstance(failures.get("__merge__"), dict)
+
+    trajectory = next(
+        (multi_stack_target / ".daydream" / "runs").glob("*/trajectory.json")
+    )
+    manifest = json.loads(
+        (archive_dir / "runs" / trajectory.parent.name / "manifest.json").read_text()
+    )
+    assert manifest["archive_status"] == "complete"
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "failed"}
+    assert manifest["pipeline_status"] == "failed"
 
 
 async def test_ac5_per_stack_prompt_inlines_diff_hunks(

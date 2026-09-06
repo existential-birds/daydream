@@ -1355,6 +1355,8 @@ class _SignalFlushRegistry:
         cutoff = self._partial_cutoff(recorders)
         prepared: list[TrajectoryDocumentSnapshot] = []
         for recorder in recorders:
+            if recorder is root:
+                continue
             try:
                 document = recorder._prepare_document(status="partial", cutoff_at=cutoff)
                 if document is not None:
@@ -1364,6 +1366,23 @@ class _SignalFlushRegistry:
                     _console,
                     f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
                 )
+        child_evidence = bool(prepared or self._completed)
+        try:
+            root_document = root._prepare_document(
+                status="partial",
+                cutoff_at=cutoff,
+                allow_empty_root=child_evidence,
+            )
+            if root_document is not None:
+                prepared.insert(0, root_document)
+        except Exception as exc:  # noqa: BLE001 - isolate each signal write
+            print_warning(
+                _console,
+                f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
+            )
+            return
+        if child_evidence and root_document is None:
+            return
         if prepared or self._completed:
             self._write_snapshot(
                 status="partial",
@@ -2563,7 +2582,6 @@ class TrajectoryRecorder:
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _folded_fork_totals: bool = False
     _previous_token: Any = None
-    _registered_siblings: list[tuple[Path, str]] = field(default_factory=list)
     # Active invocations whose in-flight steps haven't been flushed yet.
     # write_partial reads this so SIGINT mid-run_agent() captures partial
     # work rather than dropping it.
@@ -2896,8 +2914,8 @@ class TrajectoryRecorder:
         ``step_id`` is allocated when a step opens but flushed here when its
         Invocation closes, so append-order only equals id-order while at most
         one Invocation is open. Concurrent siblings on one recorder (wonder
-        alongside the per-stack fan-out, whose ``create_dispatch_step`` appends
-        straight to ``self.steps``) break that: the run then dies at write time
+        alongside a per-stack dispatch materialized after its children join)
+        break that: the run then dies at write time
         on ATIF's "sequential from 1" check. Sorting on insert keeps the
         documented ``steps: step_id 1..N`` invariant true by construction.
         """
@@ -3059,60 +3077,6 @@ class TrajectoryRecorder:
             descriptor: Semantic label for the sibling (e.g. ``"fix-0"``).
         """
         return _ForkCM(parent=self, descriptor=descriptor, dispatch=dispatch)
-
-    def _register_sibling(self, path: Path, descriptor: str) -> None:
-        """Register a completed sibling trajectory (synchronous, no await)."""
-        self._registered_siblings.append((path, descriptor))
-
-    def create_dispatch_step(self, *, phase: DaydreamPhase) -> None:
-        """Create an agent Step referencing all registered sibling trajectories.
-
-        No-op when ``_registered_siblings`` is empty.
-        """
-        if not self._registered_siblings:
-            return
-        results: list[ObservationResult] = []
-        for sibling_path, desc in self._registered_siblings:
-            try:
-                rel = str(sibling_path.relative_to(self.target_dir / ".daydream"))
-            except ValueError:
-                rel = sibling_path.name
-            # trajectory_id is the sibling's canonical per-document id (mirrors
-            # the fork's build_trajectory: session_id qualified by descriptor).
-            # v1.7 makes it the resolution key for the ref; session_id stays as
-            # informational run identity only (shared across siblings, not a
-            # matching key), and trajectory_path remains the external file ref.
-            results.append(
-                ObservationResult(
-                    content=f"Dispatched to {desc}",
-                    subagent_trajectory_ref=[
-                        SubagentTrajectoryRef(
-                            trajectory_id=f"{self.session_id}:{desc}",
-                            session_id=self.session_id,
-                            trajectory_path=rel,
-                        ),
-                    ],
-                )
-            )
-        count = len(self._registered_siblings)
-        step = Step(
-            step_id=self._next_step_id(),
-            timestamp=now_iso(),
-            source="agent",
-            model_name=self.agent_model_name,
-            message=f"Dispatching {count} parallel {phase.value} tasks",
-            observation=Observation(results=results),
-            # Deterministic (non-LLM) fan-out dispatch: no inference is made
-            # here, so per the ATIF v1.7 no-LLM-orchestration rule this step
-            # carries llm_call_count=0 and omits metrics / reasoning_content.
-            llm_call_count=0,
-            extra={
-                "daydream_phase": phase.value,
-                "daydream_run_flow": self.run_flow.value,
-            },
-        )
-        self.steps.append(self.redactor.redact_step(step))
-        self._registered_siblings.clear()
 
     def _create_dispatch_step(self, dispatch: DispatchHandle) -> None:
         """Materialize one identified, start-stamped deterministic dispatch."""
@@ -3276,11 +3240,30 @@ class TrajectoryRecorder:
         *,
         status: Literal["complete", "partial"],
         cutoff_at: str,
+        allow_empty_root: bool = False,
     ) -> TrajectoryDocumentSnapshot | None:
         """Freeze one canonical document without performing any filesystem write."""
         steps = self.steps if status == "complete" else self._snapshot_in_flight_steps()
         if not steps:
-            return None
+            if status != "partial" or self.parent is not None or not allow_empty_root:
+                return None
+            # ATIF requires at least one Step. An early signal can arrive while
+            # child agents are already running but before the root has emitted a
+            # dispatch or agent Step. Represent the real host snapshot event as
+            # a system Step in the immutable partial only; do not mutate the live
+            # recorder or fabricate an agent invocation.
+            steps = [
+                Step(
+                    step_id=1,
+                    timestamp=cutoff_at,
+                    source="system",
+                    message="Daydream run snapshot",
+                    extra={
+                        "daydream_run_flow": self.run_flow.value,
+                        "host_event": "partial_snapshot",
+                    },
+                )
+            ]
         trajectory = self.build_trajectory(
             steps=list(steps),
             snapshot_at=cutoff_at if status == "partial" else None,
@@ -3498,8 +3481,6 @@ class _ForkCM:
                     cost_usd=(child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None),
                 )
                 child.parent._folded_fork_totals = True
-                if self._dispatch is None:
-                    child.parent._register_sibling(child.path, self._descriptor)
                 try:
                     sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))
                 except ValueError:

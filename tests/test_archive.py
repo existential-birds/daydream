@@ -55,6 +55,7 @@ def _write_snapshot(
     recorder: Any,
     *,
     status: str = "complete",
+    phase_events: list[dict[str, Any]] | None = None,
 ) -> RunWriteSnapshot:
     path = Path(recorder.path)
     payload: dict[str, Any] = {}
@@ -67,6 +68,8 @@ def _write_snapshot(
     payload.setdefault("trajectory_id", trajectory_id)
     payload.setdefault("steps", [])
     payload.setdefault("extra", {})
+    if phase_events is not None:
+        payload["extra"]["phase_events"] = phase_events
     payload.setdefault("final_metrics", {})
     document = TrajectoryDocumentSnapshot(
         trajectory_id=trajectory_id,
@@ -2705,6 +2708,426 @@ def _write_deep(target: Path, name: str, data: Any) -> None:
     (deep / name).write_text(json.dumps(data), encoding="utf-8")
 
 
+def _merge_events(
+    session_id: str,
+    status: str,
+    *,
+    scope_id: str = "merge-scope",
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "phase": "merge",
+            "event": "phase_start",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_id": session_id,
+            "scope_id": scope_id,
+        },
+        {
+            "phase": "merge",
+            "event": "phase_end",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "session_id": session_id,
+            "scope_id": scope_id,
+            "status": status,
+        },
+    ]
+
+
+def test_current_merge_event_succeeds_despite_stale_failure_artifact(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("current", "succeeded"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "succeeded"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "succeeded"
+
+
+def test_current_merge_event_failure_beats_stale_success_artifact(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("current", "failed"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "failed"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "failed"
+
+
+def test_current_merge_event_partial_produces_partial_pipeline(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("current", "partial"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "partial"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "partial"
+
+
+def test_stale_merge_event_failure_does_not_override_current_success(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=[
+            *_merge_events("prior", "failed", scope_id="prior-merge"),
+            *_merge_events("current", "succeeded"),
+        ],
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "succeeded"}
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [_merge_events("current", "succeeded")[1]],
+        [*_merge_events("current", "succeeded"), _merge_events("current", "succeeded")[1]],
+        [
+            {**_merge_events("current", "succeeded")[0], "timestamp": "2026-01-01T00:00:02Z"},
+            _merge_events("current", "succeeded")[1],
+        ],
+        [
+            {**_merge_events("current", "succeeded")[0], "timestamp": "2026-01-01T00:00:00"},
+            _merge_events("current", "succeeded")[1],
+        ],
+        [
+            {**_merge_events("current", "succeeded")[0], "session_id": None},
+            _merge_events("current", "succeeded")[1],
+        ],
+        [
+            _merge_events("current", "succeeded")[0],
+            {**_merge_events("current", "succeeded")[1], "status": "not-a-status"},
+        ],
+    ],
+    ids=(
+        "orphan",
+        "duplicate",
+        "reversed",
+        "incomparable-timestamps",
+        "missing-session",
+        "invalid-terminal",
+    ),
+)
+def test_malformed_current_merge_event_is_unknown(
+    tmp_path: Path,
+    events: list[dict[str, Any]],
+) -> None:
+    from daydream.archive import pipeline
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=events,
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": True, "status": "unknown"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "unknown"
+
+
+@pytest.mark.parametrize("malformed_kind", [[], {}], ids=["list", "mapping"])
+def test_current_merge_event_rejects_non_scalar_kind(
+    tmp_path: Path, malformed_kind: Any,
+) -> None:
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+
+    events = _merge_events("current", "succeeded")
+    events[1]["event"] = malformed_kind
+    states = derive_phase_states(
+        tmp_path, phase_events=events, session_id="current",
+        runs_merge=True, runs_fix=False, runs_test=False,
+    )
+    assert states["merge"] == {"ran": True, "status": "unknown"}
+    assert derive_pipeline_status("complete", None, states, runs_merge=True) == "unknown"
+
+
+def test_missing_current_merge_event_never_uses_stale_success_artifact(
+    tmp_path: Path,
+) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=_merge_events("prior", "succeeded"),
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id="current",
+    )
+
+    assert states["merge"] == {"ran": False, "status": "absent"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_merge=True
+    ) == "partial"
+
+
+@pytest.mark.parametrize(
+    ("failure_payload", "items_payload", "expected"),
+    [
+        (None, {"items": []}, {"ran": True, "status": "succeeded"}),
+        ({"__merge__": {"message": "failed"}}, {"items": []}, {"ran": True, "status": "failed"}),
+        ({"__merge__": "corrupt"}, {"items": []}, {"ran": True, "status": "unknown"}),
+        (None, {"items": "corrupt"}, {"ran": True, "status": "unknown"}),
+    ],
+    ids=("success", "failure", "malformed-failure", "malformed-items"),
+)
+def test_legacy_merge_artifact_fallback_is_strict(
+    tmp_path: Path,
+    failure_payload: Any,
+    items_payload: Any,
+    expected: dict[str, Any],
+) -> None:
+    from daydream.archive import pipeline
+
+    if failure_payload is not None:
+        _write_deep(tmp_path, "per-stack-failures.json", failure_payload)
+    _write_deep(tmp_path, "merged-items.json", items_payload)
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=[],
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id=None,
+    )
+
+    assert states["merge"] == expected
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ["per-stack-failures.json", "merged-items.json"],
+)
+def test_legacy_merge_invalid_utf8_is_unknown(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    from daydream.archive import pipeline
+
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    (deep / artifact_name).write_bytes(b"\xff")
+
+    states = pipeline.derive_phase_states(
+        tmp_path,
+        phase_events=[],
+        runs_merge=True,
+        runs_fix=False,
+        runs_test=False,
+        session_id=None,
+    )
+
+    assert states["merge"] == {"ran": True, "status": "unknown"}
+
+
+def test_current_archive_survives_invalid_utf8_fix_failures(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    session_id = "current-corrupt-fix-sidecar"
+    recorder = _MockRecorder(session_id=session_id)
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "fix-failures.json").write_bytes(b"\xff")
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(
+        tmp_path,
+        "test-verdict.json",
+        {"session_id": session_id, "passed": True},
+    )
+    phase_events = [
+        *_merge_events(session_id, "succeeded"),
+        {
+            "phase": "fix",
+            "event": "phase_start",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_id": session_id,
+            "scope_id": "fix-scope",
+        },
+    ]
+
+    _archive_run_inner(
+        recorder=cast(Any, recorder),
+        write_snapshot=_write_snapshot(recorder, phase_events=phase_events),
+        target_dir=tmp_path,
+        config=make_config(tmp_path, archive=False),
+        run_eval=True,
+        work=None,
+        upload=False,
+    )
+
+    run_dir = archive_dir / "runs" / session_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert (run_dir / "evaluation.json").is_file()
+    assert manifest["phase_states"] == {
+        "merge": {"ran": True, "status": "succeeded"},
+        "fix": {"ran": True, "status": "succeeded"},
+        "test": {"ran": True, "status": "succeeded"},
+    }
+    assert manifest["pipeline_status"] == "succeeded"
+    assert [row["session_id"] for row in query_runs(archive_dir)] == [session_id]
+
+
+def test_start_at_fix_archive_does_not_require_or_inherit_merge(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    session_id = "fix-resume-session"
+    recorder = _MockRecorder(session_id=session_id)
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
+    _write_deep(tmp_path, "test-verdict.json", {"session_id": session_id, "passed": True})
+    fix_start = {
+        "phase": "fix",
+        "event": "phase_start",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "session_id": session_id,
+        "scope_id": "fix-scope",
+    }
+
+    _archive_run_inner(
+        recorder=cast(Any, recorder),
+        write_snapshot=_write_snapshot(recorder, phase_events=[fix_start]),
+        target_dir=tmp_path,
+        config=make_config(tmp_path, archive=False, start_at="fix"),
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["merge"] == {"ran": False, "status": "absent"}
+    assert manifest["phase_states"]["fix"] == {"ran": True, "status": "succeeded"}
+    assert manifest["phase_states"]["test"] == {"ran": True, "status": "succeeded"}
+    assert manifest["pipeline_status"] == "succeeded"
+
+
+def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    session_id = "malformed-merge-session"
+    recorder = _MockRecorder(session_id=session_id)
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    events = _merge_events(session_id, "not-a-status")
+
+    _archive_run_inner(
+        recorder=cast(Any, recorder),
+        write_snapshot=_write_snapshot(recorder, phase_events=events),
+        target_dir=tmp_path,
+        config=make_config(tmp_path, archive=False),
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "unknown"}
+    assert manifest["pipeline_status"] == "partial"
+
+
+def test_archive_rejects_frozen_root_from_another_session(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    recorder = _MockRecorder(session_id="current-session")
+    payload = {
+        "session_id": "other-session",
+        "trajectory_id": recorder.session_id,
+        "steps": [],
+        "extra": {},
+        "final_metrics": {},
+    }
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at="2026-01-01T00:00:01Z",
+        root_trajectory_id=recorder.session_id,
+        documents=(
+            TrajectoryDocumentSnapshot(
+                trajectory_id=recorder.session_id,
+                path=recorder.path,
+                json_bytes=json.dumps(payload).encode(),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="archive session"):
+        _archive_run_inner(
+            recorder=cast(Any, recorder),
+            write_snapshot=snapshot,
+            target_dir=tmp_path,
+            config=make_config(tmp_path, archive=False),
+            run_eval=False,
+            work=None,
+            upload=False,
+        )
+    assert not (
+        archive_dir / "runs" / recorder.session_id / "trajectory.json"
+    ).exists()
+
+
 def test_merge_failed_discriminates_on_merge_key_not_merged_items(
     tmp_path: Path,
 ) -> None:
@@ -2922,7 +3345,10 @@ def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: Make
     config = make_config(tmp_path, archive=False)
     _archive_run_inner(
         recorder=recorder,
-        write_snapshot=_write_snapshot(recorder),
+        write_snapshot=_write_snapshot(
+            recorder,
+            phase_events=_merge_events(recorder.session_id, "failed"),
+        ),
         target_dir=tmp_path,
         config=config,
         run_eval=False,

@@ -4514,13 +4514,14 @@ async def verify_retained_tree(
     """Verify all canonical findings and join numeric wire ids to durable uids."""
     from daydream.phases import phase_fix_verify
 
-    verdicts = await phase_fix_verify(
-        ctx.backend_for("verify"),
-        ctx.work,
-        items,
-        snapshot.verifier_patch,
-        round_number=pass_number,
-    )
+    async with phase_scope(DaydreamPhase.VERIFY):
+        verdicts = await phase_fix_verify(
+            ctx.backend_for("verify"),
+            ctx.work,
+            items,
+            snapshot.verifier_patch,
+            round_number=pass_number,
+        )
     by_id = {
         item.get("id"): item
         for item in items

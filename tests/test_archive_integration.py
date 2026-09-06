@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ import anyio
 import pytest
 
 from daydream.atif import Step
+from daydream.backends import AgentEvent
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -24,7 +26,83 @@ from daydream.trajectory import (
     now_iso,
 )
 from tests.harness.config import TARGET_HUB_KEY_CONFIG
+from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
+
+
+class _SecretFailureBackend(StubBackend):
+    """External backend failure containing synthetic, intentionally private data."""
+
+    secrets = (
+        "sk-abcdefghijklmnopqrstuvwxyz1234567890",
+        "https://private-user:private-password@example.invalid/model",
+        "/Users/private-lifecycle-user/work/client-private.py",
+    )
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target)
+        self.failures = 0
+
+    async def execute(
+        self, cwd: Path, prompt: str, output_schema: Any = None,
+        continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        if "you are the **dependency-tracer** specialist" in prompt.lower():
+            self.failures += 1
+            raise RuntimeError("backend rejected " + " ".join(self.secrets))
+        async for event in super().execute(cwd, prompt, output_schema, continuation, agents, max_turns, read_only):
+            yield event
+
+
+async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
+    shard_many_python_target: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real caught backend failure emits closed codes, not its private message."""
+    from daydream.runner import RunConfig, run
+    from daydream.trajectory import LifecycleReasonCode
+
+    target = shard_many_python_target
+    backend = _SecretFailureBackend(target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
+    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True)) == 0
+    assert backend.failures == 1
+    roots = list((target / ".daydream/runs").glob("*/trajectory.json"))
+    assert len(roots) == 1
+    root = json.loads(roots[0].read_bytes())
+    dispatches = [step for step in root["steps"] if "dispatch_id" in step.get("extra", {})]
+    partials = [step for step in dispatches if step["extra"]["dispatch_status"] == "partial"]
+    assert len(partials) == 1
+    assert partials[0]["extra"]["reason_code"] == "some_children_failed"
+    refs = [ref for step in dispatches for result in step["observation"]["results"]
+            for ref in result["subagent_trajectory_ref"]]
+    assert refs
+    live_paths = [roots[0], *(target / ".daydream" / ref["trajectory_path"] for ref in refs)]
+    archive = archive_dir / "runs" / root["session_id"]
+    manifest = archive / "manifest.json"
+    evaluation = archive / "evaluation.json"
+    assert manifest.is_file() and evaluation.is_file()
+    archived_paths = list(archive.rglob("*.json"))
+    assert len(archived_paths) >= len(live_paths) + 2
+    reason_codes: list[str] = []
+
+    def collect_reasons(value: Any) -> None:
+        if isinstance(value, dict):
+            if "reason_code" in value and value["reason_code"] is not None:
+                reason_codes.append(value["reason_code"])
+            for child in value.values():
+                collect_reasons(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_reasons(child)
+
+    for path in [*live_paths, *archived_paths]:
+        text = path.read_text(encoding="utf-8")
+        for secret in backend.secrets:
+            assert secret not in text, f"private exception text leaked to {path.name}"
+        collect_reasons(json.loads(text))
+    assert "some_children_failed" in reason_codes
+    assert set(reason_codes) <= {reason.value for reason in LifecycleReasonCode}
 
 
 def _add_user_step(recorder: TrajectoryRecorder) -> None:

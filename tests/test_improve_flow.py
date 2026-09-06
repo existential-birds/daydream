@@ -1087,7 +1087,79 @@ def _dispatch_for_phase(trajectory: dict[str, Any], phase: str) -> dict[str, Any
         and "dispatch_id" in step.get("extra", {})
     ]
     assert len(steps) == 1
-    return steps[0]
+    return cast(dict[str, Any], steps[0])
+
+
+def _assert_complete_phase_dispatch(
+    repo: Path,
+    trajectory: dict[str, Any],
+    phase: str,
+    descriptors: list[str],
+) -> None:
+    """Prove dispatch enclosure and one real invocation per exact child ref."""
+    dispatch = _dispatch_for_phase(trajectory, phase)
+    expected_count = len(descriptors)
+    assert dispatch["extra"]["dispatch_status"] == "succeeded"
+    assert dispatch["extra"]["planned_count"] == expected_count
+    assert dispatch["extra"]["attempted_count"] == expected_count
+    assert dispatch["extra"]["completed_count"] == expected_count
+
+    results = dispatch["observation"]["results"]
+    assert [result["content"] for result in results] == [
+        f"Dispatched to {descriptor}" for descriptor in descriptors
+    ]
+    assert all(len(result["subagent_trajectory_ref"]) == 1 for result in results)
+    refs = [result["subagent_trajectory_ref"][0] for result in results]
+    assert len({ref["trajectory_id"] for ref in refs}) == expected_count
+    assert {ref["session_id"] for ref in refs} == {trajectory["session_id"]}
+
+    summaries = [
+        summary
+        for summary in trajectory["extra"]["subtrajectories"]
+        if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
+    ]
+    assert [summary["descriptor"] for summary in summaries] == descriptors
+    assert all("invocation_id" not in summary for summary in summaries)
+
+    children: list[dict[str, Any]] = []
+    identities: set[tuple[str, str]] = set()
+    for descriptor, ref, summary in zip(descriptors, refs, summaries, strict=True):
+        assert Path(ref["trajectory_path"]).name.startswith(f"{descriptor}--")
+        child = cast(
+            dict[str, Any],
+            json.loads(
+                (repo / ".daydream" / ref["trajectory_path"]).read_text(
+                    encoding="utf-8"
+                )
+            ),
+        )
+        assert child["trajectory_id"] == ref["trajectory_id"]
+        assert child["session_id"] == trajectory["session_id"]
+        assert summary["trajectory_id"] == ref["trajectory_id"]
+        assert summary["sibling_trajectory_ref"] == ref["trajectory_path"]
+        assert summary["fork_id"] == ref["trajectory_id"]
+        assert summary["phase"] == phase
+        assert summary["invocations"] == child["extra"]["subtrajectories"]
+        assert len(summary["invocations"]) == 1
+        invocation = summary["invocations"][0]
+        assert invocation["phase"] == phase
+        assert invocation["trajectory_id"] == child["trajectory_id"]
+        assert (
+            child["extra"]["run_started_at"]
+            <= invocation["started_at"]
+            <= invocation["ended_at"]
+            <= child["extra"]["run_ended_at"]
+        )
+        identities.add((invocation["trajectory_id"], invocation["invocation_id"]))
+        children.append(child)
+
+    assert len(identities) == expected_count
+    assert dispatch["timestamp"] <= min(
+        child["extra"]["run_started_at"] for child in children
+    )
+    assert dispatch["extra"]["dispatch_completed_at"] >= max(
+        child["extra"]["run_ended_at"] for child in children
+    )
 
 
 def _improve_observable_texts(repo: Path) -> list[str]:
@@ -4141,6 +4213,65 @@ async def test_trajectory_records_improve_flow_and_phases(
             result["content"].startswith(f"Dispatched to {phase}-")
             for result in dispatch["observation"]["results"]
         )
+
+
+@pytest.mark.anyio
+async def test_improve_timing_completeness_preserves_p09_audit_isolation(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: MakeConfig,
+) -> None:
+    """One real run proves multi-audit/vet timing and source Git isolation."""
+    repo = improve_monorepo_target
+    _pin_stack_availability(monkeypatch, tmp_path)
+    stub = install_improve_stub(monkeypatch, repo)
+    before_head = git(repo, "rev-parse", "HEAD")
+    before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    before_index = git(repo, "ls-files", "--stage")
+    before_status = _git_status_porcelain(repo)
+    source_config = repo / ".git" / "config"
+    config_before = source_config.read_bytes()
+
+    code = await run(make_config(repo, flow_name="improve"))
+
+    assert code == 0
+    trajectory = _root_run_trajectory(repo)
+    audit_descriptors = [
+        f"audit-{category}-group-{group:02d}"
+        for category in AUDIT_CATEGORIES
+        for group in range(1, 4)
+    ]
+    vet_descriptors = [
+        "vet-security-00",
+        "vet-correctness-01",
+        "vet-performance-02",
+        "vet-tests-03",
+        "vet-tech-debt-04",
+        "vet-dependencies-05",
+        "vet-dx-06",
+        "vet-docs-07",
+    ]
+    _assert_complete_phase_dispatch(repo, trajectory, "audit", audit_descriptors)
+    _assert_complete_phase_dispatch(repo, trajectory, "vet", vet_descriptors)
+
+    audit_cwds = {Path(call["cwd"]) for call in stub.calls}
+    assert len(audit_cwds) == 1
+    assert stub.calls and all(call["read_only"] for call in stub.calls)
+    audit_root = next(iter(audit_cwds))
+    assert stub.audit_root == audit_root
+    assert audit_root != repo
+    assert not audit_root.is_relative_to(repo)
+    assert not repo.is_relative_to(audit_root)
+    assert audit_root.name == "repo"
+    assert audit_root.parent.name.startswith("daydream-audit-")
+    assert not audit_root.exists()
+
+    assert git(repo, "rev-parse", "HEAD") == before_head
+    assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    assert git(repo, "ls-files", "--stage") == before_index
+    assert _git_status_porcelain(repo) == before_status
+    assert source_config.read_bytes() == config_before
 
 
 _VET_FINDINGS = [

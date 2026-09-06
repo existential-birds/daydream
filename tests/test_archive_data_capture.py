@@ -153,7 +153,7 @@ async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
 # --- AC1 + AC3: default deep run populates eval metrics AND captures recommended.patch ---
 
 
-async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
+async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
@@ -204,6 +204,15 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     assert metrics["coverage_ratio"] is not None
     assert metrics["cost_per_finding_usd"] is not None
     assert (run_dir / "evaluation.json").is_file()
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
+    assert manifest["pipeline_status"] == "succeeded"
+    merge_events = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "merge"
+    ]
+    assert len(merge_events) == 2
+    assert {event["session_id"] for event in merge_events} == {manifest["session_id"]}
 
     # AC3: recommended.patch archived and distinct from diff.patch.
     recommended = run_dir / "recommended.patch"
