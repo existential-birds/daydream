@@ -33,6 +33,21 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 _scope_attributes: ContextVar[dict[str, Any]] = ContextVar("daydream_trace_attributes", default={})
+_INHERITED_ATTRIBUTES = frozenset({
+    "daydream.run.id",
+    "daydream.session.id",
+    "daydream.trajectory.id",
+    "daydream.trajectory.descriptor",
+    "daydream.flow",
+    "daydream.step",
+    "daydream.phase",
+    "daydream.iteration",
+    "daydream.stack",
+    "daydream.backend",
+    "daydream.attempt",
+    "traceloop.association.properties.daydream_run_id",
+    "traceloop.association.properties.session_id",
+})
 
 
 def _reason_code(reason: str | None) -> str:
@@ -105,7 +120,9 @@ class SpanScope:
                 )
                 if recorder.descriptor:
                     common["daydream.trajectory.descriptor"] = recorder.descriptor
-            self._token = _scope_attributes.set(common)
+            self._token = _scope_attributes.set(
+                {key: value for key, value in common.items() if key in _INHERITED_ATTRIBUTES}
+            )
             self.span = self.session.tracer.start_span(
                 self.session.policy.text(self.name),
                 kind=SpanKind.CLIENT if self.kind == "attempt" else SpanKind.INTERNAL,
@@ -234,7 +251,7 @@ def agent_scope(phase: str, *, backend: str, model: str | None = None) -> SpanSc
         {
             "daydream.phase": phase,
             "daydream.backend": backend,
-            "gen_ai.request.model": model,
+            "daydream.configured.model": model,
         },
     )
 
@@ -403,6 +420,7 @@ class AttemptObserver:
             "daydream.span.kind": "tool",
             "traceloop.span.kind": "tool",
             "traceloop.entity.name": event.name,
+            "gen_ai.operation.name": "execute_tool",
             "gen_ai.tool.name": event.name,
             "gen_ai.tool.call.id": event.id,
             "daydream.tool.started_at": event.timestamp,

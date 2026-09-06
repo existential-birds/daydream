@@ -74,10 +74,24 @@ daydream /path/to/project --trace-to honeyhive
 The URL above is a HoneyHive documentation example; use your deployment's actual
 base. Both variables are required. Daydream appends `/opentelemetry/v1/traces` and
 sends HTTP/protobuf with bearer authentication. The API key selects the project.
+Use a write-enabled project API key, not a workspace control-plane key. You do not
+need a workspace ID header; the project key determines its workspace as well.
+
+HoneyHive creates a session around each run through its OTLP session-creation
+attributes. Run spans, steps, and logical agents appear as chains, backend attempts
+as model events, and tool executions as tools. The adapter maps known cost,
+cache-read/write counts, and reasoning tokens into native metadata fields on
+attempts only. It preserves the portable attributes and does not change spans sent
+to other destinations.
+
+HoneyHive documents a $0.10 initial session cost in its
+[normalizer](https://docs.honeyhive.ai/v2/sdk-reference/semconv-reference). Its displayed
+session cost can therefore exceed the sum of billed attempts. Use attempt-level
+cost for reconciliation; Daydream does not subtract that offset from actual usage.
 
 The adapter follows HoneyHive v2's documented
 [OTLP endpoint and authentication](https://docs.honeyhive.ai/v2/integrations/truefoundry)
-and [OpenLLMetry semantic conventions support](https://docs.honeyhive.ai/v2/tracing/concepts).
+and [semantic convention mappings](https://docs.honeyhive.ai/v2/sdk-reference/semconv-alignment).
 No HoneyHive SDK is required.
 
 ## Generic OpenTelemetry platforms
@@ -166,6 +180,10 @@ are stored as metadata; span intervals follow Daydream's observed execution. Att
 duration metadata comes only from terminal results that report the whole invocation.
 Per-message durations stay with their message usage metadata. Synthesized completion
 events do not establish an unobserved start time.
+
+Model request/response attributes belong to attempts. Logical agents retain their
+configured model as `daydream.configured.model`; child tools use the `execute_tool`
+operation and do not inherit the model-call attributes of their parent attempt.
 
 For example, current Codex CLI JSON streams omit provider identity. Daydream leaves
 that field absent instead of guessing from the model name or a partial configuration

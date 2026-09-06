@@ -48,9 +48,10 @@ async def test_owned_span_tree_usage_and_content() -> None:
     registry.register_trace_exporter("memory", lambda _: exporter)
     original_provider = trace.get_tracer_provider()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
-        with step_scope("review", iteration=2):
+        with step_scope("review", iteration=2, stack="python"):
             with agent_scope("review", backend="pi", model="requested") as agent:
                 async with attempt_scope(1) as attempt:
+                    attempt.observe(RequestEvent("effective prompt", model_name="effective"))
                     attempt.observe(TextEvent("response"))
                     attempt.observe(MetricsEvent("a", 10, 2, 3, 0.1, model_name="actual"))
                     attempt.observe(MetricsEvent("b", 20, 4, None, 0.2))
@@ -73,9 +74,52 @@ async def test_owned_span_tree_usage_and_content() -> None:
     assert attrs["gen_ai.usage.input_tokens"] == 0
     assert attrs["gen_ai.usage.output_tokens"] == 6
     assert attrs["gen_ai.usage.cost"] == pytest.approx(0.3)
+    assert attrs["gen_ai.request.model"] == "effective"
     assert attrs["gen_ai.response.model"] == "actual"
+    assert attrs["gen_ai.operation.name"] == "chat"
+    assert attrs["daydream.invocation.aggregate"] is True
     assert "response" in str(attrs["gen_ai.output.messages"])
-    assert all("gen_ai.usage.input_tokens" not in (by_kind[kind].attributes or {}) for kind in ("run", "step", "agent"))
+    for kind in ("run", "step", "agent", "tool"):
+        local = by_kind[kind].attributes or {}
+        assert "gen_ai.request.model" not in local
+        assert "daydream.invocation.aggregate" not in local
+        assert not any(key.startswith("gen_ai.usage.") for key in local)
+    assert (by_kind["agent"].attributes or {})["daydream.configured.model"] == "requested"
+    tool_attrs = by_kind["tool"].attributes or {}
+    assert tool_attrs["gen_ai.operation.name"] == "execute_tool"
+    for key, value in {
+        "daydream.flow": "review",
+        "daydream.step": "review",
+        "daydream.phase": "review",
+        "daydream.iteration": 2,
+        "daydream.stack": "python",
+        "daydream.backend": "pi",
+        "daydream.attempt": 1,
+    }.items():
+        assert tool_attrs[key] == value
+
+
+@pytest.mark.anyio
+async def test_attempt_and_nested_step_do_not_inherit_unobserved_request_metadata() -> None:
+    exporter = InMemorySpanExporter()
+    registry = Registry()
+    registry.register_trace_exporter("memory", lambda _: exporter)
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+        with agent_scope("review", backend="pi", model="configured-only"):
+            async with attempt_scope(1):
+                with step_scope("prepare"):
+                    pass
+
+    spans = {(span.attributes or {})["daydream.span.kind"]: span for span in exporter.get_finished_spans()}
+    for kind in ("attempt", "step"):
+        attrs = spans[kind].attributes or {}
+        assert "gen_ai.request.model" not in attrs
+        assert "daydream.configured.model" not in attrs
+    nested = spans["step"].attributes or {}
+    assert "gen_ai.operation.name" not in nested
+    assert "daydream.invocation.aggregate" not in nested
+    assert nested["daydream.backend"] == "pi"
+    assert nested["daydream.attempt"] == 1
 
 
 def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogCaptureFixture) -> None:

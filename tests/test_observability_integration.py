@@ -119,7 +119,10 @@ async def test_runner_exports_complete_portable_trace(
     billed = attributes(attempt)
     assert billed["gen_ai.usage.input_tokens"] == 100
     assert billed["gen_ai.usage.output_tokens"] == 12
+    assert billed["gen_ai.request.model"] == "observed-model"
     assert billed["gen_ai.response.model"] == "observed-model"
+    assert billed["gen_ai.operation.name"] == "chat"
+    assert billed["daydream.invocation.aggregate"] is True
     assert billed["gen_ai.response.finish_reasons"] == ["stop"]
     assert billed["gen_ai.provider.name"] == "observed-provider"
     assert _PROMPT in billed["gen_ai.input.messages"]
@@ -128,7 +131,16 @@ async def test_runner_exports_complete_portable_trace(
     assert "call-one" in billed["gen_ai.output.messages"]
     assert "sample.py" in attributes(tool)["traceloop.entity.input"]
     assert "return 'safe'" in attributes(tool)["traceloop.entity.output"]
-    assert all("gen_ai.usage.input_tokens" not in attributes(span) for span in (agent, phase, roots[0]))
+    for span in (agent, phase, roots[0], tool):
+        local = attributes(span)
+        assert "gen_ai.request.model" not in local
+        assert "daydream.invocation.aggregate" not in local
+        assert not any(key.startswith("gen_ai.usage.") for key in local)
+    assert attributes(agent)["daydream.configured.model"] == "test-model"
+    assert attributes(tool)["gen_ai.operation.name"] == "execute_tool"
+    assert attributes(tool)["daydream.attempt"] == 1
+    assert attributes(tool)["daydream.phase"] == "review"
+    assert attributes(tool)["daydream.step"] == "trace-probe"
     payload = json.dumps([request["body"] for request in receiver.requests])
     assert _SECRET not in payload
     assert "native-session-one" in payload
@@ -137,6 +149,8 @@ async def test_runner_exports_complete_portable_trace(
                           honeyhive="/opentelemetry/v1/traces")[destination]}
     if destination == "langsmith":
         assert billed["langsmith.span.kind"] == "llm"
+        assert attributes(tool)["langsmith.span.kind"] == "tool"
+        assert all(attributes(span)["langsmith.span.kind"] == "chain" for span in (roots[0], phase, agent))
         usage = json.loads(billed["langsmith.usage_metadata"])
         assert usage["input_tokens"] == 100
         assert usage["input_token_details"]["cache_read"] == 20

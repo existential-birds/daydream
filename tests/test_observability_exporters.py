@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -96,6 +97,11 @@ def test_destinations_emit_portable_otlp(destination: str, monkeypatch: pytest.M
             }
         elif destination == "honeyhive":
             assert headers["authorization"] == "Bearer honeyhive-opaque-key"
+            assert span["honeyhive_event_type"] == "model"
+            assert span["honeyhive_metadata.cost"] == 0.123
+            assert span["honeyhive_metadata.cache_read_input_tokens"] == 40
+            assert span["honeyhive_metadata.cache_write_input_tokens"] == 20
+            assert span["honeyhive_metadata.reasoning_tokens"] == 5
         else:
             assert headers["x-custom"] == "generic-key"
         if destination != "otlp":
@@ -129,6 +135,68 @@ def test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage(
         )
     assert exporter.force_flush()
     exporter.shutdown()
+
+
+@pytest.mark.parametrize("known_usage", [False, True])
+@pytest.mark.parametrize("has_session", [False, True])
+def test_honeyhive_mapping_preserves_spans_and_limits_native_usage_to_attempts(
+    known_usage: bool, has_session: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    originals = InMemorySpanExporter()
+    run_id = "8dc328f9-f3af-4293-a8c3-19f8627999cd"
+    session_id = "f55b21e4-4693-4795-a625-64b1a2d969ee"
+    with otlp_collector() as receiver:
+        monkeypatch.setenv("HH_API_URL", receiver.base_url)
+        monkeypatch.setenv("HH_API_KEY", "opaque-key")
+        exporter = honeyhive_exporter(ObservabilityConfig())
+        provider = TracerProvider(shutdown_on_exit=False)
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        provider.add_span_processor(SimpleSpanProcessor(originals))
+        try:
+            for kind in ("run", "step", "agent", "attempt", "tool"):
+                span_attributes: dict[str, Any] = {
+                    "daydream.span.kind": kind,
+                    "daydream.run.id": run_id,
+                    "daydream.flow": "review",
+                }
+                if has_session:
+                    span_attributes["traceloop.association.properties.session_id"] = session_id
+                if known_usage:
+                    span_attributes.update({
+                        "gen_ai.usage.input_tokens": 0,
+                        "gen_ai.usage.output_tokens": 0,
+                        "gen_ai.usage.cost": 0.0,
+                        "gen_ai.usage.cache_read.input_tokens": 0,
+                        "gen_ai.usage.cache_creation.input_tokens": 0,
+                        "gen_ai.usage.reasoning.output_tokens": 0,
+                    })
+                with provider.get_tracer("daydream-test").start_as_current_span(kind, attributes=span_attributes):
+                    pass
+            assert provider.force_flush()
+            recorded = originals.get_finished_spans()
+        finally:
+            provider.shutdown()
+    assert len(receiver.spans) == len(recorded) == 5
+    assert [attributes(span)["honeyhive_event_type"] for span in receiver.spans] == [
+        "chain", "chain", "chain", "model", "tool"
+    ]
+    for original, mapped in zip(recorded, receiver.spans, strict=True):
+        assert original.attributes is not None and original.context is not None
+        native = attributes(mapped)
+        assert base64.b64decode(mapped["spanId"]).hex() == f"{original.context.span_id:016x}"
+        assert all(native[key] == value for key, value in original.attributes.items())
+        assert not any(key.startswith("honeyhive") for key in original.attributes)
+        assert native["honeyhive.session_id"] == (session_id if has_session else run_id)
+        assert native["honeyhive.session_auto_create"] is True
+        assert native["honeyhive.session_name"] == "daydream.review"
+        expected = known_usage and original.attributes["daydream.span.kind"] == "attempt"
+        for key in (
+            "prompt_tokens", "completion_tokens", "cost", "cache_read_input_tokens",
+            "cache_write_input_tokens", "reasoning_tokens",
+        ):
+            assert (f"honeyhive_metadata.{key}" in native) == expected
+            if expected:
+                assert native[f"honeyhive_metadata.{key}"] == 0
 
 
 @pytest.mark.parametrize(

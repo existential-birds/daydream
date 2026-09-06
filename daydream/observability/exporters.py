@@ -1,4 +1,4 @@
-"""OTLP destination factories and the small LangSmith compatibility adapter.
+"""OTLP destination factories and destination-specific compatibility attributes.
 
 The runtime owns each returned exporter. Presets isolate authentication and TLS
 from generic OTLP environment settings; the generic destination honors the SDK's
@@ -123,7 +123,9 @@ def honeyhive_exporter(config: ObservabilityConfig) -> SpanExporter:
     if not base:
         raise ObservabilityError("HH_API_URL is required; use your HoneyHive deployment's API base URL")
     endpoint = _validated_endpoint(base, "HH_API_URL")
-    return _preset_exporter(endpoint + "/opentelemetry/v1/traces", {"Authorization": f"Bearer {key}"}, config)
+    return HoneyHiveExporter(
+        _preset_exporter(endpoint + "/opentelemetry/v1/traces", {"Authorization": f"Bearer {key}"}, config)
+    )
 
 
 def otlp_exporter(config: ObservabilityConfig) -> SpanExporter:
@@ -189,6 +191,68 @@ def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]
     return usage
 
 
+def _copy_span(span: ReadableSpan, attributes: Mapping[str, AttributeValue]) -> ReadableSpan:
+    return ReadableSpan(
+        name=span.name,
+        context=span.context,
+        parent=span.parent,
+        resource=span.resource,
+        attributes=attributes,
+        events=span.events,
+        links=span.links,
+        kind=span.kind,
+        status=span.status,
+        start_time=span.start_time,
+        end_time=span.end_time,
+        instrumentation_scope=span.instrumentation_scope,
+    )
+
+
+class HoneyHiveExporter(SpanExporter):
+    """Add native event types and billed metadata without changing portable spans."""
+
+    def __init__(self, exporter: SpanExporter) -> None:
+        self._exporter = exporter
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        return self._exporter.export([self._adapt(span) for span in spans])
+
+    @staticmethod
+    def _adapt(span: ReadableSpan) -> ReadableSpan:
+        attributes = dict(span.attributes or {})
+        kind = attributes.get("daydream.span.kind")
+        attributes["honeyhive_event_type"] = {
+            "run": "chain",
+            "step": "chain",
+            "agent": "chain",
+            "attempt": "model",
+            "tool": "tool",
+        }.get(str(kind), "chain")
+        session_id = attributes.get("traceloop.association.properties.session_id") or attributes.get("daydream.run.id")
+        if session_id:
+            attributes["honeyhive.session_id"] = session_id
+            attributes["honeyhive.session_auto_create"] = True
+            attributes["honeyhive.session_name"] = f"daydream.{attributes.get('daydream.flow', 'run')}"
+        if kind == "attempt":
+            for portable, native in (
+                ("gen_ai.usage.input_tokens", "prompt_tokens"),
+                ("gen_ai.usage.output_tokens", "completion_tokens"),
+                ("gen_ai.usage.cost", "cost"),
+                ("gen_ai.usage.cache_read.input_tokens", "cache_read_input_tokens"),
+                ("gen_ai.usage.cache_creation.input_tokens", "cache_write_input_tokens"),
+                ("gen_ai.usage.reasoning.output_tokens", "reasoning_tokens"),
+            ):
+                if portable in attributes:
+                    attributes[f"honeyhive_metadata.{native}"] = attributes[portable]
+        return _copy_span(span, attributes)
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._exporter.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
+
+
 class LangSmithExporter(SpanExporter):
     """Add LangSmith compatibility attributes to copies; keep portable spans untouched."""
 
@@ -208,20 +272,7 @@ class LangSmithExporter(SpanExporter):
             usage = _langsmith_usage(attributes)
             if usage:
                 attributes["langsmith.usage_metadata"] = json.dumps(usage, separators=(",", ":"))
-        return ReadableSpan(
-            name=span.name,
-            context=span.context,
-            parent=span.parent,
-            resource=span.resource,
-            attributes=attributes,
-            events=span.events,
-            links=span.links,
-            kind=span.kind,
-            status=span.status,
-            start_time=span.start_time,
-            end_time=span.end_time,
-            instrumentation_scope=span.instrumentation_scope,
-        )
+        return _copy_span(span, attributes)
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         return self._exporter.force_flush(timeout_millis)
