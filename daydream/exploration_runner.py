@@ -33,7 +33,15 @@ from daydream.prompts.exploration_subagents import (
     build_repo_survey_prompt,
     build_test_mapper_prompt,
 )
-from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
+from daydream.trajectory import (
+    DaydreamPhase,
+    DispatchHandle,
+    LifecycleReasonCode,
+    LifecycleStatus,
+    dispatch_scope,
+    get_current_recorder,
+    maybe_fork,
+)
 from daydream.tree_sitter_index import _parse_diff_name_status, detect_affected_files
 
 if TYPE_CHECKING:
@@ -254,10 +262,25 @@ async def pre_scan(
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(10, backend)
     )
-
-    async def _run_specialist(name: str, prompt: str, schema: dict[str, Any]) -> None:
+    descriptors = (
+        ("explore-dependency_tracer",)
+        if tier == "single"
+        else (
+            "explore-pattern_scanner",
+            "explore-dependency_tracer",
+            "explore-test_mapper",
+        )
+    )
+    async def _run_specialist(
+        name: str,
+        prompt: str,
+        schema: dict[str, Any],
+        dispatch: DispatchHandle | None,
+    ) -> None:
         nonlocal specialist_failed
-        async with limiter, maybe_fork(recorder, f"explore-{name}"):
+        async with limiter, maybe_fork(
+            recorder, f"explore-{name}", dispatch=dispatch,
+        ):
             try:
                 structured, _, _ = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
@@ -292,48 +315,71 @@ async def pre_scan(
         for f in static_files
     ]
 
-    with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
-        async with anyio.create_task_group() as tg:
-            if tier == "single":
-                dep_prompt = build_dependency_tracer_prompt(
-                    static_files_abs,
-                    diff_ref,
-                    cwd=repo_root,
-                    strategy=strategies["exploration.dependency_trace"],
-                )
-                tg.start_soon(_run_specialist, "dependency_tracer", dep_prompt, DEPENDENCY_TRACER_SCHEMA)
-            else:  # parallel
-                tg.start_soon(
-                    _run_specialist, "pattern_scanner",
-                    build_pattern_scanner_prompt(
-                        static_files_abs,
-                        diff_ref,
-                        cwd=repo_root,
-                        strategy=strategies["exploration.pattern_scan"],
-                    ), PATTERN_SCANNER_SCHEMA,
-                )
-                tg.start_soon(
-                    _run_specialist, "dependency_tracer",
-                    build_dependency_tracer_prompt(
+    async with dispatch_scope(
+        recorder,
+        phase=DaydreamPhase.EXPLORATION,
+        descriptors=descriptors,
+    ) as dispatch:
+        with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
+            async with anyio.create_task_group() as tg:
+                if tier == "single":
+                    dep_prompt = build_dependency_tracer_prompt(
                         static_files_abs,
                         diff_ref,
                         cwd=repo_root,
                         strategy=strategies["exploration.dependency_trace"],
+                    )
+                    tg.start_soon(
+                        _run_specialist,
+                        "dependency_tracer",
+                        dep_prompt,
+                        DEPENDENCY_TRACER_SCHEMA,
+                        dispatch,
+                    )
+                else:  # parallel
+                    tg.start_soon(
+                        _run_specialist, "pattern_scanner",
+                        build_pattern_scanner_prompt(
+                            static_files_abs,
+                            diff_ref,
+                            cwd=repo_root,
+                            strategy=strategies["exploration.pattern_scan"],
+                        ), PATTERN_SCANNER_SCHEMA, dispatch,
+                    )
+                    tg.start_soon(
+                        _run_specialist, "dependency_tracer",
+                        build_dependency_tracer_prompt(
+                            static_files_abs,
+                            diff_ref,
+                            cwd=repo_root,
+                            strategy=strategies["exploration.dependency_trace"],
+                        ),
+                        DEPENDENCY_TRACER_SCHEMA,
+                        dispatch,
+                    )
+                    tg.start_soon(
+                        _run_specialist, "test_mapper",
+                        build_test_mapper_prompt(
+                            static_files_abs,
+                            diff_ref,
+                            cwd=repo_root,
+                            strategy=strategies["exploration.test_mapping"],
+                        ), TEST_MAPPER_SCHEMA, dispatch,
+                    )
+        if dispatch is not None:
+            if timeout_scope.cancel_called:
+                dispatch.finish(
+                    LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
+                )
+            elif specialist_failed:
+                dispatch.finish(
+                    LifecycleStatus.PARTIAL if results else LifecycleStatus.FAILED,
+                    (
+                        LifecycleReasonCode.SOME_CHILDREN_FAILED
+                        if results
+                        else LifecycleReasonCode.ALL_CHILDREN_FAILED
                     ),
-                    DEPENDENCY_TRACER_SCHEMA,
                 )
-                tg.start_soon(
-                    _run_specialist, "test_mapper",
-                    build_test_mapper_prompt(
-                        static_files_abs,
-                        diff_ref,
-                        cwd=repo_root,
-                        strategy=strategies["exploration.test_mapping"],
-                    ), TEST_MAPPER_SCHEMA,
-                )
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
 
     if not results:
         static_context.completed = not (specialist_failed or timeout_scope.cancel_called)
@@ -398,10 +444,12 @@ async def repo_scan(
     sample = _sample_paths(paths, max(0, max_files))
     survey: dict[str, Any] = {}
     recorder = get_current_recorder()
-
-
-    async def _run_specialist() -> None:
-        async with maybe_fork(recorder, "explore-repo_survey"):
+    specialist_failed = False
+    async def _run_specialist(dispatch: DispatchHandle | None) -> None:
+        nonlocal specialist_failed
+        async with maybe_fork(
+            recorder, "explore-repo_survey", dispatch=dispatch,
+        ):
             try:
                 structured, _, _ = await run_agent(
                     backend,
@@ -421,14 +469,29 @@ async def repo_scan(
                 )
                 if isinstance(structured, dict):
                     survey.update(structured)
+                else:
+                    specialist_failed = True
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+                specialist_failed = True
                 pass
 
-    with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):
-        await _run_specialist()
-
-    if recorder is not None:
-        recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
+    async with dispatch_scope(
+        recorder,
+        phase=DaydreamPhase.EXPLORATION,
+        descriptors=("explore-repo_survey",),
+    ) as dispatch:
+        with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
+            await _run_specialist(dispatch)
+        if dispatch is not None:
+            if timeout_scope.cancel_called:
+                dispatch.finish(
+                    LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT,
+                )
+            elif specialist_failed:
+                dispatch.finish(
+                    LifecycleStatus.FAILED,
+                    LifecycleReasonCode.ALL_CHILDREN_FAILED,
+                )
 
     return ExplorationContext(
         conventions=_coerce_conventions(survey.get("conventions")),

@@ -50,6 +50,7 @@ _PHASE_LABELS: dict[str, str] = {
     "intent": "Understand Intent",
     "alternatives": "Alternatives",
     "deep": "Deep Review",
+    "merge": "Merge Findings",
     "exploration": "Exploration",
     "verify": "Verify Recommendations",
     "recon": "Reconnaissance",

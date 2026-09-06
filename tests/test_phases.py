@@ -25,6 +25,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as git_commit
 from tests.harness.git_helpers import git, init_repo
 from tests.harness.stub_backend import StubBackend
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 def _default_strategy(stage: str) -> str:
@@ -4798,6 +4799,37 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
     assert (work.repo / REVIEW_OUTPUT_FILE).read_text() == report_path.read_text()
 
 
+async def test_cross_stack_merge_agent_phase_label(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """The production cross-stack agent is canonically attributed to MERGE."""
+    from daydream.phases import phase_cross_stack_merge
+
+    silence_console("daydream.phases")
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        await phase_cross_stack_merge(
+            ScriptedBackend(
+                events=(
+                    TextEvent(text="merged"),
+                    ResultEvent(structured_output=_MERGE_ITEMS, continuation=None),
+                )
+            ),
+            make_work(tmp_path),
+            per_stack_records_paths=[tmp_path / "r.json"],
+            intent_path=tmp_path / "i.md",
+            alternatives_path=tmp_path / "a.json",
+            dedup_candidates_path=tmp_path / "d.json",
+        )
+
+    root = read_trajectory(recorder.path)
+    agent_steps = [step for step in root["steps"] if step["source"] == "agent"]
+    assert len(agent_steps) == 1
+    assert agent_steps[0]["extra"]["daydream_phase"] == "merge"
+
+
 async def test_merge_raises_on_empty_agent_output(
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
@@ -5576,6 +5608,134 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     assert batched_calls == ["a.py"]
     assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]
+
+
+async def test_phase_fix_parallel_partial_dispatch_preserves_successful_group(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """One failed real fix group records partial without losing its sibling ref."""
+    from daydream import phases
+
+    class _OneFixFailsBackend(ScriptedBackend):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            if "\nFile: bad.py\n" in prompt:
+                raise RuntimeError("failed fix group")
+            async for event in super().execute(
+                cwd, prompt, output_schema, continuation, agents, max_turns,
+                read_only, persist_session,
+            ):
+                yield event
+
+    silence_console("daydream.phases")
+    items = [
+        {"id": 1, "file": "good.py", "description": "good"},
+        {"id": 2, "file": "bad.py", "description": "bad"},
+    ]
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        failures = await phases.phase_fix_parallel(
+            cast(Backend, _OneFixFailsBackend(events=_FIX_TURN)),
+            make_work(tmp_path),
+            items,
+        )
+
+    assert set(failures) == {"bad.py"}
+    root = read_trajectory(recorder.path)
+    dispatches = [
+        step
+        for step in root["steps"]
+        if step.get("llm_call_count") == 0
+        and step.get("extra", {}).get("daydream_phase") == "fix"
+        and "dispatch_id" in step.get("extra", {})
+    ]
+    assert len(dispatches) == 1
+    dispatch = dispatches[0]
+    assert [
+        result["content"] for result in dispatch["observation"]["results"]
+    ] == ["Dispatched to fix-good.py", "Dispatched to fix-bad.py"]
+    child_ref = dispatch["observation"]["results"][0]["subagent_trajectory_ref"][0]
+    child = read_trajectory(tmp_path / ".daydream" / child_ref["trajectory_path"])
+    assert dispatch["timestamp"] <= child["extra"]["run_started_at"]
+    assert dispatch["extra"]["dispatch_completed_at"] >= child["extra"]["run_ended_at"]
+    assert dispatch["extra"]["dispatch_status"] == "partial"
+    assert dispatch["extra"]["reason_code"] == "some_children_failed"
+    assert dispatch["extra"]["planned_count"] == 2
+    assert dispatch["extra"]["attempted_count"] == 2
+    # The handled backend failure has its own durable child error trajectory.
+    assert dispatch["extra"]["completed_count"] == 2
+
+
+async def test_phase_fix_parallel_rolled_back_group_dispatch_is_failed(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """Progress erased by whole-group rollback is not reported as partial."""
+    from daydream import phases
+
+    class _FallbackThenFailureBackend(ScriptedBackend):
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            if prompt.startswith("Fix these ") or "\nFile: b.py\n" in prompt:
+                raise RuntimeError("group must roll back")
+            async for event in super().execute(
+                cwd, prompt, output_schema, continuation, agents, max_turns,
+                read_only, persist_session,
+            ):
+                yield event
+
+    silence_console("daydream.phases")
+    items = [
+        {
+            "id": 1,
+            "file": "a.py",
+            "related_files": ["shared.py"],
+            "description": "first",
+        },
+        {
+            "id": 2,
+            "file": "b.py",
+            "related_files": ["shared.py"],
+            "description": "second",
+        },
+    ]
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        failures = await phases.phase_fix_parallel(
+            cast(Backend, _FallbackThenFailureBackend(events=_FIX_TURN)),
+            make_work(tmp_path),
+            items,
+        )
+
+    assert set(failures) == {"a.py"}
+    root = read_trajectory(recorder.path)
+    dispatch = next(
+        step for step in root["steps"]
+        if "dispatch_id" in step.get("extra", {})
+    )
+    assert dispatch["extra"]["dispatch_status"] == "failed"
+    assert dispatch["extra"]["reason_code"] == "all_children_failed"
 
 
 # --- Issue #172 Fix B extended: inline small diffs into intent / wonder ------

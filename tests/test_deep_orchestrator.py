@@ -6181,6 +6181,17 @@ def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str,
     return found
 
 
+def _root_phase_events(target: Path, phase: str) -> list[dict[str, Any]]:
+    trajectories = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
+    assert len(trajectories) == 1
+    payload = json.loads(trajectories[0].read_text(encoding="utf-8"))
+    return [
+        event
+        for event in payload["extra"]["phase_events"]
+        if event["phase"] == phase
+    ]
+
+
 def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
     """Return N from the failed batched ``Fix these N issues in <file>`` fix turn.
 
@@ -6921,9 +6932,10 @@ def _count_merge_prompts(calls: list[dict[str, Any]]) -> int:
     return sum(1 for c in calls if "cross-stack merge agent" in c["prompt"].lower())
 
 
-async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
+async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_phase(
     tiny_diff_target: Path,
     multi_stack_target: Path,
+    archive_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -6951,7 +6963,7 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
         shared_calls = _install_model_capturing_stubs(monkeypatch, target)
         # Stub the post-merge side effects so the run terminates cleanly.
         mute_side_effects()
-        rc = await run(make_config(target))
+        rc = await run(make_config(target, archive=True, run_eval=False))
         assert rc == 0, f"deep run on {target.name} exited {rc}"
         return list(shared_calls)
 
@@ -6978,6 +6990,92 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
     assert _count_merge_prompts(tiny_calls) == 0, "merge agent ran on tiny diff"
     # And the multi_stack run still invokes it (regression-guard for AC3).
     assert _count_merge_prompts(multi_calls) == 1, "merge agent missing on multi_stack"
+    tiny_merge = _root_phase_events(tiny_diff_target, "merge")
+    multi_merge = _root_phase_events(multi_stack_target, "merge")
+    assert [event["metadata"] for event in tiny_merge] == [
+        {"stage": "single-stack-host"},
+        {"stage": "single-stack-host"},
+    ]
+    assert [event["metadata"] for event in multi_merge] == [
+        {"stage": "cross-stack-agent"},
+        {"stage": "cross-stack-agent"},
+    ]
+    assert tiny_merge[-1]["status"] == "succeeded"
+    assert multi_merge[-1]["status"] == "succeeded"
+
+    tiny_trajectory = next(
+        (tiny_diff_target / ".daydream" / "runs").glob("*/trajectory.json")
+    )
+    tiny_session_id = tiny_trajectory.parent.name
+    trajectory_documents = [
+        tiny_trajectory,
+        *sorted((tiny_trajectory.parent / "trajectories").glob("*.json")),
+    ]
+    merge_invocations: list[dict[str, Any]] = []
+    for document in trajectory_documents:
+        payload = json.loads(document.read_text(encoding="utf-8"))
+        merge_invocations.extend(
+            summary
+            for summary in (payload.get("extra") or {}).get("subtrajectories", [])
+            if isinstance(summary, dict)
+            and "invocation_id" in summary
+            and summary.get("phase") == "merge"
+        )
+    assert merge_invocations == []
+
+    manifest = json.loads(
+        (archive_dir / "runs" / tiny_session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
+
+
+async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
+    multi_stack_target: Path,
+    archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_emit_str = "no item list"
+    stale_deep = multi_stack_target / ".daydream" / "deep"
+    stale_deep.mkdir(parents=True, exist_ok=True)
+    (stale_deep / "merged-items.json").write_text(
+        json.dumps({"items": [{"id": 999, "description": "stale success"}]}),
+        encoding="utf-8",
+    )
+
+    exit_code = await run(
+        make_config(multi_stack_target, archive=True, run_eval=False)
+    )
+
+    assert exit_code == 1
+    events = _root_phase_events(multi_stack_target, "merge")
+    assert len(events) == 2
+    assert events[0]["event"] == "phase_start"
+    assert events[1]["event"] == "phase_end"
+    assert events[0]["scope_id"] == events[1]["scope_id"]
+    assert events[1]["status"] == "failed"
+    assert events[1]["reason_code"] == "domain_failure"
+    deep = multi_stack_target / ".daydream" / "deep"
+    salvage = json.loads((deep / "merged-items.json").read_text(encoding="utf-8"))
+    assert isinstance(salvage.get("items"), list)
+    failures = json.loads(
+        (deep / "per-stack-failures.json").read_text(encoding="utf-8")
+    )
+    assert isinstance(failures.get("__merge__"), dict)
+
+    trajectory = next(
+        (multi_stack_target / ".daydream" / "runs").glob("*/trajectory.json")
+    )
+    manifest = json.loads(
+        (archive_dir / "runs" / trajectory.parent.name / "manifest.json").read_text()
+    )
+    assert manifest["archive_status"] == "complete"
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "failed"}
+    assert manifest["pipeline_status"] == "failed"
 
 
 async def test_ac5_per_stack_prompt_inlines_diff_hunks(
@@ -8434,7 +8532,7 @@ async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
     assert "Second-pass sweep covered: notes.txt" in report
 
 
-async def test_run_deep_uncovered_sweep_fails_open(
+async def test_run_deep_uncovered_sweep_fails_open_uncovered_dispatch_interval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
@@ -8472,6 +8570,31 @@ async def test_run_deep_uncovered_sweep_fails_open(
     assert "## Coverage" in report
     assert "Second-pass sweep covered" not in report
     assert "Best-effort sweep failures: notes.txt" in report
+    uncovered = [
+        event
+        for event in _root_phase_events(target, "deep")
+        if event.get("metadata") == {"stage": "uncovered"}
+    ]
+    assert len(uncovered) == 2
+    assert uncovered[-1]["status"] == "failed"
+    assert uncovered[-1]["reason_code"] == "all_children_failed"
+    trajectory = json.loads(
+        next((target / ".daydream" / "runs").glob("*/trajectory.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    dispatch = next(
+        step
+        for step in trajectory["steps"]
+        if step.get("extra", {}).get("daydream_phase") == "deep"
+        and "dispatch_id" in step.get("extra", {})
+        and any(
+            result["content"] == "Dispatched to deep-uncovered-0"
+            for result in step["observation"]["results"]
+        )
+    )
+    assert dispatch["extra"]["dispatch_status"] == "failed"
+    assert dispatch["extra"]["reason_code"] == "all_children_failed"
 
 
 async def test_uncovered_sweep_disabled_by_config(

@@ -11,11 +11,12 @@ import anyio
 import pytest
 
 from daydream import review_profile as rp
-from daydream.backends import AgentEvent, Backend, ResultEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext, FileInfo
 from daydream.exploration_runner import (
     count_changed_files,
     pre_scan,
+    repo_scan,
     select_tier,
 )
 from daydream.prompts.exploration_subagents import (
@@ -31,12 +32,44 @@ from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
 
 def _default_strategy(stage: str) -> str:
     return rp.build_default_profile().strategies[stage].content
+
+
+def _dispatch_steps(trajectory: dict[str, Any], *, phase: str) -> list[dict[str, Any]]:
+    """Return identified deterministic dispatch steps for one phase."""
+    return [
+        step
+        for step in trajectory["steps"]
+        if step.get("llm_call_count") == 0
+        and step.get("extra", {}).get("daydream_phase") == phase
+        and "dispatch_id" in step.get("extra", {})
+    ]
+
+
+def _ref_descriptors(step: dict[str, Any]) -> list[str]:
+    return [
+        result["content"].removeprefix("Dispatched to ")
+        for result in step["observation"]["results"]
+    ]
+
+
+def _dispatch_encloses_children(step: dict[str, Any], target_dir: Path) -> bool:
+    children = [
+        read_trajectory(target_dir / ".daydream" / ref["trajectory_path"])
+        for result in step["observation"]["results"]
+        for ref in result["subagent_trajectory_ref"]
+    ]
+    return bool(children) and all(
+        step["timestamp"] <= child["extra"]["run_started_at"]
+        and step["extra"]["dispatch_completed_at"] >= child["extra"]["run_ended_at"]
+        for child in children
+    )
 
 
 # Subagent prompt sanity checks (Plan 03)
@@ -373,6 +406,121 @@ def _multifile_diff(paths: list[str]) -> str:
         f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-old\n+new\n"
         for p in paths
     )
+
+
+async def test_pre_scan_dispatch_interval_success(tmp_path: Path) -> None:
+    """The real parallel pre-scan records one enclosing, ordered dispatch."""
+    diff_text = _multifile_diff([f"src/file_{index}.py" for index in range(4)])
+    recorder = make_recorder(tmp_path)
+
+    async with recorder:
+        context = await pre_scan(
+            cast(Backend, _SpecialistMockBackend()), tmp_path, diff_text,
+        )
+
+    assert context.completed is True
+    steps = _dispatch_steps(read_trajectory(recorder.path), phase="exploration")
+    assert len(steps) == 1
+    step = steps[0]
+    assert _ref_descriptors(step) == [
+        "explore-pattern_scanner",
+        "explore-dependency_tracer",
+        "explore-test_mapper",
+    ]
+    assert _dispatch_encloses_children(step, recorder.target_dir)
+    assert step["extra"]["dispatch_status"] == "succeeded"
+    assert step["extra"]["planned_count"] == 3
+    assert step["extra"]["attempted_count"] == 3
+    assert step["extra"]["completed_count"] == 3
+
+
+async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-scan timeout is terminal evidence and retains only completed refs."""
+    import daydream.exploration_runner as exploration_runner
+
+    class _PartlyBlockedBackend(_SpecialistMockBackend):
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: Any,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncIterator[AgentEvent]:
+            if output_schema != DEPENDENCY_TRACER_SCHEMA:
+                await anyio.sleep_forever()
+            async for event in super().execute(
+                cwd, prompt, output_schema, continuation, agents, max_turns,
+                read_only, persist_session,
+            ):
+                yield event
+
+    monkeypatch.setattr(exploration_runner, "_SPECIALIST_TIMEOUT_SECONDS", 0.05)
+    diff_text = _multifile_diff([f"src/file_{index}.py" for index in range(4)])
+    recorder = make_recorder(tmp_path)
+
+    async with recorder:
+        context = await pre_scan(
+            cast(Backend, _PartlyBlockedBackend()), tmp_path, diff_text,
+        )
+
+    assert context.completed is False
+    assert context.dependencies
+    step = _dispatch_steps(read_trajectory(recorder.path), phase="exploration")[0]
+    assert _ref_descriptors(step) == [
+        "explore-pattern_scanner",
+        "explore-dependency_tracer",
+        "explore-test_mapper",
+    ]
+    assert _dispatch_encloses_children(step, recorder.target_dir)
+    assert step["extra"]["dispatch_status"] == "timed_out"
+    assert step["extra"]["reason_code"] == "timed_out"
+    assert step["extra"]["planned_count"] == 3
+    assert step["extra"]["attempted_count"] == 3
+    # Cancelled specialists still write their bounded child evidence; semantic
+    # completion is represented by the dispatch's timed-out terminal.
+    assert step["extra"]["completed_count"] == 3
+
+
+async def test_repo_scan_dispatch_records_survey_failure(tmp_path: Path) -> None:
+    """The best-effort repository survey still records its failed outcome."""
+    class _FailingSurveyBackend(_SpecialistMockBackend):
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: Any,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncIterator[AgentEvent]:
+            yield TextEvent(text="Starting repository survey")
+            raise RuntimeError("survey failed")
+
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        context = await repo_scan(
+            cast(Backend, _FailingSurveyBackend()), tmp_path,
+        )
+
+    assert context.conventions == []
+    step = _dispatch_steps(read_trajectory(recorder.path), phase="exploration")[0]
+    # run_agent records its handled backend failure in a durable child document.
+    assert _ref_descriptors(step) == ["explore-repo_survey"]
+    assert _dispatch_encloses_children(step, recorder.target_dir)
+    assert step["extra"]["dispatch_status"] == "failed"
+    assert step["extra"]["reason_code"] == "all_children_failed"
+    assert step["extra"]["planned_count"] == 1
+    assert step["extra"]["attempted_count"] == 1
+    assert step["extra"]["completed_count"] == 1
 
 
 def test_pre_scan_passes_cwd_absolute_paths(tmp_path: Path) -> None:

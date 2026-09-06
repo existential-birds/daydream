@@ -31,11 +31,67 @@ from daydream.eval.analyzer import (
     analyze_quality,
     analyze_session,
     analyze_shipped_duplication,
+    analyze_timing,
     analyze_tools,
     analyze_training_signals,
     load_trajectories,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+
+
+def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
+    trajectories = {
+        "main": {
+            "session_id": "session",
+            "trajectory_id": "session",
+            "steps": [
+                {"timestamp": "2026-01-01T00:00:40Z"},
+                {"timestamp": "2026-01-01T00:00:41Z"},
+            ],
+            "extra": {
+                "run_started_at": "2026-01-01T00:00:00Z",
+                "run_ended_at": "2026-01-01T00:00:10Z",
+            },
+            "_source_file": "trajectory.json",
+        },
+        "forked": [
+            {
+                "session_id": "session",
+                "trajectory_id": "child",
+                "steps": [
+                    {"timestamp": "2026-01-01T00:01:00Z"},
+                    {"timestamp": "2026-01-01T00:01:02Z"},
+                ],
+                "extra": {},
+                "_source_file": "child.json",
+            }
+        ],
+    }
+
+    assert analyze_timing(trajectories)["total_wall_clock_seconds"] == 10.0
+
+
+def test_analyze_timing_keeps_fork_inclusive_legacy_step_fallback() -> None:
+    trajectories = {
+        "main": {
+            "session_id": "legacy",
+            "trajectory_id": "legacy",
+            "steps": [{"timestamp": "2026-01-01T00:00:02Z"}],
+            "extra": {},
+            "_source_file": "trajectory.json",
+        },
+        "forked": [
+            {
+                "session_id": "legacy",
+                "trajectory_id": "child",
+                "steps": [{"timestamp": "2026-01-01T00:00:08Z"}],
+                "extra": {},
+                "_source_file": "child.json",
+            }
+        ],
+    }
+
+    assert analyze_timing(trajectories)["total_wall_clock_seconds"] == 6.0
 
 
 def _write_run(daydream_dir: Path, session_id: str, marker: str) -> Path:
@@ -325,7 +381,9 @@ def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
     assert result["total_cost_usd"] == 1.5
 
 
-async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path) -> None:
+async def test_analyze_costs_assigns_nested_forks_their_own_metrics(
+    tmp_path: Path,
+) -> None:
     session = "nested-forks"
     daydream_dir = tmp_path / ".daydream"
     recorder = TrajectoryRecorder(
@@ -401,7 +459,9 @@ def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
             _read_traj("deep-ts.json", "/repo/.daydream/exploration/affected_files.md"),
             _read_traj("deep-rust.json", "/repo/.daydream/exploration/conventions.md"),
             _read_traj(
-                "deep-c.json", "/repo/.daydream/exploration/affected_files.md", pi_style=True
+                "deep-c.json",
+                "/repo/.daydream/exploration/affected_files.md",
+                pi_style=True,
             ),
             _read_traj("deep-go.json", "/repo/src/main.go"),
         ],
@@ -425,9 +485,15 @@ def test_exploration_utilization_counts_bash_mediated_reads() -> None:
             {
                 "_source_file": "deep-python.json",
                 "steps": [
-                    {"step_id": "s0", "tool_calls": [
-                        {"function_name": "Bash", "arguments": {"command": "cat .daydream/exploration/summary.md"}},
-                    ]},
+                    {
+                        "step_id": "s0",
+                        "tool_calls": [
+                            {
+                                "function_name": "Bash",
+                                "arguments": {"command": "cat .daydream/exploration/summary.md"},
+                            },
+                        ],
+                    },
                 ],
             }
         ],
@@ -449,7 +515,10 @@ def test_grounding_rate_is_undefined_with_zero_findings(tmp_path: Path) -> None:
     reward. ``None`` is the only honest value for 0/0. Unchanged by the
     line-tightening in issue #1106.
     """
-    trajectories = {"main": None, "forked": [_read_traj("deep-python.json", "/repo/api.py")]}
+    trajectories = {
+        "main": None,
+        "forked": [_read_traj("deep-python.json", "/repo/api.py")],
+    }
 
     result = analyze_grounding(trajectories, [], tmp_path / ".daydream")
 
@@ -491,8 +560,14 @@ def test_files_read_extracts_codex_shell_paths() -> None:
 
 def test_files_read_extracts_pi_read_and_bash_paths() -> None:
     calls = [
-        {"function_name": "read", "arguments": {"path": "/repo/pkg/services/cleanup.go"}},
-        {"function_name": "bash", "arguments": {"command": "cat README.md && nl -ba core/osprey-cli"}},
+        {
+            "function_name": "read",
+            "arguments": {"path": "/repo/pkg/services/cleanup.go"},
+        },
+        {
+            "function_name": "bash",
+            "arguments": {"command": "cat README.md && nl -ba core/osprey-cli"},
+        },
     ]
 
     paths = _files_read(calls)
@@ -503,7 +578,12 @@ def test_files_read_extracts_pi_read_and_bash_paths() -> None:
 
 
 def test_files_read_counts_claude_bash_shell_reads() -> None:
-    calls = [{"function_name": "Bash", "arguments": {"command": "sed -n '1,60p' daydream/config.py"}}]
+    calls = [
+        {
+            "function_name": "Bash",
+            "arguments": {"command": "sed -n '1,60p' daydream/config.py"},
+        }
+    ]
 
     paths = _files_read(calls)
 
@@ -591,7 +671,12 @@ def test_files_read_claude_read_and_grep_unchanged() -> None:
 
 
 def test_files_read_grep_import_only_pattern_does_not_credit() -> None:
-    calls = [{"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "daydream/config.py"}}]
+    calls = [
+        {
+            "function_name": "Grep",
+            "arguments": {"pattern": "^from|^import", "path": "daydream/config.py"},
+        }
+    ]
 
     paths = _files_read(calls)
 
@@ -599,7 +684,12 @@ def test_files_read_grep_import_only_pattern_does_not_credit() -> None:
 
 
 def test_files_read_grep_content_pattern_credits_path() -> None:
-    calls = [{"function_name": "Grep", "arguments": {"pattern": "def validate", "path": "daydream/config.py"}}]
+    calls = [
+        {
+            "function_name": "Grep",
+            "arguments": {"pattern": "def validate", "path": "daydream/config.py"},
+        }
+    ]
 
     paths = _files_read(calls)
 
@@ -659,7 +749,10 @@ def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path) -> None:
                     "step_id": "m0",
                     "extra": {"daydream_phase": "deep"},
                     "tool_calls": [
-                        {"function_name": "shell", "arguments": {"command": "sed -n '1,240p' .daydream/diff.patch"}}
+                        {
+                            "function_name": "shell",
+                            "arguments": {"command": "sed -n '1,240p' .daydream/diff.patch"},
+                        }
                     ],
                 }
             ],
@@ -671,8 +764,14 @@ def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path) -> None:
                     {
                         "step_id": "s0",
                         "tool_calls": [
-                            {"function_name": "read", "arguments": {"path": "/repo/pkg/services/cleanup.go"}},
-                            {"function_name": "bash", "arguments": {"command": "cat core/osprey-cli"}},
+                            {
+                                "function_name": "read",
+                                "arguments": {"path": "/repo/pkg/services/cleanup.go"},
+                            },
+                            {
+                                "function_name": "bash",
+                                "arguments": {"command": "cat core/osprey-cli"},
+                            },
                         ],
                     }
                 ],
@@ -697,8 +796,14 @@ def test_analyze_grounding_counts_codex_and_pi_reads(tmp_path: Path) -> None:
                     {
                         "step_id": "s0",
                         "tool_calls": [
-                            {"function_name": "shell", "arguments": {"command": "cat /repo/api.py"}},
-                            {"function_name": "read", "arguments": {"path": "/repo/api.py"}},
+                            {
+                                "function_name": "shell",
+                                "arguments": {"command": "cat /repo/api.py"},
+                            },
+                            {
+                                "function_name": "read",
+                                "arguments": {"path": "/repo/api.py"},
+                            },
                         ],
                     }
                 ],
@@ -972,7 +1077,9 @@ def test_quality_monotone_across_eroding_fix(tmp_path: Path) -> None:
     assert eroded["verbosity"] >= clean["verbosity"]
 
 
-def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path) -> None:
+def test_analyze_session_includes_quality_for_post_fix_workspace(
+    tmp_path: Path,
+) -> None:
     """Real-path: analyze_session computes quality on the live workspace tree."""
     ws = _quality_workspace(
         tmp_path,
@@ -995,7 +1102,13 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path)
     result = analyze_session(daydream_dir, session_id="quality-real")
 
     quality = result["quality"]
-    assert set(quality) == {"erosion", "verbosity", "per_file", "calibration", "scoped_files"}
+    assert set(quality) == {
+        "erosion",
+        "verbosity",
+        "per_file",
+        "calibration",
+        "scoped_files",
+    }
     assert quality["scoped_files"] == 1
     assert quality["calibration"]["human_erosion"] == 0.34
     assert quality["calibration"]["human_verbosity"] == 0.19
@@ -1009,7 +1122,9 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path)
 # --- review round 1 fix regressions (#316) ---
 
 
-def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(tmp_path: Path) -> None:
+def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(
+    tmp_path: Path,
+) -> None:
     """Blank rows inside a flagged span must not count toward the ratio.
 
     A trivial wrapper's span covers the whole function, blank lines included;
@@ -1107,7 +1222,9 @@ def test_quality_verbosity_filtered_comprehension_not_flagged(tmp_path: Path) ->
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_multi_generator_comprehension_not_flagged(tmp_path: Path) -> None:
+def test_quality_verbosity_multi_generator_comprehension_not_flagged(
+    tmp_path: Path,
+) -> None:
     """``[x for x in a for y in b]`` is a product, not a passthrough."""
     ws = _quality_workspace(
         tmp_path,
@@ -1180,7 +1297,9 @@ def test_quality_verbosity_while_len_comparison_guard_flagged(tmp_path: Path) ->
     assert entry["verbosity"] == pytest.approx(2 / 4)
 
 
-def test_quality_verbosity_trivial_wrapper_with_literal_not_flagged(tmp_path: Path) -> None:
+def test_quality_verbosity_trivial_wrapper_with_literal_not_flagged(
+    tmp_path: Path,
+) -> None:
     """``g(x, 42)`` supplies a literal, so the wrapper is not a pure passthrough."""
     ws = _quality_workspace(
         tmp_path,
@@ -1192,7 +1311,9 @@ def test_quality_verbosity_trivial_wrapper_with_literal_not_flagged(tmp_path: Pa
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_trivial_wrapper_with_keyword_arg_not_flagged(tmp_path: Path) -> None:
+def test_quality_verbosity_trivial_wrapper_with_keyword_arg_not_flagged(
+    tmp_path: Path,
+) -> None:
     ws = _quality_workspace(
         tmp_path,
         {"app.py": "def f(x):\n    return g(x=x)\n"},
@@ -1203,7 +1324,9 @@ def test_quality_verbosity_trivial_wrapper_with_keyword_arg_not_flagged(tmp_path
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_trivial_wrapper_with_starred_args_not_flagged(tmp_path: Path) -> None:
+def test_quality_verbosity_trivial_wrapper_with_starred_args_not_flagged(
+    tmp_path: Path,
+) -> None:
     ws = _quality_workspace(
         tmp_path,
         {"app.py": "def f(*xs):\n    return g(*xs)\n"},
@@ -1214,7 +1337,9 @@ def test_quality_verbosity_trivial_wrapper_with_starred_args_not_flagged(tmp_pat
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_trivial_wrapper_typed_param_still_flagged(tmp_path: Path) -> None:
+def test_quality_verbosity_trivial_wrapper_typed_param_still_flagged(
+    tmp_path: Path,
+) -> None:
     """A type annotation adds no behavior, so ``def f(x: int): return g(x)`` is a wrapper."""
     ws = _quality_workspace(
         tmp_path,
@@ -1226,7 +1351,9 @@ def test_quality_verbosity_trivial_wrapper_typed_param_still_flagged(tmp_path: P
     assert result["per_file"]["app.py"]["verbosity"] == 1.0
 
 
-def test_quality_verbosity_trivial_wrapper_with_default_not_flagged(tmp_path: Path) -> None:
+def test_quality_verbosity_trivial_wrapper_with_default_not_flagged(
+    tmp_path: Path,
+) -> None:
     """A default supplies behavior, so ``def f(x=1): return g(x)`` is not a wrapper."""
     ws = _quality_workspace(
         tmp_path,
@@ -1286,7 +1413,9 @@ def test_quality_candidate_scope_indexes_valid_peers_for_clones(
     assert result["erosion"] is not None
 
 
-def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path) -> None:
+def test_quality_candidate_none_preserves_whole_workspace_result(
+    tmp_path: Path,
+) -> None:
     """An explicit ``candidate_paths=None`` preserves whole-workspace analysis."""
     ws = _quality_workspace(
         tmp_path,
@@ -1348,7 +1477,9 @@ def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path) -> N
     assert result["per_file"]["b.py"]["verbosity"] == 0.0
 
 
-def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: Path) -> None:
+def test_quality_verbosity_within_file_clones_still_count_across_pass(
+    tmp_path: Path,
+) -> None:
     """Within-file duplicates keep counting now that the cross-file pass exists."""
     ws = _quality_workspace(
         tmp_path,
@@ -1372,7 +1503,9 @@ def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: 
     assert result["per_file"]["app.py"]["verbosity"] == pytest.approx(6 / 8)
 
 
-def test_quality_erosion_generator_expression_filters_count_toward_cc(tmp_path: Path) -> None:
+def test_quality_erosion_generator_expression_filters_count_toward_cc(
+    tmp_path: Path,
+) -> None:
     """Generator-expression filters are real branch paths, like list comprehensions."""
     ws = _quality_workspace(
         tmp_path,
@@ -1415,7 +1548,9 @@ def test_quality_erosion_comprehension_types_cc_parity(
     assert entry["erosion"] == 1.0
 
 
-def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path: Path) -> None:
+def test_quality_verbosity_unfiltered_generator_expression_is_identity(
+    tmp_path: Path,
+) -> None:
     """``(x for x in items)`` is an identity comprehension, exactly like a list one."""
     ws = _quality_workspace(tmp_path, {"app.py": "def f(items):\n    return (x for x in items)\n"})
 
@@ -1471,7 +1606,9 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> N
 # --- review round 3 fix regressions (#316) ---
 
 
-def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path) -> None:
+def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(
+    tmp_path: Path,
+) -> None:
     """A malformed file's lines must never flag matching blocks in valid files.
 
     ``analyze_quality`` indexes the cross-file clone pass over successfully
@@ -1584,7 +1721,9 @@ def test_quality_verbosity_guard_after_mutation_not_flagged(
     assert result["per_file"]["app.py"]["verbosity"] == 0.0, label
 
 
-def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: Path) -> None:
+def test_quality_verbosity_guard_without_prior_mutation_still_flagged(
+    tmp_path: Path,
+) -> None:
     """A non-mutating statement between header and guard keeps it redundant.
 
     ``while items: x = f(); if not items: break`` — nothing touches ``items``,
@@ -1794,7 +1933,9 @@ def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
         analyze_findings(dd)
 
 
-def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path) -> None:
+def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(
+    tmp_path: Path,
+) -> None:
     # A *syntax*-invalid merged-items.json surfaces, not the fallback.
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
@@ -1805,7 +1946,9 @@ def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_pat
         analyze_findings(dd)
 
 
-def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path) -> None:
+def test_shipped_count_falls_back_to_regex_when_merged_items_absent(
+    tmp_path: Path,
+) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1824,7 +1967,9 @@ def test_shipped_count_never_zero_without_artifacts(tmp_path: Path) -> None:
     assert out["total"] == 4                    # pre-merge fallback, never 0
 
 
-def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Path) -> None:
+def test_per_lens_attribution_reads_alternatives_and_stack_buckets(
+    tmp_path: Path,
+) -> None:
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
     deep.mkdir(parents=True)
@@ -1833,7 +1978,12 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Pat
     seed_stack_records(deep, "uncovered", n=1)
     seed_stack_records(deep, "structure", n=2)
     out = analyze_findings(dd)
-    assert out["per_lens"] == {"wonder": 2, "per-stack": 3, "uncovered": 1, "structure": 2}
+    assert out["per_lens"] == {
+        "wonder": 2,
+        "per-stack": 3,
+        "uncovered": 1,
+        "structure": 2,
+    }
 
 
 def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path) -> None:
@@ -2179,7 +2329,11 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
     ],
 )
 def test_location_tiers_are_each_reachable(
-    tmp_path: Path, file: str, line: int, expected_tier: str, expected_distance: int | None
+    tmp_path: Path,
+    file: str,
+    line: int,
+    expected_tier: str,
+    expected_distance: int | None,
 ) -> None:
     """Every tier is reachable over the real ``(85, 92)`` hunk.
 
@@ -2417,7 +2571,9 @@ def test_location_and_duplication_propagate_corrupt_merged_items(
         analyze_shipped_duplication(dd)
 
 
-def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path) -> None:
+def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(
+    tmp_path: Path,
+) -> None:
     """A >= 0.5 pair that survived merge is an ESCAPE and is counted."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(
@@ -2613,7 +2769,12 @@ def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:
         [
             _item(1, line=88, description=WORKED_A),
             _item(2, line=4, description=WORKED_B, lens="structural"),
-            _item(3, file="other/untouched.py", line=1, description="A wholly unrelated concern"),
+            _item(
+                3,
+                file="other/untouched.py",
+                line=1,
+                description="A wholly unrelated concern",
+            ),
         ],
     )
 
@@ -2730,11 +2891,11 @@ def test_grounding_accepts_a_within_tolerance_line(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("finding", "expected_tier"),
     [
+        pytest.param({"line": 0, "lens": "structural"}, "whole_file", id="structural-lens-line-0"),
         pytest.param(
-            {"line": 0, "lens": "structural"}, "whole_file", id="structural-lens-line-0"
-        ),
-        pytest.param(
-            {"line": 0, "_stack": "structure"}, "whole_file", id="structure-stack-line-0"
+            {"line": 0, "_stack": "structure"},
+            "whole_file",
+            id="structure-stack-line-0",
         ),
         pytest.param({"line": None}, "no_line", id="missing-line"),
         pytest.param({"line": "top of file"}, "no_line", id="non-int-line"),
@@ -2811,7 +2972,9 @@ def test_grounding_scores_the_cited_line_when_the_record_was_relocated(
     assert result["grounding_rate"] == 0.0
 
 
-def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path) -> None:
+def test_analyze_session_reports_location_and_shipped_duplication(
+    tmp_path: Path,
+) -> None:
     """The two new axes reach ``analyze_session``'s result under their own keys."""
     dd = tmp_path / ".daydream"
     deep = dd / "deep"

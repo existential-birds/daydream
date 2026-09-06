@@ -21,7 +21,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
-from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
+from daydream._tree_sitter_safety import (
+    TreeSitterBadVersionError,
+    assert_tree_sitter_safe,
+)
 from daydream.generated_files import is_generated_file
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.timeutil import parse_iso_timestamp
@@ -138,7 +141,8 @@ def _agent_label(filename: str) -> str:
     parts = filename.rsplit(".", 2)
     if len(parts) >= 3:
         return parts[1]
-    return filename.replace(".json", "")
+    label = filename.replace(".json", "")
+    return re.sub(r"--[0-9a-f]{64}$", "", label)
 
 
 def _extract_tool_calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -619,7 +623,7 @@ def analyze_coverage(trajectories: dict[str, Any], daydream_dir: Path) -> dict[s
     return {
         "files_in_diff": len(diff_files),
         "files_read_by_reviewers": len(covered),
-        "coverage_ratio": round(len(covered) / len(diff_files), 4) if diff_files else 1.0,
+        "coverage_ratio": (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
         "uncovered_files": uncovered,
     }
 
@@ -1407,8 +1411,8 @@ def analyze_grounding(
         "hunk_source": hunk_source,
         "file_grounded_count": file_grounded_count,
         "line_grounded_count": line_grounded_count,
-        "file_grounding_rate": round(file_grounded_count / total, 4) if total > 0 else None,
-        "line_grounding_rate": round(line_grounded_count / total, 4) if total > 0 else None,
+        "file_grounding_rate": (round(file_grounded_count / total, 4) if total > 0 else None),
+        "line_grounding_rate": (round(line_grounded_count / total, 4) if total > 0 else None),
         "tiers": tiers,
         "grounded": grounded,
         "ungrounded": ungrounded,
@@ -1457,13 +1461,19 @@ def analyze_exploration_utilization(trajectories: dict[str, Any]) -> dict[str, A
     return {
         "reviewers_utilizing_exploration": utilized,
         "total_reviewers": total_reviewers,
-        "utilization_rate": round(utilized / total_reviewers, 4) if total_reviewers > 0 else 0,
+        "utilization_rate": (round(utilized / total_reviewers, 4) if total_reviewers > 0 else 0),
         "by_agent": results,
     }
 
 
 def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
-    """Wall-clock timing from step timestamps."""
+    """Project the shared lifecycle-first timing reducer into evaluation JSON."""
+    from daydream.trajectory import (  # noqa: PLC0415 - analyzer is a leaf consumer
+        RunWriteSnapshot,
+        TrajectoryDocumentSnapshot,
+        compute_timing_summary,
+    )
+
     all_timestamps: list[datetime] = []
     agent_timings: list[dict[str, Any]] = []
 
@@ -1479,13 +1489,56 @@ def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
             agent_timings.append({"agent": label, "duration_seconds": round(duration, 1)})
         all_timestamps.extend(ts_list)
 
-    total_duration = 0.0
-    if len(all_timestamps) >= 2:
-        total_duration = (max(all_timestamps) - min(all_timestamps)).total_seconds()
+    main = trajectories.get("main")
+    if isinstance(main, dict):
+        payloads = [
+            main,
+            *[item for item in trajectories.get("forked", []) if isinstance(item, dict)],
+        ]
+        documents: list[TrajectoryDocumentSnapshot] = []
+        for index, payload in enumerate(payloads):
+            canonical = {key: value for key, value in payload.items() if key != "_source_file"}
+            trajectory_id = canonical.get("trajectory_id")
+            if not isinstance(trajectory_id, str):
+                trajectory_id = str(canonical.get("session_id", f"legacy-{index}"))
+                canonical["trajectory_id"] = trajectory_id
+            filename = payload.get("_source_file")
+            if not isinstance(filename, str):
+                filename = "trajectory.json" if index == 0 else f"trajectory-{index}.json"
+            documents.append(
+                TrajectoryDocumentSnapshot(
+                    trajectory_id=trajectory_id,
+                    path=Path(filename),
+                    json_bytes=json.dumps(canonical, sort_keys=True).encode("utf-8"),
+                )
+            )
+        raw_extra = main.get("extra")
+        extra: dict[str, Any] = raw_extra if isinstance(raw_extra, dict) else {}
+        partial = bool(extra.get("partial")) and isinstance(extra.get("snapshot_at"), str)
+        cutoff = extra.get("snapshot_at") if partial else extra.get("run_ended_at")
+        if not isinstance(cutoff, str):
+            cutoff = ""
+        snapshot = RunWriteSnapshot(
+            status="partial" if partial else "complete",
+            cutoff_at=cutoff,
+            root_trajectory_id=documents[0].trajectory_id,
+            documents=tuple(documents),
+        )
+        summary = compute_timing_summary(snapshot)
+        if summary is not None:
+            return {
+                **summary.to_dict(),
+                "by_agent": sorted(
+                    agent_timings,
+                    key=lambda item: item["duration_seconds"],
+                    reverse=True,
+                ),
+            }
 
+    total_duration = (max(all_timestamps) - min(all_timestamps)).total_seconds() if len(all_timestamps) >= 2 else 0.0
     return {
         "total_wall_clock_seconds": round(total_duration, 1),
-        "by_agent": sorted(agent_timings, key=lambda a: a["duration_seconds"], reverse=True),
+        "by_agent": sorted(agent_timings, key=lambda item: item["duration_seconds"], reverse=True),
     }
 
 
@@ -2523,7 +2576,12 @@ def analyze_quality(
 
 # Top-level entry point
 
-def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> dict[str, Any]:
+def analyze_session(
+    daydream_dir: str | Path,
+    session_id: str | None = None,
+    *,
+    frozen_trajectories: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Run full quantitative analysis on a .daydream directory.
 
     On a known-bad tree-sitter install (issue #1087) only the ``quality``
@@ -2538,7 +2596,11 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
             most recent session.
     """
     daydream_dir = Path(daydream_dir)
-    trajectories = load_trajectories(daydream_dir, session_id=session_id)
+    trajectories = (
+        frozen_trajectories
+        if frozen_trajectories is not None
+        else load_trajectories(daydream_dir, session_id=session_id)
+    )
 
     if not trajectories["main"] and not trajectories["forked"]:
         return {"error": f"No trajectory files found in {daydream_dir}"}

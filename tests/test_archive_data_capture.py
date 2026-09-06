@@ -99,6 +99,13 @@ def _only_archived_run(archive_dir: Path) -> Path:
     return run_dirs[0]
 
 
+def _deep_python_trajectory(run_dir: Path) -> Path:
+    candidates = sorted((run_dir / "trajectories").glob("deep-python*.json"))
+    assert len(candidates) == 1
+    assert re.fullmatch(r"deep-python(?:--[0-9a-f]{64})?\.json", candidates[0].name)
+    return candidates[0]
+
+
 def _install_deep_capture_backend(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -146,7 +153,7 @@ async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
 # --- AC1 + AC3: default deep run populates eval metrics AND captures recommended.patch ---
 
 
-async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
+async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
@@ -168,7 +175,12 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     head_before = git_ops.head_sha(multi_stack_target)
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
     )
     assert exit_code == 0
     head_after = git_ops.head_sha(multi_stack_target)
@@ -192,6 +204,15 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     assert metrics["coverage_ratio"] is not None
     assert metrics["cost_per_finding_usd"] is not None
     assert (run_dir / "evaluation.json").is_file()
+    assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
+    assert manifest["pipeline_status"] == "succeeded"
+    merge_events = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "merge"
+    ]
+    assert len(merge_events) == 2
+    assert {event["session_id"] for event in merge_events} == {manifest["session_id"]}
 
     # AC3: recommended.patch archived and distinct from diff.patch.
     recommended = run_dir / "recommended.patch"
@@ -223,7 +244,12 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
     )
     assert exit_code == 0
 
@@ -248,7 +274,12 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     )
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
     )
     assert exit_code == 0
 
@@ -283,7 +314,12 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
     )
     assert exit_code == 0
 
@@ -313,7 +349,12 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
     stub.fix_edit_line = "# daydream recommended change\n"
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
     )
     assert exit_code == 0
 
@@ -331,7 +372,10 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
             "step_id": len(traj["steps"]) + 1,
             "extra": {"daydream_phase": "deep"},
             "tool_calls": [
-                {"function_name": "shell", "arguments": {"command": "rg -l '\"unclosed"}},
+                {
+                    "function_name": "shell",
+                    "arguments": {"command": "rg -l '\"unclosed"},
+                },
                 {"function_name": "shell", "arguments": {"command": "cat api.py"}},
             ],
         }
@@ -342,8 +386,21 @@ async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evalu
     eval_path.unlink(missing_ok=True)
 
     from daydream.archive import _run_eval
+    from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
 
-    result = _run_eval(multi_stack_target, session_id, run_dir)
+    snapshot = RunWriteSnapshot(
+        status="complete",
+        cutoff_at=str((traj.get("extra") or {}).get("run_ended_at", "")),
+        root_trajectory_id=str(traj["trajectory_id"]),
+        documents=(
+            TrajectoryDocumentSnapshot(
+                trajectory_id=str(traj["trajectory_id"]),
+                path=source_traj,
+                json_bytes=json.dumps(traj).encode(),
+            ),
+        ),
+    )
+    result = _run_eval(multi_stack_target, session_id, run_dir, snapshot)
     assert result is not None
     assert eval_path.is_file()
 
@@ -408,7 +465,12 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
     )
     assert exit_code == 0
     assert not dump_dir.exists()
@@ -514,7 +576,11 @@ class _FixEditingBackend:
             yield ResultEvent(
                 structured_output={
                     "verdicts": [
-                        {"issue_id": issue_id, "verdict": "resolved", "reason": "complete"}
+                        {
+                            "issue_id": issue_id,
+                            "verdict": "resolved",
+                            "reason": "complete",
+                        }
                         for issue_id in ids
                     ]
                 },
@@ -610,7 +676,9 @@ def test_capture_recommended_patch_clean_tree_uses_head_base(tmp_path: Path) -> 
     assert "+y = 2" in out.read_text()
 
 
-def test_capture_recommended_patch_excludes_only_preexisting_untracked_files(tmp_path: Path) -> None:
+def test_capture_recommended_patch_excludes_only_preexisting_untracked_files(
+    tmp_path: Path,
+) -> None:
     """R1-R4: a pre-existing untracked file (in preexisting_untracked) contributes
     no creation hunk; a fix-created untracked file still does; tracked edits
     serialize as today; omitting the snapshot keeps pre-existing files."""
@@ -644,7 +712,9 @@ def test_capture_recommended_patch_none_base_writes_nothing(tmp_path: Path) -> N
     assert not out.exists()
 
 
-def test_capture_recommended_patch_no_change_writes_empty_marker(tmp_path: Path) -> None:
+def test_capture_recommended_patch_no_change_writes_empty_marker(
+    tmp_path: Path,
+) -> None:
     """When nothing changed (no fix landed) an EMPTY recommended.patch marker is
     written so the run is distinguishable from a legacy archive (which has no
     recommended.patch at all). This prevents _read_recommended_patch from
@@ -713,7 +783,9 @@ def test_fix_applied_signal_falls_back_to_diff_patch(tmp_path: Path) -> None:
     assert sig.hunks_total == 1
 
 
-def test_fix_applied_signal_new_archive_no_recommendation_skips_fallback(tmp_path: Path) -> None:
+def test_fix_applied_signal_new_archive_no_recommendation_skips_fallback(
+    tmp_path: Path,
+) -> None:
     """A new-format archive (manifest ``recommended_patch_supported=True``) with
     no ``recommended.patch`` made NO recommendation (review-only / all-declined /
     wash). The cascade must score zero hunks and NOT fall back to ``diff.patch``
@@ -811,7 +883,12 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     stub.merge_items = [anchored, mis_anchored]
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
     )
     assert exit_code == 0
 
@@ -976,9 +1053,7 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     ) == 0
 
     run_dir = _only_archived_run(archive_dir)
-    child = json.loads(
-        (run_dir / "trajectories" / "deep-python.json").read_text(encoding="utf-8")
-    )
+    child = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     child_calls = [
         call
@@ -1050,13 +1125,8 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
     ) == 0
 
     run_dir = _only_archived_run(archive_dir)
-    child = json.loads(
-        (run_dir / "trajectories" / "deep-python.json").read_text(encoding="utf-8")
-    )
-    assert all(
-        not step.get("extra", {}).get("backend_diagnostics")
-        for step in child["steps"]
-    )
+    child = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
+    assert all(not step.get("extra", {}).get("backend_diagnostics") for step in child["steps"])
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     training = next(
         row
@@ -1096,12 +1166,22 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
                     "id": "malformed-mcp", "type": "mcp_tool_call",
                     "tool": {"unexpected": "name-shape"}, "arguments": {"path": "api.py"},
                 }
-                process = make_mock_process([
-                    json.dumps({"type": "item.started", "item": item}),
-                    json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
-                    json.dumps({"type": "turn.completed", "usage": {}}),
-                ])
-                with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+                process = make_mock_process(
+                    [
+                        json.dumps({"type": "item.started", "item": item}),
+                        json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {**item, "result": {"content": []}},
+                            }
+                        ),
+                        json.dumps({"type": "turn.completed", "usage": {}}),
+                    ]
+                )
+                with patch(
+                    "daydream.backends._transport.asyncio.create_subprocess_exec",
+                    return_value=process,
+                ):
                     async for event in CodexBackend(model="fixture-model").execute(cwd, prompt):
                         if isinstance(event, (ToolStartEvent, ToolResultEvent, DiagnosticEvent)):
                             yield event
@@ -1120,9 +1200,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
         log_mode=True,
     )) == 0
 
-    child = json.loads(
-        (_only_archived_run(archive_dir) / "trajectories" / "deep-python.json").read_text()
-    )
+    child = json.loads(_deep_python_trajectory(_only_archived_run(archive_dir)).read_text())
     calls = [call for step in child["steps"] for call in (step.get("tool_calls") or [])]
     assert [(call["tool_call_id"], call["function_name"]) for call in calls] == [("malformed-mcp", "unknown")]
     diagnostics = [
