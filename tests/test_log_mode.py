@@ -235,20 +235,6 @@ def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
     assert key == "command", "both surfaces must key Bash from command-first _PRIMARY_TOOL_ARG"
 
 
-def test_log_summary_prefers_shell_display_command_without_mutating_replay() -> None:
-    from daydream.agent import _summarize_input
-    from daydream.ui.tools import _primary_tool_value
-
-    args: dict[str, object] = {
-        "command": "cd /replay/root && git diff --stat",
-        "display_command": "git diff --stat",
-    }
-
-    assert _summarize_input(args, "shell") == "git diff --stat"
-    assert _primary_tool_value("shell", args) == ("git diff --stat", "display_command")
-    assert args["command"] == "cd /replay/root && git diff --stat"
-
-
 def test_log_summary_task_tools_not_subject_to_bash_primary_table() -> None:
     """The (command, description) preference is Bash-only in the --log summary.
 

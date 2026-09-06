@@ -48,7 +48,6 @@ from daydream.backends._transport import (
 )
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
-_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _DIAGNOSTIC_LABEL_MAX_CHARS = 64
 _DIAGNOSTIC_LABEL_MAX_DISTINCT = 32
@@ -306,25 +305,67 @@ def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
     return prompt
 
 
-def _decode_shell_command(command: str) -> tuple[str, bool]:
-    """Decode an exact Codex ``/bin/{zsh,bash,sh} -lc ARG`` wrapper.
+_SHELL_LC_PREFIX_RE = re.compile(r"^/bin/(?:zsh|bash|sh)\s+-lc\s+")
 
-    The decoded value is the shell's third argv and is therefore replayable.
-    Unrecognized or malformed strings are returned codepoint-for-codepoint
-    unchanged so parser failure cannot manufacture a plausible command.
+
+def _unwrap_shell_command(command: str) -> str:
+    """Decode the replayable ``-lc`` payload from a Codex shell command wrapper.
+
+    Codex wraps command_execution commands as ``/bin/{zsh,bash,sh} -lc <payload>``,
+    where the payload is shell-quoted (single-quoted, double-quoted, or bare) and
+    may itself contain nested quotes, ``$`` substitutions, or newlines. Decode via
+    :func:`shlex.split` so the stored command is byte-identical to what actually
+    executed — replayable verbatim, including any leading ``cd`` prefix.
+
+    Decoding happens only when the wrapper shape is recognized: non-empty argv,
+    ``argv[0]`` in {"/bin/zsh", "/bin/bash", "/bin/sh"}, ``argv[1] == "-lc"``.
+    An exactly one-argument payload returns ``argv[2]`` verbatim — no stripping,
+    no quote reprocessing, no cd removal. Real Codex also sends bare multi-word
+    payloads without quotes ('/bin/zsh -lc make test'): the payload argument then
+    splits into several argv tokens, and the raw command bytes after the ``-lc``
+    prefix are returned verbatim so embedded quoting survives.
+
+    Fails open: any other shape (non-wrapper, a shell-quoted payload followed by
+    trailing argv, missing ``-lc`` argument) or a :class:`ValueError` from
+    unbalanced quoting returns the input unchanged, byte-for-byte.
     """
     try:
-        argv = shlex.split(command, posix=True)
+        argv = shlex.split(command)
     except ValueError:
-        return command, False
-    if len(argv) != 3 or argv[0] not in {"/bin/zsh", "/bin/bash", "/bin/sh"} or argv[1] != "-lc":
-        return command, False
-    return argv[2], True
+        return command
+    if len(argv) >= 2 and argv[0] in ("/bin/zsh", "/bin/bash", "/bin/sh") and argv[1] == "-lc":
+        if len(argv) == 3:
+            return argv[2]
+        # More than one word after '-lc': a shell-quoted payload with trailing
+        # argv is not a valid wrapper (fail open), but a bare, unquoted payload
+        # is the real-Codex shape for simple commands ('/bin/zsh -lc ls -la').
+        # Recover it from the raw command so embedded quoting is preserved.
+        wrapper = _SHELL_LC_PREFIX_RE.match(command)
+        if wrapper is not None:
+            payload = command[wrapper.end() :]
+            if payload and payload[0] not in ("'", '"'):
+                return payload
+    return command
 
 
-def _display_shell_command(command: str) -> str:
-    """Shorten a decoded command for display without changing replay data."""
-    return _CD_PREFIX_RE.sub("", command).strip()
+_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
+
+
+def display_shell_command(command: str) -> str:
+    """Decode a Codex shell wrapper AND strip the leading ``cd`` prefix, for display.
+
+    This reproduces the pre-#1124 friendly rendering: the same ``shlex`` decode
+    as :func:`_unwrap_shell_command`, then removal of a leading ``cd <dir> &&``
+    prefix from the decoded value. The result is purely presentational — the
+    value stored in ``ToolStartEvent.input["command"]`` must come from
+    :func:`_unwrap_shell_command` so it stays replayable, cd prefix retained.
+
+    Fails open exactly like the decode step: unparseable input passes through
+    unchanged and the cd regex simply does not match, returning the input
+    byte-for-byte.
+    """
+    decoded = _unwrap_shell_command(command)
+    return _CD_PREFIX_RE.sub("", decoded, count=1)
 
 
 def _bounded_diagnostic_label(value: Any) -> str:
@@ -787,16 +828,10 @@ class CodexBackend:
                             raw_cmd = ""
                             for diagnostic in _take_early_diagnostics():
                                 yield diagnostic
-                        replay_command, recognized = _decode_shell_command(raw_cmd)
-                        shell_input = {"command": replay_command}
-                        if recognized:
-                            display_command = _display_shell_command(replay_command)
-                            if display_command != replay_command:
-                                shell_input["display_command"] = display_command
                         yield ToolStartEvent(
                             id=item_id,
                             name="shell",
-                            input=shell_input,
+                            input={"command": _unwrap_shell_command(raw_cmd)},
                         )
                     elif item_type == "mcp_tool_call":
                         item_id = item.get("id")
