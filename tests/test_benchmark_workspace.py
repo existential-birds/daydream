@@ -636,6 +636,37 @@ def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path
     assert validate_workspace(root) == (0, "ready")
 
 
+@pytest.mark.parametrize("tamper", ["base", "source", "source_file", "inventory"])
+def test_portable_validation_binds_case_to_checksummed_import(
+    tmp_path: Path, tamper: str
+) -> None:
+    """A cleaned workspace still binds copied case metadata to its import."""
+    import shutil
+
+    import yaml
+
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    shutil.rmtree(root / "cache" / "repository.git")
+    case_path = next((root / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    if tamper == "base":
+        raw["pull_request"]["base"]["sha"] = "f" * 40
+        raw["snapshot"]["requested_base_sha"] = "f" * 40
+    elif tamper == "source":
+        raw["source"]["import_sha256"] = "f" * 64
+    elif tamper == "source_file":
+        raw["source"]["import_file"] = "imports/other.json"
+    else:
+        raw["pull_request"]["changed_files"] = []
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    code, label = validate_workspace(root)
+    assert code == 1
+    assert "import provenance" in label
+
+
 def test_base_drift_case_is_rejected_before_compile_stage_mutation(tmp_path: Path) -> None:
     """The existing curation gate rejects typed drift before Harbor staging."""
     from daydream.benchmark.harbor import build

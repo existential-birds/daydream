@@ -145,6 +145,9 @@ def test_fetch_changed_files_persists_complete_rename_union(
         (3001, []),
         (1, [{"status": "renamed", "filename": "new.py"}]),
         (1, [{"status": "modified", "filename": "new.py", "previous_filename": "old.py"}]),
+        (1, [{"filename": "a.py"}]),
+        (1, [{"status": "invented", "filename": "a.py"}]),
+        (1, [{"status": 17, "filename": "a.py"}]),
         (2, [
             {"status": "modified", "filename": "a.py"},
             {"status": "modified", "filename": "a.py"},
@@ -1439,7 +1442,7 @@ def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path
 
 
 def test_refresh_demotes_clean_draft_when_historical_head_leaves_pr_scope(
-    tmp_path: Path, fake_gh: FakeGh
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The real import boundary applies final-inventory scope to retained heads."""
     import yaml
@@ -1459,6 +1462,8 @@ def test_refresh_demotes_clean_draft_when_historical_head_leaves_pr_scope(
     explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
     explicit = load_yaml_strict(explicit_path)
     assert explicit["snapshot"]["status"] == "ready"
+    prior_bundle = ws / explicit["snapshot"]["bundle_file"]
+    assert prior_bundle.exists()
     explicit["curation"].update(
         state="draft",
         snapshot_attested=True,
@@ -1495,6 +1500,71 @@ def test_refresh_demotes_clean_draft_when_historical_head_leaves_pr_scope(
 
     final = load_yaml_strict(ws / f"cases/pr-000101-{final_sha[:12]}.yaml")
     assert final["snapshot"]["status"] == "ready"
+    assert not prior_bundle.exists()
+
+    from daydream import cli as top_cli
+    from daydream.benchmark.workspace import validate_workspace
+
+    assert validate_workspace(ws) == (
+        2,
+        "incomplete: workspace state curating; unreplayable snapshot reasons: base_drift",
+    )
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as status_exit:
+        top_cli.main(["benchmark", "status", str(ws)])
+    assert status_exit.value.code == 0
+    assert "snapshot unreplayable (base_drift)" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as validate_exit:
+        top_cli.main(["benchmark", "validate", str(ws)])
+    assert validate_exit.value.code == 2
+    assert "unreplayable snapshot reasons: base_drift" in capsys.readouterr().out
+
+
+def test_bundle_retirement_preserves_a_ready_shared_reference(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """A transitioned case cannot retire a bundle another ready case retains."""
+    import copy
+
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.schema import case_id_for
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_tip, explicit_sha, _final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+    manifest = load_yaml_strict(ws / "benchmark.yaml")
+    explicit_id = case_id_for(101, explicit_sha)
+    explicit_path = ws / f"cases/{explicit_id}.yaml"
+    explicit = load_yaml_strict(explicit_path)
+
+    alias_head = "e" * 40
+    alias_id = case_id_for(101, alias_head)
+    alias = copy.deepcopy(explicit)
+    alias["case_id"] = alias_id
+    alias["snapshot"]["original_head_sha"] = alias_head
+    alias["snapshot"]["requested_head"] = alias_head
+    alias_path = ws / f"cases/{alias_id}.yaml"
+    alias_path.write_text(yaml.safe_dump(alias, sort_keys=False))
+    manifest["cases"].append(
+        {"case_id": alias_id, "pr_number": 101, "case_file": f"cases/{alias_id}.yaml"}
+    )
+
+    transitioned = copy.deepcopy(explicit)
+    transitioned["snapshot"]["status"] = "unreplayable"
+    assert gi._retired_snapshot_bundles(
+        ws,
+        manifest,
+        101,
+        [(explicit_id, f"cases/{explicit_id}.yaml", transitioned)],
+    ) == []
 
 
 def test_inventory_only_refresh_preserves_gold_when_snapshot_remains_in_scope(

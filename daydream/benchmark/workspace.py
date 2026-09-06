@@ -604,7 +604,8 @@ def _verify_cross_document(
 
     Each ``cases[]`` row must reference exactly ``cases/<case_id>.yaml`` and
     agree with its case document's ``pull_request.number``, and its PR must be
-    present in the ``pull_requests[]`` ledger. Every case_id a ledger entry
+    a fetched ledger entry whose import path/digest and immutable PR metadata
+    exactly match the case's source block and copied PR block. Every case_id a ledger entry
     claims must be backed by an indexed ``cases[]`` row naming the same PR —
     the reverse (every indexed case covered by ``case_ids``) is not required,
     because a fetched->fetched narrower re-import (shrink) rewrites the
@@ -632,6 +633,26 @@ def _verify_cross_document(
             raise WorkspaceCorrupt(
                 f"{root}: case {case.case_id} PR {case.pr_number} is absent from "
                 f"the pull_requests ledger"
+            )
+        entry = ledger[case.pr_number]
+        if (
+            entry.import_state != "fetched"
+            or entry.import_file is None
+            or entry.import_sha256 is None
+            or doc.source.import_file != entry.import_file
+            or doc.source.import_sha256 != entry.import_sha256
+        ):
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} import provenance mismatches its ledger entry"
+            )
+        imp = (
+            imports[entry.import_file]
+            if imports is not None and entry.import_file in imports
+            else _load_import_document(root, entry.import_file)
+        )
+        if doc.pull_request != imp.pull_request:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} import provenance PR metadata mismatch"
             )
     indexed_cases = {case.case_id: case for case in manifest.cases}
     for pr in manifest.pull_requests:

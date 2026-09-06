@@ -1767,6 +1767,91 @@ def _case_materialize(
     return out, bundle_drops
 
 
+def _retired_snapshot_bundles(
+    root: Path,
+    manifest: dict[str, Any],
+    number: int,
+    new_cases: list[tuple[str, str, dict[str, Any]]],
+) -> list[tuple[str, str]]:
+    """Return unshared prior ready bundles retired by this case rewrite.
+
+    Only a case that changes from a prior ``ready`` snapshot to a non-ready
+    snapshot contributes a candidate. A bundle still referenced by any ready
+    case in the post-transaction workspace is retained. Returned digests bind
+    :meth:`storage.Transaction.retire` to the exact prior bytes.
+    """
+    entry = _manifest_entry(manifest, number)
+    if entry is None or entry.get("import_state") != "fetched":
+        return []
+    new_by_id = {case_id: case_doc for case_id, _, case_doc in new_cases}
+    transitioned = {
+        case_id
+        for case_id, case_doc in new_by_id.items()
+        if (case_doc.get("snapshot") or {}).get("status") != "ready"
+    }
+    if not transitioned:
+        return []
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    for row in manifest.get("cases", []):
+        if isinstance(row, dict) and isinstance(row.get("case_id"), str):
+            rows_by_id[row["case_id"]] = row
+    old_docs: dict[str, schema.CaseDocument] = {}
+
+    def old_doc(case_id: str) -> schema.CaseDocument:
+        if case_id not in old_docs:
+            row = rows_by_id.get(case_id)
+            if not isinstance(row, dict) or not isinstance(row.get("case_file"), str):
+                raise storage.WorkspaceCorrupt(
+                    f"{root}: prior case {case_id} has no indexed case file"
+                )
+            raw = storage.load_yaml_strict(
+                storage.resolve_authoring_path(root, row["case_file"])
+            )
+            try:
+                old_docs[case_id] = schema.CaseDocument.model_validate(
+                    schema._schema_ready(raw)
+                )
+            except Exception as exc:
+                raise storage.WorkspaceCorrupt(
+                    f"{root}: prior case {case_id} is not a valid case document"
+                ) from exc
+        return old_docs[case_id]
+
+    candidates: dict[str, str] = {}
+    for case_id in entry.get("case_ids", []):
+        if case_id not in transitioned:
+            continue
+        prior_snapshot = old_doc(case_id).snapshot
+        if not isinstance(prior_snapshot, schema.SnapshotReady):
+            continue
+        previous = candidates.get(prior_snapshot.bundle_file)
+        if previous is not None and previous != prior_snapshot.bundle_sha256:
+            raise storage.WorkspaceCorrupt(
+                f"{root}: shared prior bundle has conflicting recorded digests"
+            )
+        candidates[prior_snapshot.bundle_file] = prior_snapshot.bundle_sha256
+
+    if not candidates:
+        return []
+    retained_refs = {
+        str((case_doc.get("snapshot") or {}).get("bundle_file"))
+        for case_doc in new_by_id.values()
+        if (case_doc.get("snapshot") or {}).get("status") == "ready"
+        and (case_doc.get("snapshot") or {}).get("bundle_file")
+    }
+    for case_id in rows_by_id:
+        if case_id in new_by_id:
+            continue
+        snapshot = old_doc(case_id).snapshot
+        if isinstance(snapshot, schema.SnapshotReady):
+            retained_refs.add(snapshot.bundle_file)
+    return sorted(
+        (bundle_file, digest)
+        for bundle_file, digest in candidates.items()
+        if bundle_file not in retained_refs
+    )
+
+
 def _ledger_replace(raw: dict[str, Any], entry: dict[str, Any]) -> None:
     """Replace (or append) one ``pull_requests[]`` entry, keeping stable order."""
     raw["pull_requests"] = [
@@ -2169,6 +2254,7 @@ def _import_one_pr(
             prior_facts=prior_facts,
             changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
+        retired_bundles = _retired_snapshot_bundles(root, raw, number, cases)
         # Re-serialize the mutated doc (authoring anchors derived on the typed
         # evidence records during materialization), recompute the fetch payload
         # digest over the same blocks, and keep every digest in lockstep.
@@ -2181,6 +2267,8 @@ def _import_one_pr(
         for _, _, case_doc in cases:
             case_doc["source"]["import_sha256"] = import_sha256
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
+            for rel, digest in retired_bundles:
+                tx.retire(rel, expected_sha256=digest)
             tx.stage(import_file, import_bytes)
             for rel, content in bundle_rels:
                 tx.stage(rel, content)
@@ -2375,6 +2463,15 @@ def fetch_and_normalize(
 
 def _normalize_changed_files(header: dict[str, Any], rows: list[Any]) -> list[str]:
     """Return a complete canonical PR path inventory or fail closed."""
+    valid_statuses = {
+        "added",
+        "removed",
+        "modified",
+        "renamed",
+        "copied",
+        "changed",
+        "unchanged",
+    }
     expected = header.get("changed_files")
     if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
         raise git_ops.GitError("PR changed_files count is missing or malformed")
@@ -2402,6 +2499,10 @@ def _normalize_changed_files(header: dict[str, Any], rows: list[Any]) -> list[st
         all_names.add(current)
 
         status = row.get("status")
+        if not isinstance(status, str) or status not in valid_statuses:
+            raise git_ops.GitError(
+                f"PR changed_files row {index} has missing or unsupported status"
+            )
         previous = row.get("previous_filename")
         if status in ("renamed", "copied") and previous is None:
             raise git_ops.GitError(
