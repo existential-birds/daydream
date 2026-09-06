@@ -3353,6 +3353,7 @@ class _AuditCommittingBackend(ImproveStubBackend):
         super().__init__(target)
         self._commit_count = 0
         self.escape_attempts = 0
+        self.local_identities: list[tuple[str, str]] = []
 
     async def execute(
         self,
@@ -3366,6 +3367,13 @@ class _AuditCommittingBackend(ImproveStubBackend):
         persist_session: Any=True,
     ) -> AsyncIterator[AgentEvent]:
         self._commit_count += 1
+        # A standalone snapshot deliberately does not inherit source-local
+        # config. This committing test actor needs its own fixture identity.
+        configure_identity(cwd)
+        self.local_identities.append((
+            git(cwd, "config", "--local", "--get", "user.name", check=False),
+            git(cwd, "config", "--local", "--get", "user.email", check=False),
+        ))
         (cwd / "model-scratch.txt").write_text(
             f"model residual {self._commit_count}\n"
         )
@@ -3398,6 +3406,8 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
     before_head = git(improve_monorepo_target, "rev-parse", "HEAD")
     before_refs = git(improve_monorepo_target, "show-ref")
     before_status = _git_status_porcelain(improve_monorepo_target)
+    source_config = improve_monorepo_target / ".git" / "config"
+    config_before = source_config.read_bytes()
 
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
@@ -3406,6 +3416,7 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
     # Every model turn also attempted the escape, so the escape-class coverage
     # is real, not vacuous; the target assertions below prove it was confined.
     assert stub.escape_attempts == len(stub.calls)
+    assert stub.local_identities == [("Tester", "test@example.com")] * len(stub.calls)
     # Every model turn ran in one standalone snapshot outside the source.
     audit_cwds = {str(call["cwd"]) for call in stub.calls}
     assert len(audit_cwds) == 1, audit_cwds
@@ -3418,6 +3429,7 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
     assert git(improve_monorepo_target, "rev-parse", "HEAD") == before_head
     assert git(improve_monorepo_target, "show-ref") == before_refs
     assert _git_status_porcelain(improve_monorepo_target) == before_status
+    assert source_config.read_bytes() == config_before
     # The standalone repository is gone (the fake committed into it, yet it was removed).
     assert not audit_repo.exists()
     worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
