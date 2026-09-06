@@ -320,6 +320,26 @@ def _unwrap_shell_command(command: str) -> str:
     return command
 
 
+_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
+
+
+def display_shell_command(command: str) -> str:
+    """Decode a Codex shell wrapper AND strip the leading ``cd`` prefix, for display.
+
+    This reproduces the pre-#1124 friendly rendering: the same ``shlex`` decode
+    as :func:`_unwrap_shell_command`, then removal of a leading ``cd <dir> &&``
+    prefix from the decoded value. The result is purely presentational — the
+    value stored in ``ToolStartEvent.input["command"]`` must come from
+    :func:`_unwrap_shell_command` so it stays replayable, cd prefix retained.
+
+    Fails open exactly like the decode step: unparseable input passes through
+    unchanged and the cd regex simply does not match, returning the input
+    byte-for-byte.
+    """
+    decoded = _unwrap_shell_command(command)
+    return _CD_PREFIX_RE.sub("", decoded, count=1)
+
+
 class CodexError(Exception):
     """Raised when a Codex turn fails or the Codex CLI subprocess exits non-zero.
 

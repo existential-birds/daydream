@@ -1454,6 +1454,31 @@ async def test_codex_preserves_exit_code_and_status_on_results() -> None:
     assert ok.status == "completed"
 
 
+class TestDisplayShellCommand:
+    """S1/M5: display variant decodes AND strips the leading cd prefix."""
+
+    def test_display_strips_cd_prefix(self) -> None:
+        from daydream.backends.codex import display_shell_command
+        assert display_shell_command('/bin/zsh -lc "cd /home/user/project && make test"') == "make test"
+
+    def test_display_decodes_nested_quotes(self) -> None:
+        from daydream.backends.codex import display_shell_command
+        cmd = "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'"
+        assert display_shell_command(cmd) == "awk '{print $1}' file.txt"
+
+    def test_display_passthrough_for_non_wrapper(self) -> None:
+        from daydream.backends.codex import display_shell_command
+        assert display_shell_command("ls -la") == "ls -la"
+        assert display_shell_command("") == ""
+
+    def test_raw_and_display_distinct_for_cd_command(self) -> None:
+        """M5: the stored value and the display value are different outputs."""
+        from daydream.backends.codex import _unwrap_shell_command, display_shell_command
+        raw = '/bin/zsh -lc "cd /app && echo hello"'
+        assert _unwrap_shell_command(raw) == "cd /app && echo hello"
+        assert display_shell_command(raw) == "echo hello"
+
+
 @pytest.fixture(autouse=True)
 def _reset_real_git_resolution() -> Iterator[Any]:
     """Clear the real-git resolver cache before AND after every test (S1 cache)."""
