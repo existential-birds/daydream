@@ -16,19 +16,26 @@ def test_protocol_observation_refuses_unknown_content_flags(backend: str) -> Non
 @pytest.mark.parametrize("shape", ["empty", "deep", "mixed"])
 def test_protocol_cwd_budget_includes_directories(tmp_path: Path, shape: str) -> None:
     cursor = tmp_path
-    for index in range(300):
-        if shape == "deep":
-            cursor /= "d"
-            cursor.mkdir()
-        elif shape == "mixed" and index % 2:
-            (tmp_path / f"file-{index}").write_bytes(b"SOURCE_CANARY")
-        else:
-            (tmp_path / f"dir-{index}").mkdir()
+    deep_directories: list[Path] = []
+    try:
+        for index in range(300):
+            if shape == "deep":
+                cursor /= "d"
+                cursor.mkdir()
+                deep_directories.append(cursor)
+            elif shape == "mixed" and index % 2:
+                (tmp_path / f"file-{index}").write_bytes(b"SOURCE_CANARY")
+            else:
+                (tmp_path / f"dir-{index}").mkdir()
 
-    observed = _cwd_observation(tmp_path)
+        observed = _cwd_observation(tmp_path)
 
-    assert observed["walk_truncated"] is True
-    assert len(observed["cwd_entries"]) == 256
+        assert observed["walk_truncated"] is True
+        assert len(observed["cwd_entries"]) == 256
+    finally:
+        # pytest's recursive temp cleanup can exceed its recursion budget here.
+        for directory in reversed(deep_directories):
+            directory.rmdir()
 
 
 def test_protocol_cwd_observation_does_not_follow_directory_or_file_symlinks(tmp_path: Path) -> None:
