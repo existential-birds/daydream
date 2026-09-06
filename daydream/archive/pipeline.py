@@ -161,6 +161,16 @@ def _repository(value: object) -> str | None:
     return normalized if text == normalized else None
 
 
+def _configured_repository(value: object) -> str | None:
+    """Validate and case-fold one operator-supplied repository slug."""
+    text = _bounded_text(value)
+    if text is None or _REPOSITORY_RE.fullmatch(text) is None:
+        return None
+    if any(piece in {".", ".."} for piece in text.split("/")):
+        return None
+    return text.lower()
+
+
 def _sha(value: object) -> str | None:
     if isinstance(value, str) and _SHA_RE.fullmatch(value) is not None:
         return value
@@ -517,7 +527,7 @@ def _remote_identity_matches(
     )
     if not identities_match:
         return False
-    if pr_repo is not None and _repository(pr_repo) != target_base:
+    if pr_repo is not None and _configured_repository(pr_repo) != target_base:
         return False
     return pr_number is None or pr_number == target_number
 

@@ -77,7 +77,9 @@ def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
 def _flow_push_remote_steps(
     flow: DaydreamRunFlow, flow_name: str | None
 ) -> tuple[bool, bool]:
-    """Return exact commit/push and remote-CI capabilities from the registry."""
+    """Return exact commit/push and remote-CI capabilities for this run."""
+    if flow in {DaydreamRunFlow.TTT, DaydreamRunFlow.PR}:
+        return False, False
     steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
     return ("commit" in steps, "remote-ci" in steps)
 

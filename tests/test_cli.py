@@ -415,7 +415,7 @@ def test_phase_subtitles_include_wonder() -> None:
     ("remote_outcome", "expected_code"),
     [("no_ci", 0), ("failed", 1)],
 )
-def test_explicit_review_argv_no_ci_uses_target_and_exits_zero(
+def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     install_backend: Any,

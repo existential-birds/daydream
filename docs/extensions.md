@@ -315,10 +315,10 @@ follow the same convention: pick globally unique step names, and use
 | 14 | `fix-gate` | `fix-gate` |
 | 15 | `verify` | `verify` |
 | 16 | `fix` | `fix` |
-| 17 | `fix-verify` | `verify` |
+| 17 | `fix-verify` | `fix-verify` |
 | 18 | `test` | `test` |
 | 19 | `commit` | `fix` |
-| 20 | `remote-ci` | `fix` |
+| 20 | `remote-ci` | `remote-ci` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble. `review` / `comment` run the review spine and stop after `post-review`;

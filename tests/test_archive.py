@@ -2749,6 +2749,56 @@ def test_remote_success_must_match_configured_pr(
     ] == "partial"
 
 
+def test_remote_success_accepts_case_insensitive_configured_pr(tmp_path: Path) -> None:
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path)
+
+    assert _p08_states(
+        tmp_path,
+        pr_repo="ExAmPlE/PrOjEcT",
+        pr_number=42,
+    )["remote_ci"]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "path"),
+    [
+        ("push-verdict.json", ("pushed_repository",)),
+        ("remote-ci-verdict.json", ("target", "base_repository")),
+        ("remote-ci-verdict.json", ("target", "head_repository")),
+        ("remote-ci-verdict.json", ("binding", "base_repository")),
+        ("remote-ci-verdict.json", ("binding", "head_repository")),
+    ],
+)
+def test_persisted_repository_identities_remain_canonical_lowercase(
+    tmp_path: Path,
+    artifact_name: str,
+    path: tuple[str, ...],
+) -> None:
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path)
+    artifact = tmp_path / ".daydream" / "deep" / artifact_name
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    cursor = payload
+    for key in path[:-1]:
+        cursor = cursor[key]
+    value = cursor[path[-1]]
+    assert isinstance(value, str)
+    cursor[path[-1]] = value.upper()
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+    states = _p08_states(
+        tmp_path,
+        pr_repo="ExAmPlE/PrOjEcT",
+        pr_number=42,
+    )
+    if artifact_name == "push-verdict.json":
+        assert states["push"]["status"] == "partial"
+        assert states["remote_ci"] == {"ran": False, "status": "absent"}
+    else:
+        assert states["remote_ci"]["status"] == "partial"
+
+
 def test_push_failure_is_failed_and_no_receipt_fabricates_no_remote(tmp_path: Path) -> None:
     from daydream.archive import pipeline
 
@@ -3154,7 +3204,7 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
     config = make_config(
         tmp_path,
         archive=False,
-        pr_repo="example/project",
+        pr_repo="ExAmPlE/PrOjEcT",
         pr_number=42,
     )
     _write_deep(
@@ -3184,6 +3234,56 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
     assert manifest["phase_states"]["push"]["status"] == "succeeded"
     assert manifest["phase_states"]["remote_ci"]["status"] == expected_status
     assert manifest["pipeline_status"] == expected_status
+
+
+@pytest.mark.parametrize(
+    ("flow", "expected_pipeline"),
+    [
+        (DaydreamRunFlow.TTT, "succeeded"),
+        (DaydreamRunFlow.PR, "partial"),
+    ],
+)
+def test_nonpublishing_runtime_flows_ignore_matching_push_and_remote_artifacts(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+    flow: DaydreamRunFlow,
+    expected_pipeline: str,
+) -> None:
+    from daydream.archive import _archive_run_inner, _flow_push_remote_steps
+    from tests.harness.trajectory import make_recorder
+
+    assert _flow_push_remote_steps(flow, None) == (False, False)
+    recorder = make_recorder(tmp_path, run_flow=flow)
+    config = make_config(
+        tmp_path,
+        archive=False,
+        pr_repo="example/project",
+        pr_number=42,
+    )
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_push_verdict(tmp_path, session_id=recorder.session_id)
+    _write_remote_verdict(tmp_path, session_id=recorder.session_id)
+
+    _archive_run_inner(
+        recorder=recorder,
+        target_dir=tmp_path,
+        config=config,
+        status="complete",
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / recorder.session_id / "manifest.json").read_text()
+    )
+    assert manifest["phase_states"]["push"] == {"ran": False, "status": "absent"}
+    assert manifest["phase_states"]["remote_ci"] == {
+        "ran": False,
+        "status": "absent",
+    }
+    assert manifest["pipeline_status"] == expected_pipeline
 
 
 def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path: Path) -> None:

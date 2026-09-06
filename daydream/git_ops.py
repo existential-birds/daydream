@@ -32,7 +32,8 @@ Error-handling patterns:
     Each function's docstring specifies which pattern it follows under its
     **Raises** or **Returns** section.
 
-The module is intentionally dependency-free: stdlib only.
+Apart from the shared bounded subprocess-termination helper, this module uses
+only the standard library.
 """
 
 from __future__ import annotations

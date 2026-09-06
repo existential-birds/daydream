@@ -1501,4 +1501,3 @@ async def test_later_real_request_timeout_at_discovery_uses_trusted_empty_snapsh
     assert [item.status for item in emitted] == ["pending", "pending", "no_ci"]
     assert fetcher.calls == 3
     assert len(fake_gh.process_calls()) == 1
-    GitHubRemoteCIFetcher,
