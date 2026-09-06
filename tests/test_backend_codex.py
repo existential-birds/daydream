@@ -43,6 +43,40 @@ from tests.harness.git_helpers import git as _git
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
 
+@pytest.mark.asyncio
+async def test_artifact_visibility_protocol_cli_consumes_stdin_and_honors_cd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    import os
+
+    from tests.harness.protocol_cli import install_protocol_cli
+
+    target = (tmp_path / "model cwd with spaces").resolve()
+    target.mkdir()
+    (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
+    fixture = install_protocol_cli(tmp_path / "external fixture", "codex")
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    prompt = "Inspect the committed source only."
+    backend = CodexBackend(model="fixture-model")
+
+    events = [event async for event in backend.execute(target, prompt)]
+
+    observation = fixture.read_observations()[0]
+    assert observation["effective_cwd"] == str(target)
+    assert observation["stdin_bytes"] == len(prompt.encode())
+    assert observation["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert observation["cwd_canaries"]["SOURCE_CANARY"] is True
+    assert observation["walk_truncated"] is False
+    argv = observation["argv"]
+    assert argv[:2] == ["exec", "--experimental-json"]
+    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+    assert argv[argv.index("--cd") + 1] == str(target)
+    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
+    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
+    assert backend._transports == []
+
+
 async def _run_fixture(backend: Any, prompt: Any, fixture: Any, **kwargs: Any) -> Any:
     """Drive ``execute`` over a canned fixture and collect the event list."""
     mock_proc = make_mock_process_from_fixture(fixture)

@@ -58,6 +58,58 @@ MakeConfig = Callable[..., "RunConfig"]
 Mute = Callable[..., None]
 
 
+@pytest.mark.asyncio
+async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+
+    from tests.harness.protocol_cli import install_protocol_cli
+
+    target = (tmp_path / "model cwd with spaces").resolve()
+    target.mkdir()
+    (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
+    fixture = install_protocol_cli(tmp_path / "external fixture", "pi")
+    settings = tmp_path / "empty pi settings"
+    settings.mkdir()
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(settings))
+    monkeypatch.setenv("PI_PROVIDER", "nous")
+    for name in ("PI_THINKING", "PI_API_KEY", "NOUS_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    prompt = "Inspect the committed source only."
+    backend = PiBackend(model="fixture-model")
+
+    events = [event async for event in backend.execute(target, prompt)]
+
+    observation = fixture.read_observations()[0]
+    assert observation["effective_cwd"] == str(target)
+    assert observation["inherited_cwd"] == str(target)
+    assert observation["stdin_bytes"] == 0
+    assert observation["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert observation["cwd_canaries"]["SOURCE_CANARY"] is True
+    assert observation["walk_truncated"] is False
+    argv = observation["argv"]
+    assert argv[argv.index("--mode") + 1] == "json"
+    assert argv[argv.index("--provider") + 1] == "nous"
+    assert argv[argv.index("--model") + 1] == "fixture-model"
+    assert "--append-system-prompt" in argv and "--no-skills" in argv
+    from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
+
+    observation_bytes = next(fixture.observations.glob("*.json")).read_bytes()
+    assert prompt.encode() not in observation_bytes
+    system_content_recorded = json.dumps(_PI_SYSTEM_PREAMBLE).encode() in observation_bytes
+    assert system_content_recorded is False
+    assert argv[argv.index("--append-system-prompt") + 1] == "[content omitted]"
+    assert observation["content_arguments"]["--append-system-prompt"] == [{
+        "bytes": len(_PI_SYSTEM_PREAMBLE.encode()),
+        "sha256": hashlib.sha256(_PI_SYSTEM_PREAMBLE.encode()).hexdigest(),
+    }]
+    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
+    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
+    assert backend._transports == []
+
+
 async def _run_and_capture_args(
     backend: Any,
     prompt: Any="p",
