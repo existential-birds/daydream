@@ -428,6 +428,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     from daydream import cli
     from tests.test_integration import (
         _FULL_FLOW_ISSUE,
+        _finish_remote_ci_fake,
         _remote_ci_push_project,
         _seed_remote_ci_pr,
         _start_remote_ci_fake_after_push,
@@ -442,7 +443,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
         text=True,
         check=True,
     ).stdout.strip())
-    seed_thread, seed_errors = _start_remote_ci_fake_after_push(
+    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome=remote_outcome
     )
     from daydream import remote_ci
@@ -462,23 +463,22 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
 
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main(
-            [
-                "review",
-                str(project),
-                "--stack",
-                "python",
-                "--shallow",
-                "--yes",
-                "--test-command",
-                "true",
-            ]
-        )
-
-    seed_thread.join(timeout=1)
-    assert not seed_thread.is_alive()
-    assert seed_errors == []
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main(
+                [
+                    "review",
+                    str(project),
+                    "--stack",
+                    "python",
+                    "--shallow",
+                    "--yes",
+                    "--test-command",
+                    "true",
+                ]
+            )
+    finally:
+        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
 
     assert exc_info.value.code == expected_code
     assert hook_marker.read_text() == "ran\n"

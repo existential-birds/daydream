@@ -2590,7 +2590,7 @@ def _write_remote_verdict(
     )
 
 
-def _p08_states(
+def _derive_push_remote_states(
     target: Path,
     *,
     session_id: str = "current",
@@ -2624,7 +2624,7 @@ def test_current_session_test_push_and_remote_success_are_distinct(
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status=remote_status)
 
-    states = _p08_states(tmp_path)
+    states = _derive_push_remote_states(tmp_path)
 
     assert states["test"] == {"ran": True, "status": "succeeded"}
     assert states["push"]["status"] == "succeeded"
@@ -2646,7 +2646,7 @@ def test_current_session_remote_required_failure_fails_pipeline(tmp_path: Path) 
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status="failed")
 
-    states = _p08_states(tmp_path)
+    states = _derive_push_remote_states(tmp_path)
 
     assert states["remote_ci"]["status"] == "failed"
     assert pipeline.derive_pipeline_status(
@@ -2659,7 +2659,7 @@ def test_archive_cancellation_precedes_remote_failure(tmp_path: Path) -> None:
 
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status="failed")
-    states = _p08_states(tmp_path)
+    states = _derive_push_remote_states(tmp_path)
 
     assert pipeline.derive_pipeline_status(
         "partial", None, states, runs_push=True, runs_remote_ci=True
@@ -2676,7 +2676,7 @@ def test_incomplete_remote_statuses_are_partial(tmp_path: Path, remote_status: s
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, status=remote_status)
 
-    states = _p08_states(tmp_path)
+    states = _derive_push_remote_states(tmp_path)
 
     assert states["remote_ci"]["status"] == "partial"
     assert pipeline.derive_pipeline_status(
@@ -2720,7 +2720,7 @@ def test_remote_success_identity_mismatch_is_partial(
     cursor[path[-1]] = value
     artifact.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 
 def test_remote_archive_state_field_is_not_outcome_authority(tmp_path: Path) -> None:
@@ -2731,7 +2731,7 @@ def test_remote_archive_state_field_is_not_outcome_authority(tmp_path: Path) -> 
     payload["archive_state"] = "failed"
     artifact.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert _p08_states(tmp_path)["remote_ci"]["status"] == "succeeded"
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "succeeded"
 
 
 @pytest.mark.parametrize(
@@ -2744,7 +2744,7 @@ def test_remote_success_must_match_configured_pr(
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path)
 
-    assert _p08_states(tmp_path, pr_repo=repo, pr_number=number)["remote_ci"][
+    assert _derive_push_remote_states(tmp_path, pr_repo=repo, pr_number=number)["remote_ci"][
         "status"
     ] == "partial"
 
@@ -2753,7 +2753,7 @@ def test_remote_success_accepts_case_insensitive_configured_pr(tmp_path: Path) -
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path)
 
-    assert _p08_states(
+    assert _derive_push_remote_states(
         tmp_path,
         pr_repo="ExAmPlE/PrOjEcT",
         pr_number=42,
@@ -2787,7 +2787,7 @@ def test_persisted_repository_identities_remain_canonical_lowercase(
     cursor[path[-1]] = value.upper()
     artifact.write_text(json.dumps(payload), encoding="utf-8")
 
-    states = _p08_states(
+    states = _derive_push_remote_states(
         tmp_path,
         pr_repo="ExAmPlE/PrOjEcT",
         pr_number=42,
@@ -2804,7 +2804,7 @@ def test_push_failure_is_failed_and_no_receipt_fabricates_no_remote(tmp_path: Pa
 
     events = [_phase_event(DaydreamPhase.PUSH)]
     _write_push_verdict(tmp_path, status="failed")
-    states = _p08_states(tmp_path, events=events)
+    states = _derive_push_remote_states(tmp_path, events=events)
     assert states["push"]["status"] == "failed"
     assert states["remote_ci"] == {"ran": False, "status": "absent"}
     assert pipeline.derive_pipeline_status(
@@ -2812,7 +2812,7 @@ def test_push_failure_is_failed_and_no_receipt_fabricates_no_remote(tmp_path: Pa
     ) == "failed"
 
     (tmp_path / ".daydream" / "deep" / "push-verdict.json").unlink()
-    states = _p08_states(tmp_path, events=[])
+    states = _derive_push_remote_states(tmp_path, events=[])
     assert states["push"] == {"ran": False, "status": "absent"}
     assert states["remote_ci"] == {"ran": False, "status": "absent"}
 
@@ -2821,7 +2821,7 @@ def test_successful_push_without_current_remote_terminal_is_partial(tmp_path: Pa
     from daydream.archive import pipeline
 
     _write_push_verdict(tmp_path)
-    states = _p08_states(tmp_path)
+    states = _derive_push_remote_states(tmp_path)
 
     assert states["remote_ci"] == {"ran": True, "status": "partial"}
     assert pipeline.derive_pipeline_status(
@@ -2835,7 +2835,7 @@ def test_phase_start_without_terminal_artifact_is_partial(tmp_path: Path) -> Non
         _phase_event(DaydreamPhase.REMOTE_CI),
     ]
 
-    states = _p08_states(tmp_path, events=events)
+    states = _derive_push_remote_states(tmp_path, events=events)
 
     assert states["push"] == {"ran": True, "status": "partial"}
     assert states["remote_ci"] == {"ran": True, "status": "partial"}
@@ -2854,7 +2854,7 @@ def test_remote_advisory_failure_is_detail_not_hard_failure(tmp_path: Path) -> N
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path, advisory=(advisory,))
 
-    remote = _p08_states(tmp_path)["remote_ci"]
+    remote = _derive_push_remote_states(tmp_path)["remote_ci"]
 
     assert remote["status"] == "succeeded"
     assert remote["details"]["advisory_failures"] == ["Optional Linux"]
@@ -2957,7 +2957,7 @@ def test_archive_no_policy_pending_observation_cannot_be_passed(tmp_path: Path) 
     payload["required_observations"] = []
     artifact.write_text(json.dumps(payload))
 
-    assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 
 @pytest.mark.parametrize(
@@ -3013,7 +3013,7 @@ def test_archive_rejects_contradictory_terminal_ci_evidence(
         payload["failing_contexts"] = ["Other (app 10)"]
     artifact.write_text(json.dumps(payload))
 
-    assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 
 @pytest.mark.parametrize("discovery_seconds", [120.0, 0.5])
@@ -3054,7 +3054,7 @@ def test_archive_no_ci_retains_empty_strict_policy(
         limits=limits,
     )
 
-    assert _p08_states(tmp_path)["remote_ci"]["status"] == "succeeded"
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "succeeded"
 
 
 @pytest.mark.parametrize(
@@ -3077,7 +3077,7 @@ def test_archive_terminal_ci_requires_declared_discovery_and_stability(
     payload["polling"][field] = value
     artifact.write_text(json.dumps(payload))
 
-    assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 
 def test_archive_unpinned_legacy_status_uses_casefolded_context(tmp_path: Path) -> None:
@@ -3091,7 +3091,7 @@ def test_archive_unpinned_legacy_status_uses_casefolded_context(tmp_path: Path) 
     )
     artifact.write_text(json.dumps(payload))
 
-    assert _p08_states(tmp_path)["remote_ci"]["status"] == "succeeded"
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "succeeded"
 
 
 @pytest.mark.parametrize(
@@ -3120,7 +3120,7 @@ def test_archive_malformed_current_ci_fields_fail_closed(
     cursor[field_path[-1]] = value
     artifact.write_text(json.dumps(payload))
 
-    states = _p08_states(tmp_path)
+    states = _derive_push_remote_states(tmp_path)
 
     assert states["push"]["status"] == (
         "partial" if artifact_name == "push-verdict.json" else "succeeded"
@@ -3140,7 +3140,7 @@ def test_push_artifact_is_strictly_current_session_bound(
 ) -> None:
     _write_deep(tmp_path, "push-verdict.json", artifact)
 
-    states = _p08_states(tmp_path)
+    states = _derive_push_remote_states(tmp_path)
 
     assert states["push"]["status"] == expected_push
     assert states["remote_ci"] == {"ran": False, "status": "absent"}
@@ -3155,7 +3155,7 @@ def test_unbound_archive_session_cannot_adopt_unbound_push_artifact(
     del payload["session_id"]
     artifact.write_text(json.dumps(payload), encoding="utf-8")
 
-    states = _p08_states(tmp_path, session_id=cast(Any, None))
+    states = _derive_push_remote_states(tmp_path, session_id=cast(Any, None))
 
     assert states["push"] == {"ran": False, "status": "absent"}
     assert states["remote_ci"] == {"ran": False, "status": "absent"}
@@ -3179,7 +3179,7 @@ def test_successful_push_rejects_malformed_or_stale_remote_artifact(
     else:
         artifact.write_text(json.dumps(value), encoding="utf-8")
 
-    assert _p08_states(tmp_path)["remote_ci"] == {
+    assert _derive_push_remote_states(tmp_path)["remote_ci"] == {
         "ran": True,
         "status": "partial",
     }

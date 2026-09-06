@@ -6271,6 +6271,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     both assertions fail. Treating the budget marker as an exception failure
     instead makes the exit/commit/remote assertions fail.
     """
+    from daydream import remote_ci
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -6289,7 +6290,10 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
     traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
+    # Preserve the original work watchdog in addition to the newly required,
+    # separately bounded remote-CI wait. The no-CI harness keeps its truthful
+    # discovery window; reducing it previously failed under parallel load.
+    with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
         exit_code = await run(
             make_config(
                 multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",

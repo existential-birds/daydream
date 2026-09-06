@@ -57,6 +57,8 @@ class NoCIRemote:
             "DEFAULT_LIMITS",
             remote_ci.RemoteCILimits(
                 poll_seconds=0.01,
+                # Real Git/gh subprocess startup under parallel CI exhausted
+                # a 5-second window; retain this loaded-host safety margin.
                 discovery_seconds=15,
                 completion_seconds=20,
                 request_seconds=10,

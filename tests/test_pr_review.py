@@ -929,6 +929,7 @@ def test_find_pr_by_number_assembles_pr_info(
         ("headRefOid", "HEAD"),
         ("headRefOid", "deadbeef"),
         ("headRefName", ""),
+        ("headRefName", 7),
         ("headRefName", "feature~1"),
         ("baseRefName", ""),
         ("baseRefName", "main~1"),

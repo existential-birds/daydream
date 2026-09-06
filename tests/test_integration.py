@@ -34,7 +34,7 @@ from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
-from tests.harness.remote_ci import NoCIRemote
+from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha
 
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -449,12 +449,6 @@ def _remote_ci_push_project(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     _git(project, "config", f"url.{remote.resolve().as_uri()}.insteadOf", raw_remote)
     _git(project, "remote", "add", "origin", raw_remote)
     marker = tmp_path / "pre push hook ran"
-    hook = project / ".git" / "hooks" / "pre-push"
-    hook.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' ran > {shlex.quote(str(marker))}\n"
-    )
-    hook.chmod(0o755)
     return project, remote, marker, raw_remote
 
 
@@ -483,32 +477,40 @@ def _start_remote_ci_fake_after_push(
     hook_marker: Path,
     *,
     outcome: str,
-) -> tuple[threading.Thread, list[BaseException]]:
+) -> tuple[threading.Thread, list[BaseException], threading.Event]:
     """Let the real pre-push hook publish the new SHA to the external fake."""
     sha_path = hook_marker.with_name(hook_marker.name + " sha")
     ready_path = hook_marker.with_name(hook_marker.name + " ready")
     hook = project / ".git" / "hooks" / "pre-push"
+    if hook.exists():
+        raise AssertionError(f"refusing to replace existing pre-push hook: {hook}")
+    sha_temp_prefix = f"{sha_path}.tmp"
     hook.write_text(
         "#!/bin/sh\n"
         "read local_ref local_sha remote_ref remote_sha\n"
         f"printf '%s\\n' ran > {shlex.quote(str(hook_marker))}\n"
-        f"printf '%s\\n' \"$local_sha\" > {shlex.quote(str(sha_path))}\n"
+        f"sha_tmp={shlex.quote(sha_temp_prefix)}.$$\n"
+        "cleanup_sha_tmp() { rm -f \"$sha_tmp\"; }\n"
+        "trap cleanup_sha_tmp EXIT HUP INT TERM\n"
+        "printf '%s\\n' \"$local_sha\" > \"$sha_tmp\"\n"
+        f"mv \"$sha_tmp\" {shlex.quote(str(sha_path))}\n"
+        "trap - EXIT HUP INT TERM\n"
         "i=0\n"
         f"while [ ! -f {shlex.quote(str(ready_path))} ]; do\n"
         "  i=$((i + 1))\n"
-        "  [ \"$i\" -lt 500 ] || exit 91\n"
+        "  [ \"$i\" -lt 3000 ] || exit 91\n"
         "  sleep 0.01\n"
         "done\n"
     )
     hook.chmod(0o755)
     errors: list[BaseException] = []
+    stop = threading.Event()
 
     def seed() -> None:
         try:
-            deadline = time.monotonic() + 6
-            while not sha_path.exists() and time.monotonic() < deadline:
-                time.sleep(0.005)
-            sha = sha_path.read_text().strip()
+            sha = _wait_for_pushed_sha(sha_path, stop)
+            if sha is None:
+                return
             pr_row = {
                 "number": 7,
                 "html_url": "https://github.com/base-user/project/pull/7",
@@ -636,12 +638,52 @@ def _start_remote_ci_fake_after_push(
 
     thread = threading.Thread(target=seed, daemon=True)
     thread.start()
-    return thread, errors
+    return thread, errors, stop
 
 
-async def _wait_for_remote_ci_pids(path: Path) -> dict[str, int]:
+def _finish_remote_ci_fake(
+    thread: threading.Thread,
+    errors: list[BaseException],
+    stop: threading.Event,
+) -> None:
+    """Stop and join a seeder before its owning test releases fixture state."""
+    stop.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "remote-CI seeding thread did not stop"
+    assert errors == []
+
+
+async def _wait_for_remote_ci_pids(
+    path: Path,
+    *,
+    sha_path: Path,
+    runner_task: asyncio.Task[int],
+) -> dict[str, int]:
+    while not sha_path.exists():
+        if runner_task.done():
+            try:
+                result = runner_task.result()
+            except BaseException as exc:
+                raise AssertionError(
+                    "runner ended before reaching the remote-CI push boundary"
+                ) from exc
+            raise AssertionError(
+                f"runner exited {result} before reaching the remote-CI push boundary"
+            )
+        await asyncio.sleep(0.01)
+
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
+        if runner_task.done():
+            try:
+                result = runner_task.result()
+            except BaseException as exc:
+                raise AssertionError(
+                    "runner ended before the blocking remote-CI process started"
+                ) from exc
+            raise AssertionError(
+                f"runner exited {result} before the blocking remote-CI process started"
+            )
         try:
             value = json.loads(path.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
@@ -679,27 +721,27 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
     _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
-    seed_thread, seed_errors = _start_remote_ci_fake_after_push(
+    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome="failed"
     )
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
 
-    exit_code = await run(
-        make_config(
-            project,
-            stack="python",
-            quiet=True,
-            shallow=True,
-            assume="yes",
-            archive=True,
-            test_command="true",
-            pr_number=7,
-            pr_repo="base-user/project",
+    try:
+        exit_code = await run(
+            make_config(
+                project,
+                stack="python",
+                quiet=True,
+                shallow=True,
+                assume="yes",
+                archive=True,
+                test_command="true",
+                pr_number=7,
+                pr_repo="base-user/project",
+            )
         )
-    )
-    seed_thread.join(timeout=1)
-    assert not seed_thread.is_alive()
-    assert seed_errors == []
+    finally:
+        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
 
     assert exit_code == 1
     new_sha = _git(project, "rev-parse", "HEAD")
@@ -768,7 +810,7 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
             }
         )
     )
-    seed_thread, seed_errors = _start_remote_ci_fake_after_push(
+    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome=ci_variant
     )
     monkeypatch.setattr(
@@ -783,22 +825,22 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
     )
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
 
-    exit_code = await run(
-        make_config(
-            project,
-            stack="python",
-            quiet=True,
-            shallow=True,
-            assume="yes",
-            archive=True,
-            test_command="true",
-            pr_number=7,
-            pr_repo="base-user/project",
+    try:
+        exit_code = await run(
+            make_config(
+                project,
+                stack="python",
+                quiet=True,
+                shallow=True,
+                assume="yes",
+                archive=True,
+                test_command="true",
+                pr_number=7,
+                pr_repo="base-user/project",
+            )
         )
-    )
-    seed_thread.join(timeout=1)
-    assert not seed_thread.is_alive()
-    assert seed_errors == []
+    finally:
+        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
 
     assert exit_code == 0
     new_sha = _git(project, "rev-parse", "HEAD")
@@ -871,7 +913,7 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
 
         _seed_fix_resume(project, [_fix_item()])
     _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
-    seed_thread, seed_errors = _start_remote_ci_fake_after_push(
+    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome="blocking"
     )
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
@@ -894,7 +936,9 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     pids: dict[str, int] | None = None
     try:
         pids = await _wait_for_remote_ci_pids(
-            hook_marker.with_name(hook_marker.name + " pids")
+            hook_marker.with_name(hook_marker.name + " pids"),
+            sha_path=hook_marker.with_name(hook_marker.name + " sha"),
+            runner_task=task,
         )
         pending = json.loads(verdict_path.read_text())
         assert pending["status"] == "pending"
@@ -905,13 +949,13 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
             assert unrelated.read_bytes() == b'{"keep":"operator notes"}\n'
     finally:
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        seed_thread.join(timeout=1)
-        assert not seed_thread.is_alive()
-        assert seed_errors == []
-        if pids is not None:
-            await _wait_for_process_group_exit(pids["direct"])
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+            if pids is not None:
+                await _wait_for_process_group_exit(pids["direct"])
 
     verdict = json.loads(verdict_path.read_text())
     assert verdict["status"] == "cancelled"

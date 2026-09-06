@@ -23,7 +23,7 @@ def _budget(
     seconds: float = 30.0,
     per_request: float = 5.0,
     monotonic: Callable[[], float] = time.monotonic,
-) -> Any:
+) -> git_ops.GitHubRequestBudget:
     now = monotonic()
     return git_ops.GitHubRequestBudget(
         deadline=now + seconds,
@@ -35,6 +35,29 @@ def _budget(
 def _page_endpoint(endpoint: str, page: int, *, per_page: int = 100) -> str:
     separator = "&" if "?" in endpoint else "?"
     return f"{endpoint}{separator}per_page={per_page}&page={page}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("per_page", "max_pages"),
+    [(0, 10), (-1, 10), (100, 0), (100, -1)],
+)
+async def test_nonpositive_page_limits_fail_before_spawning_gh(
+    fake_gh: FakeGh,
+    git_repo: Path,
+    per_page: int,
+    max_pages: int,
+) -> None:
+    with pytest.raises(git_ops.GitError, match="pagination limits must be positive"):
+        await git_ops.gh_api_bounded_pages(
+            git_repo,
+            "repos/acme/widgets/statuses",
+            envelope=None,
+            limits=git_ops.GitHubPageLimits(per_page=per_page, max_pages=max_pages),
+            budget=_budget(),
+        )
+
+    assert fake_gh.process_calls() == []
 
 
 @pytest.mark.asyncio
