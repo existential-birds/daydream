@@ -1,12 +1,16 @@
 """Tests for CLI argument parsing."""
+import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.atif import validate as atif_validate
 from daydream.cli import _parse_args
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
@@ -637,6 +641,178 @@ def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(
     assert git(repo, "status", "--porcelain=v1") == before_status
     assert git(origin, "show-ref") == before_origin_refs
     assert not list(process_tmp.glob("daydream-audit-*"))
+
+
+_SIGNAL_FIXTURE_EXTENSION = """
+import os
+from pathlib import Path
+
+import anyio
+
+from daydream.backends import ResultEvent, TextEvent
+from daydream.extensions import FlowStep
+from daydream.trajectory import DaydreamPhase, get_current_recorder
+
+
+async def _hold_child(root, descriptor, marker, entered):
+    async with root.fork(descriptor) as child:
+        async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text=marker))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            entered.set()
+            await anyio.sleep_forever()
+
+
+async def _signal_fixture(ctx):
+    root = get_current_recorder()
+    assert root is not None
+    async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
+        inv.observe(TextEvent(text="ROOT_SIGNAL_ONLY"))
+        inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    entered_a = anyio.Event()
+    entered_b = anyio.Event()
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_hold_child, root, "signal-a", "SIGNAL_A_ONLY", entered_a)
+        await entered_a.wait()
+        tg.start_soon(_hold_child, root, "signal-b", "SIGNAL_B_ONLY", entered_b)
+        await entered_b.wait()
+        Path(os.environ["DAYDREAM_SIGNAL_READY"]).write_text("ready", encoding="utf-8")
+        await anyio.sleep_forever()
+
+
+def register(registry):
+    registry.register_phase(FlowStep(name="signal-fixture-step", run=_signal_fixture))
+    registry.set_flow("signal-fixture", ["signal-fixture-step"])
+"""
+
+
+def _write_signal_fake_gh(tmp_path: Path) -> tuple[Path, Path]:
+    """Create the subprocess's only external API boundary: two read-only gh calls."""
+    bin_dir = tmp_path / "signal-bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "signal-gh.log"
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$DAYDREAM_SIGNAL_GH_LOG\"\n"
+        "if [ \"$*\" = \"repo view --json nameWithOwner -q .nameWithOwner\" ]; then\n"
+        "  printf '%s\\n' 'acme/widgets'\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$*\" = \"api /user\" ]; then\n"
+        "  printf '%s\\n' '{\"login\":\"signal-fixture\"}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' \"unexpected gh call: $*\" >&2\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    return bin_dir, log_path
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_signal_flushes_all_runner_recorders(
+    tmp_path: Path,
+    git_repo: Path,
+    ext_dir: Any,
+    signum: signal.Signals,
+) -> None:
+    """A real OS signal through CLI/runner flushes root and both live forks."""
+    extension_dir = ext_dir.write_module(_SIGNAL_FIXTURE_EXTENSION)
+    bin_dir, gh_log = _write_signal_fake_gh(tmp_path)
+    ready = tmp_path / "signal-ready"
+    child_env = dict(os.environ)
+    for name in (
+        "DAYDREAM_APP_ID",
+        "DAYDREAM_APP_PRIVATE_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+    ):
+        child_env.pop(name, None)
+    child_env.update(
+        {
+            "DAYDREAM_EXT_DIR": str(extension_dir),
+            "DAYDREAM_SIGNAL_GH_LOG": str(gh_log),
+            "DAYDREAM_SIGNAL_READY": str(ready),
+            "PATH": os.pathsep.join((str(bin_dir), child_env.get("PATH", ""))),
+        }
+    )
+    argv = [
+        sys.executable,
+        "-m",
+        "daydream",
+        "--non-interactive",
+        "--no-archive",
+        "--no-eval",
+        "--flow",
+        "signal-fixture",
+        "--pr-number",
+        "1",
+        str(git_repo),
+    ]
+    proc = subprocess.Popen(  # noqa: S603 - controlled production entrypoint
+        argv,
+        cwd=Path(__file__).resolve().parents[1],
+        env=child_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout = ""
+    stderr = ""
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                pytest.fail(
+                    f"signal fixture exited before READY: {proc.returncode}\n"
+                    f"stdout={stdout}\nstderr={stderr}"
+                )
+            time.sleep(0.05)
+        assert ready.exists(), "signal fixture did not expose two live sibling invocations"
+
+        os.kill(proc.pid, signum)
+        stdout, stderr = proc.communicate(timeout=10)
+        assert proc.returncode == 130, (
+            f"signal={signum.name} exit={proc.returncode}\nstdout={stdout}\nstderr={stderr}"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+
+    run_root = git_repo / ".daydream" / "runs"
+    run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
+    assert len(run_dirs) == 1
+    partials = sorted(run_dirs[0].rglob("*.partial"))
+    assert len(partials) == 3
+    by_name = {path.name: json.loads(path.read_text(encoding="utf-8")) for path in partials}
+    assert set(by_name) == {"trajectory.json.partial", "signal-a.json.partial", "signal-b.json.partial"}
+    assert all(atif_validate(item, validate_images=False) for item in by_name.values())
+    assert all(item.get("extra", {}).get("partial") is True for item in by_name.values())
+
+    root_text = json.dumps(by_name["trajectory.json.partial"], sort_keys=True)
+    a_text = json.dumps(by_name["signal-a.json.partial"], sort_keys=True)
+    b_text = json.dumps(by_name["signal-b.json.partial"], sort_keys=True)
+    assert "ROOT_SIGNAL_ONLY" in root_text
+    assert "SIGNAL_A_ONLY" not in root_text and "SIGNAL_B_ONLY" not in root_text
+    assert "SIGNAL_A_ONLY" in a_text
+    assert "SIGNAL_B_ONLY" not in a_text and "ROOT_SIGNAL_ONLY" not in a_text
+    assert "SIGNAL_B_ONLY" in b_text
+    assert "SIGNAL_A_ONLY" not in b_text and "ROOT_SIGNAL_ONLY" not in b_text
+    assert "Traceback" not in stdout + stderr
+    assert "trajectory write failed" not in (stdout + stderr).lower()
+
+    calls = gh_log.read_text(encoding="utf-8").splitlines()
+    assert calls == [
+        "repo view --json nameWithOwner -q .nameWithOwner",
+        "api /user",
+    ]
 
 
 # corpus harvest / build subcommand wiring (Task 11 / corpus-pipeline-architecture)

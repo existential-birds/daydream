@@ -88,7 +88,8 @@ def _review_run_env(
             "headRefName": "feature",
             "baseRefName": "main",
             "headRefOid": git_ops.head_sha(repo),
-            "baseRefOid": git_ops.merge_base(repo, "main"),
+            "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+            "headRepositoryOwner": {"login": "acme"},
             "url": "https://github.com/acme/widgets/pull/7",
             "body": "",
         }

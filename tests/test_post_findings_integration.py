@@ -15,6 +15,7 @@ in-process bookkeeping.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from daydream import cli
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers, validate_diagram_payload
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit, git
+from tests.harness.git_helpers import commit, git, init_repo
 
 
 def cli_main(argv: list[str]) -> int:
@@ -42,7 +43,7 @@ def cli_main(argv: list[str]) -> int:
 
 
 def _post_argv(
-    artifact: Path, *, pr: int = 7, head_sha: str | None = None
+    artifact: Path, *, pr: int = 7, head_sha: str | None = None, target: Path | None = None,
 ) -> list[str]:
     """The ``post-findings`` argv for *artifact*; override only what a test varies."""
     return [
@@ -54,7 +55,83 @@ def _post_argv(
         head_sha or "h" * 40,
         "--repo",
         "o/r",
+        *(["--target", str(target)] if target is not None else []),
     ]
+
+
+def test_post_findings_uses_two_explicit_checkout_configs_without_chdir(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    ambient = Path.cwd()
+    targets = [tmp_path / "checkout A", tmp_path / "checkout B"]
+    for target in targets:
+        init_repo(target)
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_OLD"], viewer_did_author=True,
+    )
+    for index, target in enumerate(targets):
+        (target / ".daydream.toml").write_text(f"approve_on_clean = {'true' if index == 0 else 'false'}\n")
+        artifact = _write_artifact(target / "findings.json", [
+            _finding(
+                ("b" if index == 0 else "c") * 64, path="a.py", line=1,
+                placement="inline", title=f"Checkout {index} finding", severity="low",
+            ),
+        ])
+        before = len(fake_gh.process_calls())
+        # The second invocation pins relative paths with spaces against the
+        # unchanged ambient cwd, not against the artifact or first checkout.
+        argument = target if index == 0 else Path(os.path.relpath(target, ambient))
+        assert cli_main(_post_argv(artifact, target=argument)) == 0
+        processes = fake_gh.process_calls()[before:]
+        assert processes and all(call.cwd == target.resolve() for call in processes)
+        assert Path.cwd() == ambient
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert [call.payload["event"] for call in posts] == ["APPROVE", "COMMENT"]
+    assert [call.payload["comments"][0]["path"] for call in posts] == ["a.py", "a.py"]
+    assert sum("minimizeComment" in call.payload.get("query", "")
+               for call in fake_gh.calls("POST", "graphql")) == 2
+
+
+@pytest.mark.parametrize("target_kind", ["missing", "file"])
+def test_post_findings_rejects_invalid_target_before_github(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str], target_kind: str,
+) -> None:
+    target = tmp_path / target_kind
+    if target_kind == "file":
+        target.write_text("not a directory")
+    artifact = _write_artifact(tmp_path / "findings.json", [])
+    assert cli_main(_post_argv(artifact, target=target)) == 2
+    assert "--target must be an existing directory" in capsys.readouterr().err
+    assert fake_gh.process_calls() == []
+
+
+def test_post_findings_omitted_target_preserves_invocation_directory(
+    fake_gh: FakeGh, artifact_on_disk: Path,
+) -> None:
+    assert cli_main(_post_argv(artifact_on_disk)) == 0
+    assert fake_gh.process_calls()
+    assert all(call.cwd == Path.cwd().resolve() for call in fake_gh.process_calls())
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
+
+
+def test_post_findings_reads_valid_diagram_evidence_from_explicit_target(
+    fake_gh: FakeGh, git_repo: Path,
+) -> None:
+    ambient = Path.cwd()
+    (git_repo / "a.py").write_text("def run():\n    return 1\n")
+    git(git_repo, "add", "a.py")
+    head = commit(git_repo, "seed diagram evidence")
+    artifact = _write_artifact(
+        git_repo / "findings.json", [], diagrams=_flowchart_payload(), head_sha=head,
+    )
+    assert cli_main(_post_argv(artifact, head_sha=head, target=git_repo)) == 0
+    assert Path.cwd() == ambient
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert "```mermaid" in posts[0].payload["body"]
+    assert posts[0].payload["commit_id"] == head
+    assert fake_gh.process_calls()
+    assert all(call.cwd == git_repo.resolve() for call in fake_gh.process_calls())
 
 
 def _finding(
@@ -423,7 +500,6 @@ def test_malformed_artifact_aborts(fake_gh: FakeGh, tmp_path: Path) -> None:
 def test_malformed_repo_config_warns_and_still_posts(
     fake_gh: FakeGh,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A malformed .daydream.toml in the checkout must not abort the unattended post.
 
@@ -431,10 +507,9 @@ def test_malformed_repo_config_warns_and_still_posts(
     approve-on-clean lookup is best-effort, so a malformed TOML degrades to a
     warning plus the CLI flag instead of a Fatal Error (exit 1).
     """
-    monkeypatch.chdir(tmp_path)
     (tmp_path / ".daydream.toml").write_text("this is [not valid toml ==")
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
-    code = cli_main(_forged_marker_argv(artifact))
+    code = cli_main(_forged_marker_argv(artifact, "--target", str(tmp_path)))
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
@@ -616,12 +691,11 @@ def test_post_findings_all_matched_no_approve_without_flag(
 
 
 def test_post_findings_rejects_forged_diagram_grounding_attestation(
-    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh, git_repo: Path,
 ) -> None:
     (git_repo / "a.py").write_text("def run():\n    return 1\n")
     git(git_repo, "add", "a.py")
     head_sha = commit(git_repo, "add flowchart source")
-    monkeypatch.chdir(git_repo)
     payload = _flowchart_payload()
     flowchart = payload["results"]["flowchart"]
     flowchart["spec_final"]["nodes"] = [
@@ -703,7 +777,7 @@ def test_post_findings_rejects_forged_diagram_grounding_attestation(
     )
 
     code = cli_main(
-        _post_argv(artifact, head_sha=head_sha) + ["--bot-login", "daydream"]
+        _post_argv(artifact, head_sha=head_sha, target=git_repo) + ["--bot-login", "daydream"]
     )
 
     assert code == 1
@@ -711,7 +785,7 @@ def test_post_findings_rejects_forged_diagram_grounding_attestation(
 
 
 def test_post_findings_rejects_forged_sequence_grounding_attestation(
-    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh, git_repo: Path,
 ) -> None:
     (git_repo / "api.py").write_text(
         "from worker import worker\n"
@@ -726,7 +800,6 @@ def test_post_findings_rejects_forged_sequence_grounding_attestation(
     )
     git(git_repo, "add", "api.py", "worker.py")
     head_sha = commit(git_repo, "add sequence source")
-    monkeypatch.chdir(git_repo)
     payload = _sequence_payload()
     assert validate_diagram_payload(payload, target_dir=git_repo, head_sha=head_sha) is None
     payload["results"]["sequence"]["spec_final"]["messages"][0]["evidence"] = {
@@ -738,19 +811,18 @@ def test_post_findings_rejects_forged_sequence_grounding_attestation(
         git_repo / "findings.json", [], diagrams=payload, head_sha=head_sha
     )
 
-    code = cli_main(_post_argv(artifact, head_sha=head_sha))
+    code = cli_main(_post_argv(artifact, head_sha=head_sha, target=git_repo))
 
     assert code == 1
     assert fake_gh.calls("POST") == []
 
 
 def test_post_findings_rejects_diagram_evidence_absent_from_immutable_head(
-    fake_gh: FakeGh, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    fake_gh: FakeGh, git_repo: Path,
 ) -> None:
     (git_repo / "a.py").write_text("def run():\n    return 1\n")
     git(git_repo, "add", "a.py")
     head_sha = commit(git_repo, "add flowchart source")
-    monkeypatch.chdir(git_repo)
 
     payload = _flowchart_payload()
     flowchart = payload["results"]["flowchart"]
@@ -766,7 +838,7 @@ def test_post_findings_rejects_diagram_evidence_absent_from_immutable_head(
     )
 
     code = cli_main(
-        _post_argv(artifact, head_sha=head_sha) + ["--bot-login", "daydream"]
+        _post_argv(artifact, head_sha=head_sha, target=git_repo) + ["--bot-login", "daydream"]
     )
 
     assert code == 1

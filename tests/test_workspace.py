@@ -20,6 +20,7 @@ from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.workspace import (
     WorkContext,
     WorkspaceCopyPathError,
+    _resolve_base,
     copy_files_into_ephemeral,
     open_audit_workspace,
     open_workspace,
@@ -31,6 +32,20 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 
 # --- Helpers (workspace-specific: bare-origin push plumbing) ----------------
+
+
+def test_resolve_base_falls_back_when_pr_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("daydream.workspace.shutil.which", lambda _name: "/bin/gh")
+    monkeypatch.setattr(
+        git_ops,
+        "gh_pr_list_for_branch",
+        lambda *_args: (_ for _ in ()).throw(GitError("gh auth failed")),
+    )
+    monkeypatch.setattr(git_ops, "default_branch", lambda _repo: "trunk")
+
+    assert _resolve_base(tmp_path, "feature", None) == "trunk"
 
 
 def _make_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
