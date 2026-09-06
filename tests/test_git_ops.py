@@ -799,6 +799,16 @@ def test_clone_no_local_requests_independent_objects(
     assert calls == [["git", "clone", "--no-local", "source", str(tmp_path / "snapshot")]]
 
 
+@pytest.mark.parametrize("name", [" leading and trailing ", "line\nbreak", "café.py"])
+def test_diff_name_only_strict_preserves_exact_git_paths(tmp_path: Path, name: str) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / name).write_bytes(b"content\n")
+    _git(repo, "add", "--", name)
+    _commit(repo, "unusual path")
+    assert git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD") == [name]
+    assert git_ops.diff_name_only_strict(repo, "HEAD", "HEAD") == []
+
+
 def test_assert_is_worktree_passes_for_real_repo(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     git_ops.assert_is_worktree(repo)

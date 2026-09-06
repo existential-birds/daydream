@@ -14,15 +14,14 @@ phase primitive (D-39).
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
 import os
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Iterable, cast
+from typing import TYPE_CHECKING, Any, Awaitable, cast
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -64,6 +63,7 @@ from daydream.deep.artifacts import (
     diff_key,
     diff_key_path,
     fix_failures_path,
+    fix_footprint_path,
     fix_leftover_untracked_path,
     fix_outcomes_path,
     fix_quality_gate_path,
@@ -73,6 +73,7 @@ from daydream.deep.artifacts import (
     per_stack_failures_path,
     per_stack_records_path,
     recommended_capture_path,
+    stabilization_failed_path,
     test_verdict_path,
 )
 from daydream.deep.artifacts import (
@@ -118,36 +119,33 @@ from daydream.deep.records import (
     record_uid,
     stack_name_from_records_source,
     stack_name_from_uid,
+    stamp_item_uids,
     stamp_record_uids,
 )
 from daydream.deep.render import insert_diagrams_section, render_held_section, render_report
 from daydream.deep.scope_issues import (
-    _file_out_of_scope_issue,
     _resolve_changed_files,
-    _revert_out_of_scope_edits,
-    _scope_filing_note,
+    enforce_authorized_fix_footprint,
 )
 from daydream.deep.sharding import shard_stacks
 from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
 from daydream.extensions import get_registry
 from daydream.extensions.api import BreakLoop, FlowStep, Stop
+from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext, run_flow
 from daydream.generated_files import (
-    _changed_untracked_generated_files,
-    _restore_untracked_generated_file,
-    _snapshot_untracked_generated_files,
     is_generated_file,
     related_manifest_paths,
 )
+from daydream.git_ops import GitPathState, IndexSnapshot, WorktreeRollbackSnapshot
 from daydream.json_utils import atomic_write_json
 from daydream.phases import (
     FIX_VERIFY_ACTIONABLE_VERDICTS,
     FIX_VERIFY_RETARGETABLE_VERDICTS,
     UNCOVERED_SWEEP_SCHEMA,
     CrossStackMergeError,
-    UnconfinedFindingError,
-    _record_fix_failure,
-    _resolve_finding_file_ref,
+    TestAndHealResult,
+    TestAttemptEvidence,
     _write_single_stack_merged_items,
     phase_alternative_review,
     phase_arbiter_review,
@@ -158,8 +156,10 @@ from daydream.phases import (
     phase_supervise_review,
     phase_suppression_review,
     phase_test_and_heal,
+    phase_test_once,
     phase_understand_intent,
     phase_verify_recommendations,
+    require_empty_staged_index,
     severity_sorted,
 )
 from daydream.quote_scrub import scrub_smart_quotes_changed_files
@@ -995,199 +995,6 @@ def _rewrite_stack_records(
         )
 
 
-def _protect_tree_after_fix_failures(
-    work: WorkContext,
-    target_dir: Path,
-    fix_failures: dict[str, str],
-    *,
-    snapshot: str | None,
-    snapshot_captured: bool,
-    pre_untracked: set[str],
-) -> None:
-    """Roll each failed fix group's file back to its pre-fix content.
-
-    For every dropped file-group (keyed by repo-relative path), the partial-fix
-    content is FIRST saved to ``.daydream/partial-fixes/<slug>.patch`` (a
-    ``git diff`` against the pre-fix snapshot) so no agent work is destroyed,
-    THEN the path is restored to exactly its pre-fix state. Only the failed
-    paths are touched -- successful groups and unrelated paths are never
-    reverted. A failed group's newly-created untracked file (absent from
-    *pre_untracked*) has its raw content preserved and is then removed; untracked
-    files we cannot attribute to the failed group are left in place.
-
-    Args:
-        work: The run's workspace (``work.repo`` is the git working dir).
-        target_dir: Resolved target dir (``== work.repo``); root for the
-            ``.daydream/partial-fixes`` recovery directory.
-        fix_failures: ``{file_group: reason}`` for groups that failed.
-        snapshot: ``git stash create`` SHA captured before fixes, or ``None``
-            when the pre-fix tracked tree equalled ``HEAD``.
-        pre_untracked: Untracked paths present before the fix pass.
-    """
-    from daydream import git_ops
-    from daydream.git_ops import GitError
-
-    if not snapshot_captured:
-        # HEAD is not a safe substitute when capturing the pre-fix state
-        # failed: it may discard edits that were present before this pass.
-        return
-
-    repo = work.repo
-    ref = snapshot or "HEAD"
-    recovery_dir = target_dir / ".daydream" / "partial-fixes"
-    recovery_dir.mkdir(parents=True, exist_ok=True)
-
-    for fkey in sorted(fix_failures):
-        slug = fkey.replace("/", "-").replace("\\", "-")
-        file_path = repo / fkey
-        # 1. Save the partial-fix content first -- non-negotiable, before revert.
-        try:
-            patch = git_ops.diff_worktree_against(repo, ref, [fkey])
-        except GitError as exc:
-            patch = ""
-            print_warning(console, f"Could not diff partial fix for '{fkey}': {exc}")
-        if patch:
-            (recovery_dir / f"{slug}.patch").write_text(patch, encoding="utf-8")
-        elif file_path.is_file() and fkey not in pre_untracked:
-            # Newly-created untracked file (no diff vs ref): preserve raw content.
-            try:
-                (recovery_dir / f"{slug}.orphan").write_text(
-                    file_path.read_text(encoding="utf-8", errors="replace"),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
-        # 2. Restore the path to its pre-fix content.
-        try:
-            git_ops.restore_paths_from_ref(repo, ref, [fkey])
-        except GitError:
-            # Path absent at ref => the failed group newly created it. Remove the
-            # orphan only when it was not already present pre-fix (attributable).
-            if file_path.is_file() and fkey not in pre_untracked:
-                try:
-                    file_path.unlink()
-                except OSError:
-                    pass
-
-
-def _reject_generated_file_edits(
-    work: WorkContext,
-    target_dir: Path,
-    *,
-    snapshot: str | None,
-    snapshot_captured: bool,
-    pre_untracked: set[str],
-    pre_untracked_contents: dict[str, bytes] | None = None,
-) -> list[str] | None:
-    """Restore changed generated files, returning ``None`` if restoration fails."""
-    from daydream import git_ops
-    from daydream.git_ops import GitError
-
-    if not snapshot_captured:
-        # A failed snapshot has no trustworthy pre-fix baseline.  In
-        # particular, falling back to HEAD could erase a user's existing edit.
-        return []
-
-    repo = work.repo
-    ref = snapshot or "HEAD"
-    changed = git_ops.changed_files_against(
-        repo, ref, preexisting_untracked=pre_untracked
-    )
-
-    tracked_violations: list[str] = []
-    patches: dict[str, str] = {}
-    recovery_dir = target_dir / ".daydream" / "partial-fixes"
-    for path in changed:
-        try:
-            baseline = git_ops.show(repo, ref, path)
-        except GitError:
-            # Newly-created generated files (notably new migrations) are
-            # deliberately allowed.
-            continue
-        if not is_generated_file(path, baseline):
-            continue
-        try:
-            patch = git_ops.diff_worktree_against(repo, ref, [path])
-        except GitError as exc:
-            patch = ""
-            print_warning(console, f"Could not save forbidden generated-file edit for '{path}': {exc}")
-        if not patch:
-            # New generated files (notably new migrations) have no baseline
-            # diff and are deliberately allowed.
-            continue
-        tracked_violations.append(path)
-        patches[path] = patch
-
-    untracked_baselines = pre_untracked_contents or {}
-    untracked_violations = _changed_untracked_generated_files(repo, untracked_baselines)
-    direct_violations = [*tracked_violations, *untracked_violations]
-    paths_to_restore = list(tracked_violations)
-    for path in direct_violations:
-        for manifest_path in related_manifest_paths(path):
-            if manifest_path in paths_to_restore:
-                continue
-            try:
-                manifest_patch = git_ops.diff_worktree_against(repo, ref, [manifest_path])
-                if not manifest_patch:
-                    continue
-                git_ops.show(repo, ref, manifest_path)
-            except GitError:
-                continue
-            paths_to_restore.append(manifest_path)
-            patches[manifest_path] = manifest_patch
-
-    for path, patch in patches.items():
-        slug = path.replace("/", "-").replace("\\", "-")
-        digest = hashlib.sha256(path.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
-        try:
-            recovery_dir.mkdir(parents=True, exist_ok=True)
-            (recovery_dir / f"{slug}-{digest}.patch").write_text(patch, encoding="utf-8")
-        except OSError as exc:
-            print_warning(console, f"Could not write recovery patch for '{path}': {exc}")
-
-    for path in untracked_violations:
-        file_path = repo / path
-        if not file_path.is_file():
-            continue
-        slug = path.replace("/", "-").replace("\\", "-")
-        digest = hashlib.sha256(path.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
-        try:
-            recovery_dir.mkdir(parents=True, exist_ok=True)
-            (recovery_dir / f"{slug}-{digest}.orphan").write_bytes(file_path.read_bytes())
-        except OSError as exc:
-            print_warning(console, f"Could not save forbidden generated-file edit for '{path}': {exc}")
-
-    restoration_failed = False
-    if paths_to_restore:
-        try:
-            git_ops.restore_paths_from_ref(repo, ref, paths_to_restore)
-        except GitError as exc:
-            print_warning(console, f"Could not restore generated files: {exc}")
-            restoration_failed = True
-
-    for path in untracked_violations:
-        try:
-            _restore_untracked_generated_file(repo, path, untracked_baselines[path])
-        except OSError as exc:
-            print_warning(console, f"Could not restore generated file '{path}': {exc}")
-            restoration_failed = True
-
-    if direct_violations:
-        artifact = generated_file_violations_path(deep_dir(target_dir))
-        try:
-            artifact.write_text(
-                json.dumps({"violations": direct_violations, "ref": ref}, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            print_warning(console, f"Could not record generated-file violations: {exc}")
-        if not restoration_failed:
-            print_warning(
-                console,
-                f"Reverted forbidden edits to existing generated files: {', '.join(direct_violations)}. "
-                "Add a new migration file instead.",
-            )
-    return None if restoration_failed else direct_violations
 
 
 def _has_non_daydream_worktree_changes(status: str) -> bool:
@@ -3426,6 +3233,18 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     return Stop(0)
 
 
+def _record_fix_preflight_rejection(dd: Path, items: list[dict[str, Any]]) -> None:
+    """Record an admitted cycle's blocked items without reflecting unsafe paths."""
+    failures = {
+        item["item_uid"]: "fix_preflight_rejected: fix cycle did not start"
+        for item in items
+    }
+    try:
+        atomic_write_json(fix_failures_path(dd), failures, sort_keys=True)
+    except OSError as exc:
+        print_error(console, "Fix preflight failure audit failed", str(exc))
+
+
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     """Fix-apply gate; on accept, load and severity-sort the canonical items."""
     # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
@@ -3442,6 +3261,37 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         print_success(console, f"Report written to {ctx.data['merged_report']}. Exiting.")
         return Stop(0)
 
+    from daydream import git_ops
+
+    # A rejected index preflight must preserve prior artifacts as well as
+    # source bytes. Only an admitted run may start a new evidence session.
+    try:
+        initial_index = require_empty_staged_index(ctx.work)
+    except (OSError, git_ops.GitError) as exc:
+        print_error(console, "Fix preflight failed", str(exc))
+        return Stop(1)
+
+    # An accepted gate starts a new evidence session. No prior run's success,
+    # patch, or policy audit may be inherited if this run later stops early.
+    dd: Path = ctx.data["dd"]
+    stale_paths = (
+        fix_footprint_path(dd),
+        fix_outcomes_path(dd),
+        test_verdict_path(dd),
+        recommended_capture_path(dd),
+        generated_file_violations_path(dd),
+        fix_failures_path(dd),
+        fix_leftover_untracked_path(dd),
+        stabilization_failed_path(dd),
+        ctx.work.repo / ".daydream" / "recommended.patch",
+    )
+    try:
+        for stale in stale_paths:
+            stale.unlink(missing_ok=True)
+    except OSError as exc:
+        print_error(console, "Fix preflight failed", str(exc))
+        return Stop(1)
+
     # Read canonical merged items directly (validated above). Replaces an LLM
     # re-parse of the markdown, which silently dropped structural findings; here
     # they are ordinary tagged items that reach phase_fix like any other.
@@ -3457,49 +3307,51 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         _file = _item.get("file")
         if isinstance(_file, str) and _file.startswith("./"):
             _item["file"] = _file[2:]
+    stamp_item_uids(items)
     if not items:
         print_success(console, "No actionable items -- done.")
         return Stop(0)
 
-    # Issue #336 — pre-fix scope partition. Findings on files OUTSIDE the
-    # reviewed diff are excluded from auto-fix; issue filing is gated by
-    # ``scope_issue_filing`` (#1056). The loop must not expand the PR's scope. The reviewed-diff file
-    # set is resolved via _resolve_changed_files (shared with _step_fix) so the
-    # gate and the post-fix residual net agree on the allowed set (a divergence
-    # left the residual net strictly weaker than the gate on the resume path).
+    # The footprint deliberately admits canonical finding primary/related
+    # paths even when they were not themselves in the reviewed diff. This is
+    # the explicit authorization that lets a regression test or sibling source
+    # file travel with a finding without turning every reviewed file into every
+    # fixer's edit scope.
     changed_files = _resolve_changed_files(ctx)
-    if changed_files is not None:
-        in_scope: list[dict[str, Any]] = []
-        out_of_scope: list[dict[str, Any]] = []
-        for item in items:
-            (in_scope if (item.get("file") or "") in changed_files else out_of_scope).append(item)
-        file_scope_issues = _scope_issue_filing(ctx.config)
-        for item in out_of_scope:
-            if file_scope_issues:
-                _file_out_of_scope_issue(ctx, item)
-        if out_of_scope:
-            print_warning(
-                console,
-                f"{len(out_of_scope)} finding(s) outside the reviewed diff "
-                f"{_scope_filing_note(file_scope_issues)}, not fixed.",
-            )
-        items = in_scope
-        # Issue #336 — every finding routed out of the fix list leaves nothing
-        # to auto-fix, so short-circuit before a no-op fix pass, a full target
-        # test-suite run, and a commit-agent turn. Matches the pre-partition
-        # "no actionable items" Stop(0) above. Keying on identity (``is not
-        # None``) distinguishes an empty reviewed diff — every file is out of
-        # scope, so every finding is excluded from auto-fix (filed as an issue
-        # only under the ``scope_issue_filing`` opt-in, issue #1056) and the
-        # run ends — from ``None``, which skips the partition entirely because
-        # scope cannot be judged.
-        if not items:
-            print_success(
-                console,
-                f"All findings outside the reviewed diff -- {_scope_filing_note(file_scope_issues)}, "
-                "nothing to fix.",
-            )
-            return Stop(0)
+
+    try:
+        stable_head = git_ops.head_sha(ctx.work.repo)
+        stable_ref = git_ops.stash_create(ctx.work.repo) or stable_head
+        preexisting_untracked = git_ops.snapshot_untracked_paths(
+            ctx.work.repo, include_runtime_artifacts=False
+        )
+        preexisting_gitlinks = git_ops.snapshot_worktree_gitlinks(ctx.work.repo)
+        footprint = AuthorizedFixFootprint.build(
+            ctx.work.repo, set(changed_files or []), items
+        )
+    except (OSError, ValueError, git_ops.GitError) as exc:
+        _record_fix_preflight_rejection(dd, items)
+        print_error(console, "Fix preflight failed", str(exc))
+        return Stop(1)
+
+    session_id = _current_session_id() or ctx.work.run_id
+    state = FixCycleState(
+        session_id=session_id,
+        stable_ref=stable_ref,
+        stable_head=stable_head,
+        initial_index=initial_index,
+        preexisting_untracked=preexisting_untracked,
+        preexisting_gitlinks=preexisting_gitlinks,
+        footprint=footprint,
+    )
+    ctx.data["fix_cycle_state"] = state
+    try:
+        initial_key = EvidenceKey(_capture_full_delta_key(ctx.work, state), footprint.policy_revision)
+        _write_footprint_audit(ctx, state, initial_key)
+    except (OSError, git_ops.GitError) as exc:
+        _record_fix_preflight_rejection(dd, items)
+        print_error(console, "Fix preflight failed", str(exc))
+        return Stop(1)
 
     # Severity-ordered (high before medium before low), stable within a
     # tier so equal-severity items keep their canonical merge order.
@@ -4052,127 +3904,119 @@ async def _evaluate_quality_gate(
                 f"({type(inner).__name__}: {inner})",
             )
 
-
-def _first_unconfined_finding(
-    repo: Path, items: list[dict[str, Any]]
-) -> dict[str, Any] | None:
-    """Return the first item whose ``file`` ref the confinement gate rejects.
-
-    Mirrors ``_preflight_finding_file_refs``'s item order (items[0] first,
-    then the rest) and reuses the phase's own predicate
-    (``_resolve_finding_file_ref``) so there is no grammar drift between the
-    phase's preflight raise and this guard's offender identification.
-    Returns ``None`` when every item is confined.
-    """
-    for item in items:
-        try:
-            _resolve_finding_file_ref(repo, item.get("file"))
-        except UnconfinedFindingError:
-            return item
-    return None
+MAX_POST_TEST_STABILIZATION_PASSES = 2
+ACTIONABLE_VERDICTS = frozenset(FIX_VERIFY_ACTIONABLE_VERDICTS)
+RETARGETABLE_VERDICTS = frozenset(FIX_VERIFY_RETARGETABLE_VERDICTS)
 
 
-def _record_unconfined_finding_failure(
-    repo: Path,
-    items: list[dict[str, Any]],
-    exc: UnconfinedFindingError,
-) -> tuple[dict[str, str], str]:
-    """Record an unconfined-finding preflight rejection in ``fix_failures``.
+@dataclass(frozen=True)
+class EvidenceKey:
+    """Tree and policy identity required by verifier evidence."""
 
-    ``phase_fix_parallel``'s confinement gate raises ``UnconfinedFindingError``
-    before dispatching any fix. This routes the rejection through the same
-    exception-failure recovery as a normal fix-group failure (patch capture,
-    fix_failures persistence, tree restore, generated-file reject, Stop(1))
-    instead of letting it escape to cli.py's generic handler.
+    tree_key: str
+    policy_revision: int
 
-    The failure entry is keyed by the finding's STABLE id -- never the
-    unconfined path -- so the unsafe ref cannot become a grouping key or
-    restore argument. Returns the single-entry ``fix_failures`` dict along
-    with its key, so the caller can exclude the entry from path-based
-    tree-restore machinery: the id is not a repo-relative path, and the
-    preflight aborted before any dispatch, so no rollback is owed for it.
-    """
-    offender = _first_unconfined_finding(repo, items)
-    offender_id = offender.get("id") if offender else None
-    offender_file = offender.get("file") if offender else None
-    detail = f" (finding {offender_id}, file {offender_file!r})"
-    fix_key = str(offender_id) if offender_id is not None else "<unconfined-finding>"
-    fix_failures: dict[str, str] = {}
-    _record_fix_failure(fix_failures, fix_key, exc)
-    fix_failures[fix_key] += detail
-    print_warning(
-        console,
-        f"Fix preflight rejected an unconfined finding{detail}; no fixes applied.",
+
+@dataclass(frozen=True)
+class RetainedTreeSnapshot:
+    """Authorized retained patch plus full observed-tree identity."""
+
+    paths: frozenset[str]
+    states: tuple[GitPathState, ...]
+    tree_key: str
+    verifier_patch: str
+    recommended_patch: bytes
+
+
+@dataclass
+class FixCycleState:
+    """One accepted fix gate's stable policy, baseline, and evidence."""
+
+    session_id: str
+    stable_ref: str
+    stable_head: str
+    initial_index: IndexSnapshot
+    preexisting_untracked: dict[str, GitPathState]
+    preexisting_gitlinks: tuple[GitPathState, ...]
+    footprint: AuthorizedFixFootprint
+    latest_retained: RetainedTreeSnapshot | None = None
+    verifier_key: EvidenceKey | None = None
+    test_evidence: TestAttemptEvidence | None = None
+    last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
+
+
+def _fix_cycle_state(ctx: FlowContext) -> FixCycleState:
+    state = ctx.data.get("fix_cycle_state")
+    if not isinstance(state, FixCycleState):
+        raise RuntimeError("fix cycle was not initialized at the accepted gate")
+    return state
+
+
+def _capture_full_delta_key(work: WorkContext, state: FixCycleState) -> str:
+    from daydream import git_ops
+
+    return git_ops.tree_key(
+        git_ops.snapshot_worktree_delta(
+            work.repo,
+            state.stable_ref,
+            preexisting_untracked=state.preexisting_untracked,
+            preexisting_gitlinks=state.preexisting_gitlinks,
+        )
     )
-    return fix_failures, fix_key
 
 
-def _scrub_smart_quotes(
-    work: WorkContext,
-    *,
-    changed_files: list[str] | None = None,
-    ref: str = "HEAD",
-    preexisting_untracked: set[str] | None = None,
-    trustworthy: bool = True,
-    skip_reason: str = "Smart-quote scrub skipped: no trustworthy pre-fix snapshot.",
-) -> None:
-    """Best-effort ASCII-quote scrub of changed files about to be committed (#687).
+def capture_retained_tree(work: WorkContext, state: FixCycleState) -> RetainedTreeSnapshot:
+    """Capture the authorized HEAD delta while keying the run-relative tree.
 
-    Rewrites typographic smart quotes (U+201C/U+201D/U+2018/U+2019) back to ASCII
-    straight quotes in the given ``changed_files`` set, or — when ``changed_files``
-    is None — in the set freshly enumerated against ``ref`` with
-    ``preexisting_untracked`` filtered out. The driver attributes the agent-added
-    lines against ``ref`` (only those lines are rewritten; pre-existing smart
-    quotes in baseline content are preserved). Shared by the deep fix pass and
-    the deep test-heal pass.
-
-    Fail-open by design, never a gate: a missing, binary, or generated file is
-    skipped by the driver, an enumeration or attribution ``GitError`` degrades to
-    a warning, and an untrustworthy pre-fix base (``trustworthy=False``) skips
-    with ``skip_reason``. The scrub must never abort a run or block a commit.
+    ``stable_ref`` includes pre-gate tracked edits so it remains the authority
+    for mutation attribution, rollback, and test identity.  Commit selection is
+    deliberately relative to the original HEAD: authorized reviewed edits that
+    predate the gate are part of the result even when no fixer touches them.
+    Pre-existing untracked owner files remain protected even when a finding
+    names them; authorization cannot silently enroll that private draft in a
+    commit. New related files created after the gate are still retained.
     """
     from daydream import git_ops
 
-    if not trustworthy:
-        print_warning(console, skip_reason)
-        return
-    if changed_files is None:
-        try:
-            changed_files = git_ops.changed_files_against(
-                work.repo, ref, preexisting_untracked=preexisting_untracked,
-            )
-        except git_ops.GitError as exc:
-            print_warning(
-                console,
-                f"Could not enumerate changed files for smart-quote scrub: {exc}",
-            )
-            return
-    try:
-        scrubbed = scrub_smart_quotes_changed_files(
-            work.repo, changed_files, pre_fix_ref=ref,
-        )
-    except git_ops.GitError as exc:
-        # Attribution diff could not be computed: fail-open, never abort.
-        print_warning(console, f"Could not scrub smart quotes in changed files: {exc}")
-        return
-    if scrubbed:
-        print_warning(
-            console,
-            "Normalized smart quotes to ASCII in: " + ", ".join(sorted(scrubbed)),
-        )
+    changed = set(git_ops.changed_paths_z(work.repo, state.stable_head))
+    paths = frozenset(
+        (changed & set(state.footprint.run_allowed_paths)) - set(state.preexisting_untracked)
+    )
+    states = git_ops.snapshot_worktree_paths(work.repo, paths)
+    full_states = git_ops.snapshot_worktree_delta(
+        work.repo,
+        state.stable_ref,
+        preexisting_untracked=state.preexisting_untracked,
+        preexisting_gitlinks=state.preexisting_gitlinks,
+    )
+    recommended = git_ops.build_recommended_patch_strict(
+        work.repo, state.stable_head, paths
+    )
+    return RetainedTreeSnapshot(
+        paths=paths,
+        states=states,
+        tree_key=git_ops.tree_key(full_states),
+        verifier_patch=recommended.decode("utf-8", errors="replace"),
+        recommended_patch=recommended,
+    )
 
 
-# Actionable verdicts shared by every round/report consumer (issue #744).
-# Aliases into the single authority in ``daydream.phases`` (FIX_VERIFY_VERDICTS),
-# so _round_dispatch_items, _actionable_verdicts, and _render_fix_outcome_summary
-# all derive actionability from one source. Anything not in this set (notably
-# ``resolved``) is a terminal pass and is never re-dispatched.
-ACTIONABLE_VERDICTS = FIX_VERIFY_ACTIONABLE_VERDICTS
+def _evidence_payload(key: EvidenceKey) -> dict[str, Any]:
+    return {"tree_key": key.tree_key, "policy_revision": key.policy_revision}
 
-# Verdicts that may carry a corrected target ``path`` for re-dispatch (a
-# subset of ACTIONABLE_VERDICTS: only these retarget the file; ``unresolved``
-# keeps the item's full file next round).
-RETARGETABLE_VERDICTS = FIX_VERIFY_RETARGETABLE_VERDICTS
+
+def _write_footprint_audit(ctx: FlowContext, state: FixCycleState, key: EvidenceKey) -> None:
+    atomic_write_json(
+        fix_footprint_path(ctx.data["dd"]),
+        state.footprint.audit_payload(state.session_id, evidence_key=_evidence_payload(key)),
+    )
+
+
+def _persist_stabilization_failure(ctx: FlowContext, state: FixCycleState, reason: str) -> None:
+    atomic_write_json(
+        stabilization_failed_path(ctx.data["dd"]),
+        {"session_id": state.session_id, "reason": reason},
+    )
 
 
 def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4190,558 +4034,485 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     """
     iteration = ctx.data.get("iteration")
     outcomes = ctx.data.get("fix_outcomes") or {}
+    state = _fix_cycle_state(ctx)
     if iteration in (None, 1) or not outcomes:
-        return [dict(i) for i in canonical]
-    allowed = set(_resolve_changed_files(ctx) or [])
-    allowed |= {f for i in canonical if isinstance((f := i.get("file")), str)}
+        initial_dispatch = [dict(i) for i in canonical]
+        for item in initial_dispatch:
+            uid = item.get("item_uid")
+            target = item.get("file")
+            if isinstance(uid, str) and isinstance(target, str):
+                state.last_fix_target_by_uid[uid] = target
+        return initial_dispatch
+    round_number = iteration if isinstance(iteration, int) else 1
     dispatched: list[dict[str, Any]] = []
     for item in canonical:
-        iid = item.get("id")
-        outcome = outcomes.get(iid) if isinstance(iid, int) else None
+        uid = item.get("item_uid")
+        outcome = outcomes.get(uid) if isinstance(uid, str) else None
         if not outcome or outcome.get("verdict") not in ACTIONABLE_VERDICTS:
             continue
         copy = dict(item)
         if outcome.get("verdict") in RETARGETABLE_VERDICTS:
-            path = outcome.get("path")
-            if isinstance(path, str) and path in allowed:
-                copy["file"] = path
-                copy["fix_verify_path"] = path
+            accepted = state.footprint.accept_retarget(
+                ctx.work.repo,
+                str(uid),
+                outcome.get("path"),
+                phase="fix",
+                round_number=round_number,
+            )
+            if accepted is not None:
+                copy["file"] = accepted
+                copy["fix_verify_path"] = accepted
         copy["fix_verify_verdict"] = outcome.get("verdict")
         copy["fix_verify_reason"] = outcome.get("reason") or ""
+        target = copy.get("file")
+        if isinstance(uid, str) and isinstance(target, str):
+            state.last_fix_target_by_uid[uid] = target
         dispatched.append(copy)
     return dispatched
 
 
-def _capture_fix_round_snapshot(
-    work: WorkContext,
-    pre_fix_ref: str,
-    changed_after_fix: list[str] | None,
-) -> str:
-    """Issue #744: capture the round's changed hunks for post-fix fix-verify.
 
-    Returns the round's worktree diff (the hunks the fix pass produced) as a
-    single string for the read-only verifier, which audits only these hunks,
-    never the whole tree. The caller computes ``changed_after_fix`` against
-    ``pre_fix_ref`` after the residual net + scrub, so the verifier sees the
-    exact state the round left behind. Best-effort: ``None`` (no diff context,
-    i.e. a failed enumeration) or a diff failure degrades to an empty hunks
-    string, never a crash.
-    """
+
+def _round_rollback_snapshot(state: FixCycleState, work: WorkContext) -> WorktreeRollbackSnapshot:
+    """Capture one exact rollback point for all authorized group paths."""
     from daydream import git_ops
 
-    if changed_after_fix is None:
-        return ""
-    try:
-        diff = git_ops.diff_worktree_against(
-            work.repo, pre_fix_ref, sorted(changed_after_fix)
-        )
-    except git_ops.GitError as exc:
-        print_warning(console, f"Could not capture round diff for fix-verify: {exc}")
-        return ""
-    return _append_new_file_hunks(work.repo, changed_after_fix, diff)
+    return WorktreeRollbackSnapshot(
+        ref=state.stable_ref,
+        index=git_ops.snapshot_index(work.repo),
+        path_states=git_ops.snapshot_worktree_paths(
+            work.repo, state.footprint.run_allowed_paths
+        ),
+        untracked=git_ops.snapshot_untracked_paths(
+            work.repo, include_runtime_artifacts=False
+        ),
+    )
 
 
-def _append_new_file_hunks(
-    repo: Path, changed_files: list[str], hunks: str
-) -> str:
-    """Append added-file hunks for changed files that are still untracked (issue #4).
-
-    ``git diff <ref> -- <paths>`` never emits content for paths that were
-    untracked at the base ref, so a fix that resolves a finding by creating a
-    new file would have that file absent from the hunks the fix-verify agent
-    is mandated to audit. Re-snapshot the worktree's untracked set and render
-    each changed path in it as an added-file hunk so the new file is named in
-    the verifier's hunks (its content stays in the tree for the read-only
-    verifier to Read, not inlined into the prompt). Best-effort: a failed
-    enumeration degrades to the tracked hunks only, never a crash.
-    """
+def _strict_scope_and_scrub(
+    ctx: FlowContext,
+    state: FixCycleState,
+    *,
+    phase: str,
+    round_number: int | None,
+) -> bool:
+    """Apply the run-wide guard and quote scrub, returning whether bytes changed."""
     from daydream import git_ops
 
-    untracked = set(git_ops.list_untracked(repo))
-    new_files = sorted({p for p in changed_files if p in untracked})
-    if not new_files:
-        return hunks
-    pieces: list[str] = [hunks] if hunks else []
-    for rel in new_files:
-        pieces.append(
-            f"diff --git a/{rel} b/{rel}\n"
-            "new file mode 100644\n"
-            f"--- /dev/null\n"
-            f"+++ b/{rel}\n"
-        )
-    return "\n".join(pieces)
-
-
-async def _step_fix(ctx: FlowContext) -> Stop | None:
-    """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection.
-
-    Round-aware dispatch (issue #744): the canonical ``ctx.data["items"]`` is
-    the full list for the run; each round dispatches only its own set — round 1
-    the full list, later rounds only the actionable subset from the prior
-    round's fix-verify outcomes, each carrying the verifier's reason forward.
-    """
-    from daydream import git_ops
-
-    config = ctx.config
-    work = ctx.work
-    target_dir = work.repo
-    daydream_dir = target_dir / ".daydream"
-    dd = ctx.data["dd"]
-    items: list[dict[str, Any]] = _round_dispatch_items(ctx, ctx.data["items"])
-    intent_p: Path = ctx.data["intent_path"]
-
-    # Only forward confirmed intent when we ran the intent phase in
-    # this invocation.  When resuming via --start-at fix/merge/per-stack
-    # the intent phase was skipped, so intent_p may hold a stale
-    # artifact from a prior run; injecting it as authoritative would
-    # contradict the current diff's context.
-    intent_grounded_this_run = config.start_at not in ("per-stack", "merge", "fix")
-    # Snapshot the tracked tree + untracked set BEFORE fixes so a failed
-    # group's partial, possibly non-compiling edits can be captured and
-    # rolled back to exactly their pre-fix content (#203 follow-up).
-    try:
-        pre_fix_snapshot = git_ops.stash_create(work.repo)
-        pre_fix_untracked = set(git_ops.list_untracked(work.repo))
-        pre_fix_untracked_contents = _snapshot_untracked_generated_files(work.repo, pre_fix_untracked)
-    except (git_ops.GitError, OSError) as exc:
-        print_warning(console, f"Could not snapshot tree before fixes: {exc}")
-        pre_fix_snapshot = None
-        pre_fix_untracked = set()
-        pre_fix_untracked_contents = {}
-        pre_fix_snapshot_captured = False
-    else:
-        pre_fix_snapshot_captured = True
-    # Issue #543: thread the pre-fix untracked snapshot into the commit steps so
-    # the host-native _do_commit can exclude user scratch files from the
-    # daydream commit (it never stages beyond the daydream change set).
-    ctx.data["pre_fix_untracked"] = pre_fix_untracked
-    # Pre-fix HEAD is the recommended-patch base only when the tree was
-    # clean (stash_create returns None then) -- otherwise the snapshot is
-    # the base and HEAD is unused, so skip the rev-parse. Captured now
-    # because the commit phase below advances HEAD past the fix.
-    if pre_fix_snapshot is None:
+    before = _capture_full_delta_key(ctx.work, state)
+    generated_restores: list[str] = []
+    for path in git_ops.changed_paths_z(ctx.work.repo, state.stable_ref):
+        if path.startswith(".daydream/") or path == REVIEW_OUTPUT_FILE:
+            continue
         try:
-            pre_fix_head = git_ops.head_sha(work.repo)
+            baseline = git_ops.show(ctx.work.repo, state.stable_ref, path)
         except git_ops.GitError:
-            pre_fix_head = None
-    else:
-        pre_fix_head = None
-    # Resolve per-file-group fix budgets (#201): file-config override wins, else
-    # the config.py default. A runaway file group cannot silently dominate a run.
-    group_wall_s = _resolve_config_value(config, "group_max_wall_s", DEFAULT_GROUP_MAX_WALL_S)
-    group_serial = _resolve_config_value(config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS)
-    # Issue #315: anti-degradation quality gate. Capture the pre-fix quality
-    # snapshot before any fix runs; the post-fix capture + verdict happen after
-    # failure protection below. Fail-open: a snapshot failure means the gate is
-    # unavailable for this run, never a run failure.
-    quality_gate_enabled = _resolve_config_value(config, "quality_gate_enabled", DEFAULT_QUALITY_GATE_ENABLED)
-    quality_gate_erosion_delta = _quality_gate_threshold(
-        config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
-    )
-    quality_gate_verbosity_delta = _quality_gate_threshold(
-        config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
-    )
-    quality_gate_erosion_absolute = _quality_gate_threshold(
-        config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
-    )
-    quality_gate_verbosity_absolute = _quality_gate_threshold(
-        config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
-    )
-    # Issue #336 — fix-loop scope bound. Thread the reviewed diff's file set
-    # into every fix prompt as an explicit "Allowed files" clause. ``None``
-    # (no diff context, e.g. a resume that lost ctx.data["diff"]) leaves the
-    # prompt unchanged; the prose scope boundary still applies. Resolved via
-    # _resolve_changed_files (shared with the gate) so a missing key never
-    # crashes and the gate and post-fix residual net agree on the allowed set.
-    # Issue #457: resolved BEFORE the pre-fix quality capture so the same
-    # reviewed set scopes both gate captures (parsing only reviewed ``*.py``)
-    # and the residual net.
-    changed_files = _resolve_changed_files(ctx)
-
-    # Set when the preflight confinement gate aborts the fix pass; its
-    # id-keyed failure entry is excluded from path-based tree restore below.
-    unconfined_fix_key: str | None = None
-
-    def _py_only(paths: Iterable[str]) -> set[str]:
-        return {p for p in paths if p.endswith(".py")}
-
-    if quality_gate_enabled:
-        # Issue #457: scope the pre-fix snapshot to the reviewed ``*.py`` set.
-        # ``None`` (no diff context, e.g. a resume that lost ctx.data["diff"])
-        # keeps the whole-workspace capture, exactly today's behavior on that
-        # resume path.
-        quality_before_paths: set[str] | None = (
-            _py_only(changed_files) if changed_files is not None else None
+            absolute = ctx.work.repo / path
+            try:
+                current = absolute.read_bytes()
+            except OSError:
+                current = None
+            if current is not None and is_generated_file(path, current):
+                state.footprint.authorize_new_generated(
+                    ctx.work.repo,
+                    path,
+                    phase=phase,
+                    round_number=round_number,
+                    reason="new generated output approved by generated-file policy",
+                )
+            continue
+        if is_generated_file(path, baseline):
+            generated_restores.append(path)
+            generated_restores.extend(related_manifest_paths(path))
+    if generated_restores:
+        restore_paths = sorted(set(generated_restores))
+        git_ops.restore_worktree_paths_from_ref(
+            ctx.work.repo, state.stable_ref, restore_paths
         )
-        quality_before, quality_before_unavailable = await _capture_quality_before(
-            daydream_dir, quality_before_paths
-        )
-    else:
-        quality_before, quality_before_unavailable = None, None
-    exploration_dir = ctx.data.get("exploration_dir")
-    exploration_dir = exploration_dir if isinstance(exploration_dir, Path) else None
-    test_map_path = exploration_dir / "test-map.json" if exploration_dir is not None else None
-    # Issue #744: record THIS round's dispatch set so the post-round fix-verify
-    # step audits exactly the findings that were dispatched (round 1: the full
-    # canonical list; later rounds: the actionable subset derived in _step_fix).
-    ctx.data["fix_round_items"] = list(items)
-    async with phase_scope(DaydreamPhase.FIX):
-        try:
-            fix_failures: dict[str, str] = await phase_fix_parallel(
-                ctx.backend_for("fix"),
-                work,
-                items,
-                intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
-                group_max_wall_s=group_wall_s,
-                group_max_serial_items=group_serial,
-                changed_files=changed_files,
-                exploration_dir=exploration_dir,
-                test_map_path=test_map_path,
+        for path in restore_paths:
+            state.footprint.record_git_event(
+                action="restore",
+                path=path,
+                origin="guard",
+                phase=phase,
+                round_number=round_number,
+                reason="restored an edit to existing generated output or its manifest",
             )
-        except UnconfinedFindingError as exc:
-            # Issue #574: the phase's preflight confinement gate raises on an
-            # unconfined/missing/non-string finding ``file`` ref. Route it
-            # through the same exception-failure recovery below (patch capture,
-            # fix_failures persistence, tree restore, generated-file reject,
-            # Stop(1)) instead of letting it escape to cli.py's generic
-            # handler. Only this exact type is caught so a ValueError from
-            # elsewhere inside phase_fix_parallel (e.g. a parser) is never
-            # misattributed to an unconfined finding.
-            fix_failures, unconfined_fix_key = _record_unconfined_finding_failure(
-                work.repo, items, exc
-            )
-    # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
-    # NOW, before the fix-failure and test-failure early returns below, so
-    # a run that generated a recommendation always archives it — even when
-    # tests fail or a fix group is reverted. Best-effort; never raises.
-    git_ops.capture_recommended_patch_with_base(
-        work.repo,
-        pre_fix_snapshot,
-        pre_fix_head,
-        daydream_dir / "recommended.patch",
-        preexisting_untracked=pre_fix_untracked,
-    )
-    fix_failures_p = fix_failures_path(dd)
-    # Partition failures: budget-exceeded groups have their already-applied fixes
-    # intact (only remaining findings were skipped) and must NOT be reverted.
-    # Exception-failed groups may hold broken partial edits and must be reverted.
-    _BUDGET_PREFIX = "file_group_budget_exceeded:"
-    exception_failures = {k: v for k, v in fix_failures.items() if not v.startswith(_BUDGET_PREFIX)}
-    budget_skips = {k: v for k, v in fix_failures.items() if v.startswith(_BUDGET_PREFIX)}
-
-    all_non_success = {**exception_failures, **budget_skips}
-    if all_non_success:
-        # Persist so the archive marks the run "partial" instead of
-        # "complete" -- the tree holds skipped or reverted groups.
-        fix_failures_p.write_text(json.dumps(all_non_success, indent=2, sort_keys=True))
-    elif fix_failures_p.exists():
-        fix_failures_p.unlink()
-
-    # Issue #744: fix-outcomes sidecar adjacent to the fix-failure record.
-    # Every dispatched finding's accumulated terminal verdict lives here so an
-    # attempted-but-unconfirmed finding cannot silently pass as fixed. The
-    # verifier step merges verdicts into ctx.data["fix_outcomes"]; this write
-    # keeps the sidecar current at every round boundary (and deletes it when
-    # empty -- no dispatched findings means no outcomes).
-    _persist_fix_outcomes(dd, ctx.data.get("fix_outcomes") or {})
-
-    if exception_failures:
-        # Only revert and abort for exception-failed groups; budget-exceeded
-        # groups' applied fixes are preserved and the run continues. The
-        # unconfined-finding entry (id-keyed, not a repo-relative path) is
-        # excluded: its preflight abort dispatched no fixes, and the id must
-        # never reach path-based restore machinery as a file path.
-        _protect_tree_after_fix_failures(
-            work,
-            target_dir,
-            {k: v for k, v in exception_failures.items() if k != unconfined_fix_key},
-            snapshot=pre_fix_snapshot,
-            snapshot_captured=pre_fix_snapshot_captured,
-            pre_untracked=pre_fix_untracked,
+        atomic_write_json(
+            generated_file_violations_path(ctx.data["dd"]),
+            {
+                "session_id": state.session_id,
+                "violations": restore_paths,
+                "phase": phase,
+                "round_number": round_number,
+            },
+            sort_keys=True,
         )
-        _reject_generated_file_edits(
-            work,
-            target_dir,
-            snapshot=pre_fix_snapshot,
-            snapshot_captured=pre_fix_snapshot_captured,
-            pre_untracked=pre_fix_untracked,
-            pre_untracked_contents=pre_fix_untracked_contents,
-        )
-        # Enumerate every untracked path that appeared during the fix
-        # pass and survived protection. Attribution to a specific group
-        # is impossible (shared tree, parallel groups), so we never
-        # delete these -- we record them so the partial state is fully
-        # auditable instead of silently leaving stray files unaccounted.
-        try:
-            leftover = sorted(set(git_ops.list_untracked(work.repo)) - pre_fix_untracked)
-        except git_ops.GitError:
-            leftover = []
-        leftover_p = fix_leftover_untracked_path(dd)
-        if leftover:
-            leftover_p.write_text(json.dumps(leftover, indent=2))
-        elif leftover_p.exists():
-            leftover_p.unlink()
-        print_warning(
-            console,
-            f"{len(exception_failures)} fix group(s) failed: {sorted(exception_failures)}; "
-            "partial edits reverted (patches saved under .daydream/partial-fixes/).",
-        )
-        return Stop(1)
-
-    # No exception failures: budget-skipped groups (if any) already warned via
-    # _record_budget_stop; proceed to test/commit with the applied fixes intact.
-    stale_leftover_p = fix_leftover_untracked_path(dd)
-    if stale_leftover_p.exists():
-        stale_leftover_p.unlink()
-    generated_guard_result = _reject_generated_file_edits(
-        work,
-        target_dir,
-        snapshot=pre_fix_snapshot,
-        snapshot_captured=pre_fix_snapshot_captured,
-        pre_untracked=pre_fix_untracked,
-        pre_untracked_contents=pre_fix_untracked_contents,
-    )
-    if generated_guard_result is None:
-        return Stop(1)
-    # Issue #336 (Task 4) — post-fix residual scope check: revert any edit the
-    # fix pass made outside the reviewed diff and file an issue per residual, so
-    # the commit step below can only land in-scope changes. Runs AFTER the
-    # generated-file guard (which already reverted generated-file edits, so no
-    # double-revert) and BEFORE the quality gate (which then measures the
-    # now-scoped edited set).
-    pre_fix_ref = pre_fix_snapshot or "HEAD"
-    # Thread the pre-fix base + snapshot trust into the test-heal scrub
-    # (_step_test) so it measures the same base on the same trust gate.
-    ctx.data["pre_fix_ref"] = pre_fix_ref
-    ctx.data["pre_fix_snapshot_captured"] = pre_fix_snapshot_captured
-    # Thread the raw pre-fix base onto ctx.data so _step_test's post-test
-    # re-capture passes an IDENTICAL base to the archived recommended.patch.
-    # pre_fix_head is None when a snapshot was captured (the snapshot is the
-    # base), and the pre-fix HEAD SHA when the tree was clean — exactly what
-    # the first capture passed at :3367-3368.
-    ctx.data["pre_fix_snapshot"] = pre_fix_snapshot
-    ctx.data["pre_fix_head"] = pre_fix_head
-    residual_guard_result = _revert_out_of_scope_edits(
-        work,
-        pre_fix_ref=pre_fix_ref,
-        snapshot_captured=pre_fix_snapshot_captured,
-        pre_fix_untracked=pre_fix_untracked,
-        changed_files=changed_files,
-        finding_files={item["file"] for item in ctx.data["items"] if item.get("file")},
-        # Issue #1056 — reverted-edit filing is opt-in; the revert itself is not.
+    enforced = enforce_authorized_fix_footprint(
+        ctx.work,
+        state.stable_ref,
+        state.footprint,
+        preexisting_untracked=state.preexisting_untracked,
+        preexisting_gitlinks=state.preexisting_gitlinks,
+        phase=phase,
+        round_number=round_number,
         file_scope_issues=_scope_issue_filing(ctx.config),
     )
-    if residual_guard_result is None:
-        # Fail-close to match the generated-file guard: an unreverted
-        # out-of-scope edit must never reach the commit step.
-        return Stop(1)
-    # Issue #687: ASCII-quote normalization on the fix path. A fix agent that
-    # writes typographic smart quotes (U+201C/U+201D/U+2018/U+2019) into a
-    # changed file would otherwise commit those bytes and re-trigger the same
-    # typographic finding on every re-review. Scrub the same changed-file set
-    # the residual net and quality gate use (pre_fix_ref base) back to ASCII
-    # straight quotes BEFORE the quality gate measures the tree, so the gate
-    # and the commit stage the final scrubbed bytes. Only the lines the fix
-    # pass added are normalized (attributed from the working-tree diff against
-    # the same base), so pre-existing smart quotes in baseline content are
-    # never rewritten. Best-effort, never a gate: a missing, binary, or
-    # generated file is skipped, a write failure degrades to a warning, and a
-    # changed-file enumeration failure degrades to a warning rather than
-    # aborting the run or blocking the commit. The scrub and the quality gate
-    # below both enumerate the same post-residual tree with no mutation between
-    # them, so enumerate the changed-file set ONCE (Issue #336): one two-
-    # subprocess enumeration per fix run instead of two byte-identical ones,
-    # collapsing the repeated try/except -> warn/None shape.
+    scrub_smart_quotes_changed_files(
+        ctx.work.repo,
+        sorted(enforced.retained_paths),
+        pre_fix_ref=state.stable_ref,
+    )
+    after = _capture_full_delta_key(ctx.work, state)
+    return bool(generated_restores) or enforced.mutated or before != after
+
+
+def _enforce_terminal_confinement(
+    ctx: FlowContext,
+    state: FixCycleState,
+    *,
+    phase: str,
+    round_number: int | None,
+) -> str | None:
+    """Restore all out-of-run/protected state and durably audit a failed exit."""
     try:
-        changed_after_fix = git_ops.changed_files_against(
-            work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
+        enforce_authorized_fix_footprint(
+            ctx.work,
+            state.stable_ref,
+            state.footprint,
+            preexisting_untracked=state.preexisting_untracked,
+            preexisting_gitlinks=state.preexisting_gitlinks,
+            phase=phase,
+            round_number=round_number,
+            file_scope_issues=_scope_issue_filing(ctx.config),
         )
-    except git_ops.GitError as exc:
-        print_warning(console, f"Could not enumerate changed files after fix: {exc}")
-        changed_after_fix = None
-    # Trust gate: when the pre-fix snapshot could not be captured, pre_fix_ref
-    # falls back to HEAD, which may include user edits present before the fix
-    # pass — scrubbing them would rewrite the user's in-progress work. Match the
-    # sibling guards: fail-open, skip with a warning.
-    if changed_after_fix is not None:
-        _scrub_smart_quotes(
-            work,
-            changed_files=changed_after_fix,
-            ref=pre_fix_ref,
-            trustworthy=pre_fix_snapshot_captured,
-            skip_reason=(
-                "Smart-quote scrub skipped: no trustworthy pre-fix snapshot; "
-                "HEAD may include edits present before the fix pass."
-            ),
+        key = EvidenceKey(
+            _capture_full_delta_key(ctx.work, state),
+            state.footprint.policy_revision,
         )
-    # Issue #744: capture the round's changed hunks for the post-fix fix-verify
-    # step (read-only verifier audits the round's hunks only, never the whole
-    # tree). Written after the residual net + scrub so the verifier sees the
-    # exact state the round left behind; best-effort (a failed enumeration or
-    # diff degrades to an empty hunks string, never a crash). Only ``hunks``
-    # crosses the round barrier -- the changed-file set stays local to this
-    # step (the quality gate consumes it live below), so no ``fix_round_changed``
-    # intermediate is written.
-    ctx.data["fix_round_hunks"] = _capture_fix_round_snapshot(
-        work, pre_fix_ref, changed_after_fix
-    )
-    # Issue #315: post-fix anti-degradation gate over the files the fix phase
-    # edited. Tree is post-fix here (every applied or budget-preserved fix is
-    # intact); a regression is flagged and surfaced, never fatal.
-    #
-    # Issue #329 / Finding 6: gate every python file the fix pass changed, not
-    # just the finding-group targets. The fix agent is explicitly allowed to
-    # touch files outside a group's named file, so a regression in such a
-    # secondary file would otherwise bypass the gate, the artifact, the
-    # manifest, and SQLite. The candidate set is derived from the PRE-FIX git
-    # snapshot (clean tree -> HEAD; dirty tree -> the stash snapshot) -- the
-    # same base the generated-file guard and recommended-patch capture use --
-    # scoped to ``*.py``, then unioned with the finding-target files so finding
-    # targets stay covered even when their on-disk content did not change.
-    # Fail-open: if enumeration raises, candidates stay ``None`` and the gate
-    # persists an explicit ``unavailable`` verdict rather than gating on a
-    # partial candidate set.
-    #
-    # The PRE-FIX snapshot, by contrast, is scoped to the reviewed ``*.py``
-    # set only (#457), so a candidate that survived the residual net outside
-    # the reviewed diff (e.g. a newly-created untracked ``*.py``) has no
-    # before baseline; ``_evaluate_quality_gate`` records those explicitly as
-    # flagged missing-baseline entries rather than computing an undefined delta.
-    quality_candidates: set[str] | None
-    if quality_gate_enabled:
-        if changed_after_fix is not None:
-            quality_candidates = _py_only(changed_after_fix)
-            quality_candidates |= _py_only(
-                item["file"] for item in ctx.data["items"] if item.get("file")
-            )
-        else:
-            # Enumeration failed: gate records an explicit ``unavailable`` verdict
-            # rather than gating on a partial candidate set (same fail-open
-            # contract as before).
-            quality_candidates = None
-    else:
-        quality_candidates = set()
-    await _evaluate_quality_gate(
-        enabled=quality_gate_enabled,
-        erosion_delta_threshold=quality_gate_erosion_delta,
-        verbosity_delta_threshold=quality_gate_verbosity_delta,
-        erosion_absolute_threshold=quality_gate_erosion_absolute,
-        verbosity_absolute_threshold=quality_gate_verbosity_absolute,
-        daydream_dir=daydream_dir,
-        dd=dd,
-        candidates=quality_candidates,
-        before=quality_before,
-        before_unavailable_reason=quality_before_unavailable,
-        iteration=ctx.data.get("iteration"),
-    )
+        _write_footprint_audit(ctx, state, key)
+    except Exception as exc:
+        return str(exc)
     return None
 
 
-def _merge_round_verdicts(
-    round_items: list[dict[str, Any]],
-    per_group_verdicts: Iterable[list[dict[str, Any]]],
-) -> dict[int, dict[str, Any]]:
-    """Id-keyed merge of one round's per-fix-group verdicts (issue #744).
-
-    A retargetable verdict (the ``RETARGETABLE_VERDICTS`` members
-    ``wrong_target``/``regressed``) is re-dispatched to the corrected path;
-    when that re-dispatch finally resolves, keep the path on the terminal
-    outcome so the record says where the defect was actually fixed (#336 net
-    never widened). Verdicts lacking an int ``issue_id`` are dropped.
-    """
-    merged: dict[int, dict[str, Any]] = {}
-    round_items_by_id = {
-        item["id"]: item for item in round_items if isinstance(item.get("id"), int)
-    }
-    for verdicts in per_group_verdicts:
-        for verdict in verdicts:
-            issue_id = verdict.get("issue_id")
-            if not isinstance(issue_id, int):
-                continue
-            prior = round_items_by_id.get(issue_id)
-            if (
-                verdict.get("verdict") == "resolved"
-                and prior is not None
-                and prior.get("fix_verify_verdict") in RETARGETABLE_VERDICTS
-                and isinstance(prior.get("fix_verify_path"), str)
-            ):
-                stored = dict(verdict)
-                stored["path"] = prior["fix_verify_path"]
-            else:
-                stored = verdict
-            merged[issue_id] = stored
-    return merged
-
-
-async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
-    """Post-round fix verifier step (issue #744): one verdict per dispatched finding.
-
-    Runs after every fix group in a round finishes (the round barrier) on the
-    round's changed hunks only. Phase work is delegated to
-    ``phase_fix_verify`` (read-only, advisory); each dispatched finding is
-    recorded in ``ctx.data["fix_outcomes"]`` keyed by its canonical id so the
-    dispatched-count == outcome-count invariant holds. Round 1 dispatches the
-    full canonical item list; later rounds re-dispatch only the actionable
-    subset (see ``_step_fix``).
-
-    Returns:
-        ``BreakLoop`` when no actionable verdicts remain — or when the round
-        budget is spent (iteration 3) — after persisting ``fix-outcomes.json``
-        and rendering the honest per-finding summary. ``None`` keeps the
-        enclosing LoopGroup iterating.
-    """
-    from daydream import git_ops
-    from daydream.phases import group_items_by_footprint, phase_fix_verify
-
-    round_value = ctx.data.get("fix_round_items")
-    round_items: list[dict[str, Any]] = (
-        list(round_value) if round_value is not None else list(ctx.data["items"])
+def _stabilization_stop(
+    ctx: FlowContext,
+    state: FixCycleState,
+    reason: str,
+    *,
+    round_number: int | None,
+) -> Stop:
+    """Fail closed after finalization while still restoring and auditing scope."""
+    confinement_error = _enforce_terminal_confinement(
+        ctx,
+        state,
+        phase="post_test_failure",
+        round_number=round_number,
     )
-    if not round_items:
-        _persist_fix_outcomes(ctx.data["dd"], ctx.data.get("fix_outcomes") or {})
-        return BreakLoop()
-    hunks: str = ctx.data.get("fix_round_hunks") or ""
-    if not hunks:
-        # Best-effort whole-tree fallback: diff every uncommitted tracked change
-        # vs HEAD and append any untracked files as added hunks, so a lost round
-        # snapshot still lets the verifier audit the real tree rather than
-        # degrading to "(no hunks provided)". Never raises.
+    if confinement_error is not None:
+        reason = f"{reason}; confinement failed: {confinement_error}"
+    try:
+        _persist_stabilization_failure(ctx, state, reason)
+    except OSError as exc:
+        print_error(console, "Stabilization failure audit failed", str(exc))
+    return Stop(1)
+
+
+async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop | None:
+    """Run one policy-bound fix round using its own complete rollback point."""
+    items = _round_dispatch_items(ctx, ctx.data["items"])
+    ctx.data["fix_round_items"] = list(items)
+    if not items:
+        return None
+    try:
+        round_snapshot = _round_rollback_snapshot(state, ctx.work)
+    except Exception as exc:
+        print_error(console, "Fix snapshot failed", str(exc))
+        return Stop(1)
+    config = ctx.config
+    quality_enabled = _resolve_config_value(
+        config, "quality_gate_enabled", DEFAULT_QUALITY_GATE_ENABLED
+    )
+    reviewed_python = {
+        path for path in (_resolve_changed_files(ctx) or []) if path.endswith(".py")
+    }
+    if quality_enabled:
+        quality_before, quality_unavailable = await _capture_quality_before(
+            ctx.work.repo / ".daydream", reviewed_python
+        )
+    else:
+        quality_before, quality_unavailable = None, None
+    exploration_dir = ctx.data.get("exploration_dir")
+    exploration_dir = exploration_dir if isinstance(exploration_dir, Path) else None
+    test_map_path = exploration_dir / "test-map.json" if exploration_dir else None
+    intent_p: Path = ctx.data["intent_path"]
+    grounded = config.start_at not in ("per-stack", "merge", "fix")
+    async with phase_scope(DaydreamPhase.FIX):
         try:
-            hunks = git_ops.diff(ctx.work.repo, "HEAD", "HEAD")
-            hunks = _append_new_file_hunks(
-                ctx.work.repo, list(git_ops.list_untracked(ctx.work.repo)), hunks
+            failures = await phase_fix_parallel(
+                ctx.backend_for("fix"),
+                ctx.work,
+                items,
+                intent_path=intent_p if grounded and intent_p.exists() else None,
+                group_max_wall_s=_resolve_config_value(
+                    config, "group_max_wall_s", DEFAULT_GROUP_MAX_WALL_S
+                ),
+                group_max_serial_items=_resolve_config_value(
+                    config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS
+                ),
+                exploration_dir=exploration_dir,
+                test_map_path=test_map_path,
+                footprint=state.footprint,
+                round_snapshot=round_snapshot,
             )
-        except git_ops.GitError:
-            hunks = ""
-    outcomes: dict[int, dict[str, Any]] = ctx.data.setdefault("fix_outcomes", {})
-    iteration = ctx.data.get("iteration")
-    async with phase_scope(DaydreamPhase.VERIFY):
-        per_group_verdicts: list[list[dict[str, Any]]] = []
-        groups = group_items_by_footprint(round_items)
-        for _, group_items in groups:
-            per_group_verdicts.append(
-                await phase_fix_verify(
-                    ctx.backend_for("verify"),
-                    ctx.work,
-                    group_items,
-                    hunks,
-                    round_number=iteration if isinstance(iteration, int) else 1,
+        except Exception as exc:
+            confinement_error = _enforce_terminal_confinement(
+                ctx,
+                state,
+                phase="fix_failure",
+                round_number=ctx.data.get("iteration"),
+            )
+            print_error(console, "Fix failed", str(exc))
+            if confinement_error is not None:
+                print_error(console, "Fix failure confinement failed", confinement_error)
+            return Stop(1)
+    budget_prefix = "file_group_budget_exceeded:"
+    exception_failures = {
+        path: reason
+        for path, reason in failures.items()
+        if not reason.startswith(budget_prefix)
+    }
+    failures_artifact = fix_failures_path(ctx.data["dd"])
+    try:
+        if failures:
+            atomic_write_json(failures_artifact, failures, sort_keys=True)
+        else:
+            failures_artifact.unlink(missing_ok=True)
+    except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
+        )
+        print_error(console, "Fix failure audit failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        return Stop(1)
+    if exception_failures:
+        from daydream import git_ops
+
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
+        )
+        artifact_errors: list[str] = []
+        try:
+            leftover = sorted(
+                set(
+                    git_ops.snapshot_untracked_paths(
+                        ctx.work.repo, include_runtime_artifacts=False
+                    )
                 )
+                - set(state.preexisting_untracked)
             )
-    outcomes.update(_merge_round_verdicts(round_items, per_group_verdicts))
+            if leftover:
+                atomic_write_json(fix_leftover_untracked_path(ctx.data["dd"]), leftover)
+        except Exception as exc:
+            artifact_errors.append(str(exc))
+        print_warning(
+            console,
+            "Failed fix groups were restored; this run will not commit successful "
+            "sibling-group edits: " + ", ".join(sorted(exception_failures)),
+        )
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        if artifact_errors:
+            print_error(console, "Fix failure audit failed", "; ".join(artifact_errors))
+        return Stop(1)
+    try:
+        _strict_scope_and_scrub(
+            ctx,
+            state,
+            phase="fix",
+            round_number=ctx.data.get("iteration"),
+        )
+        snapshot = capture_retained_tree(ctx.work, state)
+    except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
+        )
+        print_error(console, "Fix scope enforcement failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        return Stop(1)
+    ctx.data["fix_round_snapshot"] = snapshot
+    try:
+        await _evaluate_quality_gate(
+            enabled=quality_enabled,
+            erosion_delta_threshold=_quality_gate_threshold(
+                config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
+            ),
+            verbosity_delta_threshold=_quality_gate_threshold(
+                config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
+            ),
+            erosion_absolute_threshold=_quality_gate_threshold(
+                config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
+            ),
+            verbosity_absolute_threshold=_quality_gate_threshold(
+                config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
+            ),
+            daydream_dir=ctx.work.repo / ".daydream",
+            dd=ctx.data["dd"],
+            candidates={path for path in snapshot.paths if path.endswith(".py")}
+            | {
+                str(item["file"])
+                for item in ctx.data["items"]
+                if isinstance(item.get("file"), str) and str(item["file"]).endswith(".py")
+            },
+            before=quality_before,
+            before_unavailable_reason=quality_unavailable,
+            iteration=ctx.data.get("iteration"),
+        )
+    except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
+        )
+        print_error(console, "Fix quality evaluation failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        return Stop(1)
+    return None
+
+
+async def _step_fix(ctx: FlowContext) -> Stop | None:
+    """Run one policy-bound fix round against the stable fix-cycle baseline."""
+    return await _step_fix_authorized(ctx, _fix_cycle_state(ctx))
+
+
+
+
+async def verify_retained_tree(
+    ctx: FlowContext,
+    snapshot: RetainedTreeSnapshot,
+    items: list[dict[str, Any]],
+    *,
+    pass_number: int,
+) -> dict[str, dict[str, Any]]:
+    """Verify all canonical findings and join numeric wire ids to durable uids."""
+    from daydream.phases import phase_fix_verify
+
+    verdicts = await phase_fix_verify(
+        ctx.backend_for("verify"),
+        ctx.work,
+        items,
+        snapshot.verifier_patch,
+        round_number=pass_number,
+    )
+    by_id = {
+        item.get("id"): item
+        for item in items
+        if isinstance(item.get("id"), int) and isinstance(item.get("item_uid"), str)
+    }
+    state = _fix_cycle_state(ctx)
+    outcomes: dict[str, dict[str, Any]] = {}
+    for verdict in verdicts:
+        item = by_id.get(verdict.get("issue_id"))
+        if item is None:
+            continue
+        stored = dict(verdict)
+        stored["issue_id"] = item["id"]
+        uid = item["item_uid"]
+        if stored.get("verdict") == "resolved":
+            target = state.last_fix_target_by_uid.get(uid)
+            if target is not None:
+                stored["path"] = target
+        outcomes[uid] = stored
+    return outcomes
+
+
+def _persist_fix_outcomes_current(
+    ctx: FlowContext,
+    state: FixCycleState,
+    key: EvidenceKey,
+    outcomes: dict[str, dict[str, Any]],
+) -> None:
+    atomic_write_json(
+        fix_outcomes_path(ctx.data["dd"]),
+        {
+            "session_id": state.session_id,
+            "evidence_key": _evidence_payload(key),
+            "outcomes": outcomes,
+        },
+        sort_keys=True,
+    )
+
+
+async def _step_fix_verify_authorized(
+    ctx: FlowContext, state: FixCycleState
+) -> BreakLoop | Stop | None:
+    snapshot = ctx.data.get("fix_round_snapshot")
+    if not isinstance(snapshot, RetainedTreeSnapshot):
+        try:
+            snapshot = capture_retained_tree(ctx.work, state)
+        except Exception as exc:
+            confinement_error = _enforce_terminal_confinement(
+                ctx,
+                state,
+                phase="fix_verify_failure",
+                round_number=ctx.data.get("iteration"),
+            )
+            print_error(console, "Fix verification capture failed", str(exc))
+            if confinement_error is not None:
+                print_error(console, "Fix failure confinement failed", confinement_error)
+            return Stop(1)
+    iteration = ctx.data.get("iteration")
+    round_number = iteration if isinstance(iteration, int) else 1
+    try:
+        outcomes = await verify_retained_tree(
+            ctx, snapshot, ctx.data["items"], pass_number=round_number
+        )
+        key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
+        state.latest_retained = snapshot
+        state.verifier_key = key
+        ctx.data["fix_outcomes"] = outcomes
+        _persist_fix_outcomes_current(ctx, state, key, outcomes)
+        _write_footprint_audit(ctx, state, key)
+    except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_verify_failure",
+            round_number=round_number,
+        )
+        print_error(console, "Fix verification failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        return Stop(1)
     actionable = _actionable_verdicts(outcomes)
-    # Budget spent (iteration == 3), a flat/no-loop pass (iteration unset), or
-    # nothing left to re-dispatch all terminate the loop. In every terminal
-    # case the accumulated outcomes are persisted and the honest per-finding
-    # summary rendered (attempted-not-fixed for still-unresolved findings).
     if actionable and iteration not in (None, 3):
         return None
-    _persist_fix_outcomes(ctx.data["dd"], outcomes)
-    _render_fix_outcome_summary(ctx.data["dd"], round_items, outcomes)
+    _render_fix_outcome_summary(ctx.data["dd"], ctx.data["items"], outcomes)
+    if actionable:
+        return Stop(1)
     return BreakLoop()
 
 
-def _actionable_verdicts(outcomes: dict[int, dict[str, Any]]) -> list[str]:
+async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
+    """Verify every canonical finding against the complete retained tree."""
+    return await _step_fix_verify_authorized(ctx, _fix_cycle_state(ctx))
+
+
+def _actionable_verdicts(outcomes: dict[Any, dict[str, Any]]) -> list[str]:
     """Verdicts that schedule re-dispatch in a later round (issue #744)."""
     return [
         v["verdict"]
@@ -4750,25 +4521,12 @@ def _actionable_verdicts(outcomes: dict[int, dict[str, Any]]) -> list[str]:
     ]
 
 
-def _persist_fix_outcomes(dd: Path, outcomes: dict[int, dict[str, Any]]) -> None:
-    """Write ``fix-outcomes.json`` beside the fix-failure record (issue #744).
-
-    Keys are finding ids (JSON stringified), values the terminal verdict dicts.
-    Deleted when empty — no dispatched findings means no outcomes.
-    """
-    fix_outcomes_p = fix_outcomes_path(dd)
-    if outcomes:
-        fix_outcomes_p.write_text(
-            json.dumps({str(k): v for k, v in outcomes.items()}, indent=2, sort_keys=True)
-        )
-    elif fix_outcomes_p.exists():
-        fix_outcomes_p.unlink()
 
 
 def _render_fix_outcome_summary(
     dd: Path,
     items: list[dict[str, Any]],
-    outcomes: dict[int, dict[str, Any]],
+    outcomes: dict[Any, dict[str, Any]],
 ) -> None:
     """Render the terminal per-finding fix-verdict lines (issue #744).
 
@@ -4784,83 +4542,259 @@ def _render_fix_outcome_summary(
     """
     if not outcomes:
         return
-    numbering = {
+    numbering_by_id = {
         item["id"]: num
         for num, item in enumerate(items, start=1)
         if isinstance(item.get("id"), int)
     }
+    numbering_by_uid = {
+        item["item_uid"]: num
+        for num, item in enumerate(items, start=1)
+        if isinstance(item.get("item_uid"), str)
+    }
     total = len(items)
-    for issue_id, verdict in outcomes.items():
-        num = numbering.get(issue_id)
+    for outcome_key, verdict in outcomes.items():
+        num = (
+            numbering_by_uid.get(outcome_key)
+            if isinstance(outcome_key, str)
+            else numbering_by_id.get(outcome_key)
+        )
+        if num is None:
+            num = numbering_by_id.get(verdict.get("issue_id"))
         if num is None:
             continue
         print_fix_complete(console, num, total, outcome=verdict.get("verdict"))
 
 
+def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
+    return {
+        "session_id": attempt.session_id,
+        "kind": attempt.kind,
+        "command": list(attempt.command) if attempt.command is not None else "agent-fallback",
+        "passed": attempt.passed,
+        "input_tree_key": attempt.input_tree_key,
+        "output_tree_key": attempt.output_tree_key,
+    }
+
+
+def _persist_test_verdict(
+    ctx: FlowContext,
+    state: FixCycleState,
+    *,
+    passed: bool,
+    ignored: bool,
+    attempts: list[TestAttemptEvidence],
+) -> None:
+    atomic_write_json(
+        test_verdict_path(ctx.data["dd"]),
+        {
+            "session_id": state.session_id,
+            "passed": passed,
+            "ignored": ignored,
+            "retries": max(0, len(attempts) - 1),
+            "attempts": [_test_attempt_payload(attempt) for attempt in attempts],
+        },
+        sort_keys=True,
+    )
+
+
+def _authorize_final_red_override() -> bool:
+    """Require a fresh interactive decision for a changed-tree red retest."""
+    if get_assume() is not None or get_non_interactive():
+        return False
+    return resolve_or_prompt(
+        assume=None,
+        interactive=True,
+        safe_default=False,
+        question="Final no-heal validation is still red. Ignore and continue? [y/N]",
+        default="n",
+    )
+
+
+async def finalize_retained_tree_after_test(
+    ctx: FlowContext, result: TestAndHealResult
+) -> Stop | None:
+    """Strictly stabilize post-heal state in at most two guard passes."""
+    state = _fix_cycle_state(ctx)
+    attempts = list(result.attempts)
+    if not attempts:
+        return _stabilization_stop(
+            ctx, state, "test produced no evidence", round_number=None
+        )
+    evidence = attempts[-1]
+    state.test_evidence = evidence
+    ignored = result.ignored
+
+    for pass_number in range(1, MAX_POST_TEST_STABILIZATION_PASSES + 1):
+        try:
+            mutated = _strict_scope_and_scrub(
+                ctx,
+                state,
+                phase="post_test",
+                round_number=pass_number,
+            )
+            snapshot = capture_retained_tree(ctx.work, state)
+            key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
+            _write_footprint_audit(ctx, state, key)
+        except Exception as exc:
+            return _stabilization_stop(
+                ctx,
+                state,
+                f"guard/capture/audit failed: {exc}",
+                round_number=pass_number,
+            )
+
+        if state.verifier_key != key:
+            try:
+                outcomes = await verify_retained_tree(
+                    ctx, snapshot, ctx.data["items"], pass_number=pass_number
+                )
+                _persist_fix_outcomes_current(ctx, state, key, outcomes)
+            except Exception as exc:
+                return _stabilization_stop(
+                    ctx,
+                    state,
+                    f"final verifier failed: {exc}",
+                    round_number=pass_number,
+                )
+            state.verifier_key = key
+            ctx.data["fix_outcomes"] = outcomes
+            if _actionable_verdicts(outcomes):
+                return _stabilization_stop(
+                    ctx,
+                    state,
+                    "final verifier remains actionable",
+                    round_number=pass_number,
+                )
+
+        matching_test = (
+            evidence.session_id == state.session_id
+            and evidence.input_tree_key == snapshot.tree_key
+            and evidence.output_tree_key == snapshot.tree_key
+        )
+        ran_test = False
+        if not matching_test and pass_number == 1:
+            try:
+                evidence, _, _ = await phase_test_once(
+                    ctx.backend_for("test"),
+                    ctx.work,
+                    config=ctx.config,
+                    session_id=state.session_id,
+                    capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
+                )
+            except Exception as exc:
+                return _stabilization_stop(
+                    ctx,
+                    state,
+                    f"final test failed to run: {exc}",
+                    round_number=pass_number,
+                )
+            attempts.append(evidence)
+            state.test_evidence = evidence
+            ignored = False if evidence.passed else _authorize_final_red_override()
+            ran_test = True
+            _persist_test_verdict(
+                ctx,
+                state,
+                passed=evidence.passed,
+                ignored=ignored,
+                attempts=attempts,
+            )
+
+        if pass_number == 1 and (mutated or ran_test):
+            continue
+        stable_test = (
+            evidence.input_tree_key == snapshot.tree_key
+            and evidence.output_tree_key == snapshot.tree_key
+            and (evidence.passed or ignored)
+        )
+        if mutated or state.verifier_key != key or not stable_test:
+            return _stabilization_stop(
+                ctx,
+                state,
+                "post-test tree did not stabilize",
+                round_number=pass_number,
+            )
+
+        try:
+            patch_path = ctx.work.repo / ".daydream" / "recommended.patch"
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_bytes(snapshot.recommended_patch)
+            atomic_write_json(
+                recommended_capture_path(ctx.data["dd"]),
+                {
+                    "session_id": state.session_id,
+                    "capture_point": "post_test",
+                    "tree_key": snapshot.tree_key,
+                    "evidence_key": _evidence_payload(key),
+                },
+                sort_keys=True,
+            )
+        except OSError as exc:
+            return _stabilization_stop(
+                ctx,
+                state,
+                f"recommended capture failed: {exc}",
+                round_number=pass_number,
+            )
+        state.latest_retained = snapshot
+        return None
+
+    return _stabilization_stop(
+        ctx,
+        state,
+        "post-test pass bound exhausted",
+        round_number=MAX_POST_TEST_STABILIZATION_PASSES,
+    )
+
+
 
 async def _step_test(ctx: FlowContext) -> Stop | None:
-    """Post-fix test validation."""
-    from daydream import git_ops
+    """Run typed, identity-bound tests and strictly finalize the retained tree."""
+    state = _fix_cycle_state(ctx)
     async with phase_scope(DaydreamPhase.TEST):
-        passed, retries, proceed = await phase_test_and_heal(
-            ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"],
-            config=ctx.config,
-        )
-    # Persisted before the failure early-return so both outcomes leave a verdict.
-    # ``passed`` is always the suite's own result: an operator who continues past
-    # a red suite records the override in ``ignored``, never as a green verdict.
-    test_verdict_path(ctx.data["dd"]).write_text(
-        json.dumps({"passed": passed, "retries": retries, "ignored": proceed and not passed}, indent=2)
-    )
-    if not proceed:
-        print_warning(console, "Tests failed after fix attempt.")
-        return Stop(1)
-    # Issue #687: test healing (phase_test_and_heal) writes agent edits after
-    # _step_fix's scrub, so re-scrub the tree about to be committed on the same
-    # pre_fix_ref base and trust gate (skip with a warning when the pre-fix
-    # snapshot could not be captured). Idempotent for the already-scrubbed fix
-    # edits; catches the test-heal edits before _step_commit stages the tree.
-    _scrub_smart_quotes(
-        ctx.work,
-        ref=ctx.data.get("pre_fix_ref") or "HEAD",
-        preexisting_untracked=ctx.data.get("pre_fix_untracked"),
-        trustworthy=bool(ctx.data.get("pre_fix_snapshot_captured", False)),
-        skip_reason=(
-            "Smart-quote scrub skipped after test healing: no trustworthy "
-            "pre-fix snapshot; HEAD may include edits present before the fix pass."
-        ),
-    )
-    # Issue #743: best-effort post-test re-capture. The pre-test capture above
-    # (in _step_fix) predates test-and-heal edits; re-capture the post-heal
-    # (post-scrub) tree here so the archived recommended.patch reproduces the
-    # exact tree _step_commit commits. Runs only on the success path (after the
-    # test-failure early return) and only in flows with a fix/test cycle.
-    # Best-effort: a raise writes nothing and leaves the pre-test patch intact.
-    re_captured = False
-    try:
-        git_ops.capture_recommended_patch_with_base(
-            ctx.work.repo,
-            ctx.data.get("pre_fix_snapshot"),
-            ctx.data.get("pre_fix_head"),
-            ctx.work.repo / ".daydream" / "recommended.patch",
-            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
-        )
-        re_captured = True
-    except Exception:
-        pass
-    # Session-bound capture-point sidecar, mirrored from fix-quality-gate.json.
-    # Only record "post_test" when the re-capture succeeded; otherwise the patched
-    # tree on disk is still the pre-test capture, not the post-heal tree.
-    if re_captured:
         try:
-            recommended_capture_path(ctx.data["dd"]).write_text(
-                json.dumps(
-                    {"session_id": _current_session_id(), "capture_point": "post_test"}, indent=2
-                )
+            result = await phase_test_and_heal(
+                ctx.backend_for("test"),
+                ctx.work,
+                feedback_items=ctx.data["items"],
+                config=ctx.config,
+                session_id=state.session_id,
+                capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
+                footprint=state.footprint,
             )
-        except Exception:
-            pass
-    return None
+            if not isinstance(result, TestAndHealResult):
+                raise TypeError("phase_test_and_heal returned an invalid evidence result")
+            _persist_test_verdict(
+                ctx,
+                state,
+                passed=result.passed,
+                ignored=result.ignored,
+                attempts=list(result.attempts),
+            )
+        except Exception as exc:
+            confinement_error = _enforce_terminal_confinement(
+                ctx,
+                state,
+                phase="test_failure",
+                round_number=None,
+            )
+            print_error(console, "Test evidence failed", str(exc))
+            if confinement_error is not None:
+                print_error(console, "Test failure confinement failed", confinement_error)
+            return Stop(1)
+    if not result.proceed:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="test_failure",
+            round_number=None,
+        )
+        print_warning(console, "Tests failed after fix attempt.")
+        if confinement_error is not None:
+            print_error(console, "Test failure confinement failed", confinement_error)
+        return Stop(1)
+    return await finalize_retained_tree_after_test(ctx, result)
 
 
 async def _commit_push_or_stop(coro: Awaitable[None]) -> Stop | None:
@@ -4880,20 +4814,37 @@ async def _commit_push_or_stop(coro: Awaitable[None]) -> Stop | None:
 
 
 async def _step_commit(ctx: FlowContext) -> Stop | None:
-    """Commit-and-push the applied fixes."""
-    # phase_commit_push runs as part of the fix/commit cycle — reuse
-    # the fix backend (no separate "commit" phase identifier).
-    # stage_paths can raise GitError synchronously before the agent turn;
-    # _commit_push_or_stop surfaces that as a clean Stop(1) instead of
-    # an unhandled traceback terminating the deep run.
-    # The applied fix items are threaded through to build_commit_message so
-    # the deterministic commit message lists them instead of static boilerplate.
+    """Stage the finalized retained paths once, then commit and push them."""
+    state = _fix_cycle_state(ctx)
+    snapshot = state.latest_retained
+    if snapshot is None:
+        print_error(console, "Commit/Push Failed", "retained tree was not finalized")
+        return Stop(1)
+    key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
+    try:
+        for path in sorted(snapshot.paths):
+            state.footprint.record_git_event(
+                action="stage",
+                path=path,
+                origin="staging",
+                phase="commit",
+                round_number=None,
+                reason="final retained path selected for the validated index",
+            )
+        _write_footprint_audit(ctx, state, key)
+    except Exception as exc:
+        print_error(console, "Commit/Push Failed", str(exc))
+        return Stop(1)
     return await _commit_push_or_stop(
         phase_commit_push(
-            ctx.backend_for("fix"), ctx.work,
-            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+            ctx.backend_for("fix"),
+            ctx.work,
+            preexisting_untracked=set(state.preexisting_untracked),
             config=ctx.config,
             items=ctx.data.get("items") or [],
+            retained_paths=snapshot.paths,
+            retained_states=snapshot.states,
+            initial_index=state.initial_index,
         )
     )
 

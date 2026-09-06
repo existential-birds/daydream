@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, cast
 import anyio
 import pytest
 
+import daydream
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.eval.analyzer import _records_issues
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
@@ -179,14 +180,7 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
 
 
 def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
-    """Commit *files* to the current branch so they land in the reviewed diff.
-
-    Issue #336 bounds the fix loop to the reviewed diff's file set: findings on
-    files OUTSIDE the diff are filed as GitHub issues instead of auto-fixed.
-    Fix-loop-mechanics tests that feed synthetic merge items must therefore put
-    those files IN the diff, or the partition correctly routes them to issues
-    and the fix never runs.
-    """
+    """Commit *files* to the branch for tests that need reviewed-diff fixtures."""
     for name in files:
         (target / name).touch()
     _git(target, "add", *files)
@@ -299,13 +293,31 @@ def _prime_merge_resume(
     return deep
 
 
-async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int, bool]:
+async def _ok(*_a: Any, **kwargs: Any) -> Any:
     """Async stand-in for phase_test_and_heal that always passes.
 
     Kept for the sibling modules that import it (tests/test_archive_data_capture.py);
     tests in this module use the ``mute_side_effects`` fixture instead.
     """
-    return (True, 0, True)
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    key = kwargs["capture_tree_key"]()
+    return TestAndHealResult(
+        passed=True,
+        retries=0,
+        proceed=True,
+        ignored=False,
+        attempts=(
+            TestAttemptEvidence(
+                session_id=kwargs["session_id"],
+                kind="agent",
+                command=None,
+                passed=True,
+                input_tree_key=key,
+                output_tree_key=key,
+            ),
+        ),
+    )
 
 
 async def _noop_commit(*_a: Any, **_k: Any) -> None:
@@ -679,11 +691,7 @@ async def test_parallel_fix_applies_all_disjoint_files(
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """AC#3: every disjoint-file group is applied (each per-file sentinel lands).
-
-    A serial loop + single-sentinel stub would fail this -- it asserts EVERY
-    per-file ``.fixed-*`` marker, not just the last one written.
-    """
+    """AC#3: every disjoint-file group receives its own fixer dispatch."""
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -699,8 +707,9 @@ async def test_parallel_fix_applies_all_disjoint_files(
         )
     )
     assert exit_code == 0
+    prompts = [call["prompt"] for call in stub.calls if call["prompt"].lower().startswith("fix this")]
     for f in files:
-        assert (multi_stack_target / f".fixed-{f.replace('.', '_')}").exists()
+        assert any(f in prompt for prompt in prompts), f"no fixer dispatched for {f}"
 
 
 async def test_long_fix_is_not_turn_capped(
@@ -747,8 +756,13 @@ async def test_long_fix_is_not_turn_capped(
     )
 
     assert exit_code == 0
-    assert (multi_stack_target / ".fixed-api_py").exists()
-    assert (multi_stack_target / ".fixed-App_tsx").exists()
+    fix_calls = [
+        call for call in stub.calls
+        if call["prompt"].lower().startswith(("fix this", "fix these"))
+    ]
+    assert any("api.py" in call["prompt"] for call in fix_calls)
+    assert any("App.tsx" in call["prompt"] for call in fix_calls)
+    assert all(call["max_turns"] is None for call in fix_calls)
 
     run_dirs = list((archive_dir / "runs").iterdir())
     assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
@@ -885,8 +899,9 @@ async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
     assert outcomes_p.exists()
     outcomes = json.loads(outcomes_p.read_text())
     # every dispatched finding (incl. structural) has exactly one recorded outcome
-    assert sorted(int(k) for k in outcomes) == [1, 2, 3]
-    assert all(v["verdict"] == "resolved" for v in outcomes.values())
+    assert outcomes["session_id"]
+    assert sorted(v["issue_id"] for v in outcomes["outcomes"].values()) == [1, 2, 3]
+    assert all(v["verdict"] == "resolved" for v in outcomes["outcomes"].values())
     # one round only (all resolved -> BreakLoop on round 1)
     fix_calls = [c for c in stub.calls
                  if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
@@ -918,7 +933,7 @@ async def test_fix_verify_loop_redispatch_resolves_second_round(
     assert exit_code == 0
     outcomes_p = multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json"
     outcomes = json.loads(outcomes_p.read_text())
-    assert outcomes["1"]["verdict"] == "resolved"
+    assert outcomes["outcomes"]["item:1"]["verdict"] == "resolved"
     fix_calls = [c for c in stub.calls
                  if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
     assert len(fix_calls) == 2  # loop ran twice: round 1 + re-dispatch round 2
@@ -938,7 +953,9 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
     _force_interactive(monkeypatch)
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    item = _merge_item(1, "api.py", "high")
+    item["related_files"] = ["App.tsx"]
+    stub.merge_items = [item]
     # round 1 verifier says: defect really lives in App.tsx
     stub.fix_verify_verdicts = {1: {"issue_id": 1, "verdict": "wrong_target",
                                     "path": "App.tsx", "reason": "moved"}}
@@ -949,8 +966,19 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
     )
     assert exit_code == 0
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
-    assert outcomes["1"]["verdict"] == "resolved"
-    assert outcomes["1"].get("path") == "App.tsx"
+    assert outcomes["outcomes"]["item:1"]["verdict"] == "resolved"
+    assert outcomes["outcomes"]["item:1"]["path"] == "App.tsx"
+    audit = json.loads((multi_stack_target / ".daydream/deep/fix-footprint.json").read_text())
+    accepted = [
+        event
+        for event in audit["events"]
+        if event["action"] == "authorize" and event["origin"] == "retarget"
+    ]
+    assert len(accepted) == 1
+    assert accepted[0]["path"] == "App.tsx"
+    assert accepted[0]["item_uid"] == "item:1"
+    assert accepted[0]["round_number"] == 2
+    assert audit["policy_revision"] == 1
 
 
 async def test_unresolved_finding_reported_attempted_not_fixed(
@@ -958,6 +986,7 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Spec: a finding still unresolved after the last round appears as
     attempted-not-fixed, never counted/shown as fixed."""
@@ -974,11 +1003,12 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
             multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
         )
     )
-    assert exit_code == 0
+    assert exit_code == 1
+    assert "Attempted, not fixed" in capsys.readouterr().out
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
-    assert outcomes["1"]["verdict"] == "unresolved"
+    assert outcomes["outcomes"]["item:1"]["verdict"] == "unresolved"
     # fix applied was NOT asserted for the unresolved finding (no "Fix applied" line for it)
-    assert all(v["verdict"] == "unresolved" for v in outcomes.values())
+    assert all(v["verdict"] == "unresolved" for v in outcomes["outcomes"].values())
 
 
 async def test_parallel_fix_failure_isolated_returns_nonzero(
@@ -986,6 +1016,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """AC#5: a failed fix group is isolated, surfaced, and exits nonzero.
 
@@ -1001,6 +1032,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _add_to_reviewed_diff(multi_stack_target, ["good1.py", "bad.py", "good2.py"])
     stub.fix_fail_file = "bad.py"
+    stub.fix_edit_line = "# retained successful group\n"
     stub.merge_items = [
         _merge_item(1, "good1.py", "high"),
         _merge_item(2, "bad.py", "high"),
@@ -1023,11 +1055,16 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
         )
     )
     assert exit_code == 1  # decision: nonzero on failure
-    assert (multi_stack_target / ".fixed-good1_py").exists()  # other groups applied
-    assert (multi_stack_target / ".fixed-good2_py").exists()
+    assert "# retained successful group" in (multi_stack_target / "good1.py").read_text()
+    assert "# retained successful group" in (multi_stack_target / "good2.py").read_text()
+    assert not (multi_stack_target / ".fixed-good1_py").exists()
+    assert not (multi_stack_target / ".fixed-good2_py").exists()
     assert not (multi_stack_target / ".fixed-bad_py").exists()  # failed group did not apply
     assert any("bad.py" in m for m in warnings)  # non-silent
     assert commit_calls == []  # no commit on failure
+    output = capsys.readouterr().out
+    assert "complete group was restored" in output
+    assert "this file's changes are left uncommitted" not in output
 
 
 async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
@@ -1062,6 +1099,7 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
+    stub.fix_edit_line = "# retained successful group\n"
     stub.merge_items = [
         _merge_item(1, "api.py", "high"),
         _merge_item(2, "App.tsx", "high"),
@@ -1079,16 +1117,17 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     )
     assert exit_code == 1  # dropped fix group => nonzero
 
-    # (b) successful group applied and survives.
-    assert (multi_stack_target / ".fixed-api_py").exists()
+    # (b) the successful group's authorized edit survives; its old out-of-scope
+    # sentinel does not.
+    assert "# retained successful group" in (multi_stack_target / "api.py").read_text()
+    assert not (multi_stack_target / ".fixed-api_py").exists()
 
     # (c) failed group reverted to pre-fix content; broken edit gone.
     apptsx_after = (multi_stack_target / "App.tsx").read_text()
     assert apptsx_after == pre_fix_apptsx
     assert _PARTIAL_FIX_MARKER not in apptsx_after
     patches = list((multi_stack_target / ".daydream" / "partial-fixes").glob("*.patch"))
-    assert patches, "expected a recovery patch for the reverted partial fix"
-    assert any("App.tsx" in p.read_text() for p in patches), "patch must capture the partial edit"
+    assert patches == []
 
     # (a) manifest records the failure and is no longer "complete".
     run_dirs = list((archive_dir / "runs").iterdir())
@@ -1099,23 +1138,17 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     assert any("App.tsx" in key for key in manifest["fix_failures"])
 
 
-async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
+async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """A symlink-escape finding in the fix cycle is handled, not raised.
+    """Footprint preflight blocks unsafe paths before fixing and records why.
 
-    The ``src/handler.py`` finding is confined *lexically* (so it passes the
-    ``_step_fix_gate`` changed_files partition) but escapes via a symlink, so
-    ``phase_fix_parallel``'s preflight raises ``UnconfinedFindingError``. The
-    guarded
-    caller must run the recovery machinery, avoid creating the fix-group
-    sentinel for the aborted group, archive ``recommended.patch``, mark the run
-    partial, name the offending item, and return ``Stop(1)`` (exit 1) rather
-    than let the exception reach cli.py's generic handler.
+    The durable failure names blocked canonical item identities without
+    reflecting an unsafe model path. No fixer or unconfined patch read runs.
     """
     from daydream.runner import run
 
@@ -1153,43 +1186,33 @@ async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
     )
     assert exit_code == 1  # handled failure => Stop(1), not a raise
 
-    # (a) recovery ran: the archived run is partial and records the failure,
-    #     and the recommendation patch survives.
+    # The admitted evidence session records the blocked findings in archive.
     run_dirs = list((archive_dir / "runs").iterdir())
     assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
     manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "partial"
-    assert manifest["fix_failures"], "manifest must record the dropped finding"
+    items = _merged_items(multi_stack_target / ".daydream" / "deep")
+    assert set(manifest["fix_failures"]) == {item["item_uid"] for item in items}
+    assert set(manifest["fix_failures"].values()) == {"fix_preflight_rejected: fix cycle did not start"}
+    assert manifest["pipeline_status"] == "partial"
+    assert manifest["phase_states"]["test"] == {"ran": False, "status": "absent"}
 
     # (b) no dangling pre-fix stash / tree restored: the symlink finding's
     #     group never got a fix applied (preflight aborts before dispatch).
     assert not (multi_stack_target / ".fixed-src_handler_py").exists()
 
-    # (c) the CLI output names the offending item by id and/or file ref.
-    assert any("src/handler.py" in m for m in warnings), warnings
+    # Unsafe path values are not reflected into diagnostics.
+    assert not any("src/handler.py" in warning for warning in warnings)
 
 
-async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
+async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archive(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path: a stray untracked file a failed group creates -- one that is
-    NOT the group's key file -- is enumerated in the manifest and never deleted.
-
-    The failing ``App.tsx`` group writes a stray ``store/uuid.go`` before raising
-    ``MaxTurnsError``. Because parallel groups share one tree, that orphan can't
-    be attributed to a group, so the orchestrator records it (never deletes it):
-
-      (a) ``manifest.json`` lists ``store/uuid.go`` in ``fix_leftover_untracked``;
-      (b) the orphan still EXISTS in the tree (no risk of deleting good work);
-      (c) the run is still ``status == "partial"``.
-
-    Fails if the enumeration is removed: without (a) the orphan is invisible in
-    the archive -- the exact "half-broken tree presented as clean" gap.
-    """
+    """Real runner confines a failed fixer and archives its restore audit."""
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -1198,6 +1221,10 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.fix_orphan_file = "store/uuid.go"
+    stub.fix_edit_line = "# retained successful fix\n"
+    scratch = multi_stack_target / "owner-scratch.bin"
+    scratch.write_bytes(b"\x00owner-original")
+    stub.fix_damage_protected_file = "owner-scratch.bin"
     stub.merge_items = [
         _merge_item(1, "api.py", "high"),
         _merge_item(2, "App.tsx", "high"),
@@ -1214,17 +1241,26 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     )
     assert exit_code == 1
 
-    # (b) the unattributable orphan is preserved, never deleted.
-    assert (multi_stack_target / "store" / "uuid.go").exists()
+    # The successful group remains while the failed group's outside-run write
+    # is removed and the user's protected untracked file is restored exactly.
+    assert "# retained successful fix" in (multi_stack_target / "api.py").read_text()
+    assert not (multi_stack_target / "store" / "uuid.go").exists()
+    assert scratch.read_bytes() == b"\x00owner-original"
 
     run_dirs = list((archive_dir / "runs").iterdir())
     assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
     manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
-    # (c) partial, and (a) the orphan is enumerated for audit.
+    # The archive is partial, but there is no surviving leftover.  The durable
+    # policy audit records both confinement operations.
     assert manifest["status"] == "partial"
-    leftover = manifest["fix_leftover_untracked"]
-    assert leftover, "manifest must enumerate untracked files left by the failed fix pass"
-    assert "store/uuid.go" in leftover
+    assert manifest["fix_leftover_untracked"] is None
+    run_audit = json.loads((run_dirs[0] / "deep" / "fix-footprint.json").read_text())
+    restored = {
+        event["path"]
+        for event in run_audit["events"]
+        if event["action"] in {"remove", "restore"}
+    }
+    assert {"store/uuid.go", "owner-scratch.bin"} <= restored
 
 
 # Issue #315: the fix-phase stub appends a duplicated if/else branch to the
@@ -2100,18 +2136,8 @@ async def test_fix_quality_gate_flags_missing_baseline_secondary_file(
     gate = _read_quality_gate(target)
     assert gate["enabled"] is True
     per_file = gate["rounds"][0]["per_file"]
-    entry = per_file["new_module.py"]
-    # Absolute fallbacks are raised out of the way (100.0): only the explicit
-    # missing-baseline flag can mark this file -- the old undefined-delta path
-    # would have left it unflagged and invisible.
-    assert entry["erosion_before"] is None
-    assert entry["erosion_after"] is not None
-    assert entry["erosion_delta"] is None
-    assert entry["flagged"] is True
-    assert "baseline" in entry["reason"]
-    assert any("new_module.py" in w for w in warnings), (
-        "a missing-baseline file must be named in a warning, never silently pass"
-    )
+    assert "new_module.py" not in per_file
+    assert not (target / "new_module.py").exists()
     # The reviewed file stays covered and clean.
     assert per_file["api.py"]["flagged"] is False
 
@@ -2161,7 +2187,6 @@ async def test_fix_guard_reverts_generated_migration_edit(
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    import daydream
     from daydream.runner import run
 
     project, migration = _migration_project(tmp_path, "migration_repo")
@@ -2215,13 +2240,13 @@ async def test_fix_guard_reverts_generated_migration_edit(
     violations = project / ".daydream" / "deep" / "generated-file-violations.json"
     assert violations.exists()
     violations_payload = json.loads(violations.read_text())
-    assert violations_payload["ref"] == "HEAD"
+    assert violations_payload["session_id"]
+    assert violations_payload["phase"] == "fix"
+    assert violations_payload["round_number"] == 1
     assert set(violations_payload["violations"]) == {
         "migrations/0001_init.sql",
         "migrations/0000_local_draft.sql",
     }
-    patches = list((project / ".daydream" / "partial-fixes").glob("*.patch"))
-    assert any("migrations/0001_init.sql" in patch.read_text() for patch in patches)
     head_after = _git(project, "rev-parse", "HEAD")
     assert head_after != head_before
     committed_paths = _git(project, "show", "--name-only", "--format=", "HEAD").split()
@@ -2319,7 +2344,7 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     new_migration = project / "migrations" / "0002_add_x.sql"
     assert new_migration.is_file()
     assert new_migration.read_text() == "-- new healing migration\n"
-    assert (project / ".daydream-heal-fix-applied").is_file()
+    assert not (project / ".daydream-heal-fix-applied").exists()
     violations = project / ".daydream" / "deep" / "generated-file-violations.json"
     assert json.loads(violations.read_text()) == {
         "violations": ["migrations/0001_init.sql"],
@@ -2378,10 +2403,10 @@ async def test_parallel_fix_commit_runs_once_after_all(
 ) -> None:
     """AC#6: commit stays serial and runs exactly once, after every parallel fix lands.
 
-    Each fix writes its own ``.fixed-*`` sentinel; the spy commit records whether ALL
-    sentinels already exist at commit time. ``seen_at_commit == [True]`` proves a single
-    commit that observed every fix -- a regression moving commit inside the fan-out would
-    see a partial set (False) or commit more than once.
+    Each fix edits its authorized source file; the spy commit records whether ALL
+    source edits already exist at commit time. ``seen_at_commit == [True]`` proves a
+    single commit that observed every fix -- a regression moving commit inside the
+    fan-out would see a partial set (False) or commit more than once.
     """
     from daydream.runner import run
 
@@ -2392,11 +2417,13 @@ async def test_parallel_fix_commit_runs_once_after_all(
     files = ["f1.py", "f2.py", "f3.py"]
     _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
+    fix_marker = "\n# fixed before commit\n"
+    stub.fix_edit_line = fix_marker
     seen_at_commit: list[bool] = []
 
     async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:
         seen_at_commit.append(
-            all((multi_stack_target / f".fixed-{f.replace('.', '_')}").exists() for f in files)
+            all(fix_marker in (multi_stack_target / path).read_text() for path in files)
         )
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
@@ -2643,7 +2670,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     Mirror of ``test_fix_reverts_post_fix_edit_outside_reviewed_diff`` plus the
     generated-file guard's ``test_fix_guard_restore_failure_aborts_before_commit``:
     the fix agent edits unrelated.py (outside the reviewed diff) and the
-    residual revert's ``restore_paths_from_ref`` raises. The run must fail-close
+    residual revert's exact snapshot restore raises. The run must fail-close
     (exit 1) and the commit step must never run — HEAD stays at the pre-fix SHA.
     """
     from daydream.git_ops import GitError
@@ -2660,7 +2687,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr(
-        "daydream.git_ops.restore_paths_from_ref",
+        "daydream.git_ops.restore_group_from_snapshot",
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
     )
 
@@ -3342,16 +3369,13 @@ async def test_yes_auto_applies_fix(
 
     Drives ``runner.run`` through the deep orchestrator's fix gate with
     ``assume="yes"``. The gate must NOT call ``prompt_user`` and MUST proceed to
-    ``phase_fix`` — the observable consequence is the sentinel file the stub
-    writes when it receives a fix prompt.
+    ``phase_fix`` — the observable consequence is a recorded fixer prompt on
+    the stub backend (the run-wide guard correctly removes stub sentinels).
     """
     from daydream.runner import run
 
     _add_bare_remote(multi_stack_target)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    fix_marker = multi_stack_target / ".daydream-fix-applied"
-    assert not fix_marker.exists()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
     prompt_calls: list[tuple[Any, ...]] = []
 
@@ -3375,28 +3399,19 @@ async def test_yes_auto_applies_fix(
     assert not any(
         "apply" in msg.lower() or "fix" in msg.lower() for msg, _ in prompt_calls
     ), f"fix gate prompted under --yes: {prompt_calls}"
-    # Observable consequence: the fix landed.
-    assert fix_marker.exists(), "phase_fix never ran -> --yes did not auto-apply"
+    assert _fix_prompts(stub), "phase_fix never ran -> --yes did not auto-apply"
 
 
-async def test_fix_gate_routes_out_of_scope_finding_to_issue(
+async def test_fix_gate_authorizes_canonical_finding_outside_reviewed_diff(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#336 real-path: the fix gate files out-of-scope findings as issues.
+    """A canonical primary path is authorized even when absent from the diff.
 
-    merged-items.json carries item A on api.py (inside the reviewed diff) and
-    item B on notes.txt (outside it). Under ``assume="yes"`` the gate must:
-
-      1. exclude item B from the fix list — no fix prompt names notes.txt;
-      2. file exactly one GitHub issue carrying item B's file + description;
-      3. run ``phase_fix`` only for item A's file group.
-
-    Discriminating: without the pre-fix partition, item B would be auto-fixed
-    (a fix prompt would name notes.txt) and no issue would be filed — both
-    assertions fail.
+    Both findings must reach the fixer and merely being outside the reviewed
+    diff must not route ``notes.txt`` to issue filing.
     """
     from daydream.runner import run
 
@@ -3416,8 +3431,6 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
-    # opt-in explicitly.
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
@@ -3431,29 +3444,19 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
         if c["prompt"].lower().startswith(("fix this issue", "fix these"))
     ]
     assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
-    # 1. Item B (notes.txt) is NOT in the fix list.
-    assert not any("notes.txt" in p for p in fix_prompts), (
-        "out-of-scope finding was auto-fixed instead of filed as an issue"
-    )
-    # 3. Fix phase ran for item A's file group (api.py).
+    assert any("notes.txt" in p for p in fix_prompts)
     assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
 
-    # 2. Exactly one issue filed, carrying item B's file + description.
-    assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
-    _, title, body = issues[0]
-    assert "notes.txt" in body
-    assert "out-of-scope finding" in body
-    assert "out of scope for PR" in body
+    assert issues == []
 
 
-async def test_fix_gate_files_no_issue_by_default(
+async def test_fix_gate_off_diff_finding_files_no_issue_by_default(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#1056 default-off: out-of-scope findings are excluded and short-circuited
-    but NO GitHub issue is filed."""
+    """A canonical off-diff finding is fixed and files no issue by default."""
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -3473,18 +3476,16 @@ async def test_fix_gate_files_no_issue_by_default(
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
     assert exit_code == 0
     assert created == [], f"no issue may be filed by default, got {created!r}"
-    # Exclusion still happened: the fix pass never touched notes.txt and the
-    # short-circuit fired before phase_fix.
-    assert not any("notes.txt" in (b or "") for b in _fix_prompts(stub))
+    assert any("notes.txt" in (b or "") for b in _fix_prompts(stub))
 
 
-async def test_fix_gate_files_issue_when_opted_in(
+async def test_fix_gate_off_diff_finding_files_no_issue_when_opted_in(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#1056 opt-in: scope_issue_filing=True restores the #336 filing behavior."""
+    """Scope filing does not turn an authorized finding path into a residual."""
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -3507,7 +3508,8 @@ async def test_fix_gate_files_issue_when_opted_in(
         )
     )
     assert exit_code == 0
-    assert len(created) == 1 and "notes.txt" in created[0][1]
+    assert created == []
+    assert any("notes.txt" in (body or "") for body in _fix_prompts(stub))
 
 
 async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
@@ -3518,15 +3520,9 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
 ) -> None:
     """#572/#573: a ``./``-prefixed finding file stays in scope.
 
-    The grammar now admits ``./x`` as a legal path spelling, so a finding's
-    ``file`` may arrive as ``./api.py`` while the reviewed diff (and the git
-    tree) name the same file as bare ``api.py``. The fix gate's pre-fix
-    partition and the post-fix residual net both compare the finding file
-    against bare git-derived paths, so without normalization a ``./api.py``
-    finding is misfiled as out-of-scope: dropped from auto-fix AND filed as an
-    issue. Discriminating: if the gate normalizes a leading ``./``, the
-    ``./api.py`` finding is fixed (a fix prompt names api.py) and no issue is
-    filed for it.
+    The grammar admits ``./x`` while Git-derived paths are bare. The gate must
+    normalize that spelling before building the footprint so ``api.py`` reaches
+    the fixer under its confined repository-relative identity.
     """
     from daydream.runner import run
 
@@ -3546,8 +3542,6 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
-    # opt-in explicitly.
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
@@ -3565,121 +3559,28 @@ async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
     assert any("api.py" in p for p in fix_prompts), (
         "dot-slash in-scope finding was misfiled out-of-scope and not fixed"
     )
-    # The genuinely out-of-scope finding is still excluded from auto-fix.
-    assert not any("notes.txt" in p for p in fix_prompts), (
-        "out-of-scope finding was auto-fixed instead of filed as an issue"
-    )
-    # Exactly one issue filed — for notes.txt only, never for ./api.py.
-    assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
-    _, title, body = issues[0]
-    assert "notes.txt" in body
-    assert "out-of-scope finding" in body
+    assert any("notes.txt" in p for p in fix_prompts)
+    assert issues == []
 
 
-async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
+async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_diff(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """#336 real-path: an out-of-scope finding already filed is not re-filed.
+    """Every canonical finding path reaches the fixer, including off-diff paths.
 
-    Out-of-scope findings are never fixed, so a re-run/resume re-derives them.
-    Without cross-run dedup they would be re-filed as a duplicate issue every
-    run (#336 finding). The gate embeds the finding's fingerprint as a hidden
-    marker in the issue body and skips filing when an open issue already
-    carries it (GitHub is the store — same stateless-dedup model as
-    reconcile.py). Discriminating: with dedup ``gh_issue_create`` is never
-    called even though the finding is still excluded from auto-fix.
-    """
-    from daydream.deep.scope_issues import (
-        _scope_finding_fingerprint,
-        _scope_finding_marker,
-    )
-    from daydream.pr_review import compute_fingerprint
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [
-        _merge_item(1, "api.py", "high", desc="in-scope finding"),
-        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
-    ]
-    mute_side_effects()
-
-    # The marker the gate would embed for item 2 — pre-filed in an open issue,
-    # simulating a prior run. Confirm the local helper reproduces the same
-    # identity compute_fingerprint produces, so the dedup key is stable.
-    item_b = _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding")
-    fp = compute_fingerprint(item_b["file"], item_b["description"], item_b["evidence"])
-    marker = _scope_finding_marker(fp)
-    assert marker == _scope_finding_marker(_scope_finding_fingerprint(item_b))
-
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_issue_list",
-        lambda repo, **kw: [
-            {
-                "number": 9,
-                "title": "[daydream] out-of-scope finding: notes.txt",
-                "body": f"prior run\n{marker}",
-                "url": "https://github.com/owner/repo/issues/9",
-            }
-        ],
-    )
-
-    created: list[tuple[Any, ...]] = []
-
-    def _record_create(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
-        created.append((repo, title, body))
-        return "https://github.com/owner/repo/issues/9"
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_create)
-
-    exit_code = await run(
-        make_config(
-            multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
-        )
-    )
-    assert exit_code == 0
-
-    # Deduped: the already-filed finding is NOT re-filed.
-    assert created == [], f"out-of-scope finding re-filed as a duplicate: {created!r}"
-
-    # And it is still excluded from auto-fix (no fix prompt names notes.txt).
-    fix_prompts = [
-        c["prompt"]
-        for c in stub.calls
-        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
-    ]
-    assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
-    assert not any("notes.txt" in p for p in fix_prompts), "deduped finding was auto-fixed"
-
-
-async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """#336 real-path: when every finding routes to issues, the gate Stop(0)s.
-
-    merged-items.json carries ONLY out-of-scope findings (files outside the
-    reviewed diff {api.py, App.tsx, README.md}). The host also appends a
-    structural finding, so ``parse_by_stack`` routes THAT one to an
-    out-of-scope file too -- otherwise it would default to ``api.py`` (in
-    scope) and keep the gate open. With every merged item out of scope the
-    gate files them all and short-circuits before the no-op fix pass, the
-    full target test-suite run, and the commit-agent turn. Discriminating:
-    without the post-partition ``Stop(0)`` the flow continues into
-    ``phase_fix`` with nothing to fix -- a fix prompt would be dispatched.
+    The test uses only findings outside the reviewed diff and proves the gate
+    neither short-circuits nor files them merely because of that location.
     """
     from daydream.runner import run
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "notes.txt", "high", desc="out-of-scope finding")]
-    # Route the appended structural finding to an out-of-scope file too; the
-    # stub's default structural parse emits ``file=api.py`` (in scope).
+    # Route the appended structural finding to another off-diff file; the
+    # stub's default structural parse emits ``file=api.py``.
     stub.parse_by_stack = {
         "structure": {
             "severity": "high",
@@ -3699,8 +3600,6 @@ async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    # Issue #1056: filing is opt-in, so this filing-behavior test passes the
-    # opt-in explicitly.
     exit_code = await run(
         make_config(
             multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True
@@ -3708,25 +3607,15 @@ async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
     )
     assert exit_code == 0
 
-    # Every finding filed as an issue, all on out-of-scope files.
-    assert issues, "no out-of-scope finding was filed as an issue"
-    in_scope_files = {"api.py", "App.tsx", "README.md"}
-    for _, _, body in issues:
-        assert not any(f in body for f in in_scope_files), (
-            f"an in-scope file was filed as out-of-scope: {body!r}"
-        )
+    assert issues == []
 
-    # No fix prompt dispatched -- the gate short-circuited before phase_fix,
-    # so the run skipped a no-op fix pass + the full target test suite + the
-    # commit-agent turn.
     fix_prompts = [
         c["prompt"]
         for c in stub.calls
         if c["prompt"].lower().startswith(("fix this issue", "fix these"))
     ]
-    assert fix_prompts == [], (
-        f"fix phase ran with nothing to fix (gate did not short-circuit): {fix_prompts!r}"
-    )
+    assert any("notes.txt" in prompt for prompt in fix_prompts)
+    assert any("docs/elsewhere.md" in prompt for prompt in fix_prompts)
 
 
 async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4935,9 +4824,11 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
         "scope instruction missing from heal fix prompt -- feedback_items not "
         f"honored; prompt was: {heal_prompt!r}"
     )
-    # First call failed, second passed: exactly two runs.
-    assert stub.test_suite_calls == 2, (
-        f"expected 2 test-suite runs (fail then pass), saw {stub.test_suite_calls}"
+    # The heal stub also writes an unauthorized sentinel. The post-heal guard
+    # removes it, invalidating the retry's tree identity, so one shared no-heal
+    # final test is mandatory: fail, healed pass, stable pass.
+    assert stub.test_suite_calls == 3, (
+        f"expected 3 test-suite runs (fail, healed pass, stable pass), saw {stub.test_suite_calls}"
     )
 
 
@@ -5249,19 +5140,16 @@ async def test_apply_fixes_gate_interactive_yes_applies_fixes(
 
     ``precision_mode=True`` mirrors ``daydream . --precision``: the extra
     suppression pass must not consume the gate's stdin answer or drop every
-    finding before the gate. The observable consequence is the sentinel file
-    the stub writes on a fix prompt.
+    finding before the gate. The observable consequence is a recorded fixer
+    prompt; run-wide scope enforcement removes the stub's sentinel afterward.
     """
     from daydream.agent import reset_state
     from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     mute_side_effects()
-    _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _force_interactive(monkeypatch)
-
-    fix_marker = multi_stack_target / ".daydream-fix-applied"
-    assert not fix_marker.exists()
 
     reads: list[str] = []
 
@@ -5286,7 +5174,7 @@ async def test_apply_fixes_gate_interactive_yes_applies_fixes(
 
     assert exit_code == 0
     assert reads, "the apply-fixes gate never reached input() -- no prompt was answered"
-    assert fix_marker.is_file(), (
+    assert _fix_prompts(stub), (
         "a typed 'y' at the apply-fixes gate did not reach phase_fix -- the gate "
         "declined despite an affirmative answer"
     )
@@ -6335,7 +6223,6 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
-    mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: a runaway file group is capped by the serial-item budget.
 
@@ -6346,11 +6233,15 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     group serial-item ceiling lowered to 3, only 3 of the 6 fallback fixes run;
     the remaining 3 are skipped, recorded in ``failures`` (surfaced as the
     fix-failures artifact), and a ``file_group_budget_exceeded`` trajectory event
-    is emitted naming the file, reason, and processed/skipped counts.
+    is emitted naming the file, reason, and processed/skipped counts. Budget
+    exhaustion is recoverable: the retained authorized edits proceed through
+    the real verifier, TEST-agent fallback, strict commit, and push to a local
+    bare remote.
 
     Discriminating: without the group budget, the fallback loop fixes all 6
     api.py findings (six "fix this issue" turns) and no budget event exists --
-    both assertions fail.
+    both assertions fail. Treating the budget marker as an exception failure
+    instead makes the exit/commit/remote assertions fail.
     """
     from daydream.runner import run
 
@@ -6363,7 +6254,10 @@ async def test_run_caps_runaway_file_group_serial_fixes(
         _merge_item(7, "App.tsx", "high")
     ]
     stub.fail_batched_fix_file = "api.py"  # force the per-finding fallback for api.py
-    mute_side_effects()
+    retained_marker = "# retained before budget stop\n"
+    stub.fix_edit_line = retained_marker
+    _add_bare_remote(multi_stack_target)
+    head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
@@ -6372,7 +6266,13 @@ async def test_run_caps_runaway_file_group_serial_fixes(
                 multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
             )
         )
-    assert isinstance(exit_code, int)
+    assert exit_code == 0
+    assert retained_marker in (multi_stack_target / "api.py").read_text()
+    assert stub.test_suite_calls >= 1
+    head_after = _git(multi_stack_target, "rev-parse", "HEAD")
+    assert head_after != head_before
+    remote = multi_stack_target.parent / "multi_stack-remote.git"
+    assert _git(remote, "rev-parse", "refs/heads/feature") == head_after
 
     # The failed batched turn names the api.py group size (the pipeline may add a
     # structural finding, so derive N rather than hard-coding it).
@@ -6544,8 +6444,8 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
     ``phase_fix_parallel`` -> ``phase_fix_batched`` -> ``run_agent`` path. Several
     findings target api.py and one targets App.tsx, so the fix stage must issue
     exactly TWO fix turns (one batched per file-group), never one-per-finding.
-    The batched api.py turn carries a single "Fix these N issues" prompt naming
-    every same-file finding, and still lands the per-file sentinel.
+        The batched api.py turn carries a single "Fix these N issues" prompt naming
+        every same-file finding.
 
     Discriminating: a per-finding loop (the pre-#202 state) issues one fix turn
     PER finding, so the fix-prompt count balloons past two and no single batched
@@ -6593,9 +6493,8 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
     assert int(m.group(1)) >= 3
     assert Path(m.group(2)).name == "api.py"
     assert "CONCISE MODE" in batched[0]
-    # The batched turn still lands its per-file sentinel (observable apply).
-    assert (multi_stack_target / ".fixed-api_py").exists()
-    assert (multi_stack_target / ".fixed-App_tsx").exists()
+    # The recorded batched prompt is the apply observation; unauthorized stub
+    # sentinels are intentionally removed by run-wide scope enforcement.
 
 
 async def test_environmental_failure_aborts_heal_loop(
@@ -7774,7 +7673,6 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     went green), AND the fix is really committed -- HEAD advances onto a commit that
     carries the fix and the daydream trailers.
     """
-    import daydream
     from daydream.runner import run
 
     _silence(monkeypatch, prompts=False)
@@ -7807,16 +7705,8 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
         f"an ignored failure was persisted as a green suite: {verdict}"
     )
     assert verdict["ignored"] is True, f"the operator override was not recorded: {verdict}"
-    assert _git(tiny_diff_target, "rev-parse", "HEAD") != head_before, (
-        "choice '3' did not produce a commit"
-    )
-    committed = _git(tiny_diff_target, "show", "--name-only", "--format=", "HEAD").split()
-    assert ".fixed-api_py" in committed, f"the applied fix was not part of the commit: {committed}"
-    head_message = _git(tiny_diff_target, "log", "-1", "--format=%B")
-    assert "Daydream-Run: " in head_message, f"commit lost the run trailer: {head_message}"
-    assert f"Daydream-Version: {daydream.__version__}" in head_message, (
-        f"commit lost the version trailer: {head_message}"
-    )
+    assert _git(tiny_diff_target, "rev-parse", "HEAD") == head_before
+    assert not (tiny_diff_target / ".fixed-api_py").exists()
     assert stub.test_suite_calls == 1, (
         f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
     )
@@ -10608,3 +10498,931 @@ async def test_item_uid_is_never_reported_as_record_provenance(
         # junk.
         assert set(provenance) <= pool, f"{provenance} not within {sorted(pool)}"
     assert pool and not any(uid.startswith("item:") for uid in pool), pool
+
+
+@pytest.mark.parametrize("scratch_is_related", [False, True])
+def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
+    tmp_path: Path, scratch_is_related: bool,
+) -> None:
+    """Unrelated/protected bytes invalidate evidence without entering the patch."""
+    from daydream import git_ops
+    from daydream.deep.orchestrator import FixCycleState, capture_retained_tree
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.workspace import WorkContext
+
+    repo = tmp_path / "retained"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    (repo / "c.py").write_text("C = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    (repo / "scratch.bin").write_bytes(b"\x00user")
+    protected = git_ops.snapshot_untracked_paths(repo)
+    item = {
+        "id": 1, "item_uid": "item:1", "file": "a.py",
+        "related_files": ["scratch.bin"] if scratch_is_related else [],
+    }
+    footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
+    index = git_ops.snapshot_index(repo)
+    state = FixCycleState(
+        session_id="s",
+        stable_ref=git_ops.head_sha(repo),
+        stable_head=git_ops.head_sha(repo),
+        initial_index=index,
+        preexisting_untracked=protected,
+        preexisting_gitlinks=(),
+        footprint=footprint,
+    )
+    (repo / "a.py").write_text("A = 2\n")
+    first = capture_retained_tree(
+        WorkContext(
+            repo=repo, source=repo, base_branch="main", base_sha=state.stable_head,
+            head_branch="main", head_sha=state.stable_head, is_ephemeral=False, run_id="s",
+        ),
+        state,
+    )
+    (repo / "c.py").write_text("C = 9\n")
+    second = capture_retained_tree(
+        WorkContext(
+            repo=repo, source=repo, base_branch="main", base_sha=state.stable_head,
+            head_branch="main", head_sha=state.stable_head, is_ephemeral=False, run_id="s",
+        ),
+        state,
+    )
+    assert first.paths == second.paths == frozenset({"a.py"})
+    assert b"c.py" not in second.recommended_patch
+    assert first.tree_key != second.tree_key
+
+
+def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path) -> None:
+    """Commit selection is HEAD-relative even though evidence stays run-relative."""
+    from daydream import git_ops
+    from daydream.deep.orchestrator import FixCycleState, capture_retained_tree
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.workspace import WorkContext
+
+    repo = tmp_path / "preexisting-retained"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    (repo / "b.py").write_text("B = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    head = git_ops.head_sha(repo)
+
+    # This reviewed edit predates the fix gate and is therefore part of the
+    # stable rollback snapshot, but it still belongs in the eventual commit.
+    (repo / "a.py").write_text("A = 2\n")
+    stable_ref = git_ops.stash_create(repo) or head
+    item = {
+        "id": 1,
+        "item_uid": "item:1",
+        "file": "b.py",
+        "related_files": ["a.py"],
+    }
+    footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
+    state = FixCycleState(
+        session_id="s",
+        stable_ref=stable_ref,
+        stable_head=head,
+        initial_index=git_ops.snapshot_index(repo),
+        preexisting_untracked={},
+        preexisting_gitlinks=(),
+        footprint=footprint,
+    )
+    (repo / "b.py").write_text("B = 2\n")
+    work = WorkContext(
+        repo=repo,
+        source=repo,
+        base_branch="main",
+        base_sha=head,
+        head_branch="main",
+        head_sha=head,
+        is_ephemeral=False,
+        run_id="s",
+    )
+
+    snapshot = capture_retained_tree(work, state)
+
+    assert snapshot.paths == frozenset({"a.py", "b.py"})
+    assert {path.path for path in snapshot.states} == {"a.py", "b.py"}
+    assert b"a.py" in snapshot.recommended_patch
+    assert b"b.py" in snapshot.recommended_patch
+
+
+def _direct_fix_context(
+    repo: Path,
+    items: list[dict[str, Any]],
+    *,
+    changed_files: set[str],
+    start_at: str = "review",
+) -> Any:
+    """Build the smallest real-Git FlowContext for fix-boundary unit tests."""
+    from daydream import git_ops
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
+
+    dd = repo / ".daydream" / "deep"
+    dd.mkdir(parents=True, exist_ok=True)
+    items_file = dd / "merged-items.json"
+    items_file.write_text(json.dumps({"items": items}))
+    head = git_ops.head_sha(repo)
+    return FlowContext(
+        config=RunConfig(target=str(repo), assume="yes", cleanup=False, start_at=start_at),
+        work=WorkContext(
+            repo=repo,
+            source=repo,
+            base_branch="main",
+            base_sha=head,
+            head_branch="main",
+            head_sha=head,
+            is_ephemeral=False,
+            run_id="session-current",
+        ),
+        registry=Registry(),
+        data={
+            "dd": dd,
+            "items_file": items_file,
+            "merged_report": dd / "merged-review.md",
+            "changed_files": changed_files,
+        },
+    )
+
+
+def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str]) -> Any:
+    from daydream import git_ops
+    from daydream.deep.orchestrator import FixCycleState
+    from daydream.fix_footprint import AuthorizedFixFootprint
+
+    footprint = AuthorizedFixFootprint.build(ctx.work.repo, reviewed, items)
+    state = FixCycleState(
+        session_id="session-current",
+        stable_ref=git_ops.head_sha(ctx.work.repo),
+        stable_head=git_ops.head_sha(ctx.work.repo),
+        initial_index=git_ops.snapshot_index(ctx.work.repo),
+        preexisting_untracked=git_ops.snapshot_untracked_paths(
+            ctx.work.repo, include_runtime_artifacts=False
+        ),
+        preexisting_gitlinks=git_ops.snapshot_worktree_gitlinks(ctx.work.repo),
+        footprint=footprint,
+    )
+    ctx.data["fix_cycle_state"] = state
+    ctx.data["items"] = items
+    return state
+
+
+async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start-at-fix preflight cannot inherit green evidence when policy parsing fails."""
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _step_fix_gate
+    from daydream.extensions import Stop
+
+    repo = tmp_path / "malformed-related"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    (repo / "a.py").write_text("A = 2\n")
+    item = _merge_item(1, "a.py", "high")
+    item["related_files"] = ["../outside.py"]
+    ctx = _direct_fix_context(repo, [item], changed_files={"a.py"}, start_at="fix")
+    stale = ctx.data["dd"] / "test-verdict.json"
+    stale.write_text(json.dumps({"session_id": "prior", "passed": True}))
+    index_before = git_ops.snapshot_index(repo)
+    bytes_before = (repo / "a.py").read_bytes()
+    monkeypatch.setattr("daydream.deep.orchestrator.resolve_or_prompt", lambda **_k: True)
+
+    result = await _step_fix_gate(ctx)
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    assert not stale.exists()
+    assert "fix_cycle_state" not in ctx.data
+    assert ctx._backend_cache == {}
+    assert git_ops.snapshot_index(repo) == index_before
+    assert (repo / "a.py").read_bytes() == bytes_before
+
+
+async def test_fix_cycle_nonempty_index_stops_before_backend_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _step_fix_gate
+    from daydream.extensions import Stop
+
+    repo = tmp_path / "staged-preflight"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    (repo / "a.py").write_text("A = 2\n")
+    _git(repo, "add", "a.py")
+    item = _merge_item(1, "a.py", "high")
+    ctx = _direct_fix_context(repo, [item], changed_files={"a.py"})
+    stale = ctx.data["dd"] / "test-verdict.json"
+    stale_bytes = b'{"session_id":"prior","passed":true}\n'
+    stale.write_bytes(stale_bytes)
+    index_before = git_ops.snapshot_index(repo)
+    bytes_before = (repo / "a.py").read_bytes()
+    monkeypatch.setattr("daydream.deep.orchestrator.resolve_or_prompt", lambda **_k: True)
+
+    result = await _step_fix_gate(ctx)
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    assert "fix_cycle_state" not in ctx.data
+    assert ctx._backend_cache == {}
+    assert git_ops.snapshot_index(repo) == index_before
+    assert (repo / "a.py").read_bytes() == bytes_before
+    assert stale.read_bytes() == stale_bytes
+
+
+def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None:
+    from daydream.deep.orchestrator import _round_dispatch_items
+
+    repo = tmp_path / "cross-item-retarget"
+    _init_repo(repo)
+    for path in ("a.py", "b.py", "c.py"):
+        (repo / path).write_text(f"# {path}\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    items = [
+        {**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": ["b.py"]},
+        {**_merge_item(2, "c.py", "high"), "item_uid": "item:c", "related_files": []},
+    ]
+    ctx = _direct_fix_context(repo, items, changed_files={"a.py", "c.py"})
+    state = _direct_fix_state(ctx, items, {"a.py", "c.py"})
+    ctx.data["iteration"] = 2
+    ctx.data["fix_outcomes"] = {
+        "item:a": {
+            "issue_id": 1,
+            "verdict": "wrong_target",
+            "path": "c.py",
+            "reason": "try the other item's file",
+        }
+    }
+
+    dispatched = _round_dispatch_items(ctx, items)
+
+    assert [item["item_uid"] for item in dispatched] == ["item:a"]
+    assert dispatched[0]["file"] == "a.py"
+    assert state.footprint.item_paths("item:a") == frozenset({"a.py", "b.py"})
+    rejected = [event for event in state.footprint.events if event.action == "rejected_retarget"]
+    assert len(rejected) == 1
+    assert rejected[0].path == "c.py"
+    assert rejected[0].round_number == 2
+
+
+def test_fix_cycle_tracks_last_dispatched_target_after_accepted_then_rejected_retarget(
+    tmp_path: Path,
+) -> None:
+    from daydream.deep.orchestrator import _round_dispatch_items
+
+    repo = tmp_path / "accepted-then-rejected-retarget"
+    _init_repo(repo)
+    for path in ("a.py", "b.py", "c.py"):
+        (repo / path).write_text(f"# {path}\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    items = [
+        {**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": ["b.py"]},
+        {**_merge_item(2, "c.py", "high"), "item_uid": "item:c", "related_files": []},
+    ]
+    ctx = _direct_fix_context(repo, items, changed_files={"a.py", "c.py"})
+    state = _direct_fix_state(ctx, items, {"a.py", "c.py"})
+
+    ctx.data["iteration"] = 1
+    assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["a.py", "c.py"]
+    assert state.last_fix_target_by_uid == {"item:a": "a.py", "item:c": "c.py"}
+
+    ctx.data["iteration"] = 2
+    ctx.data["fix_outcomes"] = {
+        "item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "b.py", "reason": "moved"}
+    }
+    assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["b.py"]
+    assert state.last_fix_target_by_uid["item:a"] == "b.py"
+
+    ctx.data["iteration"] = 3
+    ctx.data["fix_outcomes"] = {
+        "item:a": {
+            "issue_id": 1,
+            "verdict": "wrong_target",
+            "path": "c.py",
+            "reason": "other item",
+        }
+    }
+    assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["a.py"]
+    assert state.last_fix_target_by_uid["item:a"] == "a.py"
+
+
+async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.deep.orchestrator import RetainedTreeSnapshot, verify_retained_tree
+    from tests.harness.backend import ScriptedBackend
+
+    repo = tmp_path / "resolved-target-provenance"
+    _init_repo(repo)
+    for path in ("a.py", "b.py", "untrusted.py"):
+        (repo / path).write_text(f"# {path}\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    item = {
+        **_merge_item(1, "a.py", "high"),
+        "item_uid": "item:a",
+        "related_files": ["b.py"],
+    }
+    ctx = _direct_fix_context(repo, [item], changed_files={"a.py"})
+    state = _direct_fix_state(ctx, [item], {"a.py"})
+    state.last_fix_target_by_uid["item:a"] = "b.py"
+    snapshot = RetainedTreeSnapshot(
+        paths=frozenset(),
+        states=(),
+        tree_key="tree",
+        verifier_patch="patch",
+        recommended_patch=b"patch",
+    )
+
+    backend = ScriptedBackend(
+        events=[
+            ResultEvent(
+                structured_output={
+                    "verdicts": [
+                        {
+                            "issue_id": 1,
+                            "verdict": "resolved",
+                            "path": "untrusted.py",
+                            "reason": "model candidate must not become provenance",
+                        }
+                    ]
+                },
+                continuation=None,
+            )
+        ]
+    )
+    monkeypatch.setattr("daydream.runner._resolve_backend", lambda *_a, **_k: backend)
+
+    outcomes = await verify_retained_tree(ctx, snapshot, [item], pass_number=2)
+
+    assert backend.call_count == 1
+    assert backend.read_only_calls == [True]
+    assert outcomes["item:a"]["path"] == "b.py"
+
+
+def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
+    from daydream.deep.orchestrator import capture_retained_tree
+
+    repo = tmp_path / "finalization"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "base")
+    items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": []}]
+    ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
+    state = _direct_fix_state(ctx, items, {"a.py"})
+    (repo / "a.py").write_text("A = 2\n")
+    snapshot = capture_retained_tree(ctx.work, state)
+    return ctx, state, snapshot
+
+
+async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep.orchestrator import (
+        EvidenceKey,
+        finalize_retained_tree_after_test,
+    )
+    from daydream.extensions import Stop
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    ctx, state, snapshot = _finalization_fixture(tmp_path)
+    state.verifier_key = EvidenceKey("prior-tree", state.footprint.policy_revision)
+    evidence = TestAttemptEvidence(
+        session_id=state.session_id,
+        kind="host",
+        command=("pytest",),
+        passed=True,
+        input_tree_key=snapshot.tree_key,
+        output_tree_key=snapshot.tree_key,
+    )
+    calls = {"verify": 0, "test": 0}
+
+    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
+
+    async def _actionable(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
+        calls["verify"] += 1
+        return {"item:a": {"issue_id": 1, "verdict": "unresolved", "reason": "still broken"}}
+
+    async def _no_test(*_a: Any, **_k: Any) -> Any:
+        calls["test"] += 1
+        raise AssertionError("actionable verifier must stop before a no-heal test")
+
+    monkeypatch.setattr("daydream.deep.orchestrator.verify_retained_tree", _actionable)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_once", _no_test)
+
+    result = await finalize_retained_tree_after_test(
+        ctx,
+        TestAndHealResult(True, 0, True, False, (evidence,)),
+    )
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    assert calls == {"verify": 1, "test": 0}
+    assert state.latest_retained is None
+    failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
+    assert failure["session_id"] == state.session_id
+    assert "actionable" in failure["reason"]
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+
+    phase_states = derive_phase_states(
+        ctx.work.repo, phase_events=[], session_id=state.session_id
+    )
+    assert phase_states["fix"]["status"] == "failed"
+    assert phase_states["test"]["status"] == "failed"
+    assert derive_pipeline_status(
+        "complete", None, phase_states, runs_fix=True, runs_test=True
+    ) == "failed"
+
+
+@pytest.mark.parametrize("terminal_mode", ["red", "exception"])
+async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_mode: str
+) -> None:
+    """A healer's red/exception exit is confined like a successful path."""
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _step_test
+    from daydream.extensions import Stop
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    repo = tmp_path / "red-heal-confinement"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    (repo / "unrelated.py").write_text("OWNER = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    scratch = repo / "scratch.bin"
+    scratch.write_bytes(b"\x00owner")
+    items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a"}]
+    ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
+    state = _direct_fix_state(ctx, items, {"a.py"})
+
+    async def _red_after_mutation(*_a: Any, **_k: Any) -> TestAndHealResult:
+        (repo / "a.py").write_text("A = 2\n")
+        (repo / "unrelated.py").write_text("OWNER = 9\n")
+        scratch.unlink()
+        (repo / "orphan.txt").write_text("outside\n")
+        if terminal_mode == "exception":
+            raise RuntimeError("healer transport failed after writing")
+        key = "red-tree"
+        attempt = TestAttemptEvidence(
+            session_id=state.session_id,
+            kind="host",
+            command=("false",),
+            passed=False,
+            input_tree_key=key,
+            output_tree_key=key,
+        )
+        return TestAndHealResult(False, 1, False, False, (attempt,))
+
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.phase_test_and_heal", _red_after_mutation
+    )
+    result = await _step_test(ctx)
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    assert (repo / "a.py").read_text() == "A = 2\n"
+    assert (repo / "unrelated.py").read_text() == "OWNER = 1\n"
+    assert scratch.read_bytes() == b"\x00owner"
+    assert not (repo / "orphan.txt").exists()
+    audit = json.loads((ctx.data["dd"] / "fix-footprint.json").read_text())
+    events = {(event["action"], event["path"]) for event in audit["events"]}
+    assert {("restore", "unrelated.py"), ("restore", "scratch.bin"), ("remove", "orphan.txt")} <= events
+    assert git_ops.snapshot_index(repo) == state.initial_index
+
+
+@pytest.mark.parametrize("failure_mode", ["pass2_mutates", "unstable_test"])
+async def test_stabilization_stops_after_two_passes_without_third_or_heal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
+) -> None:
+    from daydream.deep.orchestrator import (
+        EvidenceKey,
+        finalize_retained_tree_after_test,
+    )
+    from daydream.extensions import Stop
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    ctx, state, snapshot = _finalization_fixture(tmp_path)
+    state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
+    stale = TestAttemptEvidence(
+        session_id=state.session_id,
+        kind="host",
+        command=("pytest",),
+        passed=False,
+        input_tree_key="before-heal",
+        output_tree_key="after-heal",
+    )
+    guard_calls: list[int] = []
+    test_calls = 0
+
+    def _guard(*_a: Any, **kwargs: Any) -> bool:
+        guard_calls.append(kwargs["round_number"])
+        return failure_mode == "pass2_mutates"
+
+    async def _one_test(*_a: Any, **_k: Any) -> Any:
+        nonlocal test_calls
+        test_calls += 1
+        output_key = "unstable-output" if failure_mode == "unstable_test" else snapshot.tree_key
+        return (
+            TestAttemptEvidence(
+                session_id=state.session_id,
+                kind="host",
+                command=("pytest",),
+                passed=True,
+                input_tree_key=snapshot.tree_key,
+                output_tree_key=output_key,
+            ),
+            None,
+            "test output",
+        )
+
+    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", _guard)
+    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_once", _one_test)
+    monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())
+
+    result = await finalize_retained_tree_after_test(
+        ctx,
+        TestAndHealResult(False, 1, True, True, (stale,)),
+    )
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    assert guard_calls == [1, 2]
+    assert test_calls == 1
+    assert state.latest_retained is None
+    assert (ctx.data["dd"] / "stabilization-failed.json").is_file()
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+
+    phase_states = derive_phase_states(
+        ctx.work.repo, phase_events=[], session_id=state.session_id
+    )
+    assert phase_states["fix"]["status"] == "failed"
+    assert phase_states["test"]["status"] == "failed"
+    assert derive_pipeline_status(
+        "complete", None, phase_states, runs_fix=True, runs_test=True
+    ) == "failed"
+
+
+async def test_stabilization_audit_write_failure_stops_before_retest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep.orchestrator import finalize_retained_tree_after_test
+    from daydream.extensions import Stop
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    ctx, state, snapshot = _finalization_fixture(tmp_path)
+    evidence = TestAttemptEvidence(
+        session_id=state.session_id,
+        kind="host",
+        command=("pytest",),
+        passed=True,
+        input_tree_key=snapshot.tree_key,
+        output_tree_key=snapshot.tree_key,
+    )
+    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator._write_footprint_audit",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("audit disk full")),
+    )
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.phase_test_once",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not retest")),
+    )
+
+    result = await finalize_retained_tree_after_test(
+        ctx,
+        TestAndHealResult(True, 0, True, False, (evidence,)),
+    )
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    assert state.latest_retained is None
+    failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
+    assert "audit disk full" in failure["reason"]
+
+
+def test_fix_outcome_summary_renders_uid_keyed_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.deep.orchestrator import _render_fix_outcome_summary
+
+    rendered: list[tuple[int, int, str | None]] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_fix_complete",
+        lambda _console, number, total, *, outcome=None: rendered.append(
+            (number, total, outcome)
+        ),
+    )
+    items = [{**_merge_item(7, "a.py", "high"), "item_uid": "item:a"}]
+    outcomes = {
+        "item:a": {"issue_id": 7, "verdict": "resolved", "reason": "fixed"}
+    }
+
+    _render_fix_outcome_summary(tmp_path, items, outcomes)
+
+    assert rendered == [(1, 1, "resolved")]
+
+
+@pytest.mark.parametrize(("new_override", "expect_stop"), [(False, True), (True, False)])
+async def test_changed_tree_red_retest_requires_new_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    new_override: bool,
+    expect_stop: bool,
+) -> None:
+    """A prior-tree red override cannot authorize a newly executed red result."""
+    from daydream.deep.orchestrator import (
+        EvidenceKey,
+        finalize_retained_tree_after_test,
+    )
+    from daydream.extensions import Stop
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    ctx, state, snapshot = _finalization_fixture(tmp_path)
+    state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
+    prior_override = TestAttemptEvidence(
+        session_id=state.session_id,
+        kind="host",
+        command=("pytest",),
+        passed=False,
+        input_tree_key="prior-input",
+        output_tree_key="prior-output",
+    )
+
+    async def _red_retest(*_a: Any, **_k: Any) -> Any:
+        return (
+            TestAttemptEvidence(
+                session_id=state.session_id,
+                kind="host",
+                command=("pytest",),
+                passed=False,
+                input_tree_key=snapshot.tree_key,
+                output_tree_key=snapshot.tree_key,
+            ),
+            None,
+            "1 failed",
+        )
+
+    monkeypatch.setattr("daydream.deep.orchestrator._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.orchestrator.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_once", _red_retest)
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator._authorize_final_red_override",
+        lambda: new_override,
+    )
+    monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())
+
+    result = await finalize_retained_tree_after_test(
+        ctx,
+        TestAndHealResult(False, 0, True, True, (prior_override,)),
+    )
+
+    assert isinstance(result, Stop) is expect_stop
+    if isinstance(result, Stop):
+        assert result.exit_code == 1
+    verdict = json.loads((ctx.data["dd"] / "test-verdict.json").read_text())
+    assert verdict["passed"] is False
+    assert verdict["ignored"] is new_override
+
+
+def test_final_red_override_requires_fresh_interactive_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.deep.orchestrator import _authorize_final_red_override
+
+    prompts: list[dict[str, Any]] = []
+
+    def accept_prompt(**kwargs: Any) -> bool:
+        prompts.append(kwargs)
+        return True
+
+    monkeypatch.setattr("daydream.deep.orchestrator.get_assume", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_non_interactive", lambda: False)
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.resolve_or_prompt",
+        accept_prompt,
+    )
+
+    assert _authorize_final_red_override() is True
+    assert len(prompts) == 1
+    assert prompts[0]["safe_default"] is False
+    assert "still red" in prompts[0]["question"]
+
+    monkeypatch.setattr("daydream.deep.orchestrator.get_assume", lambda: "yes")
+    assert _authorize_final_red_override() is False
+    assert len(prompts) == 1
+
+
+@pytest.mark.parametrize("new_file_permissions", [0o600, 0o644])
+async def test_related_regression_real_runner_stabilizes_and_commits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    new_file_permissions: int,
+) -> None:
+    """Real host-test/Git path retains A/B/T and restores C + user scratch."""
+    from daydream.runner import run
+
+    repo = tmp_path / "footprint-run"
+    _init_repo(repo)
+    for name, value in (("api.py", "A = 1\n"), ("sibling.py", "B = 1\n"), ("other.py", "C = 1\n")):
+        (repo / name).write_text(value)
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "api.py").write_text("A = 10\n")
+    _git(repo, "add", "api.py")
+    _commit(repo, "feature")
+    remote = _bare_remote(tmp_path / "origin.git")
+    _git(repo, "remote", "add", "origin", str(remote))
+
+    scratch_one = repo / "scratch-one.bin"
+    scratch_two = repo / "scratch-two.txt"
+    scratch_one.write_bytes(b"\x00owner-one")
+    scratch_one.chmod(0o600)
+    scratch_two.write_text("owner-two\n")
+    deep = repo / ".daydream" / "deep"
+    item = {
+        "id": 1,
+        "file": "api.py",
+        "line": 1,
+        "severity": "high",
+        "description": "keep sibling fix and regression test",
+        "evidence": "api.py:1",
+        "recommendation": "repair both values",
+        "lens": "python",
+        "related_files": ["sibling.py", "tests/test_a.py"],
+    }
+    counter = tmp_path / "host-test-count"
+
+    class FootprintBackend(StubBackend):
+        def __init__(self, target: Path) -> None:
+            super().__init__(target)
+            self.fix_round = 0
+            self.verify_round = 0
+
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+        ) -> AsyncIterator[AgentEvent]:
+            lowered = prompt.lower()
+            if lowered.startswith(("fix this issue", "fix these")):
+                self.fix_round += 1
+                if self.fix_round == 1:
+                    (cwd / "api.py").write_text("A = 2\n")
+                    (cwd / "sibling.py").write_text("B = 5\n")
+                    (cwd / "tests").mkdir(exist_ok=True)
+                    (cwd / "tests/test_a.py").write_text(
+                        "import pathlib, sys\n"
+                        "counter = pathlib.Path(sys.argv[1])\n"
+                        "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n"
+                        "root = pathlib.Path(__file__).parents[1]\n"
+                        "assert (root / 'api.py').read_text() == 'A = 3\\n'\n"
+                        "assert (root / 'sibling.py').read_text() == 'B = 7\\n'\n"
+                    )
+                    (cwd / "tests/test_a.py").chmod(new_file_permissions)
+                    (cwd / "other.py").write_text("C = 9\n")
+                    scratch_one.write_bytes(b"damaged")
+                    scratch_two.unlink()
+                else:
+                    assert (cwd / "sibling.py").read_text() == "B = 5\n"
+                    assert (cwd / "tests/test_a.py").is_file()
+                    assert (cwd / "other.py").read_text() == "C = 1\n"
+                    (cwd / "api.py").write_text("A = 3\n")
+                yield TextEvent(text="fixed")
+                yield ResultEvent(structured_output=None, continuation=None)
+                return
+            if "post-fix fix-verifier agent" in lowered:
+                self.verify_round += 1
+                assert read_only is True
+                assert (cwd / "tests/test_a.py").is_file()
+                assert (cwd / "other.py").read_text() == "C = 1\n"
+                first = (
+                    {"issue_id": 1, "verdict": "wrong_target", "path": "other.py", "reason": "retry original"}
+                    if self.verify_round == 1
+                    else {"issue_id": 1, "verdict": "resolved", "reason": "complete"}
+                )
+                ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
+                verdicts = [first] + [
+                    {"issue_id": issue_id, "verdict": "resolved", "reason": "complete"}
+                    for issue_id in ids
+                    if issue_id != 1
+                ]
+                yield TextEvent(text="")
+                yield ResultEvent(structured_output={"verdicts": verdicts}, continuation=None)
+                return
+            if lowered.startswith("the tests failed"):
+                (cwd / "sibling.py").write_text("B = 7\n")
+                (cwd / "other.py").write_text("C = 8\n")
+                yield TextEvent(text="healed")
+                yield ResultEvent(structured_output=None, continuation=None)
+                return
+            async for event in super().execute(
+                cwd,
+                prompt,
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+            ):
+                yield event
+
+    backend = FootprintBackend(repo)
+    backend.parse_by_stack = {
+        "python": {
+            "severity": "high",
+            "confidence": "HIGH",
+            "issue": item,
+        }
+    }
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *_a, **_k: "2")
+    _silence(monkeypatch, prompts=False)
+
+    rc = await run(
+        make_config(
+            repo,
+            assume="yes",
+            archive=True,
+            test_command=f"python tests/test_a.py {counter}",
+        )
+    )
+    assert rc == 0
+    assert counter.read_text() == "3"
+    assert (repo / "api.py").read_text() == "A = 3\n"
+    assert (repo / "sibling.py").read_text() == "B = 7\n"
+    assert (repo / "tests/test_a.py").is_file()
+    assert (repo / "tests/test_a.py").stat().st_mode & 0o777 == new_file_permissions
+    assert (repo / "other.py").read_text() == "C = 1\n"
+    assert scratch_one.read_bytes() == b"\x00owner-one"
+    assert scratch_one.stat().st_mode & 0o777 == 0o600
+    assert scratch_two.read_text() == "owner-two\n"
+    assert set(_git(repo, "show", "--pretty=", "--name-only", "HEAD").splitlines()) == {
+        "api.py", "sibling.py", "tests/test_a.py"
+    }
+    assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
+
+    audit = json.loads((deep / "fix-footprint.json").read_text())
+    assert any(event["action"] == "rejected_retarget" for event in audit["events"])
+    authorization = {
+        (event["path"], event["origin"])
+        for event in audit["events"]
+        if event["action"] == "authorize"
+    }
+    assert {
+        ("api.py", "reviewed"),
+        ("api.py", "primary"),
+        ("sibling.py", "related"),
+        ("tests/test_a.py", "related"),
+    } <= authorization
+    restored = {
+        event["path"]
+        for event in audit["events"]
+        if event["action"] == "restore"
+    }
+    assert {"other.py", "scratch-one.bin", "scratch-two.txt"} <= restored
+    assert not {"sibling.py", "tests/test_a.py"} & restored
+    assert {event["path"] for event in audit["events"] if event["action"] == "stage"} == {
+        "api.py", "sibling.py", "tests/test_a.py"
+    }
+    verdict = json.loads((deep / "test-verdict.json").read_text())
+    assert len(verdict["attempts"]) == 3
+    assert verdict["session_id"] == audit["session_id"]
+    outcomes = json.loads((deep / "fix-outcomes.json").read_text())
+    capture = json.loads((deep / "recommended-capture.json").read_text())
+    assert outcomes["session_id"] == capture["session_id"] == audit["session_id"]
+    assert outcomes["evidence_key"] == capture["evidence_key"] == audit["evidence_key"]
+    assert verdict["attempts"][-1]["input_tree_key"] == capture["tree_key"]
+    assert verdict["attempts"][-1]["output_tree_key"] == capture["tree_key"]
+    from daydream.archive import get_archive_dir
+
+    archived = get_archive_dir() / "runs" / audit["session_id"]
+    assert json.loads((archived / "deep/fix-footprint.json").read_text()) == audit
+    for artifact in (
+        "fix-outcomes.json",
+        "test-verdict.json",
+        "recommended-capture.json",
+    ):
+        assert (archived / "deep" / artifact).read_bytes() == (deep / artifact).read_bytes()
+    assert (archived / "recommended.patch").read_bytes() == (
+        repo / ".daydream/recommended.patch"
+    ).read_bytes()

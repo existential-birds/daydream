@@ -2077,3 +2077,20 @@ def test_registry_diagram_prompt_override_accepts_inline_kwargs(tmp_path: Path) 
         schema={"type": "object", "properties": {}},
     )
     assert isinstance(prompt, str)
+
+
+def test_fix_verify_prompt_audits_complete_retained_patch_and_all_findings(tmp_path: Path) -> None:
+    """The compatible prompt contract is stage-neutral and final-tree aware."""
+    from daydream.deep.prompts import build_fix_verify_prompt
+
+    prompt = build_fix_verify_prompt(
+        items=[{"id": 1, "description": "fix it", "file": "a.py", "line": 1}],
+        changed_hunks="diff --git a/a.py b/a.py\n",
+        cwd=tmp_path,
+        round_number=2,
+    )
+
+    assert "complete current retained patch" in prompt
+    assert "all canonical findings" in prompt
+    assert "round's changed hunks ONLY" not in prompt
+    assert "findings the round dispatched" not in prompt

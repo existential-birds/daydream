@@ -868,6 +868,20 @@ async def _stub_verify(*_a: Any, **_k: Any) -> tuple[Path, dict[str, Any]]:
     return Path("/nonexistent"), {"verdicts": []}
 
 
+async def _stub_fix_verify(
+    _backend: Any,
+    _work: Any,
+    items: list[dict[str, Any]],
+    *_args: Any,
+    **_kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Resolve every canonical item for fix-cycle harnesses."""
+    return [
+        {"issue_id": item["id"], "verdict": "resolved", "reason": "harness"}
+        for item in items
+    ]
+
+
 @pytest.mark.asyncio
 async def test_fix_cycle_awaken_hero_followed_by_model_line(
     monkeypatch: pytest.MonkeyPatch,
@@ -899,6 +913,7 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
         ),
     )
     monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
         return {}
@@ -972,6 +987,7 @@ async def test_fix_cycle_items_severity_ordered(
         lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model="stub-model"),
     )
     monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     order: list[list[str]] = []
 
@@ -979,8 +995,19 @@ async def test_fix_cycle_items_severity_ordered(
         order.append([item["severity"] for item in items])
         return {}
 
-    async def _noop_test(*_a: Any, **_k: Any) -> tuple[bool, int, bool]:
-        return (True, 0, True)
+    async def _noop_test(*_a: Any, **kwargs: Any) -> Any:
+        from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+        key = kwargs["capture_tree_key"]()
+        attempt = TestAttemptEvidence(
+            session_id=kwargs["session_id"],
+            kind="host",
+            command=("true",),
+            passed=True,
+            input_tree_key=key,
+            output_tree_key=key,
+        )
+        return TestAndHealResult(True, 0, True, False, (attempt,))
 
     async def _noop_commit(*_a: Any, **_k: Any) -> None:
         return None
@@ -1140,6 +1167,7 @@ async def test_fix_cycle_yes_commits_fixes(
         lambda _config, _phase, cache=None, **_kwargs: commit_backend,
     )
     monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     async def _fix_writes(*_a: Any, **_k: Any) -> dict[str, str]:
         main_py = feature_branch_repo / "main.py"
@@ -1248,6 +1276,7 @@ async def _drive_fix_cycle_failing(
         ),
     )
     monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
+    monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
 
     async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
         return {}
