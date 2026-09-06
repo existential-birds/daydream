@@ -11,7 +11,7 @@ import anyio
 import pytest
 
 from daydream import review_profile as rp
-from daydream.backends import AgentEvent, Backend, ResultEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext, FileInfo
 from daydream.exploration_runner import (
     count_changed_files,
@@ -502,8 +502,8 @@ async def test_repo_scan_dispatch_records_survey_failure(tmp_path: Path) -> None
             read_only: bool = False,
             persist_session: bool = True,
         ) -> AsyncIterator[AgentEvent]:
+            yield TextEvent(text="Starting repository survey")
             raise RuntimeError("survey failed")
-            yield  # pragma: no cover - preserves the async-generator protocol
 
     recorder = make_recorder(tmp_path)
     async with recorder:
