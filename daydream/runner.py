@@ -51,11 +51,20 @@ from daydream.backends import (
 from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
-from daydream.extensions import ExtensionError, build_registry, get_registry, set_registry
+from daydream.extensions import (
+    ExtensionError,
+    build_registry,
+    get_registry,
+    set_registry,
+)
 from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
 from daydream.hunk_index import write_hunk_index
-from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
+from daydream.observability.config import (
+    ObservabilityConfig,
+    ObservabilityError,
+    resolve_observability_config,
+)
 from daydream.observability.runtime import associate_run_trajectory, trace_run
 from daydream.phases import (
     _detect_default_branch,
@@ -65,6 +74,7 @@ from daydream.phases import (
 from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.trajectory import (
     DaydreamRunFlow,
+    RunWriteSnapshot,
     TrajectoryRecorder,
     default_trajectory_path,
     get_current_recorder,
@@ -78,7 +88,12 @@ from daydream.ui import (
     print_success,
     prompt_user,
 )
-from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
+from daydream.workspace import (
+    AuditWorkspace,
+    WorkContext,
+    open_audit_workspace,
+    open_workspace,
+)
 
 if TYPE_CHECKING:
     from daydream.pr_review import ParsedIssue
@@ -376,8 +391,10 @@ class RunConfig:
 
 
 def _make_archive_callback(
-    config: RunConfig, target_dir: Path, work: WorkContext | None = None,
-) -> Callable[[TrajectoryRecorder, str], None] | None:
+    config: RunConfig,
+    target_dir: Path,
+    work: WorkContext | None = None,
+) -> Callable[[TrajectoryRecorder, RunWriteSnapshot], None] | None:
     """Build the on_write archive callback, or None if archiving is disabled.
 
     ``--dump-artifacts`` reuses the same bundle assembly, so the callback also
@@ -387,17 +404,17 @@ def _make_archive_callback(
     if not config.archive and not config.dump_artifacts:
         return None
 
-    def _cb(recorder: TrajectoryRecorder, status: str) -> None:
+    def _cb(recorder: TrajectoryRecorder, write_snapshot: RunWriteSnapshot) -> None:
         from daydream.archive import archive_run
 
         archive_run(
             recorder=recorder,
+            write_snapshot=write_snapshot,
             target_dir=target_dir,
             config=config,
-            status=status,
             run_eval=config.run_eval,
             work=work,
-            upload=status != "partial",
+            upload=write_snapshot.status != "partial",
         )
 
     return _cb

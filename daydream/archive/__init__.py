@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
-    from daydream.trajectory import TrajectoryRecorder
+    from daydream.trajectory import RunWriteSnapshot, TrajectoryRecorder
     from daydream.workspace import WorkContext
 
 
@@ -90,9 +90,9 @@ def get_archive_dir() -> Path:
 def archive_run(
     *,
     recorder: TrajectoryRecorder,
+    write_snapshot: RunWriteSnapshot,
     target_dir: Path,
     config: RunConfig,
-    status: str = "complete",
     run_eval: bool = True,
     work: WorkContext | None = None,
     upload: bool = True,
@@ -104,10 +104,11 @@ def archive_run(
     primary run.
 
     Args:
-        recorder: The TrajectoryRecorder that produced the trajectory.
+        recorder: Immutable run identity/configuration context.
+        write_snapshot: Canonical trajectory bytes and run status frozen before
+            the first write. Archive consumers never reread live recorder data.
         target_dir: Target directory that was reviewed.
         config: The RunConfig for this run.
-        status: Run status (``complete``, ``partial``, ``failed``).
         run_eval: Whether to run deterministic evaluation analysis.
         work: Optional WorkContext with pre-resolved git metadata. When
             provided, ``base_branch`` and ``base_sha`` are taken from the
@@ -121,9 +122,9 @@ def archive_run(
     try:
         _archive_run_inner(
             recorder=recorder,
+            write_snapshot=write_snapshot,
             target_dir=target_dir,
             config=config,
-            status=status,
             run_eval=run_eval,
             work=work,
             upload=upload,
@@ -141,9 +142,9 @@ def archive_run(
 def _archive_run_inner(
     *,
     recorder: TrajectoryRecorder,
+    write_snapshot: RunWriteSnapshot,
     target_dir: Path,
     config: RunConfig,
-    status: str,
     run_eval: bool,
     work: WorkContext | None = None,
     upload: bool = True,
@@ -154,7 +155,14 @@ def _archive_run_inner(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Copy artifact bundle
-    _copy_bundle(target_dir, run_dir, recorder, config)
+    _copy_bundle(
+        target_dir,
+        run_dir,
+        recorder,
+        config,
+        write_snapshot=write_snapshot,
+    )
+    status = write_snapshot.status
 
     # 2. Capture git context — prefer pre-resolved WorkContext over re-deriving
     #    from disk (HEAD may have moved; base-branch detection fails in worktrees).
@@ -180,7 +188,12 @@ def _archive_run_inner(
     # 3. Optionally run deterministic evaluation
     evaluation: dict[str, Any] | None = None
     if run_eval and recorder.run_flow is not DaydreamRunFlow.DIAGRAM:
-        evaluation = _run_eval(target_dir, recorder.session_id, run_dir)
+        evaluation = _run_eval(
+            target_dir,
+            recorder.session_id,
+            run_dir,
+            write_snapshot,
+        )
 
     # 3b. Surface dropped fix groups. A deep fix run that hit per-group failures
     #     left partial/reverted edits in the tree; the run is NOT "complete".
@@ -211,9 +224,45 @@ def _archive_run_inner(
     # previously deep-reviewed repo must not inherit a prior run's state (#336,
     # #762). ``runs_merge`` mirrors the ``_flow_fix_test_steps`` classification.
     runs_merge = _flow_runs_merge(recorder.run_flow, config.flow_name)
+    from daydream.trajectory import (
+        DaydreamPhase,
+        LifecycleReasonCode,
+        LifecycleStatus,
+        PhaseEvent,
+        snapshot_trajectories,
+    )
+
+    frozen_root = snapshot_trajectories(write_snapshot).get("main")
+    raw_frozen_extra = frozen_root.get("extra") if isinstance(frozen_root, dict) else None
+    frozen_extra: dict[str, Any] = raw_frozen_extra if isinstance(raw_frozen_extra, dict) else {}
+    frozen_phase_events = frozen_extra.get("phase_events")
+    typed_phase_events: list[PhaseEvent] = []
+    if isinstance(frozen_phase_events, list):
+        for value in frozen_phase_events:
+            if not isinstance(value, dict):
+                continue
+            try:
+                raw_status = value.get("status")
+                raw_reason = value.get("reason_code")
+                raw_metadata = value.get("metadata")
+                metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+                typed_phase_events.append(
+                    PhaseEvent(
+                        phase=DaydreamPhase(value["phase"]),
+                        event=str(value["event"]),
+                        timestamp=str(value["timestamp"]),
+                        session_id=value.get("session_id"),
+                        scope_id=value.get("scope_id"),
+                        status=(LifecycleStatus(raw_status) if raw_status is not None else None),
+                        reason_code=(LifecycleReasonCode(raw_reason) if raw_reason is not None else None),
+                        metadata=metadata,
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
     phase_states = derive_phase_states(
         target_dir,
-        phase_events=getattr(recorder, "_phase_events", []),
+        phase_events=typed_phase_events,
         runs_merge=runs_merge,
         runs_fix=runs_fix,
         runs_test=runs_test,
@@ -227,6 +276,7 @@ def _archive_run_inner(
     source_path = str(work.source) if work is not None else str(target_dir)
     manifest = build_manifest(
         recorder=recorder,
+        write_snapshot=write_snapshot,
         config=config,
         git_ctx=git_ctx,
         status=status,
@@ -390,12 +440,14 @@ def _copy_bundle(
     run_dir: Path,
     recorder: TrajectoryRecorder,
     config: RunConfig,
+    *,
+    write_snapshot: RunWriteSnapshot | None = None,
 ) -> None:
     """Copy ``.daydream/`` artifacts to the archive run directory.
 
-    Trajectory subtree (``runs/<session_id>/trajectory.json`` plus
-    ``runs/<session_id>/trajectories/``) is copied wholesale via copytree
-    so the archive layout mirrors the live layout exactly. Other artifacts
+    Production callbacks project the exact frozen ``RunWriteSnapshot`` bytes
+    into ``trajectory.json`` and ``trajectories/*.json``; direct legacy callers
+    without a snapshot retain the prior live-tree copy behavior. Other artifacts
     (``review-output.md``, ``deep/``, ``diff.patch``, ``findings.json``)
     keep their existing copy logic. Diagram-only runs retain prior deep-review
     state in the live tree, so they archive only ``diagram.json`` and
@@ -403,24 +455,43 @@ def _copy_bundle(
     """
     daydream_dir = target_dir / ".daydream"
 
-    # Trajectory subtree: live and archive share the run-dir shape, so a
-    # single copytree handles trajectory.json + trajectory.json.partial +
-    # trajectories/* in one go.
     live_run_dir = daydream_dir / "runs" / recorder.session_id
-    if live_run_dir.is_dir():
-        shutil.copytree(live_run_dir, run_dir, dirs_exist_ok=True)
-
-    # When --trajectory points to a custom path outside the live run dir,
-    # the main trajectory file won't be captured by the copytree above.
-    # Copy it explicitly so the archive always contains trajectory.json.
-    if recorder.explicit_path and recorder.path.is_file():
-        try:
-            resolved = recorder.path.resolve()
-            inside_run_dir = resolved.is_relative_to(live_run_dir.resolve())
-        except (OSError, ValueError):
-            inside_run_dir = False
-        if not inside_run_dir:
-            shutil.copy2(recorder.path, run_dir / "trajectory.json")
+    if write_snapshot is None:
+        # Compatibility path for direct bundle-copy callers. Production archive
+        # callbacks always supply the immutable run snapshot.
+        if live_run_dir.is_dir():
+            shutil.copytree(live_run_dir, run_dir, dirs_exist_ok=True)
+        if recorder.explicit_path and recorder.path.is_file():
+            try:
+                resolved = recorder.path.resolve()
+                inside_run_dir = resolved.is_relative_to(live_run_dir.resolve())
+            except (OSError, ValueError):
+                inside_run_dir = False
+            if not inside_run_dir:
+                shutil.copy2(recorder.path, run_dir / "trajectory.json")
+    else:
+        root_path = run_dir / "trajectory.json"
+        root_path.unlink(missing_ok=True)
+        shutil.rmtree(run_dir / "trajectories", ignore_errors=True)
+        seen_destinations: set[Path] = set()
+        for document in write_snapshot.documents:
+            payload = json.loads(document.json_bytes)
+            if not isinstance(payload, dict) or payload.get("trajectory_id") != document.trajectory_id:
+                raise ValueError("invalid frozen trajectory document identity")
+            if document.trajectory_id == write_snapshot.root_trajectory_id:
+                destination = root_path
+            else:
+                name = document.path.name
+                if name.endswith(".json.partial"):
+                    name = name.removesuffix(".partial")
+                if not name.endswith(".json") or name in {".", ".."}:
+                    raise ValueError("invalid frozen trajectory document path")
+                destination = run_dir / "trajectories" / name
+            if destination in seen_destinations:
+                raise ValueError("duplicate frozen trajectory destination")
+            seen_destinations.add(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(document.json_bytes)
 
     diagram_only = recorder.run_flow is DaydreamRunFlow.DIAGRAM
     deep_dir = daydream_dir / "deep"
@@ -465,13 +536,23 @@ def _copy_bundle(
             shutil.copy2(findings_src, run_dir / "findings.json")
 
 
-def _run_eval(target_dir: Path, session_id: str, run_dir: Path) -> dict[str, Any] | None:
+def _run_eval(
+    target_dir: Path,
+    session_id: str,
+    run_dir: Path,
+    write_snapshot: RunWriteSnapshot,
+) -> dict[str, Any] | None:
     """Run deterministic evaluation analysis and write results to the archive."""
     try:
         from daydream.eval.analyzer import analyze_session
+        from daydream.trajectory import snapshot_trajectories
 
         daydream_dir = target_dir / ".daydream"
-        result = analyze_session(daydream_dir, session_id=session_id)
+        result = analyze_session(
+            daydream_dir,
+            session_id=session_id,
+            frozen_trajectories=snapshot_trajectories(write_snapshot),
+        )
         eval_path = run_dir / "evaluation.json"
         eval_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
@@ -483,6 +564,7 @@ def _run_eval(target_dir: Path, session_id: str, run_dir: Path) -> dict[str, Any
         from daydream.ui import create_console, print_warning
 
         print_warning(
-            create_console(), f"Evaluation failed for session {session_id}; archive missing evaluation.json"
+            create_console(),
+            f"Evaluation failed for session {session_id}; archive missing evaluation.json",
         )
         return None

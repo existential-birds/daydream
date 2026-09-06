@@ -12,12 +12,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.atif import Step
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
+    RunWriteSnapshot,
     TrajectoryRecorder,
     now_iso,
 )
@@ -38,6 +40,22 @@ def _add_user_step(recorder: TrajectoryRecorder) -> None:
         },
     )
     recorder.steps.append(step)
+
+
+async def _hold_archive_fork(
+    parent: TrajectoryRecorder,
+    name: str,
+    entered: anyio.Event,
+    release: anyio.Event,
+) -> None:
+    async with parent.fork(name) as child:
+        for call in ("first", "second"):
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                invocation.observe_user_step(prompt=f"{name}-{call}")
+        async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe_user_step(prompt=f"{name}-blocked")
+            entered.set()
+            await release.wait()
 
 
 # --- shared round-trip setup for the archive on_write tests ---
@@ -152,8 +170,8 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
     """Empty trajectories skip _write entirely, so on_write must not be called."""
     callback_calls: list[tuple[str, str]] = []
 
-    def on_write(recorder: TrajectoryRecorder, status: str) -> None:
-        callback_calls.append((recorder.session_id, status))
+    def on_write(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
+        callback_calls.append((recorder.session_id, snapshot.status))
 
     recorder = make_recorder(tmp_path, on_write=on_write)
     async with recorder:
@@ -168,10 +186,13 @@ async def test_full_archive_round_trip_fix_test_backend_columns(
     tmp_path: Path,
     archive_dir: Path,
     run_flow: DaydreamRunFlow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real-path round-trip: IMPROVE omits fix/test_backend (keys + NULL SQL
     columns); NORMAL (deep-family) records both (keys present + non-NULL)."""
     recorder = _make_round_trip_fixture(tmp_path, run_flow)
+    lifecycle_times = iter(("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"))
+    monkeypatch.setattr("daydream.trajectory.now_iso", lambda: next(lifecycle_times))
 
     async with recorder:
         pass
@@ -234,7 +255,10 @@ async def test_archive_round_trip_projects_eval_location_metrics(
 async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     """If on_write raises, the context manager exits cleanly and trajectory is still written."""
 
-    def on_write_boom(recorder: TrajectoryRecorder, status: str) -> None:
+    def on_write_boom(
+        recorder: TrajectoryRecorder,
+        snapshot: RunWriteSnapshot,
+    ) -> None:
         raise RuntimeError("archive exploded")
 
     recorder = make_recorder(tmp_path, on_write=on_write_boom)
@@ -417,18 +441,91 @@ async def test_archive_callback_partial_status_skips_hf_upload(
     recorder = make_recorder(tmp_path, on_write=cb)
     _add_user_step(recorder)
 
-    # Signal flush fires on_write("partial") synchronously; the blocking HF
+    # Signal flush publishes a partial snapshot synchronously; the blocking HF
     # upload must be skipped so Ctrl-C/Ctrl-\ shutdown never hangs on a network call.
     recorder.write_partial()
     assert uploaded == []
 
-    # Normal completion fires on_write("complete"); the upload must run.
+    # Normal completion publishes a complete snapshot; the upload must run.
     async with recorder:
         pass
 
     assert len(uploaded) == 1
     assert uploaded[0][1] == "acme/dd-trajectories"
     assert uploaded[0][2] == recorder.session_id
+
+
+async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
+    tmp_path: Path,
+    archive_dir: Path,
+) -> None:
+    from daydream.runner import RunConfig, _make_archive_callback
+
+    config = RunConfig(target=str(tmp_path), archive=True, run_eval=True)
+    archive_callback = _make_archive_callback(config, tmp_path)
+    assert archive_callback is not None
+    snapshots: list[RunWriteSnapshot] = []
+
+    def callback(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
+        snapshots.append(snapshot)
+        archive_callback(recorder, snapshot)
+
+    recorder = make_recorder(tmp_path, on_write=callback)
+    entered = {name: anyio.Event() for name in ("a", "b")}
+    release = {name: anyio.Event() for name in entered}
+    async with recorder:
+        _add_user_step(recorder)
+        async with anyio.create_task_group() as task_group:
+            for name in entered:
+                task_group.start_soon(
+                    _hold_archive_fork,
+                    recorder,
+                    name,
+                    entered[name],
+                    release[name],
+                )
+                await entered[name].wait()
+            recorder.write_partial()
+            partial = snapshots[-1]
+            assert partial.status == "partial"
+            assert len(partial.documents) == 3
+            assert {json.loads(document.json_bytes)["extra"]["snapshot_at"] for document in partial.documents} == {
+                partial.cutoff_at
+            }
+            frozen = tuple(document.json_bytes for document in partial.documents)
+
+            run_dir = archive_dir / "runs" / recorder.session_id
+            manifest = json.loads((run_dir / "manifest.json").read_text())
+            evaluation = json.loads((run_dir / "evaluation.json").read_text())
+            assert manifest["metrics"]["wall_clock_seconds"] == evaluation["timing"]["total_wall_clock_seconds"]
+            assert evaluation["timing"]["agent_completeness"] == {
+                "total": 6,
+                "attributed": 0,
+                "unattributed": 6,
+            }
+            assert evaluation["timing"]["diagnostics"]["malformed_invocation"] == 2
+            assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == evaluation["timing"][
+                "agent_completeness"
+            ]
+            assert len(list((run_dir / "trajectories").glob("*.json"))) == 2
+            for event in release.values():
+                event.set()
+
+        assert tuple(document.json_bytes for document in partial.documents) == frozen
+
+    complete = snapshots[-1]
+    assert complete.status == "complete"
+    assert complete.cutoff_at > partial.cutoff_at
+    assert all("run_ended_at" in json.loads(document.json_bytes)["extra"] for document in complete.documents)
+    final_evaluation = json.loads(
+        (archive_dir / "runs" / recorder.session_id / "evaluation.json").read_text()
+    )
+    assert final_evaluation["timing"]["agent_completeness"] == {
+        "total": 6,
+        "attributed": 0,
+        "unattributed": 6,
+    }
+    assert final_evaluation["timing"]["diagnostics"]["malformed_invocation"] == 0
 
 
 # --no-archive + --dump-artifacts: bundle still dumped, upload never fires
@@ -495,18 +592,25 @@ async def test_runner_archive_round_trip_redacts_structured_tool_credentials(
     target_dir = tmp_path / "project"
     target_dir.mkdir()
 
-    backend = ScriptedBackend(events=(
-        ToolStartEvent(
-            id="t1", name="ListDir",
-            input={"dir": "/tmp", "apiKey": {"nested": sentinel}, "displayName": "visible"},
-        ),
-        ToolResultEvent(
-            id="t1",
-            output='{"status": "ok", "token": "opaque-test-only-sentinel"}',
-            is_error=False,
-        ),
-        ResultEvent(structured_output=None, continuation=None),
-    ))
+    backend = ScriptedBackend(
+        events=(
+            ToolStartEvent(
+                id="t1",
+                name="ListDir",
+                input={
+                    "dir": "/tmp",
+                    "apiKey": {"nested": sentinel},
+                    "displayName": "visible",
+                },
+            ),
+            ToolResultEvent(
+                id="t1",
+                output='{"status": "ok", "token": "opaque-test-only-sentinel"}',
+                is_error=False,
+            ),
+            ResultEvent(structured_output=None, continuation=None),
+        )
+    )
 
     config = RunConfig(target=str(target_dir), archive=True, run_eval=False)
     recorder = _open_recorder(

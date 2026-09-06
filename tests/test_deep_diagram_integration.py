@@ -157,6 +157,39 @@ def _artifact(target: Path) -> dict[str, Any]:
     return data
 
 
+def _root_trajectory(target: Path) -> dict[str, Any]:
+    paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
+    assert len(paths) == 1
+    payload = json.loads(paths[0].read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _diagram_lifecycle(target: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    trajectory = _root_trajectory(target)
+    events = [
+        event
+        for event in trajectory["extra"]["phase_events"]
+        if event["phase"] == "diagram"
+    ]
+    starts = [event for event in events if event["event"] == "phase_start"]
+    ends = [event for event in events if event["event"] == "phase_end"]
+    assert len(starts) == len(ends) == 1
+    assert starts[0]["scope_id"] == ends[0]["scope_id"]
+    return starts[0], ends[0]
+
+
+def _diagram_dispatch(target: Path) -> dict[str, Any]:
+    steps = [
+        step
+        for step in _root_trajectory(target)["steps"]
+        if step.get("extra", {}).get("daydream_phase") == "diagram"
+        and "dispatch_id" in step.get("extra", {})
+    ]
+    assert len(steps) == 1
+    return steps[0]
+
+
 def _diagram_calls(stub: StubBackend, kind: str) -> list[dict[str, Any]]:
     """The stub calls that are diagram turns for ``kind`` (author + repair)."""
     role = (
@@ -435,6 +468,16 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
     # The evidence table lists only the rendered (grounded) rows.
     assert body.count("| 6 | Client → Core: Ghost call |") == 1
     assert "Unsnappable symbol" not in body
+    dispatch = _diagram_dispatch(target)
+    assert [
+        result["content"] for result in dispatch["observation"]["results"]
+    ] == [
+        "Dispatched to diagram-sequence",
+        "Dispatched to diagram-sequence-repair",
+    ]
+    assert dispatch["extra"]["planned_count"] == 2
+    assert dispatch["extra"]["attempted_count"] == 2
+    assert dispatch["extra"]["completed_count"] == 2
 
 
 # --- Spec test 5: flowchart grounding ---------------------------------------
@@ -926,7 +969,7 @@ async def test_injection_payloads_cannot_add_mermaid_statements(
 # --- Spec test 14: fail-open in review --------------------------------------
 
 
-async def test_agent_error_fails_one_kind_and_leaves_the_other(
+async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails(
     tmp_path: Path,
     review_run: Callable[..., Any],
     captured_post: _CapturedPost,
@@ -950,10 +993,64 @@ async def test_agent_error_fails_one_kind_and_leaves_the_other(
     assert results["flowchart"]["grounding"] is None
     assert results["sequence"]["status"] == "rendered"
 
+    start, end = _diagram_lifecycle(target)
+    dispatch = _diagram_dispatch(target)
+    assert start["metadata"] == {"stage": "diagram"}
+    assert end["status"] == "partial"
+    assert end["reason_code"] == "some_children_failed"
+    assert dispatch["extra"]["dispatch_status"] == "partial"
+    assert dispatch["extra"]["reason_code"] == "some_children_failed"
+    assert dispatch["timestamp"] <= min(
+        json.loads(
+            (target / ".daydream" / ref["trajectory_path"]).read_text(
+                encoding="utf-8"
+            )
+        )["extra"]["run_started_at"]
+        for result in dispatch["observation"]["results"]
+        for ref in result["subagent_trajectory_ref"]
+    )
+    assert dispatch["extra"]["planned_count"] == 2
+    assert dispatch["extra"]["attempted_count"] == 2
     body = captured_post.body()
     assert SEQUENCE_HEADING in body
     assert FLOWCHART_HEADING not in body
 
+
+async def test_diagram_phase_outcome_all_authors_fail_open(
+    tmp_path: Path,
+    review_run: Callable[..., Any],
+) -> None:
+    target = dr.build_both_signals_repo(tmp_path)
+
+    exit_code, _ = await review_run(
+        target,
+        fail=frozenset({"sequence", "flowchart"}),
+    )
+
+    assert exit_code == 0
+    assert {
+        result["status"] for result in _artifact(target)["results"].values()
+    } == {"failed"}
+    _, end = _diagram_lifecycle(target)
+    dispatch = _diagram_dispatch(target)
+    assert end["status"] == "failed"
+    assert end["reason_code"] == "all_children_failed"
+    assert dispatch["extra"]["dispatch_status"] == "failed"
+    assert dispatch["extra"]["reason_code"] == "all_children_failed"
+
+
+async def test_no_eligible_diagram_closes_skipped_lifecycle(
+    tmp_path: Path,
+    review_run: Callable[..., Any],
+) -> None:
+    target = dr.build_flat_repo(tmp_path)
+
+    exit_code, _ = await review_run(target)
+
+    assert exit_code == 0
+    _, end = _diagram_lifecycle(target)
+    assert end["status"] == "skipped"
+    assert end["reason_code"] == "no_eligible_work"
 
 # --- Per-phase config override (spec section 9) ------------------------------
 
