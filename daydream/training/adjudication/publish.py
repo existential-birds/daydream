@@ -32,7 +32,7 @@ from daydream.archive.hydrate import (
 from daydream.archive.hydrate_rules import derive_curation_id_v2
 from daydream.training.adjudication.final_bundle import (
     FINAL_IDENTITY_FILES,
-    final_snapshot_id,
+    _bundle_input_names,
 )
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 from daydream.trajectory import redact_text
@@ -745,14 +745,19 @@ def _validate_final_semantics(payloads: Mapping[str, bytes]) -> tuple[str, str]:
 
 
 def _prepare_final_bundle(bundle_dir: Path) -> tuple[str, str, str, dict[str, bytes]]:
-    final_id, digests = final_snapshot_id(bundle_dir)
-    local_names = {path.name for path in bundle_dir.iterdir()}
+    local_names = _bundle_input_names(bundle_dir)
     if local_names != set(FINAL_IDENTITY_FILES):
         raise ValueError("final publication input must contain exactly the seven semantic files")
-    payloads = {
-        name: _read_regular_file(bundle_dir / name, label=name)
-        for name in FINAL_IDENTITY_FILES
-    }
+    payloads: dict[str, bytes] = {}
+    for name in FINAL_IDENTITY_FILES:
+        path = bundle_dir / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"final bundle identity input {name!r} must be a regular file")
+        payloads[name] = _read_regular_file(path, label=name)
+    # Bind identity, validation, checksums, and upload to one captured byteset.
+    # A concurrent local edit must not separate an immutable ID from its data.
+    digests = {name: _digest(data) for name, data in payloads.items()}
+    final_id = _digest(_canonical_json_bytes(digests))
     for name, data in payloads.items():
         _scan_for_secrets(name, data)
     curation_id, source_snapshot_id = _validate_final_semantics(payloads)

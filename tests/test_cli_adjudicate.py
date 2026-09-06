@@ -676,9 +676,10 @@ from tests.fixtures.training.build_hub_snapshot import AnnotationsHub, build_sna
 from tests.test_training_adjudication_final_bundle import seed_final_bundle_state  # noqa: E402
 
 
+@pytest.mark.parametrize("legacy_stage", [False, True])
 def test_publish_final_dry_run_validates_and_publishes_nothing(
         tmp_path: Path, capsys: pytest.CaptureFixture[str],
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch: pytest.MonkeyPatch, legacy_stage: bool) -> None:
     from daydream.training.adjudication import cli as adjudication_cli
     from daydream.training.corpus_v2.identity import record_id
 
@@ -707,6 +708,11 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     }) + "\n", encoding="utf-8")
     run_canonical_harvest(index_root, mat, archive_dir,
                           observations_path=state / "observations.jsonl")
+    scratch = mat / "final-bundle" / ".publish-stage"
+    scratch_bytes = b"hf_legacyPrivateScratchMustNeverBeUploaded\n"
+    if legacy_stage:
+        scratch.mkdir(parents=True)
+        (scratch / "annotations.jsonl").write_bytes(scratch_bytes)
     rc = handle_adjudicate([
         "publish-final", "--index-root", str(index_root),
         "--materialize-dir", str(mat), "--archive-dir", str(archive_dir),
@@ -737,6 +743,10 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     assert final_id in published_output
     assert hub.repo_info("main").sha in published_output
     assert any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
+    if legacy_stage:
+        assert (scratch / "annotations.jsonl").read_bytes() == scratch_bytes
+        assert not any(".publish-stage" in name for name in hub.files)
+        assert not any(scratch_bytes in data for data in hub.files.values())
 
 
 def test_publish_final_refuses_when_admission_gate_not_met(

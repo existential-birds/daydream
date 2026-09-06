@@ -921,6 +921,51 @@ def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(
     )
 
 
+def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    bundle, curation_id = _final_bundle(tmp_path)
+    annotations = (bundle / "annotations.jsonl").resolve()
+    original = annotations.read_bytes()
+    replacement = original + b"\n"
+    real_read_bytes = Path.read_bytes
+    replaced = False
+
+    def read_then_replace(path: Path) -> bytes:
+        nonlocal replaced
+        data = real_read_bytes(path)
+        if path == annotations and not replaced:
+            annotations.write_bytes(replacement)
+            replaced = True
+        return data
+
+    # Keep real filesystem reads and writes, but force a competing edit at the
+    # boundary where the old publisher separated hashing from payload capture.
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", read_then_replace)
+        published = publish_final_annotation_bundle(hub, bundle)
+
+    assert replaced
+    assert annotations.read_bytes() == replacement
+    prefix = published["prefix"]
+    remote = hub.revision_files(published["hub_commit_sha"])
+    publication = json.loads(remote[f"{prefix}publication-manifest.json"])
+    for name, digest in publication["files"].items():
+        assert hashlib.sha256(remote[f"{prefix}{name}"]).hexdigest() == digest
+    assert remote[f"{prefix}annotations.jsonl"] == original
+
+    destination = tmp_path / "verified download"
+    download_final_annotation_bundle(
+        hub,
+        curation_id=curation_id,
+        snapshot_id=published["final_snapshot_id"],
+        revision=published["hub_commit_sha"],
+        destination=destination,
+    )
+    assert (destination / "annotations.jsonl").read_bytes() == original
+
+
 def test_final_publish_accepts_real_bundle_root_under_symlinked_ancestor(tmp_path: Path) -> None:
     actual = tmp_path / "actual"
     actual.mkdir()

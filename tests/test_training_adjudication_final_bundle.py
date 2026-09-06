@@ -196,7 +196,7 @@ def test_build_final_bundle_gate_fails_without_human_adjudication(tmp_path: Path
 
 
 def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> None:
-    """A real publish leaves ``.publish-stage/`` in the bundle dir; the next
+    """A legacy publish left ``.publish-stage/`` in the bundle dir; the next
     construction/dry-run over the same dir must treat it as publish scratch,
     never foreign content (issue #336 finding 5)."""
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
@@ -205,6 +205,7 @@ def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> 
     build_final_bundle(
         index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
     )
+    original_identity = final_snapshot_id(out)
     stage = out / ".publish-stage"
     stage.mkdir()
     (stage / "annotations.jsonl").write_text("stale-stage", encoding="utf-8")
@@ -213,10 +214,46 @@ def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> 
         index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
     )
     assert ".publish-stage" not in summary["files"]
+    assert final_snapshot_id(out) == original_identity
+    assert (stage / "annotations.jsonl").read_text() == "stale-stage"
     for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
                  "coverage-report.json", "lineage.json", "preview-manifest.json",
                  "policy-binding.json"):
         assert (out / name).is_file(), name
+
+
+@pytest.mark.parametrize("kind", ["file", "directory-symlink", "file-symlink"])
+def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path) -> None:
+    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+    run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
+    out = tmp_path / "final-bundle"
+    build_final_bundle(
+        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
+    )
+    stage = out / ".publish-stage"
+    outside = tmp_path / "outside"
+    if kind == "file":
+        stage.write_bytes(b"not a scratch directory")
+    elif kind == "directory-symlink":
+        outside.mkdir()
+        stage.symlink_to(outside, target_is_directory=True)
+    else:
+        outside.write_bytes(b"private outside bytes")
+        stage.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="foreign"):
+        final_snapshot_id(out)
+    with pytest.raises(ValueError, match="foreign content"):
+        build_final_bundle(
+            index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
+        )
+    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+
+    hub = AnnotationsHub(repo_id="org/private-annotations")
+    with pytest.raises(ValueError, match="exactly the seven semantic files"):
+        publish_final_annotation_bundle(hub, out)
+    assert hub.commit_order == []
 
 
 def test_build_final_bundle_unpinned_as_of_emits_empty_not_none(tmp_path: Path) -> None:

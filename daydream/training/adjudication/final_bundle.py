@@ -90,13 +90,26 @@ def _canonical(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _bundle_input_names(root: Path) -> set[str]:
+    """Ignore only a real legacy scratch directory, without reading its contents."""
+    return {
+        path.name
+        for path in root.iterdir()
+        if not (
+            path.name == _PUBLISH_STAGE_DIRNAME
+            and not path.is_symlink()
+            and path.is_dir()
+        )
+    }
+
+
 def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
     """Hash the exact seven-file semantic annotation bundle contract."""
     root = Path(bundle_dir)
     if root.is_symlink() or not root.is_dir():
         raise ValueError("final bundle must be a real directory")
     allowed_envelope = {"publication-manifest.json", "SHA256SUMS", "_SUCCESS"}
-    names = {path.name for path in root.iterdir()}
+    names = _bundle_input_names(root)
     foreign = sorted(names - set(FINAL_IDENTITY_FILES) - allowed_envelope)
     missing = sorted(set(FINAL_IDENTITY_FILES) - names)
     if foreign or missing:
@@ -407,9 +420,9 @@ def build_final_bundle(
     byte-identical; any foreign file (a previous run's ``_SUCCESS``, editor
     droppings, a partial publish) raises ``ValueError`` naming the directory,
     because a stale or published staging dir must never be silently mixed
-    with fresh content. The ``.publish-stage`` scratch dir a real publish
-    leaves behind is publish-internal, not foreign content, so a re-publish
-    over the same dir is tolerated.
+    with fresh content. A real, non-symlink ``.publish-stage`` directory left
+    by an older publisher is preserved without reading its contents; it is
+    excluded from construction, identity, and publication.
 
     Returns a summary dict with ``disposition_counts`` covering all five
     dispositions (``accepted``/``rejected``/``ambiguous``/``unanswered``/
@@ -420,10 +433,7 @@ def build_final_bundle(
         raise ValueError("curation bundle root must be a real directory")
     curated = load_curated_bundle(bundle_root)
     if out_dir.exists():
-        foreign = sorted(
-            p.name for p in out_dir.iterdir()
-            if p.name not in _BUNDLE_FILES and p.name != _PUBLISH_STAGE_DIRNAME
-        )
+        foreign = sorted(_bundle_input_names(out_dir) - set(_BUNDLE_FILES))
         if foreign:
             raise ValueError(
                 f"final-bundle staging dir {out_dir} contains foreign content "
