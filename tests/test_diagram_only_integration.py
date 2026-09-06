@@ -49,7 +49,8 @@ def _serve_pr(fake_gh: FakeGh, target: Path) -> None:
             "headRefName": "feature",
             "baseRefName": "main",
             "headRefOid": git_ops.head_sha(target),
-            "baseRefOid": git_ops.merge_base(target, "main"),
+            "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+            "headRepositoryOwner": {"login": "acme"},
             "url": "https://github.com/acme/widgets/pull/7",
             "body": "",
         }
