@@ -1831,11 +1831,30 @@ def snapshot_worktree_paths(repo: Path, paths: Iterable[str]) -> tuple[GitPathSt
     )
 
 
+def snapshot_worktree_gitlinks(repo: Path) -> tuple[GitPathState, ...]:
+    """Capture every tracked gitlink's actual clean checked-out commit."""
+    proc = _run_git(repo, ["ls-files", "--stage", "-z"], capture_bytes=True)
+    if proc.returncode != 0:
+        raise GitError(
+            f"git ls-files --stage failed in {repo}: {os.fsdecode(proc.stderr).strip()}"
+        )
+    paths: list[str] = []
+    for record in (record for record in proc.stdout.split(b"\0") if record):
+        metadata, separator, raw_path = record.partition(b"\t")
+        if not separator:
+            raise GitError("git returned malformed staged path data")
+        mode, _oid, stage = metadata.decode("ascii").split(" ")
+        if mode == "160000" and stage == "0":
+            paths.append(os.fsdecode(raw_path))
+    return snapshot_worktree_paths(repo, paths)
+
+
 def snapshot_worktree_delta(
     repo: Path,
     ref: str,
     *,
     preexisting_untracked: dict[str, GitPathState],
+    preexisting_gitlinks: tuple[GitPathState, ...] = (),
 ) -> tuple[GitPathState, ...]:
     """Capture source delta plus protected paths, not changing runtime output.
 
@@ -1843,7 +1862,11 @@ def snapshot_worktree_delta(
     makes user-file changes invalidate evidence without audit/trace writes
     recursively invalidating the evidence they describe.
     """
-    paths = set(changed_paths_z(repo, ref, include_runtime_artifacts=False)) | set(preexisting_untracked)
+    paths = (
+        set(changed_paths_z(repo, ref, include_runtime_artifacts=False))
+        | set(preexisting_untracked)
+        | {state.path for state in preexisting_gitlinks}
+    )
     return tuple(
         _snapshot_worktree_path(
             repo,
@@ -2424,7 +2447,6 @@ def _restore_path_state(
     state: GitPathState,
     *,
     allow_leaf_type_replacement: bool,
-    ref: str,
 ) -> None:
     if state.state == "missing":
         _remove_confined_leaf(repo, state.path)
@@ -2435,7 +2457,22 @@ def _restore_path_state(
         allow_leaf_symlink=allow_leaf_type_replacement or state.state == "symlink",
     )
     if state.state == "gitlink":
-        restore_worktree_paths_from_ref(repo, ref, [state.path])
+        nested = _preflight_gitlink_restore(repo, state)
+        assert state.digest is not None
+        proc = _run_git(
+            nested,
+            ["checkout", "--detach", state.digest],
+            timeout=30,
+            retries=0,
+        )
+        if proc.returncode != 0:
+            raise GitError(
+                f"could not restore gitlink {state.path!r} to its captured commit: "
+                f"{proc.stderr.strip()}"
+            )
+        if head_sha(nested) != state.digest:
+            raise GitError(f"gitlink {state.path!r} did not reach its captured commit")
+        _preflight_gitlink_restore(repo, state)
         return
     if state.digest is None or state.mode is None:
         raise GitError("restorable path state is incomplete")
@@ -2461,6 +2498,36 @@ def _restore_path_state(
         raise GitError("could not restore confined worktree path") from exc
 
 
+def _preflight_gitlink_restore(repo: Path, state: GitPathState) -> Path:
+    """Prove a gitlink can be restored without discarding nested user state."""
+    if state.digest is None or state.mode != 0o160000:
+        raise GitError("restorable gitlink state is incomplete")
+    _require_git_path_confined(repo, state.path, allow_leaf_symlink=False)
+    nested = repo / state.path
+    try:
+        assert_is_worktree(nested)
+    except NotAWorktreeError as exc:
+        raise GitError("gitlink working tree is unavailable for exact restoration") from exc
+    dirty = _run_git(
+        nested,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"],
+        capture_bytes=True,
+    )
+    if dirty.returncode != 0:
+        raise GitError("could not inspect gitlink before exact restoration")
+    if dirty.stdout:
+        raise GitError("dirty gitlink cannot be restored without discarding nested user state")
+    target = _run_git(
+        nested,
+        ["cat-file", "-e", f"{state.digest}^{{commit}}"],
+        timeout=30,
+        retries=0,
+    )
+    if target.returncode != 0:
+        raise GitError(f"captured gitlink commit is unavailable for {state.path!r}")
+    return nested
+
+
 def restore_group_from_snapshot(
     repo: Path,
     snapshot: WorktreeRollbackSnapshot,
@@ -2477,22 +2544,32 @@ def restore_group_from_snapshot(
             [path for path in requested if path not in tracked and path not in snapshot.untracked],
         )
     }
+    restore_states: list[tuple[GitPathState, bool]] = []
+    for path in requested:
+        if path in snapshot.untracked:
+            state = snapshot.untracked[path]
+            replace_type = True
+        elif path in tracked:
+            state = tracked[path]
+            replace_type = False
+        else:
+            state = committed[path]
+            replace_type = state.state == "missing"
+        restore_states.append((state, replace_type))
+
     try:
-        for path in requested:
-            if path in snapshot.untracked:
-                state = snapshot.untracked[path]
-                replace_type = True
-            elif path in tracked:
-                state = tracked[path]
-                replace_type = False
-            else:
-                state = committed[path]
-                replace_type = state.state == "missing"
+        # Preflight every nested repository before changing any worktree path.
+        # A dirty or unavailable gitlink is a fail-closed condition, never
+        # grounds for a forced checkout that could destroy user content.  The
+        # complete parent index is still restored by ``finally``.
+        for state, _replace_type in restore_states:
+            if state.state == "gitlink":
+                _preflight_gitlink_restore(repo, state)
+        for state, replace_type in restore_states:
             _restore_path_state(
                 repo,
                 state,
                 allow_leaf_type_replacement=replace_type,
-                ref=snapshot.ref,
             )
     finally:
         restore_index(repo, snapshot.index)

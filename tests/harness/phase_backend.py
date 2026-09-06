@@ -11,6 +11,7 @@ per-iteration parse queue. Two response modes:
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -171,6 +172,22 @@ class PhaseDispatchBackend:
             # payload always carries it (empty when not exercised).
             yield ResultEvent(
                 structured_output={"issues": issues, "verdicts": []}, continuation=None
+            )
+        elif "post-fix fix-verifier agent" in prompt_lower:
+            ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output={
+                    "verdicts": [
+                        {
+                            "issue_id": issue_id,
+                            "verdict": "resolved",
+                            "reason": "harness fix accepted",
+                        }
+                        for issue_id in ids
+                    ]
+                },
+                continuation=None,
             )
         elif "fix this issue" in prompt_lower or prompt_lower.startswith("fix these"):
             yield TextEvent(text="Fixed.")

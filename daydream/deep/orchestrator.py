@@ -3287,6 +3287,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         preexisting_untracked = git_ops.snapshot_untracked_paths(
             ctx.work.repo, include_runtime_artifacts=False
         )
+        preexisting_gitlinks = git_ops.snapshot_worktree_gitlinks(ctx.work.repo)
         footprint = AuthorizedFixFootprint.build(
             ctx.work.repo, set(changed_files or []), items
         )
@@ -3301,6 +3302,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         stable_head=stable_head,
         initial_index=initial_index,
         preexisting_untracked=preexisting_untracked,
+        preexisting_gitlinks=preexisting_gitlinks,
         footprint=footprint,
     )
     ctx.data["fix_cycle_state"] = state
@@ -3895,6 +3897,7 @@ class FixCycleState:
     stable_head: str
     initial_index: IndexSnapshot
     preexisting_untracked: dict[str, GitPathState]
+    preexisting_gitlinks: tuple[GitPathState, ...]
     footprint: AuthorizedFixFootprint
     latest_retained: RetainedTreeSnapshot | None = None
     verifier_key: EvidenceKey | None = None
@@ -3916,24 +3919,32 @@ def _capture_full_delta_key(work: WorkContext, state: FixCycleState) -> str:
             work.repo,
             state.stable_ref,
             preexisting_untracked=state.preexisting_untracked,
+            preexisting_gitlinks=state.preexisting_gitlinks,
         )
     )
 
 
 def capture_retained_tree(work: WorkContext, state: FixCycleState) -> RetainedTreeSnapshot:
-    """Capture the authorized delta while keying the complete observable tree."""
+    """Capture the authorized HEAD delta while keying the run-relative tree.
+
+    ``stable_ref`` includes pre-gate tracked edits so it remains the authority
+    for mutation attribution, rollback, and test identity.  Commit selection is
+    deliberately relative to the original HEAD: authorized reviewed edits that
+    predate the gate are part of the result even when no fixer touches them.
+    """
     from daydream import git_ops
 
-    changed = set(git_ops.changed_paths_z(work.repo, state.stable_ref))
+    changed = set(git_ops.changed_paths_z(work.repo, state.stable_head))
     paths = frozenset(changed & set(state.footprint.run_allowed_paths))
     states = git_ops.snapshot_worktree_paths(work.repo, paths)
     full_states = git_ops.snapshot_worktree_delta(
         work.repo,
         state.stable_ref,
         preexisting_untracked=state.preexisting_untracked,
+        preexisting_gitlinks=state.preexisting_gitlinks,
     )
     recommended = git_ops.build_recommended_patch_strict(
-        work.repo, state.stable_ref, paths
+        work.repo, state.stable_head, paths
     )
     return RetainedTreeSnapshot(
         paths=paths,
@@ -4087,6 +4098,7 @@ def _strict_scope_and_scrub(
         state.stable_ref,
         state.footprint,
         preexisting_untracked=state.preexisting_untracked,
+        preexisting_gitlinks=state.preexisting_gitlinks,
         phase=phase,
         round_number=round_number,
         file_scope_issues=_scope_issue_filing(ctx.config),
@@ -4098,6 +4110,58 @@ def _strict_scope_and_scrub(
     )
     after = _capture_full_delta_key(ctx.work, state)
     return bool(generated_restores) or enforced.mutated or before != after
+
+
+def _enforce_terminal_confinement(
+    ctx: FlowContext,
+    state: FixCycleState,
+    *,
+    phase: str,
+    round_number: int | None,
+) -> str | None:
+    """Restore all out-of-run/protected state and durably audit a failed exit."""
+    try:
+        enforce_authorized_fix_footprint(
+            ctx.work,
+            state.stable_ref,
+            state.footprint,
+            preexisting_untracked=state.preexisting_untracked,
+            preexisting_gitlinks=state.preexisting_gitlinks,
+            phase=phase,
+            round_number=round_number,
+            file_scope_issues=_scope_issue_filing(ctx.config),
+        )
+        key = EvidenceKey(
+            _capture_full_delta_key(ctx.work, state),
+            state.footprint.policy_revision,
+        )
+        _write_footprint_audit(ctx, state, key)
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
+def _stabilization_stop(
+    ctx: FlowContext,
+    state: FixCycleState,
+    reason: str,
+    *,
+    round_number: int | None,
+) -> Stop:
+    """Fail closed after finalization while still restoring and auditing scope."""
+    confinement_error = _enforce_terminal_confinement(
+        ctx,
+        state,
+        phase="post_test_failure",
+        round_number=round_number,
+    )
+    if confinement_error is not None:
+        reason = f"{reason}; confinement failed: {confinement_error}"
+    try:
+        _persist_stabilization_failure(ctx, state, reason)
+    except OSError as exc:
+        print_error(console, "Stabilization failure audit failed", str(exc))
+    return Stop(1)
 
 
 async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop | None:
@@ -4148,26 +4212,48 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
                 round_snapshot=round_snapshot,
             )
         except Exception as exc:
+            confinement_error = _enforce_terminal_confinement(
+                ctx,
+                state,
+                phase="fix_failure",
+                round_number=ctx.data.get("iteration"),
+            )
             print_error(console, "Fix failed", str(exc))
+            if confinement_error is not None:
+                print_error(console, "Fix failure confinement failed", confinement_error)
             return Stop(1)
     if failures:
-        atomic_write_json(fix_failures_path(ctx.data["dd"]), failures, sort_keys=True)
         from daydream import git_ops
 
-        leftover = sorted(
-            set(
-                git_ops.snapshot_untracked_paths(
-                    ctx.work.repo, include_runtime_artifacts=False
-                )
-            )
-            - set(state.preexisting_untracked)
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
         )
-        if leftover:
-            atomic_write_json(fix_leftover_untracked_path(ctx.data["dd"]), leftover)
+        artifact_errors: list[str] = []
+        try:
+            atomic_write_json(fix_failures_path(ctx.data["dd"]), failures, sort_keys=True)
+            leftover = sorted(
+                set(
+                    git_ops.snapshot_untracked_paths(
+                        ctx.work.repo, include_runtime_artifacts=False
+                    )
+                )
+                - set(state.preexisting_untracked)
+            )
+            if leftover:
+                atomic_write_json(fix_leftover_untracked_path(ctx.data["dd"]), leftover)
+        except Exception as exc:
+            artifact_errors.append(str(exc))
         print_warning(
             console,
             "Fix groups failed and were rolled back: " + ", ".join(sorted(failures)),
         )
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        if artifact_errors:
+            print_error(console, "Fix failure audit failed", "; ".join(artifact_errors))
         return Stop(1)
     try:
         _strict_scope_and_scrub(
@@ -4178,35 +4264,55 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
         )
         snapshot = capture_retained_tree(ctx.work, state)
     except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
+        )
         print_error(console, "Fix scope enforcement failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
         return Stop(1)
     ctx.data["fix_round_snapshot"] = snapshot
-    await _evaluate_quality_gate(
-        enabled=quality_enabled,
-        erosion_delta_threshold=_quality_gate_threshold(
-            config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
-        ),
-        verbosity_delta_threshold=_quality_gate_threshold(
-            config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
-        ),
-        erosion_absolute_threshold=_quality_gate_threshold(
-            config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
-        ),
-        verbosity_absolute_threshold=_quality_gate_threshold(
-            config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
-        ),
-        daydream_dir=ctx.work.repo / ".daydream",
-        dd=ctx.data["dd"],
-        candidates={path for path in snapshot.paths if path.endswith(".py")}
-        | {
-            str(item["file"])
-            for item in ctx.data["items"]
-            if isinstance(item.get("file"), str) and str(item["file"]).endswith(".py")
-        },
-        before=quality_before,
-        before_unavailable_reason=quality_unavailable,
-        iteration=ctx.data.get("iteration"),
-    )
+    try:
+        await _evaluate_quality_gate(
+            enabled=quality_enabled,
+            erosion_delta_threshold=_quality_gate_threshold(
+                config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
+            ),
+            verbosity_delta_threshold=_quality_gate_threshold(
+                config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
+            ),
+            erosion_absolute_threshold=_quality_gate_threshold(
+                config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
+            ),
+            verbosity_absolute_threshold=_quality_gate_threshold(
+                config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
+            ),
+            daydream_dir=ctx.work.repo / ".daydream",
+            dd=ctx.data["dd"],
+            candidates={path for path in snapshot.paths if path.endswith(".py")}
+            | {
+                str(item["file"])
+                for item in ctx.data["items"]
+                if isinstance(item.get("file"), str) and str(item["file"]).endswith(".py")
+            },
+            before=quality_before,
+            before_unavailable_reason=quality_unavailable,
+            iteration=ctx.data.get("iteration"),
+        )
+    except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_failure",
+            round_number=ctx.data.get("iteration"),
+        )
+        print_error(console, "Fix quality evaluation failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
+        return Stop(1)
     return None
 
 
@@ -4275,7 +4381,15 @@ async def _step_fix_verify_authorized(
         try:
             snapshot = capture_retained_tree(ctx.work, state)
         except Exception as exc:
+            confinement_error = _enforce_terminal_confinement(
+                ctx,
+                state,
+                phase="fix_verify_failure",
+                round_number=ctx.data.get("iteration"),
+            )
             print_error(console, "Fix verification capture failed", str(exc))
+            if confinement_error is not None:
+                print_error(console, "Fix failure confinement failed", confinement_error)
             return Stop(1)
     iteration = ctx.data.get("iteration")
     round_number = iteration if isinstance(iteration, int) else 1
@@ -4290,7 +4404,15 @@ async def _step_fix_verify_authorized(
         _persist_fix_outcomes_current(ctx, state, key, outcomes)
         _write_footprint_audit(ctx, state, key)
     except Exception as exc:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="fix_verify_failure",
+            round_number=round_number,
+        )
         print_error(console, "Fix verification failed", str(exc))
+        if confinement_error is not None:
+            print_error(console, "Fix failure confinement failed", confinement_error)
         return Stop(1)
     actionable = _actionable_verdicts(outcomes)
     if actionable and iteration not in (None, 3):
@@ -4412,8 +4534,9 @@ async def finalize_retained_tree_after_test(
     state = _fix_cycle_state(ctx)
     attempts = list(result.attempts)
     if not attempts:
-        _persist_stabilization_failure(ctx, state, "test produced no evidence")
-        return Stop(1)
+        return _stabilization_stop(
+            ctx, state, "test produced no evidence", round_number=None
+        )
     evidence = attempts[-1]
     state.test_evidence = evidence
     ignored = result.ignored
@@ -4430,8 +4553,12 @@ async def finalize_retained_tree_after_test(
             key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
             _write_footprint_audit(ctx, state, key)
         except Exception as exc:
-            _persist_stabilization_failure(ctx, state, f"guard/capture/audit failed: {exc}")
-            return Stop(1)
+            return _stabilization_stop(
+                ctx,
+                state,
+                f"guard/capture/audit failed: {exc}",
+                round_number=pass_number,
+            )
 
         if state.verifier_key != key:
             try:
@@ -4440,13 +4567,21 @@ async def finalize_retained_tree_after_test(
                 )
                 _persist_fix_outcomes_current(ctx, state, key, outcomes)
             except Exception as exc:
-                _persist_stabilization_failure(ctx, state, f"final verifier failed: {exc}")
-                return Stop(1)
+                return _stabilization_stop(
+                    ctx,
+                    state,
+                    f"final verifier failed: {exc}",
+                    round_number=pass_number,
+                )
             state.verifier_key = key
             ctx.data["fix_outcomes"] = outcomes
             if _actionable_verdicts(outcomes):
-                _persist_stabilization_failure(ctx, state, "final verifier remains actionable")
-                return Stop(1)
+                return _stabilization_stop(
+                    ctx,
+                    state,
+                    "final verifier remains actionable",
+                    round_number=pass_number,
+                )
 
         matching_test = (
             evidence.session_id == state.session_id
@@ -4464,8 +4599,12 @@ async def finalize_retained_tree_after_test(
                     capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
                 )
             except Exception as exc:
-                _persist_stabilization_failure(ctx, state, f"final test failed to run: {exc}")
-                return Stop(1)
+                return _stabilization_stop(
+                    ctx,
+                    state,
+                    f"final test failed to run: {exc}",
+                    round_number=pass_number,
+                )
             attempts.append(evidence)
             state.test_evidence = evidence
             ignored = False if evidence.passed else _authorize_final_red_override()
@@ -4486,8 +4625,12 @@ async def finalize_retained_tree_after_test(
             and (evidence.passed or ignored)
         )
         if mutated or state.verifier_key != key or not stable_test:
-            _persist_stabilization_failure(ctx, state, "post-test tree did not stabilize")
-            return Stop(1)
+            return _stabilization_stop(
+                ctx,
+                state,
+                "post-test tree did not stabilize",
+                round_number=pass_number,
+            )
 
         try:
             patch_path = ctx.work.repo / ".daydream" / "recommended.patch"
@@ -4504,13 +4647,21 @@ async def finalize_retained_tree_after_test(
                 sort_keys=True,
             )
         except OSError as exc:
-            _persist_stabilization_failure(ctx, state, f"recommended capture failed: {exc}")
-            return Stop(1)
+            return _stabilization_stop(
+                ctx,
+                state,
+                f"recommended capture failed: {exc}",
+                round_number=pass_number,
+            )
         state.latest_retained = snapshot
         return None
 
-    _persist_stabilization_failure(ctx, state, "post-test pass bound exhausted")
-    return Stop(1)
+    return _stabilization_stop(
+        ctx,
+        state,
+        "post-test pass bound exhausted",
+        round_number=MAX_POST_TEST_STABILIZATION_PASSES,
+    )
 
 
 
@@ -4538,10 +4689,26 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 attempts=list(result.attempts),
             )
         except Exception as exc:
+            confinement_error = _enforce_terminal_confinement(
+                ctx,
+                state,
+                phase="test_failure",
+                round_number=None,
+            )
             print_error(console, "Test evidence failed", str(exc))
+            if confinement_error is not None:
+                print_error(console, "Test failure confinement failed", confinement_error)
             return Stop(1)
     if not result.proceed:
+        confinement_error = _enforce_terminal_confinement(
+            ctx,
+            state,
+            phase="test_failure",
+            round_number=None,
+        )
         print_warning(console, "Tests failed after fix attempt.")
+        if confinement_error is not None:
+            print_error(console, "Test failure confinement failed", confinement_error)
         return Stop(1)
     return await finalize_retained_tree_after_test(ctx, result)
 

@@ -150,6 +150,9 @@ class StubBackend:
         # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
         # it survives tree-protection and must surface in fix_leftover_untracked.
         self.fix_orphan_file: str | None = None
+        # Existing untracked user file damaged by the same failed turn.  The
+        # run-wide terminal guard must restore its exact pre-run bytes.
+        self.fix_damage_protected_file: str | None = None
         # Repo-relative generated path created by a successful fix turn.
         self.fix_new_generated: str | None = None
         # Repo-relative historical generated path modified by a test-healing
@@ -1017,6 +1020,8 @@ class StubBackend:
                     orphan = cwd / self.fix_orphan_file
                     orphan.parent.mkdir(parents=True, exist_ok=True)
                     orphan.write_text("// stray file from a dead fix agent\n")
+                if self.fix_damage_protected_file is not None:
+                    (cwd / self.fix_damage_protected_file).write_bytes(b"damaged by failed fixer")
                 raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
             if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")

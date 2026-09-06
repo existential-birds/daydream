@@ -41,6 +41,7 @@ def enforce_authorized_fix_footprint(
     footprint: AuthorizedFixFootprint,
     *,
     preexisting_untracked: dict[str, GitPathState],
+    preexisting_gitlinks: tuple[GitPathState, ...] = (),
     phase: str,
     round_number: int | None,
     file_scope_issues: bool = False,
@@ -58,6 +59,16 @@ def enforce_authorized_fix_footprint(
     repo = work.repo
     index_before = git_ops.snapshot_index(repo)
     tracked_changed = set(git_ops.changed_paths_z(repo, stable_ref, include_untracked=False))
+    gitlink_baseline = {state.path: state for state in preexisting_gitlinks}
+    current_gitlinks = {
+        state.path: state
+        for state in git_ops.snapshot_worktree_paths(repo, gitlink_baseline)
+    }
+    mutated_gitlinks = {
+        path
+        for path, baseline in gitlink_baseline.items()
+        if current_gitlinks[path] != baseline
+    }
     current_untracked = git_ops.snapshot_untracked_paths(repo, include_runtime_artifacts=False)
     current_protected: dict[str, GitPathState] = {}
     for path in preexisting_untracked:
@@ -72,8 +83,21 @@ def enforce_authorized_fix_footprint(
     }
     new_untracked = set(current_untracked) - set(preexisting_untracked)
     residual_tracked = tracked_changed - set(footprint.run_allowed_paths)
+    # A pre-run checkout different from the superproject entry is owner state,
+    # not a run-created residual.  Preserve it unless the run changed it.
+    residual_tracked -= {
+        path
+        for path, baseline in gitlink_baseline.items()
+        if current_gitlinks[path] == baseline
+    }
     residual_new = new_untracked - set(footprint.run_allowed_paths)
-    to_restore = residual_tracked | residual_new | mutated_protected
+    protected_gitlink_mutations = mutated_gitlinks - set(footprint.run_allowed_paths)
+    to_restore = (
+        residual_tracked
+        | residual_new
+        | mutated_protected
+        | protected_gitlink_mutations
+    )
 
     if file_scope_issues:
         paths_to_file = sorted(
@@ -88,12 +112,17 @@ def enforce_authorized_fix_footprint(
         stable_states = git_ops.snapshot_commit_paths(
             repo,
             stable_ref,
-            residual_tracked - set(preexisting_untracked),
+            residual_tracked - set(preexisting_untracked) - set(gitlink_baseline),
         )
         rollback = git_ops.WorktreeRollbackSnapshot(
             ref=stable_ref,
             index=index_before,
-            path_states=stable_states,
+            path_states=tuple(
+                (
+                    *stable_states,
+                    *(gitlink_baseline[path] for path in protected_gitlink_mutations),
+                )
+            ),
             untracked={path: preexisting_untracked[path] for path in mutated_protected},
         )
         git_ops.restore_group_from_snapshot(repo, rollback, to_restore)
@@ -107,7 +136,11 @@ def enforce_authorized_fix_footprint(
                 reason = (
                     "restored protected pre-existing untracked state"
                     if path in preexisting_untracked
-                    else "restored tracked content outside the authorized run footprint"
+                    else (
+                        "restored protected pre-existing gitlink checkout"
+                        if path in gitlink_baseline
+                        else "restored tracked content outside the authorized run footprint"
+                    )
                 )
             footprint.record_git_event(
                 action=action,
@@ -130,6 +163,15 @@ def enforce_authorized_fix_footprint(
         if current != baseline:
             raise git_ops.GitError("scope enforcement did not restore protected untracked state")
     remaining_tracked = set(git_ops.changed_paths_z(repo, stable_ref, include_untracked=False))
+    final_gitlinks = {
+        state.path: state
+        for state in git_ops.snapshot_worktree_paths(repo, gitlink_baseline)
+    }
+    for path, baseline in gitlink_baseline.items():
+        if path in protected_gitlink_mutations and final_gitlinks[path] != baseline:
+            raise git_ops.GitError("scope enforcement did not restore protected gitlink state")
+        if final_gitlinks[path] == baseline:
+            remaining_tracked.discard(path)
     remaining_untracked = set(untracked_after) - set(preexisting_untracked)
     residual_after = (remaining_tracked | remaining_untracked) - set(footprint.run_allowed_paths)
     if residual_after:

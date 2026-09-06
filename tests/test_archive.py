@@ -2505,6 +2505,86 @@ def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(tmp_path: P
     ) == "partial"
 
 
+def test_matching_stabilization_failure_overrides_green_test_pipeline(tmp_path: Path) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
+    _write_deep(
+        tmp_path,
+        "stabilization-failed.json",
+        {"session_id": "current", "reason": "final verifier remains actionable"},
+    )
+
+    states = pipeline.derive_phase_states(
+        tmp_path, phase_events=[], session_id="current"
+    )
+
+    assert states["fix"] == {"ran": True, "status": "failed"}
+    assert states["test"] == {"ran": True, "status": "failed"}
+    assert pipeline.derive_pipeline_status(
+        "complete", None, states, runs_fix=True, runs_test=True
+    ) == "failed"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"session_id": "prior", "reason": "stale"},
+        {"session_id": "current"},
+        {"session_id": "current", "reason": ""},
+        ["malformed"],
+    ],
+)
+def test_stale_or_malformed_stabilization_failure_is_neutral(
+    tmp_path: Path, payload: Any
+) -> None:
+    from daydream.archive import pipeline
+
+    _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
+    _write_deep(tmp_path, "stabilization-failed.json", payload)
+
+    states = pipeline.derive_phase_states(
+        tmp_path, phase_events=[], session_id="current"
+    )
+
+    assert states["fix"] == {"ran": False, "status": "absent"}
+    assert states["test"] == {"ran": True, "status": "succeeded"}
+
+
+def test_archive_manifest_fails_matching_stabilization_session(
+    tmp_path: Path, archive_dir: Path, make_config: MakeConfig
+) -> None:
+    from daydream.archive import _archive_run_inner
+
+    session_id = "stabilization-session"
+    _write_deep(tmp_path, "merged-items.json", {"items": [{"id": 1}]})
+    _write_deep(tmp_path, "test-verdict.json", {"session_id": session_id, "passed": True})
+    _write_deep(
+        tmp_path,
+        "stabilization-failed.json",
+        {"session_id": session_id, "reason": "post-test tree did not stabilize"},
+    )
+    recorder = _MockRecorder(session_id=session_id)
+
+    _archive_run_inner(
+        recorder=cast(Any, recorder),
+        target_dir=tmp_path,
+        config=make_config(tmp_path, archive=False),
+        status="complete",
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    manifest = json.loads(
+        (archive_dir / "runs" / session_id / "manifest.json").read_text()
+    )
+    assert manifest["archive_status"] == "complete"
+    assert manifest["pipeline_status"] == "failed"
+    assert manifest["phase_states"]["fix"] == {"ran": True, "status": "failed"}
+    assert manifest["phase_states"]["test"] == {"ran": True, "status": "failed"}
+
+
 def test_test_absent_when_no_verdict(tmp_path: Path) -> None:
     from daydream.archive import pipeline
     states = pipeline.derive_phase_states(tmp_path, phase_events=[])

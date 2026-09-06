@@ -1024,6 +1024,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _add_to_reviewed_diff(multi_stack_target, ["good1.py", "bad.py", "good2.py"])
     stub.fix_fail_file = "bad.py"
+    stub.fix_edit_line = "# retained successful group\n"
     stub.merge_items = [
         _merge_item(1, "good1.py", "high"),
         _merge_item(2, "bad.py", "high"),
@@ -1046,8 +1047,10 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
         )
     )
     assert exit_code == 1  # decision: nonzero on failure
-    assert (multi_stack_target / ".fixed-good1_py").exists()  # other groups applied
-    assert (multi_stack_target / ".fixed-good2_py").exists()
+    assert "# retained successful group" in (multi_stack_target / "good1.py").read_text()
+    assert "# retained successful group" in (multi_stack_target / "good2.py").read_text()
+    assert not (multi_stack_target / ".fixed-good1_py").exists()
+    assert not (multi_stack_target / ".fixed-good2_py").exists()
     assert not (multi_stack_target / ".fixed-bad_py").exists()  # failed group did not apply
     assert any("bad.py" in m for m in warnings)  # non-silent
     assert commit_calls == []  # no commit on failure
@@ -1085,6 +1088,7 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
+    stub.fix_edit_line = "# retained successful group\n"
     stub.merge_items = [
         _merge_item(1, "api.py", "high"),
         _merge_item(2, "App.tsx", "high"),
@@ -1102,8 +1106,10 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     )
     assert exit_code == 1  # dropped fix group => nonzero
 
-    # (b) successful group applied and survives.
-    assert (multi_stack_target / ".fixed-api_py").exists()
+    # (b) the successful group's authorized edit survives; its old out-of-scope
+    # sentinel does not.
+    assert "# retained successful group" in (multi_stack_target / "api.py").read_text()
+    assert not (multi_stack_target / ".fixed-api_py").exists()
 
     # (c) failed group reverted to pre-fix content; broken edit gone.
     apptsx_after = (multi_stack_target / "App.tsx").read_text()
@@ -1192,27 +1198,14 @@ async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
     assert not any("src/handler.py" in warning for warning in warnings)
 
 
-async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
+async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archive(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path: a stray untracked file a failed group creates -- one that is
-    NOT the group's key file -- is enumerated in the manifest and never deleted.
-
-    The failing ``App.tsx`` group writes a stray ``store/uuid.go`` before raising
-    ``MaxTurnsError``. Because parallel groups share one tree, that orphan can't
-    be attributed to a group, so the orchestrator records it (never deletes it):
-
-      (a) ``manifest.json`` lists ``store/uuid.go`` in ``fix_leftover_untracked``;
-      (b) the orphan still EXISTS in the tree (no risk of deleting good work);
-      (c) the run is still ``status == "partial"``.
-
-    Fails if the enumeration is removed: without (a) the orphan is invisible in
-    the archive -- the exact "half-broken tree presented as clean" gap.
-    """
+    """Real runner confines a failed fixer and archives its restore audit."""
     from daydream.runner import run
 
     _silence(monkeypatch)
@@ -1221,6 +1214,10 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.fix_orphan_file = "store/uuid.go"
+    stub.fix_edit_line = "# retained successful fix\n"
+    scratch = multi_stack_target / "owner-scratch.bin"
+    scratch.write_bytes(b"\x00owner-original")
+    stub.fix_damage_protected_file = "owner-scratch.bin"
     stub.merge_items = [
         _merge_item(1, "api.py", "high"),
         _merge_item(2, "App.tsx", "high"),
@@ -1237,17 +1234,26 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     )
     assert exit_code == 1
 
-    # (b) the unattributable orphan is preserved, never deleted.
-    assert (multi_stack_target / "store" / "uuid.go").exists()
+    # The successful group remains while the failed group's outside-run write
+    # is removed and the user's protected untracked file is restored exactly.
+    assert "# retained successful fix" in (multi_stack_target / "api.py").read_text()
+    assert not (multi_stack_target / "store" / "uuid.go").exists()
+    assert scratch.read_bytes() == b"\x00owner-original"
 
     run_dirs = list((archive_dir / "runs").iterdir())
     assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
     manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
-    # (c) partial, and (a) the orphan is enumerated for audit.
+    # The archive is partial, but there is no surviving leftover.  The durable
+    # policy audit records both confinement operations.
     assert manifest["status"] == "partial"
-    leftover = manifest["fix_leftover_untracked"]
-    assert leftover, "manifest must enumerate untracked files left by the failed fix pass"
-    assert "store/uuid.go" in leftover
+    assert manifest["fix_leftover_untracked"] is None
+    run_audit = json.loads((run_dirs[0] / "deep" / "fix-footprint.json").read_text())
+    restored = {
+        event["path"]
+        for event in run_audit["events"]
+        if event["action"] in {"remove", "restore"}
+    }
+    assert {"store/uuid.go", "owner-scratch.bin"} <= restored
 
 
 # Issue #315: the fix-phase stub appends a duplicated if/else branch to the
@@ -10566,6 +10572,7 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: P
         stable_head=git_ops.head_sha(repo),
         initial_index=index,
         preexisting_untracked=protected,
+        preexisting_gitlinks=(),
         footprint=footprint,
     )
     (repo / "a.py").write_text("A = 2\n")
@@ -10587,6 +10594,61 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: P
     assert first.paths == second.paths == frozenset({"a.py"})
     assert b"c.py" not in second.recommended_patch
     assert first.tree_key != second.tree_key
+
+
+def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path) -> None:
+    """Commit selection is HEAD-relative even though evidence stays run-relative."""
+    from daydream import git_ops
+    from daydream.deep.orchestrator import FixCycleState, capture_retained_tree
+    from daydream.fix_footprint import AuthorizedFixFootprint
+    from daydream.workspace import WorkContext
+
+    repo = tmp_path / "preexisting-retained"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    (repo / "b.py").write_text("B = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    head = git_ops.head_sha(repo)
+
+    # This reviewed edit predates the fix gate and is therefore part of the
+    # stable rollback snapshot, but it still belongs in the eventual commit.
+    (repo / "a.py").write_text("A = 2\n")
+    stable_ref = git_ops.stash_create(repo) or head
+    item = {
+        "id": 1,
+        "item_uid": "item:1",
+        "file": "b.py",
+        "related_files": ["a.py"],
+    }
+    footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
+    state = FixCycleState(
+        session_id="s",
+        stable_ref=stable_ref,
+        stable_head=head,
+        initial_index=git_ops.snapshot_index(repo),
+        preexisting_untracked={},
+        preexisting_gitlinks=(),
+        footprint=footprint,
+    )
+    (repo / "b.py").write_text("B = 2\n")
+    work = WorkContext(
+        repo=repo,
+        source=repo,
+        base_branch="main",
+        base_sha=head,
+        head_branch="main",
+        head_sha=head,
+        is_ephemeral=False,
+        run_id="s",
+    )
+
+    snapshot = capture_retained_tree(work, state)
+
+    assert snapshot.paths == frozenset({"a.py", "b.py"})
+    assert {path.path for path in snapshot.states} == {"a.py", "b.py"}
+    assert b"a.py" in snapshot.recommended_patch
+    assert b"b.py" in snapshot.recommended_patch
 
 
 def _direct_fix_context(
@@ -10644,6 +10706,7 @@ def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str])
         preexisting_untracked=git_ops.snapshot_untracked_paths(
             ctx.work.repo, include_runtime_artifacts=False
         ),
+        preexisting_gitlinks=git_ops.snapshot_worktree_gitlinks(ctx.work.repo),
         footprint=footprint,
     )
     ctx.data["fix_cycle_state"] = state
@@ -10812,6 +10875,72 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
     assert failure["session_id"] == state.session_id
     assert "actionable" in failure["reason"]
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+
+    phase_states = derive_phase_states(
+        ctx.work.repo, phase_events=[], session_id=state.session_id
+    )
+    assert phase_states["fix"]["status"] == "failed"
+    assert phase_states["test"]["status"] == "failed"
+    assert derive_pipeline_status(
+        "complete", None, phase_states, runs_fix=True, runs_test=True
+    ) == "failed"
+
+
+@pytest.mark.parametrize("terminal_mode", ["red", "exception"])
+async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_mode: str
+) -> None:
+    """A healer's red/exception exit is confined like a successful path."""
+    from daydream import git_ops
+    from daydream.deep.orchestrator import _step_test
+    from daydream.extensions import Stop
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+
+    repo = tmp_path / "red-heal-confinement"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    (repo / "unrelated.py").write_text("OWNER = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    scratch = repo / "scratch.bin"
+    scratch.write_bytes(b"\x00owner")
+    items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a"}]
+    ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
+    state = _direct_fix_state(ctx, items, {"a.py"})
+
+    async def _red_after_mutation(*_a: Any, **_k: Any) -> TestAndHealResult:
+        (repo / "a.py").write_text("A = 2\n")
+        (repo / "unrelated.py").write_text("OWNER = 9\n")
+        scratch.unlink()
+        (repo / "orphan.txt").write_text("outside\n")
+        if terminal_mode == "exception":
+            raise RuntimeError("healer transport failed after writing")
+        key = "red-tree"
+        attempt = TestAttemptEvidence(
+            session_id=state.session_id,
+            kind="host",
+            command=("false",),
+            passed=False,
+            input_tree_key=key,
+            output_tree_key=key,
+        )
+        return TestAndHealResult(False, 1, False, False, (attempt,))
+
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.phase_test_and_heal", _red_after_mutation
+    )
+    result = await _step_test(ctx)
+
+    assert isinstance(result, Stop) and result.exit_code == 1
+    assert (repo / "a.py").read_text() == "A = 2\n"
+    assert (repo / "unrelated.py").read_text() == "OWNER = 1\n"
+    assert scratch.read_bytes() == b"\x00owner"
+    assert not (repo / "orphan.txt").exists()
+    audit = json.loads((ctx.data["dd"] / "fix-footprint.json").read_text())
+    events = {(event["action"], event["path"]) for event in audit["events"]}
+    assert {("restore", "unrelated.py"), ("restore", "scratch.bin"), ("remove", "orphan.txt")} <= events
+    assert git_ops.snapshot_index(repo) == state.initial_index
 
 
 @pytest.mark.parametrize("failure_mode", ["pass2_mutates", "unstable_test"])
@@ -10874,6 +11003,16 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     assert test_calls == 1
     assert state.latest_retained is None
     assert (ctx.data["dd"] / "stabilization-failed.json").is_file()
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+
+    phase_states = derive_phase_states(
+        ctx.work.repo, phase_events=[], session_id=state.session_id
+    )
+    assert phase_states["fix"]["status"] == "failed"
+    assert phase_states["test"]["status"] == "failed"
+    assert derive_pipeline_status(
+        "complete", None, phase_states, runs_fix=True, runs_test=True
+    ) == "failed"
 
 
 async def test_stabilization_audit_write_failure_stops_before_retest(

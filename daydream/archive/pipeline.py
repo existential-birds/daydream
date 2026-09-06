@@ -49,13 +49,36 @@ def _merge_state(target_dir: Path) -> dict[str, Any]:
     return {"ran": False, "status": _ABSENT}
 
 
-def _fix_state(target_dir: Path, phase_events: list[Any]) -> dict[str, Any]:
-    """Derive the fix terminal state from ``fix-failures.json`` + phase events.
+def _matching_stabilization_failure(
+    target_dir: Path, session_id: str | None
+) -> bool:
+    """Return whether a well-formed terminal failure belongs to this run."""
+    failure = _read_json_artifact(
+        _deep_dir(target_dir) / "stabilization-failed.json", dict
+    )
+    return bool(
+        failure is not None
+        and session_id is not None
+        and failure.get("session_id") == session_id
+        and isinstance(failure.get("reason"), str)
+        and failure["reason"].strip()
+    )
 
-    A present non-empty ``fix-failures.json`` means fix groups were
-    dropped/reverted (partial); otherwise a ``phase_start`` for
-    ``DaydreamPhase.FIX`` marks the fix phase as having run successfully.
+
+def _fix_state(
+    target_dir: Path,
+    phase_events: list[Any],
+    *,
+    stabilization_failed: bool,
+) -> dict[str, Any]:
+    """Derive fix state from stabilization/fix failures and phase events.
+
+    A current-session stabilization failure wins because the retained fix was
+    deliberately rejected.  Otherwise non-empty group failures are partial and
+    a FIX phase start is successful.
     """
+    if stabilization_failed:
+        return {"ran": True, "status": _FAILED}
     fix_failures = _read_json_artifact(_deep_dir(target_dir) / "fix-failures.json", dict)
     if fix_failures:
         return {"ran": True, "status": _PARTIAL}
@@ -66,12 +89,19 @@ def _fix_state(target_dir: Path, phase_events: list[Any]) -> dict[str, Any]:
     return {"ran": False, "status": _ABSENT}
 
 
-def _test_state(target_dir: Path, session_id: str | None) -> dict[str, Any]:
-    """Derive the test terminal state from ``test-verdict.json``.
+def _test_state(
+    target_dir: Path,
+    session_id: str | None,
+    *,
+    stabilization_failed: bool,
+) -> dict[str, Any]:
+    """Derive test state from final stabilization and ``test-verdict.json``.
 
-    The verdict is written for BOTH outcomes before the failure early-return, so
-    presence ⇔ the test phase ran; ``passed: false`` ⇔ failed.
+    The pre-finalization verdict is not sufficient when a matching terminal
+    stabilization artifact rejects that evidence.
     """
+    if stabilization_failed:
+        return {"ran": True, "status": _FAILED}
     verdict = _read_json_artifact(_deep_dir(target_dir) / "test-verdict.json", dict)
     if verdict is None or session_id is None or verdict.get("session_id") != session_id:
         return {"ran": False, "status": _ABSENT}
@@ -102,16 +132,34 @@ def derive_phase_states(
     raises on absent/malformed artifacts (they read as ``absent``).
 
     Most deep artifacts are repository-local rather than run-qualified.
-    ``test-verdict.json`` therefore carries a ``session_id`` and is accepted
-    only when it matches this archive session; stale or unbound test evidence
-    reads as absent. ``runs_merge`` / ``runs_fix`` / ``runs_test`` additionally
-    gate reads to phases the current flow executes, so a skipped phase remains
-    neutral regardless of artifacts left by prior runs.
+    ``test-verdict.json`` and ``stabilization-failed.json`` therefore carry a
+    ``session_id`` and are accepted only when they match this archive session;
+    stale or unbound evidence reads as absent. ``runs_merge`` / ``runs_fix`` /
+    ``runs_test`` additionally gate reads to phases the current flow executes,
+    so a skipped phase remains neutral regardless of artifacts left by prior
+    runs.
     """
+    stabilization_failed = _matching_stabilization_failure(target_dir, session_id)
     return {
         "merge": _merge_state(target_dir) if runs_merge else _absent(),
-        "fix": _fix_state(target_dir, phase_events) if runs_fix else _absent(),
-        "test": _test_state(target_dir, session_id) if runs_test else _absent(),
+        "fix": (
+            _fix_state(
+                target_dir,
+                phase_events,
+                stabilization_failed=stabilization_failed,
+            )
+            if runs_fix
+            else _absent()
+        ),
+        "test": (
+            _test_state(
+                target_dir,
+                session_id,
+                stabilization_failed=stabilization_failed,
+            )
+            if runs_test
+            else _absent()
+        ),
     }
 
 
@@ -139,7 +187,7 @@ def derive_pipeline_status(
     Precedence:
     1. ``cancelled`` when the archive is ``partial`` with no fix failures
        (``write_partial`` signal flush — the run stopped early, nothing failed).
-    2. ``failed`` when merge or test reports failed.
+    2. ``failed`` when merge, fix stabilization, or test reports failed.
     3. ``partial`` when ``fix_failures`` are present.
     4. ``partial`` when a phase the flow runs never ran (run stopped early).
     5. ``succeeded`` when every phase is succeeded or absent AND at least one
@@ -152,7 +200,8 @@ def derive_pipeline_status(
         return "cancelled"
     merge_status = _phase(phase_states, "merge").get("status")
     test_status = _phase(phase_states, "test").get("status")
-    if merge_status == _FAILED or test_status == _FAILED:
+    fix_status = _phase(phase_states, "fix").get("status")
+    if merge_status == _FAILED or fix_status == _FAILED or test_status == _FAILED:
         return _FAILED
     if fix_failures:
         return _PARTIAL

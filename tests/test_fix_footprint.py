@@ -476,6 +476,110 @@ def test_uninitialized_gitlink_cannot_capture_parent_repository_head(git_repo: P
         git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
 
 
+def _gitlink_rollback_snapshot(
+    repo: Path, path: str = "dependency"
+) -> WorktreeRollbackSnapshot:
+    return WorktreeRollbackSnapshot(
+        ref="HEAD",
+        index=git_ops.snapshot_index(repo),
+        path_states=git_ops.snapshot_worktree_paths(repo, [path]),
+        untracked=git_ops.snapshot_untracked_paths(repo),
+    )
+
+
+def test_gitlink_group_rollback_restores_captured_nested_oid(git_repo: Path) -> None:
+    nested = git_repo / "dependency"
+    init_repo(nested)
+    _seed(nested, {"source.py": b"value = 1\n"})
+    captured = _git(nested, "rev-parse", "HEAD")
+    _git(git_repo, "add", "dependency")
+    _commit(git_repo, "record dependency")
+    snapshot = _gitlink_rollback_snapshot(git_repo)
+    _seed(nested, {"source.py": b"value = 2\n"})
+    assert _git(nested, "rev-parse", "HEAD") != captured
+
+    git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])
+
+    assert _git(nested, "rev-parse", "HEAD") == captured
+    assert _git(nested, "status", "--porcelain=v1", "--untracked-files=all") == ""
+
+
+def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: Path) -> None:
+    nested = git_repo / "dependency"
+    init_repo(nested)
+    _seed(nested, {"source.py": b"value = 1\n"})
+    indexed = _git(nested, "rev-parse", "HEAD")
+    _git(git_repo, "add", "dependency")
+    _commit(git_repo, "record dependency")
+    _seed(nested, {"source.py": b"value = 2\n"})
+    captured = _git(nested, "rev-parse", "HEAD")
+    assert captured != indexed
+    snapshot = _gitlink_rollback_snapshot(git_repo)
+    _git(nested, "checkout", "--detach", indexed)
+
+    git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])
+
+    assert _git(nested, "rev-parse", "HEAD") == captured
+    assert _git(git_repo, "status", "--porcelain=v1", "--untracked-files=all") == "M dependency"
+
+
+def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(
+    git_repo: Path,
+) -> None:
+    nested = git_repo / "dependency"
+    init_repo(nested)
+    _seed(nested, {"source.py": b"value = 1\n"})
+    _git(git_repo, "add", "dependency")
+    _commit(git_repo, "record dependency")
+    snapshot = _gitlink_rollback_snapshot(git_repo)
+    original_head = _git(nested, "rev-parse", "HEAD")
+    (nested / "source.py").write_bytes(b"owner dirty bytes\n")
+    (git_repo / "agent-staged.txt").write_bytes(b"agent index mutation\n")
+    _git(git_repo, "add", "agent-staged.txt")
+
+    with pytest.raises(GitError, match="dirty gitlink"):
+        git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])
+
+    assert _git(nested, "rev-parse", "HEAD") == original_head
+    assert (nested / "source.py").read_bytes() == b"owner dirty bytes\n"
+    assert git_ops.snapshot_index(git_repo) == snapshot.index
+    assert (git_repo / "agent-staged.txt").read_bytes() == b"agent index mutation\n"
+
+
+def test_scope_guard_restores_pre_run_non_index_gitlink_checkout(git_repo: Path) -> None:
+    nested = git_repo / "dependency"
+    init_repo(nested)
+    _seed(nested, {"source.py": b"value = 1\n"})
+    indexed = _git(nested, "rev-parse", "HEAD")
+    _git(git_repo, "add", "dependency")
+    _commit(git_repo, "record dependency")
+    _seed(nested, {"source.py": b"value = 2\n"})
+    protected = _git(nested, "rev-parse", "HEAD")
+    assert protected != indexed
+    gitlinks = git_ops.snapshot_worktree_gitlinks(git_repo)
+    footprint = AuthorizedFixFootprint.build(git_repo, set(), [])
+    _git(nested, "checkout", "--detach", indexed)
+
+    result = enforce_authorized_fix_footprint(
+        _work(git_repo),
+        "HEAD",
+        footprint,
+        preexisting_untracked={},
+        preexisting_gitlinks=gitlinks,
+        phase="terminal",
+        round_number=1,
+    )
+
+    assert result.mutated
+    assert _git(nested, "rev-parse", "HEAD") == protected
+    assert any(
+        event.action == "restore"
+        and event.path == "dependency"
+        and "gitlink" in event.reason
+        for event in footprint.events
+    )
+
+
 def test_strict_recommended_patch_contains_binary_change_and_commit_staged_does_not_restage(
     git_repo: Path
 ) -> None:

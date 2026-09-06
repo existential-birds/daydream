@@ -200,6 +200,70 @@ async def test_full_fix_flow(
     assert _git(target_project, "rev-parse", "HEAD") != head_before
 
 
+@pytest.mark.asyncio
+async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
+    tmp_path: Path,
+    install_backend: Callable[[object], object],
+    make_config: Callable[..., 'RunConfig'],
+) -> None:
+    """Real runner commits the complete authorized HEAD-relative result."""
+    repo = tmp_path / "pre-gate-authorized"
+    _init_repo(repo)
+    (repo / "a.py").write_text("A = 1\n")
+    (repo / "b.py").write_text("B = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "a.py").write_text("A = 2\n")
+    _git(repo, "add", "a.py")
+    _commit(repo, "feature")
+    # Reviewed and authorized before the fix gate, but never touched by the
+    # fixer.  This must still be selected relative to the original HEAD.
+    (repo / "a.py").write_text("A = 3\n")
+    remote = bare_remote(tmp_path / "pre-gate-origin.git")
+    _git(repo, "remote", "add", "origin", str(remote))
+
+    issue = {
+        "id": 1,
+        "description": "Update the related value",
+        "file": "b.py",
+        "line": 1,
+        "related_files": ["a.py"],
+    }
+
+    class RelatedOnlyBackend(PhaseDispatchBackend):
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            **kwargs: Any,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
+                (Path(cwd) / "b.py").write_text("B = 2\n")
+            async for event in super().execute(
+                cwd, prompt, output_schema, continuation, **kwargs
+            ):
+                yield event
+
+    install_backend(RelatedOnlyBackend(parse_results=[[issue]]))
+
+    exit_code = await run(
+        make_config(repo, stack="python", quiet=True, shallow=True, assume="yes")
+    )
+
+    assert exit_code == 0
+    assert _git(repo, "show", "HEAD:a.py") == "A = 3"
+    assert _git(repo, "show", "HEAD:b.py") == "B = 2"
+    assert set(_git(repo, "show", "--pretty=", "--name-only", "HEAD").splitlines()) == {
+        "a.py",
+        "b.py",
+    }
+    remote_head = _git(remote, "rev-parse", "refs/heads/feature")
+    assert remote_head == _git(repo, "rev-parse", "HEAD")
+
+
 class _WorktreeMutatingBackend(PhaseDispatchBackend):
     """Phase-dispatch fake whose fix and commit turns really touch the worktree.
 
