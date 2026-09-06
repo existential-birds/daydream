@@ -130,3 +130,78 @@ def test_annotation_hub_commit_identity_binds_parent_message_paths_and_bytes(tmp
     second = hub.commit_files_atomic(mapping, "same", parent_commit=first, branch="main")
     assert first == baseline
     assert second != first
+
+
+def test_annotation_hub_rejects_legacy_in_place_bundle_mutation() -> None:
+    hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
+    revision = hub.repo_info("main").sha
+    before = hub.revision_files(revision)
+
+    with pytest.raises(NotImplementedError, match="immutable annotation revisions"):
+        hub.mutate_bundle(revision, "rogue", b"changed")
+
+    assert hub.repo_info("main").sha == revision
+    assert hub.revision_files(revision) == before
+    assert hub.commit_order == []
+
+
+def test_annotation_hub_supported_mutation_creates_one_immutable_revision() -> None:
+    hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
+    revision = hub.repo_info("main").sha
+    before = hub.revision_files(revision)
+
+    hub.mutate_annotation_file("review.json", b"changed")
+
+    changed_revision = hub.repo_info("main").sha
+    path = "annotations/cur/snap/review.json"
+    assert changed_revision != revision
+    assert hub.revision_files(revision) == before
+    assert hub.download_file(path, changed_revision) == b"changed"
+    assert hub.commit_order == [{"contains": [path], "sha": changed_revision}]
+
+
+def test_annotation_hub_commit_revision_cannot_rewrite_an_existing_pin() -> None:
+    hub = AnnotationsHub(curation_id="cur", snapshot_id="snap", files={"a": b"old"})
+    revision = hub.repo_info("main").sha
+    before = hub.revision_files(revision)
+
+    hub.commit_revision(revision, ref="main")
+    hub.files["a"] = b"changed"
+    with pytest.raises(ValueError, match="cannot replace immutable annotation revision"):
+        hub.commit_revision(revision, ref="main")
+
+    assert hub.repo_info("main").sha == revision
+    assert hub.revision_files(revision) == before
+
+
+@pytest.mark.parametrize("revision", ["short", "A" * 40])
+def test_annotation_hub_rejects_noncanonical_revision_ids(revision: str) -> None:
+    hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
+    head = hub.repo_info("main").sha
+
+    with pytest.raises(ValueError, match="lowercase 40-hex"):
+        hub.commit_revision(revision)
+
+    assert hub.repo_info("main").sha == head
+
+
+def test_annotation_hub_legacy_upload_uses_atomic_main_commits(tmp_path: Path) -> None:
+    hub = AnnotationsHub(curation_id="cur", snapshot_id="snap", files={"a": b"old"})
+    base = hub.repo_info("main").sha
+    base_tree = hub.revision_files(base)
+
+    hub.upload_files(_mapping(tmp_path / "first", {"a": b"one"}), "same")
+    first = hub.repo_info("main").sha
+    first_tree = hub.revision_files(first)
+    assert first != base
+    assert hub.atomic_attempt_log[-1]["parent_commit"] == base
+    assert hub.atomic_attempt_log[-1]["branch"] == "main"
+
+    hub.upload_files(_mapping(tmp_path / "second", {"a": b"two"}), "same")
+    second = hub.repo_info("main").sha
+    assert second != first
+    assert hub.revision_files(base) == base_tree
+    assert hub.revision_files(first) == first_tree
+    assert hub.download_file("a", first) == b"one"
+    assert hub.download_file("a", second) == b"two"
+    assert [entry["sha"] for entry in hub.commit_order] == [first, second]

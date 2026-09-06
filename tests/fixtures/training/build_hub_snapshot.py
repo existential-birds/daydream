@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -224,6 +225,32 @@ class AnnotationsHub(FakeHub):
         self.downloaded_revision_log: list[tuple[str, str | None]] = []
         self.atomic_attempt_log: list[dict[str, Any]] = []
         self._queued_rivals: list[tuple[str, dict[str, bytes], str]] = []
+
+    def commit_revision(self, sha: str, *, ref: str | None = None) -> None:
+        """Pin only canonical revision IDs without replacing stored history."""
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ValueError("annotation revision IDs must be lowercase 40-hex")
+        existing = self._revisions.get(sha)
+        if existing is not None and existing != self.files:
+            raise ValueError("cannot replace immutable annotation revision")
+        super().commit_revision(sha, ref=ref)
+
+    def mutate_bundle(self, revision: str, session_id: str, content: bytes) -> None:
+        """Reject the hydration fixture's legacy in-place mutation seam."""
+        raise NotImplementedError(
+            "immutable annotation revisions require mutate_annotation_file()"
+        )
+
+    def upload_files(
+        self, mapping: dict[str | Path, Path], commit_message: str,
+    ) -> None:
+        """Preserve the legacy surface while committing atomically to main."""
+        self.commit_files_atomic(
+            mapping,
+            commit_message,
+            parent_commit=self._head,
+            branch="main",
+        )
 
     def repo_info(self, revision: str | None = None) -> RepoInfo:
         self.info_revision_log.append(revision)
