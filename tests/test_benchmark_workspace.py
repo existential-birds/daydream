@@ -358,9 +358,12 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
     (root / import_file).write_bytes(import_bytes)
     (root / "snapshots").mkdir(parents=True, exist_ok=True)
     (root / "cases").mkdir(parents=True, exist_ok=True)
-    (root / case_file).write_text(
-        yaml.safe_dump(case_doc.model_dump(mode="json"), sort_keys=False)
-    )
+    case_raw = case_doc.model_dump(mode="json")
+    if case_raw["curation"]["state"] == "ready":
+        from daydream.benchmark.harbor.build import task_spec_digest
+
+        case_raw["curation"]["task_spec_sha256"] = task_spec_digest(case_raw)
+    (root / case_file).write_text(yaml.safe_dump(case_raw, sort_keys=False))
     return root
 
 
@@ -485,6 +488,53 @@ def test_status_derives_ready_from_curated_cases(tmp_path: Path) -> None:
     assert st.repository_identity_resolved is True
 
 
+def test_status_and_validate_project_changed_ready_task_spec_as_stale_without_writing(
+    tmp_path: Path,
+) -> None:
+    import yaml
+
+    from daydream.benchmark.schema import derive_finding_id
+    from daydream.benchmark.workspace import validate_workspace, workspace_status
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    case_path = next((root / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    raw["curation"]["findings"][0]["title"] = "Changed after approval"
+    raw["curation"]["findings"][0]["severity"] = "medium"
+    raw["curation"]["findings"][0]["finding_id"] = derive_finding_id(
+        raw["curation"]["findings"][0], case_id=raw["case_id"]
+    )
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    before = case_path.read_bytes()
+
+    status = workspace_status(root)
+
+    assert status.workspace_state == "stale"
+    assert status.case_snapshots[0]["task_spec_approval"] == "stale"
+    assert validate_workspace(root) == (2, "incomplete: workspace state stale")
+    assert case_path.read_bytes() == before
+
+
+def test_legacy_ready_approval_is_derived_in_memory_without_writing(tmp_path: Path) -> None:
+    import yaml
+
+    from daydream.benchmark.workspace import validate_workspace, workspace_status
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    case_path = next((root / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    raw["curation"].pop("task_spec_sha256")
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    before = case_path.read_bytes()
+
+    status = workspace_status(root)
+
+    assert status.workspace_state == "ready"
+    assert status.case_snapshots[0]["task_spec_approval"] == "current"
+    assert validate_workspace(root) == (0, "ready")
+    assert case_path.read_bytes() == before
+
+
 def _seed_frozen_case(ws: Any) -> Any:
     """Seed one ``ready`` snapshot case + its bundle + the indexed ledger.
 
@@ -583,6 +633,7 @@ def test_status_and_validate_surface_typed_unreplayable_reason(
             "snapshot_status": "unreplayable",
             "head_prefix": case_id.rsplit("-", 1)[-1],
             "error_reason": "base_drift",
+            "task_spec_approval": "not-required",
         }
     ]
     assert validate_workspace(root) == (

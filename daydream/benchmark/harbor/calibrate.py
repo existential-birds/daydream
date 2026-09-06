@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from daydream.benchmark import storage
-from daydream.benchmark.schema import BenchmarkManifest
+from daydream.benchmark.manifest import load_benchmark_manifest
 
 _HARBOR = Path(__file__).parent
 _TEMPLATES = _HARBOR / "templates"
@@ -192,16 +192,7 @@ def _load_workspace_allowlist(workspace: Path) -> list[str]:
     a malformed or missing manifest raises the project's existing workspace
     error (``WorkspaceCorrupt``) — never a silent default.
     """
-    try:
-        raw = storage.load_yaml_strict(workspace / "benchmark.yaml")
-    except storage.WorkspaceCorrupt:
-        raise
-    try:
-        manifest = BenchmarkManifest.model_validate(raw)
-    except Exception as exc:
-        raise storage.WorkspaceCorrupt(
-            f"{workspace}: invalid benchmark.yaml: {exc}"
-        ) from exc
+    manifest = load_benchmark_manifest(workspace).model
     return list(manifest.privacy.judge_allowed_hosts)
 
 

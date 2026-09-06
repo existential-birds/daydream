@@ -822,6 +822,50 @@ def test_legacy_ready_without_task_spec_digest_backfills_and_validates() -> None
     assert CaseDocument.model_validate(prepared).curation.task_spec_sha256 == digest
 
 
+def test_present_null_ready_task_spec_digest_is_not_legacy_backfilled() -> None:
+    import daydream.benchmark.schema as schema
+
+    raw = _valid_case_dict()
+    raw["curation"]["task_spec_sha256"] = None
+
+    prepared = schema._schema_ready(raw)
+
+    assert "task_spec_sha256" in prepared["curation"]
+    assert prepared["curation"]["task_spec_sha256"] is None
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(prepared)
+
+
+@pytest.mark.parametrize("digest", ["", "zzz", "a" * 63, "a" * 65, "g" * 64, "A" * 64])
+def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str) -> None:
+    import daydream.benchmark.schema as schema
+
+    raw = _valid_case_dict()
+    raw["curation"]["task_spec_sha256"] = digest
+    prepared = schema._schema_ready(raw)
+
+    assert prepared["curation"]["task_spec_sha256"] == digest
+    with pytest.raises(ValidationError, match="lowercase 64-hex"):
+        CaseDocument.model_validate(prepared)
+
+
+def test_task_spec_approval_reports_nonready_current_and_stale() -> None:
+    from daydream.benchmark.harbor.build import task_spec_approval, task_spec_digest
+
+    raw = _valid_case_dict()
+    raw["curation"]["state"] = "draft"
+    assert task_spec_approval(raw).state == "not-required"
+    raw = _valid_case_dict()
+    digest = task_spec_digest(raw)
+    raw["curation"]["task_spec_sha256"] = digest
+    assert task_spec_approval(raw).state == "current"
+    raw["curation"]["task_spec_sha256"] = "0" * 64
+    approval = task_spec_approval(raw)
+    assert approval.state == "stale"
+    assert approval.current_sha256 == digest
+    assert approval.approved_sha256 == "0" * 64
+
+
 def test_gold_status_and_mode_derived() -> None:
     case = _valid_case()  # ready, 1 finding, clean_attested=False
     assert derive_gold_status(case.curation) == "findings"

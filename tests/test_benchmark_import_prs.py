@@ -1815,6 +1815,7 @@ def _curate_case(ws: Path, case_file: Any) -> None:
     """Mark a materialized case ready + attested with one historical finding."""
     import yaml
 
+    from daydream.benchmark.harbor.build import task_spec_digest
     from daydream.benchmark.schema import derive_finding_id
     from daydream.benchmark.storage import load_yaml_strict
 
@@ -1836,8 +1837,8 @@ def _curate_case(ws: Path, case_file: Any) -> None:
         "findings": [finding],
         "exclusions": [],
         "case_exclusion": None,
-        "task_spec_sha256": "d" * 64,
     }
+    raw["curation"]["task_spec_sha256"] = task_spec_digest(raw)
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
 

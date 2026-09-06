@@ -103,12 +103,17 @@ harbor/` and a self-ignoring `.gitignore`.
 daydream benchmark status ~/bench-owner-repo
 ```
 
-Reports the derived workspace state (`empty` / `collecting` / `ready` / …),
+Reports the derived workspace state (`empty` / `collecting` / `curating` /
+`stale` / `ready`),
 whether the repository identity is **unresolved**, the PR ledger, and per-indexed
 case snapshot state (`ready` / `unreplayable` / `imported`) with the frozen head
-prefix each case was caught at. Unreplayable rows include their typed reason,
-such as `base_drift`, without exposing the private path detail. Safe to run
-concurrently with other read-only commands.
+prefix each case was caught at. Each case also reports whether its approved
+task specification is `current`, `stale`, or `not-required`. A stale approval
+cannot produce global `ready`, though an outstanding import or draft case keeps
+the existing higher-priority global `collecting` or `curating` label.
+Unreplayable rows include their typed reason, such as `base_drift`, without
+exposing the private path detail. Safe to run concurrently with other read-only
+commands.
 
 ### `validate` — 0/2/1 exit codes
 
@@ -121,6 +126,12 @@ incomplete (for example an unresolved repository identity on a fresh workspace;
 typed unreplayable reasons are appended to this label),
 `1` corrupt (invalid/missing `benchmark.yaml`, an orphan or missing indexed file,
 or a checksum-mismatched ready-snapshot bundle).
+
+A valid-shaped task specification digest that no longer matches the canonical
+`Task.md` is structurally valid but incomplete (`2`). A present null or invalid digest is
+corrupt (`1`). For compatibility, legacy ready cases where the approval key is
+entirely absent receive the canonical derived approval in memory and remain
+ready; status and validate leave the persisted key absent.
 
 ### `import-prs` — explicit private evidence
 
@@ -253,6 +264,8 @@ daydream benchmark build-harbor ~/bench-owner-repo --daydream-wheel dist/daydrea
 Packages a validated workspace for Harbor `0.22`. `--daydream-wheel` names the
 wheel for this Daydream version; the emitted `harbor/benchmark.lock.json`
 `daydream` block records its version and SHA-256.
+Compilation re-renders every ready case's canonical task specification and
+rejects a stale approval before replacing an existing `harbor/` tree.
 
 ### `upgrade` — repair legacy case documents
 
@@ -288,7 +301,8 @@ daydream benchmark calibrate-judge ~/bench-owner-repo --yes
 `calibrate-judge` is an optional, **diagnostic**-only pass that measures the
 configured judge's agreement with an **unverified** fixture. It is not an
 authorization, correctness, or validation check, and it carries no operational
-authority.
+authority. Current and stale task specification approvals follow the same
+calibration path; calibration is neither a task approval gate nor a training gate.
 
 ### `clean` — disposable artifacts
 

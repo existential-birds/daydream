@@ -461,7 +461,7 @@ def test_mark_ready_clean_attested_empty_yields_ready(tmp_path: Path, fake_gh: F
     from daydream.benchmark.workspace import validate_workspace
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold
     cu.attest_clean(ws, case_id)
-    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
+    cu.mark_ready(ws, case_id, head_sha=head_sha)  # canonical Task.md digest derived in-lock
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "ready" and cur["snapshot_attested"] is True
     assert cur["clean_attested"] is True
@@ -726,7 +726,7 @@ def test_curate_and_validate_after_mirror_removal(tmp_path: Path, fake_gh: FakeG
     assert rows[0]["changed_files"] == 2 and rows[0]["changed_lines"] == 6
     # attest ready (re-exercises location-vs-head from the bundle), so the
     # workspace reaches the ``ready`` exit-0 state on validation
-    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
+    cu.mark_ready(ws, case_id, head_sha=head_sha)  # canonical Task.md digest derived in-lock
     # validate_workspace still passes (fidelity is bundle-based)
     code, label = validate_workspace(ws)
     assert code == 0 and label == "ready"
