@@ -907,11 +907,11 @@ class _ManifestEntry(BaseModel):
         The manifest promises LITERAL repository-relative paths, but the scoring
         gate passes each entry to git as a bare pathspec (``_protected_test_paths_unchanged``),
         where ``*``, ``?`` and ``[`` are glob metacharacters and a leading ``:``
-        is pathspec magic. Absolute paths and exact ``.``/``..`` components are
-        also non-canonical. A path that matches nothing would read as a clean diff
-        and an empty ``ls-files`` list, letting ``test_command`` run against an
-        unprotected oracle — so such entries must fail the load rather than ship a
-        silently-inert protection.
+        is pathspec magic. Git normalizes exact ``.``/``..`` components, which
+        can redirect a declared path to an unintended location that matches
+        nothing. Absolute paths instead make the oracle probe fail closed.
+        Reject both non-canonical forms at load time to preserve the manifest's
+        literal repository-relative path contract; do not normalize entries.
         """
         for path in paths:
             if (
