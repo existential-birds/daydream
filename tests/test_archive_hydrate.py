@@ -5,9 +5,12 @@ import hashlib
 import json
 import pathlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from huggingface_hub.errors import HfHubHTTPError
 
 from daydream.archive import hydrate, hydrate_rules
 from daydream.archive.hydrate_client import FakeHub
@@ -112,6 +115,253 @@ def test_hf_client_requires_token_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
     with pytest.raises(hydrate.HubUnavailableError, match="HF_TOKEN"):
         hydrate._make_client("org/private-ds", token_present=False)
+
+
+class _FakeCommitOperationAdd:
+    error: Exception | None = None
+
+    def __init__(self, *, path_in_repo: str, path_or_fileobj: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.path_in_repo = path_in_repo
+        self.path_or_fileobj = path_or_fileobj
+
+
+class _FakeAtomicApi:
+    def __init__(self, *, oid: str = "b" * 40, error: Exception | None = None) -> None:
+        self.oid = oid
+        self.error = error
+        self.create_commit_calls: list[dict[str, Any]] = []
+
+    def create_commit(self, **kwargs: Any) -> Any:
+        self.create_commit_calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(oid=self.oid)
+
+
+def _install_fake_hf_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    oid: str = "b" * 40,
+    error: Exception | None = None,
+    operation_error: Exception | None = None,
+) -> _FakeAtomicApi:
+    api = _FakeAtomicApi(oid=oid, error=error)
+    monkeypatch.setattr(_FakeCommitOperationAdd, "error", operation_error)
+    fake_hf = SimpleNamespace(
+        CommitOperationAdd=_FakeCommitOperationAdd,
+        HfApi=lambda *, token: api,
+    )
+    monkeypatch.setattr(hydrate, "_import_hf_hub", lambda: fake_hf)
+    return api
+
+
+def _write_atomic_mapping(tmp_path: Path, payloads: dict[str, bytes]) -> dict[str | Path, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str | Path, Path] = {}
+    for index, (remote, payload) in enumerate(payloads.items()):
+        local = tmp_path / f"atomic-{index}.bin"
+        local.write_bytes(payload)
+        mapping[remote] = local
+    return mapping
+
+
+def _hf_http_error(status: int, message: str = "Hub request failed") -> HfHubHTTPError:
+    request = httpx.Request("POST", "https://huggingface.co/api/datasets/org/private-ds/commit/main")
+    return HfHubHTTPError(message, response=httpx.Response(status, request=request))
+
+
+def test_hf_atomic_commit_uses_one_guarded_dataset_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _install_fake_hf_atomic(monkeypatch)
+    client = hydrate.HfHubClient("org/private-ds")
+    mapping = _write_atomic_mapping(
+        tmp_path,
+        {"z/final.bin": b"third", "a/first.bin": b"first", "m/middle.bin": b"second"},
+    )
+
+    sha = client.commit_files_atomic(
+        mapping,
+        "annotation batch",
+        parent_commit="a" * 40,
+        branch=hydrate.ANNOTATION_BRANCH,
+    )
+
+    assert sha == "b" * 40
+    assert len(api.create_commit_calls) == 1
+    call = api.create_commit_calls[0]
+    assert [op.path_in_repo for op in call["operations"]] == sorted(str(path) for path in mapping)
+    assert call["parent_commit"] == "a" * 40
+    assert call["revision"] == "main"
+    assert call["repo_type"] == "dataset"
+    assert call["create_pr"] is False
+    assert call["run_as_future"] is False
+
+
+@pytest.mark.parametrize(
+    "operation_error",
+    [
+        ValueError("invalid https://user:hf_secret_token@huggingface.co/private/path"),
+        _hf_http_error(412, "constructor rejected https://user:hf_secret_token@huggingface.co/private"),
+    ],
+)
+def test_hf_atomic_commit_constructor_errors_are_redacted_and_never_concurrent(
+    operation_error: Exception,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _install_fake_hf_atomic(monkeypatch, operation_error=operation_error)
+    client = hydrate.HfHubClient("org/private-ds")
+
+    with pytest.raises(hydrate.HydrationError) as excinfo:
+        client.commit_files_atomic(
+            _write_atomic_mapping(tmp_path, {"state.json": b"{}"}),
+            "annotation batch",
+            parent_commit="a" * 40,
+            branch="main",
+        )
+
+    assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
+    assert "hf_secret_token" not in str(excinfo.value)
+    assert api.create_commit_calls == []
+
+
+def test_hf_atomic_commit_maps_only_precondition_failed_to_concurrent_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "https://user:hf_secret_token@huggingface.co/private"
+    api = _install_fake_hf_atomic(monkeypatch, error=_hf_http_error(412, secret))
+    client = hydrate.HfHubClient("org/private-ds")
+
+    with pytest.raises(hydrate.HubConcurrentUpdateError) as excinfo:
+        client.commit_files_atomic(
+            _write_atomic_mapping(tmp_path, {"state.json": b"{}"}),
+            "annotation batch",
+            parent_commit="a" * 40,
+            branch="main",
+        )
+
+    assert len(api.create_commit_calls) == 1
+    assert "hf_secret_token" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("status", [409, 401, 403, 404, 500, 503])
+def test_hf_atomic_commit_does_not_misclassify_other_http_errors(
+    status: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "https://user:hf_secret_token@huggingface.co/private"
+    _install_fake_hf_atomic(monkeypatch, error=_hf_http_error(status, secret))
+    client = hydrate.HfHubClient("org/private-ds")
+
+    with pytest.raises(hydrate.HydrationError) as excinfo:
+        client.commit_files_atomic(
+            _write_atomic_mapping(tmp_path, {"state.json": b"{}"}),
+            "annotation batch",
+            parent_commit="a" * 40,
+            branch="main",
+        )
+
+    assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
+    assert "hf_secret_token" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("error", [RuntimeError("transport failed"), ValueError("bad request")])
+def test_hf_atomic_commit_does_not_misclassify_unrelated_errors(
+    error: Exception, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_hf_atomic(monkeypatch, error=error)
+    client = hydrate.HfHubClient("org/private-ds")
+
+    with pytest.raises(hydrate.HydrationError) as excinfo:
+        client.commit_files_atomic(
+            _write_atomic_mapping(tmp_path, {"state.json": b"{}"}),
+            "annotation batch",
+            parent_commit="a" * 40,
+            branch="main",
+        )
+
+    assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
+
+
+def test_hf_atomic_commit_does_not_misclassify_http_error_without_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = _hf_http_error(412)
+    error.response = None  # type: ignore[assignment]  # model a malformed third-party exception
+    _install_fake_hf_atomic(monkeypatch, error=error)
+    client = hydrate.HfHubClient("org/private-ds")
+
+    with pytest.raises(hydrate.HydrationError) as excinfo:
+        client.commit_files_atomic(
+            _write_atomic_mapping(tmp_path, {"state.json": b"{}"}),
+            "annotation batch",
+            parent_commit="a" * 40,
+            branch="main",
+        )
+
+    assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
+
+
+def test_hf_atomic_commit_rejects_non_commit_oid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_hf_atomic(monkeypatch, oid="not-a-commit")
+    client = hydrate.HfHubClient("org/private-ds")
+
+    with pytest.raises(hydrate.HydrationError, match="invalid commit OID"):
+        client.commit_files_atomic(
+            _write_atomic_mapping(tmp_path, {"state.json": b"{}"}),
+            "annotation batch",
+            parent_commit="a" * 40,
+            branch="main",
+        )
+
+
+def test_fake_hub_atomic_commit_installs_one_content_derived_tree(tmp_path: Path) -> None:
+    parent = "a" * 40
+    first = FakeHub(repo_id="org/private-ds", files={"existing": b"old"}, head_sha=parent)
+    second = FakeHub(repo_id="org/private-ds", files={"existing": b"old"}, head_sha=parent)
+
+    first_sha = first.commit_files_atomic(
+        _write_atomic_mapping(tmp_path / "first", {"b": b"two", "a": b"one"}),
+        "annotation batch",
+        parent_commit=parent,
+        branch="main",
+    )
+    second_sha = second.commit_files_atomic(
+        _write_atomic_mapping(tmp_path / "second", {"b": b"changed", "a": b"one"}),
+        "annotation batch",
+        parent_commit=parent,
+        branch="main",
+    )
+
+    assert first_sha != second_sha
+    assert first.repo_info(revision="main").sha == first_sha
+    assert first.list_repo_files(revision=first_sha) == ["a", "b", "existing"]
+    assert first.download_file("a", revision=first_sha) == b"one"
+    assert first.download_file("b", revision=first_sha) == b"two"
+    assert first.commit_order == [{"contains": ["a", "b"], "sha": first_sha}]
+
+
+def test_fake_hub_atomic_commit_stale_parent_changes_nothing(tmp_path: Path) -> None:
+    parent = "a" * 40
+    hub = FakeHub(repo_id="org/private-ds", files={"existing": b"old"}, head_sha=parent)
+    before_files = dict(hub.files)
+    before_commits = list(hub.commit_order)
+
+    with pytest.raises(hydrate.HubConcurrentUpdateError):
+        hub.commit_files_atomic(
+            _write_atomic_mapping(tmp_path, {"new": b"value"}),
+            "annotation batch",
+            parent_commit="b" * 40,
+            branch="main",
+        )
+
+    assert hub.files == before_files
+    assert hub.repo_info().sha == parent
+    assert hub.commit_order == before_commits
 
 
 class TestHydrateRules:

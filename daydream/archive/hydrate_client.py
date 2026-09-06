@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.hydrate import HubDownloadError, HydrationError, RepoInfo
+from daydream.archive.hydrate import (
+    HubConcurrentUpdateError,
+    HubDownloadError,
+    HydrationError,
+    RepoInfo,
+)
 
 
 class FakeHub:
@@ -125,6 +131,57 @@ class FakeHub:
         self._revisions[sha] = dict(self.files)
         self._head = sha
         self.commit_order.append({"contains": sorted(paths), "sha": sha})
+
+    def commit_files_atomic(
+        self,
+        mapping: dict[str | Path, Path],
+        commit_message: str,
+        *,
+        parent_commit: str,
+        branch: str,
+    ) -> str:
+        """Install all mapped files in one content-derived revision tree."""
+        if self.fail_uploads:
+            raise HydrationError(f"upload failed for {self.repo_id}: simulated Hub outage")
+        if parent_commit != self._head:
+            raise HubConcurrentUpdateError(
+                f"atomic commit parent changed for {self.repo_id} on {branch}"
+            )
+
+        additions = [
+            (str(path_in_repo), Path(local_path).read_bytes())
+            for path_in_repo, local_path in sorted(mapping.items(), key=lambda item: str(item[0]))
+        ]
+        new_tree = dict(self.files)
+        for path_in_repo, content in additions:
+            new_tree[path_in_repo] = content
+
+        identity = {
+            "schema_version": "fake-hub-atomic-v1",
+            "parent_commit": parent_commit,
+            "branch": branch,
+            "commit_message": commit_message,
+            "files": [
+                {
+                    "path": path_in_repo,
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for path_in_repo, content in additions
+            ],
+        }
+        sha = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:40]
+
+        paths = [path for path, _ in additions]
+        self.files = new_tree
+        self._revisions[sha] = dict(new_tree)
+        self._refs[branch] = sha
+        self._head = sha
+        self.uploaded_paths.extend(paths)
+        self.commit_order.append({"contains": paths, "sha": sha})
+        return sha
 
     def _revision_tree(self, revision: str) -> dict[str, bytes]:
         tree = self._revisions.get(revision)

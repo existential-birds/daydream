@@ -19,18 +19,19 @@ deterministic adjudication queue:
   list disagreeing-rater findings oldest-first.
 - ``materialize`` — materialize the preview annotation snapshot
   (``sessions.jsonl`` + ``preview-manifest.json``) for one curation pin.
-- ``publish-state`` — publish adjudication state additively to the private
-  Hub under ``annotations/<curation-id>/<snapshot-id>/`` with an optional
-  batch checkpoint (``--batch-complete``).
+- ``publish-state`` — atomically publish an immutable adjudication checkpoint
+  and its stable curation-scoped pointer to the private Hub.
 - ``resume-state`` — restore published adjudication state onto a fresh VM
-  from the Hub-side checkpoint, digest-verified.
+  from the stable curation pointer, digest-verified at one pinned revision.
 - ``harvest-snapshot`` — canonical harvest of the materialized preview
   snapshot: drift gate, precedence merge, exactly-once
   ``label_observations`` append, and ``annotations.jsonl`` emission.
 - ``publish-final`` — construct the final annotation staging bundle from
   pipeline state (no hand-authored files) and publish it additively to the
-  private Hub under ``annotations/<curation-id>/<snapshot-id>/final/``;
+  private Hub under its content-addressed final snapshot prefix;
   ``--dry-run`` builds and validates the bundle without constructing a client.
+- ``download-final`` — pin and verify an exact final success revision into a
+  fresh local destination.
 - ``import-local-observations`` — read-only import of surviving local
   archive/backup roots' immutable ``label_observations`` histories:
   read-only inventory, identity linkage against the roots' run metadata,
@@ -97,10 +98,12 @@ from daydream.training.labeler_versions import (
 __all__ = [
     "handle_adjudicate",
     "handle_build",
+    "handle_download_final",
     "handle_export",
     "handle_harvest_snapshot",
     "handle_label",
     "handle_materialize",
+    "handle_publish_final",
     "handle_publish_state",
     "handle_report",
     "handle_resume_state",
@@ -308,17 +311,23 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                            help="Preview manifest pinning the snapshot")
     p_publish.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
                            help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
-    p_publish.add_argument("--batch-complete", action="store_true",
-                           help="Write the checkpoints/batch-latest.json checkpoint")
+    p_publish.add_argument("--batch-complete", action="store_true", help=argparse.SUPPRESS)
 
     p_resume = sub.add_parser(
         "resume-state",
         help="Restore published adjudication state onto a fresh VM (digest-verified).",
     )
-    p_resume.add_argument("--manifest", type=Path, required=True, metavar="PATH",
-                          help="Preview manifest pinning the snapshot")
-    p_resume.add_argument("--stage-dir", type=Path, required=True, metavar="PATH",
-                          help="Directory to restore the published state files into")
+    resume_identity = p_resume.add_mutually_exclusive_group(required=True)
+    resume_identity.add_argument("--curation-id", type=str, metavar="ID",
+                                 help="Stable curation identity used to discover the checkpoint")
+    resume_identity.add_argument("--manifest", type=Path, metavar="PATH",
+                                 help="Compatibility manifest supplying curation and snapshot identity")
+    p_resume.add_argument("--destination", type=Path, required=True, metavar="PATH",
+                          help="Fresh directory to install the verified state into")
+    p_resume.add_argument("--snapshot-id", type=str, default=None, metavar="ID",
+                          help="Optional expected preview snapshot identity")
+    p_resume.add_argument("--revision", type=str, default=None, metavar="OID",
+                          help="Optional exact 40-hex Hub revision to restore")
     p_resume.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
                           help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
 
@@ -352,6 +361,21 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                                  help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
     p_publish_final.add_argument("--dry-run", action="store_true",
                                  help="Build and validate the staging bundle without publishing to the Hub")
+
+    p_download_final = sub.add_parser(
+        "download-final",
+        help="Download and verify an exact final annotation success revision.",
+    )
+    p_download_final.add_argument("--curation-id", type=str, required=True, metavar="ID",
+                                  help="Stable curation identity")
+    p_download_final.add_argument("--snapshot-id", type=str, required=True, metavar="ID",
+                                  help="Content-derived final snapshot identity")
+    p_download_final.add_argument("--revision", type=str, required=True, metavar="OID",
+                                  help="Exact 40-hex final success commit")
+    p_download_final.add_argument("--destination", type=Path, required=True, metavar="PATH",
+                                  help="Fresh directory to install the verified final bundle into")
+    p_download_final.add_argument("--hub-repo", type=str, required=True, metavar="REPO",
+                                  help="Private Hub dataset repository")
 
     p_import = sub.add_parser(
         "import-local-observations",
@@ -679,38 +703,59 @@ def handle_publish_state(argv: list[str]) -> int:
     args = _build_adjudicate_parser().parse_args(["publish-state", *argv])
     try:
         client = _make_client(args.hub_repo)
-        summary = publish_annotation_state(
-            client, args.state_dir, manifest=args.manifest, batch_complete=args.batch_complete,
-        )
+        summary = publish_annotation_state(client, args.state_dir, manifest=args.manifest)
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-state failed", str(exc))
         return 1
-    message = f"Published {len(summary['uploaded'])} file(s) under {summary['prefix']}"
-    if "observation_count" in summary:
-        message += f" (checkpoint: {summary['observation_count']} observation(s))"
-    print_success(create_console(), message)
+    print_success(
+        create_console(),
+        f"Published checkpoint batch {summary['batch_id']} at Hub revision "
+        f"{summary['checkpoint_revision']}: {len(summary['uploaded'])} file(s) "
+        f"under {summary['batch_prefix']}",
+    )
     return 0
 
 
 def handle_resume_state(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate resume-state --manifest <path> --stage-dir <path>``."""
+    """Handle stable-curation checkpoint discovery and verified restoration."""
     from daydream.ui import create_console, print_error, print_success
 
     args = _build_adjudicate_parser().parse_args(["resume-state", *argv])
     try:
+        curation_id = args.curation_id
+        expected_snapshot_id = args.snapshot_id
+        if args.manifest is not None:
+            manifest = _load_json(args.manifest, "preview manifest")
+            if not isinstance(manifest, dict):
+                raise ValueError("preview manifest must be a JSON object")
+            manifest_curation_id = manifest.get("curation_id")
+            manifest_snapshot_id = manifest.get("snapshot_id")
+            if not isinstance(manifest_curation_id, str) or not manifest_curation_id:
+                raise ValueError("preview manifest is missing curation_id")
+            if not isinstance(manifest_snapshot_id, str) or not manifest_snapshot_id:
+                raise ValueError("preview manifest is missing snapshot_id")
+            if expected_snapshot_id is not None and expected_snapshot_id != manifest_snapshot_id:
+                raise ValueError("--snapshot-id does not match the compatibility manifest")
+            curation_id = manifest_curation_id
+            expected_snapshot_id = manifest_snapshot_id
+        if not isinstance(curation_id, str) or not curation_id:
+            raise ValueError("resume-state requires a curation identity")
         client = _make_client(args.hub_repo)
-        summary = resume_annotation_state(client, manifest=args.manifest, stage_dir=args.stage_dir)
-    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
+        summary = resume_annotation_state(
+            client,
+            curation_id=curation_id,
+            destination=args.destination,
+            expected_snapshot_id=expected_snapshot_id,
+            revision=args.revision,
+        )
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, OSError) as exc:
         print_error(create_console(), "adjudicate resume-state failed", str(exc))
         return 1
-    if summary["restored"]:
-        print_success(
-            create_console(),
-            f"Restored {len(summary['restored'])} file(s) "
-            f"({summary['observation_count']} observation(s)) -> {args.stage_dir}",
-        )
-    else:
-        print_success(create_console(), "Nothing published yet; empty state restored.")
+    print_success(
+        create_console(),
+        f"Restored {len(summary['restored'])} file(s) for curation {summary['curation_id']} "
+        f"from checkpoint revision {summary['checkpoint_revision']} -> {args.destination}",
+    )
     return 0
 
 
@@ -727,7 +772,7 @@ def handle_publish_final(argv: list[str]) -> int:
     (private-repo gate, 80% admission-gate refusal, secret scan, SHA256SUMS,
     additive upload, clean-download verify, ``_SUCCESS`` last).
     """
-    from daydream.training.adjudication.final_bundle import build_final_bundle
+    from daydream.training.adjudication.final_bundle import build_final_bundle, final_snapshot_id
     from daydream.training.adjudication.publish import publish_final_annotation_bundle
     from daydream.ui import create_console, print_error, print_success
 
@@ -742,6 +787,7 @@ def handle_publish_final(argv: list[str]) -> int:
             curation_bundle_dir=args.curation_bundle_dir,
             observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
         )
+        complete_id, _digests = final_snapshot_id(bundle_dir)
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-final failed", str(exc))
         return 1
@@ -763,6 +809,7 @@ def handle_publish_final(argv: list[str]) -> int:
             f"Dry-run: final bundle validated at {bundle_dir} — "
             f"{summary['record_count']} record(s) across "
             f"{', '.join(summary['files'])} ({counts}); "
+            f"final snapshot {complete_id}; "
             f"80% admission gate {'PASS' if gate['passes_80pct'] else 'FAIL'} "
             f"({coverage['adjudicated']}/{coverage['total']} outcome-bearing "
             f"adjudicated); nothing published",
@@ -770,18 +817,7 @@ def handle_publish_final(argv: list[str]) -> int:
         return 0
     try:
         client = _make_client(args.hub_repo)
-        result = publish_final_annotation_bundle(
-            client, bundle_dir, manifest=args.materialize_dir / "preview-manifest.json",
-            verify_download=True,
-        )
-        # The snapshot-id label for the success message is read here, inside
-        # the publish try/except, so a missing/corrupt manifest can never
-        # escape the handler as an uncaught exception after a successful
-        # publish — every handler must return an int exit code.
-        manifest = json.loads(
-            (args.materialize_dir / "preview-manifest.json").read_text(encoding="utf-8")
-        )
-        snapshot_id = manifest.get("snapshot_id", "")
+        result = publish_final_annotation_bundle(client, bundle_dir)
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-final failed", str(exc))
         return 1
@@ -789,7 +825,33 @@ def handle_publish_final(argv: list[str]) -> int:
         create_console(),
         f"Published final annotation bundle ({summary['record_count']} record(s)) "
         f"under {result['prefix']} (hub commit {result['hub_commit_sha']}, "
-        f"snapshot {snapshot_id})",
+        f"final snapshot {result['final_snapshot_id']})",
+    )
+    return 0
+
+
+def handle_download_final(argv: list[str]) -> int:
+    """Handle a pinned clean-room download of a final annotation bundle."""
+    from daydream.training.adjudication.publish import download_final_annotation_bundle
+    from daydream.ui import create_console, print_error, print_success
+
+    args = _build_adjudicate_parser().parse_args(["download-final", *argv])
+    try:
+        client = _make_client(args.hub_repo)
+        result = download_final_annotation_bundle(
+            client,
+            curation_id=args.curation_id,
+            snapshot_id=args.snapshot_id,
+            revision=args.revision,
+            destination=args.destination,
+        )
+    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, OSError) as exc:
+        print_error(create_console(), "adjudicate download-final failed", str(exc))
+        return 1
+    print_success(
+        create_console(),
+        f"Verified final snapshot {result['final_snapshot_id']} at Hub revision "
+        f"{result['hub_commit_sha']}: {len(result['files'])} file(s) -> {args.destination}",
     )
     return 0
 
@@ -1121,6 +1183,49 @@ def _load_import_index_sessions(index_root: Path) -> list[dict[str, Any]]:
     )
 
 
+def _load_import_index_runs(
+    index_root: Path, sessions: Sequence[Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Read the complete eligible run inventory from a hydrated index.
+
+    A materialized ``sessions.jsonl`` root has no authoritative ``runs``
+    table, so its import retains the legacy behavior of seeding only linked
+    producer rows.  A hydrated staging root does have one: read it through
+    the same immutable/read-only adapter used by materialization and retain
+    every run represented in ``sessions``.  Those run identities must travel
+    in the published checkpoint even when a surviving backup contributed no
+    observation for that session; otherwise a fresh-VM harvest cannot append
+    the session's first canonical observation.
+
+    Rows absent from ``sessions`` are deliberately excluded.  Importing a
+    backup never grants unrelated producer runs membership in the pinned
+    curation, and seeding these rows never creates observation history.
+    """
+    if (index_root / _SESSIONS_FILENAME).is_file():
+        return {}
+
+    db_path = index_root / "index.db"
+    if not db_path.is_file():
+        return {}
+    from daydream.training.adjudication.materialize import (
+        _query_runs_readonly,
+        _raise_on_uncheckpointed_wal,
+    )
+
+    _raise_on_uncheckpointed_wal(db_path)
+    available = {
+        str(row["session_id"]): row for row in _query_runs_readonly(db_path)
+    }
+    eligible = {str(session["session_id"]) for session in sessions}
+    missing = sorted(eligible - available.keys())
+    if missing:
+        raise ValueError(
+            "hydrated import index is missing runs for eligible session(s): "
+            + ", ".join(missing)
+        )
+    return {session_id: available[session_id] for session_id in sorted(eligible)}
+
+
 def _hydrated_identity_index(
     sessions: list[dict[str, Any]], index_root: Path
 ) -> dict[str, dict[str, Any]]:
@@ -1231,6 +1336,7 @@ def _write_import_merge(
     state_dir: Path,
     linked_rows: list[dict[str, Any]],
     runs_by_session: dict[str, dict[str, Any]],
+    index_runs_by_session: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """Redaction-gated merge of the linked rows into the hydrated archive.
 
@@ -1280,11 +1386,18 @@ def _write_import_merge(
             {k: v for k, v in row.items() if k != "payload_digest"},
             include_observed_at=row["source"] != "auto",
         )
-    _seed_target_runs(
-        archive_dir,
-        {str(row["session_id"]) for row in redacted_rows},
-        runs_by_session,
-    )
+    # The hydrated index is the curation-membership authority.  Preserve its
+    # complete eligible run inventory in the checkpoint even if the imported
+    # backup contains observations for only a subset: canonical harvest on a
+    # fresh VM needs each parent run before it can append that session's first
+    # observation.  Pinned rows override overlapping producer metadata;
+    # unrelated backup runs remain excluded unless an observation was
+    # identity-linked above.  Seeding runs creates no history of its own.
+    seed_runs = dict(runs_by_session)
+    seed_runs.update(index_runs_by_session)
+    seed_sessions = set(index_runs_by_session)
+    seed_sessions.update(str(row["session_id"]) for row in redacted_rows)
+    _seed_target_runs(archive_dir, seed_sessions, seed_runs)
     merged = merge_imported_observations(archive_dir, redacted_rows, dry_run=False)
     return {
         "planned": merged["planned"],
@@ -1381,9 +1494,7 @@ def _publish_import_state(
             "publication payload before --publish"
         )
     client = _make_client(hub_repo)
-    published = publish_annotation_state(
-        client, state_dir, manifest=manifest, batch_complete=True,
-    )
+    published = publish_annotation_state(client, state_dir, manifest=manifest)
     return {"prefix": published["prefix"], "uploaded": published["uploaded"]}
 
 
@@ -1427,6 +1538,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
         # literals: the hydrated-index map for session linkage and the
         # projector's per-finding map for exact run-level evidence matching.
         sessions = _load_import_index_sessions(args.index_root)
+        index_runs_by_session = _load_import_index_runs(args.index_root, sessions)
         hydrated_index = _hydrated_identity_index(sessions, args.index_root)
         projector_findings = _projector_findings_map(
             sessions, inventory["runs_by_session"]
@@ -1448,7 +1560,11 @@ def handle_import_local_observations(argv: list[str]) -> int:
             merge_imported_observations(args.archive_dir, linked_rows, dry_run=True)
             if args.dry_run
             else _write_import_merge(
-                args.archive_dir, args.state_dir, linked_rows, inventory["runs_by_session"]
+                args.archive_dir,
+                args.state_dir,
+                linked_rows,
+                inventory["runs_by_session"],
+                index_runs_by_session,
             )
         )
     except _ImportBlockedError as exc:
@@ -1519,6 +1635,7 @@ _HANDLERS = {
     "resume-state": handle_resume_state,
     "harvest-snapshot": handle_harvest_snapshot,
     "publish-final": handle_publish_final,
+    "download-final": handle_download_final,
     "import-local-observations": handle_import_local_observations,
 }
 

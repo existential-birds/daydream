@@ -1,303 +1,191 @@
-# Annotation Final-Publish Runbook (issue #1078, M9)
+# Publish and verify an annotation snapshot
 
-This runbook walks the daydream operator through publishing the immutable,
-per-finding annotation snapshot to the private Hub and projecting it into a
-corpus-v2 training bundle — entirely from the `daydream corpus adjudicate`
-CLI. There are no hand-authored JSON files and no `python -c` imports: every
-artifact in the chain is produced and validated by a supported command.
+Use this runbook to checkpoint human adjudication, recover it on an empty
+replacement VM, publish a content-addressed final annotation bundle, and
+verify that bundle by downloading its exact Hub revision.
 
-Audience: the daydream operator on a fresh VM, holding the private Hub dataset
-repo name and provider credentials in their environment.
+This procedure stops at verified annotation publication. For downstream
+corpus construction and training, follow `docs/training-launch.md` after the
+final download succeeds.
 
-Two operator-safety constraints frame every step:
+## Prerequisites
 
-- **Success is defined only by the end of step 10.** A run is finished when a
-  clean-download verification passes, the bundle's `_SUCCESS` marker is
-  present, and a green `daydream train --corpus-v2` dry run consumes the
-  frozen projection. Anything before that — including a green
-  `--dry-run` on an intermediate command — is not success.
-- **The VM is expendable; the Hub checkpoint is not.** Step 2 recovers all
-  published adjudication state from the Hub after VM loss. Re-run it any time
-  you are unsure the local state is intact.
+You need:
 
-Every `daydream corpus adjudicate` command below (steps 1–8, including the
-lettered sub-steps 3a–3b) is a literal, single-line CLI invocation that parses against the real parser (enforced by
-`tests/test_cli_adjudicate.py::test_runbook_commands_parse_against_real_parser`). The step 9 (`corpus build-v2`) and step 10 (`train --corpus-v2`) commands are not covered by that parser check — `tests/test_training_docs_v2.py` only asserts their presence.
+- a private source dataset repository containing the archived run bundles;
+- a private annotation dataset repository;
+- the exact lowercase 40-hex source revision;
+- the checked-in production license policy;
+- Hub credentials in your environment; and
+- `GITHUB_TOKEN` in your environment if license enrichment must query GitHub.
 
----
+Never put credentials in a URL, command argument, state file, or manifest.
+The commands below use these placeholders:
 
-## 1. Hydrate the source index
+- `<source-revision>`: the exact source dataset commit;
+- `<curation-id>`: the stable curation identity produced by hydration;
+- `<archive-index-digest>`: the SHA-256 digest of the hydrated archive index;
+- `<evidence-observed-at>`: the ISO-8601 evidence observation time;
+- `<final-snapshot-id>`: the ID printed by `publish-final`; and
+- `<success-commit-oid>`: the Hub commit printed by `publish-final`.
 
-Bring the producer's archived run bundles down from the Hub into a local,
-normalized index root. First run the identical command with `--dry-run`:
+## Prepare and checkpoint the first VM
 
-```bash
-daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --allow-copyleft <owner/repo> --dry-run
-```
+### Hydrate the pinned source
 
-The non-dry publication below is gated on that dry-run: proceed only after a
-completed dry-run reports full record accounting (the discovered-candidate
-tally, the license-admission gate's per-code and per-repo counts matching over
-the license-adjudicated population — imported sessions plus license-gate
-rejections; ingest/fixture rejections are reported separately, never counted
-as adjudicated) and an admitted count you accept.
+First inspect the complete admission accounting without publishing:
 
 ```bash
-daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <commit-sha> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --allow-copyleft <owner/repo>
+daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <source-revision> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json --dry-run
 ```
 
-`--license-policy` is required on every non-dry publication — the command
-refuses to run without it. `--allow-copyleft` opts in, by exact `owner/repo`
-slug (case-insensitive; repeat the flag once per slug, e.g.
-`--allow-copyleft a/b --allow-copyleft c/d`), specific copyleft-licensed
-repositories the production policy would otherwise reject; omit it when no
-such exception is intended.
+Gate the next step on complete record accounting: every discovered record
+must have an admission or exclusion decision, and the license decisions must
+match the production policy. Copyleft repositories remain excluded unless
+you explicitly opt in with `--allow-copyleft`; when needed, pass that option
+to both the dry run and the subsequent hydration commands.
 
-License-evidence enrichment (which fills legacy bundles' missing evidence
-from the live GitHub license API during both the dry-run and the
-publication) requires `GITHUB_TOKEN` in the environment — exported,
-read-only, and never placed on a URL or argv. Export it before running
-either command above, or the step fails after download/ingest with a clear
-`GITHUB_TOKEN is not set` error instead of a silent empty-token 401.
-
-The stage dir itself is the hydrated index root this runbook refers to as
-`INDEX_ROOT`: hydration writes the SQLite index (`index.db`) and one sanitized
-per-run trajectory (`runs/<session_id>/trajectory.json`) at the stage root,
-with the pinned source snapshot under `downloads/<revision>`. A hydrated
-staging archive has no `sessions.jsonl` — the commands below derive sessions
-from the index plus trajectories.
-
-## 2. Restore adjudication state after VM loss
-
-If you are resuming on a fresh VM (or doubt the local state), restore the
-published adjudication state — digest-verified — from the Hub checkpoint:
+After this gate passes, hydrate the pinned source into the local index:
 
 ```bash
-daydream corpus adjudicate resume-state --manifest /tmp/state/preview-manifest.json --stage-dir /tmp/state --hub-repo org/annotation-snapshot
+daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <source-revision> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json
 ```
 
-The manifest is the `preview-manifest.json` written by the last
-`publish-state` run; pin it with the state (keep it outside the expendable VM
-path, e.g. in the Hub repo or an operator-controlled store). After this step
-`/tmp/state` holds the restored observations and queue.
+Hydration writes the curation bundle under
+`/tmp/daydream-hydrate/curated/<curation-id>/`. Record the curation ID; it is
+the only local-independent identity required to discover the latest durable
+checkpoint.
 
-## 3. Materialize the annotation snapshot
+### Materialize and adjudicate the preview
 
-Materialize one record per finding — automatic decisive, human-decisive, and
-non-decisive alike — into the snapshot directory:
+Materialize the preview snapshot from the pinned hydrated index:
 
 ```bash
-daydream corpus adjudicate materialize --index-root /tmp/daydream-hydrate --out-dir /tmp/snapshot --curation-id <curation-id> --sanitized-hub-commit <commit-sha> --source-hub-commit <commit-sha> --archive-index-digest <archive-index-digest> --evidence-observed-at <evidence-observed-at>
+daydream corpus adjudicate materialize --index-root /tmp/daydream-hydrate --out-dir /tmp/snapshot --curation-id <curation-id> --sanitized-hub-commit <source-revision> --source-hub-commit <source-revision> --archive-index-digest <archive-index-digest> --evidence-observed-at <evidence-observed-at>
 ```
 
-All five pin components are mandatory — a missing one is an exit-1 data
-problem, not a usage error, and nothing is written. `--curation-id` is the
-single `cur-*` directory hydration wrote under
-`/tmp/daydream-hydrate/curated/` (recorded as `curation_id` in that
-directory's `curation-manifest.json`); `--source-hub-commit` is the pinned
-`<commit-sha>` from step 1 (recorded as `source_hub_commit` in the same
-curation manifest), and `--sanitized-hub-commit` is the same pinned revision.
-`--archive-index-digest` is the 64-hex sha256 of the hydrated archive index;
-`--evidence-observed-at` is the ISO-8601 observation timestamp.
-
-`/tmp/snapshot` receives `sessions.jsonl` and the `preview-manifest.json` that
-pins it. This snapshot is the input to both the canonical harvest (step 5) and
-the final bundle (steps 6–7).
-
-## 3a. Preview the ledger — the pre-harvest drift check
-
-Before labeling (or re-harvesting on a resume), build the digest-pinned preview
-ledger over the materialized snapshot and validate the export rows it feeds —
-`--dry-run` skips only the `--out` export rows file; the ledger pin below is
-written either way:
-
-```bash
-daydream corpus adjudicate export --index-root /tmp/snapshot --state-dir /tmp/state --dry-run
-```
-
-This runs the read-only preview over the snapshot's `sessions.jsonl` and pins
-`preview-ledger.json` (canonical JSON, byte-identical for an identical index)
-in `/tmp/state` — the ledger feeds the export rows and the publish payload. The
-canonical harvest's drift gate (step 5) does not read it: it re-derives the
-fresh queue over the snapshot and compares materialized evidence digests
-against that queue directly. A re-run of this command against a changed
-snapshot reports any drifted record ids instead of silently merging them,
-which is exactly what you want to catch before labeling or harvesting. Re-run
-it any time the snapshot or the observations change.
-
-## 3b. Import surviving local history into the hydrated archive
-
-Before the canonical harvest, merge any surviving local archive/backup roots'
-immutable `label_observations` histories into the hydrated stage's archive
-index — the same `index.db` (under `INDEX_ROOT`, i.e. `/tmp/daydream-hydrate`)
-that step 5 appends the harvest's observations into, so imported and
-harvested resolutions meet in one place. First plan the import without
-writing anything:
-
-```bash
-daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --dry-run
-```
-
-`--archive-root` (repeatable) is each local archive/backup root holding an
-`index.db` with a `label_observations` history; `--index-root` is the pinned
-materialized snapshot the import links session identity and per-finding
-evidence against. The dry run inventories the sources, runs the identity
-linkage and content-digest dedupe against the pinned index, and reports the
-reason-coded per-session accounting (the buckets always sum to the source row
-count) while writing nothing.
-
-Proceed with the real run only after the planned accounting looks right:
-
-```bash
-daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state
-```
-
-The real run is read-only over the sources: it appends the surviving
-(survived-dedupe) rows — after a fail-closed redaction + secret scan — into
-the `--archive-dir` archive and writes the digest-stable import report and
-ledger beside the scan artifacts in `--state-dir`. The import never writes
-the state-dir `index.db`; the hydrated archive is the single merge target.
-To checkpoint the merged state for fresh-VM resume, re-run the command with
-`--publish --manifest /tmp/snapshot/preview-manifest.json` (mutually
-exclusive with `--dry-run`) — the publish payload also needs the queue and
-observations that step 4's `build`/`label` produce, so run that publish
-re-run after step 4 (see the checkpoint note there).
-
-## 4. Build, label, and publish the human queue
-
-Build the unresolved-only operator queue, record human observations, and push
-state back to the Hub. These three commands repeat per labeling session:
+Build the queue and preview ledger, then record human decisions:
 
 ```bash
 daydream corpus adjudicate build --index-root /tmp/snapshot --state-dir /tmp/state
 ```
 
 ```bash
+daydream corpus adjudicate export --index-root /tmp/snapshot --state-dir /tmp/state --dry-run
+```
+
+```bash
 daydream corpus adjudicate label --state-dir /tmp/state --batch 10 --disposition accepted --rationale verified-against-diff-context --labeler alice
 ```
+
+Repeat `label` with the appropriate disposition, rationale, and labeler until
+the coverage report shows the intended adjudication state.
+
+### Import surviving observation history
+
+If a local archive or backup contains additional `label_observations`, merge
+it into the hydrated archive and publish the resulting SQLite history with
+the state checkpoint:
+
+```bash
+daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --publish --manifest /tmp/snapshot/preview-manifest.json --hub-repo org/annotation-snapshot
+```
+
+The import keeps the source archive read-only, merges into the hydrated
+`index.db`, copies that merged index into the checkpoint state, and then uses
+the same immutable checkpoint protocol as `publish-state`.
+
+### Publish every adjudication batch
+
+Publish after every ordinary labeling batch:
 
 ```bash
 daydream corpus adjudicate publish-state --state-dir /tmp/state --manifest /tmp/snapshot/preview-manifest.json --hub-repo org/annotation-snapshot
 ```
 
-`build` consumes the materialized snapshot (the hydrated stage root has no
-`sessions.jsonl`; the snapshot written by step 3 does) and never shows
-decisive records — those are adjudicated automatically.
-`label` records provenance (who, why, when) that the final bundle carries
-forward. `publish-state` uploads additively, so it is safe to re-run.
+Every successful invocation creates one immutable content-addressed batch and
+updates the stable curation pointer in the same guarded commit. The command
+prints both the batch ID and the actual checkpoint revision. Re-publishing
+identical state is idempotent.
 
-To checkpoint the step-3b import's merged history for fresh-VM resume, re-run
-the step-3b import with `--publish --manifest
-/tmp/snapshot/preview-manifest.json` (mutually exclusive with `--dry-run`);
-`build` above supplies the queue the publish payload requires, and the import
-stages the merged `--archive-dir` index into the state dir for the
-publication:
+## Recover on an empty replacement VM
+
+Assume all first-VM paths are gone. Create no destination directory before
+running `resume-state`; the command installs only a fully verified checkpoint.
 
 ```bash
-daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --publish --manifest /tmp/snapshot/preview-manifest.json
+daydream corpus adjudicate resume-state --curation-id <curation-id> --destination /tmp/state --hub-repo org/annotation-snapshot
 ```
 
-## 5. Canonical harvest with the drift gate
+This command discovers one repository revision from the stable curation
+pointer, pins every download to it, verifies all declared digests, and restores
+`preview-manifest.json` as data. Missing state, authentication failure, Hub
+failure, corruption, or an existing destination exits nonzero.
 
-Run the canonical harvest: the drift gate checks the complete record set
-(decisive records included) against the queue, merges precedence, and appends
-label observations to the hydrated stage's archive index (`--archive-dir` is
-the same `index.db` hydration wrote the runs into — no separate archive
-directory is materialized):
+Re-hydrate the original source revision on the replacement VM:
 
 ```bash
-daydream corpus adjudicate harvest-snapshot --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state
+daydream corpus hydrate-hub --source-repo org/run-bundles --source-revision <source-revision> --destination-repo org/run-bundles --stage-dir /tmp/daydream-hydrate --license-policy daydream/training/schema/license-policy-production.json
 ```
 
-A drift failure here means the snapshot and the queue disagree; fix the
-upstream labeling rather than bypassing the gate.
-
-## 6. Construct and validate the final bundle (dry run)
-
-Build the staging bundle — annotations, sessions, observation history,
-coverage report, and generated lineage — and validate every gate without
-publishing:
+Re-materialize the same preview from those pinned inputs:
 
 ```bash
-daydream corpus adjudicate publish-final --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir /tmp/daydream-hydrate --curation-bundle-dir /tmp/daydream-hydrate/curated/<curation-id> --hub-repo org/annotation-snapshot --state-dir /tmp/state --dry-run
+daydream corpus adjudicate materialize --index-root /tmp/daydream-hydrate --out-dir /tmp/snapshot --curation-id <curation-id> --sanitized-hub-commit <source-revision> --source-hub-commit <source-revision> --archive-index-digest <archive-index-digest> --evidence-observed-at <evidence-observed-at>
 ```
 
-The dry run validates the staging bundle's construction, coverage, and lineage
-only, and prints the 80% human-adjudication admission-gate verdict (PASS/FAIL
-over the outcome-bearing numerator/denominator). The private-repo gate, the
-admission-gate refusal, the secret scan, and SHA256SUMS construction run at
-real publish time (step 7). Only proceed when the dry run is green — a red
-gate means more outcome-bearing records must be adjudicated and the bundle
-rebuilt before the Hub can ever see it.
+## Build and publish the final bundle
 
-`--curation-bundle-dir` is the hydration-produced curated bundle root — the
-single `cur-*` directory under `/tmp/daydream-hydrate/curated/` (the curation
-id is derived deterministically from the pinned source commit and is recorded
-as `curation_id` in `/tmp/snapshot/preview-manifest.json`).
-
-## 7. Publish the final bundle
-
-Repeat the same command without `--dry-run` to upload the bundle additively to
-the Hub (the `_SUCCESS` marker is written last). A bundle whose coverage
-report fails the 80% human-adjudication admission gate is refused (the
-handler exits 1) before any byte is uploaded: adjudicate more outcome-bearing
-records and rebuild before re-publishing.
+Select the archive once and use it for both harvest and final publication.
+If the checkpoint restored `/tmp/state/index.db`, use it directly to preserve
+its SQLite-only history; do not copy it into the newly hydrated tree. If you
+did not import a backup and the checkpoint has no optional index, use the
+newly rehydrated, pinned source index instead. Keep `/tmp/state` as the state
+directory in both cases so your restored annotation decisions are applied.
 
 ```bash
-daydream corpus adjudicate publish-final --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir /tmp/daydream-hydrate --curation-bundle-dir /tmp/daydream-hydrate/curated/<curation-id> --hub-repo org/annotation-snapshot --state-dir /tmp/state
+ANNOTATION_ARCHIVE_DIR=/tmp/daydream-hydrate
+if [ -f /tmp/state/index.db ]; then
+  ANNOTATION_ARCHIVE_DIR=/tmp/state
+fi
+daydream corpus adjudicate harvest-snapshot --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir "$ANNOTATION_ARCHIVE_DIR" --state-dir /tmp/state
 ```
 
-## 8. Verify by clean download
-
-Success is defined only here. Clean-download the published final bundle tree —
-`annotations/<curation-id>/<snapshot-id>/final/` in the dataset repo (the ids
-come from `/tmp/snapshot/preview-manifest.json`) — into a fresh directory
-(e.g. `/tmp/annotation-bundle`, which step 9 consumes), verify every file
-against the bundle's published `SHA256SUMS`, and confirm the `_SUCCESS` marker
-is present in that layout. Any checksum mismatch or a missing `_SUCCESS` means
-the publish is not done — re-run step 7.
-
-## 9. Project corpus v2
-
-Project the curated bundle and the verified annotation bundle into the frozen
-corpus-v2 training records:
+Validate the complete final bundle without contacting the Hub:
 
 ```bash
-daydream corpus build-v2 --bundle-root /tmp/daydream-hydrate/curated/<curation-id> --annotation-bundle-root /tmp/annotation-bundle --license-policy <license-policy.json> --out /tmp/corpus-v2/corpus-v2.jsonl
+daydream corpus adjudicate publish-final --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir "$ANNOTATION_ARCHIVE_DIR" --curation-bundle-dir /tmp/daydream-hydrate/curated/<curation-id> --hub-repo org/annotation-snapshot --state-dir /tmp/state --dry-run
 ```
 
-`build-v2` self-verifies the annotation bundle (`_SUCCESS`, `SHA256SUMS`,
-`lineage.json`, `annotations.jsonl`) and cross-links it against the curated
-bundle root before projecting — `--bundle-root` is the hydration-produced
-curated bundle (`/tmp/daydream-hydrate/curated/<curation-id>/`, which carries
-`_SUCCESS`, `SHA256SUMS`, and `curation-manifest.json`), not the raw
-`downloads/<revision>` snapshot tree. `--license-policy` is the digest-pinned
-license-policy JSON every record's per-repo license decision is resolved from
-(it is required — the command refuses to run without it). It applies per-tier
-caps and writes the split manifests and lineage beside the output.
+The dry run builds the same semantic bundle as publication, checks the 80%
+human-adjudication gate, and prints the computed final snapshot ID. It does not
+construct a Hub client or upload any bytes.
 
-## 10. Train on the frozen corpus-v2 projection
-
-The projection directory written by step 9 is a frozen, immutable training
-input — do not edit, filter, or re-split it. Train the four-stage pipeline
-against it directly:
+Publish only after the dry run passes:
 
 ```bash
-daydream train --corpus-v2 /tmp/corpus-v2 --out /tmp/train-out --dry-run
+daydream corpus adjudicate publish-final --index-root /tmp/daydream-hydrate --materialize-dir /tmp/snapshot --archive-dir "$ANNOTATION_ARCHIVE_DIR" --curation-bundle-dir /tmp/daydream-hydrate/curated/<curation-id> --hub-repo org/annotation-snapshot --state-dir /tmp/state
 ```
 
-(Drop `--dry-run` for the real run; `--corpus-v2` is mutually exclusive with
-the v1 `--corpus` flag.) The loader fail-closes before any stage runs unless
-the directory's `_SUCCESS` marker and `lineage.json` are present, and it
-re-applies the C5 exclusion list and the C8 copyleft opt-in gate fail-closed
-on every load — the projector's decisions are never trusted on their own. The split is
-recomputed from each record id under the lineage's pinned salt and rates and
-compared against the recorded `lineage.split`; any drift refuses the entire
-load with the offending record id named, so Stage 0 always consumes exactly
-the projector's frozen split. Stage-2 RFT rebuilds replay tasks from the
-records' task-identity git SHAs (`base_sha`/`head_sha`), which are validated
-as full 40-hex SHAs before any rebuild.
+Record the printed final snapshot ID and Hub commit. The Hub commit is the
+actual success-marker commit, not the source revision or a synthetic digest.
 
-A green `daydream train --corpus-v2` dry run here is the end of the pipeline:
-the successfully frozen corpus-v2 bundle feeds Stage-0, SFT, and RFT directly,
-with no manual conversion to the legacy JSONL schema.
+## Verify the exact final revision
+
+Choose a destination that does not exist. Download the final snapshot using
+the exact values printed by `publish-final`:
+
+```bash
+daydream corpus adjudicate download-final --curation-id <curation-id> --snapshot-id <final-snapshot-id> --revision <success-commit-oid> --destination /tmp/annotation-bundle --hub-repo org/annotation-snapshot
+```
+
+The command pins every read to the requested success commit, verifies the
+publication manifest, semantic-file digests, `SHA256SUMS`, and `_SUCCESS`
+binding, then installs the complete directory in one final replacement. After
+establishing ownership, a failed install attempts to remove only the staging or
+installed tree whose identity it still owns. A concurrent replacement is
+preserved. Failure before ownership can be established may leave a temporary
+pathname for operator inspection.
+
+Annotation publication is complete only when this command succeeds and prints
+the same final snapshot ID and success commit that `publish-final` reported.

@@ -52,10 +52,15 @@ from daydream.trajectory import redact_text
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,39}$")
+ANNOTATION_BRANCH = "main"
 
 
 class HydrationError(Exception):
     """Base class for every hydrate failure mode; the orchestrator decides."""
+
+
+class HubConcurrentUpdateError(HydrationError):
+    """An atomic Hub commit was rejected because its parent is no longer head."""
 
 
 class HubUnavailableError(HydrationError):
@@ -2248,6 +2253,62 @@ class HfHubClient:
                 )
         except Exception as exc:
             raise HydrationError(f"upload failed for {self._repo_id}: {exc}") from exc
+
+    def commit_files_atomic(
+        self,
+        mapping: dict[str | Path, Path],
+        commit_message: str,
+        *,
+        parent_commit: str,
+        branch: str,
+    ) -> str:
+        """Commit ``mapping`` as one guarded dataset tree update.
+
+        ``parent_commit`` is the optimistic-concurrency guard for ``branch``.
+        A stale parent can still cause the Hub to pre-upload LFS blobs, but it
+        cannot create a repository-tree commit.
+        """
+        from huggingface_hub.errors import HfHubHTTPError  # noqa: PLC0415  # optional lazy dependency
+
+        try:
+            operations = [
+                self._hf.CommitOperationAdd(
+                    path_in_repo=str(path_in_repo),
+                    path_or_fileobj=str(local_path),
+                )
+                for path_in_repo, local_path in sorted(mapping.items(), key=lambda item: str(item[0]))
+            ]
+        except Exception as exc:
+            raise HydrationError(
+                redact_text(f"atomic commit input failed for {self._repo_id} on {branch}: {exc}")
+            ) from None
+        try:
+            result = self._api.create_commit(
+                repo_id=self._repo_id,
+                repo_type="dataset",
+                operations=operations,
+                commit_message=commit_message,
+                revision=branch,
+                create_pr=False,
+                run_as_future=False,
+                parent_commit=parent_commit,
+            )
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            if isinstance(exc, HfHubHTTPError) and getattr(response, "status_code", None) == 412:
+                raise HubConcurrentUpdateError(
+                    redact_text(f"atomic commit parent changed for {self._repo_id} on {branch}")
+                ) from None
+            raise HydrationError(
+                redact_text(f"atomic commit failed for {self._repo_id} on {branch}: {exc}")
+            ) from None
+
+        oid = str(getattr(result, "oid", ""))
+        if _FULL_SHA_RE.fullmatch(oid) is None:
+            raise HydrationError(
+                redact_text(f"atomic commit returned invalid commit OID for {self._repo_id}")
+            )
+        return oid
 
 
 # ---------------------------------------------------------------------------

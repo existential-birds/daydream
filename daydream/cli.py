@@ -25,7 +25,7 @@ top-level ``TARGET`` positional):
     - ``corpus hydrate-hub`` — turn a pinned private-Hub trajectory snapshot into a
       verified, sanitized, harvestable local staging archive and publish it additively
       back to the Hub under ``curated/<curation-id>/``
-    - ``corpus adjudicate <build|show|label|export|report|...|publish-final>`` — per-finding
+    - ``corpus adjudicate <build|show|label|...|publish-final|download-final>`` — per-finding
       human-label workflow: build the deterministic adjudication queue, show
       unresolved items grouped by disposition, record provenance-complete
       human observations, export the projector-shape rows (with ``--dry-run``
@@ -2403,7 +2403,7 @@ _CORPUS_USAGE = (
     "  calibrate-reward  validate a calibration bundle and emit a deterministic reward-calibration artifact\n"
     "  adjudicate  per-finding human-label workflow: build/show/label/export/report, then"
     "\n"
-    "  materialize/harvest/publish the annotation snapshot"
+    "  checkpoint/resume/materialize/harvest/publish/download the annotation snapshot"
 )
 
 _EXT_USAGE = (
