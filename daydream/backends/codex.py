@@ -11,12 +11,14 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess as subprocess
 import sys as sys
 import tempfile
 import threading
 import uuid
+from collections import Counter
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from daydream.backends import (
     AgentEvent,
     ContinuationToken,
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -45,9 +48,17 @@ from daydream.backends._transport import (
 )
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
-_SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
-_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
+_DIAGNOSTIC_LABEL_MAX_CHARS = 64
+_DIAGNOSTIC_LABEL_MAX_DISTINCT = 32
+_NON_JSON_EXCERPT_MAX_LINES = 20
+_NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
+_PROCESS_EXIT_EXCERPT_MAX_LINES = 10
+# Observable boundary: this contract is activated only by a public ``error``
+# item. If Codex omits a tool and emits no public marker, Daydream cannot infer
+# the invisible call and must not fabricate a ToolStart/ToolResult or an
+# invocation-wide coverage diagnostic.
+_TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode-v1"
 
 _logger = logging.getLogger(__name__)
 
@@ -294,25 +305,168 @@ def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
     return prompt
 
 
+_SHELL_LC_PREFIX_RE = re.compile(r"^/bin/(?:zsh|bash|sh)\s+-lc\s+")
+
+
 def _unwrap_shell_command(command: str) -> str:
-    """Strip shell wrapper from Codex command_execution commands.
+    """Decode the replayable ``-lc`` payload from a Codex shell command wrapper.
 
-    Codex wraps commands in three forms::
+    Codex wraps command_execution commands as ``/bin/{zsh,bash,sh} -lc <payload>``,
+    where the payload is shell-quoted (single-quoted, double-quoted, or bare) and
+    may itself contain nested quotes, ``$`` substitutions, or newlines. Decode via
+    :func:`shlex.split` so the stored command is byte-identical to what actually
+    executed — replayable verbatim, including any leading ``cd`` prefix.
 
-        /bin/zsh -lc 'actual command'      (single-quoted)
-        /bin/zsh -lc "actual command"      (double-quoted)
-        /bin/zsh -lc actual command         (unquoted)
+    Decoding happens only when the wrapper shape is recognized: non-empty argv,
+    ``argv[0]`` in {"/bin/zsh", "/bin/bash", "/bin/sh"}, ``argv[1] == "-lc"``.
+    An exactly one-argument payload returns ``argv[2]`` verbatim — no stripping,
+    no quote reprocessing, no cd removal. Real Codex also sends bare multi-word
+    payloads without quotes ('/bin/zsh -lc make test'): the payload argument then
+    splits into several argv tokens, and the raw command bytes after the ``-lc``
+    prefix are returned verbatim so embedded quoting survives.
 
-    This extracts just the inner command for display purposes.
+    Fails open: any other shape (non-wrapper, a shell-quoted payload followed by
+    trailing argv, missing ``-lc`` argument) or a :class:`ValueError` from
+    unbalanced quoting returns the input unchanged, byte-for-byte.
     """
-    m = _SHELL_WRAPPER_RE.match(command)
-    if not m:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
         return command
-    inner = m.group(1)
-    if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
-        inner = inner[1:-1]
-    inner = _CD_PREFIX_RE.sub("", inner)  # Strip leading "cd /some/path &&".
-    return inner.strip()
+    if len(argv) >= 2 and argv[0] in ("/bin/zsh", "/bin/bash", "/bin/sh") and argv[1] == "-lc":
+        if len(argv) == 3:
+            return argv[2]
+        # More than one word after '-lc': a shell-quoted payload with trailing
+        # argv is not a valid wrapper (fail open), but a bare, unquoted payload
+        # is the real-Codex shape for simple commands ('/bin/zsh -lc ls -la').
+        # Recover it from the raw command so embedded quoting is preserved.
+        wrapper = _SHELL_LC_PREFIX_RE.match(command)
+        if wrapper is not None:
+            payload = command[wrapper.end() :]
+            if payload and payload[0] not in ("'", '"'):
+                return payload
+    return command
+
+
+_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
+
+
+def display_shell_command(command: str) -> str:
+    """Decode a Codex shell wrapper AND strip the leading ``cd`` prefix, for display.
+
+    This reproduces the pre-#1124 friendly rendering: the same ``shlex`` decode
+    as :func:`_unwrap_shell_command`, then removal of a leading ``cd <dir> &&``
+    prefix from the decoded value. The result is purely presentational — the
+    value stored in ``ToolStartEvent.input["command"]`` must come from
+    :func:`_unwrap_shell_command` so it stays replayable, cd prefix retained.
+
+    Fails open exactly like the decode step: unparseable input passes through
+    unchanged and the cd regex simply does not match, returning the input
+    byte-for-byte.
+    """
+    decoded = _unwrap_shell_command(command)
+    return _CD_PREFIX_RE.sub("", decoded, count=1)
+
+
+def _bounded_diagnostic_label(value: Any) -> str:
+    """Return one redacted, bounded scalar label for diagnostic aggregation."""
+    if not isinstance(value, (str, int, float, bool)) and value is not None:
+        return "<non-scalar>"
+    from daydream.trajectory import redact_structured_text
+
+    return redact_structured_text(str(value))[:_DIAGNOSTIC_LABEL_MAX_CHARS]
+
+
+def _bounded_process_excerpt(value: str) -> str:
+    """Redact a complete non-JSON line before applying the exception cap."""
+    from daydream.trajectory import redact_structured_text
+
+    return redact_structured_text(value)[:_NON_JSON_EXCERPT_MAX_CHARS_PER_LINE]
+
+
+def _record_unknown(
+    counter: Counter[str],
+    value: Any,
+    *,
+    overflow: list[int],
+) -> None:
+    """Count an unknown label with bounded retained cardinality."""
+    label = _bounded_diagnostic_label(value)
+    if label in counter:
+        counter[label] += 1
+    elif len(counter) < _DIAGNOSTIC_LABEL_MAX_DISTINCT:
+        counter[label] = 1
+    else:
+        overflow[0] += 1
+
+
+def _counter_summary(counter: Counter[str], overflow: list[int]) -> dict[str, Any]:
+    return {
+        "total": sum(counter.values()) + overflow[0],
+        "labels": dict(counter),
+        "overflow": overflow[0],
+    }
+
+
+def _parser_diagnostics(
+    *,
+    error_sentinel_count: int,
+    unknown_event_types: Counter[str],
+    unknown_event_overflow: list[int],
+    unknown_item_types: Counter[str],
+    unknown_item_overflow: list[int],
+    malformed_shapes: Counter[str],
+    non_json_count: int,
+    parse_warnings: Counter[str],
+) -> list[DiagnosticEvent]:
+    """Build deterministic conditional diagnostics from bounded parser state."""
+    diagnostics: list[DiagnosticEvent] = []
+    if error_sentinel_count:
+        diagnostics.append(
+            DiagnosticEvent(
+                code="codex_transport_coverage",
+                message=(
+                    "The current Codex public stream contains uncorrelated error items; "
+                    "tool coverage is incomplete."
+                ),
+                metadata={
+                    "coverage": "incomplete",
+                    "reason": "uncorrelated_public_error_item",
+                    "occurrences": error_sentinel_count,
+                    "contract": _TRANSPORT_COVERAGE_CONTRACT,
+                },
+            )
+        )
+    if (
+        unknown_event_types
+        or unknown_event_overflow[0]
+        or unknown_item_types
+        or unknown_item_overflow[0]
+        or malformed_shapes
+        or non_json_count
+        or parse_warnings
+    ):
+        diagnostics.append(
+            DiagnosticEvent(
+                code="codex_parser_coverage",
+                message="The Codex public stream contained parser coverage gaps.",
+                metadata={
+                    "unknown_event_types": _counter_summary(
+                        unknown_event_types, unknown_event_overflow
+                    ),
+                    "unknown_item_types": _counter_summary(
+                        unknown_item_types, unknown_item_overflow
+                    ),
+                    "malformed_shapes": dict(malformed_shapes),
+                    "non_json_lines": non_json_count,
+                    "warnings": {
+                        "total": sum(parse_warnings.values()),
+                        "reasons": dict(parse_warnings),
+                    },
+                },
+            )
+        )
+    return diagnostics
 
 
 class CodexError(Exception):
@@ -431,17 +585,72 @@ class CodexBackend:
         pending_fifo: dict[str, list[str]] = {}  # item_type → [ids] in start order
         pending_item_ids: dict[str, str] = {}  # "type:content" → generated id (legacy)
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
-        parse_warnings: list[str] = []  # observable parse-failure surface
+        parse_warnings: Counter[str] = Counter()  # persisted bounded reasons
+        unknown_event_types: Counter[str] = Counter()
+        unknown_event_overflow = [0]
+        unknown_item_types: Counter[str] = Counter()
+        unknown_item_overflow = [0]
+        malformed_shapes: Counter[str] = Counter()
+        non_json_count = 0
+        error_sentinel_count = 0
         _pending_result: ResultEvent | None = None
-        non_json_lines: list[str] = []  # non-JSON lines (stdout merged with stderr) for error diagnostics
+        non_json_lines: list[str] = []  # redacted/capped process-exit excerpts
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
 
-        def _warn(msg: str, **detail: Any) -> None:
-            """Log a parser warning and record it for later trajectory surfacing."""
-            parse_warnings.append(msg)
-            _logger.warning("codex: %s %s", msg, detail)
+        def _warn(reason: str) -> None:
+            """Log and retain only a fixed parser-warning reason."""
+            parse_warnings[reason] += 1
+            _logger.warning("codex parser warning: %s", reason.replace("_", " "))
 
-        def _claim_tool_id(item_type: str, content_key: str, content_value: Any) -> str:
+        emitted_diagnostic_signatures: dict[str, str] = {}
+        early_diagnostic_codes: set[str] = set()
+
+        def _current_diagnostics() -> list[DiagnosticEvent]:
+            return _parser_diagnostics(
+                error_sentinel_count=error_sentinel_count,
+                unknown_event_types=unknown_event_types,
+                unknown_event_overflow=unknown_event_overflow,
+                unknown_item_types=unknown_item_types,
+                unknown_item_overflow=unknown_item_overflow,
+                malformed_shapes=malformed_shapes,
+                non_json_count=non_json_count,
+                parse_warnings=parse_warnings,
+            )
+
+        def _diagnostic_signature(event: DiagnosticEvent) -> str:
+            return json.dumps(
+                {
+                    "code": event.code,
+                    "message": event.message,
+                    "metadata": event.metadata,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        def _take_early_diagnostics() -> list[DiagnosticEvent]:
+            """Emit the first observable marker for each diagnostic code."""
+            fresh = [
+                event
+                for event in _current_diagnostics()
+                if event.code not in early_diagnostic_codes
+            ]
+            for event in fresh:
+                early_diagnostic_codes.add(event.code)
+                emitted_diagnostic_signatures[event.code] = _diagnostic_signature(event)
+            return fresh
+
+        def _take_final_diagnostics() -> list[DiagnosticEvent]:
+            """Emit only aggregates that changed since their first marker."""
+            changed = []
+            for event in _current_diagnostics():
+                signature = _diagnostic_signature(event)
+                if emitted_diagnostic_signatures.get(event.code) != signature:
+                    emitted_diagnostic_signatures[event.code] = signature
+                    changed.append(event)
+            return changed
+
+        def _claim_tool_id(item_type: str, content_key: str) -> str:
             """Pop the next correlated id for a no-id item.completed.
 
             Prefers the FIFO (content-independent order correlation), falls back
@@ -457,7 +666,7 @@ class CodexBackend:
             if item_id is None:
                 item_id = pending_item_ids.pop(content_key, None)
             if item_id is None:
-                _warn("unmatched tool result", item_type=item_type, key=content_key, value=content_value)
+                _warn("unmatched_tool_result")
                 item_id = f"codex-unmatched-{unmatched_seq}"
                 unmatched_seq += 1
             return item_id
@@ -564,23 +773,46 @@ class CodexBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    # Codex occasionally emits non-JSON status lines on stdout;
-                    # skip them but leave a debug breadcrumb for triage.
-                    # Capture non-JSON lines for diagnostic surfacing on non-zero exit.
-                    if len(non_json_lines) >= 20:
+                    # Keep bounded raw lines only for the existing process-exit
+                    # exception excerpt. Persistent diagnostics and logs retain
+                    # only the count, never the line payload.
+                    non_json_count += 1
+                    if len(non_json_lines) >= _NON_JSON_EXCERPT_MAX_LINES:
                         non_json_lines.pop(0)
-                    non_json_lines.append(raw_line)
-                    _logger.debug("codex: non-JSON line skipped: %r", raw_line[:80])
+                    non_json_lines.append(_bounded_process_excerpt(raw_line))
+                    _logger.debug("codex: non-JSON line skipped")
+                    for diagnostic in _take_early_diagnostics():
+                        yield diagnostic
                     continue
 
+                if not isinstance(event, dict):
+                    malformed_shapes["event_not_object"] += 1
+                    for diagnostic in _take_early_diagnostics():
+                        yield diagnostic
+                    continue
                 event_type = event.get("type", "")
+                if isinstance(event_type, (dict, list)):
+                    malformed_shapes["event_type_not_scalar"] += 1
+                    for diagnostic in _take_early_diagnostics():
+                        yield diagnostic
+                    continue
 
                 if event_type == "thread.started":
                     thread_id = event.get("thread_id")
 
                 elif event_type == "item.started":
                     item = event.get("item", {})
+                    if not isinstance(item, dict):
+                        malformed_shapes["item_not_object"] += 1
+                        for diagnostic in _take_early_diagnostics():
+                            yield diagnostic
+                        continue
                     item_type = item.get("type", "")
+                    if isinstance(item_type, (dict, list)):
+                        malformed_shapes["item_type_not_scalar"] += 1
+                        for diagnostic in _take_early_diagnostics():
+                            yield diagnostic
+                        continue
 
                     if item_type == "command_execution":
                         item_id = item.get("id")
@@ -591,6 +823,11 @@ class CodexBackend:
                             pending_fifo.setdefault("command_execution", []).append(item_id)
                             pending_item_ids[f"command_execution:{item.get('command', '')}"] = item_id
                         raw_cmd = item.get("command", "")
+                        if not isinstance(raw_cmd, str):
+                            _warn("command_not_string")
+                            raw_cmd = ""
+                            for diagnostic in _take_early_diagnostics():
+                                yield diagnostic
                         yield ToolStartEvent(
                             id=item_id,
                             name="shell",
@@ -604,27 +841,71 @@ class CodexBackend:
                             # preserving); content-key stays as legacy fallback.
                             pending_fifo.setdefault("mcp_tool_call", []).append(item_id)
                             pending_item_ids[f"mcp_tool_call:{item.get('tool', '')}"] = item_id
+                        tool_name = item.get("tool", "unknown")
+                        if not isinstance(tool_name, str):
+                            _warn("tool_not_string")
+                            tool_name = "unknown"
+                            for diagnostic in _take_early_diagnostics():
+                                yield diagnostic
+                        arguments = item.get("arguments", {})
+                        if not isinstance(arguments, dict):
+                            _warn("tool_arguments_not_object")
+                            arguments = {}
+                            for diagnostic in _take_early_diagnostics():
+                                yield diagnostic
                         yield ToolStartEvent(
                             id=item_id,
-                            name=item.get("tool", "unknown"),
-                            input=item.get("arguments", {}),
+                            name=tool_name,
+                            input=arguments,
+                        )
+                    elif item_type not in ("agent_message", "reasoning", "file_change", "error"):
+                        _record_unknown(
+                            unknown_item_types,
+                            item_type,
+                            overflow=unknown_item_overflow,
                         )
                     # agent_message and reasoning item.started are no-ops
                     # (text is empty, we wait for item.completed)
 
                 elif event_type == "item.updated":
                     item = event.get("item", {})
+                    if not isinstance(item, dict):
+                        malformed_shapes["item_not_object"] += 1
+                        for diagnostic in _take_early_diagnostics():
+                            yield diagnostic
+                        continue
                     item_type = item.get("type", "")
+                    if isinstance(item_type, (dict, list)):
+                        malformed_shapes["item_type_not_scalar"] += 1
+                        for diagnostic in _take_early_diagnostics():
+                            yield diagnostic
+                        continue
                     item_id = item.get("id", "")
 
                     if item_type in ("agent_message", "reasoning"):
                         text = self._extract_text(item)
                         if text and item_id:
                             updated_text.setdefault(item_id, []).append(text)
+                    elif item_type not in ("command_execution", "mcp_tool_call", "file_change", "error"):
+                        _record_unknown(
+                            unknown_item_types,
+                            item_type,
+                            overflow=unknown_item_overflow,
+                        )
 
                 elif event_type == "item.completed":
                     item = event.get("item", {})
+                    if not isinstance(item, dict):
+                        malformed_shapes["item_not_object"] += 1
+                        for diagnostic in _take_early_diagnostics():
+                            yield diagnostic
+                        continue
                     item_type = item.get("type", "")
+                    if isinstance(item_type, (dict, list)):
+                        malformed_shapes["item_type_not_scalar"] += 1
+                        for diagnostic in _take_early_diagnostics():
+                            yield diagnostic
+                        continue
 
                     if item_type == "agent_message":
                         text = self._extract_text(item)
@@ -654,8 +935,9 @@ class CodexBackend:
                             item_id = _claim_tool_id(
                                 "command_execution",
                                 f"command_execution:{item.get('command', '')}",
-                                item.get("command", ""),
                             )
+                            for diagnostic in _take_early_diagnostics():
+                                yield diagnostic
                         exit_code = item.get("exit_code", -1)
                         output = item.get("aggregated_output", "")
                         status = item.get("status", "")
@@ -814,11 +1096,18 @@ class CodexBackend:
                             item_id = _claim_tool_id(
                                 "mcp_tool_call",
                                 f"mcp_tool_call:{item.get('tool', '')}",
-                                item.get("tool", ""),
                             )
+                            for diagnostic in _take_early_diagnostics():
+                                yield diagnostic
                         result_content = ""
                         if "result" in item:
-                            result_content = str(item["result"].get("content", ""))
+                            result = item["result"]
+                            if isinstance(result, dict):
+                                result_content = str(result.get("content", ""))
+                            else:
+                                _warn("tool_result_not_object")
+                                for diagnostic in _take_early_diagnostics():
+                                    yield diagnostic
                         error = item.get("error")
                         yield ToolResultEvent(
                             id=item_id,
@@ -826,8 +1115,21 @@ class CodexBackend:
                             is_error=bool(error),
                         )
 
+                    elif item_type == "error":
+                        error_sentinel_count += 1
+
+                    else:
+                        _record_unknown(
+                            unknown_item_types,
+                            item_type,
+                            overflow=unknown_item_overflow,
+                        )
+
                 elif event_type == "turn.completed":
                     usage = event.get("usage", {})
+                    if not isinstance(usage, dict):
+                        malformed_shapes["usage_not_object"] += 1
+                        usage = {}
                     native_model = event.get("model")
                     native_provider = event.get("provider")
                     if isinstance(native_model, str) and native_model:
@@ -888,11 +1190,9 @@ class CodexBackend:
                         except json.JSONDecodeError:
                             # Observable failure path — surface the bad payload
                             # instead of silently degrading to None.
-                            _warn(
-                                "structured output parse failed",
-                                source="agent_text",
-                                raw=last_agent_text[:200],
-                            )
+                            _warn("structured_output_parse_failed")
+                            for diagnostic in _take_early_diagnostics():
+                                yield diagnostic
 
                     # Fallback: result/output field directly on turn.completed.
                     if output_schema and structured_result is None:
@@ -905,11 +1205,9 @@ class CodexBackend:
                                     try:
                                         structured_result = json.loads(raw)
                                     except json.JSONDecodeError:
-                                        _warn(
-                                            "structured output parse failed",
-                                            source=f"turn.completed.{key}",
-                                            raw=raw[:200],
-                                        )
+                                        _warn("structured_output_parse_failed")
+                                        for diagnostic in _take_early_diagnostics():
+                                            yield diagnostic
                                 if structured_result is not None:
                                     break
 
@@ -931,10 +1229,24 @@ class CodexBackend:
 
                 elif event_type == "turn.failed":
                     error = event.get("error", {})
-                    raise CodexError(error.get("message", "Unknown Codex error"))
+                    message = (
+                        error.get("message", "Unknown Codex error")
+                        if isinstance(error, dict)
+                        else "Unknown Codex error"
+                    )
+                    for diagnostic in _take_final_diagnostics():
+                        yield diagnostic
+                    raise CodexError(str(message))
 
                 elif event_type not in ("turn.started",):
-                    pass
+                    _record_unknown(
+                        unknown_event_types,
+                        event_type,
+                        overflow=unknown_event_overflow,
+                    )
+
+                for diagnostic in _take_early_diagnostics():
+                    yield diagnostic
 
             # Reap the child (the transport raises TransportExitError on a
             # non-zero exit; _check_return_code below formats the backend-
@@ -943,6 +1255,9 @@ class CodexBackend:
                 await transport.wait()
             except TransportExitError:
                 pass
+
+            for diagnostic in _take_final_diagnostics():
+                yield diagnostic
 
             # Fail fast on non-zero exit: if codex crashed without emitting a
             # turn.failed event, surface the failure with diagnostic output
@@ -999,10 +1314,10 @@ class CodexBackend:
     ) -> None:
         """Raise CodexError(PROCESS_EXIT) if the subprocess exited non-zero."""
         if returncode is not None and returncode != 0:
-            tail = "\n".join(non_json_lines[-10:])
+            tail = "\n".join(non_json_lines[-_PROCESS_EXIT_EXCERPT_MAX_LINES:])
             if non_json_lines:
                 detail = (
-                    f"\nCodex CLI output (last {min(len(non_json_lines), 10)} "
+                    f"\nCodex CLI output (last {min(len(non_json_lines), _PROCESS_EXIT_EXCERPT_MAX_LINES)} "
                     f"non-JSON lines):\n{tail}"
                 )
             else:

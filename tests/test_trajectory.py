@@ -18,6 +18,7 @@ from daydream.atif import validate as atif_validate
 from daydream.atif.models import Step
 from daydream.backends import (
     AgentEvent,
+    DiagnosticEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -78,6 +79,68 @@ async def test_text_event_then_result_produces_one_agent_step(tmp_path: Path) ->
     agent_steps = _agent_steps(traj)
     assert len(agent_steps) == 1
     assert agent_steps[0]["message"] == "Hello world"
+
+
+async def test_diagnostic_is_json_safe_redacted_and_persisted_in_arrival_order(
+    tmp_path: Path,
+) -> None:
+    """Diagnostics cross one fail-closed recorder privacy/type boundary."""
+    secret = "sk-diagnostic123456"
+    unsupported = object()
+    _, steps = await _record_events(
+        tmp_path,
+        DiagnosticEvent(
+            code=secret,
+            message=f"API_KEY={secret}",
+            metadata={
+                "nested": {secret: f"TOKEN={secret}", "api_key": secret},
+                "unsupported": unsupported,
+                "unsupported_key": {42: "retained safely"},
+                "non_finite": float("nan"),
+            },
+        ),
+        DiagnosticEvent(code="second", message="safe", metadata={"count": 2}),
+        ResultEvent(structured_output=None, continuation=None),
+    )
+
+    assert len(steps) == 1
+    records = (steps[0].extra or {})["backend_diagnostics"]
+    assert [record["code"] for record in records] == ["[REDACTED_API_KEY]", "second"]
+    encoded = json.dumps(records, allow_nan=False)
+    assert secret not in encoded
+    assert "[REDACTED" in encoded
+    assert records[0]["metadata"]["unsupported"] == "[UNSUPPORTED_DIAGNOSTIC_VALUE]"
+    assert records[0]["metadata"]["unsupported_key"] == {
+        "[UNSUPPORTED_DIAGNOSTIC_KEY]": "retained safely"
+    }
+    assert records[0]["metadata"]["non_finite"] == "[UNSUPPORTED_DIAGNOSTIC_VALUE]"
+    assert json.loads(encoded) == records
+
+
+async def test_diagnostic_redaction_failure_persists_fixed_safe_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "sk-neverpersist123456"
+
+    def fail_redaction(value: Any, sensitive: bool = False) -> Any:
+        raise RuntimeError("redaction unavailable")
+
+    monkeypatch.setattr("daydream.trajectory.redact_value", fail_redaction)
+    _, steps = await _record_events(
+        tmp_path,
+        DiagnosticEvent(code=secret, message=secret, metadata={"raw": secret}),
+        ResultEvent(structured_output=None, continuation=None),
+    )
+
+    records = (steps[0].extra or {})["backend_diagnostics"]
+    assert records == [
+        {
+            "code": "diagnostic_redaction_failed",
+            "message": "[DIAGNOSTIC_REDACTION_FAILED]",
+            "metadata": {},
+        }
+    ]
+    assert secret not in json.dumps(records)
 
 
 # Behavior 2: Two consecutive TextEvent chunks coalesce into one step (D-03)
@@ -1213,6 +1276,31 @@ async def test_write_partial_records_in_flight_tool_like_finish(tmp_path: Path) 
                  "extra": {"is_error": True, "status": "interrupted"}}]
     assert marker_results(partial) == expected
     assert marker_results(final) == expected
+
+
+async def test_write_partial_preserves_in_flight_diagnostic_once(tmp_path: Path) -> None:
+    """Signal-safe snapshots include normalized diagnostics without consuming them."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(DiagnosticEvent(code="parser_gap", message="bounded", metadata={"count": 1}))
+            recorder.write_partial()
+
+    partial = json.loads(
+        recorder.path.with_suffix(recorder.path.suffix + ".partial").read_text(encoding="utf-8")
+    )
+    final = read_trajectory(recorder.path)
+
+    for trajectory in (partial, final):
+        diagnostics = [
+            diagnostic
+            for step in trajectory["steps"]
+            if step["source"] == "agent"
+            for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+        ]
+        assert diagnostics == [
+            {"code": "parser_gap", "message": "bounded", "metadata": {"count": 1}}
+        ]
 
 
 async def test_write_partial_no_double_count_after_invocation_exit(tmp_path: Path) -> None:

@@ -20,13 +20,22 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from daydream import git_ops
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.backends import (
+    AgentEvent,
+    DiagnosticEvent,
+    ResultEvent,
+    TextEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+)
 from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import bare_remote, git
 
@@ -848,3 +857,276 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["metrics"]["grounding_rate"] is not None
     assert manifest["metrics"]["total_findings"] == 3
+
+
+class _CodexEvidenceBackend(StubBackend):
+    """Emit one isolated standard-event evidence stream on the Python child."""
+
+    def __init__(self, target: Path, *, evidence: bool) -> None:
+        super().__init__(target)
+        self.evidence = evidence
+
+    async def execute(
+        self,
+        cwd: Any,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        if "you are reviewing the python stack" in prompt.lower():
+            if self.evidence:
+                for index in range(311):
+                    call_id = f"shell-{index}"
+                    yield ToolStartEvent(
+                        id=call_id,
+                        name="shell",
+                        input={"command": f"printf 'shell {index}\\n'"},
+                    )
+                    if index == 1:
+                        continue
+                    yield ToolResultEvent(
+                        id=call_id,
+                        output="failed" if index == 0 else "ok",
+                        is_error=index == 0,
+                    )
+                for index in range(15):
+                    call_id = f"patch-{index}"
+                    yield ToolStartEvent(
+                        id=call_id,
+                        name="patch",
+                        input={"patch": f"*** patch {index} ***"},
+                    )
+                    yield ToolResultEvent(id=call_id, output="applied", is_error=False)
+                yield ToolResultEvent(id="unmatched-result", output="orphan", is_error=True)
+                yield DiagnosticEvent(
+                    code="codex_transport_coverage",
+                    message="current public stream has incomplete tool coverage",
+                    metadata={"occurrences": 1},
+                )
+                yield DiagnosticEvent(
+                    code="codex_parser_coverage",
+                    message="bounded parser gap evidence",
+                    metadata={"unknown_items": 1},
+                )
+            else:
+                yield ToolStartEvent(
+                    id="clean-read",
+                    name="read",
+                    input={"path": "api.py"},
+                )
+                yield ToolResultEvent(
+                    id="clean-read",
+                    output="file content",
+                    is_error=False,
+                )
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+def _install_codex_evidence_backend(
+    target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    evidence: bool,
+) -> _CodexEvidenceBackend:
+    """Install the evidence backend while keeping unrelated phases tool-free."""
+    _install_deep_capture_backend(target, monkeypatch)
+    monkeypatch.setattr(
+        "daydream.agent.console", Console(file=StringIO(), force_terminal=False)
+    )
+    backend = _CodexEvidenceBackend(target, evidence=evidence)
+    backend.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: backend,
+    )
+    return backend
+
+
+async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flags(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+) -> None:
+    """runner.run -> archive -> evaluation preserves all unsafe evidence."""
+    _install_codex_evidence_backend(
+        multi_stack_target,
+        monkeypatch,
+        evidence=True,
+    )
+
+    assert await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
+    ) == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    child = json.loads(
+        (run_dir / "trajectories" / "deep-python.json").read_text(encoding="utf-8")
+    )
+    evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
+    child_calls = [
+        call
+        for step in child["steps"]
+        for call in step.get("tool_calls") or []
+    ]
+    assert len(child_calls) == 326
+    assert child_calls[0]["arguments"]["command"] == "printf 'shell 0\\n'"
+    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 326
+    assert evaluation["tools"]["total_calls"] == 326
+    assert evaluation["tools"]["by_type"] == {"shell": 311, "patch": 15}
+    assert evaluation["tools"]["write_ratio"] == 0.046
+
+    agent_steps = [step for step in child["steps"] if step["source"] == "agent"]
+    result_extras = [
+        result.get("extra", {})
+        for step in agent_steps
+        for result in (step.get("observation") or {}).get("results", [])
+    ]
+    assert any(extra.get("is_error") is True for extra in result_extras)
+    assert any(extra.get("status") == "interrupted" for extra in result_extras)
+    assert any(
+        "unmatched-result" in step.get("extra", {}).get("unmatched_tool_results", [])
+        for step in agent_steps
+    )
+    diagnostics = [
+        diagnostic
+        for step in agent_steps
+        for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+    ]
+    assert [diagnostic["code"] for diagnostic in diagnostics] == [
+        "codex_transport_coverage",
+        "codex_parser_coverage",
+    ]
+    training = next(
+        row
+        for row in evaluation["training_signals"]["trajectories"]
+        if row["trajectory"] == "deep-python"
+    )
+    assert training["training_quality"] == "review"
+    assert training["noise_flags"][:5] == [
+        "failed_tool_result",
+        "incomplete_tool_call",
+        "unmatched_tool_result",
+        "incomplete_telemetry",
+        "parser_coverage_gap",
+    ]
+
+
+async def test_codex_evidence_integrity_clean_archive_stays_clean(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+) -> None:
+    """An independent paired-success run acquires no telemetry review flag."""
+    _install_codex_evidence_backend(
+        multi_stack_target,
+        monkeypatch,
+        evidence=False,
+    )
+
+    assert await run(
+        RunConfig(
+            target=str(multi_stack_target),
+            assume="yes",
+            output_mode="loop",
+            cleanup=False,
+        )
+    ) == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    child = json.loads(
+        (run_dir / "trajectories" / "deep-python.json").read_text(encoding="utf-8")
+    )
+    assert all(
+        not step.get("extra", {}).get("backend_diagnostics")
+        for step in child["steps"]
+    )
+    evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
+    training = next(
+        row
+        for row in evaluation["training_signals"]["trajectories"]
+        if row["trajectory"] == "deep-python"
+    )
+    assert evaluation["tools"]["total_calls"] == 1
+    assert evaluation["tools"]["by_type"] == {"read": 1}
+    assert training["noise_flags"] == []
+    assert training["training_quality"] == "clean"
+
+
+async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+) -> None:
+    """Replay CLI drift through the real parser, log-mode runner, and archive."""
+    from unittest.mock import patch
+
+    from daydream.backends.codex import CodexBackend
+    from tests.harness.codex_replay import make_mock_process
+
+    class MalformedToolBackend(StubBackend):
+        async def execute(
+            self,
+            cwd: Any,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+        ) -> AsyncIterator[AgentEvent]:
+            if "you are reviewing the python stack" in prompt.lower():
+                item = {
+                    "id": "malformed-mcp", "type": "mcp_tool_call",
+                    "tool": {"unexpected": "name-shape"}, "arguments": {"path": "api.py"},
+                }
+                process = make_mock_process([
+                    json.dumps({"type": "item.started", "item": item}),
+                    json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
+                    json.dumps({"type": "turn.completed", "usage": {}}),
+                ])
+                with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+                    async for event in CodexBackend(model="fixture-model").execute(cwd, prompt):
+                        if isinstance(event, (ToolStartEvent, ToolResultEvent, DiagnosticEvent)):
+                            yield event
+            async for event in super().execute(
+                cwd, prompt, output_schema=output_schema, continuation=continuation,
+                agents=agents, max_turns=max_turns, read_only=read_only,
+            ):
+                yield event
+
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    backend = MalformedToolBackend(multi_stack_target)
+    backend.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
+    assert await run(RunConfig(
+        target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False,
+        log_mode=True,
+    )) == 0
+
+    child = json.loads(
+        (_only_archived_run(archive_dir) / "trajectories" / "deep-python.json").read_text()
+    )
+    calls = [call for step in child["steps"] for call in (step.get("tool_calls") or [])]
+    assert [(call["tool_call_id"], call["function_name"]) for call in calls] == [("malformed-mcp", "unknown")]
+    diagnostics = [
+        diagnostic for step in child["steps"]
+        for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+    ]
+    assert diagnostics[0]["metadata"]["warnings"]["reasons"] == {"tool_not_string": 1}

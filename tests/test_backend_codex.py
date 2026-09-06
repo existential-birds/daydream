@@ -18,6 +18,7 @@ import pytest
 from daydream import git_ops
 from daydream.backends import (
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -27,6 +28,8 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends import codex as codex_backend
+from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import (
     _CODEX_STDOUT_LIMIT_BYTES,
     CodexBackend,
@@ -99,6 +102,32 @@ async def test_tool_use_events() -> None:
     assert any("main.py" in tr.output for tr in tool_results)
 
     assert any(t.text == "Done!" for t in texts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", [None, 42, False, [], {"token": "private-value"}])
+async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(
+    tmp_path: Path, tool_name: Any,
+) -> None:
+    item = {"id": "mcp-1", "type": "mcp_tool_call", "tool": tool_name, "arguments": {"path": "api.py"}}
+    process = make_mock_process([
+        json.dumps({"type": "item.started", "item": item}),
+        json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ])
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        events = [event async for event in CodexBackend(model="fixture-model").execute(tmp_path, "review")]
+
+    starts = [event for event in events if isinstance(event, ToolStartEvent)]
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert len(starts) == len(results) == 1
+    assert starts[0].name == "unknown"
+    assert starts[0].id == results[0].id == "mcp-1"
+    assert diagnostics[0].code == "codex_parser_coverage"
+    assert diagnostics[0].metadata["warnings"]["reasons"] == {"tool_not_string": 1}
+    assert events.index(diagnostics[0]) < events.index(starts[0])
+    assert "private-value" not in repr(diagnostics)
 
 
 @pytest.mark.asyncio
@@ -359,9 +388,12 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
             async for event in backend.execute(Path("/tmp"), "Fail"):
                 events.append(event)
 
-    # The attempted request is observable, and the stream still raises.
-    assert len(events) == 1
+    # The attempted request and bounded parse gap are observable before the
+    # original process-exit failure is preserved.
+    assert len(events) == 2
     assert isinstance(events[0], RequestEvent)
+    assert isinstance(events[1], DiagnosticEvent)
+    assert events[1].code == "codex_parser_coverage"
     msg = str(exc_info.value)
     assert "authentication required" in msg
     assert exc_info.value.category == "PROCESS_EXIT"
@@ -1188,17 +1220,196 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 class TestUnwrapShellCommand:
     """Tests for _unwrap_shell_command helper."""
 
-    def test_zsh_wrapper_with_cd(self) -> None:
+    def test_zsh_wrapper_with_cd_kept_replayable(self) -> None:
         cmd = '/bin/zsh -lc "cd /home/user/project && make test"'
-        assert _unwrap_shell_command(cmd) == "make test"
+        assert _unwrap_shell_command(cmd) == "cd /home/user/project && make test"
 
-    def test_bash_wrapper_with_cd(self) -> None:
+    def test_bash_wrapper_with_cd_kept_replayable(self) -> None:
         cmd = '/bin/bash -lc "cd /tmp/work && pytest -x"'
-        assert _unwrap_shell_command(cmd) == "pytest -x"
+        assert _unwrap_shell_command(cmd) == "cd /tmp/work && pytest -x"
 
-    def test_sh_wrapper_with_cd(self) -> None:
+    def test_sh_wrapper_with_cd_kept_replayable(self) -> None:
         cmd = '/bin/sh -lc "cd /app && echo hello"'
-        assert _unwrap_shell_command(cmd) == "echo hello"
+        assert _unwrap_shell_command(cmd) == "cd /app && echo hello"
+
+    def test_nested_single_quotes_round_trip(self) -> None:
+        # The reported corruption class: '\' escaping inside the -lc payload.
+        cmd = "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'"
+        assert _unwrap_shell_command(cmd) == "awk '{print $1}' file.txt"
+
+    def test_escaped_double_quotes_and_env_round_trip(self) -> None:
+        cmd = '/bin/zsh -lc "echo \\"hi\\" and $HOME"'
+        assert _unwrap_shell_command(cmd) == 'echo "hi" and $HOME'
+
+    def test_command_substitution_round_trip(self) -> None:
+        cmd = '/bin/zsh -lc "echo $(date)"'
+        assert _unwrap_shell_command(cmd) == "echo $(date)"
+
+    def test_multiline_round_trip(self) -> None:
+        cmd = "/bin/zsh -lc 'echo line1\nline2'"
+        assert _unwrap_shell_command(cmd) == "echo line1\nline2"
+
+    def test_heredoc_round_trip(self) -> None:
+        cmd = "/bin/zsh -lc 'cat <<EOF\nhello\nEOF'"
+        assert _unwrap_shell_command(cmd) == "cat <<EOF\nhello\nEOF"
+
+    def test_unrecognized_wrapper_passthrough(self) -> None:
+        assert _unwrap_shell_command('python -c "print(1)"') == 'python -c "print(1)"'
+
+    def test_trailing_argv_is_raw_fallback(self) -> None:
+        cmd = '/bin/zsh -lc "cmd" extra_arg'
+        assert _unwrap_shell_command(cmd) == cmd
+
+    def test_unbalanced_quotes_fail_open_to_raw(self) -> None:
+        cmd = "/bin/zsh -lc 'unbalanced"
+        assert _unwrap_shell_command(cmd) == cmd
+
+    def test_flag_only_wrapper_raw_fallback(self) -> None:
+        assert _unwrap_shell_command("/bin/zsh -lc") == "/bin/zsh -lc"
+
+    @pytest.mark.asyncio
+    async def test_pending_content_key_uses_raw_command(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """M7: the legacy pending-id key is built from the raw wrapped command.
+
+        Drives the real parser over two no-id ``command_execution`` items, one
+        Codex-wrapped so the raw command differs from its decoded payload, plus
+        a trailing duplicate completion. The duplicate arrives once the FIFO
+        head is drained, so ``_claim_tool_id`` must resolve it through the
+        legacy content-key fallback — a lookup that only matches when both the
+        item.started registration and the item.completed claim key
+        ``pending_item_ids`` on the raw ``item['command']`` (never
+        ``_unwrap_shell_command`` output). A regression re-keying either site
+        by the decoded payload makes the fallback miss and must surface as an
+        'unmatched tool result' warning.
+        """
+        raw = '/bin/zsh -lc "ls -la"'
+
+        def line(event_type: str, item: dict[str, Any]) -> str:
+            return json.dumps({"type": event_type, "item": item}, separators=(",", ":"))
+
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": "th_m7"}),
+            line("item.started", {"type": "command_execution", "command": "echo one"}),
+            line("item.started", {"type": "command_execution", "command": raw}),
+            line(
+                "item.completed",
+                {
+                    "type": "command_execution",
+                    "command": "echo one",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "aggregated_output": "one",
+                },
+            ),
+            line(
+                "item.completed",
+                {
+                    "type": "command_execution",
+                    "command": raw,
+                    "status": "completed",
+                    "exit_code": 0,
+                    "aggregated_output": "ls",
+                },
+            ),
+            line(
+                "item.completed",
+                {
+                    "type": "command_execution",
+                    "command": raw,
+                    "status": "completed",
+                    "exit_code": 0,
+                    "aggregated_output": "ls (dup)",
+                },
+            ),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+        ]
+
+        backend = CodexBackend(model="fixture-model")
+        mock_proc = make_mock_process(lines)
+        with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+                events = [event async for event in backend.execute(Path("/tmp"), "M7 content key")]
+
+        starts = [e for e in events if isinstance(e, ToolStartEvent)]
+        results = [e for e in events if isinstance(e, ToolResultEvent)]
+
+        # The parse site unwraps for the stored command but must NOT re-key by it.
+        assert [s.input["command"] for s in starts] == ["echo one", "ls -la"]
+        # FIFO pairs the first two completions; the trailing duplicate must resolve
+        # via the content-key fallback keyed on the raw wrapped command.
+        start_ids = [s.id for s in starts]
+        assert [r.id for r in results] == start_ids + [start_ids[1]], (
+            f"duplicate completion must resolve to its started item via the raw-command "
+            f"content key; starts={start_ids} results={[r.id for r in results]}"
+        )
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not warnings, (
+            f"content-key fallback must key on the raw wrapped command, not the decoded "
+            f"payload; got warnings: {warnings}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_supervisor_sees_cd_stripped_display_variant(self) -> None:
+        """Extension tool supervisors match the pre-#1124 cd-stripped value.
+
+        The stored ToolStartEvent input keeps the replayable cd-prefixed payload
+        ('cd /home/user/project && make test'), but the extension tool supervisor
+        — a matching surface holding start-anchored deny patterns such as
+        '^make' — must keep receiving the pre-#1124 wrapper-decoded, cd-stripped
+        command. A regression handing the supervisor the stored value would let
+        'cd <dir> && make test' silently evade '^make'.
+        """
+        from daydream.agent import run_agent
+        from daydream.extensions import Registry, ToolDecision, set_registry
+        from daydream.trajectory import DaydreamPhase
+
+        raw = '/bin/zsh -lc "cd /home/user/project && make test"'
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": "th_sup"}),
+            json.dumps(
+                {"type": "item.started", "item": {"type": "command_execution", "command": raw}}
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": raw,
+                        "status": "completed",
+                        "exit_code": 0,
+                        "aggregated_output": "ok",
+                    },
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+        ]
+
+        seen: dict[str, str] = {}
+
+        def supervisor(tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
+            del phase
+            assert tool_name == "shell"
+            seen["command"] = str(tool_input.get("command", ""))
+            if seen["command"].startswith("make"):
+                return ToolDecision(veto=True, reason="^make deny")
+            return ToolDecision(veto=False)
+
+        registry = Registry()
+        registry.register_tool_supervisor(supervisor)
+        set_registry(registry)
+        backend = CodexBackend(model="fixture-model")
+        mock_proc = make_mock_process(lines)
+        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+            _, _, budget_reason = await run_agent(
+                backend, Path("/tmp"), "run", phase=DaydreamPhase.REVIEW,
+            )
+
+        # The supervisor matched the cd-stripped display variant, so the
+        # start-anchored '^make' deny fired against the pre-#1124 shape.
+        assert seen["command"] == "make test"
+        assert budget_reason == "tool_vetoed:shell"
 
     def test_wrapper_without_cd(self) -> None:
         cmd = '/bin/zsh -lc "ls -la"'
@@ -1212,11 +1423,37 @@ class TestUnwrapShellCommand:
 
     def test_single_quotes(self) -> None:
         cmd = "/bin/zsh -lc 'cd /project && git status'"
-        assert _unwrap_shell_command(cmd) == "git status"
+        assert _unwrap_shell_command(cmd) == "cd /project && git status"
 
     def test_unquoted_simple(self) -> None:
         """Real Codex format: no quotes around simple commands."""
         assert _unwrap_shell_command("/bin/zsh -lc ls") == "ls"
+
+    def test_unquoted_multi_word(self) -> None:
+        """Real Codex format: no quotes around simple multi-word commands.
+
+        '/bin/zsh -lc make test' splits to four shlex tokens, so the strict
+        3-token shape check used to fall open to the wrapper for both storage
+        and display. A bare payload decodes to the raw command bytes after
+        '-lc'; a shell-quoted payload with trailing argv still fails open
+        (see test_trailing_argv_is_raw_fallback).
+        """
+        assert _unwrap_shell_command("/bin/zsh -lc make test") == "make test"
+        assert _unwrap_shell_command("/bin/zsh -lc ls -la") == "ls -la"
+        assert _unwrap_shell_command("/bin/bash -lc git status --short") == "git status --short"
+
+    def test_unquoted_multi_word_keeps_embedded_quotes(self) -> None:
+        """The raw-remainder decode preserves embedded quoting byte-for-byte."""
+        cmd = "/bin/zsh -lc echo 'hello world'"
+        assert _unwrap_shell_command(cmd) == "echo 'hello world'"
+
+    def test_unquoted_multi_word_cd_display(self) -> None:
+        """Unquoted multi-word cd chains stay replayable stored, cd-stripped on display."""
+        from daydream.backends.codex import display_shell_command
+
+        raw = "/bin/zsh -lc cd /app && make test"
+        assert _unwrap_shell_command(raw) == "cd /app && make test"
+        assert display_shell_command(raw) == "make test"
 
     def test_single_quoted_git_diff(self) -> None:
         """Real Codex format: single-quoted multi-word command."""
@@ -1327,6 +1564,204 @@ async def test_malformed_structured_output_warns(caplog: pytest.LogCaptureFixtur
     )
 
 
+@pytest.mark.asyncio
+async def test_parser_coverage_is_bounded_redacted_and_precedes_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = CodexBackend(model="fixture-model")
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+
+    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+        events = await _run_fixture(
+            backend,
+            "Parse gaps",
+            "parser_coverage_gaps.jsonl",
+            output_schema=schema,
+        )
+
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert [event.code for event in diagnostics] == [
+        "codex_transport_coverage",
+        "codex_parser_coverage",
+        "codex_parser_coverage",
+    ]
+    assert events.index(diagnostics[-1]) < next(
+        index for index, event in enumerate(events) if isinstance(event, ResultEvent)
+    )
+
+    transport = diagnostics[0]
+    assert transport.metadata == {
+        "coverage": "incomplete",
+        "reason": "uncorrelated_public_error_item",
+        "occurrences": 1,
+        "contract": "codex-cli-0.153.4-json-code-mode-v1",
+    }
+
+    assert diagnostics[1].metadata["unknown_event_types"]["total"] == 1
+    parser = diagnostics[-1].metadata
+    assert parser["unknown_event_types"] == {
+        "total": 35,
+        "labels": {f"unknown.{index:02d}": (2 if index == 0 else 1) for index in range(32)},
+        "overflow": 2,
+    }
+    assert parser["unknown_item_types"] == {
+        "total": 3,
+        "labels": {"mystery.item": 2, 'token="[REDACTED_CREDENTIAL]"': 1},
+        "overflow": 0,
+    }
+    assert parser["malformed_shapes"] == {
+        "event_not_object": 2,
+        "event_type_not_scalar": 1,
+        "item_not_object": 1,
+    }
+    assert parser["non_json_lines"] == 1
+    assert parser["warnings"] == {
+        "total": 2,
+        "reasons": {
+            "structured_output_parse_failed": 1,
+            "unmatched_tool_result": 1,
+        },
+    }
+
+    combined = json.dumps([event.metadata for event in diagnostics]) + "\n" + caplog.text
+    assert "opaque-parser-secret" not in combined
+    assert "/Users/private-person" not in combined
+    assert "printf hidden-command" not in combined
+
+
+def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
+    label = "x" * 54 + " ghp_" + "y" * 12
+
+    bounded = codex_backend._bounded_diagnostic_label(label)
+
+    assert len(bounded) <= 64
+    assert "ghp_" not in bounded
+    assert "[REDACTED" in bounded
+
+
+@pytest.mark.asyncio
+async def test_parser_diagnostic_precedes_structured_turn_failure() -> None:
+    backend = CodexBackend(model="fixture-model")
+    lines = [
+        json.dumps({"type": "future.event"}),
+        json.dumps({"type": "turn.failed", "error": {"message": "Model returned an error"}}),
+    ]
+    mock_proc = make_mock_process(lines)
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="Model returned an error"):
+            async for event in backend.execute(Path("/tmp"), "Fail"):
+                observed.append(event)
+
+    assert isinstance(observed[-1], DiagnosticEvent)
+    assert observed[-1].code == "codex_parser_coverage"
+
+
+@pytest.mark.asyncio
+async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout() -> None:
+    backend = CodexBackend(model="fixture-model")
+
+    class _FailureThenBlockingStdout:
+        def __init__(self) -> None:
+            self._lines = iter(
+                [
+                    json.dumps({"type": "future.one"}),
+                    json.dumps({"type": "future.two"}),
+                    json.dumps(
+                        {"type": "turn.failed", "error": {"message": "terminal failure"}}
+                    ),
+                ]
+            )
+            self.blocking_read_started = False
+
+        async def readline(self) -> bytes:
+            try:
+                return (next(self._lines) + "\n").encode()
+            except StopIteration:
+                self.blocking_read_started = True
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+    stdout = _FailureThenBlockingStdout()
+    mock_proc = make_mock_process([])
+    mock_proc.stdout = stdout
+    observed: list[Any] = []
+
+    async def consume() -> None:
+        async for event in backend.execute(Path("/tmp"), "Fail now"):
+            observed.append(event)
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="terminal failure"):
+            await asyncio.wait_for(consume(), timeout=0.2)
+
+    parser_diagnostics = [
+        event
+        for event in observed
+        if isinstance(event, DiagnosticEvent) and event.code == "codex_parser_coverage"
+    ]
+    assert [event.metadata["unknown_event_types"]["total"] for event in parser_diagnostics] == [1, 2]
+    assert stdout.blocking_read_started is False
+
+
+@pytest.mark.asyncio
+async def test_first_parser_gap_is_observable_before_following_stream_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CodexBackend(model="fixture-model")
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
+
+    class _GapThenBlockingStdout:
+        def __init__(self) -> None:
+            self.sent_gap = False
+
+        async def readline(self) -> bytes:
+            if not self.sent_gap:
+                self.sent_gap = True
+                return b'{"type":"future.before.stall"}\n'
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    mock_proc = make_mock_process([])
+    mock_proc.stdout = _GapThenBlockingStdout()
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(StreamStalledError):
+            async for event in backend.execute(Path("/tmp"), "Stall"):
+                observed.append(event)
+
+    diagnostics = [event for event in observed if isinstance(event, DiagnosticEvent)]
+    assert [event.code for event in diagnostics] == ["codex_parser_coverage"]
+    assert diagnostics[0].metadata["unknown_event_types"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
+    backend = CodexBackend(model="fixture-model")
+    secret_line = (
+        "not-json token=opaque-parser-secret /Users/private-person/.codex/config.toml "
+        + "x" * 500
+    )
+    mock_proc = make_mock_process([secret_line] * 30)
+    mock_proc.returncode = 9
+    observed: list[Any] = []
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="return code 9") as exc_info:
+            async for event in backend.execute(Path("/tmp"), "Fail"):
+                observed.append(event)
+
+    assert isinstance(observed[-1], DiagnosticEvent)
+    assert observed[-1].metadata["non_json_lines"] == 30
+    assert "opaque-parser-secret" not in json.dumps(observed[-1].metadata)
+    message = str(exc_info.value)
+    assert "opaque-parser-secret" not in message
+    assert "/Users/private-person" not in message
+    assert len(message) <= 3_000
+
+
 @pytest.mark.parametrize(
     ("fixture", "expected_substring"),
     [
@@ -1409,6 +1844,31 @@ async def test_codex_preserves_exit_code_and_status_on_results() -> None:
     assert ok.is_error is False
     assert ok.exit_code == 0
     assert ok.status == "completed"
+
+
+class TestDisplayShellCommand:
+    """S1/M5: display variant decodes AND strips the leading cd prefix."""
+
+    def test_display_strips_cd_prefix(self) -> None:
+        from daydream.backends.codex import display_shell_command
+        assert display_shell_command('/bin/zsh -lc "cd /home/user/project && make test"') == "make test"
+
+    def test_display_decodes_nested_quotes(self) -> None:
+        from daydream.backends.codex import display_shell_command
+        cmd = "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'"
+        assert display_shell_command(cmd) == "awk '{print $1}' file.txt"
+
+    def test_display_passthrough_for_non_wrapper(self) -> None:
+        from daydream.backends.codex import display_shell_command
+        assert display_shell_command("ls -la") == "ls -la"
+        assert display_shell_command("") == ""
+
+    def test_raw_and_display_distinct_for_cd_command(self) -> None:
+        """M5: the stored value and the display value are different outputs."""
+        from daydream.backends.codex import _unwrap_shell_command, display_shell_command
+        raw = '/bin/zsh -lc "cd /app && echo hello"'
+        assert _unwrap_shell_command(raw) == "cd /app && echo hello"
+        assert display_shell_command(raw) == "echo hello"
 
 
 @pytest.fixture(autouse=True)
@@ -1617,3 +2077,19 @@ class TestIsolatedChildEnvDarwinPath:
 
         assert codex._isolated_child_env(Path("/work"), Path("/work")) is None  # M7
         assert called == []  # resolver never invoked on the non-clone path
+
+
+@pytest.mark.asyncio
+async def test_issue1124_stored_commands_are_replayable() -> None:
+    """M1-M3: ToolStartEvent.input['command'] is the exact -lc argument (or raw fallback)."""
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_fixture(backend, "Run the commands", "issue1124_unwrap.jsonl")
+    starts = {e.id: e.input["command"] for e in events if isinstance(e, ToolStartEvent)}
+    assert starts["cmd_1"] == "awk '{print $1}' file.txt"
+    assert starts["cmd_2"] == 'echo "hi" and $HOME'
+    assert starts["cmd_3"] == "echo $(date)"
+    assert starts["cmd_4"] == "echo line1\nline2"
+    assert starts["cmd_5"] == "cat <<EOF\nhello\nEOF"
+    assert starts["cmd_6"] == 'python -c "print(1)"'
+    assert starts["cmd_7"] == "/bin/zsh -lc 'unbalanced"
+    assert starts["cmd_8"] == "make test"

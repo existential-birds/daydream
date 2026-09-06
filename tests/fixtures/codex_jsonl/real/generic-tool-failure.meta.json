@@ -1,0 +1,44 @@
+{
+  "capture_sha256_raw": "896389a5da72401e74ee50324bedd745c513cb7468fa5dcb0fbf682e4b125683",
+  "capture_working_directory": "disposable_git_repo",
+  "captured_at_utc": "2026-09-06T02:31:50Z",
+  "cli_version": "0.153.4",
+  "exit_code": 0,
+  "fixture_sanitized": true,
+  "fixture_sha256_sanitized": "718298cad84a6d51375aa5b85d8179830c8899100f2ce9d9db13fbd9705b7cb5",
+  "ordered_public_shape": [
+    "thread.started",
+    "item.completed/error",
+    "turn.started",
+    "item.completed/error",
+    "item.completed/agent_message",
+    "item.completed/agent_message",
+    "turn.completed"
+  ],
+  "private_custom_tool_calls": [
+    {
+      "count": 1,
+      "error_class": "TypeError",
+      "matching_outputs": 1,
+      "name": "exec"
+    }
+  ],
+  "private_rollout_correlated": true,
+  "probe_prompt": "This is a transport-contract probe. You MUST invoke the functions.exec tool exactly once with this exact JavaScript body: const r = await tools.wait({cell_id:\"definitely-missing-cell\",yield_time_ms:250}); text(r); Do not call any other tool. Do not claim success unless you receive the tool output. Afterward report whether the nested wait call was visible to you and include its error category without inventing it.",
+  "public_flags": [
+    "--json",
+    "--sandbox",
+    "read-only",
+    "--enable",
+    "code_mode"
+  ],
+  "public_generic_function_items_exposed": false,
+  "sanitizations": [
+    {
+      "field": "item.message",
+      "occurrences": 1,
+      "reason": "personal_home_path",
+      "replacement": "/Users/[REDACTED_USER]/.codex/config.toml"
+    }
+  ]
+}

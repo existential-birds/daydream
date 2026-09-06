@@ -16,7 +16,9 @@ Contract tests over a real-shape multi-turn Codex JSONL fixture:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -25,6 +27,7 @@ import pytest
 
 from daydream.atif.validator import TrajectoryValidator
 from daydream.backends import MetricsEvent
+from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.codex_replay import make_mock_process_from_fixture
@@ -189,7 +192,6 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
             f"step {cs.step_id}: cached_tokens not positive "
             f"({metrics.cached_tokens})"
         )
-
     # #192: reasoning_output_tokens surfaced via Metrics.extra (vendored
     # Metrics has no dedicated field — D-03 — so the documented extension
     # carrier ``extra`` is used). Fixture's two turns carry 88 and 100.
@@ -216,6 +218,128 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
             f"step {rs.step_id}: reasoning_tokens ({rt}) exceeds "
             f"completion_tokens ({metrics.completion_tokens}) — subset invariant"
         )
+
+
+@pytest.mark.asyncio
+async def test_replayable_shell_commands_survive_codex_to_atif_exactly(
+    tmp_path: Path,
+) -> None:
+    """Decoded shell argv are archived exactly and only syntax-checked, never run."""
+    expected = [
+        'printf "%s\\n" "$HOME"',
+        '''sed -n '1,3p' "a file.txt"''',
+        'printf "%s" "$(uname -s)"',
+        "printf one\nprintf two",
+        "cat <<'EOF'\n$HOME\nEOF",
+    ]
+
+    _, recorder = await _drive_codex_through_recorder(
+        tmp_path,
+        fixture="replayable_shell_commands.jsonl",
+    )
+    archived = [
+        call.arguments["command"]
+        for step in recorder.steps
+        for call in (step.tool_calls or [])
+        if call.function_name == "shell"
+    ]
+
+    assert archived == expected
+    for command in archived:
+        # These bodies use POSIX shell syntax; validate without requiring the
+        # wrapper shell from the capture to be installed on the test host.
+        checked = subprocess.run(
+            ["/bin/sh", "-n", "-c", command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert checked.returncode == 0, checked.stderr
+
+
+@pytest.mark.asyncio
+async def test_codex_diagnostics_survive_atif_validation_and_json_round_trip(
+    tmp_path: Path,
+) -> None:
+    """Conditional transport/parser evidence reaches normalized Step.extra."""
+    await _drive_codex_through_recorder(
+        tmp_path,
+        fixture="parser_coverage_gaps.jsonl",
+    )
+    trajectory_path = tmp_path / "trajectory.json"
+    raw = json.loads(trajectory_path.read_text())
+    diagnostics = [
+        diagnostic
+        for step in raw["steps"]
+        for diagnostic in (step.get("extra") or {}).get("backend_diagnostics", [])
+    ]
+
+    assert [diagnostic["code"] for diagnostic in diagnostics] == [
+        "codex_transport_coverage",
+        "codex_parser_coverage",
+        "codex_parser_coverage",
+    ]
+    assert all(set(diagnostic) == {"code", "message", "metadata"} for diagnostic in diagnostics)
+    assert diagnostics[0]["metadata"]["occurrences"] == 1
+    assert diagnostics[-1]["metadata"]["unknown_event_types"]["total"] == 35
+    serialized = json.dumps(raw)
+    assert "opaque-parser-secret" not in serialized
+    assert "/Users/private-person" not in serialized
+
+    validator = TrajectoryValidator()  # type: ignore[no-untyped-call]
+    assert validator.validate(raw, validate_images=False), validator.get_errors()
+
+
+@pytest.mark.asyncio
+async def test_parser_gap_survives_in_partial_trajectory_before_stream_stall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first gap reaches the recorder before a later blocked read stalls."""
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
+
+    class _GapThenBlockingStdout:
+        def __init__(self) -> None:
+            self.sent_gap = False
+
+        async def readline(self) -> bytes:
+            if not self.sent_gap:
+                self.sent_gap = True
+                return b'{"type":"future.before.stall"}\n'
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    recorder = TrajectoryRecorder(
+        path=tmp_path / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="codex-test-model",
+        session_id="00000000-0000-0000-0000-000000001128",
+    )
+    backend = CodexBackend(model="codex-test-model")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    mock_proc.stdout = _GapThenBlockingStdout()
+
+    async with recorder:
+        with pytest.raises(StreamStalledError):
+            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                with patch(
+                    "daydream.backends._transport.asyncio.create_subprocess_exec",
+                    return_value=mock_proc,
+                ):
+                    async for event in backend.execute(tmp_path, "review"):
+                        invocation.observe(event)
+
+    raw = json.loads((tmp_path / "trajectory.json").read_text())
+    diagnostics = [
+        diagnostic
+        for step in raw["steps"]
+        for diagnostic in (step.get("extra") or {}).get("backend_diagnostics", [])
+    ]
+    assert [diagnostic["code"] for diagnostic in diagnostics] == [
+        "codex_parser_coverage"
+    ]
+    assert diagnostics[0]["metadata"]["unknown_event_types"]["total"] == 1
 
 
 @pytest.mark.asyncio
