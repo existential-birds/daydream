@@ -1009,6 +1009,87 @@ async def test_artifact_session_detaches_routes_and_restores_public_bytes(
     assert artifact_dir_for(work.repo) == source / ".daydream"
 
 
+async def test_artifact_session_preserves_resume_mtimes_across_publication_and_reopen(
+    tmp_path: Path,
+) -> None:
+    from daydream.deep.artifacts import check_deep_artifacts
+
+    source = tmp_path / "source"
+    _init_repo(source)
+    deep = source / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    intent = deep / "intent.md"
+    alternatives = deep / "alternatives.json"
+    key = deep / "diff-key"
+    intent.write_text("intent\n", encoding="utf-8")
+    alternatives.write_text("[]\n", encoding="utf-8")
+    current_diff_sha = "a" * 64
+    key.write_text(current_diff_sha, encoding="ascii")
+
+    key_mtime_ns = 1_700_000_000_000_000_000
+    prerequisite_mtime_ns = key_mtime_ns + 10_000_000_000
+    os.utime(key, ns=(key_mtime_ns, key_mtime_ns))
+    for prerequisite in (intent, alternatives):
+        os.utime(
+            prerequisite,
+            ns=(prerequisite_mtime_ns, prerequisite_mtime_ns),
+        )
+
+    session_id = "mtime-first"
+    canonical: Path
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        live_deep = session.daydream_dir / "deep"
+        assert (live_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
+        assert (live_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
+        check_deep_artifacts(
+            "per-stack",
+            live_deep,
+            current_diff_sha=current_diff_sha,
+        )
+
+        payload = json.dumps(
+            {"session_id": session_id, "trajectory_id": session_id},
+            sort_keys=True,
+        ).encode("utf-8")
+        destination = session.daydream_dir / "runs" / session_id / "trajectory.json"
+        frozen = session.freeze(
+            RunWriteSnapshot(
+                status="complete",
+                cutoff_at="2026-09-06T12:00:00Z",
+                root_trajectory_id=session_id,
+                documents=(
+                    TrajectoryDocumentSnapshot(session_id, destination, payload),
+                ),
+            )
+        )
+        canonical = session.layout.state_root / "canonical"
+        session.finalize_frozen(
+            frozen,
+            disposition=artifact_visibility.ArtifactDisposition.COMPLETE,
+        )
+
+    for copied_deep in (source / ".daydream" / "deep", canonical / ".daydream" / "deep"):
+        assert (copied_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
+        assert (copied_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
+
+    public_deep = source / ".daydream" / "deep"
+    contradictory_mtime_ns = key_mtime_ns - 10_000_000_000
+    os.utime(
+        public_deep / "alternatives.json",
+        ns=(contradictory_mtime_ns, contradictory_mtime_ns),
+    )
+
+    async with open_artifact_session(_work(source), session_id="mtime-second") as session:
+        live_deep = session.daydream_dir / "deep"
+        assert (live_deep / "diff-key").stat().st_mtime_ns == key_mtime_ns
+        assert (live_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
+        check_deep_artifacts(
+            "per-stack",
+            live_deep,
+            current_diff_sha=current_diff_sha,
+        )
+
+
 async def test_artifact_session_uses_stable_source_key_across_ephemeral_repos(
     tmp_path: Path,
 ) -> None:

@@ -1005,7 +1005,8 @@ def _copy_tree(source: Path, destination: Path, entries: tuple[ArtifactManifestE
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         original = source / entry.path
-        content = _read_regular(original, original.lstat())
+        source_metadata = original.lstat()
+        content = _read_regular(original, source_metadata)
         if len(content) != entry.size or hashlib.sha256(content).hexdigest() != entry.sha256:
             raise ArtifactVisibilityError("artifact file changed during copy")
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, entry.mode)
@@ -1013,10 +1014,14 @@ def _copy_tree(source: Path, destination: Path, entries: tuple[ArtifactManifestE
             with os.fdopen(fd, "wb", closefd=False) as handle:
                 handle.write(content)
                 handle.flush()
+                os.fchmod(fd, entry.mode)
+                os.utime(
+                    fd,
+                    ns=(source_metadata.st_atime_ns, source_metadata.st_mtime_ns),
+                )
                 os.fsync(handle.fileno())
         finally:
             os.close(fd)
-        os.chmod(target, entry.mode)
     for entry in reversed(entries):
         if entry.kind == "directory":
             directory = destination / entry.path

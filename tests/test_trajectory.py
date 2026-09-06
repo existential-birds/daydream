@@ -2728,6 +2728,83 @@ async def test_artifact_document_writer_precedes_root_capture_and_is_inherited_b
     assert not recorder.path.exists()
 
 
+async def test_private_dispatch_references_captured_child_by_public_logical_path(
+    tmp_path: Path,
+) -> None:
+    """Private child bytes retain one resolvable public `.daydream` reference."""
+    target = tmp_path / "source"
+    target.mkdir()
+    session_id = "private-dispatch"
+    private_run = tmp_path / "private" / "runs" / session_id
+    written: list[Any] = []
+    captured: list[Any] = []
+
+    def writer(document: Any, status: str) -> None:
+        assert status == "complete"
+        document.path.parent.mkdir(parents=True, exist_ok=True)
+        document.path.write_bytes(document.json_bytes)
+        written.append(document)
+
+    recorder = TrajectoryRecorder(
+        path=private_run / "trajectory.json",
+        run_flow=DaydreamRunFlow.DEEP,
+        target_dir=target,
+        artifact_run_dir=private_run,
+        document_writer=writer,
+        agent_model_name="test",
+        session_id=session_id,
+        on_write=lambda _recorder, snapshot: captured.append(snapshot),
+    )
+    async with recorder:
+        async with trajectory_module.dispatch_scope(
+            recorder,
+            phase=DaydreamPhase.REVIEW,
+            descriptors=["diagram-sequence"],
+        ) as dispatch:
+            assert dispatch is not None
+            async with recorder.fork("diagram-sequence", dispatch=dispatch) as child:
+                async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                    observe_text_and_result(invocation, "child")
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            observe_text_and_result(invocation, "root")
+
+    assert len(captured) == 1
+    snapshot = captured[0]
+    payloads = {
+        document.trajectory_id: json.loads(document.json_bytes)
+        for document in snapshot.documents
+    }
+    root_payload = payloads[session_id]
+    child_payload = payloads[child.trajectory_id]
+    dispatch_ref = dispatch_refs(only_dispatch(root_payload))[0]
+    child_summary = next(
+        summary
+        for summary in root_payload["extra"]["subtrajectories"]
+        if summary["trajectory_id"] == child.trajectory_id
+    )
+    logical_ref = f"runs/{session_id}/trajectories/{child.path.name}"
+
+    assert dispatch_ref["trajectory_path"] == logical_ref
+    assert child_summary["sibling_trajectory_ref"] == logical_ref
+    assert str(private_run) not in logical_ref
+    assert dispatch_ref["trajectory_id"] == child_payload["trajectory_id"]
+    assert dispatch_ref["session_id"] == child_payload["session_id"] == session_id
+    assert child_summary["trajectory_id"] == child_payload["trajectory_id"]
+    child_document = next(
+        document
+        for document in snapshot.documents
+        if document.trajectory_id == child.trajectory_id
+    )
+    assert child_document.path == child.path
+    assert child_document.path.is_relative_to(private_run)
+    assert child.path.read_bytes() == child_document.json_bytes
+    assert [document.trajectory_id for document in written] == [
+        child.trajectory_id,
+        session_id,
+    ]
+    assert not (target / ".daydream" / logical_ref).exists()
+
+
 async def test_artifact_partial_writer_failure_still_delivers_immutable_capture(
     tmp_path: Path,
 ) -> None:

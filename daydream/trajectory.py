@@ -3139,6 +3139,13 @@ class TrajectoryRecorder:
             run_dir = self.target_dir / _DAYDREAM_DIRNAME / _RUNS_SUBDIR / self.session_id
         return run_dir / _TRAJECTORIES_SUBDIR / f"{slug}.json"
 
+    def _logical_child_trajectory_ref(self, child_path: Path) -> str:
+        """Return a child path relative to the stable public ``.daydream`` root."""
+        if self.artifact_run_dir is not None:
+            relative = child_path.relative_to(self.artifact_run_dir)
+            return (Path(_RUNS_SUBDIR) / self.session_id / relative).as_posix()
+        return child_path.relative_to(self.target_dir / _DAYDREAM_DIRNAME).as_posix()
+
     def fork(
         self,
         descriptor: str,
@@ -3156,10 +3163,6 @@ class TrajectoryRecorder:
         """Materialize one identified, start-stamped deterministic dispatch."""
         results: list[ObservationResult] = []
         for completed in dispatch._ordered_completed():
-            try:
-                relative_path = str(completed.path.relative_to(self.target_dir / _DAYDREAM_DIRNAME))
-            except ValueError:
-                relative_path = completed.path.name
             results.append(
                 ObservationResult(
                     content=f"Dispatched to {completed.identity.descriptor}",
@@ -3167,7 +3170,9 @@ class TrajectoryRecorder:
                         SubagentTrajectoryRef(
                             trajectory_id=completed.trajectory_id,
                             session_id=self.session_id,
-                            trajectory_path=relative_path,
+                            trajectory_path=self._logical_child_trajectory_ref(
+                                completed.path
+                            ),
                         )
                     ],
                 )
@@ -3546,10 +3551,7 @@ class _ForkCM:
                     cost_usd=(child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None),
                 )
                 child.parent._folded_fork_totals = True
-                try:
-                    sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))
-                except ValueError:
-                    sibling_ref = child.path.name
+                sibling_ref = child.parent._logical_child_trajectory_ref(child.path)
                 phase = DaydreamPhase.FIX.value
                 for step in child.steps:
                     if step.extra is None:
