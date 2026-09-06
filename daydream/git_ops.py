@@ -1832,8 +1832,30 @@ _SNAPSHOT_GIT_REDIRECTS = frozenset({
     "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES",
     "GIT_PREFIX", "GIT_NAMESPACE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
     "GIT_REPLACE_REF_BASE", "GIT_REFERENCE_BACKEND", "GIT_TEMPLATE_DIR",
-    "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS",
 })
+
+
+def _snapshot_git_exec_path_is_safe() -> bool:
+    """Admit only the exact helper path Git itself exports to hook processes."""
+    inherited = os.environ.get("GIT_EXEC_PATH")
+    if inherited is None:
+        return True
+    if not inherited:
+        return False
+    query_env = dict(os.environ)
+    del query_env["GIT_EXEC_PATH"]
+    try:
+        proc = _run_git(
+            Path.cwd(),
+            ["--exec-path"],
+            timeout=5,
+            retries=0,
+            env_cmd=query_env,
+        )
+    except (GitError, OSError):
+        return False
+    return proc.returncode == 0 and proc.stdout == f"{inherited}\n"
 
 
 def _snapshot_git_environment_is_safe() -> bool:
@@ -1844,28 +1866,32 @@ def _snapshot_git_environment_is_safe() -> bool:
         for name in os.environ
     ):
         return False
-    if not config_names:
-        return True
-    raw_count = os.environ.get("GIT_CONFIG_COUNT", "")
-    if re.fullmatch(r"[0-9]{1,3}", raw_count) is None or int(raw_count) > 256:
-        return False
-    expected = {"GIT_CONFIG_COUNT"}
-    for index in range(int(raw_count)):
-        key_name, value_name = f"GIT_CONFIG_KEY_{index}", f"GIT_CONFIG_VALUE_{index}"
-        expected.update((key_name, value_name))
-        key = os.environ.get(key_name, "").lower()
-        value = os.environ.get(value_name)
-        if value is None:
+    if config_names:
+        raw_count = os.environ.get("GIT_CONFIG_COUNT", "")
+        if re.fullmatch(r"[0-9]{1,3}", raw_count) is None or int(raw_count) > 256:
             return False
-        # Signing policy and ignore-pattern paths cannot redirect storage or
-        # execute Git helpers. Preserve them verbatim, including true signing.
-        # All other config (especially includes, filters and hooks) fails closed.
-        if key == "commit.gpgsign":
-            if value.lower() not in {"true", "false", "yes", "no", "on", "off", "1", "0"}:
+        expected = {"GIT_CONFIG_COUNT"}
+        for index in range(int(raw_count)):
+            key_name = f"GIT_CONFIG_KEY_{index}"
+            value_name = f"GIT_CONFIG_VALUE_{index}"
+            expected.update((key_name, value_name))
+            key = os.environ.get(key_name, "").lower()
+            value = os.environ.get(value_name)
+            if value is None:
                 return False
-        elif key != "core.excludesfile":
+            # Signing policy and ignore-pattern paths cannot redirect storage or
+            # execute Git helpers. Preserve them verbatim, including true signing.
+            # All other config (especially includes, filters and hooks) fails closed.
+            if key == "commit.gpgsign":
+                if value.lower() not in {
+                    "true", "false", "yes", "no", "on", "off", "1", "0",
+                }:
+                    return False
+            elif key != "core.excludesfile":
+                return False
+        if config_names != expected:
             return False
-    return config_names == expected
+    return _snapshot_git_exec_path_is_safe()
 
 
 def prepare_independent_snapshot(
@@ -1878,10 +1904,11 @@ def prepare_independent_snapshot(
     owns the newly created destination and its cleanup on every failure path.
 
     Inherited Git repository/diff/trace and arbitrary configuration overrides
-    are unsupported, even when empty. Only well-formed indexed signing-policy
-    and ignore-file configuration passes through unchanged. Refuse before any
-    subprocess or mutation rather than clearing caller settings (including
-    hooks) or returning storage that only works in the parent environment.
+    are unsupported, even when empty. Only well-formed indexed signing-policy,
+    ignore-file configuration, and Git's exact default executable-helper path
+    pass through unchanged. Refuse before any snapshot subprocess or mutation
+    rather than clearing caller settings (including hooks) or returning storage
+    that only works in the parent environment.
     """
     if not _snapshot_git_environment_is_safe():
         raise SnapshotPreparationError(

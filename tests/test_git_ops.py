@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -236,6 +237,96 @@ def test_independent_snapshot_preserves_safe_config_and_independent_objects(
     _git(snapshot.repo, "fsck", "--full", "--no-dangling")
     assert any((snapshot.repo / ".git" / "objects").rglob("*.pack"))
     assert git_ops.object_alternates(snapshot.repo, strict=True) == ()
+
+
+def test_independent_snapshot_accepts_git_exported_default_exec_path_in_pre_push(
+    tmp_path: Path,
+) -> None:
+    """A real pre-push hook may pass Git's own helper path to the snapshot."""
+    repo = _make_repo_with_main(tmp_path)
+    remote = _bare_remote(tmp_path / "remote.git")
+    _git(repo, "remote", "add", "origin", str(remote))
+    destination = tmp_path / "snapshot"
+    observed = tmp_path / "hook-exec-path"
+    probe = tmp_path / "prepare-in-hook.py"
+    project_root = Path(__file__).resolve().parents[1]
+    probe.write_text(
+        "import os, sys\n"
+        f"sys.path.insert(0, {str(project_root)!r})\n"
+        "from pathlib import Path\n"
+        "from daydream import git_ops\n"
+        "before = dict(os.environ)\n"
+        f"source = Path({str(repo)!r})\n"
+        f"destination = Path({str(destination)!r})\n"
+        "git_ops.prepare_independent_snapshot(\n"
+        "    source, destination, include_untracked=False,\n"
+        ")\n"
+        "if dict(os.environ) != before:\n"
+        "    raise RuntimeError('snapshot preparation changed the hook environment')\n"
+        f"Path({str(observed)!r}).write_text(os.environ['GIT_EXEC_PATH'], encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "while IFS= read -r git_env_var; do\n"
+        "    unset \"$git_env_var\"\n"
+        "done < <(git rev-parse --local-env-vars)\n"
+        f"exec {shlex.quote(sys.executable)} {shlex.quote(str(probe))}\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    before = dict(os.environ)
+    push_env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("GIT_CONFIG")
+    }
+    clean_exec_env = dict(push_env)
+    clean_exec_env.pop("GIT_EXEC_PATH", None)
+    expected_exec_path = subprocess.run(
+        ["git", "--exec-path"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=clean_exec_env,
+    ).stdout.removesuffix("\n")
+
+    pushed = subprocess.run(
+        ["git", "push", "origin", "main"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=push_env,
+    )
+
+    assert pushed.returncode == 0, pushed.stdout + pushed.stderr
+    assert dict(os.environ) == before
+    assert observed.read_text(encoding="utf-8") == expected_exec_path
+    assert _git(destination, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
+    _git(destination, "fsck", "--full", "--no-dangling")
+    assert git_ops.object_alternates(destination, strict=True) == ()
+
+
+def test_independent_snapshot_rejects_exec_path_when_default_query_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    destination = tmp_path / "snapshot"
+    monkeypatch.setenv("GIT_EXEC_PATH", "/trusted-looking/git-core")
+    monkeypatch.setenv("PATH", str(tmp_path / "missing-bin"))
+    before = dict(os.environ)
+
+    with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git"):
+        git_ops.prepare_independent_snapshot(
+            repo, destination, include_untracked=False,
+        )
+
+    assert not destination.exists()
+    assert dict(os.environ) == before
 
 
 def test_independent_snapshot_unborn_detection_rejects_corrupt_head(tmp_path: Path) -> None:
