@@ -624,6 +624,33 @@ def test_validate_rechecks_marked_snapshot_source_when_mirror_is_present(tmp_pat
     assert "feature.py" not in label
 
 
+def test_validate_partial_mirror_reports_restore_guidance_without_mutation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real CLI names the retained mirror and leaves its repair to the user."""
+    import shutil
+
+    from daydream import cli as top_cli
+
+    parent = tmp_path / "parent with spaces"
+    parent.mkdir()
+    root = _write_curated_workspace(parent, "ready")
+    mirror = root / "cache" / "repository.git"
+    shutil.rmtree(mirror / "objects")
+    (mirror / "objects").mkdir()
+    sentinel = mirror / "restore-me"
+    sentinel.write_text("operator recovery marker\n")
+
+    with pytest.raises(SystemExit) as exc:
+        top_cli.main(["benchmark", "validate", str(root)])
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert str(root) in output
+    assert "cache/repository.git" in output
+    assert "restore" in output.lower()
+    assert sentinel.read_text() == "operator recovery marker\n"
+
+
 def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path: Path) -> None:
     """The marker plus offline bundle remains sufficient after cache cleanup."""
     import shutil

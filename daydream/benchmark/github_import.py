@@ -1807,6 +1807,17 @@ def _retired_snapshot_bundles(
             raw = storage.load_yaml_strict(
                 storage.resolve_authoring_path(root, row["case_file"])
             )
+            prior_snapshot = raw.get("snapshot") if isinstance(raw, dict) else None
+            if (
+                isinstance(prior_snapshot, dict)
+                and prior_snapshot.get("status") == "ready"
+                and "base_resolution" not in prior_snapshot
+            ):
+                raise storage.WorkspaceCorrupt(
+                    f"{root}: prior ready case {case_id} is missing snapshot.base_resolution; "
+                    "run `daydream benchmark upgrade <workspace>` for this workspace "
+                    "before refreshing"
+                )
             try:
                 old_docs[case_id] = schema.CaseDocument.model_validate(
                     schema._schema_ready(raw)

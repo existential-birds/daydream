@@ -5,11 +5,11 @@ Issue #806 hardened the authoring schemas and made ``finding_id`` case-scoped
 :func:`daydream.benchmark.schema.derive_finding_id`, gated on
 ``CaseDocument.schema_version == 2`` so pre-change v1 workspaces stay loadable.
 This module deterministically re-derives ``finding_id`` for every v1 case and
-bumps its ``schema_version`` to 2, mutating only those two fields and never
-touching authored content. It also repairs legacy snapshot provenance:
-imported snapshots preserve their sole base candidate, while ready snapshots
-gain the merge-base marker only after local Git objects prove their requested
-tip, merge base, and trees.
+bumps its ``schema_version`` to 2 without touching authored content. It also
+repairs the legacy producer's draft/unreplayable state pairing and snapshot
+provenance: imported snapshots preserve their sole base candidate, while ready
+snapshots gain the merge-base marker only after local Git objects prove their
+requested tip, merge base, and trees.
 
 Invalid data is **never** silently rewritten: a case that fails to load or
 validate is surfaced in ``UpgradeReport.errors`` and left byte-unchanged.
@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from daydream import git_ops
-from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark import curation, schema, snapshot, storage
 
 
 @dataclass
@@ -108,6 +108,27 @@ def _repair_ready_base_provenance(root: Path, doc: dict[str, Any]) -> bool:
     return True
 
 
+def _repair_legacy_unreplayable_curation(doc: dict[str, Any]) -> bool:
+    """Repair the legacy producer's draft/unreplayable state pairing."""
+    raw_snapshot = doc.get("snapshot")
+    raw_curation = doc.get("curation")
+    if (
+        not isinstance(raw_snapshot, dict)
+        or raw_snapshot.get("status") != "unreplayable"
+        or not isinstance(raw_curation, dict)
+        or raw_curation.get("state") != "draft"
+    ):
+        return False
+    repaired = dict(raw_curation)
+    repaired["state"] = "unreplayable"
+    repaired["snapshot_attested"] = False
+    repaired["clean_attested"] = False
+    repaired["gold_status"] = "findings" if repaired.get("findings") else None
+    curation._invalidate_task_spec_approval(repaired)
+    doc["curation"] = repaired
+    return True
+
+
 def _upgrade_case(raw: dict[str, Any], case_id: str) -> tuple[dict[str, Any], int]:
     """Return a copy of *raw* with case-scoped finding ids and schema_version 2.
 
@@ -136,10 +157,12 @@ def _upgrade_case(raw: dict[str, Any], case_id: str) -> tuple[dict[str, Any], in
 def migrate_workspace(root: Path, *, dry_run: bool = False) -> UpgradeReport:
     """Deterministically upgrade every v1 case in the workspace to v2.
 
-    Recomputes case-scoped ``finding_id`` and bumps ``schema_version`` to 2,
-    writing changed cases atomically through ``storage.Transaction``. When
-    *dry_run* is True the report is computed without writing. Invalid cases are
-    recorded in ``report.errors`` and left byte-unchanged.
+    Recomputes case-scoped ``finding_id``, bumps ``schema_version`` to 2, and
+    repairs the legacy producer's draft/unreplayable curation pairing, writing
+    changed cases atomically through ``storage.Transaction``. When *dry_run* is
+    True the report is computed without writing. Every unchanged v2 case is
+    still validated; invalid cases are recorded in ``report.errors`` and left
+    byte-unchanged.
 
     The migration's writes run under the workspace lock so they serialize
     against concurrent curators — otherwise a curator mutation and a migration
@@ -167,15 +190,16 @@ def _migrate_workspace_unlocked(root: Path, *, dry_run: bool) -> UpgradeReport:
         try:
             raw = storage.load_yaml_strict(root / case_file)
             current = raw.get("schema_version")
+            changed = True
             if current == 2:
                 # v2 repair pass: preserve an imported snapshot's sole base
-                # candidate or prove an unmarked ready snapshot. A current v2
-                # case stays byte-unchanged and is not reported.
+                # candidate, prove an unmarked ready snapshot, or repair the
+                # one legacy producer state pairing. A current valid v2 case
+                # stays byte-unchanged and is not reported.
                 repaired = dict(raw)
                 changed = _backfill_requested_base_sha(repaired)
                 changed = _repair_ready_base_provenance(root, repaired) or changed
-                if not changed:
-                    continue
+                changed = _repair_legacy_unreplayable_curation(repaired) or changed
                 new_raw, recomputed = repaired, 0
             else:
                 if current != 1:
@@ -184,9 +208,12 @@ def _migrate_workspace_unlocked(root: Path, *, dry_run: bool) -> UpgradeReport:
                     )
                 new_raw, recomputed = _upgrade_case(raw, case_id)
                 _repair_ready_base_provenance(root, new_raw)
+                _repair_legacy_unreplayable_curation(new_raw)
             # strip the persisted audit field for validation (curation pattern),
             # but keep it in the written output — authored content is preserved.
             schema.CaseDocument.model_validate(schema._schema_ready(new_raw))
+            if not changed:
+                continue
             # Every staged case is written: the v1 schema_version bump is
             # unconditional, and a v2 repair is a real backfill.
             upgrades.append(CaseUpgrade(case_id=case_id, finding_ids_recomputed=recomputed,

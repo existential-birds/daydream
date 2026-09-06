@@ -12,6 +12,7 @@ origin (no network).
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1518,6 +1519,96 @@ def test_refresh_demotes_clean_draft_when_historical_head_leaves_pr_scope(
         top_cli.main(["benchmark", "validate", str(ws)])
     assert validate_exit.value.code == 2
     assert "unreplayable snapshot reasons: base_drift" in capsys.readouterr().out
+
+
+def test_explicit_head_path_probe_git_failure_isolated_to_that_case(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real git diff failure is a typed case result, not a whole-PR abort."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "git shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = diff ] && [ \"$2\" = --name-status ]; then\n"
+        "  echo 'injected path inventory failure' >&2\n"
+        "  exit 88\n"
+        "fi\n"
+        "exec \"$DAYDREAM_TEST_REAL_GIT\" \"$@\"\n"
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+    manifest = load_yaml_strict(ws / "benchmark.yaml")
+    assert manifest["pull_requests"][0]["import_state"] == "fetched"
+    explicit = load_yaml_strict(ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml")
+    final = load_yaml_strict(ws / f"cases/pr-000101-{final_sha[:12]}.yaml")
+    assert explicit["snapshot"]["status"] == "unreplayable"
+    assert explicit["snapshot"]["error"]["reason"] == "bundle_failure"
+    assert "injected path inventory failure" in explicit["snapshot"]["error"]["detail"]
+    assert final["snapshot"]["status"] == "ready"
+
+
+def test_refresh_legacy_ready_snapshot_requires_upgrade_before_retirement(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """Retirement names the upgrade needed for a pre-marker ready case."""
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "workspace with spaces"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+
+    explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
+    prior = load_yaml_strict(explicit_path)
+    prior["snapshot"].pop("base_resolution")
+    explicit_path.write_text(yaml.safe_dump(prior, sort_keys=False))
+    prior_bytes = explicit_path.read_bytes()
+    prior_bundle = ws / prior["snapshot"]["bundle_file"]
+
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": base_tip}
+    header["head"] = {"ref": "feature", "sha": final_sha}
+    header["changed_files"] = 1
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101/files", [{"status": "added", "filename": "feature.py"}]
+    )
+
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
+    ) == 1
+    entry = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    assert entry["import_state"] == "fetched"
+    message = entry["latest_error"]["message"]
+    assert "daydream benchmark upgrade <workspace>" in message
+    assert str(ws) in message
+    assert "base_resolution" in message
+    assert explicit_path.read_bytes() == prior_bytes
+    assert prior_bundle.exists()
 
 
 def test_bundle_retirement_preserves_a_ready_shared_reference(

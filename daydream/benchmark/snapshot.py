@@ -857,7 +857,12 @@ def freeze_one(
         return unreplayable(degen, f"no real code change between base and head ({degen})")
 
     if policy == "explicit_head":
-        extra_paths = sorted(changed_paths(m, base, head_sha) - pr_changed_files)
+        try:
+            extra_paths = sorted(changed_paths(m, base, head_sha) - pr_changed_files)
+        except git_ops.GitError as exc:
+            return unreplayable(
+                "bundle_failure", f"snapshot path-inventory probe failed: {exc}"
+            )
         if extra_paths:
             preview = ", ".join(repr(path) for path in extra_paths[:20])
             suffix = "" if len(extra_paths) <= 20 else f", and {len(extra_paths) - 20} more"

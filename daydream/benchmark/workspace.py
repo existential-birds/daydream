@@ -515,7 +515,8 @@ def _verify_snapshot_source_provenance(
             )
         except git_ops.GitError as exc:
             raise WorkspaceCorrupt(
-                f"{root}: case {case.case_id} snapshot source provenance cannot be resolved"
+                f"{root}: case {case.case_id} snapshot source provenance cannot be resolved "
+                "from cache/repository.git; restore that mirror before retrying"
             ) from exc
         if resolved_base != snapshot.original_base_sha:
             raise WorkspaceCorrupt(
@@ -523,7 +524,8 @@ def _verify_snapshot_source_provenance(
             )
         if not isinstance(trees, tuple):
             raise WorkspaceCorrupt(
-                f"{root}: case {case.case_id} snapshot source provenance object missing"
+                f"{root}: case {case.case_id} snapshot source provenance object is missing "
+                "from cache/repository.git; restore that mirror before retrying"
             )
         base_tree, head_tree = trees
         if base_tree != snapshot.base_tree_sha or head_tree != snapshot.head_tree_sha:
