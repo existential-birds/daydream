@@ -262,6 +262,77 @@ def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
     assert not (ws / "cache" / "harbor-build-stage").exists()
 
 
+@pytest.mark.parametrize("digest", [None, "PRIVATE_DIGEST_SENTINEL"])
+def test_real_cli_rejects_corrupt_approval_digest_without_disclosure_or_mutation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    digest: str | None,
+) -> None:
+    import importlib.metadata
+
+    import yaml
+
+    from daydream import cli as top_cli
+    from daydream.benchmark.storage import load_yaml_strict
+    from tests.test_benchmark_workspace import _write_curated_workspace
+
+    ws = _write_curated_workspace(tmp_path / "malformed approval workspace", "ready")
+    wheel = tmp_path / f"daydream-{importlib.metadata.version('daydream')}-py3-none-any.whl"
+    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    with pytest.raises(SystemExit) as built:
+        top_cli.main(["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)])
+    assert built.value.code == 0
+    assert _tree_bytes(ws / "harbor")
+    capsys.readouterr()
+
+    case_path = next((ws / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    raw["curation"]["task_spec_sha256"] = digest
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    before = _tree_bytes(ws)
+    git_before = _git_states(tmp_path)
+
+    commands = [
+        ["benchmark", "status", str(ws)],
+        ["benchmark", "validate", str(ws)],
+        ["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)],
+    ]
+    for command in commands:
+        with pytest.raises(SystemExit) as result:
+            top_cli.main(command)
+        assert result.value.code == 1
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "PRIVATE_DIGEST_SENTINEL" not in output
+        assert "Traceback" not in output
+        assert _tree_bytes(ws) == before
+        assert _git_states(tmp_path) == git_before
+
+
+def test_real_cli_validate_distinguishes_recovery_corruption_without_disclosure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from daydream import cli as top_cli
+    from tests.test_benchmark_workspace import _write_curated_workspace
+
+    ws = _write_curated_workspace(tmp_path / "corrupt journal workspace", "ready")
+    residue = ws / "transactions" / "PRIVATE_JOURNAL_SENTINEL"
+    residue.write_bytes(b"private unknown transaction residue\n")
+    before = _tree_bytes(ws)
+
+    with pytest.raises(SystemExit) as result:
+        top_cli.main(["benchmark", "validate", str(ws)])
+
+    assert result.value.code == 1
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "workspace recovery failed" in output
+    assert "invalid benchmark.yaml" not in output
+    assert "PRIVATE_JOURNAL_SENTINEL" not in output
+    assert "private unknown transaction residue" not in output
+    assert _tree_bytes(ws) == before
+
+
 def test_real_cli_calibration_treats_current_and_stale_approval_identically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

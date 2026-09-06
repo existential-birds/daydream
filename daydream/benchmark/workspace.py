@@ -265,6 +265,13 @@ def validate_workspace(root: Path) -> tuple[int, str]:
     with WorkspaceLock(root):
         try:
             recover_startup(root)
+        except Exception:  # recovery diagnostics must not disclose journal contents
+            return (
+                classify_validation(corrupt=True, ready=False, incomplete=False),
+                f"corrupt: {root}: workspace recovery failed",
+            )
+
+        try:
             manifest = load_benchmark_manifest(root).model
         except Exception:  # schema/checksum/unreadable all map to corruption
             return (

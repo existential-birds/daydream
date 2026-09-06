@@ -979,6 +979,11 @@ class Curation(BaseModel):
     case_exclusion: CaseExclusion | None = None
     task_spec_sha256: str | None = None
 
+    @field_validator("task_spec_sha256")
+    @classmethod
+    def _approved_spec_digest(cls, value: str | None) -> str | None:
+        return _hex64(value) if value is not None else None
+
     @model_validator(mode="after")
     def _consistent(self) -> "Curation":
         if self.case_exclusion is not None and self.state != "excluded":
