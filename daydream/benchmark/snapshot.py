@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, overload
+from typing import AbstractSet, Any, Literal, NamedTuple, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -221,6 +221,56 @@ def _nul_fields(stdout: str | bytes) -> list[str]:
     """
     stdout = stdout if isinstance(stdout, bytes) else stdout.encode()
     return [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
+
+
+def changed_paths(mirror_repo: Path, base_sha: str, head_sha: str) -> frozenset[str]:
+    """Return every old/new path in a strict NUL-framed Git tree diff."""
+    proc = git_ops._run_git(
+        mirror_repo,
+        ["diff", "--name-status", "-z", "-M", base_sha, head_sha],
+        retries=0,
+        capture_bytes=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        stderr = (
+            proc.stderr.decode("utf-8", errors="replace")
+            if isinstance(proc.stderr, bytes)
+            else proc.stderr
+        )
+        raise git_ops.GitError(f"git diff --name-status failed: {stderr.strip()}")
+    raw = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+    if not raw:
+        return frozenset()
+    if not raw.endswith(b"\0"):
+        raise git_ops.GitError("git diff --name-status returned a truncated NUL record")
+    fields = raw[:-1].split(b"\0")
+    if any(field == b"" for field in fields):
+        raise git_ops.GitError("git diff --name-status returned an empty field")
+
+    paths: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if status[:1] in (b"R", b"C"):
+            if (
+                len(status) < 2
+                or not status[1:].isdigit()
+                or int(status[1:]) > 100
+                or index + 2 >= len(fields)
+            ):
+                raise git_ops.GitError("git diff --name-status returned a malformed rename/copy record")
+            record_paths = fields[index + 1:index + 3]
+            index += 3
+        elif status in (b"A", b"D", b"M", b"T", b"U", b"X", b"B"):
+            if index + 1 >= len(fields):
+                raise git_ops.GitError("git diff --name-status returned a malformed one-path record")
+            record_paths = fields[index + 1:index + 2]
+            index += 2
+        else:
+            raise git_ops.GitError("git diff --name-status returned an unsupported status record")
+        paths.update(path.decode("utf-8", errors="surrogateescape") for path in record_paths)
+    return frozenset(paths)
 
 
 def _classify_diff(name_status: str | bytes, numstat: str | bytes) -> AnchorDiff:
@@ -710,6 +760,7 @@ def freeze_one(
     head_sha: str,
     policy: str,
     requested_head: str,
+    pr_changed_files: AbstractSet[str],
     origin_url: str | None = None,
 ) -> tuple[dict[str, Any], bytes | None]:
     """Freeze one requested head into a ``(ready|unreplayable, bundle_bytes)`` pair.
@@ -805,6 +856,16 @@ def freeze_one(
     if degen is not None:
         return unreplayable(degen, f"no real code change between base and head ({degen})")
 
+    if policy == "explicit_head":
+        extra_paths = sorted(changed_paths(m, base, head_sha) - pr_changed_files)
+        if extra_paths:
+            preview = ", ".join(repr(path) for path in extra_paths[:20])
+            suffix = "" if len(extra_paths) <= 20 else f", and {len(extra_paths) - 20} more"
+            return unreplayable(
+                "base_drift",
+                f"snapshot contains {len(extra_paths)} path(s) outside PR inventory: {preview}{suffix}",
+            )
+
     # 7) canonical diff + deterministic bundle + offline validation.
     #    The bundle is built under the private scratch area (never ``snapshots/<case>``)
     #    and cleaned up after its bytes are captured, so the final ``snapshots/`` path is
@@ -825,6 +886,7 @@ def freeze_one(
 
     ready = {
         "status": "ready",
+        "base_resolution": "merge_base_v1",
         "policy": policy,
         "requested_head": requested_head,
         # original_base_sha is the true merge base of the selected base tip and

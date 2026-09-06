@@ -1630,6 +1630,10 @@ def _case_materialize(
             curation = dict(prior_curations[case_id])
         if root is not None and origin_url is not None and base_sha and head_sha:
             policy = "final_pr_head" if head_token == "final" else "explicit_head"
+            if policy == "explicit_head" and pull_request.changed_files is None:
+                raise git_ops.GitError(
+                    f"PR {number} explicit-head freeze requires a complete changed-files inventory"
+                )
             snapshot_doc, bundle_bytes = snapshot.freeze_one(
                 root,
                 repo_slug,
@@ -1638,6 +1642,7 @@ def _case_materialize(
                 head_sha=head_sha,
                 policy=policy,
                 requested_head=head_token,
+                pr_changed_files=frozenset(pull_request.changed_files or ()),
                 origin_url=origin_url,
             )
             if snapshot_doc.get("status") == "ready" and bundle_bytes is not None:
@@ -1658,6 +1663,12 @@ def _case_materialize(
                     f"PR {number} freeze of curated case {case_id} is unreplayable "
                     f"({error.get('reason')}): {error.get('detail')}"
                 )
+            elif snapshot_doc.get("status") == "unreplayable" and curation.get("state") != "excluded":
+                curation["state"] = "unreplayable"
+                curation["snapshot_attested"] = False
+                curation["clean_attested"] = False
+                curation["gold_status"] = "findings" if curation.get("findings") else None
+                cu._invalidate_task_spec_approval(curation)
             # Strict authoring anchors: derived from the authenticated mirror
             # (the same one the freeze just populated) immediately before
             # projection. Derivation mutates the typed doc's evidence records
@@ -2033,7 +2044,19 @@ def _import_one_pr(
     prior_sig, prior_task_sig, prior_curations, prior_candidates, import_file, prior_pinned, \
         prior_policy, prior_facts, prior_requested_heads = _prior_import_state(root, raw, number)
     try:
-        doc = fetch_and_normalize(root, repo, number)
+        # Refresh/re-import never orphans a previously pinned case. The same
+        # union also decides whether a complete PR-file inventory is required:
+        # a newly final-only refresh must still protect a retained explicit head.
+        materialize_heads = requested_heads
+        if prior_requested_heads:
+            materialize_heads = list(dict.fromkeys([*prior_requested_heads, *requested_heads]))
+        include_changed_files = any(head != "final" for head in materialize_heads)
+        doc = fetch_and_normalize(
+            root,
+            repo,
+            number,
+            include_changed_files=include_changed_files,
+        )
         # Head-immutable task input: an existing final_pr_head case pins the
         # refreshed doc's head to its snapshot.original_head_sha, so a live
         # head advance neither re-anchors the case nor flips the task-input
@@ -2132,9 +2155,6 @@ def _import_one_pr(
         # Refresh/re-import never orphans a previously pinned case: materialize
         # the union of the prior ledger heads and the newly-requested heads so
         # _stamp_fetched's cases[] rewrite keeps every curated case indexed.
-        materialize_heads = requested_heads
-        if prior_requested_heads:
-            materialize_heads = list(dict.fromkeys([*prior_requested_heads, *requested_heads]))
         cases, bundle_rels = _case_materialize(
             doc, number, materialize_heads, import_file, import_sha256,
             root=root, repo_slug=repo, origin_url=origin_url,
@@ -2264,6 +2284,8 @@ def fetch_and_normalize(
     root: Path,
     owner_repo: str,
     number: int,
+    *,
+    include_changed_files: bool = False,
 ) -> schema.ImportDocument:
     """Fetch one PR's full evidence set through REST and normalize it.
 
@@ -2284,6 +2306,12 @@ def fetch_and_normalize(
     silent default.
     """
     header = _fetch_with_retry(root, owner_repo, number)
+    changed_files = None
+    if include_changed_files:
+        changed_files = _normalize_changed_files(
+            header,
+            _rest(root, f"repos/{owner_repo}/pulls/{number}/files"),
+        )
 
     review_records = _rest(root, f"repos/{owner_repo}/pulls/{number}/reviews")
     inline_records = [_evidence_from_inline(raw) for raw in _rest(root, f"repos/{owner_repo}/pulls/{number}/comments")]
@@ -2319,6 +2347,7 @@ def fetch_and_normalize(
         "merged_at": header.get("merged_at"),
         "closed_at": header.get("closed_at"),
         "author": _as_author(header),
+        "changed_files": changed_files,
     }
     import_doc = {
         "schema_version": 1,
@@ -2336,3 +2365,51 @@ def fetch_and_normalize(
             },
         }
     )
+
+
+def _normalize_changed_files(header: dict[str, Any], rows: list[Any]) -> list[str]:
+    """Return a complete canonical PR path inventory or fail closed."""
+    expected = header.get("changed_files")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+        raise git_ops.GitError("PR changed_files count is missing or malformed")
+    if expected > 3000:
+        raise git_ops.GitError(
+            f"PR changed_files count {expected} exceeds the 3000-file API inventory limit"
+        )
+    if len(rows) != expected:
+        raise git_ops.GitError(
+            f"PR changed_files inventory count mismatch: header={expected}, rows={len(rows)}"
+        )
+
+    current_names: set[str] = set()
+    all_names: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise git_ops.GitError(f"PR changed_files row {index} is not an object")
+        try:
+            current = schema.exact_git_tree_path(row.get("filename"))
+        except ValueError as exc:
+            raise git_ops.GitError(f"PR changed_files row {index} has invalid filename: {exc}") from exc
+        if current in current_names:
+            raise git_ops.GitError(f"PR changed_files inventory repeats filename {current!r}")
+        current_names.add(current)
+        all_names.add(current)
+
+        status = row.get("status")
+        previous = row.get("previous_filename")
+        if status in ("renamed", "copied") and previous is None:
+            raise git_ops.GitError(
+                f"PR changed_files {status} row {index} is missing previous_filename"
+            )
+        if status not in ("renamed", "copied") and previous is not None:
+            raise git_ops.GitError(
+                f"PR changed_files row {index} has unexpected previous_filename"
+            )
+        if previous is not None:
+            try:
+                all_names.add(schema.exact_git_tree_path(previous))
+            except ValueError as exc:
+                raise git_ops.GitError(
+                    f"PR changed_files row {index} has invalid previous_filename: {exc}"
+                ) from exc
+    return sorted(all_names)

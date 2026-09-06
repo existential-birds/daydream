@@ -291,6 +291,13 @@ def validate_workspace(root: Path) -> tuple[int, str]:
         except WorkspaceCorrupt as exc:
             return (classify_validation(corrupt=True, ready=False, incomplete=False), f"corrupt: {exc}")
 
+    reasons = sorted(
+        {
+            doc.snapshot.error.reason
+            for doc in docs.values()
+            if isinstance(doc.snapshot, schema.SnapshotUnreplayable)
+        }
+    )
     ready = resolved and state == "ready"
     if ready:
         label = "ready"
@@ -298,6 +305,8 @@ def validate_workspace(root: Path) -> tuple[int, str]:
         label = "incomplete: repository identity unresolved"
     else:
         label = f"incomplete: workspace state {state}"
+    if reasons:
+        label += f"; unreplayable snapshot reasons: {', '.join(reasons)}"
     return (classify_validation(ready=ready, incomplete=not ready, corrupt=False), label)
 
 
@@ -308,10 +317,11 @@ def _derived_state(
 
     Loading each indexed case document with the shared model-gated loader,
     resolving every indexed authoring file exactly once, and verifying each
-    fetched import's on-disk sha256 plus each ``ready`` snapshot's bundle
-    sha256 keeps the two read-only call paths on one rule, so a
-    state/resolution rule can't diverge between them. An unreadable/invalid
-    case or a checksum mismatch surfaces as :class:`WorkspaceCorrupt`.
+    fetched import's on-disk sha256, each ``ready`` snapshot's bundle fidelity,
+    and (when retained) local source-mirror provenance keeps the two read-only
+    call paths on one rule, so a state/resolution rule can't diverge between
+    them. An unreadable/invalid case or failed proof surfaces as
+    :class:`WorkspaceCorrupt`.
     """
     if docs is None:
         docs = load_case_documents(root, manifest)
@@ -330,6 +340,7 @@ def _derived_state(
     paths = _resolved_authoring_paths(root, manifest, docs)
     _verify_import_checksums(root, manifest, paths)
     _verify_snapshot_checksums(root, manifest, docs, paths)
+    _verify_snapshot_source_provenance(root, manifest, docs)
     _verify_cross_document(root, manifest, docs, imports=imports)
     _verify_duplicate_inodes(root, paths)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
@@ -420,7 +431,10 @@ def _verify_snapshot_checksums(
     synthetic reachable commits, root base, head-parented-on-base, tree IDs
     and the canonical diff digest. A fidelity failure is corruption (exit 1),
     never curatable staleness; only a checksum-restamped tampered bundle
-    passes the sha256 gate yet still fails here.
+    passes the sha256 gate yet still fails here. Source-commit provenance is
+    the separate, local-only check in
+    :func:`_verify_snapshot_source_provenance`; this helper owns the portable
+    self-contained bundle contract.
     """
     for case in manifest.cases:
         snapshot = docs[case.case_file].snapshot
@@ -467,6 +481,55 @@ def _verify_snapshot_checksums(
                 f"{root}: case {case.case_id} snapshot bundle fails offline-clone "
                 f"fidelity: {exc}"
             ) from exc
+
+
+def _verify_snapshot_source_provenance(
+    root: Path,
+    manifest: BenchmarkManifest,
+    docs: dict[str, CaseDocument],
+) -> None:
+    """Re-attest ready snapshot commit linkage from the local mirror when present.
+
+    The ready marker records that the merge-base algorithm was already proven.
+    A retained authoring mirror lets status/validate repeat that proof without
+    network access.  Once disposable cache is cleaned, the required marker and
+    offline bundle-fidelity check remain the portable contract.
+    """
+    mirror = snapshot_mod.mirror(root)
+    if not mirror.exists():
+        return
+    for case in manifest.cases:
+        snapshot = docs[case.case_file].snapshot
+        if not isinstance(snapshot, schema.SnapshotReady):
+            continue
+        try:
+            resolved_base = snapshot_mod.resolve_original_base(
+                mirror,
+                snapshot.requested_base_sha,
+                snapshot.original_head_sha,
+            )
+            trees = snapshot_mod.resolve_trees(
+                mirror,
+                snapshot.original_base_sha,
+                snapshot.original_head_sha,
+            )
+        except git_ops.GitError as exc:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot source provenance cannot be resolved"
+            ) from exc
+        if resolved_base != snapshot.original_base_sha:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot source provenance merge-base mismatch"
+            )
+        if not isinstance(trees, tuple):
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot source provenance object missing"
+            )
+        base_tree, head_tree = trees
+        if base_tree != snapshot.base_tree_sha or head_tree != snapshot.head_tree_sha:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot source provenance tree mismatch"
+            )
 
 
 def _load_import_document(root: Path, import_file: str) -> ImportDocument:
@@ -695,9 +758,10 @@ def _case_snapshot_summaries(
     """Per-case snapshot summary for ``status``: snapshot state + frozen head.
 
     For each indexed case, loads the case through the shared model-gated
-    loader and reports its snapshot ``status`` and the frozen head prefix
-    (``original_head_sha[:12]``) when present. An unreadable/invalid case
-    surfaces as :class:`WorkspaceCorrupt` (shared with the validate path).
+    loader and reports its snapshot ``status``, the frozen head prefix
+    (``original_head_sha[:12]``) when present, and the typed failure reason for
+    unreplayable snapshots. An unreadable/invalid case surfaces as
+    :class:`WorkspaceCorrupt` (shared with the validate path).
     """
     if docs is None:
         docs = load_case_documents(root, manifest)
@@ -706,11 +770,17 @@ def _case_snapshot_summaries(
         doc = docs[case.case_file]
         status = doc.snapshot.status or "imported"
         head = doc.snapshot.original_head_sha or ""
+        error_reason = (
+            doc.snapshot.error.reason
+            if isinstance(doc.snapshot, schema.SnapshotUnreplayable)
+            else ""
+        )
         summaries.append(
             {
                 "case_id": case.case_id,
                 "snapshot_status": status,
                 "head_prefix": head[:12],
+                "error_reason": error_reason,
             }
         )
     return summaries
