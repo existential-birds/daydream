@@ -127,8 +127,8 @@ typed unreplayable reasons are appended to this label),
 `1` corrupt (invalid/missing `benchmark.yaml`, an orphan or missing indexed file,
 or a checksum-mismatched ready-snapshot bundle).
 
-A valid-shaped task-spec digest that no longer matches the canonical `Task.md`
-is structurally valid but incomplete (`2`). A present null or invalid digest is
+A valid-shaped task specification digest that no longer matches the canonical
+`Task.md` is structurally valid but incomplete (`2`). A present null or invalid digest is
 corrupt (`1`). For compatibility, legacy ready cases where the approval key is
 entirely absent receive the canonical derived approval in memory and remain
 ready; status and validate leave the persisted key absent.
@@ -301,8 +301,8 @@ daydream benchmark calibrate-judge ~/bench-owner-repo --yes
 `calibrate-judge` is an optional, **diagnostic**-only pass that measures the
 configured judge's agreement with an **unverified** fixture. It is not an
 authorization, correctness, or validation check, and it carries no operational
-authority. Current and stale task-spec approvals follow the same calibration
-path; calibration is neither a task-approval gate nor a training gate.
+authority. Current and stale task specification approvals follow the same
+calibration path; calibration is neither a task approval gate nor a training gate.
 
 ### `clean` — disposable artifacts
 
