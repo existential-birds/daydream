@@ -41,7 +41,7 @@ sufficient for a code change. Install the command again after a pull that change
 
 ```bash
 git pull
-uv tool install --editable .    # necessary only for a dependency change
+uv tool install --reinstall --editable .    # necessary only for a dependency change
 ```
 
 ### Run without an installed command

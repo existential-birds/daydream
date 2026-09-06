@@ -61,6 +61,37 @@ Endpoint and field mappings follow the
 Usage details use the `langsmith.usage_metadata` format emitted by
 [LangSmith's own OTLP exporter](https://github.com/langchain-ai/langsmith-sdk/blob/4792a53f807e9129fd4f5c243056d1976e2cff80/js/src/experimental/otel/exporter.ts#L219).
 
+## Missing tracing dependencies
+
+If tracing reports `No module named 'opentelemetry.exporter.otlp.proto.grpc'`,
+`No module named 'traceloop'`, or missing/incompatible tracing dependencies, refresh
+the installation. This can happen after pulling changes into an editable install:
+the command reads the new source, but its Python environment still has the old
+dependencies. It affects LangSmith and HoneyHive even though both send HTTP,
+because OpenLLMetry imports both OTLP transports.
+
+From the Daydream clone, reinstall the command and its dependencies:
+
+```bash
+uv tool install --reinstall --editable .
+command -v daydream
+```
+
+The command should resolve to the uv tool executable directory (`uv tool dir --bin`),
+usually `~/.local/bin`. If it resolves to a pyenv shim or another installation,
+remove that stale Daydream installation or put the uv tool directory first on
+`PATH`. The install requires Python 3.12.13 or newer.
+
+To run directly from the clone with its synchronized dependencies:
+
+```bash
+uv run daydream /path/to/project --trace-to langsmith
+uv run daydream /path/to/project --trace-to honeyhive
+```
+
+`uv sync` updates the clone's `.venv`; it does not update a separately installed
+`daydream` command. See [uv's tool management documentation](https://docs.astral.sh/uv/concepts/tools/).
+
 ## HoneyHive
 
 Use the deployment API base for your HoneyHive organization and region:

@@ -120,7 +120,15 @@ class TraceSession:
             except Exception:
                 raise ObservabilityError(f"Unknown trace exporter '{name}'") from None
         with diagnostic_scope(self.policy):
-            from traceloop.sdk import Traceloop
+            try:
+                from traceloop.sdk import Traceloop
+            except ImportError:
+                raise ObservabilityError(
+                    "Tracing dependencies are missing or incompatible. From the Daydream clone, run "
+                    "'uv tool install --reinstall --editable .' to refresh the installed command, "
+                    "or use 'uv run daydream ...' to run with the project's dependencies. "
+                    "If the error persists, check 'command -v daydream' for an older installation on PATH."
+                ) from None
 
             for name, factory in factories:
                 try:
