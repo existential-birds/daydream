@@ -4535,9 +4535,22 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     seen_phases: list[str] = []
     original = _runner._resolve_backend
 
-    def spy(config: Any, phase: Any, cache: Any=None, *, cwd: Any=None) -> Any:
+    def spy(
+        config: Any,
+        phase: Any,
+        cache: Any = None,
+        *,
+        cwd: Any = None,
+        audit_workspace: Any = None,
+    ) -> Any:
         seen_phases.append(phase)
-        return original(config, phase, cache, cwd=cwd)
+        return original(
+            config,
+            phase,
+            cache,
+            cwd=cwd,
+            audit_workspace=audit_workspace,
+        )
 
     # run_deep imports _resolve_backend from daydream.runner, so patching it there
     # intercepts every call site under per-phase resolution.

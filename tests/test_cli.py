@@ -14,6 +14,7 @@ from daydream.atif import validate as atif_validate
 from daydream.cli import _parse_args
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
+from tests.harness.git_helpers import bare_remote, commit, git, init_repo
 
 
 def test_approved_head_sha_flag_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -649,6 +650,109 @@ def test_build_corpus_exits_0_on_dry_run(tmp_path: Path) -> None:
     assert result.returncode == 0, (
         f"exit={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
     )
+
+
+@pytest.mark.parametrize("backend_name", ["codex", "pi", "osprey"])
+def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(
+    tmp_path: Path,
+    backend_name: str,
+) -> None:
+    """The real parser/runner path refuses unsupported improve executables."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / ".gitignore").write_text(".daydream/\ndaydream_plans/\n", encoding="utf-8")
+    (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    git(repo, "add", ".gitignore", "app.py")
+    commit(repo, "initial")
+    origin = bare_remote(tmp_path / "origin.git")
+    git(repo, "remote", "add", "origin", str(origin))
+    git(repo, "push", "-u", "origin", "main")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    backend_marker = tmp_path / "backend-launched"
+    backend_script = "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$BACKEND_MARKER\"\nexit 97\n"
+    for executable in ("codex", "pi", "osprey"):
+        path = fake_bin / executable
+        path.write_text(backend_script, encoding="utf-8")
+        path.chmod(0o755)
+
+    gh_log = tmp_path / "gh.log"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
+        "case \"$*\" in\n"
+        "  'repo view --json nameWithOwner -q .nameWithOwner') "
+        "printf '%s\\n' 'acme/widgets' ;;\n"
+        "  'api /user') printf '%s\\n' '{\"login\":\"fixture-user\"}' ;;\n"
+        "  *) printf '%s\\n' 'unexpected gh invocation' >&2; exit 91 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    process_tmp = tmp_path / "process-tmp"
+    process_tmp.mkdir()
+
+    before_head = git(repo, "rev-parse", "HEAD")
+    before_refs = git(repo, "show-ref")
+    before_status = git(repo, "status", "--porcelain=v1")
+    before_origin_refs = git(origin, "show-ref")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "DAYDREAM_GITHUB_APP_ID",
+            "DAYDREAM_GITHUB_APP_PRIVATE_KEY",
+        }
+    }
+    env.update(
+        {
+            "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+            "BACKEND_MARKER": str(backend_marker),
+            "GH_LOG": str(gh_log),
+            "TMPDIR": str(process_tmp),
+            "CI": "1",
+        }
+    )
+    result = subprocess.run(  # noqa: S603 - fixed module and enum parameter
+        [
+            sys.executable,
+            "-m",
+            "daydream",
+            "improve",
+            "--backend",
+            backend_name,
+            "--no-archive",
+            "--no-eval",
+            str(repo),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    assert f"backend '{backend_name}'" in combined
+    assert "Use backend 'claude'" in combined
+    assert not backend_marker.exists()
+    assert gh_log.read_text(encoding="utf-8").splitlines() == [
+        "repo view --json nameWithOwner -q .nameWithOwner",
+        "api /user",
+    ]
+    assert git(repo, "rev-parse", "HEAD") == before_head
+    assert git(repo, "show-ref") == before_refs
+    assert git(repo, "status", "--porcelain=v1") == before_status
+    assert git(origin, "show-ref") == before_origin_refs
+    assert not list(process_tmp.glob("daydream-audit-*"))
 
 
 _SIGNAL_FIXTURE_EXTENSION = """

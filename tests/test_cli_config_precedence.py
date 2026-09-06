@@ -126,7 +126,9 @@ def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
 def _codex_backend(
     cfg: RunConfig,
     phase: str,
-    cache: dict[tuple[str, str | None, str | None], Backend] | None = None,
+    cache: dict[
+        tuple[str, str | None, str | None, Path | None], Backend
+    ] | None = None,
 ) -> CodexBackend:
     """Resolve ``phase`` and narrow to the concrete Codex backend under test."""
     backend = _resolve_backend(cfg, phase, cache)
@@ -186,7 +188,7 @@ def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:
     and ``xhigh`` respectively, so the cache key must keep them distinct.
     """
     cfg = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
-    cache: dict[tuple[str, str | None, str | None], Backend] = {}
+    cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
     review = _codex_backend(cfg, "review", cache)
     arbiter = _codex_backend(cfg, "arbiter", cache)
     assert review.model == arbiter.model == "gpt-5.6-sol"

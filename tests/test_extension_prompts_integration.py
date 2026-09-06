@@ -22,7 +22,11 @@ from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
-from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
+from tests.harness.improve_backend import (
+    ImproveStubBackend,
+    improve_artifact,
+    install_capable_improve_backend,
+)
 
 
 async def test_fork_prompt_override_reaches_backend(
@@ -135,11 +139,11 @@ async def test_plan_writer_override_receives_legacy_string_commands_and_typed_ou
     ext_dir: ExtDir,
     improve_monorepo_target: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_plan_writer_override())
     backend = ImproveStubBackend(improve_monorepo_target, n_findings=1)
-    install_backend(backend)
+    install_capable_improve_backend(monkeypatch, backend)
 
     rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 
@@ -166,7 +170,7 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     ext_dir: ExtDir,
     improve_monorepo_target: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A legacy markdown-blob payload blocks on missing authored content.
 
@@ -178,7 +182,7 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     ext_dir.write_module(_plan_writer_override())
     backend = ImproveStubBackend(improve_monorepo_target, n_findings=1)
     backend.return_legacy_plan = True
-    install_backend(backend)
+    install_capable_improve_backend(monkeypatch, backend)
 
     rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 
@@ -212,11 +216,11 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
     ext_dir: ExtDir,
     improve_monorepo_target: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_plan_writer_override(raises_on_first_call=True))
     backend = ImproveStubBackend(improve_monorepo_target, n_findings=2)
-    install_backend(backend)
+    install_capable_improve_backend(monkeypatch, backend)
 
     rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 

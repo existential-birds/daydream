@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from collections.abc import AsyncGenerator
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, cast
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookJSONOutput, HookMatcher
@@ -25,6 +26,7 @@ from claude_agent_sdk.types import (
 )
 
 from daydream.backends import (
+    AUDIT_ROOT_ISOLATION_V1,
     AgentEvent,
     ContinuationToken,
     CostEvent,
@@ -129,6 +131,107 @@ _CLI_ENV: dict[str, str] = {
     "BASH_DEFAULT_TIMEOUT_MS": str(_BASH_TIMEOUT_MS),
     "BASH_MAX_TIMEOUT_MS": str(_BASH_TIMEOUT_MS),
 }
+
+_AUDIT_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "StructuredOutput")
+_AUDIT_GREP_OUTPUT_MODES = frozenset({"content", "files_with_matches", "count"})
+_AUDIT_GREP_BOOL_FIELDS = frozenset({"-n", "-i", "multiline"})
+_AUDIT_GREP_INT_FIELDS = frozenset({"head_limit", "offset"})
+
+
+def _audit_cli_env(root: Path) -> dict[str, str]:
+    """Return SDK environment overrides bound to one standalone audit repo."""
+    git_dir = root / ".git"
+    return {
+        **_CLI_ENV,
+        "PWD": str(root),
+        "OLDPWD": str(root),
+        "GIT_DIR": str(git_dir),
+        "GIT_WORK_TREE": str(root),
+        "GIT_INDEX_FILE": str(git_dir / "index"),
+        "GIT_OBJECT_DIRECTORY": str(git_dir / "objects"),
+        "GIT_COMMON_DIR": str(git_dir),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": "",
+        "GIT_CEILING_DIRECTORIES": str(root.parent),
+        "GIT_PREFIX": "",
+    }
+
+
+def _nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _valid_relative_audit_path(value: str) -> bool:
+    """Reject path spellings whose meaning differs across supported hosts."""
+    if not value or "\x00" in value or "\\" in value:
+        return False
+    windows = PureWindowsPath(value)
+    path = Path(value)
+    return not path.is_absolute() and not windows.drive and ".." not in path.parts
+
+
+def _audit_regular_file(root: Path, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
+        return None
+    if PureWindowsPath(value).drive:
+        return None
+    candidate = Path(value)
+    if ".." in candidate.parts:
+        return None
+    try:
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve(
+            strict=True
+        )
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved
+
+
+def _audit_directory(root: Path, value: Any) -> Path | None:
+    if value is None:
+        return root
+    if not isinstance(value, str) or not _valid_relative_audit_path(value):
+        return None
+    try:
+        resolved = (root / value).resolve(strict=True)
+        if not resolved.is_relative_to(root) or not resolved.is_dir():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved
+
+
+def _audit_path_crosses_lexical_symlink(root: Path, value: str) -> bool:
+    """Return whether any component of one validated relative path is a link."""
+    candidate = root
+    try:
+        for part in Path(value).parts:
+            candidate /= part
+            if candidate.is_symlink():
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _audit_symlink_inventory(root: Path) -> frozenset[Path]:
+    """Inventory lexical links below *root* without traversing link targets."""
+    links: set[Path] = set()
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = directory / entry.name
+                    if entry.is_symlink():
+                        links.add(path)
+                    elif entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
+    except OSError as exc:
+        raise ValueError("cannot inventory audit-root symlinks") from exc
+    return frozenset(links)
 
 
 def _total_input_tokens(usage: dict[str, Any]) -> int | None:
@@ -328,6 +431,88 @@ def _read_only_deny(reason: str) -> HookJSONOutput:
     }
 
 
+def _build_audit_root_guard(
+    root: Path,
+    lexical_symlinks: frozenset[Path],
+) -> HookCallback:
+    """Build a deny-by-default guard for one immutable audit snapshot root."""
+
+    async def _guard(
+        input_data: Any,
+        tool_use_id: Any,
+        context: Any,
+    ) -> HookJSONOutput:
+        del tool_use_id, context
+        if not isinstance(input_data, dict):
+            return _read_only_deny("audit isolation denied malformed tool input")
+        tool_name = input_data.get("tool_name")
+        tool_input = input_data.get("tool_input")
+        if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
+            return _read_only_deny("audit isolation denied malformed tool input")
+        if tool_name == "StructuredOutput":
+            return {}
+        if tool_name == "Read":
+            if not set(tool_input).issubset({"file_path", "offset", "limit"}):
+                return _read_only_deny("audit isolation denied unsupported Read options")
+            if any(
+                field in tool_input and not _nonnegative_int(tool_input[field])
+                for field in ("offset", "limit")
+            ):
+                return _read_only_deny("audit isolation denied malformed Read options")
+            if _audit_regular_file(root, tool_input.get("file_path")) is None:
+                return _read_only_deny("audit isolation denied Read outside its root")
+            return {}
+        if tool_name == "Grep":
+            allowed_fields = {
+                "pattern",
+                "path",
+                "output_mode",
+                *_AUDIT_GREP_BOOL_FIELDS,
+                *_AUDIT_GREP_INT_FIELDS,
+            }
+            if not set(tool_input).issubset(allowed_fields):
+                return _read_only_deny("audit isolation denied unsupported Grep options")
+            pattern = tool_input.get("pattern")
+            if not isinstance(pattern, str) or not pattern or "\x00" in pattern:
+                return _read_only_deny("audit isolation denied malformed Grep pattern")
+            output_mode = tool_input.get("output_mode")
+            if output_mode is not None and (
+                not isinstance(output_mode, str)
+                or output_mode not in _AUDIT_GREP_OUTPUT_MODES
+            ):
+                return _read_only_deny("audit isolation denied malformed Grep options")
+            if any(
+                field in tool_input and not isinstance(tool_input[field], bool)
+                for field in _AUDIT_GREP_BOOL_FIELDS
+            ) or any(
+                field in tool_input and not _nonnegative_int(tool_input[field])
+                for field in _AUDIT_GREP_INT_FIELDS
+            ):
+                return _read_only_deny("audit isolation denied malformed Grep options")
+            if _audit_regular_file(root, tool_input.get("path")) is None:
+                return _read_only_deny("audit isolation denied Grep outside its root")
+            return {}
+        if tool_name == "Glob":
+            if not set(tool_input).issubset({"pattern", "path"}):
+                return _read_only_deny("audit isolation denied unsupported Glob options")
+            pattern = tool_input.get("pattern")
+            if not isinstance(pattern, str) or not _valid_relative_audit_path(pattern):
+                return _read_only_deny("audit isolation denied malformed Glob pattern")
+            raw_base = tool_input.get("path")
+            if isinstance(raw_base, str) and _valid_relative_audit_path(raw_base):
+                if _audit_path_crosses_lexical_symlink(root, raw_base):
+                    return _read_only_deny("audit isolation denied Glob across a symlink")
+            base = _audit_directory(root, raw_base)
+            if base is None:
+                return _read_only_deny("audit isolation denied Glob outside its root")
+            if any(link == base or link.is_relative_to(base) for link in lexical_symlinks):
+                return _read_only_deny("audit isolation denied Glob across a symlink")
+            return {}
+        return _read_only_deny("audit isolation denied an unsupported tool")
+
+    return _guard
+
+
 async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
     """PreToolUse hook enforcing the read-only guard contract.
 
@@ -455,9 +640,40 @@ class ClaudeBackend:
 
     concise_fix_prompts = False
 
-    def __init__(self, model: str, *, reasoning_effort: str | None = None):
+    def __init__(
+        self,
+        model: str,
+        *,
+        reasoning_effort: str | None = None,
+        audit_root: Path | None = None,
+        audit_outward_symlinks: frozenset[Path] = frozenset(),
+    ):
         self.model = model
         self.reasoning_effort = _claude_effort(reasoning_effort)
+        self.audit_root = audit_root.resolve(strict=True) if audit_root is not None else None
+        self.audit_root_isolation = (
+            AUDIT_ROOT_ISOLATION_V1 if self.audit_root is not None else None
+        )
+        lexical_links = frozenset(
+            Path(os.path.abspath(path)) for path in audit_outward_symlinks
+        )
+        if self.audit_root is None and lexical_links:
+            raise ValueError("audit_outward_symlinks requires audit_root")
+        if self.audit_root is not None and any(
+            not path.is_relative_to(self.audit_root) for path in lexical_links
+        ):
+            raise ValueError("audit_outward_symlinks must be inside audit_root")
+        self.audit_outward_symlinks = lexical_links
+        audit_symlinks = (
+            lexical_links | _audit_symlink_inventory(self.audit_root)
+            if self.audit_root is not None
+            else frozenset()
+        )
+        self._audit_root_guard = (
+            _build_audit_root_guard(self.audit_root, audit_symlinks)
+            if self.audit_root is not None
+            else None
+        )
         self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 8)
         self._active_clients: set[ClaudeSDKClient] = set()
 
@@ -498,6 +714,25 @@ class ClaudeBackend:
             ClaudeAgentError: If the agent run ends with an error result
                 (``ResultMessage.is_error``), e.g. an invalid API key.
         """
+        audit_root = self.audit_root
+        audit_guard = self._audit_root_guard
+        if audit_root is not None:
+            try:
+                resolved_cwd = cwd.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ClaudeAgentError(
+                    "audit isolation requires an existing canonical cwd"
+                ) from exc
+            if resolved_cwd != audit_root:
+                raise ClaudeAgentError("audit isolation requires the bound audit root cwd")
+            if not read_only:
+                raise ClaudeAgentError("audit isolation requires read_only=True")
+            if continuation is not None:
+                raise ClaudeAgentError("audit isolation does not allow continuation")
+            if agents:
+                raise ClaudeAgentError("audit isolation does not allow agents")
+            persist_session = False
+
         output_format = (
             {"type": "json_schema", "schema": output_schema}
             if output_schema
@@ -509,31 +744,64 @@ class ClaudeBackend:
         # and background-Bash guards are always-on (all phases); the read-only guard
         # composes on top when read_only=True.
         #
-        # NOTE (#887): the skill tool is intentionally left unguarded. daydream no
-        # longer invokes any skill (the skill-resolution seam and skill guard were
-        # deliberately removed), so we consciously accept that a model could call an
-        # operator-installed Claude Code skill. Documented rather than re-adding the
-        # skill-guard machinery.
-        pre_tool_use_hooks: list[HookCallback] = [_dangerous_command_guard, _background_bash_guard]
-        if read_only:
-            pre_tool_use_hooks.append(_read_only_guard)
-        options = ClaudeAgentOptions(
-            cwd=str(cwd),
-            permission_mode="bypassPermissions",
-            allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-            setting_sources=["user"],
-            model=self.model,
-            output_format=output_format,
-            max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
-            max_turns=max_turns,
-            extra_args={"no-session-persistence": None} if not persist_session else {},
-            # None leaves the CLI's ambient default; the SDK omits --effort.
-            effort=self.reasoning_effort,
-            env=dict(_CLI_ENV),
-            hooks={
-                "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
-            },
-        )
+        # In ordinary mode (#887), the skill tool is intentionally left unguarded:
+        # daydream no longer invokes a skill itself. Strict audit mode takes the
+        # separate branch below and denies Skill along with every unhandled tool.
+        if audit_guard is not None:
+            assert audit_root is not None
+            options = ClaudeAgentOptions(
+                cwd=str(audit_root),
+                permission_mode="bypassPermissions",
+                tools=list(_AUDIT_TOOLS),
+                allowed_tools=list(_AUDIT_TOOLS),
+                mcp_servers={},
+                strict_mcp_config=True,
+                setting_sources=[],
+                skills=[],
+                plugins=[],
+                agents=None,
+                model=self.model,
+                output_format=output_format,
+                max_buffer_size=10 * 1024 * 1024,
+                max_turns=max_turns,
+                extra_args={"no-session-persistence": None},
+                effort=self.reasoning_effort,
+                env=_audit_cli_env(audit_root),
+                hooks={
+                    "PreToolUse": [
+                        HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=[audit_guard])
+                    ]
+                },
+            )
+        else:
+            pre_tool_use_hooks: list[HookCallback] = [
+                _dangerous_command_guard,
+                _background_bash_guard,
+            ]
+            if read_only:
+                pre_tool_use_hooks.append(_read_only_guard)
+            options = ClaudeAgentOptions(
+                cwd=str(cwd),
+                permission_mode="bypassPermissions",
+                allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+                setting_sources=["user"],
+                model=self.model,
+                output_format=output_format,
+                max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
+                max_turns=max_turns,
+                extra_args={"no-session-persistence": None} if not persist_session else {},
+                # None leaves the CLI's ambient default; the SDK omits --effort.
+                effort=self.reasoning_effort,
+                env=dict(_CLI_ENV),
+                hooks={
+                    "PreToolUse": [
+                        HookMatcher(
+                            matcher=_READ_ONLY_HOOK_MATCHER,
+                            hooks=pre_tool_use_hooks,
+                        )
+                    ]
+                },
+            )
 
         # Resume the prior conversation when the caller threaded a claude-minted
         # token through. Options stay otherwise byte-stable so prefix caching

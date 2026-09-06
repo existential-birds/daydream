@@ -979,6 +979,11 @@ class Curation(BaseModel):
     case_exclusion: CaseExclusion | None = None
     task_spec_sha256: str | None = None
 
+    @field_validator("task_spec_sha256")
+    @classmethod
+    def _approved_spec_digest(cls, value: str | None) -> str | None:
+        return _hex64(value) if value is not None else None
+
     @model_validator(mode="after")
     def _consistent(self) -> "Curation":
         if self.case_exclusion is not None and self.state != "excluded":
@@ -1017,7 +1022,7 @@ def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
     curation = dict(raw.get("curation") or {})
     curation.pop("gold_mode", None)
     curation.pop("task_spec_approved_at", None)
-    if curation.get("state") == "ready" and curation.get("task_spec_sha256") is None:
+    if curation.get("state") == "ready" and "task_spec_sha256" not in curation:
         from daydream.benchmark.harbor.build import (
             task_spec_digest,
         )

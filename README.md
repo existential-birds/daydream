@@ -130,7 +130,11 @@ and the scope of captured data.
 
 ## Audit a repository and write implementation plans
 
-The `improve` command audits a whole repository. It verifies each candidate finding, prioritizes the findings by impact, and writes self-contained implementation plans. Every agent call uses a read-only backend profile. Daydream writes only run artifacts under `.daydream/` and advisory plans under `daydream_plans/`. It does not modify tracked source files.
+The `improve` command audits a whole repository. It verifies each candidate finding, prioritizes the findings by impact, and writes self-contained implementation plans. Every model turn runs against an independent, disposable Git snapshot outside the target and uses Claude's strict tool-root guard. Daydream writes only host-owned run artifacts under `.daydream/` and advisory plans under `daydream_plans/`. It does not modify tracked source files.
+
+Improve currently requires the `claude` backend for all of its model phases. Codex, Pi, and Osprey improve configurations are refused before a model executable starts until those drivers can prove an equivalent root-confinement capability. Other review flows retain support for all four backends. The independent repository prevents shared Git refs, objects, indexes, and remotes; the Claude hook separately mediates model tool access. Neither a detached worktree nor a disposable clone by itself is a filesystem sandbox, and this tool-layer policy is not an OS sandbox.
+
+Snapshot preparation refuses inherited Git repository, external-diff, trace, executable-path, or arbitrary configuration overrides, including empty values. Well-formed indexed `commit.gpgsign` and `core.excludesFile` settings and the exact default `GIT_EXEC_PATH` that Git itself exports to hook processes are the only exceptions and pass through unchanged. Unsupported overrides fail before creating the snapshot; caller settings and hooks are never silently changed. This also applies to Codex's disposable read-only snapshots; ordinary Git commands retain their existing environment behavior.
 
 ```bash
 daydream improve /path/to/project
@@ -335,6 +339,8 @@ Daydream supports four backends. Each implements the same `Backend` protocol and
 | `codex` | Codex CLI in a disposable read-only clone |
 | `pi` | Pi CLI (Nous DeepSeek models) |
 | `osprey` | Osprey CLI |
+
+All four remain available to review flows. Repository-wide `improve` is intentionally stricter and currently accepts only Claude, whose SDK hook provides the required snapshot-root tool boundary.
 
 Select a backend with `--backend`. The selection order, highest first, is:
 

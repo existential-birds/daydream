@@ -64,81 +64,13 @@ _logger = logging.getLogger(__name__)
 
 
 def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
-    """Build a disposable standalone clone of *source* at *destination*.
+    """Build the shared standalone snapshot, including nonignored untracked files.
 
-    Mirrors source's HEAD, staged index, tracked working files, and nonignored
-    untracked files into a fresh clone with no source remote. Uses only
-    :mod:`daydream.git_ops` primitives plus shutil/pathlib — never
-    ``git rev-parse --git-common-dir``, ``git worktree list``, or the source
-    ``.git`` file (the linked-worktree #221 trap). Unstaged deletions are
-    mirrored (the worktree file is removed from the clone) and symlinks are
-    recreated as links — never materialised as their targets. Submodule gitlink
-    entries are skipped: they have no copyable worktree file.
-
-    Returns:
-        The clone path.
-
-    Raises:
-        GitError / OSError / shutil.Error: Underlying git or filesystem
-            failure; the caller wraps these in ``CodexError``.
-
-    Local branch refs are snapshotted by OID from the source so base-branch
-    names resolve and ``git diff <base>...HEAD`` works inside the clone,
-    without keeping any remote.
+    Generic Codex read-only behavior remains path-hiding, not an audit sandbox.
     """
-    git_ops.clone(str(source), destination)
-    git_ops.checkout_detach(destination, git_ops.head_sha(source))
-    # Snapshot every source local branch (name -> OID) into the clone before
-    # the remote is removed: after a plain clone the clone only exposes the
-    # source's checked-out branch under refs/heads/* (the rest exist only as
-    # refs/remotes/origin/*), so re-create each same-named ref by explicit OID
-    # — never a symbolic ref — with update_refs' validation as the gate. All
-    # branches go through one `git update-ref --stdin` transaction, so prep
-    # costs a single git call regardless of branch count, and any GitError
-    # (invalid name, failed transaction) propagates fail-closed: no
-    # half-snapshotted clone is used.
-    branches = git_ops.list_local_branches(source)
-    if branches:
-        git_ops.update_refs(
-            destination,
-            {f"refs/heads/{name}": oid for name, oid in branches.items()},
-        )
-    git_ops.remove_remote(destination)
-    # ls-files and ls-files --others --exclude-standard are disjoint by
-    # construction, so one loop covers both. Enumerate strictly so a mid-prep
-    # git failure raises (per this function's error-propagation contract) instead
-    # of silently producing a clone missing tracked/untracked files.
-    for rel in [*git_ops.ls_files(source, strict=True), *git_ops.list_untracked(source, strict=True)]:
-        src = source / rel
-        dst = destination / rel
-        if src.is_symlink():
-            # Mirror the LINK itself. copy2 follows the link (materialising a
-            # regular file, or copying a directory target) and src.exists()/
-            # src.is_dir() would drop directory-pointing and dangling links,
-            # leaving a phantom 120000-mode typechange against the clone's index.
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.unlink(missing_ok=True)
-            os.symlink(os.readlink(src), dst)
-        elif src.is_dir():
-            continue  # submodule gitlink — no copyable worktree file
-        elif src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.is_symlink():
-                # Committed symlink now a regular file in the source.
-                dst.unlink()
-            shutil.copy2(src, dst)
-        else:
-            # Unstaged deletion: the path is still tracked but the source's
-            # worktree file is gone — mirror the missing file so the audit model
-            # does not see a phantom file in every git status/ls it runs.
-            if dst.is_dir() and not dst.is_symlink():
-                shutil.rmtree(dst)
-            else:
-                dst.unlink(missing_ok=True)
-    patch = git_ops.staged_patch(source)
-    if patch:
-        git_ops.apply_staged_patch(destination, patch)
-    return destination
+    return git_ops.prepare_independent_snapshot(
+        source, destination, include_untracked=True,
+    ).repo
 
 
 # Child-environment variables whose value would give an isolated codex

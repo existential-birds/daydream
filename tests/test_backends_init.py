@@ -9,6 +9,8 @@ from typing import Any, cast
 import pytest
 
 from daydream.backends import (
+    AUDIT_ROOT_ISOLATION_V1,
+    AuditIsolationError,
     ClaudeBackend,
     ContinuationToken,
     ResultEvent,
@@ -114,3 +116,53 @@ def test_create_backend_without_reasoning_effort_leaves_it_unset() -> None:
 
     for name in ("claude", "codex", "pi"):
         assert cast(Any, create_backend(name)).reasoning_effort is None, name
+
+
+def test_create_backend_binds_claude_to_exact_audit_root(tmp_path: Path) -> None:
+    root = tmp_path / "audit root"
+    root.mkdir()
+    outward = frozenset({root / "outside-link"})
+
+    backend = create_backend(
+        "claude",
+        model="test",
+        audit_root=root,
+        audit_outward_symlinks=outward,
+    )
+
+    assert isinstance(backend, ClaudeBackend)
+    assert backend.audit_root_isolation == AUDIT_ROOT_ISOLATION_V1
+    assert backend.audit_root == root.resolve(strict=True)
+    assert backend.audit_outward_symlinks == outward
+
+
+@pytest.mark.parametrize("name", ["codex", "pi", "osprey"])
+def test_create_backend_refuses_unsupported_audit_backend(
+    name: str,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "audit"
+    root.mkdir()
+
+    with pytest.raises(AuditIsolationError) as exc_info:
+        create_backend(name, audit_root=root)
+
+    assert exc_info.value.backend_name == name
+    assert exc_info.value.reason == "unsupported_backend"
+
+
+def test_create_backend_unknown_name_stays_a_value_error_with_audit_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "audit"
+    root.mkdir()
+
+    with pytest.raises(ValueError, match="Unknown backend"):
+        create_backend("invalid", audit_root=root)
+
+
+@pytest.mark.parametrize("name", ["claude", "codex", "pi", "osprey"])
+def test_create_backend_without_audit_root_keeps_ordinary_backends(name: str) -> None:
+    backend = create_backend(name, model="test")
+
+    assert getattr(backend, "audit_root_isolation", None) is None

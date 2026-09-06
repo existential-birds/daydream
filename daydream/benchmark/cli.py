@@ -258,7 +258,8 @@ def _handle_benchmark_status(dir_path: Path) -> int:
             snapshot_status += f" ({reason})"
         print(
             f"  case {summary.get('case_id', '')}: "
-            f"snapshot {snapshot_status} @ {head}"
+            f"snapshot {snapshot_status} @ {head}; "
+            f"task-spec approval {summary.get('task_spec_approval', 'not-required')}"
         )
     return 0
 
