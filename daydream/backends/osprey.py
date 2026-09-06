@@ -23,6 +23,7 @@ from daydream.backends import (
     ContinuationToken,
     CostEvent,
     MetricsEvent,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -558,12 +559,12 @@ class OspreyBackend:
         saw_session_end = False
         failed_message: str | None = None
         total_cost: float | None = None
-        saw_metric_cost = False
         stderr_lines: list[str] = []
         terminal_outcome: str | None = None
         terminal_exit_code: int | None = None
         terminal_structured_output: Any = None
         turn_text_emitted = False
+        turn_started_at: str | None = None
         thinking_parts: list[str] = []
         protocol_state = _OspreyProtocolState()
 
@@ -639,7 +640,7 @@ class OspreyBackend:
                     if event_name != "session_start":
                         raise OspreyProtocolError("session_start must follow the protocol header")
                     session_id = _required_string(event, "session_id")
-                    _required_string(event, "started_at")
+                    started_at = _required_string(event, "started_at")
                     session_model = _required_string(event, "model")
                     # ``self.model`` starts as a backend-only placeholder when
                     # Osprey is allowed to resolve its own config. The session
@@ -647,6 +648,11 @@ class OspreyBackend:
                     self.model = session_model
                     provider = _required_string(event, "provider")
                     saw_session_start = True
+                    yield RequestEvent(
+                        prompt=prompt, model_name=session_model, provider_name=provider,
+                        session_id=session_id, reasoning_effort=self.effort or self.reasoning_effort,
+                        output_schema=output_schema, timestamp=started_at,
+                    )
                     continue
                 if saw_session_end:
                     raise OspreyProtocolError("JSONL event appeared after session_end")
@@ -669,8 +675,30 @@ class OspreyBackend:
                     terminal_structured_output = event.get("structured_output")
                     saw_session_end = True
                     final_cost = _parse_cost(event.get("total_cost_usd"), event_name=event_name, field="total_cost_usd")
-                    if final_cost is not None and not saw_metric_cost:
+                    if final_cost is not None:
                         total_cost = final_cost
+                    yield CostEvent(
+                        cost_usd=total_cost,
+                        input_tokens=_optional_non_negative_int(event, "total_prompt_tokens"),
+                        output_tokens=_optional_non_negative_int(event, "total_completion_tokens"),
+                        cached_tokens=_optional_non_negative_int(event, "total_cached_tokens"),
+                        cache_creation_tokens=_optional_non_negative_int(event, "total_cache_write_tokens"),
+                        reasoning_tokens=_optional_non_negative_int(event, "total_thinking_tokens"),
+                        model_name=session_model, provider_name=provider,
+                    )
+                    yield ResultEvent(
+                        structured_output=terminal_structured_output,
+                        continuation=(
+                            ContinuationToken(backend="osprey", data={
+                                "session_id": session_id, "provider": provider,
+                                "model": session_model, "outcome": terminal_outcome,
+                                "exit_code": terminal_exit_code,
+                            }) if terminal_outcome in _SUCCESS_OUTCOMES else None
+                        ),
+                        model_name=session_model, provider_name=provider,
+                        session_id=session_id, finish_reason=terminal_outcome,
+                        duration_ms=_optional_non_negative_int(event, "session_wallclock_ms"),
+                    )
                     continue
 
                 if event_name == "session_start":
@@ -703,16 +731,16 @@ class OspreyBackend:
                     content = event.get("content")
                     if not isinstance(content, str):
                         raise OspreyProtocolError("tool_result requires string content")
-                    _required_int(event, "duration_ms")
+                    duration_ms = _required_int(event, "duration_ms")
                     protocol_state.finish_tool_call(call_id)
-                    yield ToolResultEvent(call_id, content, status == "error")
+                    yield ToolResultEvent(call_id, content, status == "error", duration_ms=duration_ms, status=status)
                 elif event_name == "tool_update":
                     _required_string(event, "tool_call_id")
                     if not isinstance(event.get("content"), str):
                         raise OspreyProtocolError("tool_update requires string content")
                 elif event_name == "turn_start":
                     turn_id = _required_string(event, "turn_id")
-                    _required_string(event, "timestamp")
+                    turn_started_at = _required_string(event, "timestamp")
                     protocol_state.start_turn(turn_id)
                     turn_text_emitted = False
                 elif event_name == "turn_end":
@@ -736,7 +764,6 @@ class OspreyBackend:
                             raise OspreyProtocolError("turn_end model must be string or null")
                         if cost is not None:
                             total_cost = (total_cost or 0.0) + cost
-                            saw_metric_cost = True
                         yield MetricsEvent(
                             message_id=turn_id,
                             prompt_tokens=prompt_tokens,
@@ -745,8 +772,13 @@ class OspreyBackend:
                             cost_usd=cost,
                             reasoning_tokens=reasoning_tokens,
                             model_name=turn_model or session_model,
+                            provider_name=provider,
+                            cache_creation_tokens=_optional_non_negative_int(event, "cache_write_tokens"),
+                            duration_ms=_required_non_negative_int(event, "duration_ms"),
+                            started_at=turn_started_at,
                         )
                     yield TurnEndEvent(message_id=turn_id)
+                    turn_started_at = None
                 elif event_name == "message_end":
                     messages = event.get("messages")
                     if not isinstance(messages, list):
@@ -808,28 +840,6 @@ class OspreyBackend:
                 raise OspreyProtocolError("successful session_end has an active turn")
             if protocol_state.pending_tool_calls:
                 raise OspreyProtocolError("successful session_end has pending tool calls")
-            if total_cost is not None and not saw_metric_cost:
-                yield CostEvent(
-                    cost_usd=total_cost,
-                    input_tokens=None,
-                    output_tokens=None,
-                    cached_tokens=None,
-                    model_name=session_model,
-                )
-            yield ResultEvent(
-                structured_output=terminal_structured_output,
-                continuation=ContinuationToken(
-                    backend="osprey",
-                    data={
-                        "session_id": session_id,
-                        "provider": provider,
-                        "model": session_model,
-                        "outcome": terminal_outcome,
-                        "exit_code": terminal_exit_code,
-                    },
-                ),
-                model_name=session_model,
-            )
         finally:
             if transport is not None:
                 await transport.terminate()

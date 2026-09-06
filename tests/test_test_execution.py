@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -30,7 +31,7 @@ def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path: Pat
     async def go() -> TestExecutionResult:
         return await run_test_command(
             [
-                "python",
+                sys.executable,
                 "-c",
                 "import os,sys; print(os.getcwd()); print('hello-stdout');"
                 " print('sec+REAL_SECRET+', file=sys.stderr)",
@@ -54,7 +55,7 @@ def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path: Pat
 def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
     async def go() -> TestExecutionResult:
         return await run_test_command(
-            ["python", "-c", "import sys; print('boom'); sys.exit(3)"],
+            [sys.executable, "-c", "import sys; print('boom'); sys.exit(3)"],
             cwd=tmp_path,
             wall_budget_s=10.0,
         )
@@ -101,10 +102,10 @@ def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path
     async def go() -> TestExecutionResult:
         return await run_test_command(
             [
-                "python",
+                sys.executable,
                 "-c",
-                "import subprocess,os,time;"
-                f"subprocess.Popen(['python','-c',"
+                "import subprocess,os,sys,time;"
+                f"subprocess.Popen([sys.executable,'-c',"
                 f"'import os,time;open(r\"{marker}\",\"w\").write(str(os.getpid()));time.sleep(30)']);"
                 "time.sleep(30)",
             ],
@@ -144,7 +145,7 @@ async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
 
     rec = make_recorder(tmp_path)
     async with rec:
-        await run_test_command(["python", "-c", "pass"], cwd=tmp_path, wall_budget_s=10.0)
+        await run_test_command([sys.executable, "-c", "pass"], cwd=tmp_path, wall_budget_s=10.0)
 
     events = [
         e
@@ -164,7 +165,7 @@ async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
     rec = make_recorder(tmp_path)
     async with rec:
         await run_test_command(
-            ["python", "-c", "import time; time.sleep(30)"], cwd=tmp_path, wall_budget_s=0.3
+            [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path, wall_budget_s=0.3
         )
 
     events = [
@@ -183,7 +184,7 @@ def test_runner_fails_closed_when_env_value_survives_scrub(tmp_path: Path) -> No
     whole field rather than emit a buffer that still shows the secret."""
     async def go() -> TestExecutionResult:
         return await run_test_command(
-            ["python", "-c", "print('REDACTED', flush=True)"],
+            [sys.executable, "-c", "print('REDACTED', flush=True)"],
             cwd=tmp_path,
             wall_budget_s=10.0,
             env={"STUCK": "REDACTED"},
@@ -206,7 +207,7 @@ def test_runner_scrubs_inherited_env_when_env_omitted(
     async def go() -> TestExecutionResult:
         return await run_test_command(
             [
-                "python",
+                sys.executable,
                 "-c",
                 "import os; print('value=' + os.environ['DAYDREAM_TEST_SECRET'], flush=True)",
             ],

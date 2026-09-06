@@ -32,6 +32,40 @@ def test_registry_has_no_skill_methods() -> None:
         assert not hasattr(reg, method)
 
 
+def test_trace_exporter_registry_is_lazy_and_replace_is_explicit() -> None:
+    from daydream.extensions import ObservabilityConfig, TraceExporterFactory
+
+    def factory(config: ObservabilityConfig) -> Any:
+        raise AssertionError("registration and lookup must never create an exporter")
+
+    reg = Registry()
+    reg.register_trace_exporter("custom", factory)
+    assert reg.trace_exporter("custom") is factory
+    assert reg.trace_exporter_names() == ("custom",)
+    with pytest.raises(ExtensionError, match="already registered"):
+        reg.register_trace_exporter("custom", factory)
+    reg.register_trace_exporter("custom", cast(TraceExporterFactory, factory), replace=True)
+    with pytest.raises(UnresolvedExtensionError, match="trace exporter 'absent'"):
+        reg.trace_exporter("absent")
+
+
+@pytest.mark.parametrize("kind", ["none", "async", "async-object", "name"])
+def test_trace_exporter_registry_rejects_invalid_factories(kind: str) -> None:
+    from daydream.extensions import TraceExporterFactory
+
+    async def async_factory(config: Any) -> Any:
+        return None
+
+    class AsyncFactory:
+        async def __call__(self, config: Any) -> Any:
+            return None
+
+    factory = {"none": None, "async": async_factory, "async-object": AsyncFactory(), "name": lambda config: None}[kind]
+    with pytest.raises(ExtensionError):
+        Registry().register_trace_exporter("bad name" if kind == "name" else "custom",
+                                          cast(TraceExporterFactory, factory))
+
+
 def test_flow_mutation_and_unresolved_lookup() -> None:
     reg = Registry()
     reg.register_phase(FlowStep(name="a", run=_noop))

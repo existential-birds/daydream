@@ -19,6 +19,7 @@ from daydream import git_ops
 from daydream.backends import (
     CostEvent,
     MetricsEvent,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -358,8 +359,9 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
             async for event in backend.execute(Path("/tmp"), "Fail"):
                 events.append(event)
 
-    # No events yielded — the run must not appear successful.
-    assert events == []
+    # The attempted request is observable, and the stream still raises.
+    assert len(events) == 1
+    assert isinstance(events[0], RequestEvent)
     msg = str(exc_info.value)
     assert "authentication required" in msg
     assert exc_info.value.category == "PROCESS_EXIT"
@@ -443,10 +445,9 @@ async def test_codex_read_only_uses_read_only_sandbox(
         return mock_proc
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        async for _ in CodexBackend(model="fixture-model").execute(
+        events = [event async for event in CodexBackend(model="fixture-model").execute(
             source, f"Audit repository at {source}", read_only=True,
-        ):
-            pass
+        )]
 
     flat = captured["args"]
     assert flat[flat.index("--sandbox") + 1] == "read-only"
@@ -470,6 +471,8 @@ async def test_codex_read_only_uses_read_only_sandbox(
     assert isinstance(written, bytes)
     assert str(isolated).encode() in written
     assert str(source).encode() not in written
+    request = next(event for event in events if isinstance(event, RequestEvent))
+    assert request.prompt.encode() == written
     # Temp dir removed after execute.
     assert not isolated.exists()
 
@@ -1165,6 +1168,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         first_iter = backend.execute(Path("/tmp"), "first")
+        assert isinstance(await anext(first_iter), RequestEvent)
         first_event = await anext(first_iter)
         assert isinstance(first_event, TextEvent)
 

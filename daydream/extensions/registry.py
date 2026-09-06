@@ -1,7 +1,7 @@
 """Per-run extension registry.
 
 ``Registry`` holds phases + flows, named prompts, renderers, a tool supervisor,
-and fork stack rules. ``register_builtins()`` seeds it with everything daydream
+trace destination factories and fork stack rules. ``register_builtins()`` seeds it with everything daydream
 does today; an optional ``daydream_ext`` package mutates it through the same API.
 
 This module must not import from ``daydream.runner`` or ``daydream.phases``
@@ -21,6 +21,7 @@ from daydream.extensions.api import (
     ToolSupervisor,
     UnresolvedExtensionError,
 )
+from daydream.observability.config import ObservabilityError, TraceExporterFactory, validate_destination_name
 
 FlowEntry = str | LoopGroup
 
@@ -28,7 +29,7 @@ _VALIDATE_HINT = "run 'daydream ext validate' to check the extension registry"
 
 
 class Registry:
-    """Mutable per-run store for phases, flows, prompts, renderers, supervision, and stack rules."""
+    """Mutable per-run store for phases, flows, prompts, renderers, supervision, tracing, and stack rules."""
 
     def __init__(self) -> None:
         self._phases: dict[str, FlowStep] = {}
@@ -37,6 +38,7 @@ class Registry:
         self._renderers: dict[str, Callable[..., str]] = {}
         self._stack_rules: dict[str, StackRule] = {}
         self._tool_supervisor: ToolSupervisor | None = None
+        self._trace_exporters: dict[str, TraceExporterFactory] = {}
 
     # -- phases -----------------------------------------------------------
 
@@ -172,6 +174,33 @@ class Registry:
     def tool_supervisor_if_registered(self) -> ToolSupervisor | None:
         """Return the registered tool supervisor, or None when absent."""
         return self._tool_supervisor
+
+    # -- trace destinations -----------------------------------------------
+
+    def register_trace_exporter(self, name: str, factory: TraceExporterFactory, *, replace: bool = False) -> None:
+        """Register a destination factory without creating a transport or reading credentials."""
+        try:
+            validate_destination_name(name)
+        except ObservabilityError as exc:
+            raise ExtensionError(str(exc)) from None
+        if not callable(factory):
+            raise ExtensionError(f"trace exporter '{name}' factory must be callable")
+        if inspect.iscoroutinefunction(factory) or inspect.iscoroutinefunction(getattr(factory, "__call__", None)):
+            raise ExtensionError(f"trace exporter '{name}' factory must be synchronous")
+        if name in self._trace_exporters and not replace:
+            raise ExtensionError(f"trace exporter '{name}' is already registered; pass replace=True to override it")
+        self._trace_exporters[name] = factory
+
+    def trace_exporter(self, name: str) -> TraceExporterFactory:
+        """Look up a selected factory without invoking it."""
+        try:
+            return self._trace_exporters[name]
+        except KeyError:
+            raise UnresolvedExtensionError(f"trace exporter '{name}' is not registered; {_VALIDATE_HINT}") from None
+
+    def trace_exporter_names(self) -> tuple[str, ...]:
+        """Return destination names in deterministic registration order."""
+        return tuple(self._trace_exporters)
 
     # -- stack rules ------------------------------------------------------
 

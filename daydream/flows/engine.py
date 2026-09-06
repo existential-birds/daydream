@@ -23,6 +23,7 @@ from daydream.extensions.api import (
 from daydream.extensions.api import (
     LoopGroup as LoopGroup,
 )
+from daydream.observability.spans import step_scope
 
 if TYPE_CHECKING:
     from daydream.backends import Backend
@@ -124,7 +125,12 @@ async def _run_step(step: FlowStep, ctx: FlowContext) -> Stop | BreakLoop | None
     """Run one step unless its ``enabled`` predicate gates it off."""
     if step.enabled is not None and not step.enabled(ctx):
         return None
-    return await step.run(ctx)
+    with step_scope(
+        step.name, phase=step.phase_key, iteration=ctx.data.get("iteration"), stack=ctx.config.stack,
+    ) as observed:
+        result = await step.run(ctx)
+        observed.finish(result.exit_code if isinstance(result, Stop) else 0)
+        return result
 
 
 async def _run_group(group: LoopGroup, steps: dict[str, FlowStep], ctx: FlowContext) -> Stop | None:

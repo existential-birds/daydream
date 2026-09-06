@@ -39,6 +39,7 @@ from daydream.backends import (
     ContinuationToken,
     CostEvent,
     MetricsEvent,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -391,14 +392,19 @@ class PiError(Exception):
 def _render_tool_result(result: Any) -> str:
     """Render a Pi ``AgentToolResult`` into a flat string for ``ToolResultEvent``.
 
-    The canonical shape is ``{"content": [{"type": "text", "text": "..."}],
-    "details": <any>, "terminate": bool}``. We join every ``text`` block. If the
-    shape diverges (older/newer Pi build), fall back to ``details`` then to a
-    JSON dump so the trajectory never loses the observation.
+    Plain text-only responses stay readable. Structured details and mixed
+    content blocks are serialized as JSON so image/resource blocks and their
+    accompanying text remain available to consumers.
     """
     if not isinstance(result, dict):
-        return "" if result is None else str(result)
+        return result if isinstance(result, str) else ("" if result is None else json.dumps(result))
     content = result.get("content")
+    if result.get("details") not in (None, "") or (
+        isinstance(content, list) and any(
+            not isinstance(block, dict) or block.get("type") != "text" for block in content
+        )
+    ):
+        return json.dumps(result, ensure_ascii=False)
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
@@ -409,17 +415,14 @@ def _render_tool_result(result: Any) -> str:
             return joined
     if isinstance(content, str) and content:
         return content
-    details = result.get("details")
-    if details is not None and details != "":
-        return str(details)
     # Last resort — preserve the payload rather than dropping the observation.
-    return json.dumps(result, default=str) if result else ""
+    return json.dumps(result, ensure_ascii=False) if result else ""
 
 
 def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
     """Pull token + cost fields out of a Pi ``AssistantMessage``.
 
-    Returns a dict with keys ``input``, ``output``, ``cacheRead`` (ints or None)
+    Returns ``input``, ``output``, ``cacheRead``, ``cacheWrite`` (ints or None)
     and ``cost_total`` (float or None). Never raises — every field is optional.
     """
     usage = message.get("usage") or {}
@@ -428,6 +431,7 @@ def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
         "input": usage.get("input"),
         "output": usage.get("output"),
         "cacheRead": usage.get("cacheRead"),
+        "cacheWrite": usage.get("cacheWrite"),
         "cost_total": cost.get("total"),
     }
 
@@ -646,14 +650,43 @@ class PiBackend:
         # captured for error reporting when the process exits non-zero.
         stderr_lines: list[str] = []
 
-        total_input = 0
-        total_output = 0
+        total_input: int | None = None
+        total_output: int | None = None
         total_cache_read: int | None = None
+        total_cache_write: int | None = None
         total_cost: float | None = None
+        last_model = self.model
+        last_provider = provider
+        finish_reason: str | None = None
         saw_finish_reason = False
         saw_turn_start = False
 
         transport: CliTransport | None = None
+
+        def terminal_events() -> tuple[CostEvent, ResultEvent]:
+            native_session = session_id or effective_session_id
+            return (
+                CostEvent(
+                    cost_usd=total_cost, input_tokens=total_input, output_tokens=total_output,
+                    cached_tokens=total_cache_read, cache_creation_tokens=total_cache_write,
+                    model_name=last_model, provider_name=last_provider,
+                ),
+                ResultEvent(
+                    structured_output=structured_result,
+                    continuation=(
+                        ContinuationToken(backend="pi", data={"session_id": native_session})
+                        if persist_session and native_session and finish_reason != "error" else None
+                    ),
+                    model_name=last_model, provider_name=last_provider,
+                    session_id=native_session, finish_reason=finish_reason,
+                ),
+            )
+
+        yield RequestEvent(
+            prompt=full_prompt, system_prompt=_PI_SYSTEM_PREAMBLE, model_name=self.model,
+            provider_name=provider, session_id=effective_session_id,
+            reasoning_effort=thinking, output_schema=output_schema,
+        )
 
         try:
             transport = CliTransport(
@@ -720,6 +753,8 @@ class PiBackend:
                 elif event_type == "message_end":
                     msg = event.get("message") or {}
                     if msg.get("role") == "assistant":
+                        last_model = msg.get("responseModel") or msg.get("model") or last_model
+                        last_provider = msg.get("provider") or last_provider
                         text_parts: list[str] = []
                         for block in msg.get("content") or []:
                             if not isinstance(block, dict):
@@ -757,37 +792,51 @@ class PiBackend:
                     active_tool_calls = 0
                     msg = event.get("message") or {}
                     stop_reason = msg.get("stopReason")
-                    if stop_reason == "error":
-                        error_msg = msg.get("errorMessage") or "Unknown Pi error"
-                        raise PiError(
-                            error_msg,
-                            retryable=_is_retryable_error_message(error_msg),
-                            category=_pi_error_category(error_msg),
-                        )
+                    last_model = msg.get("responseModel") or msg.get("model") or last_model
+                    last_provider = msg.get("provider") or last_provider
                     if stop_reason is not None:
                         saw_finish_reason = True
+                        finish_reason = stop_reason
                     usage = _extract_usage(msg)
                     inp = usage["input"]
                     outp = usage["output"]
                     cached = usage["cacheRead"]
+                    created = usage["cacheWrite"]
                     cost = usage["cost_total"]
+                    if isinstance(inp, int):
+                        inp += (cached if isinstance(cached, int) else 0) + (
+                            created if isinstance(created, int) else 0
+                        )
+                        total_input = (total_input or 0) + inp
+                    if isinstance(outp, int):
+                        total_output = (total_output or 0) + outp
+                    if isinstance(cached, int):
+                        total_cache_read = (total_cache_read or 0) + cached
+                    if isinstance(created, int):
+                        total_cache_write = (total_cache_write or 0) + created
+                    if isinstance(cost, (int, float)):
+                        total_cost = (total_cost or 0.0) + cost
                     if isinstance(inp, int) and isinstance(outp, int):
-                        model_name = msg.get("responseModel") or msg.get("model") or self.model
                         yield MetricsEvent(
                             message_id="",  # Pi has no per-message id.
                             prompt_tokens=inp,
                             completion_tokens=outp,
                             cached_tokens=cached if isinstance(cached, int) else None,
                             cost_usd=cost if isinstance(cost, (int, float)) else None,
-                            model_name=model_name,
+                            model_name=last_model,
+                            provider_name=last_provider,
+                            cache_creation_tokens=created if isinstance(created, int) else None,
                         )
-                        total_input += inp
-                        total_output += outp
-                        if isinstance(cached, int):
-                            total_cache_read = (total_cache_read or 0) + cached
-                        if isinstance(cost, (int, float)):
-                            total_cost = (total_cost or 0.0) + cost
                     yield TurnEndEvent(message_id="")
+                    if stop_reason == "error":
+                        for terminal in terminal_events():
+                            yield terminal
+                        error_msg = msg.get("errorMessage") or "Unknown Pi error"
+                        raise PiError(
+                            error_msg,
+                            retryable=_is_retryable_error_message(error_msg),
+                            category=_pi_error_category(error_msg),
+                        )
 
                 elif event_type == "agent_end":
                     # No inline finalization — Cost/Result are emitted once from
@@ -806,6 +855,11 @@ class PiBackend:
                 await transport.wait()
             except TransportExitError:
                 pass
+
+            if output_schema and last_assistant_text:
+                structured_result = extract_json(last_assistant_text)
+            for terminal in terminal_events():
+                yield terminal
 
             # Fail fast on non-zero exit: if pi crashed without emitting a
             # turn_end error event, surface the failure with diagnostic output
@@ -836,35 +890,6 @@ class PiBackend:
                     retryable=True,
                     category="STREAM_TRUNCATION",
                 )
-
-            # Single finalization path: runs exactly once whether
-            # the stream closed on agent_end or ended without it (truncated
-            # output). Cost/Result are derived from fully-accumulated totals.
-            if output_schema and last_assistant_text:
-                structured_result = extract_json(last_assistant_text)
-            yield CostEvent(
-                cost_usd=total_cost,
-                input_tokens=total_input,
-                output_tokens=total_output,
-                cached_tokens=total_cache_read,
-                model_name=self.model,
-            )
-            token_session = (
-                session_id or effective_session_id
-                if persist_session
-                else None
-            )
-            yield ResultEvent(
-                structured_output=structured_result,
-                continuation=(
-                    ContinuationToken(
-                        backend="pi",
-                        data={"session_id": token_session},
-                    )
-                    if token_session is not None
-                    else None
-                ),
-            )
 
         finally:
             if transport is not None:

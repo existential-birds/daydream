@@ -23,6 +23,16 @@ def register_builtins(registry: Registry) -> None:
     _register_builtin_prompts(registry)
     _register_builtin_renderers(registry)
     _register_builtin_flows(registry)
+    _register_trace_exporters(registry)
+
+
+def _register_trace_exporters(registry: Registry) -> None:
+    """Register lazy factories; merely validating extensions never initializes tracing."""
+    from daydream.observability.exporters import honeyhive_exporter, langsmith_exporter, otlp_exporter
+
+    registry.register_trace_exporter("langsmith", langsmith_exporter)
+    registry.register_trace_exporter("honeyhive", honeyhive_exporter)
+    registry.register_trace_exporter("otlp", otlp_exporter)
 
 
 def _register_improve_builtins(registry: Registry) -> None:

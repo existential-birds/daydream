@@ -13,7 +13,7 @@ Default flow is the deep multi-stack pipeline; `--shallow` is a single-stack, si
 are review-only. Four backends — Claude
 (in-process SDK), Codex, Pi, and Osprey (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
-Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark}.md`.
+Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark,observability}.md`.
 
 ## Commands
 
@@ -98,6 +98,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
 | `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |
 | `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
+| `observability/` | Operator trace settings, exporter factories, per-run OTel lifecycle, backend-event hydration and export privacy |
 | `backends/` | `Backend` protocol, Claude/Codex/Pi/Osprey, `AgentEvent` union, `create_backend()` |
 | `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
 | `config.py`, `config_file.py` | Per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
@@ -117,9 +118,19 @@ Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.
 ### Backend protocol
 
 `Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()`.
-`execute()` yields the 8-member `AgentEvent` union (`Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
-`Metrics`, `TurnEnd`, `Result`). Adding a backend means producing that stream correctly — phases and the
+`execute()` yields the 9-member `AgentEvent` union (`Request`, `Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
+`Metrics`, `TurnEnd`, `Result`). `Request` exposes the effective Daydream-sent request after adapter
+transformations. Adding a backend means producing that stream correctly — phases and the
 recorder are backend-agnostic.
+
+Observability is activated only by operator CLI/environment settings. The target's file config never
+selects destinations or credentials. A run owns its OTel provider and OpenLLMetry 0.62.3 processors;
+never install a global provider or call `Traceloop.init()`. Span ownership is run → executed flow step →
+logical agent → backend attempt → tool. Only attempts carry billed usage. Native turn boundaries
+differ by backend, so do not infer per-provider-call usage from `TurnEndEvent`. Preserve available
+terminal metrics before raising a backend error. Exporters register through
+`Registry.register_trace_exporter`; registration/validation must not construct exporters.
+Full contract and operator recipes: `docs/observability.md` and `docs/extensions.md`.
 
 The Claude backend enforces two always-on `PreToolUse` guards in every phase and profile: the
 dangerous-command guard (root-anchored scans, `rm -rf /`) and the background-Bash guard. The host reads a
@@ -281,6 +292,8 @@ Full contract: `docs/extensions.md`.
 | `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
 | `DAYDREAM_GIT_TOKEN` | Harvest | Optional out-of-band auth for sanitized repo clones during `corpus harvest` of private repos (e.g. a GitHub PAT); injected via git config environment variables (`http.extraHeader`), **never embedded in the remote URL** and **never on the command line**. Without it, plain clone via the ambient credential helper |
 | `DAYDREAM_TRAJECTORY_HUB_REPO` | Archive | Optional HuggingFace dataset repo to upload each run's bundle to; one of the two operator sources (the other is the CLI `--trajectory-hub-repo` flag). The target checkout's file config is ignored for this |
+| `DAYDREAM_TRACE_TO` | Observability | Comma-separated trace destinations; empty/unset disables tracing. `--trace-to` overrides this list; `--no-tracing` disables tracing |
+| `DAYDREAM_TRACE_CONTENT` | Observability | Content policy: `full` (default) or `metadata`; overridden by `--trace-content`. Does not enable tracing by itself |
 | `PI_PROVIDER` / `PI_THINKING` | Pi | `--provider` / `--thinking`; `PI_THINKING` loses to a per-phase `reasoning_effort` |
 | `PI_API_KEY` | Pi | Copied into the child's provider-native var (e.g. `ZAI_API_KEY`), **never onto argv**; warns and ignores if the provider has no mapped var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Attempts default 20, all backends |

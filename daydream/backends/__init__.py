@@ -6,6 +6,7 @@ knowing which backend produced them.
 
 Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
 
+- ``RequestEvent`` — actual request after backend transformations.
 - ``TextEvent`` — agent text output.
 - ``ThinkingEvent`` — extended reasoning / thinking content.
 - ``ToolStartEvent`` — tool invocation started.
@@ -14,8 +15,8 @@ Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
 - ``MetricsEvent`` — per-turn LLM token/cost usage.
 - ``TurnEndEvent`` — assistant-turn boundary; closes the recorder's open
   Step so multi-turn invocations are not collapsed into one Step.
-- ``ResultEvent`` — final event in the stream; carries structured output
-  and any continuation token.
+- ``ResultEvent`` — terminal metadata, structured output and continuation;
+  a failed backend can subsequently raise after exposing its billed usage.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from daydream.trajectory import now_iso
 
@@ -33,6 +34,25 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
+
+
+@dataclass
+class RequestEvent:
+    """Effective Daydream request, after adapter transformations.
+
+    Only exposed request data belongs here; backend-internal prompts and
+    environment/configuration dictionaries are never inferred or copied.
+    ``system_prompt`` contains only the system text explicitly sent by Daydream.
+    """
+
+    prompt: str
+    system_prompt: str | None = None
+    model_name: str | None = None
+    provider_name: str | None = None
+    session_id: str | None = None
+    reasoning_effort: str | None = None
+    output_schema: dict[str, Any] | None = None
+    timestamp: str = field(default_factory=now_iso)
 
 
 @dataclass
@@ -115,9 +135,26 @@ class ToolResultEvent:
     truncated: bool = False
 
 
+@dataclass(frozen=True)
+class ModelUsageTotals:
+    """Selected native per-model billing, with cache subsets of total input."""
+
+    model_name: str
+    provider_name: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cost_usd: float | None = None
+
+
 @dataclass
 class CostEvent:
     """Cost and usage information (end-of-call signal feeding FinalMetrics).
+
+    ``provider_name`` is the exposed native provider identity;
+    ``cache_creation_tokens`` is the cache-write subset of total input.
+    ``model_usage`` contains selected native per-model totals, not extra billing.
 
     Attributes:
         cost_usd: Total cost in USD; None when unavailable. Codex synthesizes
@@ -153,11 +190,18 @@ class CostEvent:
     reasoning_tokens: int | None = None
     model_name: str | None = None
     timestamp: str = field(default_factory=now_iso)
+    provider_name: str | None = None
+    cache_creation_tokens: int | None = None
+    model_usage: dict[str, ModelUsageTotals] | None = None
 
 
 @dataclass
 class MetricsEvent:
     """Per-step LLM token/cost usage.
+
+    ``usage_scope`` distinguishes per-message usage from an invocation
+    aggregate (Codex); cache creation is a subset of total prompt tokens.
+    ``duration_ms`` and ``started_at`` are native backend timing, when exposed.
 
     Emitted once per AssistantMessage by the Claude backend (keyed via
     ``AssistantMessage.message_id``), and once per ``turn.completed`` by
@@ -207,6 +251,11 @@ class MetricsEvent:
     reasoning_tokens: int | None = None
     model_name: str | None = None
     timestamp: str = field(default_factory=now_iso)
+    usage_scope: Literal["message", "invocation"] = "message"
+    provider_name: str | None = None
+    cache_creation_tokens: int | None = None
+    duration_ms: float | None = None
+    started_at: str | None = None
 
 
 @dataclass
@@ -242,7 +291,11 @@ class ContinuationToken:
 
 @dataclass
 class ResultEvent:
-    """Final event in the stream. Carries structured output and continuation token.
+    """Terminal data, including native identity, finish reason and duration.
+
+    A failed backend exposes known terminal data before raising; receiving
+    this event is not evidence that the enclosing invocation succeeded.
+    ``session_id`` is independent of whether a continuation token is requested.
 
     Attributes:
         structured_output: Structured result as emitted by the backend,
@@ -264,10 +317,16 @@ class ResultEvent:
     # ResultEvent callers continue to interpret their third argument as the
     # timestamp.
     model_name: str | None = None
+    provider_name: str | None = None
+    session_id: str | None = None
+    finish_reason: str | None = None
+    duration_ms: float | None = None
+    duration_api_ms: float | None = None
 
 
 AgentEvent = (
-    TextEvent
+    RequestEvent
+    | TextEvent
     | ThinkingEvent
     | ToolStartEvent
     | ToolResultEvent
@@ -474,8 +533,10 @@ __all__ = [
     "CostEvent",
     "MaxTurnsError",
     "MetricsEvent",
+    "ModelUsageTotals",
     "OspreyBackend",
     "PiBackend",
+    "RequestEvent",
     "ResultEvent",
     "TextEvent",
     "ThinkingEvent",

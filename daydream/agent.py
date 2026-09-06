@@ -39,6 +39,7 @@ from daydream.backends import (
 )
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
+from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
 from daydream.ui import (
     NEON_THEME,
@@ -518,6 +519,42 @@ async def run_agent(
     tool_call_budget: int | None = None,
     validate_structured_output: bool = True,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
+    """Run one logical agent, tracing its actual returned or salvaged result.
+
+    Backend retry, supervision, budget and ATIF semantics live in the invocation
+    executor. The outer scope owns exactly the result the phase receives.
+    """
+    backend_name = type(backend).__name__.removesuffix("Backend").lower()
+    with agent_scope(phase.value, backend=backend_name, model=backend.model) as observed:
+        observed.content("traceloop.entity.input", {"prompt": prompt, "output_schema": output_schema})
+        result = await _run_agent(
+            backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
+            continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
+            persist_session=persist_session, wall_budget_s=wall_budget_s, tool_call_budget=tool_call_budget,
+            validate_structured_output=validate_structured_output,
+        )
+        observed.output(result[0])
+        observed.finish(1 if result[2] else 0, reason=result[2])
+        return result
+
+
+async def _run_agent(
+    backend: Backend,
+    cwd: Path,
+    prompt: str,
+    *,
+    phase: DaydreamPhase,
+    output_schema: dict[str, Any] | None = None,
+    progress_callback: Callable[[Text], Any] | None = None,
+    continuation: ContinuationToken | None = None,
+    agents: dict[str, AgentDefinition] | None = None,
+    max_turns: int | None = None,
+    read_only: bool = False,
+    persist_session: bool = True,
+    wall_budget_s: float | None = None,
+    tool_call_budget: int | None = None,
+    validate_structured_output: bool = True,
+) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
     Streams verbose output to stdout as it's received. When progress_callback
@@ -670,7 +707,11 @@ async def run_agent(
                 )
                 event_stream_scope = _EventStreamScope(event_iter)
 
-                async with invocation_cm as inv, event_stream_scope:
+                async with (
+                    attempt_scope(attempt + 1) as observed,
+                    invocation_cm as inv,
+                    event_stream_scope,
+                ):
                     if inv is not None:
                         inv.observe_user_step(prompt=prompt)
 
@@ -684,6 +725,9 @@ async def run_agent(
 
                     with wall_scope:
                         async for event in event_iter:
+                            # The sole telemetry observer runs before UI callbacks,
+                            # supervision and budgets can interrupt event handling.
+                            observed.observe(event)
                             if use_callback and not isinstance(event, TextEvent):
                                 await _flush_callback_text()
 
@@ -855,6 +899,7 @@ async def run_agent(
                         budget_reason = "wall_budget_exceeded"
                     aborted_reason = budget_reason
                     if budget_reason is not None:
+                        observed.abort(budget_reason)
                         await event_stream_scope.aclose()
                         if inv is not None:
                             inv.mark_aborted(budget_reason)
