@@ -61,7 +61,8 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     build_p.add_argument("--daydream-wheel", required=True, type=Path, help="wheel for this Daydream version")
 
     upgrade_p = sub.add_parser(
-        "upgrade", help="deterministically upgrade legacy case documents (finding_id + schema_version)"
+        "upgrade",
+        help="upgrade legacy cases and verify ready-snapshot base provenance",
     )
     upgrade_p.add_argument("dir", type=Path, help="workspace directory")
     upgrade_p.add_argument("--dry-run", action="store_true", help="report the upgrade without writing")
@@ -251,9 +252,13 @@ def _handle_benchmark_status(dir_path: Path) -> int:
     print(f"ledger entries: {len(status.ledger.pull_requests)}")
     for summary in status.case_snapshots:
         head = summary.get("head_prefix") or "-"
+        snapshot_status = summary.get("snapshot_status", "imported")
+        reason = summary.get("error_reason") or ""
+        if reason:
+            snapshot_status += f" ({reason})"
         print(
             f"  case {summary.get('case_id', '')}: "
-            f"snapshot {summary.get('snapshot_status', 'imported')} @ {head}"
+            f"snapshot {snapshot_status} @ {head}"
         )
     return 0
 
@@ -295,7 +300,7 @@ def _handle_benchmark_build_harbor(args: argparse.Namespace) -> int:
 
 
 def _handle_benchmark_upgrade(args: argparse.Namespace) -> int:
-    """Deterministically upgrade legacy v1 case documents to v2 in place.
+    """Upgrade legacy cases and verify ready-snapshot base provenance in place.
 
     Prints the per-case report plus any surfaced errors. Returns ``0`` on a
     successful upgrade (including an idempotent no-op second run) and ``1``

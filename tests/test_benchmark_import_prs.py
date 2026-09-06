@@ -12,6 +12,7 @@ origin (no network).
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any, Literal
 
 import pytest
 
+from daydream import git_ops
 from tests.harness import github_schema as gs
 from tests.harness.fake_gh import FakeGh
 
@@ -47,6 +49,7 @@ _PR_HEADER = {
     "created_at": "2026-01-01T00:00:00Z",
     "updated_at": "2026-01-01T00:00:00Z",
     "user": {"login": "alice", "type": "User"},
+    "changed_files": 0,
 }
 
 _REPO_ID = "R_kgDOABC123"
@@ -99,6 +102,96 @@ def test_fetch_persists_complete_pr_header(tmp_path: Path, fake_gh: FakeGh) -> N
     assert pr.head.ref == "feature/cache"          # head.ref parity with base.ref
     assert pr.merged_at is not None and pr.closed_at is not None
     assert pr.number == 101 and pr.author.login == "alice"
+
+
+def test_fetch_changed_files_persists_complete_rename_union(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = {**_PR_HEADER, "changed_files": 2}
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/files",
+        [
+            {"status": "modified", "filename": "src/a:b.py"},
+            {
+                "status": "renamed",
+                "filename": "src/new name.py",
+                "previous_filename": r"src\old.py",
+            },
+        ],
+    )
+    for ep in (
+        "repos/o/r/pulls/101/reviews",
+        "repos/o/r/pulls/101/comments",
+        "repos/o/r/issues/101/comments",
+    ):
+        fake_gh.set_response("GET", ep, [])
+
+    doc = gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
+
+    assert doc.pull_request.changed_files == ["src/a:b.py", "src/new name.py", r"src\old.py"]
+    calls = fake_gh.calls("GET", "repos/o/r/pulls/101/files")
+    assert len(calls) == 1 and "--paginate" in (calls[0].argv or [])
+
+
+@pytest.mark.parametrize(
+    ("count", "rows"),
+    [
+        (2, [{"status": "modified", "filename": "a.py"}]),
+        (3001, []),
+        (1, [{"status": "renamed", "filename": "new.py"}]),
+        (1, [{"status": "modified", "filename": "new.py", "previous_filename": "old.py"}]),
+        (1, [{"filename": "a.py"}]),
+        (1, [{"status": "invented", "filename": "a.py"}]),
+        (1, [{"status": 17, "filename": "a.py"}]),
+        (2, [
+            {"status": "modified", "filename": "a.py"},
+            {"status": "modified", "filename": "a.py"},
+        ]),
+        (1, [{"status": "modified", "filename": "../escape.py"}]),
+    ],
+)
+def test_fetch_changed_files_fails_closed_on_incomplete_or_malformed_inventory(
+    tmp_path: Path, fake_gh: FakeGh, count: int, rows: list[Any]
+) -> None:
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", {**_PR_HEADER, "changed_files": count})
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/files", rows)
+    for ep in (
+        "repos/o/r/pulls/101/reviews",
+        "repos/o/r/pulls/101/comments",
+        "repos/o/r/issues/101/comments",
+    ):
+        fake_gh.set_response("GET", ep, [])
+    with pytest.raises(git_ops.GitError, match="changed.files|inventory|3000"):
+        gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
+
+
+def test_final_only_fetch_does_not_request_changed_files(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    for ep in (
+        "repos/o/r/pulls/101/reviews",
+        "repos/o/r/pulls/101/comments",
+        "repos/o/r/issues/101/comments",
+    ):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    assert doc.pull_request.changed_files is None
+    assert fake_gh.calls("GET", "repos/o/r/pulls/101/files") == []
 
 
 def test_materialized_case_carries_full_pr_header(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -1093,6 +1186,51 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str]:
     return str(bare), base_sha, head_sha
 
 
+def _seed_stacked_origin(
+    tmp_path: Path, fake_gh: FakeGh
+) -> tuple[str, str, str, str]:
+    """Build an advanced-base PR with one reverted historical path.
+
+    The explicit head adds ``legacy.py`` and ``feature.py``; the final head
+    removes ``legacy.py`` again.  GitHub's final PR inventory therefore names
+    only ``feature.py``, while the historical snapshot includes both paths.
+    """
+    repo = tmp_path / "stacked_wt"
+    repo.mkdir()
+    _seed_git(repo, "init", "-b", "main")
+    _seed_write(repo, "readme.txt", "base\n")
+    base_sha = _seed_commit(repo, "base")
+    _seed_write(repo, "upstream.py", "UPSTREAM = 1\n")
+    base_tip = _seed_commit(repo, "advanced base")
+    _seed_git(repo, "checkout", "--detach", base_sha)
+    _seed_write(repo, "legacy.py", "LEGACY = 1\n")
+    _seed_write(repo, "feature.py", "FEATURE = 1\n")
+    explicit_sha = _seed_commit(repo, "historical feature")
+    _seed_git(repo, "rm", "legacy.py")
+    final_sha = _seed_commit(repo, "revert historical path")
+
+    bare = tmp_path / "stacked_origin.git"
+    bare.mkdir()
+    _seed_git(bare, "init", "--bare")
+    _seed_git(repo, "remote", "add", "origin", str(bare))
+    _seed_git(repo, "push", "origin", "main:main")
+    _seed_git(repo, "push", "origin", f"{final_sha}:refs/pull/101/head", check=False)
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": base_tip}
+    header["head"] = {"ref": "feature", "sha": final_sha}
+    header["changed_files"] = 2
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/files",
+        [
+            {"status": "added", "filename": "feature.py"},
+            {"status": "added", "filename": "legacy.py"},
+        ],
+    )
+    return str(bare), base_tip, explicit_sha, final_sha
+
+
 def _seed_anchor_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str, str]:
     """Bare origin with authored-rename history + re-seeded PR header.
 
@@ -1302,6 +1440,312 @@ def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path
     # one shared mirror, no ref collision: the PR-head ref still resolves to head
     assert (ws / "cache" / "repository.git").exists()
     assert sn.rev_parse(ws / "cache/repository.git", "refs/pull/101/head") == head_sha
+
+
+def test_refresh_demotes_clean_draft_when_historical_head_leaves_pr_scope(
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real import boundary applies final-inventory scope to retained heads."""
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+    explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
+    explicit = load_yaml_strict(explicit_path)
+    assert explicit["snapshot"]["status"] == "ready"
+    prior_bundle = ws / explicit["snapshot"]["bundle_file"]
+    assert prior_bundle.exists()
+    explicit["curation"].update(
+        state="draft",
+        snapshot_attested=True,
+        clean_attested=True,
+        gold_status="clean",
+        task_spec_sha256="d" * 64,
+    )
+    explicit_path.write_text(yaml.safe_dump(explicit, sort_keys=False))
+
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": _base_tip}
+    header["head"] = {"ref": "feature", "sha": final_sha}
+    header["changed_files"] = 1
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101/files", [{"status": "added", "filename": "feature.py"}]
+    )
+
+    assert gi.run_import_prs(
+        ws,
+        pr_numbers=[101],
+        heads=["final"],
+        refresh=True,
+        origin_url=origin_url,
+    ) == 0
+    explicit = load_yaml_strict(explicit_path)
+    assert explicit["snapshot"]["status"] == "unreplayable"
+    assert explicit["snapshot"]["error"]["reason"] == "base_drift"
+    assert explicit["curation"]["state"] == "unreplayable"
+    assert explicit["curation"]["snapshot_attested"] is False
+    assert explicit["curation"]["clean_attested"] is False
+    assert explicit["curation"]["gold_status"] is None
+    assert "task_spec_sha256" not in explicit["curation"]
+
+    final = load_yaml_strict(ws / f"cases/pr-000101-{final_sha[:12]}.yaml")
+    assert final["snapshot"]["status"] == "ready"
+    assert not prior_bundle.exists()
+
+    from daydream import cli as top_cli
+    from daydream.benchmark.workspace import validate_workspace
+
+    assert validate_workspace(ws) == (
+        2,
+        "incomplete: workspace state curating; unreplayable snapshot reasons: base_drift",
+    )
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as status_exit:
+        top_cli.main(["benchmark", "status", str(ws)])
+    assert status_exit.value.code == 0
+    assert "snapshot unreplayable (base_drift)" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as validate_exit:
+        top_cli.main(["benchmark", "validate", str(ws)])
+    assert validate_exit.value.code == 2
+    assert "unreplayable snapshot reasons: base_drift" in capsys.readouterr().out
+
+
+def test_explicit_head_path_probe_git_failure_isolated_to_that_case(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real git diff failure is a typed case result, not a whole-PR abort."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "git shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = diff ] && [ \"$2\" = --name-status ]; then\n"
+        "  echo 'injected path inventory failure' >&2\n"
+        "  exit 88\n"
+        "fi\n"
+        "exec \"$DAYDREAM_TEST_REAL_GIT\" \"$@\"\n"
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+    manifest = load_yaml_strict(ws / "benchmark.yaml")
+    assert manifest["pull_requests"][0]["import_state"] == "fetched"
+    explicit = load_yaml_strict(ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml")
+    final = load_yaml_strict(ws / f"cases/pr-000101-{final_sha[:12]}.yaml")
+    assert explicit["snapshot"]["status"] == "unreplayable"
+    assert explicit["snapshot"]["error"]["reason"] == "bundle_failure"
+    assert "injected path inventory failure" in explicit["snapshot"]["error"]["detail"]
+    assert final["snapshot"]["status"] == "ready"
+
+
+def test_refresh_legacy_ready_snapshot_requires_upgrade_before_retirement(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """Retirement names the upgrade needed for a pre-marker ready case."""
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "workspace with spaces"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+
+    explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
+    prior = load_yaml_strict(explicit_path)
+    prior["snapshot"].pop("base_resolution")
+    explicit_path.write_text(yaml.safe_dump(prior, sort_keys=False))
+    prior_bytes = explicit_path.read_bytes()
+    prior_bundle = ws / prior["snapshot"]["bundle_file"]
+
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": base_tip}
+    header["head"] = {"ref": "feature", "sha": final_sha}
+    header["changed_files"] = 1
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101/files", [{"status": "added", "filename": "feature.py"}]
+    )
+
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url
+    ) == 1
+    entry = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    assert entry["import_state"] == "fetched"
+    message = entry["latest_error"]["message"]
+    assert "daydream benchmark upgrade <workspace>" in message
+    assert str(ws) in message
+    assert "base_resolution" in message
+    assert explicit_path.read_bytes() == prior_bytes
+    assert prior_bundle.exists()
+
+
+def test_bundle_retirement_preserves_a_ready_shared_reference(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """A transitioned case cannot retire a bundle another ready case retains."""
+    import copy
+
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.schema import case_id_for
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_tip, explicit_sha, _final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+    manifest = load_yaml_strict(ws / "benchmark.yaml")
+    explicit_id = case_id_for(101, explicit_sha)
+    explicit_path = ws / f"cases/{explicit_id}.yaml"
+    explicit = load_yaml_strict(explicit_path)
+
+    alias_head = "e" * 40
+    alias_id = case_id_for(101, alias_head)
+    alias = copy.deepcopy(explicit)
+    alias["case_id"] = alias_id
+    alias["snapshot"]["original_head_sha"] = alias_head
+    alias["snapshot"]["requested_head"] = alias_head
+    alias_path = ws / f"cases/{alias_id}.yaml"
+    alias_path.write_text(yaml.safe_dump(alias, sort_keys=False))
+    manifest["cases"].append(
+        {"case_id": alias_id, "pr_number": 101, "case_file": f"cases/{alias_id}.yaml"}
+    )
+
+    transitioned = copy.deepcopy(explicit)
+    transitioned["snapshot"]["status"] = "unreplayable"
+    assert gi._retired_snapshot_bundles(
+        ws,
+        manifest,
+        101,
+        [(explicit_id, f"cases/{explicit_id}.yaml", transitioned)],
+    ) == []
+
+
+def test_inventory_only_refresh_preserves_gold_when_snapshot_remains_in_scope(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """Changed-file scope evidence is persisted but is not reviewer task input."""
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+    explicit_path = ws / f"cases/pr-000101-{explicit_sha[:12]}.yaml"
+    explicit = load_yaml_strict(explicit_path)
+    explicit["curation"].update(
+        state="draft",
+        snapshot_attested=False,
+        clean_attested=True,
+        gold_status="clean",
+    )
+    explicit_path.write_text(yaml.safe_dump(explicit, sort_keys=False))
+    before_curation = load_yaml_strict(explicit_path)["curation"]
+
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": base_tip}
+    header["head"] = {"ref": "feature", "sha": final_sha}
+    header["changed_files"] = 3
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/files",
+        [
+            {"status": "added", "filename": "feature.py"},
+            {"status": "added", "filename": "legacy.py"},
+            {"status": "modified", "filename": "unrelated.py"},
+        ],
+    )
+    assert gi.run_import_prs(
+        ws,
+        pr_numbers=[101],
+        heads=["final"],
+        refresh=True,
+        origin_url=origin_url,
+    ) == 0
+
+    refreshed = load_yaml_strict(explicit_path)
+    assert refreshed["snapshot"]["status"] == "ready"
+    assert refreshed["pull_request"]["changed_files"] == [
+        "feature.py",
+        "legacy.py",
+        "unrelated.py",
+    ]
+    assert refreshed["curation"] == before_curation
+
+
+def test_in_scope_explicit_and_final_heads_validate_and_compile(
+    tmp_path: Path, fake_gh: FakeGh
+) -> None:
+    """The real import/curation/compile path keeps a covered explicit head."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace, validate_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_tip, explicit_sha, _final_sha = _seed_stacked_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
+    ) == 0
+
+    manifest = load_yaml_strict(ws / "benchmark.yaml")
+    for row in manifest["cases"]:
+        case_id = row["case_id"]
+        case = load_yaml_strict(ws / row["case_file"])
+        cu.attest_clean(ws, case_id)
+        cu.mark_ready(ws, case_id, head_sha=case["snapshot"]["original_head_sha"])
+
+    assert validate_workspace(ws) == (0, "ready")
+    lock = build.compile_workspace(ws)
+    assert len(lock["cases"]) == 2
 
 
 def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path: Path, fake_gh: FakeGh) -> None:

@@ -106,8 +106,9 @@ daydream benchmark status ~/bench-owner-repo
 Reports the derived workspace state (`empty` / `collecting` / `ready` / …),
 whether the repository identity is **unresolved**, the PR ledger, and per-indexed
 case snapshot state (`ready` / `unreplayable` / `imported`) with the frozen head
-prefix each case was caught at. Safe to run concurrently with other read-only
-commands.
+prefix each case was caught at. Unreplayable rows include their typed reason,
+such as `base_drift`, without exposing the private path detail. Safe to run
+concurrently with other read-only commands.
 
 ### `validate` — 0/2/1 exit codes
 
@@ -116,7 +117,8 @@ daydream benchmark validate ~/bench-owner-repo
 ```
 
 Returns a numeric **exit** code: `0` ready, `2` structurally valid but
-incomplete (for example an unresolved repository identity on a fresh workspace),
+incomplete (for example an unresolved repository identity on a fresh workspace;
+typed unreplayable reasons are appended to this label),
 `1` corrupt (invalid/missing `benchmark.yaml`, an orphan or missing indexed file,
 or a checksum-mismatched ready-snapshot bundle).
 
@@ -147,6 +149,12 @@ print) runs before any fetch; the first successful repository resolution fills
 import file and marks the PR `fetch_failed` in the resumable ledger. The command
 never selects gold and never filters bot authors — bot classification is retained
 as metadata only.
+
+Explicit historical heads are also checked against GitHub's complete final PR
+file inventory. If their merge-base snapshot touches an extra path, the case is
+refused as `base_drift`; the default final head keeps its existing behavior.
+Every ready snapshot carries `base_resolution: merge_base_v1`, recording that
+its persisted base was resolved and proven as the merge base.
 
 ### `curate` — golden review
 
@@ -526,8 +534,13 @@ commitment to content — it does **not** reveal the content it fingerprints.
 Pre-provenance-split workspaces need a one-time repair before they can build and
 run. `daydream benchmark upgrade <dir>` (and `--dry-run`) is that repair path:
 
-- It backfills `requested_base_sha` from the recorded `original_base_sha` on
-  every `ready`/`imported` snapshot — **v1 and already-v2 alike**.
+- For a legacy `ready` snapshot, it uses the private
+  `cache/repository.git` mirror to recompute the merge base and verify the
+  recorded base/head trees before writing `base_resolution: merge_base_v1`.
+  An old blind backfill (`original_base_sha == requested_base_sha`) is repaired
+  to the real merge base by the same proof.
+- For an `imported` snapshot, which has no frozen trees, it only preserves the
+  sole legacy base candidate as `requested_base_sha`.
 - It re-derives the v1→v2 **case-scoped `finding_id`** for the same snapshots.
 - **Authored content is left untouched** — curation, gold, and any author edits
   are preserved byte-for-byte.
@@ -537,6 +550,11 @@ run. `daydream benchmark upgrade <dir>` (and `--dry-run`) is that repair path:
   *would* be written without writing.
 - An **un-upgraded** such workspace fails `CaseDocument` validation and reports
   as **corrupt**.
+
+If provenance verification cannot run, restore the workspace's private
+`cache/repository.git` mirror (with the recorded commits), or refresh/re-import
+the PR before retrying `upgrade`. The command never stamps a ready snapshot from
+unverified metadata.
 
 ## 7. Failure and cleanup states
 
