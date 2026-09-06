@@ -5066,6 +5066,10 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                     discovery_deadline=discovery_deadline,
                     completion_deadline=completion_deadline,
                 )
+                # The new target is durable before the previous attempt's
+                # guidance is retired. Do this before any CI request so a
+                # blocked or abruptly interrupted resume cannot expose it.
+                remote_ci_handoff_path(ctx.data["dd"]).unlink(missing_ok=True)
                 print_info(
                     console,
                     f"Verifying remote CI for {target.base_repository} PR "

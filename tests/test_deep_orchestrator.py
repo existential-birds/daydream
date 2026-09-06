@@ -33,6 +33,7 @@ from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import (
     PARTIAL_FIX_MARKER,
     StubBackend,
@@ -66,7 +67,7 @@ def _default_strategy(stage: str) -> str:
     return _rp.build_default_profile().strategies[stage].content
 
 
-def _add_bare_remote(repo: Path) -> None:
+def _add_bare_remote(repo: Path) -> Path:
     """Give *repo* a real, pushable ``origin``: a sibling bare clone.
 
     Host-native commit/push (issue #726) really runs ``git push`` and verifies
@@ -79,6 +80,7 @@ def _add_bare_remote(repo: Path) -> None:
         ["git", "-C", str(repo), "remote", "add", "origin", str(bare)],
         check=True, capture_output=True,
     )
+    return bare
 
 
 def _install_model_capturing_stubs(
@@ -2187,12 +2189,13 @@ async def test_fix_guard_reverts_generated_migration_edit(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     from daydream.runner import run
 
     project, migration = _migration_project(tmp_path, "migration_repo")
     bare = _bare_remote(tmp_path / "remote.git")
-    _git(project, "remote", "add", "origin", str(bare))
+    no_ci_remote.connect(project, bare)
 
     # Issue #336: the fix loop only auto-fixes findings whose file is in the
     # reviewed diff. The draft migration finding must therefore be part of the
@@ -2228,6 +2231,8 @@ async def test_fix_guard_reverts_generated_migration_edit(
             output_mode="loop",
             non_interactive=False,
             archive=False,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
 
@@ -2264,6 +2269,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """Real path: a fix writing U+201D into a changed .go comment is scrubbed pre-commit.
 
@@ -2278,7 +2284,7 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
 
     project = _go_quote_project(tmp_path)
     bare = _bare_remote(tmp_path / "remote.git")
-    _git(project, "remote", "add", "origin", str(bare))
+    no_ci_remote.connect(project, bare)
     notes_before = (project / "notes.md").read_bytes()
     head_before = _git(project, "rev-parse", "HEAD")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
@@ -2301,6 +2307,8 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     exit_code = await run(make_config(
         project, assume="yes", output_mode="loop", non_interactive=False,
         archive=False,
+        pr_number=no_ci_remote.pr_number,
+        pr_repo=no_ci_remote.base_repository,
     ))
     assert exit_code == 0
     go_src = (project / "main.go").read_text()
@@ -2442,6 +2450,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#336 real-path: the post-fix residual check reverts out-of-scope edits.
 
@@ -2462,7 +2471,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_residual")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     pre_fix_unrelated = (target / "unrelated.py").read_text()
 
     _silence(monkeypatch)
@@ -2493,6 +2503,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
             non_interactive=False,
             archive=False,
             scope_issue_filing=True,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -2525,13 +2537,15 @@ async def test_fix_reverts_but_files_no_issue_by_default(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#1056 default-off: the residual edit is still reverted (safety invariant)
     but no GitHub issue is filed."""
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_default_off")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     pre_fix_unrelated = (target / "unrelated.py").read_text()
 
     _silence(monkeypatch)
@@ -2549,7 +2563,11 @@ async def test_fix_reverts_but_files_no_issue_by_default(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
     exit_code = await run(
-        make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False)
+        make_config(
+            target, assume="yes", output_mode="loop", non_interactive=False,
+            archive=False, pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
+        )
     )
     assert exit_code == 0
     # The safety revert still happened — invariant independent of filing.
@@ -2565,12 +2583,14 @@ async def test_fix_reverts_and_files_when_opted_in(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#1056 opt-in: the reverted edit is filed exactly as #336 built it."""
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_opt_in")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
@@ -2589,6 +2609,8 @@ async def test_fix_reverts_and_files_when_opted_in(
         make_config(
             target, assume="yes", output_mode="loop", non_interactive=False,
             archive=False, scope_issue_filing=True,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -2600,13 +2622,15 @@ async def test_reverted_edit_dedups_across_runs(
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#1051 regression: an opted-in run does not re-file an issue for a
     reverted edit whose fingerprint marker already sits on an open issue."""
     from daydream.runner import run
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_dedup")
-    _add_bare_remote(target)
+    bare = _add_bare_remote(target)
+    no_ci_remote.connect(target, bare)
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
@@ -2651,6 +2675,8 @@ async def test_reverted_edit_dedups_across_runs(
         make_config(
             target, assume="yes", output_mode="loop", non_interactive=False,
             archive=False, scope_issue_filing=True,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -6224,6 +6250,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """#201 real-path: a runaway file group is capped by the serial-item budget.
 
@@ -6257,14 +6284,17 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     stub.fail_batched_fix_file = "api.py"  # force the per-finding fallback for api.py
     retained_marker = "# retained before budget stop\n"
     stub.fix_edit_line = retained_marker
-    _add_bare_remote(multi_stack_target)
+    bare = _add_bare_remote(multi_stack_target)
+    no_ci_remote.connect(multi_stack_target, bare)
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
         exit_code = await run(
             make_config(
-                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                pr_number=no_ci_remote.pr_number,
+                pr_repo=no_ci_remote.base_repository,
             )
         )
     assert exit_code == 0

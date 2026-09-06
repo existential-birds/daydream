@@ -41,6 +41,7 @@ from tests.harness.git_helpers import bare_remote
 from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.remote_ci import NoCIRemote
 from tests.test_deep_pr_comment_integration import (
     FakeAssistantMessage,
     FakeResultMessage,
@@ -1147,6 +1148,7 @@ async def test_fix_cycle_yes_commits_fixes(
     tmp_path: Path,
     make_config: Callable[..., 'RunConfig'],
     silence_console: Callable[..., None],
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """Real-path: a --yes shallow deep run whose tests pass commits its fixes.
 
@@ -1160,7 +1162,7 @@ async def test_fix_cycle_yes_commits_fixes(
     _silence_fix_cycle_ui(silence_console)
     # Host-native commit/push (issue #726) pushes to 'origin' for real; give
     # the repo a bare remote so the push + ls-remote verification succeeds.
-    _git(feature_branch_repo, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
+    no_ci_remote.connect(feature_branch_repo, bare_remote(tmp_path / "origin.git"))
 
     commit_backend = _CommitWritingBackend(feature_branch_repo)
     monkeypatch.setattr(
@@ -1182,7 +1184,14 @@ async def test_fix_cycle_yes_commits_fixes(
     head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
 
     exit_code = await runner.run(
-        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes")
+        make_config(
+            feature_branch_repo,
+            start_at="fix",
+            shallow=True,
+            assume="yes",
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
+        )
     )
     assert exit_code == 0
 

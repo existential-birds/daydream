@@ -62,6 +62,7 @@ _PHASE_LABELS: dict[str, str] = {
     "hook-run": "Pre-push Hook",
     "commit": "Commit",
     "push": "Push",
+    "remote-ci": "Remote CI",
 }
 
 FALLBACK_NOTE = "*run details unavailable*"

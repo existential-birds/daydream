@@ -38,6 +38,7 @@ from daydream.backends import (
 )
 from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import bare_remote, git
+from tests.harness.remote_ci import NoCIRemote
 
 # The prompt-dispatching stub backend and its install helpers are the canonical
 # shared stub (tests/harness/stub_backend.py); re-rolling the dispatch
@@ -150,6 +151,7 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """AC1 + AC3: a default deep run (no --no-eval) populates the manifest's eval
     metrics AND writes a recommended.patch distinct from diff.patch.
@@ -158,7 +160,7 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     is non-empty and the real test/heal and commit phases run before archiving.
     """
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(multi_stack_target, "remote", "add", "origin", str(remote))
+    no_ci_remote.connect(multi_stack_target, remote)
     stub = _install_deep_capture_backend(
         multi_stack_target,
         monkeypatch,
@@ -168,7 +170,10 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     head_before = git_ops.head_sha(multi_stack_target)
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False,
+            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
+        )
     )
     assert exit_code == 0
     head_after = git_ops.head_sha(multi_stack_target)
@@ -210,11 +215,12 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """A pre-existing untracked file (present before the run) is absent from the
     archived recommended.patch while a fix-created untracked file is present."""
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(multi_stack_target, "remote", "add", "origin", str(remote))
+    no_ci_remote.connect(multi_stack_target, remote)
     stub = _install_deep_capture_backend(
         multi_stack_target, monkeypatch, real_internal_phases=True
     )
@@ -223,7 +229,10 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False,
+            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
+        )
     )
     assert exit_code == 0
 
@@ -270,11 +279,12 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """A pre-existing untracked file (before the run) is absent from the daydream
     commit's tree; a fix-created untracked file is present (issue #543)."""
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(multi_stack_target, "remote", "add", "origin", str(remote))
+    no_ci_remote.connect(multi_stack_target, remote)
     stub = _install_deep_capture_backend(
         multi_stack_target, monkeypatch, real_internal_phases=True
     )
@@ -283,7 +293,10 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        RunConfig(
+            target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False,
+            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
+        )
     )
     assert exit_code == 0
 
@@ -535,6 +548,7 @@ async def test_shallow_run_captures_recommended_patch(
     feature_branch_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """AC3 (shallow): the shallow single-pass fix path archives a recommended.patch
     carrying daydream's edit.
@@ -549,7 +563,7 @@ async def test_shallow_run_captures_recommended_patch(
     # Host-native commit/push (issue #726): the shallow --yes run commits and
     # pushes to 'origin' for real, so give the repo a bare remote.
     remote = bare_remote(archive_dir.parent / "origin.git")
-    git(feature_branch_repo, "remote", "add", "origin", str(remote))
+    no_ci_remote.connect(feature_branch_repo, remote)
     backend = _FixEditingBackend(feature_branch_repo)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
@@ -561,6 +575,8 @@ async def test_shallow_run_captures_recommended_patch(
             cleanup=False,
             shallow=True,
             assume="yes",
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0

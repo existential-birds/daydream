@@ -458,10 +458,17 @@ def parse_pr_ci_binding(raw: object, target: RemoteCITarget) -> PRCIBinding:
     )
 
 
-def _parse_required_entry(raw: object, *, app_key: str) -> RequiredContext:
+def _parse_required_entry(
+    raw: object,
+    *,
+    app_key: str,
+    app_key_optional: bool = False,
+) -> RequiredContext:
     row = _mapping(raw, "required status check")
     context = _required_text(_field(row, "context", "required status check"), "required context")
-    app_id = _field(row, app_key, "required status check")
+    app_id = row.get(app_key) if app_key_optional else _field(
+        row, app_key, "required status check"
+    )
     if app_id is not None and not _is_positive_int(app_id):
         raise ValueError("required status-check app id must be positive or null")
     return RequiredContext(context=context, app_id=cast(int | None, app_id))
@@ -507,7 +514,13 @@ def parse_required_policy(active_rules: object, classic: object | None) -> Requi
             _field(parameters, "required_status_checks", "required status-check parameters"),
             "required status checks",
         ):
-            contexts.append(_parse_required_entry(item, app_key="integration_id"))
+            contexts.append(
+                _parse_required_entry(
+                    item,
+                    app_key="integration_id",
+                    app_key_optional=True,
+                )
+            )
 
     if classic is not None:
         classic_row = _mapping(classic, "classic required checks")
@@ -682,13 +695,16 @@ def _fixed_identity_matches(target: RemoteCITarget, binding: PRCIBinding) -> boo
     )
 
 
-def _required_label(item: RequiredContext) -> str:
+def required_context_label(item: RequiredContext) -> str:
     if item.app_id is None:
         return item.context
     return f"{item.context} (app {item.app_id})"
 
 
-def _matches(item: RequiredContext, observation: CIObservation) -> bool:
+def required_context_matches(
+    item: RequiredContext,
+    observation: CIObservation,
+) -> bool:
     if item.app_id is not None:
         return (
             observation.source == "check_run"
@@ -787,13 +803,15 @@ def evaluate_remote_ci(
     pending: list[str] = []
     missing: list[str] = []
     for required in snapshot.policy.contexts:
-        matches = [item for item in observations if _matches(required, item)]
+        matches = [
+            item for item in observations if required_context_matches(required, item)
+        ]
         if not matches:
-            missing.append(_required_label(required))
+            missing.append(required_context_label(required))
             continue
         required_observations.extend(matches)
         matched_ids.update(id(item) for item in matches)
-        label = _required_label(required)
+        label = required_context_label(required)
         if any(item.state == "fail" for item in matches):
             failing.append(label)
         elif any(item.state == "pending" for item in matches):
@@ -1342,7 +1360,10 @@ async def wait_for_remote_ci(
             limit=limits.diagnostic_chars,
         )
         with anyio.CancelScope(shield=True):
-            on_snapshot(verdict)
+            try:
+                on_snapshot(verdict)
+            except BaseException:  # noqa: BLE001 - the original cancellation must win
+                pass
         raise
     except KeyboardInterrupt:
         now = monotonic()
@@ -1357,7 +1378,10 @@ async def wait_for_remote_ci(
             limit=limits.diagnostic_chars,
         )
         with anyio.CancelScope(shield=True):
-            on_snapshot(verdict)
+            try:
+                on_snapshot(verdict)
+            except BaseException:  # noqa: BLE001 - the original interrupt must win
+                pass
         raise
 
 

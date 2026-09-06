@@ -250,6 +250,44 @@ def test_policy_unions_sources_and_preserves_exact_names_and_app_pins() -> None:
     )
 
 
+def test_policy_treats_omitted_ruleset_integration_id_as_unpinned() -> None:
+    policy = parse_required_policy(
+        [
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": False,
+                    "required_status_checks": [{"context": "Build"}],
+                },
+            }
+        ],
+        None,
+    )
+
+    assert policy.contexts == (RequiredContext("Build", None),)
+
+
+@pytest.mark.parametrize("integration_id", [True, 0, -1, "7", {}])
+def test_policy_rejects_present_invalid_ruleset_integration_id(
+    integration_id: object,
+) -> None:
+    with pytest.raises(ValueError, match="app id"):
+        parse_required_policy(
+            [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": False,
+                        "required_status_checks": [
+                            {"context": "Build", "integration_id": integration_id}
+                        ],
+                    },
+                }
+            ],
+            None,
+        )
+
+
 @pytest.mark.parametrize(
     ("active", "classic"),
     [
@@ -1110,6 +1148,93 @@ async def test_waiter_api_error_is_bounded_unavailable(tmp_path: Path) -> None:
     assert emitted == [verdict]
 
 
+@pytest.mark.asyncio
+async def test_waiter_preserves_cancellation_when_cancelled_snapshot_callback_fails(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    blocker = asyncio.Event()
+    emitted: list[RemoteCIVerdict] = []
+
+    class BlockingFetcher:
+        async def fetch(
+            self, target: RemoteCITarget, *, budget: GitHubRequestBudget
+        ) -> RemoteCISnapshot:
+            del target, budget
+            started.set()
+            await blocker.wait()
+            raise AssertionError("unreachable")
+
+    def failing_persist(verdict: RemoteCIVerdict) -> None:
+        emitted.append(verdict)
+        raise OSError("artifact write failed")
+
+    task = asyncio.create_task(
+        wait_for_remote_ci(
+            _target(tmp_path),
+            fetcher=BlockingFetcher(),
+            on_snapshot=failing_persist,
+        )
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [item.status for item in emitted] == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_waiter_preserves_keyboard_interrupt_when_cancelled_snapshot_callback_fails(
+    tmp_path: Path,
+) -> None:
+    emitted: list[RemoteCIVerdict] = []
+
+    class InterruptingFetcher:
+        async def fetch(
+            self, target: RemoteCITarget, *, budget: GitHubRequestBudget
+        ) -> RemoteCISnapshot:
+            del target, budget
+            raise KeyboardInterrupt
+
+    def failing_persist(verdict: RemoteCIVerdict) -> None:
+        emitted.append(verdict)
+        raise OSError("artifact write failed")
+
+    with pytest.raises(KeyboardInterrupt):
+        await wait_for_remote_ci(
+            _target(tmp_path),
+            fetcher=InterruptingFetcher(),
+            on_snapshot=failing_persist,
+        )
+    assert [item.status for item in emitted] == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_waiter_does_not_swallow_terminal_snapshot_callback_failure(
+    tmp_path: Path,
+) -> None:
+    def failing_persist(_verdict: RemoteCIVerdict) -> None:
+        raise OSError("artifact write failed")
+
+    with pytest.raises(OSError, match="artifact write failed"):
+        await wait_for_remote_ci(
+            _target(tmp_path),
+            fetcher=_ScriptedFetcher(
+                [
+                    _snapshot(
+                        _target(tmp_path),
+                        policy=RequiredPolicy((RequiredContext("Build", 10),), False),
+                        head=(_observation("Build", "fail"),),
+                    )
+                ]
+            ),
+            monotonic=lambda: 0.0,
+            sleep=lambda _delay: asyncio.sleep(0),
+            on_snapshot=failing_persist,
+        )
+
+
 def _page(endpoint: str, *, page: int = 1) -> str:
     separator = "&" if "?" in endpoint else "?"
     return f"{endpoint}{separator}per_page=100&page={page}"
@@ -1159,6 +1284,60 @@ async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_r
     assert snapshot.policy.contexts == (RequiredContext("Build", None),)
     assert snapshot.head_observations[0].context == "Build"
     assert "must not persist" not in repr(snapshot)
+    assert len(fake_gh.process_calls()) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "required_entry",
+    [
+        {"context": "Ruleset"},
+        {"context": "Ruleset", "integration_id": None},
+    ],
+)
+async def test_github_fetcher_accepts_unpinned_ruleset_requirement(
+    fake_gh: FakeGh,
+    git_repo: Path,
+    required_entry: dict[str, object],
+) -> None:
+    target = _target(git_repo)
+    _seed_fetch(fake_gh, target)
+    fake_gh.set_response(
+        "GET",
+        _page("repos/example/project/rules/branches/main"),
+        [
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": False,
+                    "required_status_checks": [required_entry],
+                },
+            }
+        ],
+    )
+    fake_gh.set_response(
+        "GET",
+        "repos/example/project/branches/main/protection/required_status_checks",
+        {"strict": False, "contexts": [], "checks": []},
+    )
+    checks_endpoint = (
+        f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest"
+    )
+    fake_gh.set_response(
+        "GET",
+        _page(checks_endpoint),
+        {"total_count": 1, "check_runs": [_check(1, "Ruleset")]},
+    )
+    budget = GitHubRequestBudget(
+        deadline=time.monotonic() + 30,
+        per_request_seconds=5,
+        monotonic=time.monotonic,
+    )
+
+    snapshot = await GitHubRemoteCIFetcher().fetch(target, budget=budget)
+
+    assert snapshot.policy.contexts == (RequiredContext("Ruleset", None),)
+    assert snapshot.head_observations[0].context == "Ruleset"
     assert len(fake_gh.process_calls()) == 6
 
 

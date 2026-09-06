@@ -2810,6 +2810,246 @@ def test_remote_advisory_failure_is_detail_not_hard_failure(tmp_path: Path) -> N
     assert remote["details"]["advisory_failures"] == ["Optional Linux"]
 
 
+def test_archive_required_success_with_pending_advisory_is_succeeded(
+    tmp_path: Path,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    """A real archived verdict preserves the evaluator's nonblocking advisory."""
+    from daydream.archive import _archive_run_inner
+    from daydream.remote_ci import RemoteCILimits, RemoteCISnapshot, evaluate_remote_ci
+    from tests.harness.trajectory import make_recorder
+
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.NORMAL)
+    recorder._phase_events.append(_phase_event(DaydreamPhase.FIX))  # noqa: SLF001
+    config = make_config(
+        tmp_path, archive=False, pr_repo="example/project", pr_number=42
+    )
+    advisory = CIObservation(
+        source="check_run",
+        context="Optional Linux",
+        app_id=11,
+        state="pending",
+        raw_state="in_progress",
+        url="https://github.com/example/project/actions/runs/8",
+        diagnostic=None,
+    )
+    _write_deep(
+        tmp_path, "test-verdict.json", {"session_id": recorder.session_id, "passed": True}
+    )
+    _write_push_verdict(tmp_path, session_id=recorder.session_id)
+    _write_remote_verdict(
+        tmp_path, session_id=recorder.session_id, advisory=(advisory,)
+    )
+    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    payload = json.loads(artifact.read_text())
+    evaluated = evaluate_remote_ci(
+        RemoteCISnapshot(
+            target=RemoteCITarget(target_dir=tmp_path, **payload["target"]),
+            binding=PRCIBinding(**payload["binding"]),
+            policy=RequiredPolicy((RequiredContext("Build", 10),), True),
+            active_workflows=({"id": 7, "state": "active"},),
+            head_observations=(),
+            merge_observations=(
+                CIObservation(**payload["required_observations"][0]), advisory
+            ),
+        ),
+        elapsed=20,
+        stable_polls=2,
+        limits=RemoteCILimits(),
+    )
+    assert evaluated.status == "passed"
+    write_remote_ci_verdict(
+        artifact,
+        evaluated,
+        session_id=recorder.session_id,
+        poll_count=2,
+        started_at="2026-09-06T12:00:00Z",
+        updated_at="2026-09-06T12:00:20Z",
+        discovery_deadline=120,
+        completion_deadline=1800,
+    )
+
+    _archive_run_inner(
+        recorder=recorder,
+        target_dir=tmp_path,
+        config=config,
+        status="complete",
+        run_eval=False,
+        work=None,
+        upload=False,
+    )
+
+    run_dir = archive_dir / "runs" / recorder.session_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["phase_states"]["remote_ci"]["status"] == "succeeded"
+    assert manifest["pipeline_status"] == "succeeded"
+    copied = json.loads((run_dir / "deep" / "remote-ci-verdict.json").read_text())
+    assert copied["advisory_observations"][0]["state"] == "pending"
+
+
+def test_archive_no_policy_pending_observation_cannot_be_passed(tmp_path: Path) -> None:
+    """Without formal required policy, all observed CI must finish first."""
+    advisory = CIObservation(
+        source="check_run",
+        context="Build",
+        app_id=10,
+        state="pending",
+        raw_state="in_progress",
+        url="https://github.com/example/project/actions/runs/8",
+        diagnostic=None,
+    )
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path, advisory=(advisory,))
+    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    payload = json.loads(artifact.read_text())
+    payload["policy"] = {"contexts": [], "strict": False}
+    payload["required_observations"] = []
+    artifact.write_text(json.dumps(payload))
+
+    assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing-required-observations",
+        "missing-one-required-context",
+        "wrong-app-pin",
+        "wrong-check-case",
+        "required-marked-advisory",
+        "advisory-marked-required",
+        "duplicated-producer",
+        "policyless-required-partition",
+        "policyless-empty-passed",
+        "wrong-failing-context",
+    ],
+)
+def test_archive_rejects_contradictory_terminal_ci_evidence(
+    tmp_path: Path, corruption: str
+) -> None:
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(
+        tmp_path,
+        status="failed" if corruption == "wrong-failing-context" else "passed",
+    )
+    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    payload = json.loads(artifact.read_text())
+    if corruption == "missing-required-observations":
+        payload["required_observations"] = []
+        payload["urls"] = []
+    elif corruption == "missing-one-required-context":
+        payload["policy"]["contexts"].append({"context": "Other", "app_id": 10})
+    elif corruption == "wrong-app-pin":
+        payload["required_observations"][0]["app_id"] = 11
+    elif corruption == "wrong-check-case":
+        payload["required_observations"][0]["context"] = "build"
+    elif corruption == "required-marked-advisory":
+        payload["advisory_observations"] = payload["required_observations"]
+        payload["required_observations"] = []
+    elif corruption == "advisory-marked-required":
+        payload["required_observations"].append(
+            {**payload["required_observations"][0], "context": "Other"}
+        )
+    elif corruption == "duplicated-producer":
+        payload["required_observations"].append(payload["required_observations"][0])
+    elif corruption == "policyless-required-partition":
+        payload["policy"]["contexts"] = []
+    elif corruption == "policyless-empty-passed":
+        payload["policy"]["contexts"] = []
+        payload["required_observations"] = []
+        payload["urls"] = []
+    else:
+        payload["failing_contexts"] = ["Other (app 10)"]
+    artifact.write_text(json.dumps(payload))
+
+    assert _p08_states(tmp_path)["remote_ci"]["status"] == "partial"
+
+
+def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path) -> None:
+    """Strictness alone does not declare a required CI context."""
+    from daydream.remote_ci import RemoteCILimits, RemoteCISnapshot, evaluate_remote_ci
+
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path, status="no_ci")
+    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    payload = json.loads(artifact.read_text())
+    verdict = evaluate_remote_ci(
+        RemoteCISnapshot(
+            target=RemoteCITarget(target_dir=tmp_path, **payload["target"]),
+            binding=PRCIBinding(**payload["binding"]),
+            policy=RequiredPolicy((), True),
+            active_workflows=(),
+            head_observations=(),
+            merge_observations=(),
+        ),
+        elapsed=120,
+        stable_polls=2,
+        limits=RemoteCILimits(),
+    )
+    assert verdict.status == "no_ci"
+    write_remote_ci_verdict(
+        artifact,
+        verdict,
+        session_id="current",
+        poll_count=2,
+        started_at="2026-09-06T12:00:00Z",
+        updated_at="2026-09-06T12:02:00Z",
+        discovery_deadline=120,
+        completion_deadline=1800,
+    )
+
+    assert _p08_states(tmp_path)["remote_ci"]["status"] == "succeeded"
+
+
+def test_archive_unpinned_legacy_status_uses_casefolded_context(tmp_path: Path) -> None:
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path)
+    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
+    payload = json.loads(artifact.read_text())
+    payload["policy"]["contexts"][0]["app_id"] = None
+    payload["required_observations"][0].update(
+        source="status", app_id=None, context="BUILD", raw_state="success"
+    )
+    artifact.write_text(json.dumps(payload))
+
+    assert _p08_states(tmp_path)["remote_ci"]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "field_path", "value"),
+    [
+        ("push-verdict.json", ("status",), []),
+        ("remote-ci-verdict.json", ("status",), {}),
+        ("remote-ci-verdict.json", ("required_observations", 0, "state"), []),
+        ("remote-ci-verdict.json", ("required_observations", 0, "source"), {}),
+        ("remote-ci-verdict.json", ("binding", "state"), "closed"),
+    ],
+)
+def test_archive_malformed_current_ci_fields_fail_closed(
+    tmp_path: Path,
+    artifact_name: str,
+    field_path: tuple[str | int, ...],
+    value: object,
+) -> None:
+    _write_push_verdict(tmp_path)
+    _write_remote_verdict(tmp_path)
+    artifact = tmp_path / ".daydream" / "deep" / artifact_name
+    payload = json.loads(artifact.read_text())
+    cursor = payload
+    for component in field_path[:-1]:
+        cursor = cursor[component]
+    cursor[field_path[-1]] = value
+    artifact.write_text(json.dumps(payload))
+
+    states = _p08_states(tmp_path)
+
+    assert states["push"]["status"] == (
+        "partial" if artifact_name == "push-verdict.json" else "succeeded"
+    )
+    assert states["remote_ci"]["status"] != "succeeded"
+
+
 @pytest.mark.parametrize(
     ("artifact", "expected_push"),
     [

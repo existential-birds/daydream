@@ -34,6 +34,7 @@ from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.remote_ci import NoCIRemote
 
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -176,12 +177,13 @@ async def test_full_fix_flow(
     tmp_path: Path,
     install_backend: Callable[[object], object],
     make_config: Callable[..., 'RunConfig'],
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """The shallow flow writes a report, applies a fix, tests it, and commits."""
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     # Host-native commit/push (issue #726) pushes to 'origin' for real; give
     # the repo a bare remote so the push + ls-remote verification succeeds.
-    _git(target_project, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
+    no_ci_remote.connect(target_project, bare_remote(tmp_path / "origin.git"))
     head_before = _git(target_project, "rev-parse", "HEAD")
     config = make_config(
         target_project,
@@ -189,6 +191,8 @@ async def test_full_fix_flow(
         quiet=True,
         shallow=True,
         assume="yes",
+        pr_number=no_ci_remote.pr_number,
+        pr_repo=no_ci_remote.base_repository,
     )
 
     exit_code = await run(config)
@@ -213,6 +217,7 @@ async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
     install_backend: Callable[[object], object],
     make_config: Callable[..., 'RunConfig'],
     protect_untracked_related: bool,
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """Real runner commits the complete authorized HEAD-relative result."""
     repo = tmp_path / "pre-gate-authorized"
@@ -231,7 +236,7 @@ async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
     if protect_untracked_related:
         (repo / "scratch.py").write_text("PRIVATE_USER_DRAFT = 1\n")
     remote = bare_remote(tmp_path / "pre-gate-origin.git")
-    _git(repo, "remote", "add", "origin", str(remote))
+    no_ci_remote.connect(repo, remote)
 
     issue = {
         "id": 1,
@@ -264,7 +269,15 @@ async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
     install_backend(RelatedOnlyBackend(parse_results=[[issue]]))
 
     exit_code = await run(
-        make_config(repo, stack="python", quiet=True, shallow=True, assume="yes")
+        make_config(
+            repo,
+            stack="python",
+            quiet=True,
+            shallow=True,
+            assume="yes",
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
+        )
     )
 
     assert exit_code == 0
@@ -521,15 +534,15 @@ def _start_remote_ci_fake_after_push(
                 "repos/base-user/project/rules/branches/main?per_page=100&page=1",
                 [],
             )
-            contexts = (
-                ["Build"]
+            pinned_checks = (
+                [{"context": "Build", "app_id": 10}]
                 if outcome in {"failed", "delayed", "merge-delayed"}
                 else []
             )
             fake_gh.set_response(
                 "GET",
                 "repos/base-user/project/branches/main/protection/required_status_checks",
-                {"strict": False, "contexts": contexts, "checks": []},
+                {"strict": False, "contexts": [], "checks": pinned_checks},
             )
             fake_gh.set_response(
                 "GET",
@@ -550,6 +563,23 @@ def _start_remote_ci_fake_after_push(
                         "output": {
                             "title": "Build failed",
                             "summary": "secret=top-secret build failed",
+                            "text": "must not persist",
+                        },
+                    }
+                )
+            if outcome == "failed":
+                checks.append(
+                    {
+                        "id": 2,
+                        "name": "Lint",
+                        "head_sha": sha,
+                        "app": {"id": 20},
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "details_url": "https://github.com/base-user/project/actions/runs/8",
+                        "output": {
+                            "title": "Advisory lint failed",
+                            "summary": "advisory failure",
                             "text": "must not persist",
                         },
                     }
@@ -683,8 +713,12 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     assert verdict["status"] == "failed"
     assert verdict["target"]["pushed_sha"] == new_sha
     assert verdict["evidence_sha"] == new_sha
-    assert verdict["failing_contexts"] == ["Build"]
-    assert verdict["urls"] == ["https://github.com/base-user/project/actions/runs/7"]
+    assert verdict["failing_contexts"] == ["Build (app 10)"]
+    assert [item["context"] for item in verdict["advisory_observations"]] == ["Lint"]
+    assert verdict["urls"] == [
+        "https://github.com/base-user/project/actions/runs/7",
+        "https://github.com/base-user/project/actions/runs/8",
+    ]
     assert "top-secret" not in verdict_path.read_text()
     handoff = json.loads(
         (project / ".daydream" / "deep" / "remote-ci-handoff.json").read_text()
@@ -692,6 +726,7 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     assert handoff["status"] == "failed"
     assert handoff["target"]["pushed_sha"] == new_sha
     output = capsys.readouterr().out
+    assert "Advisory CI not green: Lint" in output
     assert "Commit and push complete" not in output
     assert "Exact pushed-SHA remote CI passed" not in output
 
@@ -791,15 +826,50 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resume-stale-handoff"])
 async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     tmp_path: Path,
     install_backend: Callable[[object], object],
     make_config: Callable[..., "RunConfig"],
     fake_gh: FakeGh,
+    resume: bool,
 ) -> None:
     """Cancellation reaps the real gh process before durable operator state."""
+    from daydream.remote_ci import (
+        RemoteCITarget,
+        pending_remote_ci_verdict,
+        write_remote_ci_handoff,
+    )
+
     project, _remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
+    deep = project / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    verdict_path = deep / "remote-ci-verdict.json"
+    handoff_path = deep / "remote-ci-handoff.json"
+    write_remote_ci_handoff(
+        handoff_path,
+        pending_remote_ci_verdict(
+            RemoteCITarget(
+                target_dir=project,
+                base_repository="base-user/project",
+                base_ref="main",
+                head_repository="fork-user/project",
+                head_ref="feature",
+                pr_number=7,
+                pr_url="https://github.com/base-user/project/pull/7",
+                remote="origin",
+                pushed_sha=old_sha,
+            )
+        ),
+        session_id="old-session",
+    )
+    unrelated = deep / "operator-notes.json"
+    unrelated.write_bytes(b'{"keep":"operator notes"}\n')
+    if resume:
+        from tests.test_runner import _fix_item, _seed_fix_resume
+
+        _seed_fix_resume(project, [_fix_item()])
     _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
     seed_thread, seed_errors = _start_remote_ci_fake_after_push(
         project, fake_gh, hook_marker, outcome="blocking"
@@ -813,6 +883,7 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
                 quiet=True,
                 shallow=True,
                 assume="yes",
+                start_at="fix" if resume else "ttt",
                 archive=False,
                 test_command="true",
                 pr_number=7,
@@ -820,20 +891,28 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
             )
         )
     )
-    pids = await _wait_for_remote_ci_pids(
-        hook_marker.with_name(hook_marker.name + " pids")
-    )
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    seed_thread.join(timeout=1)
-    assert not seed_thread.is_alive()
-    assert seed_errors == []
-    await _wait_for_process_group_exit(pids["direct"])
+    pids: dict[str, int] | None = None
+    try:
+        pids = await _wait_for_remote_ci_pids(
+            hook_marker.with_name(hook_marker.name + " pids")
+        )
+        pending = json.loads(verdict_path.read_text())
+        assert pending["status"] == "pending"
+        assert pending["session_id"] != "old-session"
+        assert pending["target"]["pushed_sha"] != old_sha
+        assert not handoff_path.exists(), "the new attempt retained old-SHA guidance"
+        if resume:
+            assert unrelated.read_bytes() == b'{"keep":"operator notes"}\n'
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        seed_thread.join(timeout=1)
+        assert not seed_thread.is_alive()
+        assert seed_errors == []
+        if pids is not None:
+            await _wait_for_process_group_exit(pids["direct"])
 
-    deep = project / ".daydream" / "deep"
-    verdict_path = deep / "remote-ci-verdict.json"
-    handoff_path = deep / "remote-ci-handoff.json"
     verdict = json.loads(verdict_path.read_text())
     assert verdict["status"] == "cancelled"
     assert verdict["target"]["pushed_sha"] == _git(project, "rev-parse", "HEAD")
@@ -853,6 +932,7 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     install_backend: Callable[[object], object],
     make_config: Callable[..., 'RunConfig'],
     silence_console: Callable[..., None],
+    no_ci_remote: NoCIRemote,
 ) -> None:
     """Heal-menu choice "3" keeps the shallow deep run going all the way to a real commit.
 
@@ -863,9 +943,10 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     operator's "y" at the commit gate -- so the run exits 0 and the fix lands
     in the real worktree instead of being abandoned with the failure.
     """
-    # stdin answers, in order: intent confirmation, the apply-fixes gate, the
-    # heal menu ("3" = ignore and continue), and the commit gate.
-    monkeypatch.setattr("sys.stdin", StringIO("y\ny\n3\ny\n"))
+    # stdin answers, in order: intent confirmation, decline the optional PR
+    # review post, the apply-fixes gate, the heal menu ("3" = ignore and
+    # continue), and the commit gate.
+    monkeypatch.setattr("sys.stdin", StringIO("y\nn\ny\n3\ny\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
     silence_console("daydream.runner")
@@ -876,7 +957,7 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     )
     # Host-native commit/push (issue #726) pushes to 'origin' for real; give
     # the repo a bare remote so the push + ls-remote verification succeeds.
-    _git(feature_branch_repo, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
+    no_ci_remote.connect(feature_branch_repo, bare_remote(tmp_path / "origin.git"))
 
     head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
 
@@ -887,6 +968,8 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
         shallow=True,
         non_interactive=False,
         output_mode="loop",
+        pr_number=no_ci_remote.pr_number,
+        pr_repo=no_ci_remote.base_repository,
     )
     exit_code = await run(config)
 

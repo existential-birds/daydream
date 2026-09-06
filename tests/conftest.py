@@ -21,6 +21,7 @@ from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import configure_identity as _configure_identity  # noqa: F401 - test_git_ops re-import
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
+from tests.harness.remote_ci import NoCIRemote
 
 # Isolate the test process from any inherited git environment. When the suite
 # runs under a git command that exports them — most importantly a pre-push hook
@@ -797,6 +798,18 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     everywhere, pre-push gate included.
     """
     return install_fake_gh(tmp_path / "fake-gh-state", monkeypatch)
+
+
+@pytest.fixture
+def no_ci_remote(
+    fake_gh: FakeGh,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Iterator[NoCIRemote]:
+    """A real bare transport behind a GitHub URL with external no-CI evidence."""
+    harness = NoCIRemote(fake_gh, monkeypatch, tmp_path)
+    yield harness
+    harness.finish()
 
 
 def improve_fixture_service(apps_dir: Path) -> str:

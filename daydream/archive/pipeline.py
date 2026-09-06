@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive import _read_json_artifact
+from daydream.remote_ci import (
+    CIObservation,
+    RequiredContext,
+    required_context_label,
+    required_context_matches,
+)
 from daydream.trajectory import DaydreamPhase
 
 # Phase status values shared by phase_states entries and pipeline_status.
@@ -177,6 +183,7 @@ def _push_payload(
     valid_repository = repository is None or _repository(repository) is not None
     valid = (
         payload.get("schema_version") == 1
+        and isinstance(payload.get("status"), str)
         and payload.get("status") in {"succeeded", "failed"}
         and all(_bounded_text(payload.get(key)) is not None for key in required_text)
         and _sha(payload.get("pushed_sha")) is not None
@@ -234,8 +241,10 @@ def _observation_list(value: object) -> bool:
         source = item.get("source")
         app_id = item.get("app_id")
         if (
-            source not in {"check_run", "status"}
+            not isinstance(source, str)
+            or source not in {"check_run", "status"}
             or _bounded_text(item.get("context")) is None
+            or not isinstance(item.get("state"), str)
             or item.get("state") not in {"pass", "pending", "fail"}
             or _bounded_text(item.get("raw_state")) is None
             or (item.get("url") is not None and _bounded_text(item.get("url")) is None)
@@ -251,6 +260,70 @@ def _observation_list(value: object) -> bool:
         elif app_id is not None:
             return False
     return True
+
+
+def _remote_evidence_consistent(payload: dict[str, Any]) -> bool:
+    """Recheck the serialized policy partition with the producer's match rules."""
+    contexts = tuple(
+        RequiredContext(item["context"], item.get("app_id"))
+        for item in payload["policy"]["contexts"]
+    )
+    if len(set(contexts)) != len(contexts):
+        return False
+
+    def observations(key: str) -> tuple[CIObservation, ...]:
+        return tuple(
+            CIObservation(
+                source=item["source"],
+                context=item["context"],
+                app_id=item.get("app_id"),
+                state=item["state"],
+                raw_state=item["raw_state"],
+                url=item.get("url"),
+                diagnostic=item.get("diagnostic"),
+            )
+            for item in payload[key]
+        )
+
+    required = observations("required_observations")
+    advisory = observations("advisory_observations")
+    all_observations = (*required, *advisory)
+    producer_keys = {
+        (
+            item.source,
+            item.context.casefold() if item.source == "status" else item.context,
+            item.app_id,
+        )
+        for item in all_observations
+    }
+    if len(producer_keys) != len(all_observations):
+        return False
+    if any(
+        not any(required_context_matches(context, item) for context in contexts)
+        for item in required
+    ) or any(
+        any(required_context_matches(context, item) for context in contexts)
+        for item in advisory
+    ):
+        return False
+
+    failing: list[str] = []
+    pending: list[str] = []
+    missing: list[str] = []
+    for context in contexts:
+        matches = [item for item in required if required_context_matches(context, item)]
+        label = required_context_label(context)
+        if not matches:
+            missing.append(label)
+        elif any(item.state == "fail" for item in matches):
+            failing.append(label)
+        elif any(item.state == "pending" for item in matches):
+            pending.append(label)
+    return bool(
+        payload["failing_contexts"] == failing
+        and payload["pending_contexts"] == pending
+        and payload["missing_contexts"] == missing
+    )
 
 
 def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
@@ -303,10 +376,14 @@ def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
             not isinstance(app_id, int) or isinstance(app_id, bool) or app_id <= 0
         ):
             return False
+    try:
+        if not _remote_evidence_consistent(payload):
+            return False
+    except ValueError:
+        return False
     if status == "no_ci":
         return (
-            policy["strict"] is False
-            and contexts == []
+            contexts == []
             and active_count == 0
             and payload["required_observations"] == []
             and payload["advisory_observations"] == []
@@ -324,7 +401,10 @@ def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
             and payload["pending_contexts"] == []
             and payload["missing_contexts"] == []
             and all(item["state"] == "pass" for item in required)
-            and all(item["state"] != "pending" for item in advisory)
+            and (
+                bool(contexts)
+                or (bool(advisory) and all(item["state"] != "pending" for item in advisory))
+            )
         )
     return bool(payload["failing_contexts"]) and any(
         item["state"] == "fail" for item in required
@@ -409,7 +489,8 @@ def _remote_identity_matches(
     if merge_sha is not None:
         valid_evidence.add(merge_sha)
     identities_match = (
-        target_base == binding_base
+        binding.get("state") == "open"
+        and target_base == binding_base
         and target_head == binding_head == pushed_repository
         and target_base_ref == binding_base_ref
         and target_head_ref == binding_head_ref == push["branch"]
@@ -446,6 +527,8 @@ def _remote_ci_state(
     if payload is None or payload.get("session_id") != session_id:
         return {"ran": True, "status": _PARTIAL}
     status = payload.get("status")
+    if not isinstance(status, str):
+        return {"ran": True, "status": _PARTIAL}
     if status in _REMOTE_INCOMPLETE:
         return {
             "ran": True,
