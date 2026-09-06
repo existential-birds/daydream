@@ -1,4 +1,5 @@
 """Tests for ClaudeBackend."""
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -638,6 +639,428 @@ async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk: Any) -> No
 def test_unsupported_reasoning_effort_fails_at_construction() -> None:
     with pytest.raises(ValueError, match="does not support reasoning effort"):
         ClaudeBackend(model="opus", reasoning_effort="minimal")
+
+
+async def _audit_decision(backend: ClaudeBackend, payload: Any) -> Any:
+    guard = backend._audit_root_guard  # noqa: SLF001 - security contract seam
+    assert guard is not None
+    return await guard(payload, None, {"signal": None})
+
+
+def _is_denied(decision: Any) -> bool:
+    return bool(
+        decision.get("hookSpecificOutput", {}).get("permissionDecision")
+        == "deny"
+    )
+
+
+@pytest.mark.asyncio
+async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path) -> None:
+    root = tmp_path / "audit root"
+    clean = root / "clean"
+    clean.mkdir(parents=True)
+    inside = clean / "inside.py"
+    inside.write_text("needle\n", encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    secret = source / "secret.txt"
+    secret.write_text("secret\n", encoding="utf-8")
+    outward = root / "escape"
+    outward.symlink_to(source, target_is_directory=True)
+    backend = ClaudeBackend(
+        model="opus",
+        audit_root=root,
+        audit_outward_symlinks=frozenset({outward}),
+    )
+
+    allowed = [
+        {"tool_name": "StructuredOutput", "tool_input": {"result": {}}},
+        {"tool_name": "Read", "tool_input": {"file_path": "clean/inside.py"}},
+        {
+            "tool_name": "Grep",
+            "tool_input": {
+                "pattern": "needle",
+                "path": str(inside),
+                "output_mode": "content",
+                "-n": True,
+                "head_limit": 5,
+            },
+        },
+        {"tool_name": "Glob", "tool_input": {"path": "clean", "pattern": "**/*.py"}},
+    ]
+    for payload in allowed:
+        assert not _is_denied(await _audit_decision(backend, payload)), payload
+
+    denied = [
+        {},
+        {"tool_name": "Read", "tool_input": {}},
+        {"tool_name": "Read", "tool_input": {"file_path": 7}},
+        {"tool_name": "Read", "tool_input": {"file_path": "../source/secret.txt"}},
+        {
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(clean / ".." / "clean" / "inside.py")},
+        },
+        {"tool_name": "Read", "tool_input": {"file_path": str(secret)}},
+        {"tool_name": "Read", "tool_input": {"file_path": "escape/secret.txt"}},
+        {"tool_name": "Read", "tool_input": {"file_path": "clean/inside.py", "pages": "1"}},
+        {"tool_name": "Grep", "tool_input": {"pattern": "needle"}},
+        {"tool_name": "Grep", "tool_input": {"pattern": "needle", "path": "clean"}},
+        {"tool_name": "Grep", "tool_input": {"pattern": "needle", "path": str(secret)}},
+        {
+            "tool_name": "Grep",
+            "tool_input": {
+                "pattern": "needle",
+                "path": str(inside),
+                "output_mode": [],
+            },
+        },
+        {
+            "tool_name": "Grep",
+            "tool_input": {
+                "pattern": "needle",
+                "path": str(inside),
+                "output_mode": {},
+            },
+        },
+        {"tool_name": "Grep", "tool_input": {"pattern": "needle", "path": str(inside), "glob": "*"}},
+        {"tool_name": "Glob", "tool_input": {"pattern": "clean/*.py"}},
+        {"tool_name": "Glob", "tool_input": {"path": "clean", "pattern": "../*.py"}},
+        {"tool_name": "Glob", "tool_input": {"path": "clean", "pattern": "C:\\*"}},
+        {"tool_name": "Glob", "tool_input": {"path": "clean", "pattern": "\\\\server\\share"}},
+        {"tool_name": "Bash", "tool_input": {"command": "cat ../source/secret.txt"}},
+        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "x"}},
+        {"tool_name": "Task", "tool_input": {}},
+        {"tool_name": "Skill", "tool_input": {}},
+        {"tool_name": "mcp__server__read", "tool_input": {}},
+        {"tool_name": "FutureTool", "tool_input": {}},
+    ]
+    for payload in denied:
+        assert _is_denied(await _audit_decision(backend, payload)), payload
+
+
+@pytest.mark.asyncio
+async def test_audit_execute_builds_closed_sdk_options_and_environment(
+    patch_sdk: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "audit root"
+    root.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    captured: dict[str, Any] = {}
+    patch_sdk(
+        scripted_client(
+            [MockResultMessage(total_cost_usd=0.01, session_id="must-not-persist")],
+            captured=captured,
+        )
+    )
+    for variable in (
+        "PWD",
+        "OLDPWD",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_PREFIX",
+    ):
+        monkeypatch.setenv(variable, str(source))
+    backend = ClaudeBackend(model="opus", audit_root=root)
+
+    results = [
+        event
+        async for event in backend.execute(root, "audit", read_only=True)
+        if isinstance(event, ResultEvent)
+    ]
+
+    options = captured["options"]
+    assert options.tools == ["Read", "Grep", "Glob", "StructuredOutput"]
+    assert options.allowed_tools == ["Read", "Grep", "Glob", "StructuredOutput"]
+    assert options.mcp_servers == {}
+    assert options.strict_mcp_config is True
+    assert options.setting_sources == []
+    assert options.skills == []
+    assert options.plugins == []
+    assert options.agents is None
+    assert options.resume is None
+    assert options.extra_args == {"no-session-persistence": None}
+    assert options.env == {
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "BASH_DEFAULT_TIMEOUT_MS": options.env["BASH_DEFAULT_TIMEOUT_MS"],
+        "BASH_MAX_TIMEOUT_MS": options.env["BASH_MAX_TIMEOUT_MS"],
+        "PWD": str(root.resolve()),
+        "OLDPWD": str(root.resolve()),
+        "GIT_DIR": str(root.resolve() / ".git"),
+        "GIT_WORK_TREE": str(root.resolve()),
+        "GIT_INDEX_FILE": str(root.resolve() / ".git" / "index"),
+        "GIT_OBJECT_DIRECTORY": str(root.resolve() / ".git" / "objects"),
+        "GIT_COMMON_DIR": str(root.resolve() / ".git"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": "",
+        "GIT_CEILING_DIRECTORIES": str(root.resolve().parent),
+        "GIT_PREFIX": "",
+    }
+    assert results[0].continuation is None
+    matchers = options.hooks["PreToolUse"]
+    assert len(matchers) == 1
+    assert matchers[0].matcher == ".*"
+    assert matchers[0].hooks == [backend._audit_root_guard]  # noqa: SLF001
+
+
+@pytest.mark.parametrize("bad_call", ["cwd", "read_only", "continuation", "agents"])
+@pytest.mark.asyncio
+async def test_audit_execute_rejects_unsafe_invocation_before_client(
+    patch_sdk: Any,
+    tmp_path: Path,
+    bad_call: str,
+) -> None:
+    root = tmp_path / "audit"
+    root.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
+    backend = ClaudeBackend(model="opus", audit_root=root)
+    kwargs: dict[str, Any] = {"read_only": True}
+    cwd = root
+    if bad_call == "cwd":
+        cwd = other
+    elif bad_call == "read_only":
+        kwargs["read_only"] = False
+    elif bad_call == "continuation":
+        kwargs["continuation"] = ContinuationToken(
+            backend="claude", data={"session_id": "old"}
+        )
+    else:
+        kwargs["agents"] = {"unsafe": object()}
+
+    with pytest.raises(ClaudeAgentError, match="audit isolation"):
+        async for _ in backend.execute(cwd, "audit", **kwargs):
+            pass
+
+    assert "options" not in captured
+
+
+@pytest.mark.asyncio
+async def test_audit_guard_round_trips_through_real_sdk_query_protocol(
+    tmp_path: Path,
+) -> None:
+    import anyio
+    from claude_agent_sdk._internal.query import Query
+    from claude_agent_sdk._internal.transport import Transport
+
+    class MemoryTransport(Transport):
+        def __init__(self) -> None:
+            self.in_send, self.in_receive = anyio.create_memory_object_stream[
+                dict[str, Any]
+            ](10)
+            self.out_send, self.out_receive = anyio.create_memory_object_stream[
+                dict[str, Any]
+            ](10)
+            self.ready = False
+
+        async def connect(self) -> None:
+            self.ready = True
+
+        async def write(self, data: str) -> None:
+            message = cast(dict[str, Any], json.loads(data))
+            await self.out_send.send(message)
+            if message.get("type") == "control_request":
+                request_id = message["request_id"]
+                await self.in_send.send(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {"commands": []},
+                        },
+                    }
+                )
+
+        def read_messages(self) -> AsyncIterator[dict[str, Any]]:
+            return self.in_receive.__aiter__()
+
+        async def end_input(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.ready = False
+            await self.in_send.aclose()
+            await self.out_send.aclose()
+
+        def is_ready(self) -> bool:
+            return self.ready
+
+    root = tmp_path / "audit"
+    root.mkdir()
+    inside = root / "inside.py"
+    inside.write_text("ok\n", encoding="utf-8")
+    backend = ClaudeBackend(model="opus", audit_root=root)
+    guard = backend._audit_root_guard  # noqa: SLF001 - pinned SDK adapter seam
+    assert guard is not None
+    transport = MemoryTransport()
+    await transport.connect()
+    query = Query(
+        transport=transport,
+        is_streaming_mode=True,
+        hooks={"PreToolUse": [{"matcher": ".*", "hooks": [guard]}]},
+    )
+    await query.start()
+    try:
+        await query.initialize()
+        initialize = await transport.out_receive.receive()
+        hook_config = initialize["request"]["hooks"]["PreToolUse"][0]
+        callback_id = hook_config["hookCallbackIds"][0]
+        assert callback_id in query.hook_callbacks
+
+        for request_id, payload, expected in (
+            (
+                "allow-1",
+                {"tool_name": "Read", "tool_input": {"file_path": "inside.py"}},
+                None,
+            ),
+            (
+                "deny-1",
+                {"tool_name": "Bash", "tool_input": {"command": "cat /etc/passwd"}},
+                "deny",
+            ),
+            (
+                "deny-unhashable-list",
+                {
+                    "tool_name": "Grep",
+                    "tool_input": {
+                        "pattern": "ok",
+                        "path": "inside.py",
+                        "output_mode": [],
+                    },
+                },
+                "deny",
+            ),
+            (
+                "deny-unhashable-object",
+                {
+                    "tool_name": "Grep",
+                    "tool_input": {
+                        "pattern": "ok",
+                        "path": "inside.py",
+                        "output_mode": {},
+                    },
+                },
+                "deny",
+            ),
+        ):
+            await transport.in_send.send(
+                {
+                    "type": "control_request",
+                    "request_id": request_id,
+                    "request": {
+                        "subtype": "hook_callback",
+                        "callback_id": callback_id,
+                        "input": payload,
+                        "tool_use_id": "tool-1",
+                    },
+                }
+            )
+            response = await transport.out_receive.receive()
+            assert response["response"]["subtype"] == "success"
+            hook_output = response["response"]["response"]
+            decision = hook_output.get("hookSpecificOutput", {}).get(
+                "permissionDecision"
+            )
+            assert decision == expected
+    finally:
+        await query.close()
+        query.close_receive_stream()
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_audit_options_reach_real_sdk_subprocess_transport(
+    patch_sdk: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import anyio
+    from claude_agent_sdk._internal.transport.subprocess_cli import (
+        SubprocessCLITransport,
+    )
+
+    root = tmp_path / "audit"
+    root.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
+    backend = ClaudeBackend(model="opus", audit_root=root)
+    async for _ in backend.execute(root, "audit", read_only=True):
+        pass
+    options = captured["options"]
+
+    for variable in (
+        "PWD",
+        "OLDPWD",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_PREFIX",
+    ):
+        monkeypatch.setenv(variable, str(source))
+    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
+    spawned: dict[str, Any] = {}
+
+    class FinishedProcess:
+        stdin = None
+        stdout = None
+        stderr = None
+        returncode = 0
+
+    async def fake_open_process(command: list[str], **kwargs: Any) -> FinishedProcess:
+        spawned["command"] = command
+        spawned["kwargs"] = kwargs
+        return FinishedProcess()
+
+    monkeypatch.setattr(anyio, "open_process", fake_open_process)
+    transport = SubprocessCLITransport(prompt="audit", options=options)
+    transport._cli_path = "/usr/bin/true"  # noqa: SLF001 - pinned SDK seam
+    await transport.connect()
+    await transport.close()
+
+    command = spawned["command"]
+    assert command[command.index("--tools") + 1] == "Read,Grep,Glob,StructuredOutput"
+    assert command[command.index("--allowedTools") + 1] == (
+        "Read,Grep,Glob,StructuredOutput"
+    )
+    assert "--strict-mcp-config" in command
+    assert "--setting-sources=" in command
+    assert "--no-session-persistence" in command
+    assert "--mcp-config" not in command
+    assert "--plugin-dir" not in command
+    assert not any(argument.startswith("--resume") for argument in command)
+    child_env = spawned["kwargs"]["env"]
+    for key, value in options.env.items():
+        assert child_env[key] == value
+    assert str(source) not in {
+        child_env[key]
+        for key in (
+            "PWD",
+            "OLDPWD",
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_COMMON_DIR",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_PREFIX",
+        )
+    }
 
 
 # ---------------------------------------------------------------------------

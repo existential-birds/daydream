@@ -2,23 +2,27 @@ import json
 import os
 import re
 import subprocess
-import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
 
+from daydream import git_ops
 from daydream import review_profile as rp
 from daydream.backends import AgentEvent, Backend
 from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
+from daydream.flows.engine import FlowContext
 from daydream.git_ops import GitError, head_sha
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
+    _audit_repo,
     _stamp_finding,
+    _step_write_plans,
 )
 from daydream.improve.partition import Partition
 from daydream.improve.plans import PLAN_INDEX_FILENAME
@@ -34,6 +38,7 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
+from daydream.workspace import AuditWorkspace, WorkContext
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
 from tests.harness.git_helpers import commit, configure_identity, git, init_repo
 from tests.harness.improve_backend import (
@@ -45,6 +50,7 @@ from tests.harness.improve_backend import (
     group_roots,
     group_scope,
     improve_artifact,
+    install_capable_improve_backend,
     install_improve_stub,
     install_per_phase_improve_stubs,
 )
@@ -61,6 +67,395 @@ def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(
         improve_artifact(repo, name).read_text(encoding="utf-8")
     ))
+
+
+def _flow_context_with_audit_root(
+    root: Path,
+    *,
+    audit_repo: Path,
+) -> FlowContext:
+    work = WorkContext(
+        repo=root,
+        source=root,
+        base_branch="main",
+        base_sha="1" * 40,
+        head_branch="feature",
+        head_sha="2" * 40,
+        is_ephemeral=False,
+        run_id="run-1",
+    )
+    boundary = AuditWorkspace(
+        repo=audit_repo,
+        source=root,
+        repo_git_common_dir=audit_repo / ".git",
+        source_git_common_dir=root / ".git",
+        outward_symlinks=frozenset(),
+    )
+    return FlowContext(
+        config=RunConfig(target=str(root), flow_name="improve"),
+        work=work,
+        registry=build_registry(),
+        audit_workspace=boundary,
+    )
+
+
+_UNSUPPORTED_IMPROVE_BACKENDS = ("codex", "pi", "osprey")
+_UNSUPPORTED_IMPROVE_SELECTIONS = (
+    "global",
+    "recon",
+    "audit",
+    "vet",
+    "plan_write",
+)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend_name", _UNSUPPORTED_IMPROVE_BACKENDS)
+@pytest.mark.parametrize("selection", _UNSUPPORTED_IMPROVE_SELECTIONS)
+async def test_unsupported_improve_backend_fails_atomic_preflight(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+    backend_name: str,
+    selection: str,
+    tmp_path: Path,
+) -> None:
+    """Every backend precedence seam fails before any backend can execute."""
+    from daydream.backends import ClaudeBackend
+
+    execute_calls: list[str] = []
+
+    async def _execute_canary(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        del args, kwargs
+        execute_calls.append("claude")
+        if False:
+            yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(ClaudeBackend, "execute", _execute_canary)
+    phases = (
+        {selection: {"backend": backend_name}}
+        if selection != "global"
+        else {}
+    )
+    file_config = DaydreamFileConfig(phases=phases)
+    config_kwargs: dict[str, Any] = {
+        "flow_name": "improve",
+        "file_config": file_config,
+    }
+    if selection == "global":
+        config_kwargs["backend"] = backend_name
+    if backend_name == "osprey" and selection == "plan_write":
+        profile = tmp_path / "strict-profile.toml"
+        profile.write_text(
+            'schema_version = 1\nname = "strict-isolation"\n'
+            '[strategies.intent]\ncontent = "Inspect only."\nsource = "test"\n',
+            encoding="utf-8",
+        )
+        config_kwargs["review_profile_path"] = profile
+
+    before_head = head_sha(improve_monorepo_target)
+    before_status = _git_status_porcelain(improve_monorepo_target)
+    code = await run(make_config(improve_monorepo_target, **config_kwargs))
+    output = capsys.readouterr().out
+
+    expected_phase = "recon" if selection == "global" else selection
+    assert code == 1
+    assert execute_calls == []
+    assert f"Phase '{expected_phase}'" in output
+    assert f"backend '{backend_name}'" in output
+    assert "Use backend 'claude'" in output
+    assert len(output) < 5_000
+    assert head_sha(improve_monorepo_target) == before_head
+    assert _git_status_porcelain(improve_monorepo_target) == before_status
+
+
+class _UnbornAuditBackend(ImproveStubBackend):
+    """Capability fake that observes and optionally commits its unborn snapshot."""
+
+    def __init__(self, target: Path, *, failure: BaseException | None = None) -> None:
+        super().__init__(target, n_findings=0)
+        self.failure = failure
+        self.audit_paths: list[Path] = []
+        self.first_symbolic_head: str | None = None
+        self.first_was_unborn: bool | None = None
+        self.ignored_visible: bool | None = None
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        if not self.audit_paths:
+            self.first_was_unborn = git_ops.is_unborn_head(cwd)
+            self.first_symbolic_head = git(cwd, "symbolic-ref", "--short", "HEAD")
+            self.ignored_visible = (cwd / "ignored-secret.txt").exists()
+            self.audit_paths.append(cwd)
+            if self.failure is None:
+                (cwd / "model-scratch.txt").write_text(
+                    "snapshot only\n", encoding="utf-8"
+                )
+                git(cwd, "add", "model-scratch.txt")
+                git(
+                    cwd,
+                    "-c",
+                    "user.name=Audit Test",
+                    "-c",
+                    "user.email=audit@example.invalid",
+                    "commit",
+                    "-m",
+                    "snapshot initial commit",
+                )
+        elif cwd not in self.audit_paths:
+            self.audit_paths.append(cwd)
+        if self.failure is not None:
+            raise self.failure
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
+def _make_unborn_improve_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "unborn-improve"
+    init_repo(repo)
+    git(repo, "symbolic-ref", "HEAD", "refs/heads/seedless")
+    (repo / ".gitignore").write_text("ignored-secret.txt\n", encoding="utf-8")
+    (repo / "tracked.bin").write_bytes(b"\x00staged\xff")
+    (repo / "ignored-secret.txt").write_text("do-not-copy\n", encoding="utf-8")
+    git(repo, "add", ".gitignore", "tracked.bin")
+    return repo
+
+
+@pytest.mark.anyio
+async def test_full_improve_uses_independent_unborn_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    repo = _make_unborn_improve_repo(tmp_path)
+    before_patch = git_ops.staged_patch(repo)
+    before_status = _git_status_porcelain(repo)
+    backend = install_capable_improve_backend(
+        monkeypatch, _UnbornAuditBackend(repo)
+    )
+
+    code = await run(make_config(repo, flow_name="improve"))
+
+    assert code == 0
+    assert backend.first_was_unborn is True
+    assert backend.first_symbolic_head == "seedless"
+    assert backend.ignored_visible is False
+    assert backend.calls
+    assert git_ops.is_unborn_head(repo)
+    assert git_ops.staged_patch(repo) == before_patch
+    assert _git_status_porcelain(repo) == before_status
+    assert all(not path.exists() for path in backend.audit_paths)
+
+
+@pytest.mark.anyio
+async def test_unborn_improve_backend_error_cleans_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    repo = _make_unborn_improve_repo(tmp_path)
+    backend = install_capable_improve_backend(
+        monkeypatch,
+        _UnbornAuditBackend(repo, failure=RuntimeError("injected audit failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="injected audit failure"):
+        await run(make_config(repo, flow_name="improve"))
+
+    assert backend.first_was_unborn is True
+    assert git_ops.is_unborn_head(repo)
+    assert all(not path.exists() for path in backend.audit_paths)
+
+
+@pytest.mark.anyio
+async def test_unborn_improve_cancellation_cleans_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    repo = _make_unborn_improve_repo(tmp_path)
+    started = anyio.Event()
+
+    class BlockingBackend(ImproveStubBackend):
+        def __init__(self) -> None:
+            super().__init__(repo, n_findings=0)
+            self.audit_paths: list[Path] = []
+
+        async def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: Any = None,
+            continuation: Any = None,
+            agents: Any = None,
+            max_turns: Any = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncIterator[AgentEvent]:
+            del prompt, output_schema, continuation, agents, max_turns
+            del read_only, persist_session
+            self.audit_paths.append(cwd)
+            started.set()
+            await anyio.sleep_forever()
+            if False:
+                yield  # pragma: no cover - async-generator declaration
+
+    backend = install_capable_improve_backend(monkeypatch, BlockingBackend())
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(run, make_config(repo, flow_name="improve"))
+        await started.wait()
+        tasks.cancel_scope.cancel()
+
+    assert backend.audit_paths
+    assert git_ops.is_unborn_head(repo)
+    assert all(not path.exists() for path in backend.audit_paths)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("config_fields", "message"),
+    [
+        ({"improve_focus": "branch"}, "--focus branch requires a commit anchor"),
+        ({"improve_plan_description": "add checks"}, "requires a planned-at commit"),
+    ],
+)
+async def test_unborn_commit_anchored_improve_modes_fail_before_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+    config_fields: dict[str, Any],
+    message: str,
+) -> None:
+    repo = _make_unborn_improve_repo(tmp_path)
+    factory_calls: list[object] = []
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda *args, **kwargs: factory_calls.append((args, kwargs)),
+    )
+
+    code = await run(make_config(repo, flow_name="improve", **config_fields))
+
+    assert code == 1
+    assert factory_calls == []
+    assert message in capsys.readouterr().out
+    assert git_ops.is_unborn_head(repo)
+
+
+def test_audit_repo_requires_flow_context_boundary_identity(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    audit = tmp_path / "audit"
+    audit.mkdir()
+    context = _flow_context_with_audit_root(source, audit_repo=audit)
+    context.data["audit_repo"] = audit
+
+    assert _audit_repo(context) == audit
+
+    context.data["audit_repo"] = tmp_path / "forged"
+    with pytest.raises(RuntimeError, match="audit workspace"):
+        _audit_repo(context)
+
+
+def test_vet_rejection_preserves_null_unborn_anchor() -> None:
+    finding = {"fingerprint": "fp", "title": "Title", "path": "a.py"}
+
+    kept, rejected = _apply_vet_verdicts(
+        [finding],
+        [{"vet_id": 1, "keep": False, "reason": "not actionable"}],
+        rejected_at_sha=None,
+    )
+
+    assert kept == []
+    assert rejected[0]["rejected_at_sha"] is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("selected_count", [0, 2])
+async def test_unborn_plan_write_never_constructs_a_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selected_count: int,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    audit = tmp_path / "audit"
+    audit.mkdir()
+    work = WorkContext(
+        repo=source,
+        source=source,
+        base_branch="trunk",
+        base_sha=None,
+        head_branch="trunk",
+        head_sha=None,
+        is_ephemeral=False,
+        run_id="run-unborn",
+    )
+    boundary = AuditWorkspace(
+        repo=audit,
+        source=source,
+        repo_git_common_dir=audit / ".git",
+        source_git_common_dir=source / ".git",
+        outward_symlinks=frozenset(),
+    )
+    context = FlowContext(
+        config=RunConfig(target=str(source), flow_name="improve"),
+        work=work,
+        registry=build_registry(),
+        audit_workspace=boundary,
+    )
+    improve_dir = source / ".daydream" / "improve"
+    improve_dir.mkdir(parents=True)
+    context.data.update(
+        {
+            "improve_dir": improve_dir,
+            "selection_mode": "non-interactive-default",
+            "selected_findings": [
+                {
+                    "title": f"Finding {index}",
+                    "fingerprint": f"fingerprint-{index}",
+                }
+                for index in range(selected_count)
+            ],
+        }
+    )
+
+    def fail_backend_for(self: FlowContext, phase: str) -> Backend:
+        raise AssertionError(f"backend_for unexpectedly called for {phase}")
+
+    monkeypatch.setattr(FlowContext, "backend_for", fail_backend_for)
+
+    await _step_write_plans(context)
+
+    result = context.data["plan_write"]
+    assert result["written"] == []
+    assert result["skipped"] == []
+    assert len(result["failed"]) == selected_count
+    assert len(result["diagnostics"]) == selected_count
+    assert context.data["plan_exit_code"] == (1 if selected_count else 0)
+    for entry in [*result["failed"], *result["diagnostics"]]:
+        assert "UNBORN_PLAN_ANCHOR_UNAVAILABLE" in json.dumps(entry)
+    assert not (source / "daydream_plans").exists()
 
 
 _GROUP = {
@@ -1342,7 +1737,7 @@ async def test_repo_with_no_test_files_still_receives_a_plan(
 
 
 @pytest.mark.anyio
-async def test_pi_improve_retains_valid_commands_and_avoids_provider_overload(
+async def test_capable_improve_stub_retains_commands_and_avoids_provider_overload(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1354,10 +1749,7 @@ async def test_pi_improve_retains_valid_commands_and_avoids_provider_overload(
         lambda *args, **kwargs: "1-5",
     )
     backend = ProductionPathBackend(improve_monorepo_target)
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda *args, **kwargs: backend,
-    )
+    install_capable_improve_backend(monkeypatch, backend)
 
     code = await run(
         make_config(
@@ -1389,7 +1781,7 @@ async def test_pi_improve_retains_valid_commands_and_avoids_provider_overload(
 
 
 @pytest.mark.anyio
-async def test_pi_improve_partial_failure_is_successful_and_safe(
+async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1404,10 +1796,7 @@ async def test_pi_improve_partial_failure_is_successful_and_safe(
         improve_monorepo_target,
         failed_title="Production finding 03",
     )
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda *args, **kwargs: backend,
-    )
+    install_capable_improve_backend(monkeypatch, backend)
 
     code = await run(
         make_config(
@@ -1633,10 +2022,7 @@ async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
         improve_monorepo_target,
         slow_title=slow_title,
     )
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda *args, **kwargs: backend,
-    )
+    install_capable_improve_backend(monkeypatch, backend)
 
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
@@ -1676,10 +2062,7 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
     """
     backend = OutOfOrderPlanBackend(improve_monorepo_target, n_findings=3)
     backend.vet_reject_titles = {"Phantom N+1"}
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda *args, **kwargs: backend,
-    )
+    install_capable_improve_backend(monkeypatch, backend)
 
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
@@ -1727,10 +2110,7 @@ async def test_plan_writer_crash_leaves_the_finished_plan_on_disk(
         slow_title="Security finding",
         crash=True,
     )
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda *args, **kwargs: backend,
-    )
+    install_capable_improve_backend(monkeypatch, backend)
 
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
@@ -2786,47 +3166,9 @@ async def test_improve_run_leaves_no_stray_audit_worktree(
     install_improve_stub(monkeypatch, improve_monorepo_target)
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
     assert code == 0
-    # After a full improve run, no audit worktree remains linked to the target.
+    # The independent snapshot never registers as a linked source worktree.
     worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
-    assert ".daydream/audit/" not in worktrees
-
-
-@pytest.mark.anyio
-async def test_improve_run_prunes_stale_audit_worktree_from_crashed_run(
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-) -> None:
-    """A hard-killed improve run's locked audit worktree is reclaimed by the
-    next run (the ``*-reanchor``-only prune cannot see it)."""
-    install_improve_stub(monkeypatch, improve_monorepo_target)
-    # Simulate a crashed prior run: the audit worktree was created locked and
-    # only the owning run's finally-block removes it, so it survives the kill.
-    stale_dir = improve_monorepo_target / ".daydream" / "audit" / "run-crashed"
-    git(
-        improve_monorepo_target,
-        "worktree",
-        "add",
-        "--detach",
-        "--lock",
-        "--reason",
-        "run-crashed",
-        str(stale_dir),
-        "HEAD",
-    )
-    common = Path(git(improve_monorepo_target, "rev-parse", "--git-common-dir"))
-    if not common.is_absolute():
-        common = improve_monorepo_target / common
-    old = time.time() - 48 * 3600
-    os.utime(common / "worktrees" / stale_dir.name / "locked", (old, old))
-
-    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
-
-    assert code == 0
-    worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
-    assert "run-crashed" not in worktrees
-    assert ".daydream/audit/" not in worktrees
-    assert not stale_dir.exists()
+    assert "daydream-audit-" not in worktrees
 
 
 @pytest.mark.anyio
@@ -2841,31 +3183,28 @@ async def test_improve_model_calls_run_in_audit_worktree_not_target(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    # Every model turn's cwd must be a detached audit worktree under .daydream/audit/,
-    # never the target worktree itself.
+    # Every model turn's cwd is one process-owned standalone snapshot outside
+    # the target, never a linked worktree beneath it.
     assert stub.calls, "expected at least one model call"
+    audit_cwds = {Path(call["cwd"]) for call in stub.calls}
+    assert len(audit_cwds) == 1
     for call in stub.calls:
-        assert call["cwd"] != improve_monorepo_target
-        assert ".daydream/audit/" in str(call["cwd"]), str(call["cwd"])
+        call_cwd = Path(call["cwd"])
+        assert call_cwd != improve_monorepo_target
+        assert not call_cwd.is_relative_to(improve_monorepo_target)
+        assert not improve_monorepo_target.is_relative_to(call_cwd)
+        assert "daydream-audit-" in str(call_cwd.parent)
+    assert not next(iter(audit_cwds)).exists()
     # The target tree is untouched (host artifacts under gitignored paths only).
     assert _git_status_porcelain(improve_monorepo_target) == before_status
 
 
 class _AuditCommittingBackend(ImproveStubBackend):
-    """Stub that performs a REAL git commit in every distinct cwd it is given.
+    """Host fake that performs a real Git commit in each distinct model cwd.
 
-    Simulates the Codex read-only 'git commit' residual: the model turn commits
-    into whatever working directory it runs in, so isolation must confine those
-    commits to the audit worktree by construction. A unique per-call scratch
-    file is written first so the commit always has something to commit (the
-    audit worktree is materialized exactly at the snapshot, so a plain
-    add+commit on a clean tree would be a no-op failure).
-
-    Each turn also exercises the escape class: it attempts to commit against
-    the reachable parent target (the target worktree, via the relative path
-    ``../../..`` from the audit cwd) instead of the confined cwd. git rejects
-    a pathspec outside the audit repository, so the escape fails cleanly and
-    never reaches the target's HEAD, refs, or index.
+    This test proves Git-storage independence only. The Claude SDK hook tests
+    separately prove the tool-root policy; direct Python access is not claimed
+    to be confined here.
     """
 
     def __init__(self, target: Path) -> None:
@@ -2890,10 +3229,8 @@ class _AuditCommittingBackend(ImproveStubBackend):
         )
         git(cwd, "add", "-A")
         git(cwd, "commit", "-m", "model residual commit")
-        # Escape attempt: commit against the reachable parent target instead of
-        # the confined cwd. The detached-worktree construction rejects the
-        # relative pathspec as outside the audit repository, so both commands
-        # fail cleanly and the target stays pristine.
+        # Exercise an out-of-repository Git pathspec. This is a Git behavior
+        # assertion, not evidence of an OS or Python filesystem sandbox.
         self.escape_attempts += 1
         escape_target = os.path.relpath(self._target, cwd)
         git(cwd, "add", escape_target, check=False)
@@ -2914,7 +3251,7 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
 ) -> None:
     configure_identity(improve_monorepo_target)
     stub = _AuditCommittingBackend(improve_monorepo_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **k: stub)
+    install_capable_improve_backend(monkeypatch, stub)
 
     before_head = git(improve_monorepo_target, "rev-parse", "HEAD")
     before_refs = git(improve_monorepo_target, "show-ref")
@@ -2927,18 +3264,22 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
     # Every model turn also attempted the escape, so the escape-class coverage
     # is real, not vacuous; the target assertions below prove it was confined.
     assert stub.escape_attempts == len(stub.calls)
-    # Every model turn ran in ONE detached audit worktree (a single non-target path).
+    # Every model turn ran in one standalone snapshot outside the source.
     audit_cwds = {str(call["cwd"]) for call in stub.calls}
     assert len(audit_cwds) == 1, audit_cwds
     audit_path = next(iter(audit_cwds))
-    assert ".daydream/audit/" in audit_path and audit_path != str(improve_monorepo_target)
+    audit_repo = Path(audit_path)
+    assert audit_repo != improve_monorepo_target
+    assert not audit_repo.is_relative_to(improve_monorepo_target)
+    assert "daydream-audit-" in str(audit_repo.parent)
     # Target HEAD, named refs, and staged index/diff are unchanged after the full run.
     assert git(improve_monorepo_target, "rev-parse", "HEAD") == before_head
     assert git(improve_monorepo_target, "show-ref") == before_refs
     assert _git_status_porcelain(improve_monorepo_target) == before_status
-    # The audit worktree is gone (the model committed into it, yet it was removed).
+    # The standalone repository is gone (the fake committed into it, yet it was removed).
+    assert not audit_repo.exists()
     worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
-    assert ".daydream/audit/" not in worktrees
+    assert "daydream-audit-" not in worktrees
 
 
 @pytest.mark.anyio
@@ -3195,7 +3536,7 @@ def test_stamp_finding_attributes_dot_slash_evidence_to_partition_and_service(
 
 
 @pytest.mark.anyio
-async def test_improve_pi_calls_are_ephemeral(
+async def test_improve_model_calls_are_one_shot(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
@@ -3821,10 +4162,7 @@ async def test_configured_publish_records_partial_plan_write_failure(
         improve_monorepo_target,
         failed_title="Production finding 03",
     )
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda *args, **kwargs: backend,
-    )
+    install_capable_improve_backend(monkeypatch, backend)
     monkeypatch.setattr(
         "daydream.git_ops.gh_issue_list_strict",
         lambda *args, **kwargs: [],

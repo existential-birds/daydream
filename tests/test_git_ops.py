@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,6 +33,147 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 
 # --- assert_is_worktree / is_inside_worktree --------------------------------
+
+
+@pytest.mark.parametrize("include_untracked", [False, True])
+def test_independent_snapshot_preserves_exact_filename_bytes(
+    tmp_path: Path, include_untracked: bool,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    tracked = [" leading and trailing ", "line\nbreak"]
+    untracked = [" scratch ", "scratch\nline"]
+    for name in tracked:
+        (repo / name).write_bytes(b"tracked\x00\xff")
+    _git(repo, "add", "-A")
+    _commit(repo, "unusual paths")
+    for name in untracked:
+        (repo / name).write_bytes(b"scratch\x00\xfe")
+    snapshot = git_ops.prepare_independent_snapshot(
+        repo, tmp_path / "independent", include_untracked=include_untracked,
+    )
+    assert set(git_ops.ls_tree_files(snapshot.repo, "HEAD", strict=True)) >= set(tracked)
+    for name in tracked:
+        assert (snapshot.repo / name).read_bytes() == b"tracked\x00\xff"
+    for name in untracked:
+        assert (snapshot.repo / name).exists() is include_untracked
+        if include_untracked:
+            assert (snapshot.repo / name).read_bytes() == b"scratch\x00\xfe"
+
+
+@pytest.mark.parametrize("include_untracked", [False, True])
+def test_independent_snapshot_preserves_non_utf8_paths(
+    tmp_path: Path, include_untracked: bool,
+) -> None:
+    import errno
+
+    repo = _make_repo_with_main(tmp_path)
+    tracked = os.fsdecode(b"tracked-\xff")
+    scratch = os.fsdecode(b"scratch-\xfe")
+    try:
+        (repo / tracked).write_bytes(b"tracked bytes")
+    except OSError as exc:
+        if exc.errno == errno.EILSEQ:
+            pytest.skip("host filesystem rejects non-UTF-8 filenames; covered on Linux CI")
+        raise
+    _git(repo, "add", "-A")
+    _commit(repo, "non-UTF-8 name")
+    (repo / scratch).write_bytes(b"scratch bytes")
+    snapshot = git_ops.prepare_independent_snapshot(
+        repo, tmp_path / "snapshot", include_untracked=include_untracked,
+    )
+    assert (snapshot.repo / tracked).read_bytes() == b"tracked bytes"
+    assert (snapshot.repo / scratch).exists() is include_untracked
+    if include_untracked:
+        assert (snapshot.repo / scratch).read_bytes() == b"scratch bytes"
+
+
+def test_independent_snapshot_rejects_destination_parent_symlink(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "child.txt"
+    sentinel.write_text("untouched")
+    (repo / "parent").symlink_to(outside, target_is_directory=True)
+    _git(repo, "add", "parent")
+    _commit(repo, "committed outward link")
+    (repo / "parent").unlink()
+    (repo / "parent").mkdir()
+    (repo / "parent" / "child.txt").write_text("new tracked child")
+    _git(repo, "add", "-A")
+    before = git_ops.staged_patch(repo)
+    with pytest.raises(git_ops.SnapshotPreparationError, match="symlinked parent"):
+        git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
+    assert sentinel.read_text() == "untouched"
+    assert (repo / "parent" / "child.txt").read_text() == "new tracked child"
+    assert git_ops.staged_patch(repo) == before
+
+
+def test_independent_snapshot_rejects_shared_alternates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    real_clone = git_ops.clone
+
+    def clone_with_alternates(
+        remote_url: str, target: Path, *, blobless: bool = False,
+        no_local: bool = False, timeout: int = 300,
+    ) -> None:
+        assert no_local
+        real_clone(remote_url, target, blobless=blobless, no_local=no_local, timeout=timeout)
+        (target / ".git" / "objects" / "info" / "alternates").write_text(
+            str(repo / ".git" / "objects") + "\n",
+        )
+
+    monkeypatch.setattr(git_ops, "clone", clone_with_alternates)
+    with pytest.raises(git_ops.SnapshotPreparationError, match="alternates or remotes"):
+        git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
+
+
+def test_independent_snapshot_strict_queries_reject_broken_repository(tmp_path: Path) -> None:
+    with pytest.raises(GitError):
+        git_ops.list_remotes(tmp_path, strict=True)
+    with pytest.raises(GitError):
+        git_ops.object_alternates(tmp_path, strict=True)
+    with pytest.raises(GitError):
+        git_ops.git_common_dir(tmp_path)
+    with pytest.raises(GitError):
+        git_ops.symbolic_head(tmp_path, strict=True)
+    with pytest.raises(GitError):
+        git_ops.ls_tree_files(tmp_path, "HEAD", strict=True)
+    assert git_ops.list_remotes(tmp_path) == []
+    assert git_ops.object_alternates(tmp_path) == ()
+    assert git_ops.ls_tree_files(tmp_path, "HEAD") == []
+
+
+def test_independent_snapshot_unborn_detection_rejects_corrupt_head(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / ".git" / "HEAD").write_text("invalid head contents\n")
+    with pytest.raises(GitError):
+        git_ops.is_unborn_head(repo)
+
+
+def test_independent_snapshot_symbolic_head_is_not_ambiguous_with_tag(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "tag", "main")
+    assert git_ops.symbolic_head(repo, strict=True) == "main"
+    assert not git_ops.is_unborn_head(repo)
+    snapshot = git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
+    assert _git(snapshot.repo, "for-each-ref", "--format=%(refname)", "refs/heads") == _git(
+        repo, "for-each-ref", "--format=%(refname)", "refs/heads",
+    )
+
+
+def test_clone_no_local_requests_independent_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def record_clone(remote_url: str, cmd: list[str], timeout: int) -> None:
+        calls.append(cmd)
+
+    monkeypatch.setattr(git_ops, "_run_clone", record_clone)
+    git_ops.clone("source", tmp_path / "snapshot", no_local=True)
+    assert calls == [["git", "clone", "--no-local", "source", str(tmp_path / "snapshot")]]
 
 
 def test_assert_is_worktree_passes_for_real_repo(tmp_path: Path) -> None:

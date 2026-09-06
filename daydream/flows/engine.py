@@ -12,6 +12,7 @@ bodies, exactly where the flow helpers' try/excepts sit today.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daydream.extensions.api import (
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from daydream.extensions.registry import FlowEntry, Registry
     from daydream.review_profile import Pipeline, ResolvedProfile
     from daydream.runner import RunConfig
-    from daydream.workspace import WorkContext
+    from daydream.workspace import AuditWorkspace, WorkContext
 
 
 @dataclass
@@ -53,7 +54,10 @@ class FlowContext:
     registry: Registry
     data: dict[str, Any] = field(default_factory=dict)
     review_profile: ResolvedProfile | None = None
-    _backend_cache: dict[tuple[str, str | None, str | None], Backend] = field(
+    audit_workspace: AuditWorkspace | None = None
+    _backend_cache: dict[
+        tuple[str, str | None, str | None, Path | None], Backend
+    ] = field(
         default_factory=dict, repr=False
     )
 
@@ -68,7 +72,11 @@ class FlowContext:
         from daydream.runner import _resolve_backend
 
         return _resolve_backend(
-            self.config, phase, cache=self._backend_cache, cwd=self.work.repo
+            self.config,
+            phase,
+            cache=self._backend_cache,
+            cwd=self.work.repo,
+            audit_workspace=self.audit_workspace,
         )
 
     def strategy(self, stage: str) -> str:

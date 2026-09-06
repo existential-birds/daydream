@@ -96,7 +96,6 @@ from daydream.trajectory import (
     redact_text,
 )
 from daydream.ui import print_error, print_info, print_success, print_warning
-from daydream.workspace import prune_stale_audit_worktrees
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
@@ -126,22 +125,30 @@ _EVIDENCE_LOCATION = re.compile(r"^`?(.+?):(\d+)(?::(\d+))?(?:`|\b)")
 
 
 def _audit_repo(ctx: FlowContext) -> Path:
-    """Return the detached audit worktree used as the model cwd for improve turns.
+    """Return the independent audit snapshot used as the model cwd.
 
-    The runner opens one audit worktree per improve run (see
+    The runner opens one audit snapshot per improve run (see
     :func:`daydream.workspace.open_audit_workspace`) and stores its path on
     ``ctx.data["audit_repo"]``. Every advisory model turn (recon/audit/vet/
     plan-write) runs with this path as its ``cwd``; the target worktree is never
-    a model cwd (except for unborn-HEAD targets, where
-    :func:`daydream.workspace.open_audit_workspace` yields the source itself
-    with no isolation), so a model commit can never reach the target's HEAD,
-    named refs, or staged index.
+    a model cwd. The compatibility data entry must identify the same canonical
+    root carried by :class:`~daydream.workspace.AuditWorkspace`.
 
     Raises:
-        KeyError: If the runner did not open an audit workspace (a wiring bug —
-            fail loud, never fall back to ``ctx.work.repo``).
+        RuntimeError: If the runner did not bind one exact audit workspace.
     """
-    return Path(ctx.data["audit_repo"])
+    audit = ctx.audit_workspace
+    raw_repo = ctx.data.get("audit_repo")
+    if audit is None or not isinstance(raw_repo, Path):
+        raise RuntimeError("improve flow has no bound audit workspace")
+    try:
+        data_repo = raw_repo.resolve(strict=True)
+        boundary_repo = audit.repo.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError("improve flow has an invalid audit workspace") from exc
+    if data_repo != boundary_repo:
+        raise RuntimeError("improve flow audit workspace identity mismatch")
+    return boundary_repo
 
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 _MAINTENANCE_SIGNALS = set(MAINTENANCE_SIGNALS)
@@ -1154,7 +1161,7 @@ def _apply_vet_verdicts(
     findings: list[dict[str, Any]],
     verdicts: list[Any],
     *,
-    rejected_at_sha: str,
+    rejected_at_sha: str | None,
     repo: Path | None = None,
     default_provenance: str | None = None,
     services: list[Service] | None = None,
@@ -1599,8 +1606,6 @@ def _expected_plan_fingerprints(finding: dict[str, Any]) -> list[str]:
 
 async def _step_write_plans(ctx: FlowContext) -> None:
     """Write selected findings as host-stamped, reconciling handoff plans."""
-    prune_stale_reanchor_worktrees(ctx.work.repo)
-    prune_stale_audit_worktrees(ctx.work.repo, exclude_run_id=ctx.work.run_id)
     description = ctx.config.improve_plan_description
     if description is not None:
         selected = [_description_finding(description)]
@@ -1608,6 +1613,42 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         ctx.data["selection_mode"] = "description"
     else:
         selected = ctx.data["selected_findings"]
+    if ctx.work.is_unborn:
+        diagnostics = [
+            _attempt_diagnostic(
+                finding=finding,
+                attempt=None,
+                received=None,
+                disposition="blocked",
+                stage="plan-accounting",
+                errors=("UNBORN_PLAN_ANCHOR_UNAVAILABLE@/planned_at",),
+            )
+            for finding in selected
+        ]
+        result = {
+            "written": [],
+            "skipped": [],
+            "failed": [
+                {
+                    **finding,
+                    "errors": ["UNBORN_PLAN_ANCHOR_UNAVAILABLE"],
+                }
+                for finding in selected
+            ],
+            "diagnostics": diagnostics,
+        }
+        record_plan_write_diagnostics(
+            plan_write_diagnostics_path(ctx.data["improve_dir"]),
+            diagnostics,
+            artifact_provenance=_artifact_provenance(
+                phase=DaydreamPhase.PLAN_WRITE
+            ),
+        )
+        ctx.data["plan_write"] = result
+        ctx.data["plan_exit_code"] = 1 if selected else 0
+        return
+    assert ctx.work.head_sha is not None
+    prune_stale_reanchor_worktrees(ctx.work.repo)
     backend = ctx.backend_for("plan_write")
     recorder = get_current_recorder()
     limiter = anyio.CapacityLimiter(
@@ -1615,6 +1656,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     )
     authoring_diagnostics: list[tuple[int, dict[str, Any]]] = []
     plans_dir = ctx.work.repo / "daydream_plans"
+    planned_at: str
     try:
         planned_at = git_ops.head_sha(ctx.work.repo)
     except git_ops.GitError:

@@ -22,12 +22,19 @@ import json
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import anyio
 import pytest
 
-from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import (
+    AUDIT_ROOT_ISOLATION_V1,
+    AgentEvent,
+    ResultEvent,
+    TextEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+)
 from daydream.backends._subprocess import StreamStalledError
 from daydream.config import AUDIT_CATEGORIES
 
@@ -365,6 +372,9 @@ class ImproveStubBackend:
         audit_delay: float = 0,
     ) -> None:
         self._target = target
+        self.audit_root_isolation: str | None = None
+        self.audit_root: Path | None = None
+        self.audit_outward_symlinks: frozenset[Path] = frozenset()
         self._n_findings = n_findings
         self._attempt_write = attempt_write
         self._write_attempted = False
@@ -509,6 +519,7 @@ class ImproveStubBackend:
                 continuation=None,
             )
             return
+
         if "IMPROVE_RECON" in prompt:
             if self.recon_output_override is not None:
                 yield ResultEvent(
@@ -1132,6 +1143,9 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
             self.completion_order.append(rank)
 
 
+_ImproveBackendT = TypeVar("_ImproveBackendT", bound=ImproveStubBackend)
+
+
 def install_improve_stub(
     monkeypatch: pytest.MonkeyPatch,
     target: Path,
@@ -1148,8 +1162,40 @@ def install_improve_stub(
         fanout_concurrency=fanout_concurrency,
         audit_delay=audit_delay,
     )
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: stub)
+    def _factory(*args: Any, **kwargs: Any) -> ImproveStubBackend:
+        audit_root = kwargs.get("audit_root")
+        stub.audit_root = audit_root
+        stub.audit_outward_symlinks = kwargs.get(
+            "audit_outward_symlinks", frozenset()
+        )
+        stub.audit_root_isolation = (
+            AUDIT_ROOT_ISOLATION_V1 if audit_root is not None else None
+        )
+        return stub
+
+    monkeypatch.setattr("daydream.runner.create_backend", _factory)
     return stub
+
+
+def install_capable_improve_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: _ImproveBackendT,
+) -> _ImproveBackendT:
+    """Bind an existing host-controlled fake to the runner's audit boundary."""
+
+    def _factory(*args: Any, **kwargs: Any) -> ImproveStubBackend:
+        audit_root = kwargs.get("audit_root")
+        backend.audit_root = audit_root
+        backend.audit_outward_symlinks = kwargs.get(
+            "audit_outward_symlinks", frozenset()
+        )
+        backend.audit_root_isolation = (
+            AUDIT_ROOT_ISOLATION_V1 if audit_root is not None else None
+        )
+        return backend
+
+    monkeypatch.setattr("daydream.runner.create_backend", _factory)
+    return backend
 
 
 def install_per_phase_improve_stubs(
@@ -1172,11 +1218,18 @@ def install_per_phase_improve_stubs(
         *,
         cwd: Path | None = None,
         reasoning_effort: str | None = None,
+        audit_root: Path | None = None,
+        audit_outward_symlinks: frozenset[Path] = frozenset(),
     ) -> ImproveStubBackend:
         stub = ImproveStubBackend(target)
         stub.calls = shared_calls
         stub.model = model or "mock-model"
         stub.reasoning_effort = reasoning_effort
+        stub.audit_root = audit_root
+        stub.audit_outward_symlinks = audit_outward_symlinks
+        stub.audit_root_isolation = (
+            AUDIT_ROOT_ISOLATION_V1 if audit_root is not None else None
+        )
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", _factory)

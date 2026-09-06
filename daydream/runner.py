@@ -42,7 +42,12 @@ from daydream.agent import (
     set_non_interactive,
     set_quiet_mode,
 )
-from daydream.backends import Backend, create_backend
+from daydream.backends import (
+    AUDIT_ROOT_ISOLATION_V1,
+    AuditIsolationError,
+    Backend,
+    create_backend,
+)
 from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
@@ -73,7 +78,7 @@ from daydream.ui import (
     print_success,
     prompt_user,
 )
-from daydream.workspace import WorkContext, open_audit_workspace, open_workspace
+from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 
 if TYPE_CHECKING:
     from daydream.pr_review import ParsedIssue
@@ -672,9 +677,12 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
 def _resolve_backend(
     config: RunConfig,
     phase: str,
-    cache: dict[tuple[str, str | None, str | None], Backend] | None = None,
+    cache: dict[
+        tuple[str, str | None, str | None, Path | None], Backend
+    ] | None = None,
     *,
     cwd: Path | None = None,
+    audit_workspace: AuditWorkspace | None = None,
 ) -> Backend:
     """Get or create the backend for a given phase, respecting all precedence tiers.
 
@@ -711,24 +719,93 @@ def _resolve_backend(
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
     resolved_effort = _resolved_reasoning_effort(config, phase)
+    audit_root = (
+        audit_workspace.repo.resolve(strict=True)
+        if audit_workspace is not None
+        else None
+    )
+    audit_outward_symlinks = (
+        audit_workspace.outward_symlinks
+        if audit_workspace is not None
+        else frozenset()
+    )
 
     def _make() -> Backend:
         # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
         # default model, and widening it churns every patched create_backend.
         if backend_name == "pi":
             return create_backend(
-                backend_name, model=resolved_model, cwd=cwd, reasoning_effort=resolved_effort
+                backend_name,
+                model=resolved_model,
+                cwd=cwd,
+                reasoning_effort=resolved_effort,
+                audit_root=audit_root,
+                audit_outward_symlinks=audit_outward_symlinks,
             )
         return create_backend(
-            backend_name, model=resolved_model, reasoning_effort=resolved_effort
+            backend_name,
+            model=resolved_model,
+            reasoning_effort=resolved_effort,
+            audit_root=audit_root,
+            audit_outward_symlinks=audit_outward_symlinks,
         )
 
     if cache is None:
         return _make()
-    cache_key = (backend_name, resolved_model, resolved_effort)
+    cache_key = (backend_name, resolved_model, resolved_effort, audit_root)
     if cache_key not in cache:
         cache[cache_key] = _make()
     return cache[cache_key]
+
+
+_IMPROVE_MODEL_PHASES: tuple[str, ...] = ("recon", "audit", "vet", "plan_write")
+
+
+def _preflight_improve_backends(ctx: FlowContext) -> None:
+    """Resolve and validate every improve backend before the first model turn."""
+    audit = ctx.audit_workspace
+    if audit is None:
+        raise AuditIsolationError("claude", "wrong_root", phase="recon")
+    expected_root = audit.repo.resolve(strict=True)
+    for phase in _IMPROVE_MODEL_PHASES:
+        backend_name = _resolved_backend_name(ctx.config, phase)
+        try:
+            backend = ctx.backend_for(phase)
+        except AuditIsolationError as exc:
+            raise AuditIsolationError(
+                exc.backend_name,
+                exc.reason,
+                phase=phase,
+            ) from exc
+        marker = object()
+        capability = getattr(backend, "audit_root_isolation", marker)
+        if capability is marker:
+            raise AuditIsolationError(
+                backend_name,
+                "missing_capability",
+                phase=phase,
+            )
+        if capability != AUDIT_ROOT_ISOLATION_V1:
+            raise AuditIsolationError(
+                backend_name,
+                "wrong_capability",
+                phase=phase,
+            )
+        bound_root = getattr(backend, "audit_root", None)
+        try:
+            resolved_root = (
+                bound_root.resolve(strict=True)
+                if isinstance(bound_root, Path)
+                else None
+            )
+        except (OSError, RuntimeError, ValueError):
+            resolved_root = None
+        if resolved_root != expected_root:
+            raise AuditIsolationError(
+                backend_name,
+                "wrong_root",
+                phase=phase,
+            )
 
 
 def _truthy(value: str | None) -> bool:
@@ -931,6 +1008,7 @@ async def _run_workspace(config: RunConfig, target_dir: Path, *, skip_tests: boo
             force_ephemeral=config.force_worktree,
             extra_copy=config.extra_copy,
             skip_tests=skip_tests,
+            allow_unborn=config.flow_name == "improve",
         ) as work:
             return await _dispatch(work, config)
     except git_ops.WrongBranchError:
@@ -1040,6 +1118,10 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
         config: Run configuration (``config.identity`` carries the resolved
             GitHub identity set by :func:`run`).
     """
+    if work.is_unborn:
+        if config.flow_name != "improve" or config.approved_head_sha is not None:
+            raise GitError("unborn checkout cannot satisfy a commit-anchored review")
+        return await _run_improve(work, config)
     head_status = _verify_approved_head(work, config)
     if head_status != 0:
         return head_status
@@ -1204,6 +1286,23 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
     from daydream.improve.artifacts import improve_dir
 
     target_dir = work.repo
+    if work.is_unborn and config.improve_focus == "branch":
+        print_error(
+            console,
+            "Unborn Improve Unsupported",
+            "--focus branch requires a commit anchor; create the initial commit "
+            "or run improve without branch focus.",
+        )
+        return 1
+    if work.is_unborn and config.improve_plan_description is not None:
+        print_error(
+            console,
+            "Unborn Improve Unsupported",
+            "improve plan requires a planned-at commit; create the initial commit "
+            "before requesting a plan.",
+        )
+        return 1
+
     directory = improve_dir(target_dir)
     tier = EFFORT_TIERS[config.improve_effort]
 
@@ -1214,48 +1313,54 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         flow_kind=DaydreamRunFlow.IMPROVE,
     ):
         _resolve_review_profile(config)
-        ctx = FlowContext(
-            config=config,
-            work=work,
-            registry=get_registry(),
-            review_profile=config.review_profile,
-        )
-        ctx.data["improve_dir"] = directory
-        ctx.data["effort_tier"] = tier
-        ctx.data["improve_publish_issues"] = _file_config_or_empty(config).improve_github_publish_issues
-        ctx.data["github_repo"] = config.pr_repo
+        # The standalone snapshot gives improve independent Git storage. The
+        # root-bound backend capability below is the separate filesystem-tool
+        # boundary; neither mechanism is described as an OS sandbox.
+        async with open_audit_workspace(work.repo, run_id=work.run_id) as audit:
+            ctx = FlowContext(
+                config=config,
+                work=work,
+                registry=get_registry(),
+                review_profile=config.review_profile,
+                audit_workspace=audit,
+            )
+            ctx.data["audit_repo"] = audit.repo
+            ctx.data["improve_dir"] = directory
+            ctx.data["effort_tier"] = tier
+            ctx.data["improve_publish_issues"] = (
+                _file_config_or_empty(config).improve_github_publish_issues
+            )
+            ctx.data["github_repo"] = config.pr_repo
 
-        console.print()
-        print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Effort: {config.improve_effort}")
-        print_info(console, f"Focus: {config.improve_focus or 'all'}")
-        print_info(
-            console,
-            f"GitHub issue publishing: {'enabled' if ctx.data['improve_publish_issues'] else 'disabled'}",
-        )
-        print_info(console, f"Model: {ctx.backend_for('recon').model}")
-        print_info(
-            console,
-            f"GitHub identity: {escape_markup(config.identity)}",
-        )
-        console.print()
+            try:
+                _preflight_improve_backends(ctx)
+            except AuditIsolationError as exc:
+                phase = exc.phase or "unknown"
+                print_error(
+                    console,
+                    "Improve Audit Isolation",
+                    f"Phase {phase!r} selected backend {exc.backend_name!r}, "
+                    f"which cannot provide strict audit isolation ({exc.reason}). "
+                    "Use backend 'claude' for every improve model phase.",
+                )
+                return 1
 
-        # Every improve advisory model turn (recon/audit/vet/plan-write) runs
-        # with a detached audit worktree as its cwd; the target worktree is
-        # never a model cwd (except for unborn-HEAD targets, where
-        # open_audit_workspace yields the source itself with no isolation).
-        # The audit worktree snapshots the target's
-        # committed + staged + unstaged tracked state, so an undirected model
-        # commit lands only in the detached audit HEAD and is discarded with
-        # the worktree at exit — it cannot advance the target's HEAD or staged
-        # index (named refs live in the repository's shared ref store and can
-        # be written from any worktree). This is not a hard guarantee: the
-        # audit worktree is a descendant of the target, and the sandbox's
-        # accepted residual is that it does not reliably block git commit
-        # against any reachable repo, so a deliberate cd-up-then-commit
-        # against the parent target remains possible.
-        async with open_audit_workspace(work.repo, run_id=work.run_id) as audit_repo:
-            ctx.data["audit_repo"] = audit_repo
+            console.print()
+            print_info(console, f"Target directory: {target_dir}")
+            print_info(console, f"Effort: {config.improve_effort}")
+            print_info(console, f"Focus: {config.improve_focus or 'all'}")
+            print_info(
+                console,
+                "GitHub issue publishing: "
+                f"{'enabled' if ctx.data['improve_publish_issues'] else 'disabled'}",
+            )
+            print_info(console, f"Model: {ctx.backend_for('recon').model}")
+            print_info(
+                console,
+                f"GitHub identity: {escape_markup(config.identity)}",
+            )
+            console.print()
+
             return await run_flow(ctx.registry, "improve", ctx)
 
 

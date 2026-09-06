@@ -5199,7 +5199,9 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     # Cache one Backend instance per (backend_name, resolved_model, resolved_effort)
     # so phases that resolve to the same model/effort share an instance and
     # differing ones stay isolated.
-    backend_cache: dict[tuple[str, str | None, str | None], Backend] = {}
+    backend_cache: dict[
+        tuple[str, str | None, str | None, Path | None], Backend
+    ] = {}
 
     target_dir = work.repo
 

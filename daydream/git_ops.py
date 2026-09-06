@@ -42,11 +42,14 @@ import json
 import logging
 import os
 import re
+import shutil
+import stat
 import subprocess
 import tempfile
 import time
 from collections.abc import Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Generator, Literal, overload
 from urllib.parse import urlparse
@@ -244,6 +247,10 @@ class WrongBranchError(GitError):
     Defined here for callers (notably the worktree isolation logic) to raise
     when invariant checks fail. Not raised by this module today.
     """
+
+
+class SnapshotPreparationError(GitError):
+    """A standalone repository snapshot could not be established safely."""
 
 
 # --- Internal subprocess helpers --------------------------------------------
@@ -604,7 +611,7 @@ def list_local_branches(repo: Path) -> dict[str, str]:
     """
     proc = _run_git(
         repo,
-        ["for-each-ref", "refs/heads", "--format=%(refname:short) %(objectname)"],
+        ["for-each-ref", "refs/heads", "--format=%(refname) %(objectname)"],
         timeout=10,
     )
     if proc.returncode != 0:
@@ -616,7 +623,9 @@ def list_local_branches(repo: Path) -> dict[str, str]:
         if not line.strip():
             continue
         name, _, oid = line.strip().partition(" ")
-        branches[name] = oid
+        if not name.startswith("refs/heads/"):
+            raise GitError(f"invalid local branch reference in {repo}")
+        branches[name.removeprefix("refs/heads/")] = oid
     return branches
 
 
@@ -1597,6 +1606,248 @@ def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class IndependentSnapshot:
+    """Standalone repository and lexical locations of its outward symlinks."""
+
+    repo: Path
+    outward_symlinks: frozenset[Path]
+
+
+def symbolic_head(repo: Path, *, strict: bool = False) -> str | None:
+    """Return the exact short symbolic HEAD, or None for a detached HEAD."""
+    proc = _run_git(repo, ["symbolic-ref", "--quiet", "HEAD"])
+    if proc.returncode == 0:
+        ref = proc.stdout.rstrip("\n")
+        if ref.startswith("refs/heads/"):
+            return ref.removeprefix("refs/heads/")
+        if strict:
+            raise GitError(f"HEAD does not name a local branch in {repo}")
+        return None
+    if strict and proc.returncode != 1:
+        raise GitError(f"cannot resolve symbolic HEAD in {repo}")
+    return None
+
+
+def is_unborn_head(repo: Path) -> bool:
+    """Distinguish a genuinely missing symbolic HEAD ref from corrupt Git state."""
+    branch = symbolic_head(repo, strict=True)
+    if branch is None:
+        head_sha(repo)  # a broken detached HEAD is an error, not an unborn repo
+        return False
+    proc = _run_git(repo, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"])
+    if proc.returncode == 1:
+        return True
+    if proc.returncode != 0:
+        raise GitError(f"cannot validate HEAD reference in {repo}")
+    head_sha(repo)
+    return False
+
+
+def init_repository(repo: Path, *, initial_branch: str | None = None) -> None:
+    """Initialize a standalone repository, preserving an optional branch name."""
+    repo.mkdir(parents=True, exist_ok=True)
+    args = ["init"]
+    if initial_branch is not None:
+        args.extend(["--initial-branch", initial_branch])
+    proc = _run_git(repo, args, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"cannot initialize repository in {repo}")
+
+
+def _snapshot_git_path(repo: Path, name: str) -> Path:
+    proc = _run_git(repo, ["rev-parse", "--path-format=absolute", "--git-path", name])
+    if proc.returncode != 0 or not proc.stdout.rstrip("\n"):
+        raise GitError(f"cannot resolve repository {name} path in {repo}")
+    return Path(proc.stdout.rstrip("\n")).resolve()
+
+
+def git_common_dir(repo: Path) -> Path:
+    """Return the canonical common Git directory, raising on query failure."""
+    proc = _run_git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if proc.returncode != 0 or not proc.stdout.rstrip("\n"):
+        raise GitError(f"cannot resolve common Git directory in {repo}")
+    return Path(proc.stdout.rstrip("\n")).resolve()
+
+
+def list_remotes(repo: Path, *, strict: bool = False) -> list[str]:
+    """List remote names; strict queries never confuse failure with absence."""
+    proc = _run_git(repo, ["remote"])
+    if proc.returncode != 0:
+        if strict:
+            raise GitError(f"cannot list remotes in {repo}")
+        return []
+    return proc.stdout.splitlines()
+
+
+def object_alternates(repo: Path, *, strict: bool = False) -> tuple[Path, ...]:
+    """Read file-backed alternates relative to the standalone objects directory."""
+    try:
+        objects = _snapshot_git_path(repo, "objects")
+        try:
+            raw = (objects / "info" / "alternates").read_bytes()
+        except FileNotFoundError:
+            return ()
+        result = []
+        for entry in raw.splitlines():
+            if not entry or b"\0" in entry or entry.startswith(b'"'):
+                raise GitError("malformed or quoted object alternate")
+            path = Path(os.fsdecode(entry))
+            result.append((objects / path).resolve(strict=True))
+        return tuple(result)
+    except (OSError, GitError) as exc:
+        if strict:
+            raise GitError(f"cannot inspect object alternates in {repo}: {type(exc).__name__}") from exc
+        return ()
+
+
+def _snapshot_path_names(repo: Path, args: list[str], *, strict: bool) -> list[str]:
+    proc = _run_git(repo, args, capture_bytes=True)
+    if proc.returncode != 0:
+        if strict:
+            raise GitError(f"cannot enumerate snapshot paths in {repo}")
+        return []
+    raw = proc.stdout
+    if raw and (not raw.endswith(b"\0") or b"\0\0" in raw):
+        raise GitError("malformed snapshot path enumeration")
+    return [os.fsdecode(entry) for entry in raw.split(b"\0") if entry]
+
+
+def ls_tree_files(repo: Path, ref: str, *, strict: bool = False) -> list[str]:
+    """List tree paths without quoting, trimming, or newline-splitting names."""
+    return _snapshot_path_names(repo, ["ls-tree", "-rz", "--name-only", ref], strict=strict)
+
+
+def _snapshot_remote_refs(repo: Path) -> list[str]:
+    proc = _run_git(repo, ["for-each-ref", "refs/remotes", "--format=%(refname)"])
+    if proc.returncode != 0:
+        raise GitError("cannot inspect snapshot remote-tracking refs")
+    return proc.stdout.splitlines()
+
+
+def _require_disjoint_snapshot_paths(source: Path, destination: Path) -> None:
+    if source.is_relative_to(destination) or destination.is_relative_to(source):
+        raise SnapshotPreparationError("snapshot paths must be disjoint")
+
+
+def _snapshot_leaf(root: Path, rel: str) -> Path:
+    parts = rel.split("/")
+    if not rel or any(part in {"", ".", "..", ".git"} for part in parts) or "\0" in rel:
+        raise SnapshotPreparationError("invalid snapshot-relative path")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink():
+            raise SnapshotPreparationError("snapshot path has a symlinked parent")
+    return root / rel
+
+
+def _remove_snapshot_leaf(path: Path) -> None:
+    # Called only on a validated leaf in a newly created standalone snapshot.
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _copy_snapshot_leaf(source: Path, destination: Path, rel: str) -> None:
+    src = _snapshot_leaf(source, rel)
+    dst = _snapshot_leaf(destination, rel)
+    try:
+        mode = src.lstat().st_mode
+    except FileNotFoundError:
+        _remove_snapshot_leaf(dst)
+        return
+    if stat.S_ISLNK(mode):
+        _remove_snapshot_leaf(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(os.readlink(src), dst)
+    elif stat.S_ISDIR(mode):
+        # Gitlinks contain no file bytes to copy. A former file now represented
+        # by a directory must not retain the old committed file in the snapshot.
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        dst.mkdir(parents=True, exist_ok=True)
+    elif stat.S_ISREG(mode):
+        if dst.is_symlink() or dst.is_dir():
+            _remove_snapshot_leaf(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst, follow_symlinks=False)
+    else:
+        raise SnapshotPreparationError("snapshot path is not a regular file, symlink, or directory")
+
+
+def prepare_independent_snapshot(
+    source: Path, destination: Path, *, include_untracked: bool,
+) -> IndependentSnapshot:
+    """Copy tracked worktree/index state into independent Git storage.
+
+    This is a Git-storage boundary, not a host-filesystem sandbox. Parent
+    symlinks fail closed before copying; leaf symlinks remain links. The caller
+    owns the newly created destination and its cleanup on every failure path.
+    """
+    source = source.resolve(strict=True)
+    destination = destination.resolve()
+    _require_disjoint_snapshot_paths(source, destination)
+    assert_is_worktree(source)
+    if destination.exists():
+        raise SnapshotPreparationError("snapshot destination already exists")
+    try:
+        unborn = is_unborn_head(source)
+        if unborn:
+            branch = symbolic_head(source, strict=True)
+            if branch is None:
+                raise SnapshotPreparationError("unborn snapshot needs symbolic HEAD")
+            init_repository(destination, initial_branch=branch)
+            paths = ls_files(source, strict=True)
+        else:
+            clone(str(source), destination, no_local=True)
+            checkout_detach(destination, head_sha(source))
+            update_refs(destination, {
+                f"refs/heads/{name}": oid for name, oid in list_local_branches(source).items()
+            })
+            for remote in list_remotes(destination, strict=True):
+                remove_remote(destination, remote)
+            refs = _snapshot_remote_refs(destination)
+            if refs:
+                commands = "".join(f"delete {ref}\n" for ref in refs)
+                proc = _run_git(destination, ["update-ref", "--stdin"], input_text=commands, retries=0)
+                if proc.returncode != 0:
+                    raise SnapshotPreparationError("cannot remove snapshot remote-tracking refs")
+            paths = [*ls_tree_files(source, "HEAD", strict=True), *ls_files(source, strict=True)]
+        _require_disjoint_snapshot_paths(git_common_dir(source), git_common_dir(destination))
+        _require_disjoint_snapshot_paths(
+            _snapshot_git_path(source, "objects"), _snapshot_git_path(destination, "objects"),
+        )
+        if object_alternates(destination, strict=True) or list_remotes(destination, strict=True):
+            raise SnapshotPreparationError("snapshot retains alternates or remotes")
+        if _snapshot_remote_refs(destination):
+            raise SnapshotPreparationError("snapshot retains remote-tracking refs")
+        if include_untracked:
+            paths.extend(_snapshot_path_names(
+                source, ["ls-files", "--others", "--exclude-standard", "-z"], strict=True,
+            ))
+        unique_paths = sorted(set(paths))
+        # Validate all parents before the first copy, including parents present
+        # only in HEAD or only in the index (staged path-type changes).
+        for rel in unique_paths:
+            _snapshot_leaf(source, rel)
+            _snapshot_leaf(destination, rel)
+        for rel in unique_paths:
+            _copy_snapshot_leaf(source, destination, rel)
+        patch = staged_patch(source)
+        if patch:
+            apply_staged_patch(destination, patch)
+        outward = frozenset(
+            destination / rel for rel in unique_paths
+            if (destination / rel).is_symlink()
+            and not (destination / rel).resolve().is_relative_to(destination)
+        )
+        return IndependentSnapshot(destination, outward)
+    except (OSError, ValueError) as exc:
+        raise SnapshotPreparationError(f"snapshot preparation failed: {type(exc).__name__}") from exc
+
+
 def stash_create(repo: Path) -> str | None:
     """Capture tracked working-tree + index changes as a dangling commit.
 
@@ -1925,7 +2176,10 @@ def clone_with_token(
     _run_clone(remote_url, cmd, timeout, env=env)
 
 
-def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int = 300) -> None:
+def clone(
+    remote_url: str, target: Path, *, blobless: bool = False,
+    no_local: bool = False, timeout: int = 300,
+) -> None:
     """Run ``git clone <remote_url> <target>``.
 
     Args:
@@ -1934,6 +2188,7 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int
             partial clone that omits blobs until they are accessed.  Reduces
             initial transfer and storage at the cost of lazy blob fetches on
             first access.  Requires server-side partial-clone support.
+        no_local: Disable local-clone object hardlinks and copying optimizations.
         timeout: Subprocess timeout in seconds. Defaults to 300 s to
             accommodate first-run blobless clones of large repositories.
 
@@ -1943,6 +2198,8 @@ def clone(remote_url: str, target: Path, *, blobless: bool = False, timeout: int
     cmd = ["git", "clone"]
     if blobless:
         cmd.append("--filter=blob:none")
+    if no_local:
+        cmd.append("--no-local")
     cmd += [remote_url, str(target)]
     _run_clone(remote_url, cmd, timeout)
 
