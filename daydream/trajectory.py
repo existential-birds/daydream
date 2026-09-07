@@ -1447,6 +1447,7 @@ class _SignalFlushRegistry:
         document = root._prepare_document(
             status="complete",
             cutoff_at=cutoff_at,
+            allow_empty_root=root.document_writer is not None,
         )
         if document is None:
             return
@@ -3313,25 +3314,39 @@ class TrajectoryRecorder:
         """Freeze one canonical document without performing any filesystem write."""
         steps = self.steps if status == "complete" else self._snapshot_in_flight_steps()
         if not steps:
-            if status != "partial" or self.parent is not None or not allow_empty_root:
+            if self.parent is not None or not allow_empty_root:
                 return None
-            # ATIF requires at least one Step. An early signal can arrive while
-            # child agents are already running but before the root has emitted a
-            # dispatch or agent Step. Represent the real host snapshot event as
-            # a system Step in the immutable partial only; do not mutate the live
-            # recorder or fabricate an agent invocation.
-            steps = [
-                Step(
-                    step_id=1,
-                    timestamp=cutoff_at,
-                    source="system",
-                    message="Daydream run snapshot",
-                    extra={
-                        "daydream_run_flow": self.run_flow.value,
-                        "host_event": "partial_snapshot",
-                    },
-                )
-            ]
+            if status == "partial":
+                # ATIF requires at least one Step. An early signal can arrive while
+                # child agents are already running but before the root has emitted a
+                # dispatch or agent Step. Represent the real host snapshot event as
+                # a system Step in the immutable partial only; do not mutate the live
+                # recorder or fabricate an agent invocation.
+                steps = [
+                    Step(
+                        step_id=1,
+                        timestamp=cutoff_at,
+                        source="system",
+                        message="Daydream run snapshot",
+                        extra={
+                            "daydream_run_flow": self.run_flow.value,
+                            "host_event": "partial_snapshot",
+                        },
+                    )
+                ]
+            else:
+                steps = [
+                    Step(
+                        step_id=1,
+                        timestamp=cutoff_at,
+                        source="system",
+                        message="Daydream host-only run snapshot",
+                        extra={
+                            "daydream_run_flow": self.run_flow.value,
+                            "host_event": "host_only_final_snapshot",
+                        },
+                    )
+                ]
         trajectory = self.build_trajectory(
             steps=list(steps),
             snapshot_at=cutoff_at if status == "partial" else None,
