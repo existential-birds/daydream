@@ -1140,39 +1140,39 @@ async def run(
 
     invocation_cwd = Path.cwd()
     try:
-        locations = private_root_locations() if private_roots is None else private_roots
-        private_owner = resolve_private_workspace_owner(target_dir, locations=locations)
-    except ArtifactVisibilityError as exc:
-        print_error(console, "Artifact Storage", str(exc))
-        return 1
-
-    # Resolve the active GitHub identity once onto config.identity. Under App
-    # credentials this also mints + injects the installation token into every ``gh``
-    # subprocess when the selected flow posts; every hard-abort case surfaces as
-    # GitHubAppError. Read-only flows deliberately preserve the ambient identity.
-    _flow_is_review = config.flow_name == "review"
-    is_posting = _run_posts_to_github(config)
-    try:
-        identity = github_app.resolve_run_identity(target_dir, config.pr_repo, is_posting=is_posting)
-    except github_app.GitHubAppError as exc:
-        print_error(console, "GitHub App", str(exc))
-        return 1
-    config.identity = identity
-
-    # ``--comment``/``--review`` (and ``--flow review``) stop after post-review,
-    # so they skip the test phase, hence the .env copy too.
-    skip_tests = (
-        config.output_mode != "loop"
-        or _flow_is_review
-        or config.flow_name == "improve"
-    )
-
-    try:
         observability = config.observability if config.observability is not None else resolve_observability_config()
         async with trace_run(
             observability, registry, flow=config.flow_name or ("shallow" if config.shallow else "deep"),
         ) as observed:
             observed.attrs({"daydream.output_mode": config.output_mode})
+            try:
+                locations = private_root_locations() if private_roots is None else private_roots
+                private_owner = resolve_private_workspace_owner(target_dir, locations=locations)
+            except ArtifactVisibilityError as exc:
+                print_error(console, "Artifact Storage", str(exc))
+                observed.finish(1)
+                return 1
+
+            # Resolve the active GitHub identity only after source ownership
+            # succeeds. Posting flows may acquire an installation token here;
+            # read-only flows preserve the ambient identity.
+            is_posting = _run_posts_to_github(config)
+            try:
+                identity = github_app.resolve_run_identity(
+                    target_dir, config.pr_repo, is_posting=is_posting,
+                )
+            except github_app.GitHubAppError as exc:
+                print_error(console, "GitHub App", str(exc))
+                observed.finish(1)
+                return 1
+            config.identity = identity
+
+            # Report-only flows skip the test phase and its .env copy.
+            skip_tests = (
+                config.output_mode != "loop"
+                or config.flow_name == "review"
+                or config.flow_name == "improve"
+            )
             result = await _run_workspace(
                 config,
                 target_dir,

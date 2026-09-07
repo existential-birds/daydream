@@ -1328,6 +1328,45 @@ async def test_review_run_does_not_mint_app_identity(
     assert rc == 0
 
 
+@pytest.mark.asyncio
+async def test_owner_preflight_failure_never_reaches_identity_or_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    silence_runner_ui: None,  # noqa: F841
+    tmp_path: Path,
+) -> None:
+    """Real-path: owner preflight failure stays inside the trace boundary.
+
+    A valid non-Git target fails ``resolve_private_workspace_owner`` after the
+    run-root span opens. Both boundary assertions sit on external seams — the
+    App installation-token mint (the network seam) and ``create_backend`` (the
+    Backend-protocol seam) — so the proof is that the outside world was never
+    touched, not that an internal dispatcher was swapped out. App credentials
+    are configured and the default deep flow with ``pr_repo`` is a posting
+    flow, so if identity resolution ran, ``_mint_installation_token`` would
+    fire and fail the test.
+    """
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
+
+    def mint_forbidden(*_args: object) -> None:
+        pytest.fail("owner preflight failure must not mint an App installation token")
+
+    def backend_forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("owner preflight failure must not construct a backend")
+
+    monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
+    monkeypatch.setattr("daydream.runner.create_backend", backend_forbidden)
+
+    config = RunConfig(
+        target=str(tmp_path),  # valid directory, no Git repository
+        pr_repo="acme/widgets",
+        cleanup=False,
+        archive=False,
+    )
+
+    assert await runner.run(config) == 1
+
+
 @pytest.mark.parametrize(
     ("config", "expected"),
     [
