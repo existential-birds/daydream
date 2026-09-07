@@ -98,11 +98,12 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `phases.py` | Stateless async `phase_*()` steps and prompt builders |
 | `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |
 | `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
+| `artifact_visibility.py` | Source-owned private artifact sessions: live artifact routing, output publication, conflict handling, and recovery; `artifact_dir_for` / `review_output_path_for` route through the active session |
 | `observability/` | Operator trace settings, exporter factories, per-run OTel lifecycle, backend-event hydration and export privacy |
 | `backends/` | `Backend` protocol, Claude/Codex/Pi/Osprey, `AgentEvent` union, `create_backend()` |
 | `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
 | `config.py`, `config_file.py` | Per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
-| `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree |
+| `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree; private operational worktrees under `~/.daydream/workspaces/` are separate from the runtime artifact root |
 | `git_ops.py` | **Single point of contact for every `git`/`gh` shell-out** |
 | `exploration*.py`, `tree_sitter_index.py` | Pre-scan: tree-sitter import resolution, convention detection |
 | `supervision.py` | Runtime findings + tool supervision (extension veto seam) |
@@ -285,6 +286,11 @@ Full contract: `docs/extensions.md`.
   (a section can add or override inherited keys but never unset them, so
   `[*.py]` 4-space rules still apply to vendored `.py` files) — pinned by
   `tests/contract/test_editorconfig_contract.py`.
+- **Artifact boundary**: resolve the private owner once from the canonical source; pass that same
+  owner and the active artifact session through workspace, recorder, and flow composition. Route
+  generated files through the session. Join all writers before freezing immutable evidence;
+  archive/evaluate/publish only after that boundary. Never reconstruct public output paths or
+  broaden backend read roots.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
 - Own your own bugs in plain language. Never describe your defect as the tool being buggy.

@@ -130,7 +130,7 @@ and the scope of captured data.
 
 ## Audit a repository and write implementation plans
 
-The `improve` command audits a whole repository. It verifies each candidate finding, prioritizes the findings by impact, and writes self-contained implementation plans. Every model turn runs against an independent, disposable Git snapshot outside the target and uses Claude's strict tool-root guard. Daydream writes only host-owned run artifacts under `.daydream/` and advisory plans under `daydream_plans/`. It does not modify tracked source files.
+The `improve` command audits a whole repository. It verifies each candidate finding, prioritizes the findings by impact, and writes self-contained implementation plans. Every model turn runs against an independent, disposable Git snapshot outside the target and uses Claude's strict tool-root guard. Daydream writes only host-owned run artifacts under `.daydream/` and advisory plans under `daydream_plans/`. It does not modify tracked source files. These `.daydream/` paths are finalized output in the source checkout; during the run the live artifacts stay in private source-owned storage ([Output files](#output-files) describes the lifecycle).
 
 Improve currently requires the `claude` backend for all of its model phases. Codex, Pi, and Osprey improve configurations are refused before a model executable starts until those drivers can prove an equivalent root-confinement capability. Other review flows retain support for all four backends. The independent repository prevents shared Git refs, objects, indexes, and remotes; the Claude hook separately mediates model tool access. Neither a detached worktree nor a disposable clone by itself is a filesystem sandbox, and this tool-layer policy is not an OS sandbox.
 
@@ -217,7 +217,9 @@ This section is for machine learning researchers. Daydream is a data-collection 
 
 Daydream records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. The trajectory records the review pipeline, the model output, the tool calls, the cost, and the result.
 
-Each run writes its trajectory to `<project>/.daydream/runs/<session-id>/trajectory.json`. Parallel fan-outs write sibling trajectories to `trajectories/`. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. An SQLite index at `~/.daydream/archive/index.db` supports cross-project querying.
+During a run, Daydream keeps its working artifacts outside the target checkout. After finalization, it publishes the trajectory at `<project>/.daydream/runs/<session-id>/trajectory.json` and parallel sub-trajectories in the sibling `trajectories/` directory. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. An SQLite index at `~/.daydream/archive/index.db` supports cross-project querying.
+
+Publication is all-or-nothing at finalization: a run that refuses publication (for example, because strict archive finalization failed) restores the checkout's prior artifacts instead of leaving a partial bundle. The archived bundle only exists once archiving has succeeded.
 
 ### Corpus commands
 
@@ -554,6 +556,8 @@ See [docs/self-hosted-bot-setup.md](docs/self-hosted-bot-setup.md) for details.
 
 ## Output files
 
+These paths contain finalized output in the source checkout. Live artifacts stay under `~/.daydream/runtime/<source-key>/`; temporary linked worktrees use the separate `~/.daydream/workspaces/<source-key>/operational/` tree. Both use the source checkout's identity, including when a run uses an ephemeral worktree. Daydream does not add a symlink from the checkout to private storage.
+
 | Path | Description |
 |------|-------------|
 | `.daydream/runs/<id>/trajectory.json` | ATIF v1.7 trajectory |
@@ -568,6 +572,12 @@ See [docs/self-hosted-bot-setup.md](docs/self-hosted-bot-setup.md) for details.
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
 | `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
+
+Daydream moves existing untracked `.daydream/` and `.review-output.md` artifacts into private storage for the run. It restores or merges them during finalization. Tracked files at these artifact paths cause a preflight refusal; Daydream does not detach tracked source files. If another process changes an output, Daydream retains the competing bytes and reports a conflict instead of overwriting them. Recovery remains tied to the source checkout after temporary worktree cleanup.
+
+An explicit `--trajectory` path outside the source checkout receives live, atomic full and partial trajectory updates. Other explicit outputs remain deferred until finalization; `--dump-artifacts` merges files without replacing the whole destination directory. External trajectory publication requires the destination filesystem to support the checked atomic operations. An unsupported destination fails before model dispatch; there is no non-atomic fallback.
+
+Private storage prevents generated artifacts from appearing in ordinary cwd-rooted discovery. It is not an OS sandbox. When a later phase needs a generated file, Daydream passes its exact approved path or, for isolated backend modes, its bounded contents inline. It does not grant access to an entire runtime directory.
 
 The `.daydream/exploration/` cache is reused on an exact key match. The key excludes uncommitted edits. A near-match never counts as a hit, because a stale hit would misground every review prompt. The `--shallow` and `--review` modes delete the directory. Alternating modes degrade to a cache miss, never to stale grounding.
 

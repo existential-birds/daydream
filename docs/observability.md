@@ -194,7 +194,10 @@ run
 Parallel agent invocations are siblings. Retries keep their own partial content,
 usage, and failure status. Interrupted tools close explicitly. Skipped flow steps
 do not create executed-step spans. Run and session identifiers connect spans to
-the corresponding trajectory artifacts.
+the corresponding trajectory artifacts. During execution, those artifacts live
+in private source-owned storage. After finalization, the same identifiers
+connect the published source output and archived bundle. An ephemeral worktree
+does not become a second run identity.
 
 An attempt represents one call to a Daydream backend, which may contain multiple
 internal model turns and tools. Backends expose different turn boundaries, so

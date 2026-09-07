@@ -6,6 +6,12 @@ from pathlib import Path
 import daydream.extensions as extension_api
 from daydream.extensions import EXTENSION_API_VERSION, Registry
 from daydream.extensions.builtins import register_builtins
+from daydream.prompt_budget import (
+    SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES,
+    SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES,
+    SANCTIONED_EXACT_INPUT_MAX_FILES,
+    SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
+)
 
 CONTRACT_DOC = Path(__file__).resolve().parents[1] / "docs" / "extensions.md"
 
@@ -85,3 +91,44 @@ def test_contract_doc_names_renderer_surface() -> None:
         assert name in doc, f"renderer slot {name!r} undocumented"
     for fragment in ("CommentFinding", "SummaryContext", "host-owned", "falls back"):
         assert fragment in doc
+
+
+def test_contract_doc_names_artifact_lifecycle_contract() -> None:
+    """The working-artifact-paths section matches the shipped P10 surface."""
+    doc = CONTRACT_DOC.read_text()
+    working = doc.index("### Working artifact paths")
+    stable = doc.index("### Stable `ctx.data` keys")
+    assert working < stable, "artifact section must precede the stable ctx.data keys"
+    section = doc[working:stable]
+
+    # Real helper/session names, not guessed APIs.
+    for fragment in (
+        "`ctx.artifacts`",
+        "artifact_dir_for",
+        "review_output_path_for",
+        "prepare_sanctioned_inputs",
+        "FlowStep",
+        "run_agent",
+    ):
+        assert fragment in section, f"artifact contract detail {fragment!r} undocumented"
+
+    # Active-session lifetime: bound to the run, frozen at finalization.
+    assert "active artifact session" in section
+    assert "freezes at finalization" in section
+    assert "after the session ends" in section
+
+    # Sanctioned-input contract: per-attempt validation, fail closed.
+    assert "remain unchanged before each dispatch attempt" in section
+    assert "fail before backend entry" in section
+    assert "not an OS sandbox" in section
+
+    # Transport split and budget wording stay in sync with the shipped constants.
+    assert "Strict Claude audit roots, read-only Codex clones, and sandboxed Osprey" in section
+    assert "12,288" in section
+    assert "512 files" in section
+    assert "1 MiB" in section
+    assert "4 MiB" in section
+    assert SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES == 12_288
+    assert SANCTIONED_EXACT_INPUT_MAX_FILES == 512
+    assert SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES == 1_048_576
+    assert SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES == 4_194_304
