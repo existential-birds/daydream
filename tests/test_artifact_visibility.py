@@ -2400,6 +2400,247 @@ async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpa
                 session.register_destination(requested, label=label)
 
 
+@pytest.mark.parametrize(
+    ("disposition", "status"),
+    [
+        (artifact_visibility.ArtifactDisposition.COMPLETE, "complete"),
+        (artifact_visibility.ArtifactDisposition.PARTIAL_EVIDENCE, "partial"),
+        (artifact_visibility.ArtifactDisposition.ROLLBACK, "complete"),
+    ],
+)
+async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
+    tmp_path: Path,
+    disposition: artifact_visibility.ArtifactDisposition,
+    status: str,
+) -> None:
+    source = tmp_path / f"source-{disposition.value}"
+    _init_repo(source)
+    _seed_public_artifacts(source)
+    custom_relative = Path("custom outputs") / "nested root.json"
+    requested = source / ".daydream" / custom_relative
+    requested.parent.mkdir()
+    requested.write_bytes(b"prior full")
+    partial_requested = requested.with_suffix(requested.suffix + ".partial")
+    partial_requested.write_bytes(b"prior partial")
+    unrelated = requested.parent / "unrelated.bin"
+    unrelated.write_bytes(b"unrelated")
+    baseline = _manifest(source)
+    session_id = f"custom-{disposition.value}"
+    root_bytes = json.dumps(
+        {"session_id": session_id, "trajectory_id": session_id},
+        sort_keys=True,
+    ).encode()
+    child_id = f"{session_id}:child"
+    child_bytes = json.dumps(
+        {"session_id": session_id, "trajectory_id": child_id},
+        sort_keys=True,
+    ).encode()
+
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        public_owner = session.register_destination(
+            source / ".daydream",
+            label=OutputLabel.PUBLIC_DAYDREAM,
+        )
+        review_owner = session.register_destination(
+            source / ".review-output.md",
+            label=OutputLabel.PUBLIC_REVIEW_OUTPUT,
+        )
+        assert not (source / ".daydream").exists()
+        destinations_before = tuple(session._destinations)
+        records_before = tuple(session._destination_records)
+
+        route = session.register_trajectory_output(requested)
+        private_full = session.daydream_dir / custom_relative
+        private_partial = private_full.with_suffix(private_full.suffix + ".partial")
+        assert route.full.requested == requested
+        assert route.partial.requested == partial_requested
+        assert route.full.write_path == route.full.frozen_path == private_full
+        assert route.partial.write_path == route.partial.frozen_path == private_partial
+        assert route.run_dir == session.daydream_dir / "runs" / session_id
+        assert tuple(session._destinations) == destinations_before == (
+            public_owner,
+            review_owner,
+        )
+        assert tuple(session._destination_records) == records_before == ()
+        assert not (session._detach_transaction / "destinations.json").exists()
+        assert private_full.read_bytes() == b"prior full"
+        assert private_partial.read_bytes() == b"prior partial"
+        assert (session.daydream_dir / custom_relative.parent / "unrelated.bin").read_bytes() == b"unrelated"
+        assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+
+        selected = route.full if status == "complete" else route.partial
+        root_document = TrajectoryDocumentSnapshot(
+            session_id,
+            cast(Path, selected.write_path),
+            root_bytes,
+        )
+        session.write_trajectory_document(route, root_document, cast(Any, status))
+        assert cast(Path, selected.write_path).read_bytes() == root_bytes
+        assert not (route.run_dir / "trajectory.json").exists()
+        assert not (route.run_dir / "trajectory.json.partial").exists()
+        child_path = route.run_dir / "trajectories" / "child.json"
+        child_document = TrajectoryDocumentSnapshot(child_id, child_path, child_bytes)
+        session.write_trajectory_document(route, child_document, cast(Any, status))
+        assert child_path.read_bytes() == child_bytes
+        assert not child_path.is_relative_to(private_full.parent)
+        assert not (source / ".daydream").exists()
+
+        frozen = session.freeze(
+            RunWriteSnapshot(
+                status=cast(Any, status),
+                cutoff_at="2026-09-06T12:00:00Z",
+                root_trajectory_id=session_id,
+                documents=(root_document, child_document),
+            )
+        )
+        session.finalize_frozen(frozen, disposition=disposition)
+
+    published_full = requested.read_bytes()
+    published_partial = partial_requested.read_bytes()
+    if disposition is artifact_visibility.ArtifactDisposition.COMPLETE:
+        assert (published_full, published_partial) == (root_bytes, b"prior partial")
+    elif disposition is artifact_visibility.ArtifactDisposition.PARTIAL_EVIDENCE:
+        assert (published_full, published_partial) == (b"prior full", root_bytes)
+    else:
+        assert _manifest(source) == baseline
+        assert (published_full, published_partial) == (b"prior full", b"prior partial")
+    assert unrelated.read_bytes() == b"unrelated"
+    published_child = source / ".daydream" / "runs" / session_id / "trajectories" / "child.json"
+    assert published_child.exists() is (
+        disposition is not artifact_visibility.ArtifactDisposition.ROLLBACK
+    )
+
+    async with open_artifact_session(
+        _work(source),
+        session_id=f"reopen-{disposition.value}",
+    ) as reopened:
+        imported_full = reopened.daydream_dir / custom_relative
+        imported_partial = imported_full.with_suffix(imported_full.suffix + ".partial")
+        assert imported_full.read_bytes() == published_full
+        assert imported_partial.read_bytes() == published_partial
+        assert (
+            reopened.daydream_dir / custom_relative.parent / "unrelated.bin"
+        ).read_bytes() == b"unrelated"
+
+
+async def test_public_subtree_trajectory_requires_exact_public_owner(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _init_repo(source)
+    requested = source / ".daydream" / "custom.json"
+
+    async with open_artifact_session(_work(source), session_id="missing-owner") as session:
+        with pytest.raises(
+            ArtifactVisibilityError,
+            match="overlaps a public compatibility root",
+        ):
+            session.register_trajectory_output(requested)
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "file"])
+async def test_public_subtree_trajectory_checks_private_root_itself(
+    tmp_path: Path,
+    replacement: str,
+) -> None:
+    source = tmp_path / "source"
+    _init_repo(source)
+    baseline = _seed_public_artifacts(source)
+    outside = tmp_path / "unrelated"
+    outside.mkdir()
+    (outside / "canary.bin").write_bytes(b"unrelated bytes")
+    outside_before = artifact_visibility._manifest(outside)
+
+    async with open_artifact_session(_work(source), session_id="root-replaced") as session:
+        session.register_destination(
+            source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM,
+        )
+        private_root = session.daydream_dir
+        saved_root = session.layout.live_root / "saved-daydream"
+        private_root.rename(saved_root)
+        try:
+            if replacement == "symlink":
+                private_root.symlink_to(outside, target_is_directory=True)
+            else:
+                private_root.write_bytes(b"not a directory")
+            with pytest.raises(ArtifactVisibilityError, match="private trajectory"):
+                session.register_trajectory_output(source / ".daydream" / "custom" / "root.json")
+            assert session._trajectory_route is None
+            assert artifact_visibility._manifest(outside) == outside_before
+        finally:
+            private_root.unlink()
+            saved_root.rename(private_root)
+
+    assert _manifest(source) == baseline
+    assert artifact_visibility._manifest(outside) == outside_before
+
+
+async def test_public_subtree_trajectory_allows_missing_private_root(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _init_repo(source)
+    session_id = "fresh-custom-root"
+    requested = source / ".daydream" / "custom" / "root.json"
+    payload = json.dumps({"session_id": session_id, "trajectory_id": session_id}).encode()
+    async with open_artifact_session(_work(source), session_id=session_id) as session:
+        session.register_destination(
+            source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM,
+        )
+        assert not session.daydream_dir.exists()
+        route = session.register_trajectory_output(requested)
+        assert route.full.write_path is not None
+        document = TrajectoryDocumentSnapshot(session_id, route.full.write_path, payload)
+        session.write_trajectory_document(route, document, "complete")
+        assert not (source / ".daydream").exists()
+        frozen = session.freeze(
+            RunWriteSnapshot(
+                status="complete",
+                cutoff_at="2026-09-07T09:00:00Z",
+                root_trajectory_id=session_id,
+                documents=(document,),
+            )
+        )
+        session.finalize_frozen(frozen, disposition=artifact_visibility.ArtifactDisposition.COMPLETE)
+    assert requested.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["directory-leaf", "file-ancestor", "symlink-leaf", "symlink-ancestor"],
+)
+async def test_public_subtree_trajectory_rejects_unsafe_private_counterpart(
+    tmp_path: Path,
+    problem: str,
+) -> None:
+    source = tmp_path / f"source-{problem}"
+    _init_repo(source)
+    baseline = _seed_public_artifacts(source)
+    requested = source / ".daydream" / "nested" / "custom.json"
+
+    async with open_artifact_session(_work(source), session_id=problem) as session:
+        session.register_destination(
+            source / ".daydream",
+            label=OutputLabel.PUBLIC_DAYDREAM,
+        )
+        private_nested = session.daydream_dir / "nested"
+        private_leaf = private_nested / "custom.json"
+        if problem == "directory-leaf":
+            private_leaf.mkdir(parents=True)
+        elif problem == "file-ancestor":
+            private_nested.write_bytes(b"not a directory")
+        elif problem == "symlink-leaf":
+            private_nested.mkdir()
+            private_leaf.symlink_to(session.daydream_dir / "deep" / "prior.md")
+        else:
+            private_nested.symlink_to(session.daydream_dir / "deep", target_is_directory=True)
+
+        with pytest.raises(ArtifactVisibilityError, match="private trajectory"):
+            session.register_trajectory_output(requested)
+
+    assert _manifest(source) == baseline
+
+
 async def test_independent_model_cwd_rejects_live_external_destination_overlap(
     tmp_path: Path,
 ) -> None:

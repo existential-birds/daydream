@@ -3734,10 +3734,20 @@ class ArtifactSession:
         *,
         label: OutputLabel,
         additional: Sequence[Path] = (),
+        public_subtree_owner: RoutedDestination | None = None,
     ) -> tuple[Path, Path, bool]:
         self._require_active()
         if not isinstance(label, OutputLabel):
             raise ArtifactVisibilityError("artifact destination label is unsupported")
+        if public_subtree_owner is not None and not (
+            any(public_subtree_owner is destination for destination in self._destinations)
+            and public_subtree_owner.label is OutputLabel.PUBLIC_DAYDREAM
+            and public_subtree_owner.requested == self.layout.public_daydream_dir
+            and public_subtree_owner.write_path == self.layout.daydream_dir
+            and public_subtree_owner.frozen_path == self.layout.daydream_dir
+            and public_subtree_owner.delivery is DestinationDelivery.DEFERRED
+        ):
+            raise ArtifactVisibilityError("public trajectory owner identity mismatch")
         if not requested.is_absolute():
             raise ArtifactVisibilityError("artifact destination must be absolute")
         if "\0" in os.fspath(requested):
@@ -3790,12 +3800,25 @@ class ArtifactSession:
             raise ArtifactVisibilityError("artifact destination overlaps private or Git storage")
         if self.layout.repo != self.layout.source and _overlaps(canonical, self.layout.repo):
             raise ArtifactVisibilityError("artifact destination overlaps the active model repository")
+        owned_public_subtree = (
+            public_subtree_owner is not None
+            and label
+            in (
+                OutputLabel.EXPLICIT_TRAJECTORY,
+                OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
+            )
+            and self.layout.public_daydream_dir in canonical.parents
+        )
         if label not in (OutputLabel.PUBLIC_DAYDREAM, OutputLabel.PUBLIC_REVIEW_OUTPUT) and (
             _overlaps(canonical, self.layout.public_daydream_dir)
             or canonical == self.layout.public_review_output
-        ):
+        ) and not owned_public_subtree:
             raise ArtifactVisibilityError("artifact destination overlaps a public compatibility root")
-        prior_paths = [prior.requested.resolve(strict=False) for prior in self._destinations]
+        prior_paths = [
+            prior.requested.resolve(strict=False)
+            for prior in self._destinations
+            if not (owned_public_subtree and prior is public_subtree_owner)
+        ]
         prior_paths.extend(additional)
         for prior_path in prior_paths:
             if canonical == prior_path:
@@ -3804,6 +3827,55 @@ class ArtifactSession:
                 raise ArtifactVisibilityError("artifact destination overlap")
         inside_source = canonical == self.layout.source or self.layout.source in canonical.parents
         return declared, canonical, inside_source
+
+    def _public_daydream_owner(self) -> RoutedDestination | None:
+        return next(
+            (
+                destination
+                for destination in self._destinations
+                if destination.label is OutputLabel.PUBLIC_DAYDREAM
+                and destination.requested == self.layout.public_daydream_dir
+                and destination.write_path == self.layout.daydream_dir
+                and destination.frozen_path == self.layout.daydream_dir
+                and destination.delivery is DestinationDelivery.DEFERRED
+            ),
+            None,
+        )
+
+    def _private_public_trajectory_path(
+        self,
+        canonical: Path,
+        *,
+        owner: RoutedDestination,
+    ) -> Path:
+        if not any(owner is destination for destination in self._destinations):
+            raise ArtifactVisibilityError("public trajectory owner identity mismatch")
+        try:
+            relative = canonical.relative_to(self.layout.public_daydream_dir)
+        except ValueError as exc:
+            raise ArtifactVisibilityError("public trajectory path is outside its owner") from exc
+        _validate_relative_name(relative.as_posix())
+        private = self.layout.daydream_dir / relative
+        ancestry = [self.layout.daydream_dir]
+        for part in relative.parts:
+            ancestry.append(ancestry[-1] / part)
+        for cursor in ancestry:
+            try:
+                metadata = cursor.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ArtifactVisibilityError(
+                    "private trajectory path could not be inspected"
+                ) from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ArtifactVisibilityError("private trajectory ancestry contains a symlink")
+            is_leaf = cursor == private
+            if is_leaf and not stat.S_ISREG(metadata.st_mode):
+                raise ArtifactVisibilityError("private trajectory has the wrong filesystem type")
+            if not is_leaf and not stat.S_ISDIR(metadata.st_mode):
+                raise ArtifactVisibilityError("private trajectory ancestry is not a directory")
+        return private
 
     def _capture_destination_record(
         self,
@@ -3960,6 +4032,54 @@ class ArtifactSession:
             partial = RoutedDestination(
                 OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
                 partial_requested,
+                private_partial,
+                private_partial,
+                DestinationDelivery.DEFERRED,
+            )
+        elif self.layout.public_daydream_dir in canonical_requested.parents:
+            owner = self._public_daydream_owner()
+            if owner is None:
+                self._validate_destination(
+                    declared_requested,
+                    label=OutputLabel.EXPLICIT_TRAJECTORY,
+                )
+                raise AssertionError("unreachable public trajectory validation")
+            full_declared, full_canonical, _full_inside = self._validate_destination(
+                declared_requested,
+                label=OutputLabel.EXPLICIT_TRAJECTORY,
+                public_subtree_owner=owner,
+            )
+            partial_declared, partial_canonical, _partial_inside = self._validate_destination(
+                partial_requested,
+                label=OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
+                additional=(full_canonical,),
+                public_subtree_owner=owner,
+            )
+            if not (
+                self.layout.public_daydream_dir in full_canonical.parents
+                and self.layout.public_daydream_dir in partial_canonical.parents
+            ):
+                raise ArtifactVisibilityError(
+                    "paired trajectory destinations cross routing boundaries"
+                )
+            private_full = self._private_public_trajectory_path(
+                full_canonical,
+                owner=owner,
+            )
+            private_partial = self._private_public_trajectory_path(
+                partial_canonical,
+                owner=owner,
+            )
+            full = RoutedDestination(
+                OutputLabel.EXPLICIT_TRAJECTORY,
+                full_declared,
+                private_full,
+                private_full,
+                DestinationDelivery.DEFERRED,
+            )
+            partial = RoutedDestination(
+                OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
+                partial_declared,
                 private_partial,
                 private_partial,
                 DestinationDelivery.DEFERRED,
