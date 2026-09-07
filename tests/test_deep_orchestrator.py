@@ -6724,6 +6724,7 @@ async def test_environmental_failure_aborts_heal_loop(
 async def test_ephemeral_failure_handoff_projects_public_refs_without_private_paths(
     multi_stack_target: Path,
     tmp_path: Path,
+    artifact_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -6872,7 +6873,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     )
     assert str(expected_trajectory) in body
     assert expected_trajectory.is_file()
-    assert str(tmp_path / "private") not in body
+    assert str(artifact_runtime_root.parent) not in body
     assert len(summarizer_observations) == 1
     observation = summarizer_observations[0]
     assert observation["changed_body"] == "healed\n"
@@ -6882,7 +6883,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
             expected_trajectory.with_suffix(".json.partial")
         )
     else:
-        assert str(tmp_path / "private") in observation["private_partial"]
+        assert str(artifact_runtime_root.parent) in observation["private_partial"]
     assert "Future handoff links (not readable evidence during this turn)" in observation["prompt"]
     assert "## On-disk artifacts (read these first" not in observation["prompt"]
     assert "- .daydream-heal-fix-applied" in observation["prompt"]

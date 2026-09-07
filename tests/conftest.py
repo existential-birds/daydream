@@ -722,7 +722,12 @@ def artifact_runtime_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     """
     from daydream import artifact_visibility
 
-    base = tmp_path / "private"
+    # A sibling of the per-test directory, not a child: several suites build
+    # their real Git repository directly at ``tmp_path`` (the fixture target),
+    # and the accepted private-storage disjointness rule refuses a runtime
+    # root beneath the source Git ownership. Keeping the base outside the
+    # repo-eligible tree preserves per-test isolation for both layouts.
+    base = tmp_path.parent / f"{tmp_path.name}-artifact-private"
     monkeypatch.setattr(artifact_visibility, "_default_private_base", lambda: base)
     return base / "runtime"
 
