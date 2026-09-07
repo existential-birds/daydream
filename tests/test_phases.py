@@ -1467,6 +1467,74 @@ async def test_fix_prompt_frames_confirmed_intent_body_as_untrusted(
     )
 
 
+@pytest.mark.parametrize("inline", [False, True])
+async def test_bound_phase_fix_transports_only_named_private_inputs(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+    inline: bool,
+) -> None:
+    """A production fix gets intent/index bytes without an artifact-dir grant."""
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.phases import phase_fix
+
+    silence_console("daydream.phases")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    source_file = repo / "src" / "app.py"
+    source_file.parent.mkdir()
+    source_file.write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    locations = private_root_locations(base=(tmp_path / "private").resolve())
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    if inline:
+        backend = ScriptedBackend(
+            audit_root_isolation="claude-pretooluse-v1",
+            audit_root=repo.resolve(),
+        )
+    else:
+        backend = ScriptedBackend()
+
+    async with open_artifact_session(work, session_id=f"phase-fix-{inline}", owner=owner):
+        deep = artifact_dir_for(repo) / "deep"
+        intent = deep / "intent.md"
+        affected = deep / "exploration" / "affected_files.md"
+        affected.parent.mkdir(parents=True)
+        intent.write_text("deliberate intent", encoding="utf-8")
+        affected.write_text("src/app.py -> tests/test_app.py", encoding="utf-8")
+
+        await phase_fix(
+            backend,
+            work,
+            {"id": 1, "description": "repair", "file": "src/app.py", "line": 1},
+            1,
+            1,
+            intent_path=intent,
+            exploration_dir=affected.parent,
+        )
+
+        prompt = backend.last_prompt
+        pointer_free = prompt.replace(str(affected), "").replace(str(intent), "")
+        assert str(affected.parent) not in pointer_free
+        if inline:
+            assert "deliberate intent" in prompt
+            assert "src/app.py -> tests/test_app.py" in prompt
+            assert str(intent) not in prompt
+            assert str(affected) not in prompt
+        else:
+            assert str(intent) in prompt
+            assert str(affected) in prompt
+            assert "deliberate intent" not in prompt
+
+
 def test_build_fix_prompt_concise_mode() -> None:
     """_build_fix_prompt adds concise directives when concise_mode=True."""
     from daydream.phases import _build_fix_prompt
@@ -2032,9 +2100,9 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     -> structural reviewer prompt (not just the builder's synthetic unit test).
 
     Enters from the production phase that ramps the structural stack, with a real
-    populated ``exploration/affected_files.md`` and the real registry ``structural``
+    populated exploration summary/index and the real registry ``structural``
     builder resolved -- only the external network backend is mocked. Asserts the
-    deterministic affected-files index actually reaches the reviewer prompt.
+    exact bounded files actually reach the reviewer prompt.
     """
     from daydream.backends import ResultEvent, TextEvent
     from daydream.config import STRUCTURE_STACK_NAME
@@ -2052,7 +2120,8 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     )
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
-    (exploration_dir / "affected_files.md").write_text("# Affected Files\napi/main.py role=root\n")
+    (exploration_dir / "summary.md").write_text("# Exploration Summary\n1 file\n")
+    (exploration_dir / "affected_files.md").write_text("# Affected Files\napi/main.py\n")
     diff = tmp_path / "diff.patch"
     diff.write_text("")
     intent = tmp_path / "intent.md"
@@ -2080,6 +2149,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     assert failures == {}
     assert STRUCTURE_STACK_NAME in results
     structural_prompt = next(p for p in backend.prompts if "structural" in p)
+    assert str(exploration_dir / "summary.md") in structural_prompt
     assert str(exploration_dir / "affected_files.md") in structural_prompt
 
 
@@ -3124,16 +3194,18 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path: Path) -> None:
         prompt = builder(exploration_dir=exploration_dir)
         assert str(exploration_dir) in prompt
         assert "summary.md" in prompt
+        assert "affected_files.md" in prompt
         assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
 
 
-def test_exploration_pointer_names_affected_files_and_scopes_read_clause(tmp_path: Path) -> None:
+def test_exploration_pointer_names_only_bounded_files_and_scopes_read_clause(tmp_path: Path) -> None:
     from daydream.phases import _exploration_pointer
 
     exploration_dir = tmp_path / "exploration"
     pointer = _exploration_pointer(exploration_dir)
-    assert "affected_files.md" in pointer
-    assert "do NOT read them all up front" in pointer
+    assert str(exploration_dir / "summary.md") in pointer
+    assert str(exploration_dir / "affected_files.md") in pointer
+    assert "Do not infer or enumerate sibling artifact files" in pointer
     assert "assigned source files" in pointer
     assert _exploration_pointer(None) == ""
 
@@ -3146,6 +3218,7 @@ def test_exploration_pointer_marks_results_untrusted(tmp_path: Path) -> None:
     pointer = _exploration_pointer(exploration_dir)
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in pointer
     assert pointer.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < pointer.index("summary.md")
+    assert pointer.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < pointer.index("affected_files.md")
     assert _exploration_pointer(None) == ""
 
 
@@ -4696,7 +4769,130 @@ def test_changed_files_returns_empty_on_non_git_dir(tmp_path: Path) -> None:
     assert _changed_files(tmp_path) == []
 
 
+def test_changed_files_skips_unsafe_lexical_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each unsafe Git name is warned about and skipped without escaping."""
+    from daydream.phases import _changed_files
+
+    repo = tmp_path / "repo"
+    names = [
+        "safe.py",
+        "",
+        "/absolute.py",
+        ".",
+        "./nested.py",
+        "nested/../escape.py",
+        "../escape.py",
+        "nested//empty.py",
+    ]
+    monkeypatch.setattr("daydream.phases.git_ops.changed_files", lambda _repo: names)
+
+    with caplog.at_level("WARNING", logger="daydream.phases"):
+        paths = _changed_files(repo)
+
+    assert paths == [repo / "safe.py"]
+    assert sum("unsafe changed-file name" in record.message for record in caplog.records) == 7
+
+
 # _run_failure_summarizer — writes a partial trajectory snapshot pre-exit
+
+
+@pytest.mark.asyncio
+async def test_failure_summarizer_handles_changed_symlink_outside_repo(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """A changed tracked symlink remains a lexical changed-file identity."""
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.phases import _run_failure_summarizer
+    from daydream.trajectory import DaydreamRunFlow
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    outside_one = tmp_path / "outside-one.txt"
+    outside_two = tmp_path / "outside-two.txt"
+    outside_one.write_text("one\n", encoding="utf-8")
+    outside_two.write_text("two\n", encoding="utf-8")
+    linked = repo / "linked.txt"
+    linked.symlink_to(outside_one)
+    git(repo, "add", "linked.txt")
+    git_commit(repo, "track outside symlink")
+    linked.unlink()
+    linked.symlink_to(outside_two)
+
+    work = make_work(repo)
+    locations = private_root_locations(base=(tmp_path / "private").resolve())
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+    session_id = "changed-symlink"
+    model_body = (
+        "# Daydream handoff\n\nHANDOFF_SYMLINK_SUCCESS\n\n"
+        f"## Changed files\n\n- {repo / 'linked.txt'}\n"
+    )
+    backend = ScriptedBackend(events=_handoff_turn(model_body))
+
+    async with open_artifact_session(work, session_id=session_id, owner=owner):
+        live_daydream = artifact_dir_for(repo)
+        recorder = TrajectoryRecorder(
+            path=live_daydream / "runs" / session_id / "trajectory.json",
+            run_flow=DaydreamRunFlow.NORMAL,
+            target_dir=repo,
+            artifact_run_dir=live_daydream / "runs" / session_id,
+            agent_model_name="fake-external",
+            session_id=session_id,
+        )
+        async with recorder:
+            body, handoff_path, written = await _run_failure_summarizer(
+                backend,
+                work,
+                "1 failed",
+            )
+            saved = live_daydream / "runs" / session_id / "handoff.md"
+            assert saved.read_text(encoding="utf-8") == body
+
+        assert written is True
+        assert handoff_path == repo / ".daydream" / "runs" / session_id / "handoff.md"
+        assert backend.call_count == 1
+        assert backend.calls[0]["cwd"] == repo
+        assert backend.calls[0]["read_only"] is True
+        assert "- linked.txt" in backend.last_prompt
+        assert "HANDOFF_SYMLINK_SUCCESS" in body
+        assert str(outside_one) not in body
+        assert str(outside_two) not in body
+        assert str(live_daydream) not in body
+
+
+def test_failure_summarizer_empty_governed_set_keeps_public_paths_future_only(
+    tmp_path: Path,
+) -> None:
+    """An active session with zero captured files never grants public paths."""
+    from daydream.phases import _build_failure_summarizer_prompt
+
+    public = tmp_path / "source" / ".daydream"
+    prompt = _build_failure_summarizer_prompt(
+        test_output="failed",
+        trajectory_path=public / "runs" / "session" / "trajectory.json",
+        trajectories_dir=public / "runs" / "session" / "trajectories",
+        diff_path=public / "diff.patch",
+        manifest_path=public / "runs" / "session" / "manifest.json",
+        deep_dir=public / "deep",
+        changed_files=[],
+        has_trajectory=True,
+        governed_input_labels=(),
+    )
+
+    assert "Future handoff links (not readable evidence during this turn)" in prompt
+    assert "No artifact file is sanctioned as readable during this turn" in prompt
+    assert "On-disk artifacts (read these first" not in prompt
+    assert "You MAY use Read, Grep, and Glob to inspect the artifacts" not in prompt
 
 
 @pytest.mark.asyncio
@@ -4938,6 +5134,99 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
     assert "## Structural Review" in report_path.read_text()  # rendered md still has it
     # Canonical sandbox-safe copy preserved.
     assert (work.repo / REVIEW_OUTPUT_FILE).read_text() == report_path.read_text()
+
+
+@pytest.mark.parametrize("inline", [False, True])
+async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+    inline: bool,
+) -> None:
+    from daydream.artifact_visibility import (
+        artifact_dir_for,
+        open_artifact_session,
+        private_root_locations,
+        resolve_private_workspace_owner,
+    )
+    from daydream.phases import phase_cross_stack_merge
+    from daydream.prompt_budget import SanctionedInputUnavailable
+
+    silence_console("daydream.phases")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git_commit(repo, "base")
+    work = make_work(repo)
+    locations = private_root_locations(base=(tmp_path / "private").resolve())
+    owner = resolve_private_workspace_owner(repo, locations=locations)
+
+    def _write_sized(path: Path, prefix: str, size: int) -> Path:
+        payload = prefix + (" " * (size - len(prefix.encode("utf-8"))))
+        path.write_text(payload, encoding="utf-8")
+        assert path.stat().st_size == size
+        return path
+
+    if inline:
+        backend = ScriptedBackend(
+            events=_structured_turn(_MERGE_ITEMS),
+            audit_root_isolation="claude-pretooluse-v1",
+            audit_root=repo.resolve(),
+        )
+    else:
+        backend = ScriptedBackend(events=_structured_turn(_MERGE_ITEMS))
+    async with open_artifact_session(work, session_id=f"phase-merge-{inline}", owner=owner):
+        deep = artifact_dir_for(repo) / "deep"
+        deep.mkdir(parents=True)
+        intent = _write_sized(deep / "intent.md", "intent", 6_361)
+        alternatives = _write_sized(deep / "alternatives.json", "[]", 6_234)
+        dedup = _write_sized(deep / "dedup.json", "[]", 60)
+        python_records = _write_sized(
+            deep / "python-records.json", '{"issues": [], "verdicts": []}', 7_593
+        )
+        generic_records = _write_sized(
+            deep / "generic-records.json", '{"issues": [], "verdicts": []}', 2_180
+        )
+        structural = _write_sized(
+            deep / "structural-records.json", "[]", 7_880
+        )
+        exploration = deep / "exploration"
+        exploration.mkdir()
+        _write_sized(exploration / "summary.md", "summary", 613)
+        _write_sized(exploration / "affected_files.md", "affected", 701)
+
+        call = phase_cross_stack_merge(
+            backend,
+            work,
+            per_stack_records_paths=[python_records, generic_records],
+            intent_path=intent,
+            alternatives_path=alternatives,
+            dedup_candidates_path=dedup,
+            structural_records_path=structural,
+            exploration_dir=exploration,
+        )
+        if inline:
+            with pytest.raises(SanctionedInputUnavailable, match="byte budget"):
+                await call
+            assert backend.call_count == 0
+            return
+
+        await call
+        assert backend.call_count == 1
+        prompt = backend.last_prompt
+        for expected in (
+            intent,
+            alternatives,
+            dedup,
+            python_records,
+            generic_records,
+            exploration / "summary.md",
+            exploration / "affected_files.md",
+        ):
+            assert str(expected) in prompt
+        assert str(structural) not in prompt
 
 
 async def test_cross_stack_merge_agent_phase_label(

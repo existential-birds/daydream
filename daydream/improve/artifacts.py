@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from daydream.artifact_visibility import artifact_dir_for
+
 
 def improve_dir(target: Path) -> Path:
     """Return the target's ``.daydream/improve`` directory, creating it."""
-    directory = target / ".daydream" / "improve"
+    directory = artifact_dir_for(target) / "improve"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

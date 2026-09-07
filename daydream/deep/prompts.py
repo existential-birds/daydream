@@ -494,12 +494,14 @@ def _full_diff_pointer(diff_path: Path) -> str:
 # the inline-hunk branch and the path-pointer fallback (AC#1: reviewers must not
 # re-derive changed-file/line ranges with git diff -- the hunk index is the
 # single persisted source).
-_HUNK_INDEX_AUTHORITY = (
-    "Changed line ranges are authoritative in `.daydream/hunk-index.json` "
-    "— do not re-derive them with `git diff` (the index is written once "
-    "at gather and is the single persisted source of changed-file/line "
-    "ranges)."
-)
+def _hunk_index_authority(diff_path: Path) -> str:
+    """Name the hunk index adjacent to the routed full-diff artifact."""
+    return (
+        f"Changed line ranges are authoritative in `{diff_path.parent / 'hunk-index.json'}` "
+        "— do not re-derive them with `git diff` (the index is written once "
+        "at gather and is the single persisted source of changed-file/line "
+        "ranges)."
+    )
 
 
 def _diff_instruction(
@@ -536,7 +538,7 @@ def _diff_instruction(
             "Relevant diff hunks for your stack (inlined; do NOT re-Read "
             "diff.patch for these — the hunks are already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
-            f"{_HUNK_INDEX_AUTHORITY}\n\n"
+            f"{_hunk_index_authority(diff_path)}\n\n"
             "Focus on hunks that touch your stack's files. Read the source file "
             "FIRST; you may only comment on hunks you have read. The inlined "
             "hunks are not a substitute for reading the file."
@@ -548,7 +550,7 @@ def _diff_instruction(
     # contains the full base..HEAD diff.
     return (
         f"{_full_diff_pointer(diff_path)}\n"
-        f"{_HUNK_INDEX_AUTHORITY}\n\n"
+        f"{_hunk_index_authority(diff_path)}\n\n"
         f"Focus on hunks that touch your stack's files: {joined}."
     )
 
@@ -1387,7 +1389,7 @@ def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode:
         )
         if clone_mode:
             return f"{head}{inline_diff.rstrip()}\n\n"
-        return f"{head}{inline_diff.rstrip()}\n\n{_HUNK_INDEX_AUTHORITY}"
+        return f"{head}{inline_diff.rstrip()}\n\n{_hunk_index_authority(diff_path)}"
     if clone_mode:
         if not inline_diff:
             return ""
@@ -1399,7 +1401,7 @@ def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode:
             f"{truncated}\n"
             "[diff truncated to fit the prompt budget]\n\n"
         )
-    return f"{_full_diff_pointer(diff_path)}\n{_HUNK_INDEX_AUTHORITY}"
+    return f"{_full_diff_pointer(diff_path)}\n{_hunk_index_authority(diff_path)}"
 
 
 def _diagram_exploration_block(

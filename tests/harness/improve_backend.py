@@ -1134,17 +1134,14 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
 
     def __init__(self, target: Path, *, n_findings: int) -> None:
         super().__init__(target, n_findings=n_findings)
-        self._selected_path = (
-            target / ".daydream" / "improve" / "selected.json"
-        )
+        self._expected_writers = n_findings
+        self._selection_order: list[str] = []
         self.completion_order: list[int] = []
 
-    def _selection(self) -> list[str]:
-        return list(
-            json.loads(self._selected_path.read_text(encoding="utf-8"))[
-                "selected"
-            ]
-        )
+    @property
+    def selection_order(self) -> list[str]:
+        """Fingerprints in the host's observed writer-dispatch order."""
+        return list(self._selection_order)
 
     async def execute(
         self,
@@ -1159,11 +1156,13 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
     ) -> AsyncIterator[AgentEvent]:
         rank: int | None = None
         if _is_plan_writer_prompt(prompt, output_schema):
-            selection = self._selection()
-            rank = selection.index(_finding_from_prompt(prompt)["fingerprint"])
+            fingerprint = _finding_from_prompt(prompt)["fingerprint"]
+            if fingerprint not in self._selection_order:
+                self._selection_order.append(fingerprint)
+            rank = self._selection_order.index(fingerprint)
             if rank == 0:
                 with anyio.move_on_after(10):
-                    while len(self.completion_order) < len(selection) - 1:
+                    while len(self.completion_order) < self._expected_writers - 1:
                         await anyio.sleep(0.01)
         async for event in super().execute(
             cwd,

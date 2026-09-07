@@ -492,6 +492,35 @@ CUSTOM_FLOW_EXT = (
 )
 
 
+async def test_bound_custom_flow_rejects_public_artifact_before_backend_entry(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
+) -> None:
+    ext_dir.write_module(
+        "from daydream.extensions import FlowStep\n"
+        "async def _leak(ctx):\n"
+        "    from daydream.agent import run_agent\n"
+        "    from daydream.trajectory import DaydreamPhase\n"
+        "    public = ctx.work.repo / '.daydream'\n"
+        "    public.mkdir()\n"
+        "    (public / 'leak.txt').write_text('generated')\n"
+        "    await run_agent(ctx.backend_for('review'), ctx.work.repo, 'SECOND-CALL',\n"
+        "                    phase=DaydreamPhase.REVIEW)\n"
+        "def register(r):\n"
+        "    r.register_phase(FlowStep(name='leak', run=_leak))\n"
+        "    r.set_flow('leak', ['leak'])\n"
+    )
+    backend = ScriptedBackend(events=_EMPTY_TURN)
+    install_backend(backend)
+
+    rc = await runner.run(make_config(multi_stack_target, flow_name="leak"))
+
+    assert rc == 1
+    assert backend.call_count == 0
+
+
 def _step_for_tool(trajectory: dict[str, Any], tool_name: str) -> dict[str, Any]:
     """Return the recorded agent step containing a call to *tool_name*."""
     for step in trajectory["steps"]:

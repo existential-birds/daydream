@@ -70,6 +70,18 @@ from tests.harness.improve_backend import (
 MakeConfig = Callable[..., RunConfig]
 
 
+def test_improve_dir_uses_active_artifact_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.improve import artifacts
+
+    routed = tmp_path / "private" / ".daydream"
+    monkeypatch.setattr(artifacts, "artifact_dir_for", lambda _target: routed)
+
+    assert artifacts.improve_dir(tmp_path / "model-cwd") == routed / "improve"
+    assert (routed / "improve").is_dir()
+
+
 def _default_strategy(stage: str) -> str:
     return rp.build_default_profile().strategies[stage].content
 
@@ -2946,6 +2958,7 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     assert code == 0
     assert len(selected) == 3
+    assert backend.selection_order == selected
     assert backend.completion_order == [1, 2, 0]
     assert _index_numbers_by_fingerprint(index) == {
         fingerprint: rank + 1 for rank, fingerprint in enumerate(selected)
@@ -5094,6 +5107,11 @@ async def test_disabled_publication_overwrites_stale_current_run_artifact(
         "published-issues.json",
     )
     artifact.parent.mkdir(parents=True, exist_ok=True)
+    # This is a prior Daydream bundle, not an arbitrary unowned ``.daydream``
+    # tree. The legacy run anchor makes that ownership explicit so the artifact
+    # session may import it before proving the current disabled disposition
+    # replaces the stale publication record.
+    (artifact.parents[1] / "runs").mkdir()
     artifact.write_text(
         json.dumps(
             {
