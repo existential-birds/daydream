@@ -651,7 +651,12 @@ async def test_artifact_session_runner_preserves_primary_and_publishes_partial_e
 
         async def execute(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
             raise primary
-            yield TextEvent(text="unreachable")
+            # A bare raise would not make this an async generator, so the
+            # failure would surface at call time instead of during iteration
+            # like a real backend stream. The yield is never reached.
+            # The yield is never reached; it exists only so this function is
+            # an async generator and the failure surfaces during iteration.
+            yield TextEvent(text="unreachable")  # noqa
 
         async def cancel(self) -> None:
             return None

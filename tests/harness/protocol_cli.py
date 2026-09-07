@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -17,7 +18,8 @@ from typing import Any, Literal
 
 _CANARIES = (
     "SOURCE_CANARY", "PRIOR_REASONING_CANARY", "CURRENT_REASONING_CANARY",
-    "SIBLING_REASONING_CANARY", "RESUME_CACHE_CANARY",
+    "SIBLING_REASONING_CANARY", "RESUME_CACHE_CANARY", "SANCTIONED_INPUT_CANARY",
+    "PRIVATE_ROOT_CANARY", "RUNTIME_STATE_CANARY",
 )
 _FIXTURE_CONFIG: dict[str, Any] = globals().get("_FIXTURE_CONFIG", {})
 
@@ -40,8 +42,14 @@ def install_protocol_cli(
     *,
     response_mode: Literal["success", "model_error", "process_error", "block"] = "success",
     sanctioned_files: tuple[Path, ...] = (),
+    forbidden_paths: tuple[Path, ...] = (),
 ) -> ProtocolCli:
-    """Install a real executable; block mode releases through a FIFO write."""
+    """Install a real executable; block mode releases through a FIFO write.
+
+    ``forbidden_paths`` are absolute paths that must never reach the child's
+    stdin, argv, or environment in isolation rows. Only presence booleans are
+    recorded — never the surrounding content.
+    """
     root = root.resolve()
     bin_dir = root / "bin"
     observations = root / "observations"
@@ -54,6 +62,7 @@ def install_protocol_cli(
     config = {
         "root": str(root), "backend": backend, "response_mode": response_mode,
         "sanctioned_files": [str(path) for path in sanctioned_files],
+        "forbidden_paths": [str(path) for path in forbidden_paths],
     }
     executable.write_text(
         f"#!{sys.executable}\n_FIXTURE_CONFIG = {config!r}\n"
@@ -62,6 +71,19 @@ def install_protocol_cli(
     )
     executable.chmod(0o700)
     return ProtocolCli(bin_dir, executable, observations, root / "entered", release)
+
+
+def _forbidden_path_hits(argv: list[str], prompt: str) -> dict[str, dict[str, bool]]:
+    """Record only booleans: did each forbidden path appear in argv/stdin/env?"""
+    joined_argv = "\x00".join(argv)
+    return {
+        path: {
+            "argv": path in joined_argv,
+            "stdin": path in prompt,
+            "env": any(path in value for value in os.environ.values()),
+        }
+        for path in _FIXTURE_CONFIG.get("forbidden_paths", [])
+    }
 
 
 def _atomic_observation(path: Path, payload: dict[str, Any]) -> None:
@@ -204,6 +226,23 @@ def _osprey_events(text: str, model: str, *, failed: bool, exit_code: int) -> No
     })
 
 
+def _git_remote_count(cwd: Path) -> int:
+    """Count the remotes of *cwd*; 0 when git is unavailable or it is not a repo."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "remote"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if proc.returncode != 0:
+        return 0
+    return len(proc.stdout.split())
+
+
 def _run_cli() -> int:
     config = _FIXTURE_CONFIG
     root = Path(config["root"])
@@ -229,7 +268,10 @@ def _run_cli() -> int:
         "stdin_bytes": len(stdin), "stdin_sha256": hashlib.sha256(stdin).hexdigest(),
         "prompt_bytes": len(prompt.encode()), "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "prompt_canaries": {canary: canary in prompt for canary in _CANARIES},
-        "sanctioned_reads": opened, "process_outcome": "entered", **_cwd_observation(cwd),
+        "sanctioned_reads": opened, "process_outcome": "entered",
+        "git_remote_count": _git_remote_count(cwd),
+        "forbidden_path_hits": _forbidden_path_hits(args_without_prompt, prompt),
+        **_cwd_observation(cwd),
     }
     path = root / "observations" / f"{backend}-{os.getpid()}-{time.monotonic_ns()}.json"
     _atomic_observation(path, observation)
