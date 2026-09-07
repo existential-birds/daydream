@@ -45,7 +45,10 @@ async def resume_probe(ctx):
         if aborted or continuation is None:
             raise RuntimeError("Codex continuation was not completed")
         outputs.append(output)
-    (ctx.work.repo / ".daydream/resume-outputs.json").write_text(json.dumps(outputs))
+    # The public .daydream tree is detached for the run's duration; write
+    # through the session-routed live dir, which is republished publicly at
+    # run end (keeps the post-run public-path assertion below unchanged).
+    (ctx.data["daydream_dir"] / "resume-outputs.json").write_text(json.dumps(outputs))
 
 def register(r):
     r.register_phase(FlowStep(name="resume-probe", run=resume_probe))

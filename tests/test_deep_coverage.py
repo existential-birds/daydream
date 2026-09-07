@@ -464,7 +464,7 @@ def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> Non
         exploration_dir=exploration,
     )
 
-    assert "Pre-scan exploration results are available" in prompt
+    assert "Read the pre-scan summary at" in prompt
     assert str(exploration) in prompt
 
     prompt_no_dir = build_uncovered_sweep_prompt(
@@ -476,7 +476,8 @@ def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> Non
         output_path=output,
         exploration_dir=None,
     )
-    assert "Pre-scan exploration results" not in prompt_no_dir
+    assert "Read the pre-scan summary at" not in prompt_no_dir
+    assert str(exploration) not in prompt_no_dir
 
 
 def test_coverage_receipt_records_inline_and_frontier(tmp_path: Path) -> None:

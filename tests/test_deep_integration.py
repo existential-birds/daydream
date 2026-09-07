@@ -74,12 +74,13 @@ class _DeepMockBackend:
             m = re.search(r"stack-(\S+?)-review\.md", prompt)
             if m:
                 name = m.group(1)
-                out = self.target_dir / ".daydream" / "deep" / f"stack-{name}-review.md"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(
-                    f"# Structural Review ({name})\n\n## Issues\n"
-                    "1. [api.py:1] hello() leaks a god-object boundary\n"
-                )
+                out = self._review_output_path(prompt)
+                if out is not None:
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_text(
+                        f"# Structural Review ({name})\n\n## Issues\n"
+                        "1. [api.py:1] hello() leaks a god-object boundary\n"
+                    )
             yield TextEvent(text="")
             # Issue #745: the structural reviewer emits PER_STACK_RECORD_SCHEMA
             # structured output directly (its finding lands lens="structural").
@@ -106,13 +107,15 @@ class _DeepMockBackend:
         # Per-stack review prompt contains "You are reviewing the ... stack".
         if "you are reviewing the" in pl and "stack" in pl:
             self.calls.append("per-stack")
-            # Write the per-stack review file to the path embedded in the prompt.
+            # Write the per-stack review file to the path embedded in the prompt
+            # (the session's live artifact tree).
             m = re.search(r"stack-(\S+?)-review\.md", prompt)
             if m:
                 name = m.group(1)
-                out = self.target_dir / ".daydream" / "deep" / f"stack-{name}-review.md"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(f"# Review ({name})\n\n## Issues\n1. [a.py:1] stub\n")
+                out = self._review_output_path(prompt)
+                if out is not None:
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_text(f"# Review ({name})\n\n## Issues\n1. [a.py:1] stub\n")
             yield TextEvent(text="")
             # Issue #745: per-stack reviewer emits structured output directly.
             yield ResultEvent(
@@ -163,6 +166,19 @@ class _DeepMockBackend:
         self.calls.append("other")
         yield TextEvent(text="")
         yield ResultEvent(structured_output=None, continuation=None)
+
+    def _review_output_path(self, prompt: str) -> Path | None:
+        """The review-file path the delivered prompt names.
+
+        The prompt's ``Write your full review to <path>.`` sentence names the
+        session's live artifact tree. Writing there (instead of reconstructing
+        a path under ``target_dir``) matches the sanctioned adapter contract:
+        the public ``.daydream`` tree is detached for the run's duration, so a
+        mid-run write to a reconstructed public path trips the model-cwd
+        artifact gate and fails the run.
+        """
+        m = re.search(r"Write your full review to (\S+\.md)\.", prompt)
+        return Path(m.group(1)) if m else None
 
     async def cancel(self) -> None:
         pass
